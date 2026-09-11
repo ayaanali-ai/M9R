@@ -1031,14 +1031,18 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // waiting for the next 8-30s poll tick to notice.
   const loadConversations = useCallback(async () => {
     try {
-      const res = await fetch("/api/dashboard/conversations", { cache: "no-store" });
+      // Only the open channel needs its full message history from this
+      // endpoint (see the route's own comment) -- everyone else is a
+      // preview-line read.
+      const url = selectedId ? `/api/dashboard/conversations?selected=${encodeURIComponent(selectedId)}` : "/api/dashboard/conversations";
+      const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) return;
       const data = (await res.json()) as { conversations?: Conversation[] };
       setConversations(data.conversations ?? []);
     } catch {
       setNotice("Channels are temporarily unavailable.");
     }
-  }, []);
+  }, [selectedId]);
 
   useEffect(() => {
     let cancelled = false;

@@ -1,16 +1,20 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createDashboardChannel, listConversationsForDashboard } from "@/lib/conversation-service";
 import { handleDashboardApiError } from "../_shared";
 
 /**
  * GET /api/dashboard/conversations — every open conversation the signed-in
- * owner's workspace holds, with full message history. Cookie-authenticated
+ * owner's workspace holds. Full message history (up to 80) is only returned
+ * for `?selected=<conversationId>`, the channel actually open in the
+ * viewer's UI; every other channel gets just its latest message, which is
+ * all the channel-switcher preview line ever needed. Cookie-authenticated
  * (RLS-scoped via listConversationsForDashboard), same pattern as the Wire's
  * /api/agent/runs/[id]/thread. Polled by the Watchfloor's conversation panel.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const conversations = await listConversationsForDashboard();
+    const selected = req.nextUrl.searchParams.get("selected");
+    const conversations = await listConversationsForDashboard(selected);
     return NextResponse.json({ conversations }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     return handleDashboardApiError(error);

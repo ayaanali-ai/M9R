@@ -1742,7 +1742,7 @@ function agentLabelFor(agentKind: string): string {
 // as permanently "active". session-service.ts fixes that and replaces the
 // flat turn list with a bounded, lifecycled Session object.
 
-export async function listConversationsForDashboard(): Promise<DashboardConversation[]> {
+export async function listConversationsForDashboard(selectedConversationId?: string | null): Promise<DashboardConversation[]> {
   const context = await dashboardUserContext();
   const { data: conversations, error } = await context.auth.from("agent_conversations")
     .select("id, topic, channel_slug, channel_kind, description, is_private, status, created_at, mission_id, agent_replies_paused_at, human_membership_managed")
@@ -1764,7 +1764,16 @@ export async function listConversationsForDashboard(): Promise<DashboardConversa
     // this query re-runs on every dashboard poll (every 2-10s per open tab),
     // and re-downloading up to 200 full message bodies per conversation on that
     // cadence is what actually burned through the Supabase free-tier egress cap.
-    Promise.all(ids.map((conversationId) => context.auth.from("conversation_messages").select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at").eq("workspace_id", context.workspaceId).eq("conversation_id", conversationId).order("created_at", { ascending: false }).limit(80))),
+    //
+    // Second egress fix: only the currently-open channel actually needs the
+    // 80-message window. Every other channel in this list is only ever read
+    // for its single latest message (the channel-switcher preview line), so
+    // fetching 80 full message bodies for up to 100 channels the viewer isn't
+    // looking at was ~99% wasted transfer. limit(1) for anything that isn't
+    // selectedConversationId keeps the exact same response shape (still an
+    // array under `messages`) so no client change is needed beyond passing
+    // which channel is open.
+    Promise.all(ids.map((conversationId) => context.auth.from("conversation_messages").select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at").eq("workspace_id", context.workspaceId).eq("conversation_id", conversationId).order("created_at", { ascending: false }).limit(conversationId === selectedConversationId ? 80 : 1))),
     context.auth.from("conversation_message_reactions").select("id, message_id, emoji, actor_user_id, actor_connection_id").eq("workspace_id", context.workspaceId).in("conversation_id", ids),
     context.auth.from("conversation_read_markers").select("conversation_id, read_at").eq("workspace_id", context.workspaceId).eq("user_id", context.user.id).in("conversation_id", ids),
     requireService().from("conversation_message_attachments").select("id, message_id, name, media_type, size_bytes, storage_path").in("conversation_id", ids),
@@ -1830,14 +1839,39 @@ export async function listConversationsForDashboard(): Promise<DashboardConversa
     const message = { ...row, reactions: reactionsBy.get(row.id) ?? [], attachments: attachmentsBy.get(row.id) ?? [], todos: todosBy.get(row.id as string) ?? [] } as unknown as DashboardConversationMessage & { conversation_id: string };
     messagesBy.set(row.conversation_id, [...(messagesBy.get(row.conversation_id) ?? []), message]);
   }
+  // Unread counts for non-selected channels can no longer be derived from
+  // the (now 1-message) fetched array above -- that array is a preview, not
+  // the real message set. Real counts still matter here: ChannelSwitcher
+  // renders an actual number, not a presence dot. head:true keeps this a
+  // count-only index scan with no message bodies returned, so it's cheap
+  // even at up to ~100 channels -- nowhere near what fetching full history
+  // for every channel used to cost.
+  // An archived message must stay excluded from unread counts the same way
+  // it's excluded from the message list above (rawMessages), or a channel
+  // with an unread archived message would show a phantom badge count.
+  const archivedIdList = archivedIds.size > 0 ? `(${[...archivedIds].join(",")})` : null;
+  const unreadCountsBy = new Map<string, number>();
+  await Promise.all(visibleConversations.map(async (row) => {
+    if (row.id === selectedConversationId) return; // computed from the full array below instead
+    const readAt = readBy.get(row.id);
+    let query = context.auth.from("conversation_messages").select("id", { count: "exact", head: true })
+      .eq("workspace_id", context.workspaceId).eq("conversation_id", row.id);
+    if (readAt) query = query.gt("created_at", readAt);
+    if (archivedIdList) query = query.not("id", "in", archivedIdList);
+    const { count } = await query;
+    unreadCountsBy.set(row.id, count ?? 0);
+  }));
   return visibleConversations.map((row) => {
     const messages = messagesBy.get(row.id) ?? [];
     const readAt = readBy.get(row.id);
+    const unreadCount = row.id === selectedConversationId
+      ? messages.filter((message) => !readAt || message.created_at > readAt).length
+      : unreadCountsBy.get(row.id) ?? 0;
     return {
       ...row,
       participant_connection_ids: participantsBy.get(row.id) ?? [],
       messages,
-      unread_count: messages.filter((message) => !readAt || message.created_at > readAt).length,
+      unread_count: unreadCount,
     } as DashboardConversation;
   });
 }

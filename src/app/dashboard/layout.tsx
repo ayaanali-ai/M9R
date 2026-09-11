@@ -33,23 +33,32 @@ export default async function DashboardLayout({ children }: { children: React.Re
   if (!user) redirect("/auth");
 
   const reviewerDemo = isReviewerDemoAppMetadata(user.app_metadata);
-  const [{ data: identity }, { data: settings }] = reviewerDemo
-    ? [{ data: null }, { data: null }]
+  // These three are mutually independent -- identity/settings only need
+  // user.id, the active-project cookie read has no DB dependency at all,
+  // and listProjects() is scoped by the authenticated session, not by
+  // anything the other two produce. They used to run as three sequential
+  // awaits; only activeProjectId (below) and the workspace-scoped pair
+  // after it have a real dependency to wait on.
+  const [[{ data: identity }, { data: settings }], activeCookie, projects] = reviewerDemo
+    ? [[{ data: null }, { data: null }], null, []]
     : await Promise.all([
-        supabase.from("users").select("username").eq("id", user.id).maybeSingle(),
-        supabase.from("user_settings").select("walkthrough_completed").eq("user_id", user.id).maybeSingle(),
+        Promise.all([
+          supabase.from("users").select("username").eq("id", user.id).maybeSingle(),
+          supabase.from("user_settings").select("walkthrough_completed").eq("user_id", user.id).maybeSingle(),
+        ]),
+        getActiveProjectId(),
+        listProjects().catch(() => []),
       ]);
   const username = (identity?.username as string | null) ??
     (user.user_metadata?.username as string | undefined) ?? null;
-  const activeCookie = reviewerDemo ? null : await getActiveProjectId();
-  // Resolve the workspace before loading any connection-scoped navigation
-  // data. Querying agent connections first made it possible for a stale or
-  // missing workspace cookie to surface another workspace's live agents.
-  const projects = reviewerDemo ? [] : await listProjects().catch(() => []);
   // Resolve the active workspace: the cookie if still valid, else the first project.
   const activeProjectId =
     (activeCookie && projects.some((p) => p.id === activeCookie) ? activeCookie : projects[0]?.id) ??
     null;
+  // agentStatus must wait for activeProjectId to be resolved above -- querying
+  // agent connections before the workspace is known made it possible for a
+  // stale or missing workspace cookie to surface another workspace's live
+  // agents. workspaceUsage has the same real dependency.
   const [workspaceUsage, agentStatus] = reviewerDemo
     ? [null, { byKey: {}, agents: [] }]
     : await Promise.all([
