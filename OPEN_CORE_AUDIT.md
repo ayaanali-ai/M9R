@@ -11,6 +11,17 @@ the supported Codex integration remains the existing ACP provider adapter.
 `npm run open-core:check -- --strict` passes the deterministic source and
 metadata checks. It does not replace the manual release review below.
 
+## Public snapshot checkpoint — 2026-09-11
+
+- Canonical repository: `ayaanali-ai/M9R`.
+- Canonical branch: `main`.
+- Snapshot commit: `db011ac0`.
+- The prior local OathLock checkout is retained only as historical/working
+  state; it is not the source of truth for future public changes.
+- The latest UI change narrowed the agent mention popover and added a browser
+  regression assertion that connected agent rows render without spanning the
+  composer.
+
 ## Observed repository shape
 
 - The root package is `private: true` and now declares BUSL-1.1, but it combines

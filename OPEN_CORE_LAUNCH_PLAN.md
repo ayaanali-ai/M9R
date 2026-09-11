@@ -3,6 +3,14 @@
 This is the launch plan for the first honest open-core release. It is not a
 license grant and it is not legal advice.
 
+## Current release checkpoint — 2026-09-11
+
+The public M9R repository is live at
+[`ayaanali-ai/M9R`](https://github.com/ayaanali-ai/M9R), with `main` currently
+at `db011ac0`. The local mention-popover rendering fix is included there.
+Use a clean checkout of that repository for subsequent release work. Do not
+continue publishing from the historical OathLock checkout.
+
 ## What we are announcing
 
 Use this claim:

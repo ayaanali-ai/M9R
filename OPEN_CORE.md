@@ -27,6 +27,14 @@ blocks on untracked debug or artifact output. A passing deterministic check is
 not a substitute for the manual dependency, history, clean-machine, security,
 and legal gates below.
 
+## Public repository checkpoint — 2026-09-11
+
+The public repository is [`ayaanali-ai/M9R`](https://github.com/ayaanali-ai/M9R)
+on `main`. The current public snapshot is `db011ac0`, which includes the
+mention-autocomplete rendering fix and its regression check. Future public
+changes should be made from an M9R checkout and pushed to this repository;
+the historical OathLock checkout is not a second development target.
+
 ## Product boundary
 
 M9R has two cooperating products:
