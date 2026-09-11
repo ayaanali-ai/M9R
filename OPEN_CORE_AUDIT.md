@@ -15,7 +15,7 @@ metadata checks. It does not replace the manual release review below.
 
 - Canonical repository: `ayaanali-ai/M9R`.
 - Canonical branch: `main`.
-- Snapshot commit: `db011ac0`.
+- Snapshot commit: `fb1ccdb`.
 - The prior local OathLock checkout is retained only as historical/working
   state; it is not the source of truth for future public changes.
 - The latest UI change narrowed the agent mention popover and added a browser

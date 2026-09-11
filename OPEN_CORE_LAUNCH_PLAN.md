@@ -7,7 +7,7 @@ license grant and it is not legal advice.
 
 The public M9R repository is live at
 [`ayaanali-ai/M9R`](https://github.com/ayaanali-ai/M9R), with `main` currently
-at `db011ac0`. The local mention-popover rendering fix is included there.
+at `fb1ccdb`. The local mention-popover rendering fix is included there.
 Use a clean checkout of that repository for subsequent release work. Do not
 continue publishing from the historical OathLock checkout.
 
