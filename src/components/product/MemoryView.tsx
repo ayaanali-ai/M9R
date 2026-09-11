@@ -19,6 +19,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import RuleDraftTools from "@/components/product/RuleDraftTools";
 import { SessionCatalog } from "@/components/product/memory/SessionCatalog";
@@ -112,7 +113,18 @@ export default function MemoryView() {
   const [pendingAction, setPendingAction] = useState<PendingLifecycleAction>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [showDraftTools, setShowDraftTools] = useState(false);
-  const [viewTab, setViewTab] = useState<"rules" | "sessions">("rules");
+  /**
+   * `?tab=sessions&session=<id>` is a real deep link, not decoration: the Live
+   * Sessions Archived tab links here because an archived session's messages are
+   * deliberately filtered out of channel scroll-back (conversation-service.ts's
+   * archivedMessageIdsFor choke point), so this transcript view is the only
+   * place that content is actually readable.
+   */
+  const memorySearchParams = useSearchParams();
+  const deepLinkedSessionId = memorySearchParams.get("session");
+  const [viewTab, setViewTab] = useState<"rules" | "sessions">(
+    memorySearchParams.get("tab") === "sessions" || deepLinkedSessionId ? "sessions" : "rules",
+  );
 
   const load = useCallback(async () => {
     try {
@@ -269,7 +281,7 @@ export default function MemoryView() {
     return (
       <div className="space-y-4">
         {tabBar}
-        <SessionCatalog />
+        <SessionCatalog initialSessionId={deepLinkedSessionId} />
       </div>
     );
   }

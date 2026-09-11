@@ -37,10 +37,16 @@ interface ArchivedSessionDetail extends ArchivedSessionRow {
 type ListState = { kind: "loading" } | { kind: "ready"; rows: ArchivedSessionRow[] } | { kind: "error"; message: string };
 type DetailState = { kind: "idle" } | { kind: "loading" } | { kind: "ready"; detail: ArchivedSessionDetail } | { kind: "error"; message: string };
 
-export function SessionCatalog() {
+/**
+ * `initialSessionId` opens straight onto one transcript. It is what makes the
+ * Live Sessions "Archived -> View" button land on the actual session instead of
+ * a generic list: an archived session's messages are deliberately filtered out
+ * of channel scroll-back, so this is the only view that can show them.
+ */
+export function SessionCatalog({ initialSessionId = null }: { initialSessionId?: string | null } = {}) {
   const [list, setList] = useState<ListState>({ kind: "loading" });
   const [query, setQuery] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialSessionId);
   const [detail, setDetail] = useState<DetailState>({ kind: "idle" });
 
   const loadList = useCallback(async () => {

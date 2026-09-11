@@ -8,7 +8,7 @@ import type { AgentView } from "@/lib/agent-workspace-data";
 import type { WorkspaceStep } from "@/components/product/ConversationPanel";
 import { langForPath } from "@/lib/highlight/shiki-highlighter";
 import { relAt } from "@/components/product/agent-workspace/shared";
-import { channelHref } from "@/lib/run-navigation";
+import { archivedSessionHref, channelHref } from "@/lib/run-navigation";
 import type * as MonacoEditorNS from "monaco-editor";
 
 // Monaco pulls in a large client-only bundle -- loaded lazily and only once
@@ -944,9 +944,16 @@ export function LiveSessionsPanel({ onClose }: { agents: AgentView[]; onClose: (
                     </div>
                   )}
                 </div>
-                {session.latestMessageId && (
-                  <Link href={channelHref(session.conversationId, session.latestMessageId)} className="wf-btn-ghost-sm">View</Link>
-                )}
+                {/* BUG FOUND AND FIXED: this linked into the channel with
+                    ?message=<latestMessageId>, but archiving a session is
+                    exactly what removes its messages from channel scroll-back
+                    (conversation-service.ts filters every feed against
+                    archivedMessageIdsFor). The target message was therefore
+                    guaranteed absent, the deep-link scroll silently no-opped,
+                    and "View" dropped you on #general at the newest message --
+                    a random page. The transcript's real home is the Session
+                    Catalog, which reads the archived rows directly. */}
+                <Link href={archivedSessionHref(session.id)} className="wf-btn-ghost-sm">View</Link>
               </li>
             ))}
           </ul>

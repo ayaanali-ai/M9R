@@ -129,7 +129,7 @@ export async function syncAndListOpenSessions(): Promise<DashboardSession[]> {
       atMs: Number(row.at_ms),
     });
   }
-  if (latestByMessage.size === 0) return listOpenSessionsFromTable(context.workspaceId, db);
+  if (latestByMessage.size === 0) return listOpenSessionsFromTable(context.workspaceId, context.user.id, db);
 
   const conversationIds = [...new Set([...latestByMessage.values()].map((t) => t.conversationId))];
   const [{ data: participants }, { data: existingSessions }] = await Promise.all([
@@ -265,7 +265,7 @@ export async function syncAndListOpenSessions(): Promise<DashboardSession[]> {
 
   await proposeArchiveForIdleSessions(context.workspaceId, db);
 
-  return listOpenSessionsFromTable(context.workspaceId, db);
+  return listOpenSessionsFromTable(context.workspaceId, context.user.id, db);
 }
 
 /**
@@ -315,15 +315,66 @@ async function titleForSession(db: ReturnType<typeof requireService>, anchorMess
   return trimmed.length > 80 ? `${trimmed.slice(0, 77)}...` : trimmed;
 }
 
-async function listOpenSessionsFromTable(workspaceId: string, db: ReturnType<typeof requireService>): Promise<DashboardSession[]> {
+/**
+ * Which of these conversations this viewer can actually open, using the same
+ * rule listConversationsForDashboard applies to the channel list
+ * (conversation-service.ts): a channel whose human roster has never been
+ * managed is open to the workspace; once managed, only its roster can see it.
+ *
+ * BUG FOUND AND FIXED: session listing runs on the service-role client and
+ * was scoped by workspace_id alone, so sessions living in channels the viewer
+ * is not a member of were listed anyway. Two real consequences, not one:
+ * "Join" navigated to a ?conversation= that is absent from the viewer's own
+ * conversation list, so ConversationPanel's fallback silently redirected them
+ * to #general -- the "Live Sessions just opens a random page" report -- and
+ * the row itself leaked that channel's topic, task title and owner.
+ */
+async function visibleConversationIdsFor(
+  db: ReturnType<typeof requireService>,
+  workspaceId: string,
+  userId: string,
+  conversationIds: string[],
+): Promise<Set<string>> {
+  if (conversationIds.length === 0) return new Set();
+  const [{ data: conversations }, { data: members }] = await Promise.all([
+    db.from("agent_conversations").select("id, human_membership_managed").eq("workspace_id", workspaceId).in("id", conversationIds),
+    db.from("conversation_human_members").select("conversation_id").eq("user_id", userId).in("conversation_id", conversationIds),
+  ]);
+  const rostered = new Set((members ?? []).map((row) => row.conversation_id as string));
+  const visible = new Set<string>();
+  for (const row of conversations ?? []) {
+    const id = row.id as string;
+    if (!row.human_membership_managed || rostered.has(id)) visible.add(id);
+  }
+  return visible;
+}
+
+type SessionRowLike = { conversation_id: string };
+
+async function keepViewerVisible<T extends SessionRowLike>(
+  db: ReturnType<typeof requireService>,
+  workspaceId: string,
+  userId: string,
+  rows: T[],
+): Promise<T[]> {
+  const visible = await visibleConversationIdsFor(db, workspaceId, userId, [...new Set(rows.map((row) => row.conversation_id))]);
+  return rows.filter((row) => visible.has(row.conversation_id));
+}
+
+async function listOpenSessionsFromTable(workspaceId: string, userId: string, db: ReturnType<typeof requireService>): Promise<DashboardSession[]> {
   const { data: sessions, error } = await db
     .from("conversation_sessions")
     .select("id, conversation_id, connection_id, owner_user_id, title, status, anchor_message_id, latest_message_id, created_at, last_activity_at, archive_proposed_at")
     .eq("workspace_id", workspaceId)
     .neq("status", "archived")
-    .order("last_activity_at", { ascending: false });
+    .order("last_activity_at", { ascending: false })
+    // Bounded like every other dashboard listing here. An open-session count
+    // large enough to hit this is itself the signal, not something the panel
+    // should try to render in full.
+    .limit(200);
   if (error) throw new Error("Could not read live sessions.");
-  return attachDisplayFields(workspaceId, db, sessions ?? []);
+  const visible = await keepViewerVisible(db, workspaceId, userId, sessions ?? []);
+  return attachDisplayFields(workspaceId, db, visible);
 }
 
 export async function listArchivedSessions(): Promise<DashboardSession[]> {
@@ -337,7 +388,10 @@ export async function listArchivedSessions(): Promise<DashboardSession[]> {
     .order("archived_at", { ascending: false })
     .limit(200);
   if (error) throw new Error("Could not read archived sessions.");
-  return attachDisplayFields(context.workspaceId, db, sessions ?? []);
+  // Same viewer-visibility rule as the open list above -- archiving a session
+  // must not turn a channel the viewer cannot see into one they can read.
+  const visible = await keepViewerVisible(db, context.workspaceId, context.user.id, sessions ?? []);
+  return attachDisplayFields(context.workspaceId, db, visible);
 }
 
 async function attachDisplayFields(

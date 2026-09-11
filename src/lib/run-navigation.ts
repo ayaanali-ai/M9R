@@ -23,3 +23,13 @@ export function channelHref(conversationId: string, messageId?: string | null): 
   const base = `/dashboard/agents?conversation=${cleanSegment(conversationId)}`;
   return messageId ? `${base}&message=${cleanSegment(messageId)}` : base;
 }
+
+/**
+ * Where an archived Session's transcript actually lives. Not the channel: the
+ * act of archiving removes a session's messages from channel scroll-back, so
+ * linking to `channelHref(conversationId, messageId)` for an archived session
+ * always lands on a feed that no longer contains the target.
+ */
+export function archivedSessionHref(sessionId: string): string {
+  return `/dashboard/memory?tab=sessions&session=${cleanSegment(sessionId)}`;
+}
