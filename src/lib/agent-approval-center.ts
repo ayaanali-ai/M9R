@@ -113,10 +113,13 @@ function evidenceApproval(
     created_at: timestamp(passport.submitted_at, timestamp(run.last_seen_at, fallbackCreatedAt)),
     priority: "high",
     status: "awaiting_review",
-    primary_action: { kind: "review_run_passport", label: "Open Run Passport" },
-    secondary_actions: [
-      { kind: "record_review_decision", label: "Go to review decision" },
-    ],
+    // Both action kinds route to the same place today (the run drawer's
+    // evidence zone, via runAction() in approval-center.tsx) -- the standalone
+    // Run Passport page and dedicated review-decision surface these labels
+    // used to name were both retired. One honest label instead of two
+    // identically-behaving buttons with different names.
+    primary_action: { kind: "review_run_passport", label: "Review evidence" },
+    secondary_actions: [],
     metadata: { passport_status: passport.passport_status },
   };
 }

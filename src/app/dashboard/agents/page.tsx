@@ -21,6 +21,7 @@ import {
   type WsRule,
 } from "@/lib/agent-workspace-data";
 import { buildAgentApprovalCenter } from "@/lib/agent-approval-center";
+import { whisperActivitySummary } from "@/lib/bridge/whisper-activity-service";
 import { loadAgentApprovalData } from "@/lib/agent-approval-center-data";
 import ReviewerDemoWorkspace from "@/components/product/ReviewerDemoWorkspace";
 import { isReviewerDemoAppMetadata } from "@/lib/reviewer-demo-access";
@@ -290,6 +291,16 @@ export default async function AgentsDashboardPage() {
     agents: baseAgents,
     passports: approvalData.passports,
   });
+  // Whispers is a real but usually-empty surface -- only show the toggle at
+  // all when there's something to show, same as Review's badge count. Best
+  // effort: a failure here should never block the page from rendering.
+  let hasWhispers = false;
+  try {
+    const whisperActivity = await whisperActivitySummary();
+    hasWhispers = whisperActivity.totalCount30d > 0;
+  } catch {
+    hasWhispers = false;
+  }
   const agents = baseAgents.map((agent) => ({
     ...agent,
     approvalCount: approvalCenter.by_agent[agent.key],
@@ -306,6 +317,7 @@ export default async function AgentsDashboardPage() {
           approvalRules={[...reviewRules, ...legacyRules]}
           approvalCenter={approvalCenter}
           passports={approvalData.passports}
+          initialHasWhispers={hasWhispers}
         />
 
       </div>

@@ -355,11 +355,11 @@ const WHISPERS_POLL_INTERVAL_MS = 5_000;
  * scope for this pass; noted here so the two surfaces aren't assumed to be
  * mutually exclusive.
  *
- * Deliberately its own independent fetch of /api/dashboard/conversations
- * rather than reaching into ConversationPanel's internal message state --
- * that state isn't exposed upward, and re-plumbing it through several
- * components for this one panel isn't worth the risk of touching that
- * file's live-message rendering. A short poll keeps it fresh instead.
+ * Backed by GET /api/dashboard/whispers -- a direct, workspace-scoped query
+ * on conversation_messages, not a client-side filter of the full
+ * /api/dashboard/conversations firehose (that used to mean downloading every
+ * channel's last 80 messages, including full bodies, to keep this usually-
+ * empty panel updated every 5s). A short poll keeps it fresh instead.
  *
  * Workspace-wide (every channel), not scoped to whichever channel is
  * currently open -- AgentWorkspaceClient doesn't actually know which
@@ -380,17 +380,11 @@ export function WhispersPanel({ agents, onClose }: { agents: AgentView[]; onClos
   useEffect(() => {
     let cancelled = false;
     function load() {
-      fetch("/api/dashboard/conversations", { cache: "no-store" })
+      fetch("/api/dashboard/whispers", { cache: "no-store" })
         .then((res) => res.json())
-        .then((data: { conversations?: Array<{ id: string; topic: string; messages?: Array<{ id: string; sender_connection_id: string | null; recipient_connection_id: string | null; body: string; created_at: string }> }> }) => {
+        .then((data: { messages?: WhisperMessage[] }) => {
           if (cancelled) return;
-          const whispers = (data.conversations ?? []).flatMap((conversation) =>
-            (conversation.messages ?? [])
-              .filter((m): m is typeof m & { sender_connection_id: string; recipient_connection_id: string } => Boolean(m.sender_connection_id && m.recipient_connection_id))
-              .map((m) => ({ id: m.id, senderConnectionId: m.sender_connection_id, recipientConnectionId: m.recipient_connection_id, body: m.body, createdAt: m.created_at, channelName: conversation.topic })),
-          );
-          whispers.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-          setMessages(whispers.slice(0, 100));
+          setMessages(data.messages ?? []);
         })
         .catch(() => { if (!cancelled) setError("Could not load agent whispers."); });
       fetch("/api/dashboard/whisper-activity", { cache: "no-store" })
