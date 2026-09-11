@@ -11,7 +11,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
-  FREE_PLAN_LIMIT_MESSAGE,
   FREE_PLAN_AGENT_LIMIT_MESSAGE,
   FREE_PLAN_RULE_LIMIT_MESSAGE,
   resolveUserPlan,
@@ -38,20 +37,21 @@ test("a missing optional subscription table in the PostgREST schema cache is tre
 
 test("free user with 0 workspaces can create a workspace", () => {
   const usage = workspaceUsageFor("free", 0);
-  assert.equal(usage.maxWorkspaces, 2);
+  assert.equal(usage.maxWorkspaces, null);
   assert.equal(usage.limitReached, false);
 });
 
 test("free user with 1 workspace can create a second workspace", () => {
   const usage = workspaceUsageFor("free", 1);
-  assert.equal(usage.maxWorkspaces, 2);
+  assert.equal(usage.maxWorkspaces, null);
   assert.equal(usage.limitReached, false);
 });
 
-test("free user with 2 workspaces cannot create a third workspace", () => {
+test("billing-paused free access is not blocked at the future free cap", () => {
   const usage = workspaceUsageFor("free", 2);
-  assert.equal(usage.limitReached, true);
-  assert.equal(usage.message, FREE_PLAN_LIMIT_MESSAGE);
+  assert.equal(usage.maxWorkspaces, null);
+  assert.equal(usage.limitReached, false);
+  assert.equal(usage.message, null);
 });
 
 test("paid user is not blocked by the free cap", () => {
@@ -95,12 +95,12 @@ test("dashboard create UI shows usage and disables creation at the free cap", ()
 
 // --- Real billing: agent, rule, and retention limits ------------------------
 
-test("free plan limits match the advertised numbers; paid plan has none", () => {
+test("billing-paused individual access has no workspace, agent, rule, or retention cap", () => {
   const free = getPlanLimits("free");
-  assert.equal(free.maxWorkspaces, 2);
-  assert.equal(free.maxAgents, 2);
-  assert.equal(free.maxRules, 10);
-  assert.equal(free.auditRetentionDays, 30);
+  assert.equal(free.maxWorkspaces, null);
+  assert.equal(free.maxAgents, null);
+  assert.equal(free.maxRules, null);
+  assert.equal(free.auditRetentionDays, null);
 
   const paid = getPlanLimits("paid");
   assert.equal(paid.maxWorkspaces, null);

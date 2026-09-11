@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { supabase } from "@/lib/supabase";
 import { requireStripe, priceIdForInterval, type BillingInterval } from "@/lib/stripe";
+import { BILLING_ENABLED } from "@/lib/billing-config";
 import { resolveBaseUrl } from "../../agent/_shared";
 
 /**
@@ -15,6 +16,9 @@ export async function POST(req: NextRequest) {
   if (!db) return NextResponse.json({ error: "M9R is not configured." }, { status: 503 });
   const { data: { user } } = await db.auth.getUser();
   if (!user?.email) return NextResponse.json({ error: "Sign in to upgrade." }, { status: 401 });
+  if (!BILLING_ENABLED) {
+    return NextResponse.json({ error: "Billing is temporarily paused while Stripe is being repaired." }, { status: 503 });
+  }
 
   const body = await req.json().catch(() => ({})) as { interval?: unknown };
   const interval: BillingInterval = body.interval === "annual" ? "annual" : "monthly";

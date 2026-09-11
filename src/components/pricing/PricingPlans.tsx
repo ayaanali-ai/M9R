@@ -112,13 +112,53 @@ const COMPARISON: { group: string; rows: { label: string; free: string; pro: str
   },
 ];
 
-export default function PricingPlans() {
+export default function PricingPlans({ billingEnabled }: { billingEnabled: boolean }) {
   const [billing, setBilling] = useState<Billing>("annual");
+  const tiers = billingEnabled
+    ? TIERS
+    : TIERS.map((tier) => tier.name === "Free"
+      ? {
+          ...tier,
+          tagline: "The complete individual workspace while billing is paused.",
+          proof: "No card, no expiry, no paid gate.",
+          features: [
+            "Unlimited individual workspaces",
+            "Unlimited connected agents",
+            "Full workspace chat + agent runs",
+            "Evidence chain + Run Passport",
+            "Unlimited workspace rules while billing is paused",
+          ],
+        }
+      : {
+          ...tier,
+          price: () => "Coming later",
+          cadence: () => undefined,
+          note: () => undefined,
+          cta: { label: "Billing paused", href: "/pricing" },
+          featured: false,
+          badge: "Not accepting payment",
+        });
+  const comparison = billingEnabled
+    ? COMPARISON
+    : COMPARISON.map((section) => ({
+        ...section,
+        rows: section.rows.map((row) => {
+          if (["Workspace rules", "Agent connections", "Workspace seats"].includes(row.label)) {
+            return { ...row, free: "Open", pro: "Coming later", team: "Coming later" };
+          }
+          return row;
+        }),
+      }));
 
   return (
     <>
+      {!billingEnabled && (
+        <div className="lp-tier-proof" role="status" style={{ marginTop: 32, justifyContent: "center" }}>
+          Billing is paused while Stripe is being repaired. Individual access is open; no payment is required.
+        </div>
+      )}
       {/* Billing toggle */}
-      <div style={{ marginTop: 40, display: "flex", justifyContent: "center" }}>
+      {billingEnabled && <div style={{ marginTop: 40, display: "flex", justifyContent: "center" }}>
         <div className="lp-toggle">
           {(["monthly", "annual"] as const).map((b) => (
             <button
@@ -132,7 +172,7 @@ export default function PricingPlans() {
             </button>
           ))}
         </div>
-      </div>
+      </div>}
 
       {/* Tier cards */}
       <div
@@ -143,7 +183,7 @@ export default function PricingPlans() {
           gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))",
         }}
       >
-        {TIERS.map((tier) => {
+        {tiers.map((tier) => {
           const cadence = tier.cadence?.(billing);
           const note = tier.note?.(billing);
           return (
@@ -166,13 +206,19 @@ export default function PricingPlans() {
                 <span>{tier.proof}</span>
               </div>
 
-              <Link
-                href={tier.cta.href}
-                className={`lp-btn ${tier.featured ? "lp-btn-primary" : "lp-btn-ghost"}`}
-                style={{ marginTop: 22, width: "100%" }}
-              >
-                {tier.cta.label}
-              </Link>
+              {billingEnabled || tier.name === "Free" ? (
+                <Link
+                  href={tier.name === "Free" && !billingEnabled ? "/auth" : tier.cta.href}
+                  className={`lp-btn ${tier.featured ? "lp-btn-primary" : "lp-btn-ghost"}`}
+                  style={{ marginTop: 22, width: "100%" }}
+                >
+                  {tier.cta.label}
+                </Link>
+              ) : (
+                <span className="lp-btn lp-btn-ghost" aria-disabled="true" style={{ marginTop: 22, width: "100%", opacity: 0.6 }}>
+                  {tier.cta.label}
+                </span>
+              )}
 
               <ul className="lp-tier-feats">
                 {tier.features.map((feature) => (
@@ -192,8 +238,9 @@ export default function PricingPlans() {
         <div style={{ textAlign: "center", maxWidth: "34rem", marginInline: "auto" }}>
           <h2 className="lp-doc-h" style={{ fontSize: 22 }}>Compare every plan</h2>
           <p className="lp-doc-lede" style={{ marginInline: "auto" }}>
-            The Free tier is genuinely generous. Paid tiers add unlimited scale
-            and team-grade governance.
+            {billingEnabled
+              ? "The Free tier is genuinely generous. Paid tiers add unlimited scale and team-grade governance."
+              : "Individual access is open while billing is paused. Paid and team tiers return after Stripe is re-verified."}
           </p>
         </div>
 
@@ -218,7 +265,7 @@ export default function PricingPlans() {
               </tr>
             </thead>
             <tbody>
-              {COMPARISON.map((section) => (
+              {comparison.map((section) => (
                 <FragmentGroup key={section.group} group={section.group} rows={section.rows} />
               ))}
             </tbody>

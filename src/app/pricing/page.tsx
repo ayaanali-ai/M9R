@@ -4,6 +4,7 @@ import Footer from "@/components/Footer";
 import PricingPlans from "@/components/pricing/PricingPlans";
 import ScrollReveal from "@/components/ScrollReveal";
 import type { Metadata } from "next";
+import { BILLING_ENABLED } from "@/lib/billing-config";
 
 /**
  * Pricing — describes the actual current product (Watchfloor chat, the
@@ -13,15 +14,14 @@ import type { Metadata } from "next";
  *
  * The interactive tiers + comparison live in <PricingPlans /> (client, for the
  * billing toggle). This server shell carries the metadata, the value strip,
- * an FAQ, and the closing CTA. Billing is real (Stripe Checkout + customer
- * portal, wired from Settings) — the upgrade button lives in the dashboard
- * once signed in, not on this public marketing page.
+ * an FAQ, and the closing CTA. Paid billing is opt-in while Stripe is being
+ * repaired; the dashboard never sends a user to checkout in the default mode.
  */
 
 export const metadata: Metadata = {
   title: "Pricing — M9R",
   description:
-    "One workspace and two connected agents free, forever. Upgrade for unlimited agents, unlimited history, and team-grade governance.",
+    "M9R is free while billing is paused. No card is required; team billing returns after Stripe is re-verified.",
 };
 
 const VALUE_PROPS = [
@@ -87,14 +87,14 @@ export default function PricingPage() {
           </div>
           <h1 className="lp-h-page">Pay for proof, priced for the team actually using it.</h1>
           <p className="lp-lede-page">
-            Start free: up to two workspaces, two connected agents, no card, no expiry.
-            Upgrade only when you need unlimited agents, unlimited history, or
-            team-grade governance.
+            {BILLING_ENABLED
+              ? "Start free with no card. Upgrade only when you need unlimited scale or team-grade governance."
+              : "M9R is currently open for individual use while Stripe is being repaired. No card or payment is required."}
           </p>
         </header>
 
         {/* Interactive tiers + comparison */}
-        <PricingPlans />
+        <PricingPlans billingEnabled={BILLING_ENABLED} />
 
         {/* Value strip */}
         <section className="lp-doc-section lp-reveal" style={{ borderTop: 0 }}>

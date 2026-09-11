@@ -6,6 +6,8 @@
  * be wired without scattering entitlement checks through product code.
  */
 
+import { BILLING_ENABLED } from "@/lib/billing-config";
+
 export type UserPlan = "free" | "paid" | "unknown";
 
 export interface PlanLimits {
@@ -115,6 +117,13 @@ export function resolveUserPlan(input: {
 }
 
 export function getPlanLimits(plan: UserPlan): PlanLimits {
+  // Billing is opt-in. While it is paused, everyone gets the complete
+  // individual workspace surface and no request can be blocked by a paid-plan
+  // entitlement check. The constants below remain the future free-tier policy
+  // for when billing is explicitly enabled again.
+  if (!BILLING_ENABLED) {
+    return { maxWorkspaces: null, maxAgents: null, maxRules: null, auditRetentionDays: null };
+  }
   if (plan === "paid") {
     return { maxWorkspaces: null, maxAgents: null, maxRules: null, auditRetentionDays: null };
   }

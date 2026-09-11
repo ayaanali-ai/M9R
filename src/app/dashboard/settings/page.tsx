@@ -1,6 +1,7 @@
 import { PageHeader } from "@/components/product/WorkspaceUI";
 import SettingsView from "@/components/product/SettingsView";
 import { createClient } from "@/lib/supabase/server";
+import { BILLING_ENABLED } from "@/lib/billing-config";
 
 export default async function SettingsPage() {
   const supabase = await createClient();
@@ -21,7 +22,12 @@ export default async function SettingsPage() {
         description="Account, billing, data, and preferences."
       />
       <div className="mt-7">
-        <SettingsView email={user?.email ?? "—"} userId={user?.id ?? "—"} username={username} />
+        <SettingsView
+          email={user?.email ?? "—"}
+          userId={user?.id ?? "—"}
+          username={username}
+          billingEnabled={BILLING_ENABLED}
+        />
       </div>
     </>
   );

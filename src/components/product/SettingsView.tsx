@@ -34,7 +34,7 @@ const SECTIONS = [
   ["data", "Data & privacy"],
 ] as const;
 
-export default function SettingsView({ email, userId, username }: { email: string; userId: string; username: string | null }) {
+export default function SettingsView({ email, userId, username, billingEnabled }: { email: string; userId: string; username: string | null; billingEnabled: boolean }) {
   const initial = (username ?? email).trim().charAt(0).toUpperCase() || "O";
 
   return (
@@ -54,7 +54,7 @@ export default function SettingsView({ email, userId, username }: { email: strin
         <WorkspaceIdentitySection />
         <TeamSection viewerUserId={userId} />
         <ConnectedAgentsSection />
-        <SubscriptionSection />
+        <SubscriptionSection billingEnabled={billingEnabled} />
         <AgentAccessSection />
         <GitEventsSection />
         <DataPrivacySection />
@@ -869,6 +869,7 @@ function AccountSection({ email, userId, username, initial }: { email: string; u
 /* -------------------------------------------------------------------------- */
 
 interface BillingStatus {
+  billingEnabled?: boolean;
   plan: "free" | "paid" | "unknown";
   subscription: {
     tier: "monthly" | "annual" | null;
@@ -878,7 +879,7 @@ interface BillingStatus {
   } | null;
 }
 
-function SubscriptionSection() {
+function SubscriptionSection({ billingEnabled }: { billingEnabled: boolean }) {
   const [status, setStatus] = useState<BillingStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<"monthly" | "annual" | "portal" | null>(null);
@@ -936,7 +937,7 @@ function SubscriptionSection() {
     }
   }
 
-  const isPaid = status?.plan === "paid";
+  const isPaid = billingEnabled && status?.plan === "paid";
 
   return (
     <Section id="subscription" title="Subscription" description="Your plan and billing.">
@@ -954,14 +955,16 @@ function SubscriptionSection() {
           <p className="mt-1 text-[12px] text-[color:var(--ol-text-muted)]">
             {isPaid
               ? `Billed ${status?.subscription?.tier === "annual" ? "annually" : "monthly"}${status?.subscription?.currentPeriodEnd ? ` · renews ${new Date(status.subscription.currentPeriodEnd).toLocaleDateString()}` : ""}.`
-              : "Up to 2 agents, 10 active rules, 30-day audit log retention. No card required."}
+              : billingEnabled
+                ? "Up to 2 agents, 10 active rules, 30-day audit log retention. No card required."
+                : "All individual workspace features are open while billing is paused. No card required."}
           </p>
         </div>
         {isPaid ? (
           <button className="ol-btn ol-btn--secondary" disabled={busy === "portal"} onClick={openPortal}>
             {busy === "portal" ? "Opening…" : "Manage billing"}
           </button>
-        ) : (
+        ) : billingEnabled ? (
           <div className="flex gap-2">
             <button className="ol-btn ol-btn--secondary" disabled={busy !== null} onClick={() => startCheckout("annual")}>
               {busy === "annual" ? "Redirecting…" : "Upgrade · $11/mo annual"}
@@ -970,13 +973,20 @@ function SubscriptionSection() {
               {busy === "monthly" ? "Redirecting…" : "Upgrade · $14/mo"}
             </button>
           </div>
+        ) : (
+          <span className="ol-lozenge ol-lozenge--ok">Billing paused</span>
         )}
       </div>
       {notice && <p className="mt-3 text-[12px] text-[color:var(--ol-warn)]">{notice}</p>}
-      {!isPaid && (
+      {!isPaid && billingEnabled && (
         <p className="mt-3 text-[12px] text-[color:var(--ol-text-muted)]">
           Pro removes every limit above and adds priority support. Manage payment methods, invoices,
           and cancellation from Stripe&apos;s billing portal once you&apos;re subscribed.
+        </p>
+      )}
+      {!billingEnabled && (
+        <p className="mt-3 text-[12px] text-[color:var(--ol-text-muted)]">
+          Stripe checkout and the billing portal are disabled temporarily. Teams and paid plans will return after Stripe is re-verified.
         </p>
       )}
     </Section>

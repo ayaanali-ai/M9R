@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { supabase } from "@/lib/supabase";
 import { getUserPlan } from "@/lib/plan-limits-service";
+import { BILLING_ENABLED } from "@/lib/billing-config";
 
 /** GET /api/billing/status — the signed-in user's real plan/subscription state for Settings. */
 export async function GET() {
@@ -28,5 +29,5 @@ export async function GET() {
     }
   }
 
-  return NextResponse.json({ plan, subscription });
+  return NextResponse.json({ billingEnabled: BILLING_ENABLED, plan, subscription });
 }
