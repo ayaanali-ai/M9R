@@ -261,35 +261,38 @@ export async function getGoal(agent: AuthedAgent, goalId: string): Promise<GoalS
   return loadGoalForWorkspace(agent.workspaceId, goalId);
 }
 
-export async function listGoals(agent: AuthedAgent, limit = 20): Promise<GoalSummaryDto[]> {
+async function listGoalsForWorkspace(workspaceId: string, limit: number): Promise<GoalSummaryDto[]> {
   const db = requireService();
   const boundedLimit = Math.min(Math.max(Number.isFinite(limit) ? Math.trunc(limit) : 20, 1), 100);
   const { data, error } = await db
     .from("goals")
     .select(GOAL_COLUMNS)
-    .eq("workspace_id", agent.workspaceId)
+    .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(boundedLimit);
   if (error) {
-    console.error("listGoals failed:", error.message, error.code);
+    console.error("listGoalsForWorkspace failed:", error.message, error.code);
     throw new GoalApiError("Could not list Goals.", "goal_read_failed", 500);
   }
   return ((data ?? []) as unknown as GoalRow[]).map(toSummary);
 }
 
-export async function getGoalEvents(agent: AuthedAgent, goalId: string): Promise<GoalEventDto[]> {
-  await getGoal(agent, goalId);
+export async function listGoals(agent: AuthedAgent, limit = 20): Promise<GoalSummaryDto[]> {
+  return listGoalsForWorkspace(agent.workspaceId, limit);
+}
+
+async function listGoalEventsForWorkspace(workspaceId: string, goalId: string): Promise<GoalEventDto[]> {
   const db = requireService();
   const { data, error } = await db
     .from("goal_events")
     .select("id, goal_id, sequence, event_type, payload, actor_kind, actor_id, correlation_id, causation_id, occurred_at")
     .eq("goal_id", goalId)
-    .eq("workspace_id", agent.workspaceId)
+    .eq("workspace_id", workspaceId)
     .order("sequence", { ascending: true })
     .limit(200);
   if (error) {
-    console.error("getGoalEvents failed:", error.message, error.code);
+    console.error("listGoalEventsForWorkspace failed:", error.message, error.code);
     throw new GoalApiError("Could not read Goal events.", "goal_read_failed", 500);
   }
   return ((data ?? []) as Array<{
@@ -315,6 +318,11 @@ export async function getGoalEvents(agent: AuthedAgent, goalId: string): Promise
     causationId: event.causation_id,
     occurredAt: event.occurred_at,
   }));
+}
+
+export async function getGoalEvents(agent: AuthedAgent, goalId: string): Promise<GoalEventDto[]> {
+  await getGoal(agent, goalId);
+  return listGoalEventsForWorkspace(agent.workspaceId, goalId);
 }
 
 function missionPrincipalForAgent(agent: AuthedAgent): MissionPrincipal {
@@ -562,6 +570,12 @@ export async function createContextPacket(agent: AuthedAgent, goalId: string, in
   }
 
   const db = requireService();
+  // packet.digest is the caller-supplied content digest (an integrity check on
+  // the referenced content) -- it is not a safe idempotency key on its own,
+  // since it doesn't cover sensitivity/redactionStatus/recipient. Hash the
+  // whole packet server-side, the same way submitCompletionReceipt already
+  // does, and use that for the idempotency comparison instead.
+  const requestDigest = createHash("sha256").update(JSON.stringify(packet)).digest("hex");
   const { data, error } = await db.rpc("create_goal_context_packet_atomic", {
     p_workspace_id: agent.workspaceId,
     p_goal_id: goalId,
@@ -575,6 +589,7 @@ export async function createContextPacket(agent: AuthedAgent, goalId: string, in
     p_allowed_transformations: packet.packet.allowedTransformations,
     p_redaction_status: packet.packet.redactionStatus,
     p_digest: packet.packet.digest,
+    p_request_digest: requestDigest,
     p_expires_at: packet.packet.expiresAt,
     p_actor_kind: "agent",
     p_actor_id: agent.connectionId,
@@ -595,17 +610,21 @@ export async function createContextPacket(agent: AuthedAgent, goalId: string, in
 
 export async function listContextPackets(agent: AuthedAgent, goalId: string): Promise<GoalContextPacketDto[]> {
   await requireOwnedGoal(agent, goalId);
+  return listContextPacketsForWorkspace(agent.workspaceId, goalId);
+}
+
+async function listContextPacketsForWorkspace(workspaceId: string, goalId: string): Promise<GoalContextPacketDto[]> {
   const db = requireService();
   const { data, error } = await db
     .from("goal_context_packets")
     .select(CONTEXT_PACKET_COLUMNS)
-    .eq("workspace_id", agent.workspaceId)
+    .eq("workspace_id", workspaceId)
     .eq("goal_id", goalId)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(200);
   if (error) {
-    console.error("listContextPackets failed:", error.message, error.code);
+    console.error("listContextPacketsForWorkspace failed:", error.message, error.code);
     throw new GoalApiError("Could not read context packets.", "context_packet_read_failed", 500);
   }
   return ((data ?? []) as unknown as ContextPacketRow[]).map(toContextPacket);
@@ -687,20 +706,62 @@ export async function submitCompletionReceipt(agent: AuthedAgent, goalId: string
 
 export async function listCompletionReceipts(agent: AuthedAgent, goalId: string): Promise<GoalCompletionReceiptDto[]> {
   await requireOwnedGoal(agent, goalId);
+  return listCompletionReceiptsForWorkspace(agent.workspaceId, goalId);
+}
+
+async function listCompletionReceiptsForWorkspace(workspaceId: string, goalId: string): Promise<GoalCompletionReceiptDto[]> {
   const db = requireService();
   const { data, error } = await db
     .from("goal_completion_receipts")
     .select(RECEIPT_COLUMNS)
-    .eq("workspace_id", agent.workspaceId)
+    .eq("workspace_id", workspaceId)
     .eq("goal_id", goalId)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(200);
   if (error) {
-    console.error("listCompletionReceipts failed:", error.message, error.code);
+    console.error("listCompletionReceiptsForWorkspace failed:", error.message, error.code);
     throw new GoalApiError("Could not read completion receipts.", "receipt_read_failed", 500);
   }
   return ((data ?? []) as unknown as CompletionReceiptRow[]).map(toCompletionReceipt);
+}
+
+/**
+ * Human read path for the handoff record.
+ *
+ * A signed-in workspace owner sees every Goal in their workspace, not only
+ * Goals whose principal is one particular agent connection -- the whole point
+ * of this surface is to watch handoffs *between* connections. Agent callers
+ * keep the narrower principal-scoped functions above.
+ */
+function requireHumanPrincipal(principal: MissionPrincipal): string {
+  if (principal.kind !== "human" || !principal.userId) {
+    throw new GoalApiError("Only a signed-in human can read the workspace handoff record.", "human_required", 403);
+  }
+  return principal.workspaceId;
+}
+
+export async function listWorkspaceGoals(principal: MissionPrincipal, limit = 50): Promise<GoalSummaryDto[]> {
+  return listGoalsForWorkspace(requireHumanPrincipal(principal), limit);
+}
+
+export interface GoalHandoffRecord {
+  goal: GoalSummaryDto;
+  events: GoalEventDto[];
+  contextPackets: GoalContextPacketDto[];
+  receipts: GoalCompletionReceiptDto[];
+}
+
+/** One Goal's full human-visible handoff record: lifecycle, what was handed over, and what was proven. */
+export async function getGoalHandoffRecord(principal: MissionPrincipal, goalId: string): Promise<GoalHandoffRecord> {
+  const workspaceId = requireHumanPrincipal(principal);
+  const goal = await loadGoalForWorkspace(workspaceId, goalId);
+  const [events, contextPackets, receipts] = await Promise.all([
+    listGoalEventsForWorkspace(workspaceId, goalId),
+    listContextPacketsForWorkspace(workspaceId, goalId),
+    listCompletionReceiptsForWorkspace(workspaceId, goalId),
+  ]);
+  return { goal, events, contextPackets, receipts };
 }
 
 /**
