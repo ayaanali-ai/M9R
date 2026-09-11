@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authenticateAgent, bearerFrom } from "@/lib/agent-join-service";
 import { lookupLivePtySessionRoom, publishInternalRelayFrame } from "@/lib/mission/mission-relay-internal-publish";
 import { handleAgentError } from "../../../_shared";
+import { TERMINAL_ENABLED } from "@/lib/terminal-config";
 
 const MAX_TEXT_LENGTH = 2000;
 
@@ -25,6 +26,12 @@ const MAX_TEXT_LENGTH = 2000;
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
+    // Checked before auth: while the terminal view is gated off there is no
+    // pane for a handoff card to land on, so this is unavailable rather than
+    // merely unauthorized.
+    if (!TERMINAL_ENABLED) {
+      return NextResponse.json({ error: "The terminal multiplayer view is not enabled on this deployment." }, { status: 404 });
+    }
     const { id: conversationId } = await params;
     const agent = await authenticateAgent(bearerFrom(req.headers.get("authorization")));
     if (!agent) return NextResponse.json({ error: "Invalid or missing agent token." }, { status: 401 });

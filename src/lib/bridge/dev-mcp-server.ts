@@ -55,6 +55,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { CHAT_EVIDENCE_SCHEMA_VERSION } from "@/lib/bridge/chat-evidence-schema";
+import { TERMINAL_ENABLED } from "@/lib/terminal-config";
 import {
   MAX_GIT_READ_LINES,
   readGovernedFile,
@@ -356,7 +357,10 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
     },
   );
 
-  server.registerTool(
+  // Registered only while the terminal multiplayer view is enabled. Advertising
+  // a tool whose only surface is hidden would hand agents a call that always
+  // fails at the route; the honest default is not to offer it at all.
+  if (TERMINAL_ENABLED) server.registerTool(
     "handoff_to_terminal",
     {
       description:

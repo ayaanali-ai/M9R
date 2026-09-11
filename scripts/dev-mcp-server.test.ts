@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createDevMcpServer, isDirectDevMcpProcess } from "../src/lib/bridge/dev-mcp-server.ts";
+import { TERMINAL_ENABLED } from "../src/lib/terminal-config.ts";
 
 test("compiled MCP entrypoint recognizes a Windows path without requiring a file URL slash shape", () => {
   assert.equal(
@@ -193,7 +194,12 @@ test("server exposes exactly the governed tool set (no unrestricted shell or vie
     await withClient(root, async (client) => {
       const { tools } = await client.listTools();
       const names = tools.map((tool) => tool.name).sort();
-      assert.deepEqual(names, ["draft_section", "git_read", "handoff_to_terminal", "read_file", "request_assignment_change", "request_evidence_review", "rg", "search_memory", "send_message", "str_replace", "submit_evidence", "todo", "tree"]);
+      // handoff_to_terminal is registered only while the terminal multiplayer
+      // view is enabled (NEXT_PUBLIC_M9R_TERMINAL_ENABLED), which is off by
+      // default -- so the governed set shrinks by exactly that one tool.
+      const expected = ["draft_section", "git_read", "read_file", "request_assignment_change", "request_evidence_review", "rg", "search_memory", "send_message", "str_replace", "submit_evidence", "todo", "tree"];
+      if (TERMINAL_ENABLED) expected.push("handoff_to_terminal");
+      assert.deepEqual(names, expected.sort());
     });
   } finally {
     await rm(root, { recursive: true, force: true });

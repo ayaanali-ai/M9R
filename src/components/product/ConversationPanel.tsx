@@ -9,6 +9,7 @@ import { useComposerAutosize } from "./useComposerAutosize";
 import MetalSendButton from "./MetalSendButton";
 import { BorderBeam } from "border-beam";
 import { TerminalWorkspace, type PtyRoomSession } from "./TerminalWorkspace";
+import { TERMINAL_ENABLED } from "@/lib/terminal-config";
 import { AttachIcon, MentionIcon, SendIcon } from "@/components/product/wf-icons";
 import { AgentMark, AGENT_BRAND_COLOR } from "@/components/product/WorkspaceUI";
 import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
@@ -954,7 +955,13 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
    * Files/Review/etc. are -- those show alongside chat; this replaces it,
    * and only ConversationPanel has the relay connection terminal frames ride.
    */
-  const [terminalActive, setTerminalActive] = useState(false);
+  const [terminalRequested, setTerminalActive] = useState(false);
+  /**
+   * TERMINAL_ENABLED is the kill switch, applied here rather than only on the
+   * toggle button, so stale state or a future caller can never put the
+   * unfinished view on screen while the flag is off.
+   */
+  const terminalActive = TERMINAL_ENABLED && terminalRequested;
   /** Raw session facts as the relay reports them -- isOwner/ownerLabel are per-viewer, computed at render time in ptyRoomSessions below, not stored here. */
   const [ptySessions, setPtySessions] = useState<Record<string, Omit<PtyRoomSession, "isOwner" | "ownerLabel">>>({});
   /** Captured once the relay authenticates, so a pane can tell "am I the owner" apart from "someone else is." State, not a ref -- ptyRoomSessions reads it during render, and reading a ref there is a real correctness bug (React may render without committing). */
@@ -2298,9 +2305,11 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                     <LiveIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Live</span>
                   </button>
                 )}
-                <button type="button" className="wf-chat-panel-toggle" data-active={terminalActive} onClick={() => setTerminalActive(true)} aria-pressed={terminalActive} aria-label="Terminal">
-                  <TerminalToggleIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Terminal</span>
-                </button>
+                {TERMINAL_ENABLED && (
+                  <button type="button" className="wf-chat-panel-toggle" data-active={terminalActive} onClick={() => setTerminalActive(true)} aria-pressed={terminalActive} aria-label="Terminal">
+                    <TerminalToggleIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Terminal</span>
+                  </button>
+                )}
               </div>
             </header>
             <ol ref={messagesListRef} className="wf-chat-messages scrollbar-thin" data-verbosity={verbosity}>
