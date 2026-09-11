@@ -33,6 +33,9 @@ function runNpm(args, cwd) {
 }
 
 try {
+  // Build the ignored CLI output from source so this smoke test validates a
+  // clean checkout rather than relying on a developer's stale cli/dist tree.
+  runNpm(["run", "build"], cliRoot);
   runNpm(["pack", "--ignore-scripts", "--pack-destination", tempRoot], cliRoot);
   const tarballName = readdirSync(tempRoot).find((name) => name.endsWith(".tgz"));
   if (!tarballName) throw new Error("CLI package did not produce a tarball");
