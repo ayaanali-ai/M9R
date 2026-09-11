@@ -56,6 +56,17 @@ try {
     return [a.fontSize === b.fontSize, a.lineHeight === b.lineHeight, document.documentElement.scrollWidth <= innerWidth];
   });
   assert.deepEqual(metrics, [true, true, true], "Mention backdrop and page geometry");
+  await composer.fill("@");
+  const mentionMenu = page.locator(".wf-chat-mention-menu");
+  await mentionMenu.waitFor();
+  const mentionMenuGeometry = await mentionMenu.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const field = element.parentElement?.getBoundingClientRect();
+    return { width: rect.width, fieldWidth: field?.width ?? 0, rows: element.querySelectorAll("button").length };
+  });
+  assert.ok(mentionMenuGeometry.rows > 0, "Mention menu renders connected agents");
+  assert.ok(mentionMenuGeometry.width < mentionMenuGeometry.fieldWidth, "Mention menu stays compact instead of spanning the composer");
+  await composer.fill("");
   console.log("PASS actual shell, decorative art, mention metrics, desktop overflow");
 
   const initialHeight = (await composer.boundingBox()).height;
