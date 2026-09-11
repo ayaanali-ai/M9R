@@ -1,0 +1,63 @@
+{
+  "schema": "oathlock.trace.v0",
+  "variant": "clean",
+  "provenance": "Structured recorder export with provider usage metadata.",
+  "session_id": "struct_usage_001",
+  "task_summary": "Resolve a retry loop while wiring the payments webhook.",
+  "actors_observed": ["agent", "tool"],
+  "steps": [
+    {
+      "step": 1,
+      "actor": "agent",
+      "model": "claude-sonnet-4-6",
+      "tool": "read_file",
+      "files_read": ["src/payments/webhook.ts"],
+      "token_usage": { "input": 1800, "output": 200, "total": 2000 },
+      "estimated_cost_usd": 0.009
+    },
+    {
+      "step": 2,
+      "actor": "tool",
+      "tool": "shell",
+      "shell_commands": ["npm run test:webhook"],
+      "errors": ["Error: signature verification failed"],
+      "token_usage": { "input": 0, "output": 0, "total": 0 },
+      "estimated_cost_usd": 0.0
+    },
+    {
+      "step": 3,
+      "actor": "tool",
+      "tool": "shell",
+      "shell_commands": ["npm run test:webhook"],
+      "errors": ["Error: signature verification failed"],
+      "retries": 1,
+      "token_usage": { "input": 0, "output": 0, "total": 0 },
+      "estimated_cost_usd": 0.0
+    },
+    {
+      "step": 4,
+      "actor": "agent",
+      "model": "claude-sonnet-4-6",
+      "tool": "edit_file",
+      "files_written": ["src/payments/webhook.ts"],
+      "token_usage": { "input": 2200, "output": 350, "total": 2550 },
+      "estimated_cost_usd": 0.012
+    },
+    {
+      "step": 5,
+      "actor": "tool",
+      "tool": "shell",
+      "shell_commands": ["npm run test:webhook"],
+      "errors": [],
+      "token_usage": { "input": 0, "output": 0, "total": 0 },
+      "estimated_cost_usd": 0.0
+    }
+  ],
+  "totals": {
+    "steps": 5,
+    "failed_commands": 2,
+    "retries": 1,
+    "token_usage": { "input": 6200, "output": 1100, "total": 7300 },
+    "estimated_cost_usd": 0.042
+  }
+}

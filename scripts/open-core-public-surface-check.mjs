@@ -115,10 +115,17 @@ const initialSnapshotExcludedPrefixes = [
   "src/app/api/goals/",
   "src/lib/goal/",
 ];
+const reviewedPublicTestFixtures = new Set([
+  "docs/migrations/workspace-rules-v5.1.md",
+  "docs/proof/v5.1-production-smoke-test.md",
+  "docs/proof/v5.1-before-after-proof-template.md",
+]);
 const isInitialSnapshotExcluded = (path) => {
   const normalized = path.replaceAll("\\", "/");
-  return initialSnapshotExcluded.has(normalized)
-    || initialSnapshotExcludedPrefixes.some((prefix) => normalized.startsWith(prefix));
+  return !reviewedPublicTestFixtures.has(normalized) && (
+    initialSnapshotExcluded.has(normalized)
+    || initialSnapshotExcludedPrefixes.some((prefix) => normalized.startsWith(prefix))
+  );
 };
 const excludedTracked = tracked.filter((path) => {
   return isInitialSnapshotExcluded(path);

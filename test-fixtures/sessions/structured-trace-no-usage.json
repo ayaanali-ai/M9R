@@ -1,0 +1,46 @@
+{
+  "schema": "oathlock.trace.v0",
+  "variant": "clean",
+  "provenance": "Structured recorder export WITHOUT any provider usage metadata.",
+  "session_id": "struct_nousage_001",
+  "task_summary": "Resolve a retry loop while wiring the payments webhook.",
+  "actors_observed": ["agent", "tool"],
+  "steps": [
+    {
+      "step": 1,
+      "actor": "agent",
+      "model": "claude-sonnet-4-6",
+      "tool": "read_file",
+      "files_read": ["src/payments/webhook.ts"]
+    },
+    {
+      "step": 2,
+      "actor": "tool",
+      "tool": "shell",
+      "shell_commands": ["npm run test:webhook"],
+      "errors": ["Error: signature verification failed"]
+    },
+    {
+      "step": 3,
+      "actor": "tool",
+      "tool": "shell",
+      "shell_commands": ["npm run test:webhook"],
+      "errors": ["Error: signature verification failed"],
+      "retries": 1
+    },
+    {
+      "step": 4,
+      "actor": "agent",
+      "model": "claude-sonnet-4-6",
+      "tool": "edit_file",
+      "files_written": ["src/payments/webhook.ts"]
+    },
+    {
+      "step": 5,
+      "actor": "tool",
+      "tool": "shell",
+      "shell_commands": ["npm run test:webhook"],
+      "errors": []
+    }
+  ]
+}

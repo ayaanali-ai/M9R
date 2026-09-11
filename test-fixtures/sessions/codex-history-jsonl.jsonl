@@ -1,0 +1,6 @@
+{"record":"meta","schema":"oathlock.trace.v0","variant":"messy","provenance":"Imported from a Codex CLI history export. No provider usage metadata available.","session_id":"codex_hist_5f2a","task_summary":"Add a --json flag to the export command.","actors_observed":["human","agent","tool"]}
+{"record":"step","step":1,"actor":"agent","tool_name":"read_file","files_read":["src/cli/export.ts"],"files_written":[],"shell_commands":[],"errors":[]}
+{"record":"step","step":2,"actor":"agent","tool_name":"edit_file","files_read":[],"files_written":["src/cli/export.ts"],"shell_commands":[],"errors":[]}
+{"record":"step","step":3,"actor":"tool","tool_name":"shell","files_read":[],"files_written":[],"shell_commands":["npm test"],"errors":["FAIL: export --json produced invalid JSON"]}
+{"record":"step","step":4,"actor":"agent","tool_name":"edit_file","files_read":[],"files_written":["src/cli/export.ts"],"shell_commands":[],"errors":[]}
+{"record":"step","step":5,"actor":"tool","tool_name":"shell","files_read":[],"files_written":[],"shell_commands":["npm test"],"errors":[]}

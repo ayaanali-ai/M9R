@@ -70,7 +70,11 @@ The initial snapshot also excludes the broader internal material categories
 that are not required to run or understand the multiplayer-first release:
 
 - `docs/designs/`, `docs/hackathon/`, `docs/proof/`, `docs/research/`, and
-  `docs/research-*`;
+  `docs/research-*`, except for the three reviewed synthetic rules-test
+  fixtures retained by the public test suite:
+  `docs/migrations/workspace-rules-v5.1.md`,
+  `docs/proof/v5.1-production-smoke-test.md`, and
+  `docs/proof/v5.1-before-after-proof-template.md`;
 - internal strategy, planning, phase-audit, historical RunLeak, and provider
   integration planning documents listed in the release-manifest checker;
 - `oathlock-specs-complete/`, `runleak-analyzer-mvp/`, and `experiments/`;

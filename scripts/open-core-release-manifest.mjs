@@ -82,6 +82,11 @@ const initialSnapshotExcludedPrefixes = [
   "src/app/api/goals/",
   "src/lib/goal/",
 ];
+const reviewedPublicTestFixtures = new Set([
+  "docs/migrations/workspace-rules-v5.1.md",
+  "docs/proof/v5.1-production-smoke-test.md",
+  "docs/proof/v5.1-before-after-proof-template.md",
+]);
 const secretFilePattern = /(?:^|[\\/])(?:\.env(?:\..*)?|.*\.pem|.*\.key|\.oathlock[\\/]local\.json)$/i;
 const artifactPattern = /^(?:artifacts|\.release-excluded)(?:[\\/]|$)/i;
 
@@ -97,8 +102,10 @@ function gitFiles(args) {
 }
 
 function isExcluded(path) {
-  return initialSnapshotExcluded.has(path)
-    || initialSnapshotExcludedPrefixes.some((prefix) => path.startsWith(prefix));
+  return !reviewedPublicTestFixtures.has(path) && (
+    initialSnapshotExcluded.has(path)
+    || initialSnapshotExcludedPrefixes.some((prefix) => path.startsWith(prefix))
+  );
 }
 
 function sha256(path) {

@@ -28,9 +28,10 @@ import { dedupeRules } from "../src/lib/rule-deduplication.ts";
 import { expectedImpact, buildAgentInstructionBlock } from "../src/lib/agent-instructions.ts";
 
 async function ingestSmoke() {
-  const raw = readFileSync(join(process.cwd(), "oathlock-session.md"), "utf8");
-  const detection = detectSessionInput(raw, "oathlock-session.md");
-  const result = normalizeRawSession(raw, "oathlock-session.md", detection);
+  const fixtureName = "claude-code-clean.md";
+  const raw = readFileSync(join(process.cwd(), "test-fixtures", "sessions", fixtureName), "utf8");
+  const detection = detectSessionInput(raw, fixtureName);
+  const result = normalizeRawSession(raw, fixtureName, detection);
   const trace = normalizeToTrace(result.trace);
   const metrics = computeTraceMetrics(trace);
   const report = await generateBlackboxReport(trace);
