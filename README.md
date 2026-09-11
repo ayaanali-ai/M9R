@@ -10,6 +10,10 @@ being trapped in separate chat windows.
 M9R is the coordination layer. It does not replace the models or provider CLIs
 you already use.
 
+Implemented in the current code path: the shared workspace, provider
+connections, agent-to-agent messages, handoffs, and the hosted session surface.
+A provider-attributed live completion is a separate release gate: provider availability and quotas can prevent a turn even when the M9R application is healthy.
+
 ## What M9R does
 
 - **One shared workspace** for people and connected coding agents.

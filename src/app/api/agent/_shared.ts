@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { AgentJoinError } from "@/lib/agent-join-service";
 import { PlanLimitError } from "@/lib/plan-limits-service";
 import { ChatEvidenceError } from "@/lib/bridge/chat-evidence-service";
-import { GoalApiError } from "@/lib/goal/goal-service";
 
 /**
  * Shared helpers for the /api/agent/* routes: base-URL resolution for claim
@@ -35,12 +34,6 @@ export function handleAgentError(err: unknown): NextResponse {
   }
   if (err instanceof ChatEvidenceError) {
     return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
-  }
-  if (err instanceof GoalApiError) {
-    return NextResponse.json(
-      { error: err.message, code: err.code, ...(err.detail ? { detail: err.detail } : {}) },
-      { status: err.status },
-    );
   }
   console.error("Agent route error:", err instanceof Error ? err.message : err);
   return NextResponse.json({ error: "Internal server error." }, { status: 500 });
