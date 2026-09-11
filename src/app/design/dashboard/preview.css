@@ -1,0 +1,31 @@
+.m9r-design-bench .product-shell { min-height: 100dvh; }
+.m9r-preview-toolbar { position: fixed; z-index: 60; inset: 0 0 auto; height: 32px; display: flex; align-items: center; justify-content: flex-end; gap: 16px; padding: 0 20px; background: var(--ol-surface-1); border-bottom: 1px solid var(--ol-border-subtle); color: var(--ol-text-muted); font-size: 10px; }
+.m9r-preview-toolbar button { display: inline-flex; align-items: center; background: transparent; border: 0; color: var(--ol-text-primary); cursor: pointer; }
+.m9r-preview-sidebar { position: fixed; inset: 32px auto 0 0; width: 236px; padding: 24px 16px; background: var(--ol-surface-1); border-right: 1px solid var(--ol-border-subtle); color: var(--ol-text-secondary); display: flex; flex-direction: column; }
+.m9r-preview-brand { display: flex; align-items: center; gap: 8px; padding: 0 8px 26px; color: var(--ol-text-primary); font-size: 15px; }
+.m9r-preview-brand > svg { width: 24px; height: 24px; }
+.m9r-preview-brand button { margin-left: auto; background: transparent; border: 0; color: var(--ol-text-muted); cursor: pointer; }
+.m9r-preview-space { display: flex; justify-content: space-between; padding: 12px 10px 22px; font-size: 12px; }
+.m9r-preview-sidebar nav { display: grid; gap: 4px; }
+.m9r-preview-sidebar nav button, .m9r-preview-channel { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border: 0; border-radius: 7px; background: transparent; color: inherit; text-align: left; font-size: 12px; cursor: pointer; }
+.m9r-preview-sidebar button:hover, .m9r-preview-sidebar .is-current { background: var(--ol-surface-2); color: var(--ol-text-primary); }
+.m9r-preview-nav-label { margin: 28px 10px 8px; font-size: 10px; color: var(--ol-text-muted); }
+.m9r-preview-person { display: flex; align-items: center; gap: 10px; padding: 8px 10px; font-size: 12px; }
+.m9r-preview-person > span { display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid var(--ol-border-subtle); border-radius: 6px; font-size: 10px; }
+.m9r-preview-person small { margin-left: auto; color: var(--ol-text-muted); font-size: 9px; }
+.m9r-preview-main { margin-left: 0; padding-top: 32px; }
+.m9r-preview-main[data-sidebar="true"] { margin-left: 236px; }
+.m9r-preview-main .wf-chat-shell { height: calc(100dvh - 32px); min-height: 0; border: 0; border-radius: 0; }
+.m9r-preview-main .product-nav-trigger { top: 49px; }
+.m9r-preview-main .wf-chat-shell:has(.wf-chat-side-slot) { grid-template-columns: minmax(0, 1fr) min(280px, 35%); }
+.m9r-preview-panel { padding: 24px; }
+.m9r-preview-panel button { border: 0; background: transparent; color: var(--ol-text-muted); cursor: pointer; font-size: 12px; }
+.m9r-preview-panel h2 { margin-top: 32px; color: var(--ol-text-primary); font-size: 18px; }
+.m9r-preview-panel p { margin-top: 16px; font-size: 13px; line-height: 1.7; color: var(--ol-text-muted); }
+@media (max-width: 760px) {
+  .m9r-preview-sidebar { display: none; }
+  .m9r-preview-main[data-sidebar="true"] { margin-left: 0; }
+  .m9r-preview-toolbar { gap: 12px; padding-inline: 12px; font-size: 9px; }
+  .m9r-preview-toolbar > span { margin-right: auto; max-width: 150px; }
+  .m9r-preview-panel { padding: 14px; }
+}

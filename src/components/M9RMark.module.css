@@ -1,0 +1,32 @@
+.mark {
+  transform-origin: 100px 100px;
+}
+
+.animated {
+  animation: drift 6s ease-in-out infinite;
+}
+
+.facet {
+  transform-origin: 100px 100px;
+}
+
+.animated .facet {
+  animation: pulse 3s ease-in-out infinite;
+}
+
+@keyframes drift {
+  0%, 100% { transform: rotate(-3deg) scale(1); }
+  50% { transform: rotate(3deg) scale(1.03); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animated,
+  .animated .facet {
+    animation: none;
+  }
+}

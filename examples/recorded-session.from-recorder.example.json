@@ -1,0 +1,84 @@
+{
+  "schemaVersion": "runleak.recorded.v0",
+  "runName": "Demo (recorder-lite): add search filter to list",
+  "objective": "Add a text search filter to the list view and its API route.",
+  "source": "manual",
+  "startedAt": "2026-06-20T16:00:00Z",
+  "filesChanged": [
+    "src/app/list/page.tsx",
+    "src/app/api/list/route.ts",
+    "src/lib/search-filter.ts"
+  ],
+  "commandsRun": [
+    "npm run lint",
+    "npm run build"
+  ],
+  "modelCalls": [
+    {
+      "id": "call-1",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "inputTokens": 3600,
+      "outputTokens": 800,
+      "costUsd": 0.05,
+      "latencyMs": 2100,
+      "promptSummary": "Plan the search filter",
+      "outputSummary": "Proposed query-param approach",
+      "totalTokens": 4400
+    },
+    {
+      "id": "call-2",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "inputTokens": 4400,
+      "outputTokens": 1200,
+      "costUsd": 0.07,
+      "latencyMs": 2800,
+      "promptSummary": "Implement filter + route",
+      "outputSummary": "Wrote filter and updated route",
+      "totalTokens": 5600
+    },
+    {
+      "id": "call-3",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "inputTokens": 2600,
+      "outputTokens": 500,
+      "latencyMs": 1500,
+      "promptSummary": "Fix a lint warning",
+      "outputSummary": "Adjusted import order",
+      "totalTokens": 3100
+    }
+  ],
+  "toolCalls": [
+    {
+      "id": "tool-1",
+      "toolName": "read_file",
+      "latencyMs": 35,
+      "success": true,
+      "inputSummary": "src/app/list/page.tsx"
+    },
+    {
+      "id": "tool-2",
+      "toolName": "edit_file",
+      "latencyMs": 55,
+      "success": true,
+      "inputSummary": "src/lib/search-filter.ts"
+    },
+    {
+      "id": "tool-3",
+      "toolName": "run_command",
+      "latencyMs": 4800,
+      "success": true,
+      "inputSummary": "npm run build"
+    }
+  ],
+  "knownErrors": [],
+  "notes": [
+    "Synthetic demo session built with Recorder Lite.",
+    "Token counts and costs are illustrative demo values, not measured production usage."
+  ],
+  "buildResult": "pass",
+  "lintResult": "pass",
+  "endedAt": "2026-06-20T16:14:00Z"
+}

@@ -1,0 +1,20 @@
+{
+  "crons": [
+    {
+      "path": "/api/internal/work-signal-sweep",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/internal/stale-run-sweep",
+      "schedule": "15 3 * * *"
+    },
+    {
+      "path": "/api/internal/workflow-scheduler",
+      "schedule": "30 3 * * *"
+    },
+    {
+      "path": "/api/internal/idle-session-sweep",
+      "schedule": "*/15 * * * *"
+    }
+  ]
+}

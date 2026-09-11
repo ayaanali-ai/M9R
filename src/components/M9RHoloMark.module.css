@@ -1,0 +1,78 @@
+.wrap {
+  position: relative;
+  display: block;
+  /* Width/height deliberately NOT set here -- the caller's own className
+     (e.g. .lp-min-closing-mark) owns sizing, the same pattern M9RMark
+     already uses. Setting both here too caused a real bug: with all three
+     children position:absolute, this div had no normal-flow content to
+     size itself by, and a same-specificity width/height:100% from this
+     module was winning the cascade over the caller's clamp() sizing
+     unpredictably depending on stylesheet injection order, collapsing the
+     whole mark to 0 height. */
+  clip-path: polygon(50% 10%, 59% 36%, 84% 30%, 64% 48%, 79% 69%, 54% 60%, 50% 90%, 44% 61%, 20% 70%, 37% 49%, 16% 32%, 42% 37%);
+  overflow: hidden;
+}
+
+.gradient {
+  position: absolute;
+  inset: -40%;
+  background: linear-gradient(
+    120deg,
+    #7dd8ff 0%,
+    #c99bff 22%,
+    #ff9ecf 44%,
+    #ffe28a 66%,
+    #8affea 88%,
+    #7dd8ff 100%
+  );
+  background-size: 220% 220%;
+  animation: shift 9s ease-in-out infinite, hue 14s linear infinite;
+}
+
+/* Faceted inner shadow, a darker duplicate of the same silhouette offset
+   and dimmed, giving the shard visible depth instead of reading as a flat
+   sticker -- same two-tone idea as the monochrome mark, just tinted. */
+.facet {
+  position: absolute;
+  inset: 0;
+  clip-path: polygon(50% 22.5%, 55% 40%, 72.5% 36%, 59% 49%, 69% 64%, 53% 57%, 50% 77.5%, 46% 58%, 29% 64%, 40% 50%, 26% 38%, 44% 42%);
+  background: rgb(8 8 10 / 0.38);
+  mix-blend-mode: multiply;
+}
+
+/* A soft diagonal highlight band that sweeps across on a slower loop,
+   the actual "catching the light" part of a holographic material. */
+.sheen {
+  position: absolute;
+  inset: -60%;
+  background: linear-gradient(
+    100deg,
+    transparent 40%,
+    rgb(255 255 255 / 0.55) 48%,
+    rgb(255 255 255 / 0.55) 52%,
+    transparent 60%
+  );
+  animation: sweep 6s ease-in-out infinite;
+}
+
+@keyframes shift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+@keyframes hue {
+  from { filter: hue-rotate(0deg); }
+  to { filter: hue-rotate(360deg); }
+}
+
+@keyframes sweep {
+  0% { transform: translateX(-30%) translateY(-10%); }
+  50% { transform: translateX(30%) translateY(10%); }
+  100% { transform: translateX(-30%) translateY(-10%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gradient, .sheen {
+    animation: none;
+  }
+}

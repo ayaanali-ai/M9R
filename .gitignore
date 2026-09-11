@@ -1,0 +1,102 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# generated proof-of-product snapshots — regenerate with `npm run export:proof`,
+# never reuse a stale one, so these are never committed as canonical numbers.
+/docs/research/proof-of-product/exports/*.json
+
+# dependencies
+/node_modules
+/cli/node_modules/
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+!.env.local.example
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+.vercel
+.env*
+!.env.example
+
+!runleak-analyzer-mvp/
+
+
+# MCP browser session artifacts (not source)
+.playwright-mcp/
+
+# Local browser/operator audit artifacts may contain entered credentials.
+.gstack/
+
+# Per-machine Claude/Codex settings; never include local credentials or
+# operator configuration in the public source release.
+.claude/settings.local.json
+
+# Local dev server log
+dev-server.log
+
+# Local dashboard screenshots and browser/dev logs; never ship as source.
+/debug.log
+/artifacts/dashboard-renovation/
+
+# Generated demos, decks, recordings, and proof captures stay outside the
+# public source release. The current local copy is preserved under
+# .release-excluded/artifacts for marketing/archive use.
+/.release-excluded/
+
+# M9R CLI local state (token is secret; rules.json is transient).
+# NOT ".m9r/" -- the real, persisted directory on disk is still ".oathlock/"
+# (see src/lib/oathlock-cli-core.ts's M9R_DIR constant and its comment). This
+# was ".m9r/" here, which never matched anything real, and .oathlock/local.json
+# -- a real secret token -- ended up committed and pushed as a result. Fixed
+# to match the actual directory the CLI reads and writes.
+.oathlock/local.json
+.oathlock/agents/*/local.json
+.oathlock/rules.json
+.oathlock/
+
+# M9R CLI build output + packed tarballs
+cli/dist/
+m9r-*.tgz
+
+# Extracted open-core package build output
+packages/*/dist/
+
+# Runtime state is created locally and must never enter a release package.
+cli/.oathlock/watchdog.lock
+cli/.oathlock/watchdog.log
+
+# Supabase CLI machine/project linkage cache
+/supabase/.temp/

@@ -1,0 +1,34 @@
+name: Mission Relay keep-alive
+
+# The relay (oathlock-mission-relay) runs on Render's free plan, which spins
+# the service down after ~15 minutes of no inbound traffic and cold-starts it
+# on the next connection. Every bridge's WebSocket gets forcibly dropped when
+# that happens, and reconnection isn't always clean across every provider --
+# confirmed live on 2026-08-12: a relay restart mid-session left two of three
+# local bridges silently stuck disconnected while a third reconnected fine.
+# A ping well under that 15-minute window keeps the instance warm so this
+# sleep/cold-start cycle never triggers, at no cost (this workflow's own run
+# time is a few seconds, well within GitHub Actions' free minutes).
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping relay health endpoint
+        run: |
+          # UptimeRobot checks this public endpoint every five minutes. This
+          # scheduled ping is only a secondary diagnostic, so a Render Free
+          # cold start must not fail the workflow or generate GitHub emails.
+          set +e
+          status=$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 75 https://oathlock-mission-relay.onrender.com/healthz)
+          curl_exit=$?
+          set -e
+
+          echo "relay /healthz responded with HTTP ${status:-000} (curl exit $curl_exit)"
+          if [ "$curl_exit" -ne 0 ] || [ "${status:-000}" -lt 200 ] || [ "${status:-000}" -ge 300 ]; then
+            echo "::warning::Mission Relay health check was unavailable (HTTP ${status:-000}, curl exit $curl_exit). UptimeRobot remains the primary five-minute monitor."
+          fi

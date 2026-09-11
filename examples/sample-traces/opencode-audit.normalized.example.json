@@ -1,0 +1,45 @@
+{
+  "_comment": "SYNTHETIC / REDACTED — not customer data, not production validation. Mirrors examples/sample-traces/opencode-terminal-log.example.md. No measured token/cost/energy values.",
+  "run_name": "SYNTHETIC OpenCode-style run (sample audit)",
+  "objective": "Fix a failing build and tidy the homepage.",
+  "files_changed": [
+    "src/app/layout.tsx",
+    "src/components/Hero.tsx",
+    "src/app/page.tsx"
+  ],
+  "components_created": [],
+  "pages_updated": [],
+  "commands_run": [
+    "npm run build",
+    "npm run build",
+    "npm run build",
+    "npm run build",
+    "npm run lint"
+  ],
+  "lint_result": "pass",
+  "build_result": "fail",
+  "known_errors": [
+    "Type error in src/app/page.tsx",
+    "failed again with the same error after another attempt"
+  ],
+  "correction_loops": "high",
+  "suspected_waste_patterns": [],
+  "repeated_context_risks": "none",
+  "redundant_edit_risks": "none",
+  "claims_risks": "none",
+  "quality_checks": {
+    "build_passes": false,
+    "lint_passes": true
+  },
+  "trace_kind": "normalized_manual",
+  "limitations": [
+    "pasted the entire build log (thousands of lines, truncated) into the run each time",
+    "tried again, same error, another attempt after several attempts before diagnosing",
+    "re-ran the same grep search repeatedly with no new input",
+    "usage unknown; no token metadata provided"
+  ],
+  "exact_token_count": null,
+  "exact_model_calls": null,
+  "exact_cost_usd": null,
+  "exact_energy_wh": null
+}

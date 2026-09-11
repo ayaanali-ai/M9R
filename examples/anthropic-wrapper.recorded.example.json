@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "runleak.recorded.v0",
+  "runName": "Demo (anthropic-wrapper): summarize a file",
+  "objective": "Prototype the Anthropic-style wrapper with mocked responses.",
+  "source": "manual",
+  "startedAt": "2026-06-20T19:00:00Z",
+  "filesChanged": [
+    "src/lib/summarize.ts"
+  ],
+  "commandsRun": [
+    "npm run lint",
+    "npm run build"
+  ],
+  "modelCalls": [
+    {
+      "id": "call-1",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "startedAt": "2026-06-20T22:34:18.176Z",
+      "endedAt": "2026-06-20T22:34:18.177Z",
+      "inputTokens": 4100,
+      "outputTokens": 900,
+      "totalTokens": 5000,
+      "costUsd": 0.07,
+      "latencyMs": 0,
+      "promptSummary": "Summarize file",
+      "success": true
+    },
+    {
+      "id": "call-2",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "startedAt": "2026-06-20T22:34:18.178Z",
+      "endedAt": "2026-06-20T22:34:18.178Z",
+      "inputTokens": null,
+      "outputTokens": null,
+      "totalTokens": null,
+      "costUsd": null,
+      "latencyMs": 0,
+      "promptSummary": "Follow-up question",
+      "success": true
+    },
+    {
+      "id": "call-3",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "startedAt": "2026-06-20T22:34:18.178Z",
+      "endedAt": "2026-06-20T22:34:18.178Z",
+      "inputTokens": null,
+      "outputTokens": null,
+      "totalTokens": null,
+      "costUsd": null,
+      "latencyMs": 0,
+      "promptSummary": "Call that fails",
+      "success": false,
+      "errorSummary": "mocked provider error: rate limit"
+    }
+  ],
+  "toolCalls": [],
+  "knownErrors": [],
+  "notes": [
+    "Caught expected error from call-3: mocked provider error: rate limit",
+    "Synthetic demo session built with the Anthropic-style wrapper prototype.",
+    "Callbacks are local stubs; no Anthropic SDK or API was used."
+  ],
+  "buildResult": "pass",
+  "lintResult": "pass",
+  "endedAt": "2026-06-20T19:09:00Z"
+}

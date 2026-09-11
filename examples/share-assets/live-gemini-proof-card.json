@@ -1,0 +1,16 @@
+{
+  "title": "First real provider response into RunLeak",
+  "subtitle": "1 Gemini call → recorded trace → normalized ledger → advisory policy check",
+  "provider": "Google Gemini",
+  "model": "gemini-2.5-flash-lite",
+  "exactModelCalls": 1,
+  "exactTokenCount": 22,
+  "exactCostUsd": null,
+  "exactEnergyWh": null,
+  "rawPromptStored": false,
+  "apiKeyStored": false,
+  "productionValidation": false,
+  "badge": "Unknown stays unknown",
+  "recommendedCaption": "First real provider response into RunLeak: 1 Gemini call, 22 measured tokens, cost unknown, energy unknown. Unknown stays unknown.",
+  "note": "Structured source data for future share-image generation. No image is generated here. Values mirror examples/gemini-live-smoke.normalized.example.json; cost and energy are null (not measured/estimated)."
+}

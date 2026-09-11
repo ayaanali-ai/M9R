@@ -1,0 +1,182 @@
+/* Public Agent Resume — Concept B ("Field Report"): stone ground, bold
+ * condensed display + serif body, one flat cobalt accent, tabular stat cards.
+ * Scoped via CSS module so it never leaks into the rest of the dashboard's
+ * --ol-* token system. Both themes are first-class, not an inversion. */
+
+.page {
+  --resume-bg: #eae6dd;
+  --resume-surface: #ffffff;
+  --resume-ink: #1c1a17;
+  --resume-ink-dim: #6b665c;
+  --resume-accent: #6b6862;
+  --resume-accent-ink: #ffffff;
+  --resume-rule: #1c1a17;
+  --resume-hairline: #d9d4c7;
+
+  min-height: 100vh;
+  background: var(--resume-bg);
+  color: var(--resume-ink);
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  .page {
+    --resume-bg: #17181a;
+    --resume-surface: #1f2023;
+    --resume-ink: #f1efe9;
+    --resume-ink-dim: #a9a49a;
+    --resume-accent: #d8d5cc;
+    --resume-accent-ink: #12142b;
+    --resume-rule: #f1efe9;
+    --resume-hairline: #34353a;
+  }
+}
+:root[data-theme="dark"] .page {
+  --resume-bg: #17181a;
+  --resume-surface: #1f2023;
+  --resume-ink: #f1efe9;
+  --resume-ink-dim: #a9a49a;
+  --resume-accent: #d8d5cc;
+  --resume-accent-ink: #12142b;
+  --resume-rule: #f1efe9;
+  --resume-hairline: #34353a;
+}
+:root[data-theme="light"] .page {
+  --resume-bg: #eae6dd;
+  --resume-surface: #ffffff;
+  --resume-ink: #1c1a17;
+  --resume-ink-dim: #6b665c;
+  --resume-accent: #6b6862;
+  --resume-accent-ink: #ffffff;
+  --resume-rule: #1c1a17;
+  --resume-hairline: #d9d4c7;
+}
+
+.frame {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 56px 24px 96px;
+}
+
+.nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 24px;
+  border-bottom: 3px solid var(--resume-rule);
+  margin-bottom: 56px;
+}
+
+.mark {
+  font-family: Bahnschrift, "Segoe UI Semibold", system-ui, sans-serif;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.01em;
+  color: var(--resume-ink);
+  text-decoration: none;
+}
+
+.badge {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--resume-ink-dim);
+}
+
+.headline {
+  font-family: Bahnschrift, "Segoe UI Semibold", system-ui, sans-serif;
+  font-weight: 700;
+  font-size: clamp(34px, 5.5vw, 52px);
+  line-height: 1.04;
+  letter-spacing: -0.01em;
+  margin: 0 0 16px;
+  text-wrap: balance;
+}
+
+.headline span {
+  background: var(--resume-accent);
+  color: var(--resume-accent-ink);
+  padding: 0 8px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.sub {
+  font-family: Georgia, "Iowan Old Style", Charter, serif;
+  font-size: 18px;
+  line-height: 1.6;
+  color: var(--resume-ink-dim);
+  max-width: 56ch;
+  margin: 0 0 48px;
+}
+
+.standing {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 13px;
+  color: var(--resume-accent);
+  margin-bottom: 40px;
+}
+
+.standing-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--resume-accent);
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1px;
+  background: var(--resume-hairline);
+  border: 1px solid var(--resume-hairline);
+}
+
+.card {
+  background: var(--resume-surface);
+  padding: 28px 24px;
+}
+
+.card-num {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 36px;
+  font-weight: 600;
+  display: block;
+  margin-bottom: 6px;
+  color: var(--resume-ink);
+}
+
+.card-num.accent {
+  color: var(--resume-accent);
+}
+
+.card-lbl {
+  font-size: 13px;
+  color: var(--resume-ink-dim);
+}
+
+.footnote {
+  margin-top: 48px;
+  font-family: Georgia, serif;
+  font-size: 14px;
+  color: var(--resume-ink-dim);
+  line-height: 1.6;
+  max-width: 60ch;
+}
+
+.footnote a {
+  color: var(--resume-accent);
+}
+
+.empty {
+  font-family: Georgia, serif;
+  font-size: 17px;
+  color: var(--resume-ink-dim);
+  line-height: 1.6;
+  max-width: 52ch;
+}

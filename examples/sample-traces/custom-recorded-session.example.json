@@ -1,0 +1,66 @@
+{
+  "_comment": "SYNTHETIC / REDACTED example of the runleak.recorded.v0 schema. Not customer data, not a real recording, no secrets. Illustrative token values only — never measured production usage.",
+  "schemaVersion": "runleak.recorded.v0",
+  "runName": "SYNTHETIC: add a feature flag and fix the build",
+  "objective": "Add a feature flag to the settings page and get the build green.",
+  "source": "manual",
+  "startedAt": "2026-06-21T10:00:00Z",
+  "endedAt": "2026-06-21T10:21:00Z",
+  "filesChanged": [
+    "src/app/settings/page.tsx",
+    "src/lib/flags.ts",
+    "src/components/Footer.tsx"
+  ],
+  "commandsRun": ["npm run build", "npm run build", "npm run lint"],
+  "modelCalls": [
+    {
+      "id": "call-1",
+      "provider": "google",
+      "model": "synthetic-model",
+      "inputTokens": 3100,
+      "outputTokens": 600,
+      "totalTokens": 3700,
+      "costUsd": null,
+      "latencyMs": 1800,
+      "promptSummary": "Plan the feature flag",
+      "outputSummary": "Proposed flags.ts approach"
+    },
+    {
+      "id": "call-2",
+      "provider": "google",
+      "model": "synthetic-model",
+      "inputTokens": 4200,
+      "outputTokens": 950,
+      "totalTokens": 5150,
+      "costUsd": null,
+      "latencyMs": 2400,
+      "promptSummary": "Implement flag + wire settings page",
+      "outputSummary": "Wrote flags.ts and edited settings page"
+    }
+  ],
+  "toolCalls": [
+    {
+      "id": "tool-1",
+      "toolName": "run_command",
+      "latencyMs": 5100,
+      "success": false,
+      "inputSummary": "npm run build",
+      "errorSummary": "Type error in src/app/settings/page.tsx"
+    },
+    {
+      "id": "tool-2",
+      "toolName": "run_command",
+      "latencyMs": 5000,
+      "success": true,
+      "inputSummary": "npm run build"
+    }
+  ],
+  "buildResult": "pass",
+  "lintResult": "pass",
+  "knownErrors": ["First build failed with a type error before it was fixed."],
+  "notes": [
+    "SYNTHETIC recorded session for the sample trace library.",
+    "Explicit token counts present; costUsd is null (never derived from tokens). Energy is never recorded.",
+    "One failed build then a passing build — light build-fix-loop evidence."
+  ]
+}

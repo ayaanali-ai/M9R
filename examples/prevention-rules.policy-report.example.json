@@ -1,0 +1,150 @@
+{
+  "reportVersion": "runleak.policy.v0",
+  "createdAt": "2026-06-21T20:20:31.323Z",
+  "runName": "SYNTHETIC demo run (prevention-rules example)",
+  "overallStatus": "warn",
+  "checks": [
+    {
+      "id": "missing_usage_metadata",
+      "title": "Usage metadata present",
+      "status": "warn",
+      "severity": "medium",
+      "reason": "Both exact_model_calls and exact_token_count are null — no measured usage to report.",
+      "evidence": [
+        "exact_model_calls=null",
+        "exact_token_count=null"
+      ],
+      "recommendedAction": "Provide a strict recorded-session JSON or provider usage metadata; otherwise keep usage marked unknown.",
+      "relatedPreventionRuleIds": [
+        "missing_usage_metadata"
+      ],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Usage is never inferred when absent."
+      ]
+    },
+    {
+      "id": "energy_heat_unknown",
+      "title": "Energy/heat honesty",
+      "status": "pass",
+      "severity": "low",
+      "reason": "exact_energy_wh is null and limitations state energy/heat are not measured.",
+      "evidence": [
+        "exact_energy_wh=null",
+        "energy caveat present in limitations"
+      ],
+      "recommendedAction": "Keep energy as unknown / a configurable estimate until real telemetry exists; never claim it was measured.",
+      "relatedPreventionRuleIds": [],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Energy/heat are never measured by RunLeak."
+      ]
+    },
+    {
+      "id": "build_lint_quality",
+      "title": "Build/lint quality",
+      "status": "warn",
+      "severity": "medium",
+      "reason": "Both build_result and lint_result are null — quality is unverified.",
+      "evidence": [
+        "build_result=null",
+        "lint_result=null"
+      ],
+      "recommendedAction": "Capture build and lint results in the trace to verify quality.",
+      "relatedPreventionRuleIds": [
+        "build_fix_loop"
+      ],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation."
+      ]
+    },
+    {
+      "id": "prevention_rule_presence",
+      "title": "Prevention rule coverage",
+      "status": "pass",
+      "severity": "medium",
+      "reason": "4 prevention rule(s) supplied for the detected findings.",
+      "evidence": [
+        "findings=0",
+        "high_severity_findings=0",
+        "prevention_rules=4"
+      ],
+      "recommendedAction": "No action.",
+      "relatedPreventionRuleIds": [
+        "redundant_file_read",
+        "build_fix_loop",
+        "claims_drift",
+        "missing_usage_metadata"
+      ],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Rules appear only when a finding maps to one."
+      ]
+    },
+    {
+      "id": "claims_drift",
+      "title": "Claims drift risk",
+      "status": "warn",
+      "severity": "high",
+      "reason": "A claims_drift prevention rule is present — public copy may exceed measured fields.",
+      "evidence": [
+        "prevention_rule=claims_drift"
+      ],
+      "recommendedAction": "Remove or qualify unsupported public claims; only claim what the trace evidence supports.",
+      "relatedPreventionRuleIds": [
+        "claims_drift"
+      ],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Heuristic over rule presence; not a factual audit."
+      ]
+    },
+    {
+      "id": "real_vs_synthetic",
+      "title": "Real vs synthetic proof",
+      "status": "warn",
+      "severity": "low",
+      "reason": "This input is labeled synthetic — valid as an example, but not a real measured run.",
+      "evidence": [
+        "synthetic=true",
+        "has_exact_usage=false"
+      ],
+      "recommendedAction": "Label this clearly as a synthetic example; do not present it as a real measured run.",
+      "relatedPreventionRuleIds": [],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Synthetic proof is labeled, not invalid."
+      ]
+    },
+    {
+      "id": "cost_honesty",
+      "title": "Cost honesty",
+      "status": "pass",
+      "severity": "medium",
+      "reason": "exact_cost_usd is null and limitations state cost is unknown / not supplied.",
+      "evidence": [
+        "exact_cost_usd=null",
+        "exact_token_count=null",
+        "cost caveat present in limitations"
+      ],
+      "recommendedAction": "Never derive cost from tokens; report cost only from explicit per-call costUsd.",
+      "relatedPreventionRuleIds": [
+        "missing_usage_metadata"
+      ],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Cost is never estimated from tokens."
+      ]
+    }
+  ],
+  "summary": {
+    "pass": 3,
+    "warn": 4,
+    "fail": 0
+  },
+  "limitations": [
+    "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+    "Deterministic checks over explicit fields only; no values are estimated.",
+    "Fail-on-claim checks fire only when a positive claim is present; absent claims never fail."
+  ]
+}

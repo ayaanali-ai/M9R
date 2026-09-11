@@ -1,0 +1,50 @@
+{
+  "resultVersion": "runleak.ci-gate.v0",
+  "createdAt": "2026-06-21T21:03:21.928Z",
+  "mode": "dry-run",
+  "threshold": "warn",
+  "inputPolicyStatus": "warn",
+  "wouldBlock": true,
+  "exitCode": 0,
+  "reason": "Dry-run: 4 check(s) would block at threshold \"warn\", but dry-run does not block (exit 0).",
+  "blockingChecks": [
+    {
+      "id": "missing_usage_metadata",
+      "title": "Usage metadata present",
+      "status": "warn",
+      "severity": "medium",
+      "reason": "Both exact_model_calls and exact_token_count are null — no measured usage to report.",
+      "recommendedAction": "Provide a strict recorded-session JSON or provider usage metadata; otherwise keep usage marked unknown."
+    },
+    {
+      "id": "build_lint_quality",
+      "title": "Build/lint quality",
+      "status": "warn",
+      "severity": "medium",
+      "reason": "Both build_result and lint_result are null — quality is unverified.",
+      "recommendedAction": "Capture build and lint results in the trace to verify quality."
+    },
+    {
+      "id": "claims_drift",
+      "title": "Claims drift risk",
+      "status": "warn",
+      "severity": "high",
+      "reason": "A claims_drift prevention rule is present — public copy may exceed measured fields.",
+      "recommendedAction": "Remove or qualify unsupported public claims; only claim what the trace evidence supports."
+    },
+    {
+      "id": "real_vs_synthetic",
+      "title": "Real vs synthetic proof",
+      "status": "warn",
+      "severity": "low",
+      "reason": "This input is labeled synthetic — valid as an example, but not a real measured run.",
+      "recommendedAction": "Label this clearly as a synthetic example; do not present it as a real measured run."
+    }
+  ],
+  "limitations": [
+    "Default mode is dry-run and non-blocking; enforce mode must be requested explicitly.",
+    "Consumes a runleak.policy.v0 report only — no checks are invented, recomputed, or measured.",
+    "Not a GitHub Action, not hosted CI, not a daemon, not production enforcement.",
+    "Tokens, cost, energy, and heat are never recomputed here."
+  ]
+}

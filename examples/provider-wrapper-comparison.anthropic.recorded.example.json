@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "runleak.recorded.v0",
+  "runName": "Comparison — Anthropic-style run",
+  "objective": "Anthropic-style mocked run for the wrapper comparison proof.",
+  "source": "manual",
+  "startedAt": "2026-06-20T21:00:00Z",
+  "filesChanged": [
+    "src/lib/feature-a.ts",
+    "src/app/a/page.tsx"
+  ],
+  "commandsRun": [
+    "npm run lint",
+    "npm run build"
+  ],
+  "modelCalls": [
+    {
+      "id": "a-call-1",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "startedAt": "2026-06-21T04:25:18.830Z",
+      "endedAt": "2026-06-21T04:25:18.831Z",
+      "inputTokens": 3500,
+      "outputTokens": 800,
+      "totalTokens": 4300,
+      "costUsd": 0.06,
+      "latencyMs": 0,
+      "promptSummary": "Plan",
+      "success": true
+    },
+    {
+      "id": "a-call-2",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "startedAt": "2026-06-21T04:25:18.832Z",
+      "endedAt": "2026-06-21T04:25:18.832Z",
+      "inputTokens": 4800,
+      "outputTokens": 1300,
+      "totalTokens": 6100,
+      "costUsd": 0.09,
+      "latencyMs": 0,
+      "promptSummary": "Implement",
+      "success": true
+    },
+    {
+      "id": "a-call-3",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "startedAt": "2026-06-21T04:25:18.832Z",
+      "endedAt": "2026-06-21T04:25:18.832Z",
+      "inputTokens": null,
+      "outputTokens": null,
+      "totalTokens": null,
+      "costUsd": null,
+      "latencyMs": 0,
+      "promptSummary": "Follow-up (no usage)",
+      "success": true
+    },
+    {
+      "id": "a-call-4",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "startedAt": "2026-06-21T04:25:18.832Z",
+      "endedAt": "2026-06-21T04:25:18.832Z",
+      "inputTokens": null,
+      "outputTokens": null,
+      "totalTokens": null,
+      "costUsd": null,
+      "latencyMs": 0,
+      "promptSummary": "Fails",
+      "success": false,
+      "errorSummary": "mocked anthropic error: overloaded"
+    }
+  ],
+  "toolCalls": [],
+  "knownErrors": [],
+  "notes": [
+    "Synthetic demo: Anthropic-style side of the wrapper comparison."
+  ],
+  "buildResult": "pass",
+  "lintResult": "pass",
+  "endedAt": "2026-06-20T21:09:00Z"
+}

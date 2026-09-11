@@ -1,0 +1,129 @@
+{
+  "baselineRunName": "Comparison — Anthropic-style run",
+  "controlledRunName": "Comparison — OpenAI-style run",
+  "qualityPreserved": true,
+  "findingsReduced": null,
+  "metrics": [
+    {
+      "id": "build_result",
+      "label": "Build result",
+      "baselineValue": "pass",
+      "controlledValue": "pass",
+      "direction": "unchanged",
+      "summary": "Build: pass → pass."
+    },
+    {
+      "id": "lint_result",
+      "label": "Lint result",
+      "baselineValue": "pass",
+      "controlledValue": "pass",
+      "direction": "unchanged",
+      "summary": "Lint: pass → pass."
+    },
+    {
+      "id": "correction_loops",
+      "label": "Correction loops",
+      "baselineValue": "none",
+      "controlledValue": "none",
+      "direction": "unchanged",
+      "summary": "Correction loops: none → none."
+    },
+    {
+      "id": "known_errors",
+      "label": "Known errors",
+      "baselineValue": 0,
+      "controlledValue": 0,
+      "direction": "unchanged",
+      "summary": "Known errors: 0 → 0."
+    },
+    {
+      "id": "redundant_file_read",
+      "label": "Redundant file read findings",
+      "baselineValue": 0,
+      "controlledValue": 0,
+      "direction": "unchanged",
+      "summary": "No change in redundant file read findings (0)."
+    },
+    {
+      "id": "build_fix_loop",
+      "label": "Build-fix loop findings",
+      "baselineValue": 0,
+      "controlledValue": 0,
+      "direction": "unchanged",
+      "summary": "No change in build-fix loop findings (0)."
+    },
+    {
+      "id": "ambiguous_edit_retry",
+      "label": "Ambiguous edit retry findings",
+      "baselineValue": 0,
+      "controlledValue": 0,
+      "direction": "unchanged",
+      "summary": "No change in ambiguous edit retry findings (0)."
+    },
+    {
+      "id": "scope_creep",
+      "label": "Scope creep findings",
+      "baselineValue": 0,
+      "controlledValue": 0,
+      "direction": "unchanged",
+      "summary": "No change in scope creep findings (0)."
+    },
+    {
+      "id": "claims_drift",
+      "label": "Claims drift findings",
+      "baselineValue": 0,
+      "controlledValue": 0,
+      "direction": "unchanged",
+      "summary": "No change in claims drift findings (0)."
+    },
+    {
+      "id": "duplicate_copy",
+      "label": "Duplicate copy findings",
+      "baselineValue": 0,
+      "controlledValue": 0,
+      "direction": "unchanged",
+      "summary": "No change in duplicate copy findings (0)."
+    },
+    {
+      "id": "exact_token_count",
+      "label": "Exact token count",
+      "baselineValue": 10400,
+      "controlledValue": 9700,
+      "direction": "improved",
+      "summary": "Exact token count: 10400 → 9700."
+    },
+    {
+      "id": "exact_model_calls",
+      "label": "Exact model calls",
+      "baselineValue": 4,
+      "controlledValue": 4,
+      "direction": "unchanged",
+      "summary": "Exact model calls: 4 → 4."
+    },
+    {
+      "id": "exact_cost_usd",
+      "label": "Exact cost (USD)",
+      "baselineValue": 0.15,
+      "controlledValue": 0.13,
+      "direction": "improved",
+      "summary": "Exact cost (USD): 0.15 → 0.13."
+    },
+    {
+      "id": "exact_energy_wh",
+      "label": "Exact energy (Wh)",
+      "baselineValue": null,
+      "controlledValue": null,
+      "direction": "unknown",
+      "summary": "Not measured in the source traces; comparison unknown."
+    }
+  ],
+  "baselineFindings": [],
+  "controlledFindings": [],
+  "summary": "Detector findings unchanged (0). Quality appears preserved (build/lint evidence holds, no new high-severity findings).",
+  "limitations": [
+    "Manual normalized comparison, not a measured benchmark.",
+    "Token, cost, latency, model-call, energy, and heat remain unknown unless present in both source traces.",
+    "Detector counts and severity are qualitative, derived from structured manual evidence.",
+    "Quality-preserved is based on build/lint evidence and new high-severity findings only."
+  ]
+}

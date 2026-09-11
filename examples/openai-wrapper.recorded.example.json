@@ -1,0 +1,83 @@
+{
+  "schemaVersion": "runleak.recorded.v0",
+  "runName": "Demo (openai-wrapper): refactor a module",
+  "objective": "Prototype the OpenAI-style wrapper with mocked responses.",
+  "source": "manual",
+  "startedAt": "2026-06-20T20:00:00Z",
+  "filesChanged": [
+    "src/lib/refactor-target.ts"
+  ],
+  "commandsRun": [
+    "npm run lint",
+    "npm run build"
+  ],
+  "modelCalls": [
+    {
+      "id": "call-1",
+      "provider": "openai",
+      "model": "gpt-demo",
+      "startedAt": "2026-06-21T04:13:14.722Z",
+      "endedAt": "2026-06-21T04:13:14.723Z",
+      "inputTokens": 3000,
+      "outputTokens": 700,
+      "totalTokens": 3700,
+      "costUsd": 0.05,
+      "latencyMs": 0,
+      "promptSummary": "Plan the refactor",
+      "success": true
+    },
+    {
+      "id": "call-2",
+      "provider": "openai",
+      "model": "gpt-demo",
+      "startedAt": "2026-06-21T04:13:14.723Z",
+      "endedAt": "2026-06-21T04:13:14.723Z",
+      "inputTokens": 4200,
+      "outputTokens": 1100,
+      "totalTokens": 5300,
+      "costUsd": 0.06,
+      "latencyMs": 0,
+      "promptSummary": "Apply the refactor",
+      "success": true
+    },
+    {
+      "id": "call-3",
+      "provider": "openai",
+      "model": "gpt-demo",
+      "startedAt": "2026-06-21T04:13:14.723Z",
+      "endedAt": "2026-06-21T04:13:14.723Z",
+      "inputTokens": null,
+      "outputTokens": null,
+      "totalTokens": null,
+      "costUsd": null,
+      "latencyMs": 0,
+      "promptSummary": "Quick follow-up",
+      "success": true
+    },
+    {
+      "id": "call-4",
+      "provider": "openai",
+      "model": "gpt-demo",
+      "startedAt": "2026-06-21T04:13:14.723Z",
+      "endedAt": "2026-06-21T04:13:14.723Z",
+      "inputTokens": null,
+      "outputTokens": null,
+      "totalTokens": null,
+      "costUsd": null,
+      "latencyMs": 0,
+      "promptSummary": "Call that fails",
+      "success": false,
+      "errorSummary": "mocked provider error: timeout"
+    }
+  ],
+  "toolCalls": [],
+  "knownErrors": [],
+  "notes": [
+    "Caught expected error from call-4: mocked provider error: timeout",
+    "Synthetic demo session built with the OpenAI-style wrapper prototype.",
+    "Callbacks are local stubs; no OpenAI SDK or API was used."
+  ],
+  "buildResult": "pass",
+  "lintResult": "pass",
+  "endedAt": "2026-06-20T20:10:00Z"
+}

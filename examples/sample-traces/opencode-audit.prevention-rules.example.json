@@ -1,0 +1,90 @@
+{
+  "_comment": "SYNTHETIC / REDACTED — not customer data, not production validation. Mirrors examples/sample-traces/opencode-terminal-log.example.md. No measured token/cost/energy values.",
+  "preventionRules": [
+    {
+      "id": "build_fix_loop",
+      "title": "Build-fix loop",
+      "leakType": "build_fix_loop",
+      "severity": "high",
+      "cause": "Repeated broad edits and rebuilds without isolating the first failing file or root error.",
+      "fixNow": "Stop broad edits and isolate the first failing file/error.",
+      "promptFix": "After two failed builds, enter diagnostic mode before another edit.",
+      "policyRule": "After two failed build attempts, ban unrelated file edits until the root error is identified.",
+      "evidenceNeeded": [
+        "Two or more failed build attempts",
+        "Edits across unrelated files between builds"
+      ],
+      "limitations": [
+        "Loop count is read from structured evidence; latency/cost of the loop is not measured."
+      ]
+    },
+    {
+      "id": "bloated_tool_output",
+      "title": "Bloated tool output",
+      "leakType": "bloated_tool_output",
+      "severity": "medium",
+      "cause": "A tool returns a large unfiltered payload that is fed back into the model when only a slice is needed.",
+      "fixNow": "Filter, paginate, or summarize tool output before passing it to the model.",
+      "promptFix": "Request only the fields/range you need from a tool; avoid dumping full payloads.",
+      "policyRule": "Warn when tool output above a size threshold is passed back into a prompt unfiltered.",
+      "evidenceNeeded": [
+        "Large tool-output payload",
+        "Evidence it was passed back into a model call"
+      ],
+      "limitations": [
+        "Size is qualitative unless explicit token fields are present; no cost is implied."
+      ]
+    },
+    {
+      "id": "missing_usage_metadata",
+      "title": "Missing usage metadata",
+      "leakType": "missing_usage_metadata",
+      "severity": "medium",
+      "cause": "Model calls lack explicit usage metadata, so exact tokens and cost cannot be reported.",
+      "fixNow": "Require provider usage metadata or mark cost/tokens unknown.",
+      "promptFix": "Do not summarize cost unless usage fields are present.",
+      "policyRule": "Fail cost reports when exact_token_count and exact_cost_usd are both null.",
+      "evidenceNeeded": [
+        "Model calls with null token fields",
+        "Null exact_cost_usd in the normalized trace"
+      ],
+      "limitations": [
+        "This rule enforces honesty about unknowns; it never estimates the missing values."
+      ]
+    },
+    {
+      "id": "retry_spiral",
+      "title": "Retry spiral",
+      "leakType": "retry_spiral",
+      "severity": "high",
+      "cause": "The same action is retried repeatedly without isolating the root cause, wasting calls and time.",
+      "fixNow": "Stop retrying and isolate the smallest failing case before the next attempt.",
+      "promptFix": "After two failed attempts, switch to diagnostic mode instead of retrying the same action.",
+      "policyRule": "After two failed attempts at the same action, require a diagnosis step before another retry.",
+      "evidenceNeeded": [
+        "Repeated retry/attempt language across the run",
+        "Multiple correction loops or repeated failures"
+      ],
+      "limitations": [
+        "Qualitative; the registry does not measure retry cost or latency."
+      ]
+    },
+    {
+      "id": "repeated_tool_call",
+      "title": "Repeated tool call",
+      "leakType": "repeated_tool_call",
+      "severity": "low",
+      "cause": "The same command/read/search is invoked more than once with unchanged input.",
+      "fixNow": "Reuse the prior result instead of re-running the same tool call.",
+      "promptFix": "Before invoking a tool, check whether the same call with the same input already ran.",
+      "policyRule": "Warn when an identical tool call (same command/input) repeats in the same run.",
+      "evidenceNeeded": [
+        "Identical commands repeated in commands_run",
+        "Repeated same read/search/grep with no new input"
+      ],
+      "limitations": [
+        "Detected from structured evidence; exact token/cost impact requires measured metadata."
+      ]
+    }
+  ]
+}

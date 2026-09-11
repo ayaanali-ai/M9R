@@ -1,0 +1,46 @@
+{
+  "run_name": "Demo: add pagination to results list",
+  "objective": "Add cursor-based pagination to the results list and update the API route.",
+  "files_changed": [
+    "src/app/results/page.tsx",
+    "src/app/api/results/route.ts",
+    "src/lib/pagination.ts"
+  ],
+  "components_created": [],
+  "pages_updated": [
+    "src/app/results/page.tsx"
+  ],
+  "commands_run": [
+    "npm run lint",
+    "npm run build"
+  ],
+  "lint_result": "pass",
+  "build_result": "pass",
+  "known_errors": [],
+  "correction_loops": "none",
+  "suspected_waste_patterns": [],
+  "repeated_context_risks": "none",
+  "redundant_edit_risks": "none",
+  "claims_risks": "none",
+  "quality_checks": {
+    "build_passes": true,
+    "lint_passes": true
+  },
+  "limitations": [
+    "Imported from recorded session (schema runleak.recorded.v0).",
+    "Exact model calls are counted from recorded modelCalls.",
+    "Exact token count is summed only from explicit per-call token fields.",
+    "Exact cost is summed only from explicit per-call costUsd fields.",
+    "Missing usage remains null/unknown.",
+    "Recorded latency is captured per call (total ≈ 7300 ms) but not yet represented in the normalized schema.",
+    "exact_energy_wh stays null; energy/heat remain configurable estimates, not recorder-measured.",
+    "Waste labels remain detector/heuristic findings, not provider measurements.",
+    "Note: Synthetic demo session for the runleak.recorded.v0 schema.",
+    "Note: Token counts and costs here are illustrative demo values, not measured production usage."
+  ],
+  "exact_token_count": 16100,
+  "exact_model_calls": 3,
+  "exact_cost_usd": 0.19,
+  "exact_energy_wh": null,
+  "trace_kind": "normalized_manual"
+}

@@ -1,0 +1,35 @@
+{
+  "note": "Claim-safe launch copy built from existing RunLeak proof artifacts. No savings, production, energy, or native-integration claims. Unknown stays unknown.",
+  "positioning": "RunLeak is the local-first accountability layer for AI agent runs.",
+  "mainProofPost": "RunLeak just recorded its first real provider response: 1 Gemini call → recorded trace → normalized ledger → advisory policy → CI dry-run. 1 measured model call. 22 measured tokens. Cost unknown. Energy unknown. Agent runs need a black box. Unknown stays unknown.",
+  "freeAuditPost": "Opening 5 free RunLeak trace audits. Send a redacted Claude Code / Codex / OpenCode / Gemini CLI / Cursor-style agent log and I'll return a local proof package: normalized ledger, waste findings (if evidence), prevention rules, advisory policy, CI dry-run. Manual + limited. No secrets. Unknown stays unknown.",
+  "pinnedPost": "RunLeak is the local-first accountability layer for AI agent runs. Drop a redacted trace → get a normalized ledger, measured-vs-unknown fields, waste findings (when evidence exists), prevention rules, advisory policy, and a CI dry-run. It's the black box for agent runs. Unknown stays unknown. Proof: /evidence · Audit: /trace-audit",
+  "replyTemplates": [
+    "Looks useful. If you ever want to audit a run's execution — redacted — RunLeak turns it into a ledger of measured-vs-unknown fields. Unknown stays unknown.",
+    "Nice demo. Curious what the trace looks like under the hood — RunLeak normalizes a redacted log into exact model calls/tokens where they're explicit, and leaves cost/energy unknown.",
+    "Agreed on observability. RunLeak is the local-first version for agent runs: a ledger where measured stays measured and unknown stays unknown — no estimated numbers.",
+    "If you want to spot repeated-context or redundant-read patterns in an actual run, RunLeak maps findings to deterministic prevention rules from a redacted trace.",
+    "Hard to fix cost you can't see. RunLeak records exact tokens when the provider returns them and refuses to guess cost when it doesn't — unknown stays unknown.",
+    "Build-fix loops and retries show up in the trace. RunLeak turns those into findings + prevention rules you can act on — from a redacted log.",
+    "Would love to see the trace. RunLeak accepts redacted Claude Code / Codex logs and returns a normalized ledger + advisory policy. Happy to run a free audit.",
+    "Evals tell you if it worked; RunLeak tells you how the run spent itself — measured calls/tokens, plus what stayed unknown. Complementary, not a replacement."
+  ],
+  "dmTemplate": "Hey — building RunLeak, a local-first accountability layer for AI agent runs. If you have a redacted agent log (keys/PII removed), I'll run a free audit and send back a proof package: normalized ledger, waste findings if evidence exists, prevention rules, advisory policy, and a CI dry-run. Manual and limited, no secrets, unknown stays unknown. Want me to take a look?",
+  "landingCta": "Want your agent run audited? Submit a redacted trace.",
+  "safeClaims": [
+    "Local-first accountability layer for AI agent runs.",
+    "Recorded one real Gemini response: 1 measured model call, 22 measured tokens.",
+    "Cost and energy stayed unknown — unknown stays unknown.",
+    "Accepts redacted logs/traces from common agent tools.",
+    "Turns findings into deterministic prevention rules and an advisory policy.",
+    "CI dry-run is non-blocking by default."
+  ],
+  "forbiddenClaims": [
+    "production validated",
+    "customer savings proven",
+    "energy measured",
+    "native integrations with Claude Code / Cursor / Codex / OpenCode",
+    "works across all providers",
+    "guaranteed cost reduction"
+  ]
+}

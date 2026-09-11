@@ -1,0 +1,55 @@
+{
+  "run_name": "SYNTHETIC: add a feature flag and fix the build",
+  "objective": "Add a feature flag to the settings page and get the build green.",
+  "files_changed": [
+    "src/app/settings/page.tsx",
+    "src/lib/flags.ts",
+    "src/components/Footer.tsx"
+  ],
+  "components_created": [
+    "src/components/Footer.tsx"
+  ],
+  "pages_updated": [
+    "src/app/settings/page.tsx"
+  ],
+  "commands_run": [
+    "npm run build",
+    "npm run build",
+    "npm run lint"
+  ],
+  "lint_result": "pass",
+  "build_result": "pass",
+  "known_errors": [
+    "First build failed with a type error before it was fixed."
+  ],
+  "correction_loops": "moderate",
+  "suspected_waste_patterns": [
+    "Retry / loop behavior",
+    "Build/lint fix loops"
+  ],
+  "repeated_context_risks": "none",
+  "redundant_edit_risks": "moderate",
+  "claims_risks": "none",
+  "quality_checks": {
+    "build_passes": true,
+    "lint_passes": true
+  },
+  "limitations": [
+    "Imported from recorded session (schema runleak.recorded.v0).",
+    "Exact model calls are counted from recorded modelCalls.",
+    "Exact token count is summed only from explicit per-call token fields.",
+    "Exact cost is summed only from explicit per-call costUsd fields; none present, so it stays null.",
+    "Missing usage remains null/unknown.",
+    "Recorded latency is captured per call (total ≈ 4200 ms) but not yet represented in the normalized schema.",
+    "exact_energy_wh stays null; energy/heat remain configurable estimates, not recorder-measured.",
+    "Waste labels remain detector/heuristic findings, not provider measurements.",
+    "Note: SYNTHETIC recorded session for the sample trace library.",
+    "Note: Explicit token counts present; costUsd is null (never derived from tokens). Energy is never recorded.",
+    "Note: One failed build then a passing build — light build-fix-loop evidence."
+  ],
+  "exact_token_count": 8850,
+  "exact_model_calls": 2,
+  "exact_cost_usd": null,
+  "exact_energy_wh": null,
+  "trace_kind": "normalized_manual"
+}

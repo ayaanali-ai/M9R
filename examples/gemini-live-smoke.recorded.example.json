@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "runleak.recorded.v0",
+  "runName": "Gemini LIVE smoke test (user-owned key)",
+  "objective": "Prove a real Gemini response records into runleak.recorded.v0.",
+  "source": "manual",
+  "startedAt": "2026-06-21T19:14:15.913Z",
+  "filesChanged": [],
+  "commandsRun": [
+    "npm run example:gemini-live-smoke"
+  ],
+  "modelCalls": [
+    {
+      "id": "live-1",
+      "provider": "google",
+      "model": "gemini-2.5-flash-lite",
+      "startedAt": "2026-06-21T19:14:15.914Z",
+      "endedAt": "2026-06-21T19:14:16.595Z",
+      "inputTokens": 13,
+      "outputTokens": 9,
+      "totalTokens": 22,
+      "costUsd": null,
+      "latencyMs": 681,
+      "promptSummary": "Tiny synthetic Gemini live smoke test prompt",
+      "outputSummary": "Redacted Gemini live smoke test response summary",
+      "success": true
+    }
+  ],
+  "toolCalls": [],
+  "knownErrors": [],
+  "notes": [
+    "Real Gemini local live smoke test with a user-owned key.",
+    "Summaries only; raw prompt/response not stored. costUsd null; energy null."
+  ],
+  "buildResult": "unknown",
+  "lintResult": "unknown",
+  "endedAt": "2026-06-21T19:14:16.596Z"
+}

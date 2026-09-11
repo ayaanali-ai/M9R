@@ -1,0 +1,17 @@
+{
+  "resultVersion": "runleak.ci-gate.v0",
+  "createdAt": "2026-06-21T21:03:21.157Z",
+  "mode": "dry-run",
+  "threshold": "fail",
+  "inputPolicyStatus": "warn",
+  "wouldBlock": false,
+  "exitCode": 0,
+  "reason": "Dry-run: no checks meet the \"fail\" threshold; nothing would block (exit 0).",
+  "blockingChecks": [],
+  "limitations": [
+    "Default mode is dry-run and non-blocking; enforce mode must be requested explicitly.",
+    "Consumes a runleak.policy.v0 report only — no checks are invented, recomputed, or measured.",
+    "Not a GitHub Action, not hosted CI, not a daemon, not production enforcement.",
+    "Tokens, cost, energy, and heat are never recomputed here."
+  ]
+}

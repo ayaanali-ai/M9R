@@ -1,0 +1,13 @@
+import { NextRequest, NextResponse } from "next/server";
+import { authenticateAgent, bearerFrom } from "@/lib/agent-join-service";
+import { listResidentGrants } from "@/lib/resident-service";
+import { handleAgentError } from "../../_shared";
+
+export async function GET(req: NextRequest) {
+  try {
+    const agent = await authenticateAgent(bearerFrom(req.headers.get("authorization")));
+    if (!agent) return NextResponse.json({ error: "Invalid or missing agent token." }, { status: 401 });
+    const instanceKey = req.nextUrl.searchParams.get("instance_key") ?? "";
+    return NextResponse.json({ ok: true, ...(await listResidentGrants(agent, instanceKey)) });
+  } catch (error) { return handleAgentError(error); }
+}

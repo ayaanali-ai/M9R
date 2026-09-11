@@ -1,0 +1,26 @@
+{
+  "resultVersion": "runleak.ci-gate.v0",
+  "createdAt": "2026-06-22T17:49:45.152Z",
+  "mode": "dry-run",
+  "threshold": "fail",
+  "inputPolicyStatus": "fail",
+  "wouldBlock": true,
+  "exitCode": 0,
+  "reason": "Dry-run: 1 check(s) would block at threshold \"fail\", but dry-run does not block (exit 0).",
+  "blockingChecks": [
+    {
+      "id": "build_lint_quality",
+      "title": "Build/lint quality",
+      "status": "fail",
+      "severity": "medium",
+      "reason": "build_result or lint_result is 'fail'.",
+      "recommendedAction": "Fix the failing build/lint before relying on this run."
+    }
+  ],
+  "limitations": [
+    "Default mode is dry-run and non-blocking; enforce mode must be requested explicitly.",
+    "Consumes a runleak.policy.v0 report only — no checks are invented, recomputed, or measured.",
+    "Not a GitHub Action, not hosted CI, not a daemon, not production enforcement.",
+    "Tokens, cost, energy, and heat are never recomputed here."
+  ]
+}

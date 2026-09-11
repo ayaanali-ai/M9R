@@ -1,0 +1,260 @@
+{
+  "schema": "oathlock.trace.v0",
+  "variant": "messy",
+  "provenance": "Representative anonymized coding-agent session. Token/cost values present only where a provider reported usage; all other fields are null and listed in missing_metadata.",
+  "session_id": "ol_sess_373c9a017dc49eff",
+  "task_summary": "Fix a timezone off-by-one bug in formatDueDate() and add a regression test.",
+  "started_at": "2026-06-23T16:00:00Z",
+  "ended_at": "2026-06-23T16:09:00Z",
+  "actors_observed": [
+    "human",
+    "agent",
+    "tool"
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "timestamp": "2026-06-23T16:00:00Z",
+      "actor": "human",
+      "model_name": null,
+      "tool_name": null,
+      "tool_input_summary": "Task: fix timezone off-by-one in formatDueDate(); add test.",
+      "tool_output_summary": null,
+      "files_read": [],
+      "files_written": [],
+      "shell_commands": [],
+      "errors": [],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "human_identity",
+        "credential"
+      ]
+    },
+    {
+      "step": 2,
+      "timestamp": "2026-06-23T16:02:00Z",
+      "actor": "agent",
+      "model_name": "claude-sonnet-4-6",
+      "tool_name": "read_file",
+      "tool_input_summary": "Re-read ENTIRE src/lib/dates.ts (full file, not a slice).",
+      "tool_output_summary": "~620 lines resent as full context (repeated block, unchanged).",
+      "files_read": [
+        "src/lib/dates.ts"
+      ],
+      "files_written": [],
+      "shell_commands": [],
+      "errors": [],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "token_usage (provider reported no usage)",
+        "estimated_cost_usd"
+      ]
+    },
+    {
+      "step": 3,
+      "timestamp": "2026-06-23T16:03:00Z",
+      "actor": "agent",
+      "model_name": "claude-sonnet-4-6",
+      "tool_name": "read_file",
+      "tool_input_summary": "Re-read ENTIRE src/lib/dates.ts (full file, not a slice).",
+      "tool_output_summary": "~620 lines resent as full context (repeated block, unchanged).",
+      "files_read": [
+        "src/lib/dates.ts"
+      ],
+      "files_written": [],
+      "shell_commands": [],
+      "errors": [],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "token_usage (provider reported no usage)",
+        "estimated_cost_usd"
+      ]
+    },
+    {
+      "step": 4,
+      "timestamp": "2026-06-23T16:04:00Z",
+      "actor": "agent",
+      "model_name": "claude-sonnet-4-6",
+      "tool_name": "read_file",
+      "tool_input_summary": "Re-read ENTIRE src/lib/dates.ts (full file, not a slice).",
+      "tool_output_summary": "~620 lines resent as full context (repeated block, unchanged).",
+      "files_read": [
+        "src/lib/dates.ts"
+      ],
+      "files_written": [],
+      "shell_commands": [],
+      "errors": [],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "token_usage (provider reported no usage)",
+        "estimated_cost_usd"
+      ]
+    },
+    {
+      "step": 5,
+      "timestamp": "2026-06-23T16:05:00Z",
+      "actor": "tool",
+      "model_name": null,
+      "tool_name": "shell",
+      "tool_input_summary": "cat build.log (dumped the full build log into context).",
+      "tool_output_summary": "BLOATED tool output: 48,200-char full build log dumped into context; <1% relevant. Truncated here.",
+      "files_read": [
+        "build.log"
+      ],
+      "files_written": [],
+      "shell_commands": [
+        "cat build.log"
+      ],
+      "errors": [],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "model_name (shell step)"
+      ]
+    },
+    {
+      "step": 6,
+      "timestamp": "2026-06-23T16:06:00Z",
+      "actor": "tool",
+      "model_name": null,
+      "tool_name": "shell",
+      "tool_input_summary": "npm run test:unit (wrong script name; package has none).",
+      "tool_output_summary": "FAIL: Missing script 'test:unit'. (attempt 1)",
+      "files_read": [],
+      "files_written": [],
+      "shell_commands": [
+        "npm run test:unit"
+      ],
+      "errors": [
+        "npm ERR! Missing script: test:unit"
+      ],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "model_name (shell step)"
+      ]
+    },
+    {
+      "step": 7,
+      "timestamp": "2026-06-23T16:06:40Z",
+      "actor": "tool",
+      "model_name": null,
+      "tool_name": "shell",
+      "tool_input_summary": "Retried the same command again with no new information.",
+      "tool_output_summary": "FAIL: Missing script 'test:unit'. (attempt 2 — same error)",
+      "files_read": [],
+      "files_written": [],
+      "shell_commands": [
+        "npm run test:unit"
+      ],
+      "errors": [
+        "npm ERR! Missing script: test:unit"
+      ],
+      "retries": 1,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "model_name (shell step)"
+      ]
+    },
+    {
+      "step": 8,
+      "timestamp": "2026-06-23T16:07:10Z",
+      "actor": "tool",
+      "model_name": null,
+      "tool_name": "shell",
+      "tool_input_summary": "Retried the same command a third time (retry spiral, same error).",
+      "tool_output_summary": "FAIL: Missing script 'test:unit'. (attempt 3 — kept retrying)",
+      "files_read": [],
+      "files_written": [],
+      "shell_commands": [
+        "npm run test:unit"
+      ],
+      "errors": [
+        "npm ERR! Missing script: test:unit"
+      ],
+      "retries": 2,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "model_name (shell step)"
+      ]
+    },
+    {
+      "step": 9,
+      "timestamp": "2026-06-23T16:08:00Z",
+      "actor": "agent",
+      "model_name": null,
+      "tool_name": "edit_file",
+      "tool_input_summary": "Finally edit formatDueDate to parse as UTC.",
+      "tool_output_summary": "Patched 1 hunk.",
+      "files_read": [],
+      "files_written": [
+        "src/lib/dates.ts"
+      ],
+      "shell_commands": [],
+      "errors": [],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "model_name",
+        "token_usage",
+        "estimated_cost_usd"
+      ]
+    },
+    {
+      "step": 10,
+      "timestamp": "2026-06-23T16:08:40Z",
+      "actor": "tool",
+      "model_name": null,
+      "tool_name": "shell",
+      "tool_input_summary": "node --test src/lib/dates.test.ts (correct command).",
+      "tool_output_summary": "PASS 1/1.",
+      "files_read": [],
+      "files_written": [],
+      "shell_commands": [
+        "node --test src/lib/dates.test.ts"
+      ],
+      "errors": [],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "model_name (shell step)"
+      ]
+    }
+  ],
+  "totals": {
+    "steps": 10,
+    "failed_commands": 3,
+    "retries": 3,
+    "token_usage": null,
+    "estimated_cost_usd": null
+  },
+  "missing_metadata_global": [
+    "human_identity not captured (no verified owner)",
+    "credential chain not captured",
+    "model receipts unsigned; model_name absent on step 9",
+    "no token metadata: provider reported no usage; tokens and cost stay null",
+    "policy enforcement record not present"
+  ],
+  "anonymization": {
+    "applied": true,
+    "notes": [
+      "No secrets, API keys, credentials, or env vars included.",
+      "No full file contents — tool I/O is summarized.",
+      "Paths are repo-relative; session_id is a random opaque token."
+    ]
+  }
+}

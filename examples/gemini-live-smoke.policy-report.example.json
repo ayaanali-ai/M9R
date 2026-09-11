@@ -1,0 +1,127 @@
+{
+  "reportVersion": "runleak.policy.v0",
+  "createdAt": "2026-06-21T20:20:28.815Z",
+  "runName": "Gemini LIVE smoke test (user-owned key)",
+  "overallStatus": "warn",
+  "checks": [
+    {
+      "id": "missing_usage_metadata",
+      "title": "Usage metadata present",
+      "status": "pass",
+      "severity": "medium",
+      "reason": "Explicit usage metadata is present (model calls and/or token count).",
+      "evidence": [
+        "exact_model_calls=1",
+        "exact_token_count=22"
+      ],
+      "recommendedAction": "No action — usage is explicit.",
+      "relatedPreventionRuleIds": [
+        "missing_usage_metadata"
+      ],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Usage is never inferred when absent."
+      ]
+    },
+    {
+      "id": "energy_heat_unknown",
+      "title": "Energy/heat honesty",
+      "status": "pass",
+      "severity": "low",
+      "reason": "exact_energy_wh is null and limitations state energy/heat are not measured.",
+      "evidence": [
+        "exact_energy_wh=null",
+        "energy caveat present in limitations"
+      ],
+      "recommendedAction": "Keep energy as unknown / a configurable estimate until real telemetry exists; never claim it was measured.",
+      "relatedPreventionRuleIds": [],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Energy/heat are never measured by RunLeak."
+      ]
+    },
+    {
+      "id": "build_lint_quality",
+      "title": "Build/lint quality",
+      "status": "warn",
+      "severity": "medium",
+      "reason": "Both build_result and lint_result are null — quality is unverified.",
+      "evidence": [
+        "build_result=null",
+        "lint_result=null"
+      ],
+      "recommendedAction": "Capture build and lint results in the trace to verify quality.",
+      "relatedPreventionRuleIds": [
+        "build_fix_loop"
+      ],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation."
+      ]
+    },
+    {
+      "id": "prevention_rule_presence",
+      "title": "Prevention rule coverage",
+      "status": "pass",
+      "severity": "medium",
+      "reason": "No findings require prevention rules.",
+      "evidence": [
+        "findings=0",
+        "high_severity_findings=0",
+        "prevention_rules=0"
+      ],
+      "recommendedAction": "No action.",
+      "relatedPreventionRuleIds": [],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Rules appear only when a finding maps to one."
+      ]
+    },
+    {
+      "id": "real_vs_synthetic",
+      "title": "Real vs synthetic proof",
+      "status": "pass",
+      "severity": "low",
+      "reason": "Input is not synthetic and carries explicit usage.",
+      "evidence": [
+        "synthetic=false",
+        "has_exact_usage=true"
+      ],
+      "recommendedAction": "No action.",
+      "relatedPreventionRuleIds": [],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Synthetic proof is labeled, not invalid."
+      ]
+    },
+    {
+      "id": "cost_honesty",
+      "title": "Cost honesty",
+      "status": "warn",
+      "severity": "medium",
+      "reason": "Token count is present but exact_cost_usd is null — cost cannot be reported.",
+      "evidence": [
+        "exact_cost_usd=null",
+        "exact_token_count=22",
+        "cost caveat present in limitations"
+      ],
+      "recommendedAction": "Never derive cost from tokens; report cost only from explicit per-call costUsd.",
+      "relatedPreventionRuleIds": [
+        "missing_usage_metadata"
+      ],
+      "limitations": [
+        "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+        "Cost is never estimated from tokens."
+      ]
+    }
+  ],
+  "summary": {
+    "pass": 4,
+    "warn": 2,
+    "fail": 0
+  },
+  "limitations": [
+    "Advisory only — non-blocking. Not a CI gate, not enforcement, not production validation.",
+    "Deterministic checks over explicit fields only; no values are estimated.",
+    "Fail-on-claim checks fire only when a positive claim is present; absent claims never fail."
+  ]
+}

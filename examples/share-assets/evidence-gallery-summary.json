@@ -1,0 +1,31 @@
+{
+  "title": "RunLeak Evidence Gallery",
+  "subtitle": "Proof artifacts for AI agent accountability — recorded traces, measured-vs-unknown ledgers, prevention rules, advisory policy, and CI dry-run results.",
+  "measuredFields": {
+    "modelCalls": 1,
+    "tokens": 22,
+    "provider": "Google Gemini",
+    "model": "gemini-2.5-flash-lite"
+  },
+  "unknownFields": {
+    "costUsd": null,
+    "energyWh": null,
+    "heat": null,
+    "productionSavings": null
+  },
+  "privacy": {
+    "rawPromptStored": false,
+    "apiKeyStored": false
+  },
+  "proofFlowLabels": [
+    "Provider response",
+    "Recorded session",
+    "Normalized ledger",
+    "Proof package",
+    "Advisory policy",
+    "CI dry-run"
+  ],
+  "badge": "Unknown stays unknown",
+  "recommendedCaption": "RunLeak evidence gallery: one real Gemini trace, measured tokens, unknown cost/energy, proof package, advisory policy, and CI dry-run. The point is simple: agent runs need ledgers where unknown stays unknown.",
+  "note": "Structured source data for future share-image generation. No image is generated here. Measured values mirror examples/gemini-live-smoke.normalized.example.json; cost and energy are null (not measured/estimated)."
+}

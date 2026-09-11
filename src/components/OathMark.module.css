@@ -1,0 +1,47 @@
+/* OathMark — lock-in animation for the OathLock logomark.
+   The two bracket halves slide together and the red bar stamps in once on
+   mount. Disabled entirely under prefers-reduced-motion. */
+
+.halfLeft,
+.halfRight {
+  animation: lockIn 0.7s cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+.halfLeft {
+  --shift: -14px;
+}
+.halfRight {
+  --shift: 14px;
+}
+.bar {
+  transform-origin: 170px 170px;
+  animation: stamp 0.45s cubic-bezier(0.23, 1, 0.32, 1) 0.45s both;
+}
+
+@keyframes lockIn {
+  from {
+    transform: translateX(var(--shift));
+    opacity: 0.4;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+@keyframes stamp {
+  from {
+    transform: scaleY(0);
+    opacity: 0;
+  }
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .halfLeft,
+  .halfRight,
+  .bar {
+    animation: none;
+  }
+}

@@ -1,0 +1,194 @@
+{
+  "schema": "oathlock.trace.v0",
+  "variant": "clean",
+  "provenance": "Representative anonymized coding-agent session. Token/cost values present only where a provider reported usage; all other fields are null and listed in missing_metadata.",
+  "session_id": "ol_sess_34529ff1a4594276",
+  "task_summary": "Fix a timezone off-by-one bug in formatDueDate() and add a regression test.",
+  "started_at": "2026-06-23T15:00:00Z",
+  "ended_at": "2026-06-23T15:01:25Z",
+  "actors_observed": [
+    "human",
+    "agent",
+    "tool"
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "timestamp": "2026-06-23T15:00:00Z",
+      "actor": "human",
+      "model_name": null,
+      "tool_name": null,
+      "tool_input_summary": "Task: fix timezone off-by-one in formatDueDate(); add test.",
+      "tool_output_summary": null,
+      "files_read": [],
+      "files_written": [],
+      "shell_commands": [],
+      "errors": [],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "human_identity",
+        "credential"
+      ]
+    },
+    {
+      "step": 2,
+      "timestamp": "2026-06-23T15:00:11Z",
+      "actor": "agent",
+      "model_name": "claude-sonnet-4-6",
+      "tool_name": "read_file",
+      "tool_input_summary": "Read src/lib/dates.ts (formatDueDate region only).",
+      "tool_output_summary": "~60 lines; formatDueDate uses local Date, drops UTC offset.",
+      "files_read": [
+        "src/lib/dates.ts"
+      ],
+      "files_written": [],
+      "shell_commands": [],
+      "errors": [],
+      "retries": 0,
+      "token_usage": {
+        "input": 1840,
+        "output": 220,
+        "total": 2060
+      },
+      "estimated_cost_usd": 0.0094,
+      "missing_metadata": []
+    },
+    {
+      "step": 3,
+      "timestamp": "2026-06-23T15:00:25Z",
+      "actor": "agent",
+      "model_name": "claude-sonnet-4-6",
+      "tool_name": "edit_file",
+      "tool_input_summary": "Parse ISO date as UTC; format with explicit timeZone:'UTC'.",
+      "tool_output_summary": "Patched 1 hunk in formatDueDate().",
+      "files_read": [],
+      "files_written": [
+        "src/lib/dates.ts"
+      ],
+      "shell_commands": [],
+      "errors": [],
+      "retries": 0,
+      "token_usage": {
+        "input": 2100,
+        "output": 380,
+        "total": 2480
+      },
+      "estimated_cost_usd": 0.0121,
+      "missing_metadata": []
+    },
+    {
+      "step": 4,
+      "timestamp": "2026-06-23T15:00:38Z",
+      "actor": "agent",
+      "model_name": "claude-sonnet-4-6",
+      "tool_name": "write_file",
+      "tool_input_summary": "Add dates.test.ts with a UTC boundary case (23:30+02:00).",
+      "tool_output_summary": "Created test file (1 case).",
+      "files_read": [],
+      "files_written": [
+        "src/lib/dates.test.ts"
+      ],
+      "shell_commands": [],
+      "errors": [],
+      "retries": 0,
+      "token_usage": {
+        "input": 1500,
+        "output": 410,
+        "total": 1910
+      },
+      "estimated_cost_usd": 0.0093,
+      "missing_metadata": []
+    },
+    {
+      "step": 5,
+      "timestamp": "2026-06-23T15:00:52Z",
+      "actor": "tool",
+      "model_name": null,
+      "tool_name": "shell",
+      "tool_input_summary": "node --test src/lib/dates.test.ts",
+      "tool_output_summary": "FAIL 1/1: expected '2026-06-24' received '2026-06-23' (assertion).",
+      "files_read": [],
+      "files_written": [],
+      "shell_commands": [
+        "node --test src/lib/dates.test.ts"
+      ],
+      "errors": [
+        "AssertionError: expected '2026-06-24' to equal '2026-06-23'"
+      ],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": [
+        "model_name (shell step has no model)"
+      ]
+    },
+    {
+      "step": 6,
+      "timestamp": "2026-06-23T15:01:09Z",
+      "actor": "agent",
+      "model_name": "claude-sonnet-4-6",
+      "tool_name": "edit_file",
+      "tool_input_summary": "Correction: test fixture used wrong expected day; fix expectation.",
+      "tool_output_summary": "Updated 1 assertion in dates.test.ts.",
+      "files_read": [],
+      "files_written": [
+        "src/lib/dates.test.ts"
+      ],
+      "shell_commands": [],
+      "errors": [],
+      "retries": 0,
+      "token_usage": {
+        "input": 2240,
+        "output": 300,
+        "total": 2540
+      },
+      "estimated_cost_usd": 0.0124,
+      "missing_metadata": []
+    },
+    {
+      "step": 7,
+      "timestamp": "2026-06-23T15:01:20Z",
+      "actor": "tool",
+      "model_name": null,
+      "tool_name": "shell",
+      "tool_input_summary": "node --test src/lib/dates.test.ts",
+      "tool_output_summary": "PASS 1/1.",
+      "files_read": [],
+      "files_written": [],
+      "shell_commands": [
+        "node --test src/lib/dates.test.ts"
+      ],
+      "errors": [],
+      "retries": 0,
+      "token_usage": null,
+      "estimated_cost_usd": null,
+      "missing_metadata": []
+    }
+  ],
+  "totals": {
+    "steps": 7,
+    "failed_commands": 1,
+    "retries": 0,
+    "token_usage": {
+      "input": 7680,
+      "output": 1310,
+      "total": 8990
+    },
+    "estimated_cost_usd": 0.0432
+  },
+  "missing_metadata_global": [
+    "human_identity not captured (no verified owner)",
+    "credential chain not captured",
+    "model receipts unsigned (model_name self-reported, not attested)"
+  ],
+  "anonymization": {
+    "applied": true,
+    "notes": [
+      "No secrets, API keys, credentials, or env vars included.",
+      "No full file contents — tool I/O is summarized.",
+      "Paths are repo-relative; session_id is a random opaque token."
+    ]
+  }
+}

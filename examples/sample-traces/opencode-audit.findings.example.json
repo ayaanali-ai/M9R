@@ -1,0 +1,126 @@
+{
+  "_comment": "SYNTHETIC / REDACTED — not customer data, not production validation. Mirrors examples/sample-traces/opencode-terminal-log.example.md. No measured token/cost/energy values.",
+  "findingTypes": [
+    "build_fix_loop",
+    "bloated_tool_output",
+    "missing_usage_metadata",
+    "retry_spiral",
+    "repeated_tool_call"
+  ],
+  "findings": [
+    {
+      "id": "ca-build-fix-loop",
+      "type": "build_fix_loop",
+      "title": "Build/lint fix loop",
+      "severity": "high",
+      "summary": "Repeated build/lint failures or correction loops suggest edits were made without verifying they compile/lint, causing rework.",
+      "evidence": [
+        "build_result = fail",
+        "correction_loops = high",
+        "Type error in src/app/page.tsx",
+        "failed again with the same error after another attempt"
+      ],
+      "affectedFields": [
+        "build_result",
+        "lint_result",
+        "correction_loops",
+        "known_errors"
+      ],
+      "preventionPlan": [
+        "Build/lint after each major section rather than only at the end.",
+        "Fix the root cause of a failure before making further edits.",
+        "Cap correction attempts; stop and re-plan if the same error recurs."
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "ca-bloated-tool-output",
+      "type": "bloated_tool_output",
+      "title": "Bloated tool output",
+      "severity": "low",
+      "summary": "Oversized tool/terminal output (full logs, repeated stack traces, dumped output) appears to have been carried into the run, which can bloat context. Only the relevant error block should be passed forward.",
+      "evidence": [
+        "pasted the entire build log (thousands of lines, truncated) into the run each time"
+      ],
+      "affectedFields": [
+        "limitations",
+        "known_errors",
+        "commands_run"
+      ],
+      "preventionPlan": [
+        "Pass only the relevant error block forward, not the full log.",
+        "Filter, paginate, or summarize large tool output before feeding it to the model.",
+        "Exact token waste is unknown unless explicit measured usage exists — do not estimate it."
+      ],
+      "confidence": "low"
+    },
+    {
+      "id": "ca-missing-usage-metadata",
+      "type": "missing_usage_metadata",
+      "title": "Missing usage metadata",
+      "severity": "medium",
+      "summary": "The trace has no explicit token/cost/model-call metadata, so cost and token reporting cannot be trusted. Unknown must stay unknown.",
+      "evidence": [
+        "exact_model_calls = null",
+        "exact_token_count = null",
+        "exact_cost_usd = null",
+        "usage unknown; no token metadata provided"
+      ],
+      "affectedFields": [
+        "exact_model_calls",
+        "exact_token_count",
+        "exact_cost_usd"
+      ],
+      "preventionPlan": [
+        "Require provider usage metadata or a strict runleak.recorded.v0 JSON.",
+        "Leave cost and tokens null when usage is absent — never estimate them.",
+        "Do not summarize cost unless explicit per-call usage exists."
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "ca-retry-spiral",
+      "type": "retry_spiral",
+      "title": "Retry spiral",
+      "severity": "high",
+      "summary": "Repeated attempts appear to have been made without isolating the root cause. Retrying without diagnosis wastes calls and time.",
+      "evidence": [
+        "correction_loops = high",
+        "tried again, same error, another attempt after several attempts before diagnosing",
+        "failed again with the same error after another attempt"
+      ],
+      "affectedFields": [
+        "correction_loops",
+        "known_errors",
+        "limitations"
+      ],
+      "preventionPlan": [
+        "After two failed attempts, switch to diagnostic mode before retrying.",
+        "Isolate the root cause (smallest failing case) instead of repeating the same action.",
+        "Cap retries; re-plan when the same error recurs."
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "ca-repeated-tool-call",
+      "type": "repeated_tool_call",
+      "title": "Repeated tool call",
+      "severity": "medium",
+      "summary": "The same command/read/search appears to have been run more than once with unchanged input. Repeated tool calls should be cached or deduped.",
+      "evidence": [
+        "command repeated 4x: npm run build",
+        "re-ran the same grep search repeatedly with no new input"
+      ],
+      "affectedFields": [
+        "commands_run",
+        "limitations"
+      ],
+      "preventionPlan": [
+        "Cache or reuse results when a tool's input is unchanged.",
+        "Dedupe repeated reads/searches; only re-run when inputs actually change.",
+        "Exact token/cost impact requires measured metadata — do not estimate it."
+      ],
+      "confidence": "medium"
+    }
+  ]
+}

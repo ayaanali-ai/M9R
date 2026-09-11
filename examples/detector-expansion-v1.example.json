@@ -1,0 +1,91 @@
+{
+  "note": "SYNTHETIC example — not customer data, not a measured trace. Demonstrates RunLeak detector expansion v1 over a crafted synthetic normalized trace.",
+  "syntheticInputSummary": {
+    "objective": "Used opus for formatting a simple file, then fix the build.",
+    "commands_run": [
+      "npm run build",
+      "npm run build",
+      "npm run build"
+    ],
+    "limitations": [
+      "pasted the entire log into the run (thousands of lines, truncated)",
+      "usage unknown; no token metadata provided",
+      "tried again, same error, another attempt after several attempts",
+      "re-ran the same grep search repeatedly with no new input"
+    ],
+    "exact_fields": "all null (no measured usage)"
+  },
+  "detectedFindingTypes": [
+    "build_fix_loop",
+    "bloated_tool_output",
+    "model_overkill",
+    "missing_usage_metadata",
+    "retry_spiral",
+    "repeated_tool_call"
+  ],
+  "findings": [
+    {
+      "type": "build_fix_loop",
+      "severity": "medium",
+      "title": "Build/lint fix loop",
+      "evidence": [
+        "correction_loops = moderate",
+        "failed again with the same error"
+      ]
+    },
+    {
+      "type": "bloated_tool_output",
+      "severity": "low",
+      "title": "Bloated tool output",
+      "evidence": [
+        "pasted the entire log into the run (thousands of lines, truncated)"
+      ]
+    },
+    {
+      "type": "model_overkill",
+      "severity": "low",
+      "title": "Model overkill",
+      "evidence": [
+        "Used opus for formatting a simple file, then fix the build."
+      ]
+    },
+    {
+      "type": "missing_usage_metadata",
+      "severity": "medium",
+      "title": "Missing usage metadata",
+      "evidence": [
+        "exact_model_calls = null",
+        "exact_token_count = null",
+        "exact_cost_usd = null",
+        "usage unknown; no token metadata provided"
+      ]
+    },
+    {
+      "type": "retry_spiral",
+      "severity": "medium",
+      "title": "Retry spiral",
+      "evidence": [
+        "correction_loops = moderate",
+        "tried again, same error, another attempt after several attempts",
+        "failed again with the same error"
+      ]
+    },
+    {
+      "type": "repeated_tool_call",
+      "severity": "medium",
+      "title": "Repeated tool call",
+      "evidence": [
+        "command repeated 3x: npm run build",
+        "re-ran the same grep search repeatedly with no new input"
+      ]
+    }
+  ],
+  "mappedPreventionRuleIds": [
+    "build_fix_loop",
+    "bloated_tool_output",
+    "model_overkill",
+    "missing_usage_metadata",
+    "retry_spiral",
+    "repeated_tool_call"
+  ]
+}

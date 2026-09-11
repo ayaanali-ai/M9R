@@ -1,0 +1,77 @@
+{
+  "schemaVersion": "runleak.recorded.v0",
+  "runName": "Demo (provider mappers): mixed-provider session",
+  "objective": "Demonstrate mapping explicit OpenAI/Anthropic/generic usage into recorded calls.",
+  "source": "manual",
+  "startedAt": "2026-06-20T17:00:00Z",
+  "filesChanged": [
+    "src/lib/x.ts",
+    "src/app/x/page.tsx"
+  ],
+  "commandsRun": [
+    "npm run lint",
+    "npm run build"
+  ],
+  "modelCalls": [
+    {
+      "id": "call-openai-1",
+      "provider": "openai",
+      "model": "gpt-demo",
+      "inputTokens": 3200,
+      "outputTokens": 700,
+      "totalTokens": 3900,
+      "costUsd": 0.04,
+      "latencyMs": 1800,
+      "promptSummary": "Plan with OpenAI-style usage",
+      "outputSummary": "Plan produced"
+    },
+    {
+      "id": "call-anthropic-1",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "inputTokens": 4100,
+      "outputTokens": 900,
+      "totalTokens": 5000,
+      "costUsd": 0.08,
+      "latencyMs": 2600,
+      "promptSummary": "Implement with Anthropic-style usage",
+      "outputSummary": "Implementation produced"
+    },
+    {
+      "id": "call-generic-1",
+      "provider": "local",
+      "model": "local-demo",
+      "inputTokens": 2200,
+      "outputTokens": 400,
+      "totalTokens": 2600,
+      "costUsd": null,
+      "latencyMs": 900,
+      "promptSummary": "Local runtime fix",
+      "outputSummary": "Adjusted output"
+    }
+  ],
+  "toolCalls": [
+    {
+      "id": "tool-1",
+      "toolName": "read_file",
+      "latencyMs": 30,
+      "success": true,
+      "inputSummary": "src/lib/x.ts"
+    },
+    {
+      "id": "tool-2",
+      "toolName": "run_command",
+      "latencyMs": 4200,
+      "success": true,
+      "inputSummary": "npm run build"
+    }
+  ],
+  "knownErrors": [],
+  "notes": [
+    "Synthetic demo session built with Recorder Lite + provider usage mappers.",
+    "Token counts and costs are illustrative demo values, not measured production usage."
+  ],
+  "buildResult": "pass",
+  "lintResult": "pass",
+  "endedAt": "2026-06-20T17:12:00Z"
+}

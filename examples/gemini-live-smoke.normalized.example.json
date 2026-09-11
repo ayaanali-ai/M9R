@@ -1,0 +1,39 @@
+{
+  "run_name": "Gemini LIVE smoke test (user-owned key)",
+  "objective": "Prove a real Gemini response records into runleak.recorded.v0.",
+  "files_changed": [],
+  "components_created": [],
+  "pages_updated": [],
+  "commands_run": [
+    "npm run example:gemini-live-smoke"
+  ],
+  "lint_result": null,
+  "build_result": null,
+  "known_errors": [],
+  "correction_loops": "none",
+  "suspected_waste_patterns": [],
+  "repeated_context_risks": "none",
+  "redundant_edit_risks": "none",
+  "claims_risks": "none",
+  "quality_checks": {
+    "build_passes": null,
+    "lint_passes": null
+  },
+  "limitations": [
+    "Imported from recorded session (schema runleak.recorded.v0).",
+    "Exact model calls are counted from recorded modelCalls.",
+    "Exact token count is summed only from explicit per-call token fields.",
+    "Exact cost is summed only from explicit per-call costUsd fields; none present, so it stays null.",
+    "Missing usage remains null/unknown.",
+    "Recorded latency is captured per call (total ≈ 681 ms) but not yet represented in the normalized schema.",
+    "exact_energy_wh stays null; energy/heat remain configurable estimates, not recorder-measured.",
+    "Waste labels remain detector/heuristic findings, not provider measurements.",
+    "Note: Real Gemini local live smoke test with a user-owned key.",
+    "Note: Summaries only; raw prompt/response not stored. costUsd null; energy null."
+  ],
+  "exact_token_count": 22,
+  "exact_model_calls": 1,
+  "exact_cost_usd": null,
+  "exact_energy_wh": null,
+  "trace_kind": "normalized_manual"
+}

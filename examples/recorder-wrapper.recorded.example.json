@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "runleak.recorded.v0",
+  "runName": "Demo (recorder-wrapper): add CSV export",
+  "objective": "Wrap two model-call and two tool-call callbacks while recording explicit usage.",
+  "source": "manual",
+  "startedAt": "2026-06-20T18:00:00Z",
+  "filesChanged": [
+    "src/lib/csv-export.ts",
+    "src/app/export/page.tsx"
+  ],
+  "commandsRun": [
+    "npm run lint",
+    "npm run build"
+  ],
+  "modelCalls": [
+    {
+      "id": "call-1",
+      "provider": "openai",
+      "model": "gpt-demo",
+      "startedAt": "2026-06-20T22:28:00.794Z",
+      "endedAt": "2026-06-20T22:28:00.796Z",
+      "inputTokens": 3000,
+      "outputTokens": 600,
+      "totalTokens": 3600,
+      "costUsd": 0.04,
+      "latencyMs": 0,
+      "promptSummary": "Plan CSV export",
+      "success": true
+    },
+    {
+      "id": "call-2",
+      "provider": "anthropic",
+      "model": "claude-demo",
+      "startedAt": "2026-06-20T22:28:00.797Z",
+      "endedAt": "2026-06-20T22:28:00.797Z",
+      "inputTokens": 4200,
+      "outputTokens": 1100,
+      "totalTokens": 5300,
+      "costUsd": 0.09,
+      "latencyMs": 0,
+      "promptSummary": "Implement CSV export",
+      "success": true
+    }
+  ],
+  "toolCalls": [
+    {
+      "id": "tool-1",
+      "toolName": "edit_file",
+      "startedAt": "2026-06-20T22:28:00.797Z",
+      "endedAt": "2026-06-20T22:28:00.797Z",
+      "latencyMs": 0,
+      "success": true,
+      "inputSummary": "src/lib/csv-export.ts"
+    },
+    {
+      "id": "tool-2",
+      "toolName": "run_command",
+      "startedAt": "2026-06-20T22:28:00.797Z",
+      "endedAt": "2026-06-20T22:28:00.797Z",
+      "latencyMs": 0,
+      "success": true,
+      "inputSummary": "npm run build"
+    }
+  ],
+  "knownErrors": [],
+  "notes": [
+    "Synthetic demo session built with the Recorder Wrapper.",
+    "Callbacks are local stubs; no provider was called. Usage/cost are demo values."
+  ],
+  "buildResult": "pass",
+  "lintResult": "pass",
+  "endedAt": "2026-06-20T18:11:00Z"
+}

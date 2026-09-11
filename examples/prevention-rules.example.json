@@ -1,0 +1,97 @@
+{
+  "note": "SYNTHETIC example — not customer data, not a measured trace. Deterministic prevention rules mapped from a small synthetic finding set.",
+  "source": "examples/prevention-rules.example.json (Test Case 021)",
+  "syntheticFindings": [
+    {
+      "type": "build_fix_loop",
+      "title": "Repeated failed builds with broad edits",
+      "severity": "high"
+    },
+    {
+      "type": "redundant_file_read",
+      "title": "Same file re-read without edits",
+      "severity": "medium"
+    },
+    {
+      "type": "claims_drift",
+      "title": "Copy asserts unmeasured savings",
+      "severity": "high"
+    },
+    {
+      "type": "missing_usage_metadata",
+      "title": "Model calls lack usage metadata",
+      "severity": "medium"
+    }
+  ],
+  "preventionRules": [
+    {
+      "id": "redundant_file_read",
+      "title": "Redundant file read",
+      "leakType": "redundant_file_read",
+      "severity": "medium",
+      "cause": "The same file is re-read without an intervening edit, re-loading context that was already available.",
+      "fixNow": "Reuse the already-read file contents instead of re-reading the same file.",
+      "promptFix": "Before reading a file, check whether it was already read and not modified since.",
+      "policyRule": "Warn when a file is read more than once with no edit between reads in the same run.",
+      "evidenceNeeded": [
+        "Repeated read of the same path",
+        "No edit recorded between the reads"
+      ],
+      "limitations": [
+        "Detected from structured evidence only; not every redundant read is observable.",
+        "No measured token/cost impact is claimed."
+      ]
+    },
+    {
+      "id": "build_fix_loop",
+      "title": "Build-fix loop",
+      "leakType": "build_fix_loop",
+      "severity": "high",
+      "cause": "Repeated broad edits and rebuilds without isolating the first failing file or root error.",
+      "fixNow": "Stop broad edits and isolate the first failing file/error.",
+      "promptFix": "After two failed builds, enter diagnostic mode before another edit.",
+      "policyRule": "After two failed build attempts, ban unrelated file edits until the root error is identified.",
+      "evidenceNeeded": [
+        "Two or more failed build attempts",
+        "Edits across unrelated files between builds"
+      ],
+      "limitations": [
+        "Loop count is read from structured evidence; latency/cost of the loop is not measured."
+      ]
+    },
+    {
+      "id": "claims_drift",
+      "title": "Claims drift",
+      "leakType": "claims_drift",
+      "severity": "high",
+      "cause": "Public copy or report text asserts claims that exceed what the measured/normalized fields support.",
+      "fixNow": "Remove or qualify unsupported public claims.",
+      "promptFix": "Only make claims supported by trace evidence or marked as future roadmap.",
+      "policyRule": "Block report/public-copy generation if claims exceed measured fields.",
+      "evidenceNeeded": [
+        "Claim text in notes/summaries/copy",
+        "Absence of measured fields supporting the claim"
+      ],
+      "limitations": [
+        "Heuristic over text; it flags risk, it does not verify factual accuracy."
+      ]
+    },
+    {
+      "id": "missing_usage_metadata",
+      "title": "Missing usage metadata",
+      "leakType": "missing_usage_metadata",
+      "severity": "medium",
+      "cause": "Model calls lack explicit usage metadata, so exact tokens and cost cannot be reported.",
+      "fixNow": "Require provider usage metadata or mark cost/tokens unknown.",
+      "promptFix": "Do not summarize cost unless usage fields are present.",
+      "policyRule": "Fail cost reports when exact_token_count and exact_cost_usd are both null.",
+      "evidenceNeeded": [
+        "Model calls with null token fields",
+        "Null exact_cost_usd in the normalized trace"
+      ],
+      "limitations": [
+        "This rule enforces honesty about unknowns; it never estimates the missing values."
+      ]
+    }
+  ]
+}

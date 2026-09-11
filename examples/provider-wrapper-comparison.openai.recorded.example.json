@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "runleak.recorded.v0",
+  "runName": "Comparison — OpenAI-style run",
+  "objective": "OpenAI-style mocked run for the wrapper comparison proof.",
+  "source": "manual",
+  "startedAt": "2026-06-20T21:00:00Z",
+  "filesChanged": [
+    "src/lib/feature-a.ts",
+    "src/app/a/page.tsx"
+  ],
+  "commandsRun": [
+    "npm run lint",
+    "npm run build"
+  ],
+  "modelCalls": [
+    {
+      "id": "o-call-1",
+      "provider": "openai",
+      "model": "gpt-demo",
+      "startedAt": "2026-06-21T04:25:18.832Z",
+      "endedAt": "2026-06-21T04:25:18.832Z",
+      "inputTokens": 3200,
+      "outputTokens": 700,
+      "totalTokens": 3900,
+      "costUsd": 0.05,
+      "latencyMs": 0,
+      "promptSummary": "Plan",
+      "success": true
+    },
+    {
+      "id": "o-call-2",
+      "provider": "openai",
+      "model": "gpt-demo",
+      "startedAt": "2026-06-21T04:25:18.832Z",
+      "endedAt": "2026-06-21T04:25:18.832Z",
+      "inputTokens": 4600,
+      "outputTokens": 1200,
+      "totalTokens": 5800,
+      "costUsd": 0.08,
+      "latencyMs": 0,
+      "promptSummary": "Implement",
+      "success": true
+    },
+    {
+      "id": "o-call-3",
+      "provider": "openai",
+      "model": "gpt-demo",
+      "startedAt": "2026-06-21T04:25:18.832Z",
+      "endedAt": "2026-06-21T04:25:18.832Z",
+      "inputTokens": null,
+      "outputTokens": null,
+      "totalTokens": null,
+      "costUsd": null,
+      "latencyMs": 0,
+      "promptSummary": "Follow-up (no usage)",
+      "success": true
+    },
+    {
+      "id": "o-call-4",
+      "provider": "openai",
+      "model": "gpt-demo",
+      "startedAt": "2026-06-21T04:25:18.832Z",
+      "endedAt": "2026-06-21T04:25:18.832Z",
+      "inputTokens": null,
+      "outputTokens": null,
+      "totalTokens": null,
+      "costUsd": null,
+      "latencyMs": 0,
+      "promptSummary": "Fails",
+      "success": false,
+      "errorSummary": "mocked openai error: timeout"
+    }
+  ],
+  "toolCalls": [],
+  "knownErrors": [],
+  "notes": [
+    "Synthetic demo: OpenAI-style side of the wrapper comparison."
+  ],
+  "buildResult": "pass",
+  "lintResult": "pass",
+  "endedAt": "2026-06-20T21:09:00Z"
+}

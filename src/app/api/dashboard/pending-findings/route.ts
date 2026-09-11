@@ -1,0 +1,63 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
+import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
+import { supabase } from "@/lib/supabase";
+import { isMissingOptionalTableError } from "@/lib/dashboard-optional-fallback";
+
+async function currentUserAndWorkspace(): Promise<{ userId: string; workspaceId: string } | null> {
+  const db = await createClient();
+  if (!db) return null;
+  const { data: { user } } = await db.auth.getUser();
+  if (!user) return null;
+  let workspaceId: string;
+  try {
+    workspaceId = await resolveActiveOrDefaultProjectId(db, { id: user.id, email: user.email });
+  } catch {
+    return null;
+  }
+  return { userId: user.id, workspaceId };
+}
+
+interface PendingFinding {
+  id: string;
+  title: string;
+  observedBehavior: string;
+  evidenceLevel: string;
+  announcementMessageId: string | null;
+  createdAt: string;
+}
+
+/**
+ * GET lists every "observed" (not yet human-reviewed) Finding that has
+ * already announced itself in the message feed (has an announcement_message_id
+ * -- see attachFindingAnnouncementMessage in finding-service.ts). Decisions
+ * themselves reuse the existing /api/agent/findings/[id]/review and
+ * .../promote-to-rule routes, unchanged -- this endpoint only tells the
+ * Watchfloor which message id needs an inline card.
+ */
+export async function GET() {
+  const ctx = await currentUserAndWorkspace();
+  if (!ctx || !supabase) return NextResponse.json({ findings: [] });
+  try {
+    const { data, error } = await supabase.from("findings")
+      .select("id, title, observed_behavior, evidence_level, announcement_message_id, created_at")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("review_state", "observed")
+      .not("announcement_message_id", "is", null)
+      .order("created_at", { ascending: true })
+      .limit(100);
+    if (error) throw error;
+    const findings: PendingFinding[] = (data ?? []).map((row) => ({
+      id: String(row.id),
+      title: String(row.title),
+      observedBehavior: String(row.observed_behavior),
+      evidenceLevel: String(row.evidence_level),
+      announcementMessageId: (row.announcement_message_id as string | null) ?? null,
+      createdAt: String(row.created_at),
+    }));
+    return NextResponse.json({ findings }, { headers: { "cache-control": "no-store" } });
+  } catch (error) {
+    if (isMissingOptionalTableError(error)) return NextResponse.json({ findings: [], unavailable: true }, { headers: { "cache-control": "no-store" } });
+    return NextResponse.json({ error: "Could not read pending findings." }, { status: 500 });
+  }
+}

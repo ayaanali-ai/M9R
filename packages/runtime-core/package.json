@@ -1,0 +1,25 @@
+{
+  "name": "@m9r/runtime-core",
+  "version": "0.1.0",
+  "description": "Provider-neutral coordination and adapter contracts for M9R.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "private": false,
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ayaanali-ai/M9R.git",
+    "directory": "packages/runtime-core"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist/", "README.md", "BOUNDARY.md", "LICENSE", "NOTICE"],
+  "engines": { "node": ">=18" },
+  "scripts": { "build": "tsc -p tsconfig.json" }
+}
