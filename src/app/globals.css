@@ -8046,6 +8046,52 @@ details.wf-fold > div { padding: 0.25rem 0.8rem 0.8rem; }
    .wf-term-back right next to it, in the accent color since this is the
    one affirmative action in this header versus back's neutral one. */
 .wf-term-pane__surface { flex: 1; min-height: 0; padding: 8px 10px; }
+
+/* Item #21 Phase 5b: live cursor overlay. Positioned relative to this wrap
+   (not the pane), which is exactly the box a remote cursor's x/y fraction
+   (0-1) is measured against on the SENDING side too -- keeping both ends
+   using the same box is what makes the position line up across viewers
+   with different pane sizes/tilings. pointer-events: none throughout so the
+   overlay can never intercept a click meant for the terminal underneath. */
+.wf-term-pane__surface-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+.wf-term-pane__surface-wrap .wf-term-pane__surface { flex: 1; }
+.wf-term-pane__remote-cursor {
+  position: absolute;
+  transform: translate(-2px, -2px);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+  z-index: 5;
+  transition: left 80ms linear, top 80ms linear;
+}
+.wf-term-pane__remote-cursor-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ol-accent);
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.35);
+}
+.wf-term-pane__remote-cursor-label {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--ol-accent);
+  color: #fff;
+  white-space: nowrap;
+}
+/* Item #21 Phase 5a: same placement as the Sharing-off detail line below the
+   surface, not layered inside xterm's own buffer -- a typing tag is
+   metadata about the room, never terminal content. */
+.wf-term-pane__typing {
+  margin: 0;
+  padding: 4px 10px;
+  font-size: var(--ol-text-xs);
+  color: var(--ol-text-muted);
+  border-top: 1px solid var(--ol-border-subtle);
+}
 .wf-term-pane__error { margin: 0; padding: 12px; font-size: var(--ol-text-sm); color: var(--ol-danger); }
 .wf-term-pane__detail { margin: 0; padding: 6px 10px; border-top: 1px solid var(--ol-border-subtle); font-size: var(--ol-text-xs); }
 .wf-term-pane__detail[data-tone="muted"] { color: var(--ol-text-muted); }

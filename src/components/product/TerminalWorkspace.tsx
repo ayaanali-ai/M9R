@@ -49,9 +49,13 @@ export interface PtyRoomSession {
 export interface TerminalWorkspaceProps {
   channelLabel: string;
   sessions: PtyRoomSession[];
-  sendFrame(type: "pty.input" | "pty.resize" | "pty.close" | "pty.share" | "pty.request" | "pty.link" | "pty.unlink", payload: Record<string, unknown>): boolean;
+  sendFrame(type: "pty.input" | "pty.resize" | "pty.close" | "pty.share" | "pty.request" | "pty.link" | "pty.unlink" | "presence.cursor" | "participant.typing", payload: Record<string, unknown>): boolean;
   subscribeFrames(listener: (frame: RelayFrame) => void): () => void;
   onBackToChat(): void;
+  /** Item #21 Phase 5: the current viewer's own participant id, so outgoing typing/cursor frames are stamped correctly and a pane never renders the viewer's own tag/cursor back at them. */
+  viewerParticipantId?: string | null;
+  /** participantId -> display name, same roster PresenceAvatars already uses -- reused, not rebuilt, so a name is never resolved two different ways in the same channel. */
+  roster?: Map<string, string>;
 }
 
 interface LinkLine {
@@ -61,7 +65,7 @@ interface LinkLine {
   y: number;
 }
 
-export function TerminalWorkspace({ channelLabel, sessions, sendFrame, subscribeFrames, onBackToChat }: TerminalWorkspaceProps) {
+export function TerminalWorkspace({ channelLabel, sessions, sendFrame, subscribeFrames, onBackToChat, viewerParticipantId, roster }: TerminalWorkspaceProps) {
   // Exited sessions are kept out of the tiled grid but not silently lost --
   // this is the same "was it ever announced" distinction pty.state already
   // carries, just filtered for what's worth taking up screen space.
@@ -228,6 +232,8 @@ export function TerminalWorkspace({ channelLabel, sessions, sendFrame, subscribe
                   shared={session.shared}
                   ownerLabel={session.ownerLabel}
                   onLinkDragStart={session.isOwner ? (event) => handleLinkDragStart(session.sessionId, event) : undefined}
+                  viewerParticipantId={viewerParticipantId}
+                  roster={roster}
                 />
               </div>
             ));

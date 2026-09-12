@@ -559,7 +559,7 @@ export class WorkspaceRelayBrowserClient {
    * reply, and a dropped one while reconnecting is better than a queue that
    * replays a burst of stale input into a live shell later.
    */
-  sendTerminalFrame(type: "pty.input" | "pty.resize" | "pty.close" | "pty.share" | "pty.request" | "pty.link" | "pty.unlink" | "fs.tree.request" | "fs.read.request" | "presence.cursor", payload: Record<string, unknown>): boolean {
+  sendTerminalFrame(type: "pty.input" | "pty.resize" | "pty.close" | "pty.share" | "pty.request" | "pty.link" | "pty.unlink" | "fs.tree.request" | "fs.read.request" | "presence.cursor" | "participant.typing", payload: Record<string, unknown>): boolean {
     if (!this.isOpen) return false;
     this.send(this.socket!, this.frame(type, payload));
     return true;

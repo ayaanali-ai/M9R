@@ -978,7 +978,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     ptyFrameListenersRef.current.add(listener);
     return () => { ptyFrameListenersRef.current.delete(listener); };
   }, []);
-  const sendTerminalFrame = useCallback((type: "pty.input" | "pty.resize" | "pty.close" | "pty.share" | "pty.request" | "pty.link" | "pty.unlink", payload: Record<string, unknown>) => {
+  const sendTerminalFrame = useCallback((type: "pty.input" | "pty.resize" | "pty.close" | "pty.share" | "pty.request" | "pty.link" | "pty.unlink" | "presence.cursor" | "participant.typing", payload: Record<string, unknown>) => {
     return relayRef.current?.sendTerminalFrame(type, payload) ?? false;
   }, []);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2261,6 +2261,8 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
             sendFrame={sendTerminalFrame}
             subscribeFrames={subscribePtyFrames}
             onBackToChat={() => setTerminalActive(false)}
+            viewerParticipantId={viewerParticipantId}
+            roster={channelRoster}
           />
         ) : selected ? (
           <>
