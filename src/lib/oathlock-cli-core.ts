@@ -3,6 +3,12 @@
  * ----------------------------------------------------------------------------
  * A small, repo-local CLI that lets a developer or coding agent:
  *   - `m9r init`                       connect a workspace (human-approved)
+ *   - `m9r connect`                    detect installed agent CLIs (Claude Code, Codex,
+ *                                       OpenCode) on this machine and connect all of them
+ *                                       in one command, instead of re-running `init` from
+ *                                       inside each agent's own terminal. `--agents
+ *                                       <kind,kind,...>` connects a specific list instead
+ *                                       of detecting.
  *   - `m9r disconnect`                 revoke connection + clear local volatile files
  *   - `m9r rules`                      fetch active workspace rules
  *   - `m9r inbox`                      pull dashboard instructions
@@ -30,6 +36,14 @@ import {
 } from "@/lib/oathlock-bootstrap-core";
 import { negotiateAdapterActions, type AdapterAction } from "@/lib/adapter-contract";
 import { parseProviderAdapterConfig, type ProviderAdapterConfig } from "@/lib/provider-adapter-config";
+import { detectInstalledAgents, parseAgentsFlag, type VersionProbe } from "@/lib/agent-detection-core";
+import {
+  mergeClaudeCodeLocalSettings,
+  mergeCodexHooks,
+  buildOpenCodeMemoryPlugin,
+  CAPTURE_HOOK_SCRIPT_SOURCE,
+  CAPTURE_HOOK_RELATIVE_PATH,
+} from "@/lib/cross-agent-capture-setup-core";
 
 /** Actions this CLI currently implements. Heartbeat is intentionally excluded — this CLI never calls it. */
 const CLI_IMPLEMENTED_ACTIONS = ["heartbeat", "rules_read", "inbox_read", "assignment_lifecycle", "run_lifecycle", "work_signal_emit", "work_signal_replay", "work_signal_ack", "evidence_submit", "token_rotation"];
@@ -73,6 +87,14 @@ export interface CliDeps {
   pollIntervalMs?: number;
   maxPolls?: number;
   sleep?(ms: number): Promise<void>;
+  /**
+   * Real-machine agent-CLI detection for `connect` (runs `<binary>
+   * --version`, resolves to its stdout on success or null otherwise).
+   * Omitted in tests and in any runtime that can't safely spawn child
+   * processes -- `connect` requires an explicit --agents list in that case
+   * rather than silently reporting nothing installed.
+   */
+  probeVersion?: VersionProbe;
 }
 
 // ---------------------------------------------------------------------------
@@ -515,9 +537,11 @@ interface ParsedArgs {
   approved: boolean;
   force: boolean;
   skipBootstrap: boolean;
+  skipMemoryCapture: boolean;
   file?: string;
   repo?: string;
   agentKind?: string;
+  agents?: string;
   task?: string;
   phase?: string;
   baselineRun?: string;
@@ -570,9 +594,11 @@ function parseArgs(args: string[]): ParsedArgs {
   let approved = false;
   let force = false;
   let skipBootstrap = false;
+  let skipMemoryCapture = false;
   let file: string | undefined;
   let repo: string | undefined;
   let agentKind: string | undefined;
+  let agents: string | undefined;
   let task: string | undefined;
   let phase: string | undefined;
   let baselineRun: string | undefined;
@@ -627,12 +653,16 @@ function parseArgs(args: string[]): ParsedArgs {
       force = true;
     } else if (a === "--skip-bootstrap") {
       skipBootstrap = true;
+    } else if (a === "--skip-memory-capture") {
+      skipMemoryCapture = true;
     } else if (a === "--file" || a.startsWith("--file=")) {
       file = a.includes("=") ? a.split("=").slice(1).join("=") : args[++i];
     } else if (a === "--repo" || a.startsWith("--repo=")) {
       repo = a.includes("=") ? a.split("=").slice(1).join("=") : args[++i];
     } else if (a === "--agent-kind" || a.startsWith("--agent-kind=")) {
       agentKind = a.includes("=") ? a.split("=").slice(1).join("=") : args[++i];
+    } else if (a === "--agents" || a.startsWith("--agents=")) {
+      agents = a.includes("=") ? a.split("=").slice(1).join("=") : args[++i];
     } else if (a === "--task" || a.startsWith("--task=")) {
       task = a.includes("=") ? a.split("=").slice(1).join("=") : args[++i];
     } else if (a === "--phase" || a.startsWith("--phase=")) {
@@ -728,7 +758,7 @@ function parseArgs(args: string[]): ParsedArgs {
     }
     // Unknown --flags are ignored on purpose (forward-compatible).
   }
-  return { positionals, approved, force, skipBootstrap, file, repo, agentKind, task, phase, baselineRun, laterRun, type, summary, scope, correlationId, parentEventId, since, limit, through, run, evidenceRecord, evidenceContract, mode, need, intent, criteria, binding, allow, deny, capability, preferredProvider, maxTokens, maxDurationMs, maxLatencyMs, decision, rationale, planEffect, topic, with: withArg, to, text, conversation, title, environment, observed, evidenceLevel, suggested, limitations, adapterCommand, adapterArgs, adapterProtocol, adapterShell };
+  return { positionals, approved, force, skipBootstrap, skipMemoryCapture, file, repo, agentKind, agents, task, phase, baselineRun, laterRun, type, summary, scope, correlationId, parentEventId, since, limit, through, run, evidenceRecord, evidenceContract, mode, need, intent, criteria, binding, allow, deny, capability, preferredProvider, maxTokens, maxDurationMs, maxLatencyMs, decision, rationale, planEffect, topic, with: withArg, to, text, conversation, title, environment, observed, evidenceLevel, suggested, limitations, adapterCommand, adapterArgs, adapterProtocol, adapterShell };
 }
 
 // ---------------------------------------------------------------------------
@@ -785,6 +815,69 @@ async function resolveBootstrapKind(
     return { error: "could not determine the connected agent kind. Pass --agent-kind <name> (e.g. codex, claude-code, opencode, or any other agent's name)." };
   }
   return { kind };
+}
+
+/**
+ * Installs whichever provider-specific capture artifact makes a locally-
+ * launched (not M9R-bridge-spawned) session of this agent kind flow into
+ * `.oathlock/memory/local/<kind>/` -- see cross-agent-capture-core.ts for
+ * the drain side and cross-agent-capture-setup-core.ts for what's written.
+ * A no-op, honestly, for any kind other than the three with a real,
+ * verified per-repo hook/plugin mechanism (item #35's research). Never
+ * throws -- a capture-install failure must not invalidate an otherwise
+ * successful agent connection, same posture `installWorkflow` already has.
+ */
+async function installCrossAgentCapture(deps: CliDeps, kind: string): Promise<{ installed: boolean; note: string }> {
+  if (kind !== "claude-code" && kind !== "codex" && kind !== "opencode") {
+    return { installed: false, note: "" };
+  }
+  try {
+    if (kind === "claude-code" || kind === "codex") {
+      const hookPath = join(deps.cwd, CAPTURE_HOOK_RELATIVE_PATH);
+      await deps.mkdir(dirname(hookPath));
+      await deps.writeFile(hookPath, CAPTURE_HOOK_SCRIPT_SOURCE);
+    }
+    if (kind === "claude-code") {
+      const settingsPath = join(deps.cwd, ".claude", "settings.local.json");
+      const existing = (await deps.fileExists(settingsPath)) ? await deps.readFile(settingsPath) : null;
+      const { content, changed } = mergeClaudeCodeLocalSettings(existing);
+      if (changed) {
+        await deps.mkdir(dirname(settingsPath));
+        await deps.writeFile(settingsPath, content);
+      }
+      return {
+        installed: true,
+        note: changed
+          ? "Claude Code sessions in this repo will now be captured into shared memory (.claude/settings.local.json, gitignored, per-developer)."
+          : "Claude Code memory capture was already installed.",
+      };
+    }
+    if (kind === "codex") {
+      const hooksPath = join(deps.cwd, ".codex", "hooks.json");
+      const existing = (await deps.fileExists(hooksPath)) ? await deps.readFile(hooksPath) : null;
+      const { content, changed } = mergeCodexHooks(existing);
+      if (changed) {
+        await deps.mkdir(dirname(hooksPath));
+        await deps.writeFile(hooksPath, content);
+      }
+      return {
+        installed: true,
+        note: changed
+          ? "Codex memory capture written to .codex/hooks.json -- run /hooks inside Codex once in this repo to review and trust it."
+          : "Codex memory capture was already installed.",
+      };
+    }
+    // opencode
+    const pluginPath = join(deps.cwd, ".opencode", "plugins", "m9r-memory.js");
+    await deps.mkdir(dirname(pluginPath));
+    await deps.writeFile(pluginPath, buildOpenCodeMemoryPlugin());
+    return {
+      installed: true,
+      note: "OpenCode sessions in this repo will now be captured into shared memory (.opencode/plugins/m9r-memory.js).",
+    };
+  } catch {
+    return { installed: false, note: "Memory capture could not be installed for this agent -- connection is still valid." };
+  }
 }
 
 /** Install/update the managed workflow block. Shared by bootstrap and init. */
@@ -893,8 +986,20 @@ async function cmdInit(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
     deps.err(`init failed: ${identity.error}`);
     return 1;
   }
-  const agentKind = identity.kind;
+  return connectOneAgent(deps, identity.kind, parsed);
+}
 
+/**
+ * The full register -> human-approve -> poll -> save -> bootstrap sequence
+ * for exactly one agent kind. Extracted out of `cmdInit` (which still does
+ * exactly this, for the one env-detected/--agent-kind kind) so `cmdConnect`
+ * can run the identical, unweakened path for several kinds in one command --
+ * per the explicit security research on this: `resolveAgentKind`'s env
+ * check is a UX guardrail, not what `authenticateAgent` relies on
+ * downstream (that's the one-time-consume claim token, unchanged here), so
+ * looping this same sequence per detected kind introduces no new bypass.
+ */
+async function connectOneAgent(deps: CliDeps, agentKind: string, parsed: ParsedArgs): Promise<number> {
   let adapterConfig: ProviderAdapterConfig | null = null;
   if (parsed.adapterCommand || parsed.adapterArgs || parsed.adapterShell) {
     let args: unknown = [];
@@ -932,7 +1037,7 @@ async function cmdInit(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
       deps.out("No new claim was created. To use the existing connection:");
       deps.out("  npx m9r-cli doctor   # verify setup + API reachability");
       deps.out("  npx m9r-cli rules    # fetch active workspace rules");
-      deps.out("To force a brand-new connection: npx m9r-cli init --force");
+      deps.out(`To force a brand-new connection: npx m9r-cli init --force --agent-kind ${agentKind}`);
       return 0;
     }
   }
@@ -1064,6 +1169,13 @@ async function cmdInit(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
           deps.out(`Install it manually with: npx m9r-cli bootstrap --agent-kind ${agentKind}`);
         }
       }
+
+      if (parsed.skipMemoryCapture) {
+        deps.out("Skipped shared-memory capture setup (--skip-memory-capture).");
+      } else {
+        const capture = await installCrossAgentCapture(deps, agentKind);
+        if (capture.note) deps.out(capture.note);
+      }
       deps.out("");
       deps.out("M9R browser multiplayer is ready after this connection is approved.");
       deps.out("The local terminal runtime is optional and experimental; it is not part of the public launch offer.");
@@ -1077,6 +1189,73 @@ async function cmdInit(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
 
   deps.err("init failed: timed out waiting for approval. Run init again once approved.");
   return 1;
+}
+
+/**
+ * `m9r connect` — one command that discovers which coding-agent CLIs are
+ * actually installed on this machine (Claude Code, Codex, OpenCode) and
+ * connects every one the human wants, instead of requiring `init` to be
+ * re-run separately from inside each agent's own terminal.
+ *
+ * Honest about what this does and does not prove: detection (a real
+ * `--version` probe finding the binary on PATH) only means that CLI is
+ * installed, not that it is logged in, and not that any process of it will
+ * ever run in this repo. Each detected kind still goes through the exact
+ * same register -> human-approve -> one-time-consume claim cycle `init`
+ * always used (connectOneAgent, shared code, unchanged security path) --
+ * this command removes the friction of re-invoking that per agent, it does
+ * not skip the step that actually proves a connection works.
+ */
+async function cmdConnect(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
+  const explicitKinds = parsed.agents ? parseAgentsFlag(parsed.agents) : null;
+
+  let kinds: string[];
+  if (explicitKinds && explicitKinds.length > 0) {
+    kinds = explicitKinds;
+  } else {
+    if (!deps.probeVersion) {
+      deps.err(
+        "connect failed: this runtime cannot probe for installed agents. Pass --agents <kind,kind,...> explicitly (e.g. --agents claude-code,codex).",
+      );
+      return 1;
+    }
+    deps.out("Looking for installed coding-agent CLIs on this machine…");
+    const detected = await detectInstalledAgents(deps.probeVersion);
+    if (detected.length === 0) {
+      deps.err(
+        "connect failed: no known agent CLI (Claude Code, Codex, OpenCode) was found on PATH. " +
+          "Install one first, or pass --agents <kind,kind,...> to connect a CLI this runtime can't detect.",
+      );
+      return 1;
+    }
+    for (const agent of detected) {
+      deps.out(`  found ${agent.label} (${agent.binary})${agent.versionLine ? ` — ${agent.versionLine}` : ""}`);
+    }
+    kinds = detected.map((a) => a.kind);
+  }
+
+  deps.out("");
+  deps.out(`Connecting ${kinds.length} agent${kinds.length === 1 ? "" : "s"}: ${kinds.join(", ")}`);
+
+  const results: Array<{ kind: string; code: number }> = [];
+  for (const kind of kinds) {
+    deps.out("");
+    deps.out(`--- ${agentKindLabel(kind)} (${kind}) ---`);
+    const code = await connectOneAgent(deps, kind, parsed);
+    results.push({ kind, code });
+  }
+
+  deps.out("");
+  deps.out("Summary:");
+  for (const result of results) {
+    deps.out(`  ${result.kind}: ${result.code === 0 ? "connected" : "failed"}`);
+  }
+  const failures = results.filter((r) => r.code !== 0);
+  if (failures.length > 0) {
+    deps.err(`${failures.length} of ${results.length} agent connection(s) failed. See output above for details.`);
+    return 1;
+  }
+  return 0;
 }
 
 async function cmdRules(deps: CliDeps): Promise<number> {
@@ -2527,6 +2706,7 @@ run telemetry is status-only; it never uploads source code or secrets.
 Environment:
   OATHLOCK_API_URL   API base (default ${DEFAULT_API_URL}; use http://localhost:3000 for local dev)
   --agent-kind <kind>  Claim identity: any lowercase provider slug (for example codex, gemini-cli, aider)
+  --agents <list>      connect: comma-separated kinds to connect instead of auto-detecting
   --adapter-command <cmd>  Local command for a non-bundled provider adapter
   --adapter-args <json>    JSON argv array for that provider command
   --adapter-protocol       acp-stdio (default) or oathlock-json-stdio for resident one-shot grants
@@ -2542,6 +2722,8 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
   switch (command) {
     case "init":
       return cmdInit(deps, parsed);
+    case "connect":
+      return cmdConnect(deps, parsed);
     case "bootstrap":
       return cmdBootstrap(deps, parsed);
     case "rules":

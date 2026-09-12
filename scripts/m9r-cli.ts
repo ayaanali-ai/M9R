@@ -91,7 +91,28 @@ const deps: CliDeps = {
   out: (line) => process.stdout.write(line + "\n"),
   err: (line) => process.stderr.write(line + "\n"),
   openUrl,
+  probeVersion,
 };
+
+/**
+ * Real `m9r connect` agent-detection probe: `<binary> --version`, real
+ * process, real PATH resolution -- `shell: true` so this also finds npm's
+ * Windows `.cmd` shims (`claude.cmd`, `codex.cmd`, `opencode.cmd`), the
+ * exact same PATHEXT gap `acp-stdio-adapter.ts` already had to work around
+ * for OpenCode. A 3s timeout is generous for a `--version` flag (none of
+ * these three touch the network for it) and short enough that one hung
+ * install can't stall the rest of `connect`'s detection pass. Any failure
+ * mode -- not found, non-zero exit, timeout -- returns null; `connect`
+ * treats null as "not installed," never as an error to surface.
+ */
+async function probeVersion(binary: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(binary, ["--version"], { timeout: 3000, shell: true });
+    return stdout;
+  } catch {
+    return null;
+  }
+}
 
 async function readResidentCredential(provider: ResidentAgentKind): Promise<unknown> {
   for (const path of residentCredentialPaths(process.cwd(), provider)) {
@@ -585,6 +606,15 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
   if (!localOnly) {
     const { startMemoryExportLoop } = await import("../src/lib/memory-export-core");
     startMemoryExportLoop({ repositoryRoot: process.cwd() });
+  }
+  // Item #35: drains .oathlock/capture/pending.jsonl (written by the
+  // SessionEnd hook/OpenCode plugin `m9r connect` installs) into the same
+  // .oathlock/memory/ tree above, so a Claude Code/Codex/OpenCode session a
+  // human launched directly in their own terminal -- never touching M9R's
+  // dashboard -- still becomes real, searchable shared memory.
+  {
+    const { startCaptureDrainLoop } = await import("../src/lib/cross-agent-capture-core");
+    startCaptureDrainLoop({ repositoryRoot: process.cwd() });
   }
   await import("./oathlock-terminal-bridge");
   return 0;

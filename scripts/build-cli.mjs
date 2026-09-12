@@ -45,6 +45,19 @@ function build() {
   const adapterContractTs = readFileSync(resolve(repoRoot, "src/lib/adapter-contract.ts"), "utf8");
   writeFileSync(resolve(outDir, "adapter-contract.js"), transpile(adapterContractTs));
 
+  // `m9r connect` agent-CLI detection -- pure logic, no `@/` imports of its own.
+  const agentDetectionTs = readFileSync(resolve(repoRoot, "src/lib/agent-detection-core.ts"), "utf8");
+  writeFileSync(resolve(outDir, "agent-detection-core.js"), transpile(agentDetectionTs));
+
+  // Item #35 cross-agent session capture -- setup-core (pure, no `@/` imports)
+  // and the drain-side core (imports session-redaction.ts).
+  const captureSetupCoreTs = readFileSync(resolve(repoRoot, "src/lib/cross-agent-capture-setup-core.ts"), "utf8");
+  writeFileSync(resolve(outDir, "cross-agent-capture-setup-core.js"), transpile(captureSetupCoreTs));
+  const captureCoreTs = readFileSync(resolve(repoRoot, "src/lib/cross-agent-capture-core.ts"), "utf8");
+  const captureCoreJs = transpile(captureCoreTs)
+    .replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"');
+  writeFileSync(resolve(outDir, "cross-agent-capture-core.js"), captureCoreJs);
+
   const providerAdapterConfigTs = readFileSync(resolve(repoRoot, "packages/runtime-core/src/provider-adapter-config.ts"), "utf8");
   writeFileSync(resolve(outDir, "provider-adapter-config.js"), transpile(providerAdapterConfigTs));
 
@@ -296,10 +309,13 @@ function build() {
   writeFileSync(resolve(outDir, "owner-pty-runtime.js"), ownerPtyRuntimeJs);
 
   // Item #11/#29 local memory exporter — same dynamic-import situation as
-  // owner-pty-runtime.js above. No `@/` or sibling-file imports of its own
-  // (only node builtins), so no rewrite rules needed beyond shipping the file.
+  // owner-pty-runtime.js above. Now redacts every transcript through
+  // session-redaction.ts (item #35's capture-pipeline hardening) before
+  // writing it to disk, so it gained one real "@/" import.
   const memoryExportCoreTs = readFileSync(resolve(repoRoot, "src/lib/memory-export-core.ts"), "utf8");
-  writeFileSync(resolve(outDir, "memory-export-core.js"), transpile(memoryExportCoreTs));
+  const memoryExportCoreJs = transpile(memoryExportCoreTs)
+    .replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"');
+  writeFileSync(resolve(outDir, "memory-export-core.js"), memoryExportCoreJs);
 
   // Item #9 Phase 1a — resident-served real files, no Tauri needed.
   const missionFsProtocolTs = readFileSync(resolve(repoRoot, "src/lib/mission/mission-fs-protocol.ts"), "utf8");
@@ -376,7 +392,9 @@ function build() {
   const coreJs = transpile(coreTs)
     .replace(/["']@\/lib\/oathlock-bootstrap-core["']/g, '"./oathlock-bootstrap-core.js"')
     .replace(/["']@\/lib\/adapter-contract["']/g, '"./adapter-contract.js"')
-    .replace(/["']@\/lib\/provider-adapter-config["']/g, '"./provider-adapter-config.js"');
+    .replace(/["']@\/lib\/provider-adapter-config["']/g, '"./provider-adapter-config.js"')
+    .replace(/["']@\/lib\/agent-detection-core["']/g, '"./agent-detection-core.js"')
+    .replace(/["']@\/lib\/cross-agent-capture-setup-core["']/g, '"./cross-agent-capture-setup-core.js"');
   writeFileSync(resolve(outDir, "oathlock-cli-core.js"), coreJs);
 
   // 4. Entry — rewrite the "@/lib/oathlock-cli-core" alias to a relative import,
@@ -441,6 +459,10 @@ function build() {
   entryJs = entryJs.replace(
     /["']\.\.\/src\/lib\/memory-export-core["']/g,
     '"./memory-export-core.js"',
+  );
+  entryJs = entryJs.replace(
+    /["']\.\.\/src\/lib\/cross-agent-capture-core["']/g,
+    '"./cross-agent-capture-core.js"',
   );
   if (!entryJs.startsWith(SHEBANG)) entryJs = SHEBANG + entryJs;
   const entryPath = resolve(outDir, "m9r.js");

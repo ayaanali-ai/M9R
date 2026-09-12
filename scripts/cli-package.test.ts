@@ -15,7 +15,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 
@@ -361,6 +361,52 @@ test("compiled CLI: init writes local files under the EXTERNAL cwd, not the repo
   // Token saved to local.json; config carries no token.
   assert.equal(JSON.parse(files.get(localKey)!).token, TOKEN);
   assert.ok(!("token" in JSON.parse(files.get(configKey)!)));
+});
+
+test("compiled CLI: connect --agents runs through the real packaged agent-detection-core module, not a stub", async () => {
+  const { deps, files } = makeDeps({});
+  deps.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes("/api/agent/register")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { agent_kind?: string };
+      return jsonResponse(201, {
+        claim_url: `https://oathlock.vercel.app/claim/${body.agent_kind}`,
+        claim_id: `claim-${body.agent_kind}`,
+        setup_code: `setup-${body.agent_kind}`,
+        expires_at: "2030-01-01T00:00:00Z",
+      });
+    }
+    const claimId = new URL(String(url)).searchParams.get("claim_id") ?? "";
+    return jsonResponse(200, { status: "approved", token: `token-${claimId}`, scopes: ["rules:read"] });
+  }) as unknown as typeof deps.fetch;
+
+  const code = await core.run(["connect", "--agents", "claude-code,opencode"], deps);
+  assert.equal(code, 0, "the packaged agent-detection-core.js import must actually resolve");
+  assert.ok(files.has(core.agentLocalPath(EXTERNAL_CWD, "claude-code")));
+  assert.ok(files.has(core.agentLocalPath(EXTERNAL_CWD, "opencode")));
+});
+
+test("compiled CLI: connect installs cross-agent memory capture through the real packaged cross-agent-capture-setup-core module", async () => {
+  const { deps, files } = makeDeps({});
+  deps.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes("/api/agent/register")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { agent_kind?: string };
+      return jsonResponse(201, {
+        claim_url: `https://oathlock.vercel.app/claim/${body.agent_kind}`,
+        claim_id: `claim-${body.agent_kind}`,
+        setup_code: `setup-${body.agent_kind}`,
+        expires_at: "2030-01-01T00:00:00Z",
+      });
+    }
+    const claimId = new URL(String(url)).searchParams.get("claim_id") ?? "";
+    return jsonResponse(200, { status: "approved", token: `token-${claimId}`, scopes: ["rules:read"] });
+  }) as unknown as typeof deps.fetch;
+
+  const code = await core.run(["connect", "--agents", "claude-code,codex,opencode"], deps);
+  assert.equal(code, 0, "the packaged cross-agent-capture-setup-core.js import must actually resolve");
+  assert.ok(files.has(join(EXTERNAL_CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.ok(files.has(join(EXTERNAL_CWD, ".claude", "settings.local.json")));
+  assert.ok(files.has(join(EXTERNAL_CWD, ".codex", "hooks.json")));
+  assert.ok(files.has(join(EXTERNAL_CWD, ".opencode", "plugins", "m9r-memory.js")));
 });
 
 test("compiled CLI: token masking never reveals the full token", () => {
