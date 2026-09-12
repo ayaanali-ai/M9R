@@ -282,8 +282,8 @@ test("Ready for Review opens inline in the shared side panel, defaults to five r
   assert.match(workspace, /function ApprovalCenter/);
   // Files and Activity tabs were removed outright (items #24/#25) -- the
   // shared side-panel slot now covers Review/Whispers/Drafts/People/Live.
-  assert.match(workspace, /type SidePanelMode = "review" \| "whispers" \| "drafts" \| "people" \| "live" \| null/);
-  assert.match(workspace, /function toggleSidePanel\(mode: "review" \| "whispers" \| "drafts" \| "people" \| "live"\)/);
+  assert.match(workspace, /type SidePanelMode = "review" \| "whispers" \| "drafts" \| "people" \| "live" \| "handoffs" \| null/);
+  assert.match(workspace, /function toggleSidePanel\(mode: "review" \| "whispers" \| "drafts" \| "people" \| "live" \| "handoffs"\)/);
   assert.match(workspace, /sidePanelMode === "review"/);
   assert.match(workspace, /<span>Ready for Review<\/span>/);
   assert.match(workspace, /onOpenReview=\{\(\) => toggleSidePanel\("review"\)\}/);

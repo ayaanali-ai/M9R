@@ -17,6 +17,7 @@ import { WorkspaceDrawer, ApprovalCenter } from "@/components/product/agent-work
 import { HeroRun } from "@/components/product/agent-workspace/run-panels";
 import { AssignmentPanel } from "@/components/product/agent-workspace/preflight";
 import { LiveFileView, WhispersPanel, DraftsPanel, ChannelPeoplePanel, LiveSessionsPanel } from "@/components/product/agent-workspace/files-panel";
+import { GoalHandoffPanel } from "@/components/product/agent-workspace/goal-handoff-panel";
 import { KeyMap, byLastSeen, agentForRun, type Selected, type RunZone } from "@/components/product/agent-workspace/shared";
 
 /**
@@ -107,18 +108,18 @@ export default function AgentWorkspaceClient({
   // surface, opened via ?file=, is untouched and still reachable by direct
   // link even without the rail); Activity just dumped raw events with no
   // synthesis.
-  type SidePanelMode = "review" | "whispers" | "drafts" | "people" | "live" | null;
+  type SidePanelMode = "review" | "whispers" | "drafts" | "people" | "live" | "handoffs" | null;
   const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode>(null);
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem("ol-side-panel-mode");
       // This effect hydrates browser-only panel preference state after SSR.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (stored === "review" || stored === "whispers" || stored === "drafts" || stored === "people" || stored === "live") setSidePanelMode(stored);
+      if (stored === "review" || stored === "whispers" || stored === "drafts" || stored === "people" || stored === "live" || stored === "handoffs") setSidePanelMode(stored);
       else if (stored === "") setSidePanelMode(null);
     } catch { /* localStorage can throw in a private/locked-down browser -- default stays closed */ }
   }, []);
-  function toggleSidePanel(mode: "review" | "whispers" | "drafts" | "people" | "live") {
+  function toggleSidePanel(mode: "review" | "whispers" | "drafts" | "people" | "live" | "handoffs") {
     setSidePanelMode((current) => {
       const next = current === mode ? null : mode;
       try { window.localStorage.setItem("ol-side-panel-mode", next ?? ""); } catch { /* best-effort */ }
@@ -430,6 +431,8 @@ export default function AgentWorkspaceClient({
             <ChannelPeoplePanel conversationId={searchParams.get("conversation")} onClose={() => toggleSidePanel("people")} />
           ) : sidePanelMode === "live" ? (
             <LiveSessionsPanel agents={agents} onClose={() => toggleSidePanel("live")} />
+          ) : sidePanelMode === "handoffs" ? (
+            <GoalHandoffPanel onClose={() => toggleSidePanel("handoffs")} />
           ) : null}
           onOpenReview={() => toggleSidePanel("review")}
           reviewActive={sidePanelMode === "review"}
@@ -441,6 +444,8 @@ export default function AgentWorkspaceClient({
           onOpenPeople={() => toggleSidePanel("people")}
           peopleActive={sidePanelMode === "people"}
           onOpenLive={() => toggleSidePanel("live")}
+          onOpenHandoffs={() => toggleSidePanel("handoffs")}
+          handoffsActive={sidePanelMode === "handoffs"}
           liveActive={sidePanelMode === "live"}
           filePanel={openFilePath ? (
             <LiveFileView

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, ClipboardCheck, Inbox as InboxIcon, MessageCircleMore as WhispersIcon, FileEdit as DraftsIcon, Users as PeopleIcon, Radio as LiveIcon, LogOut, SquareTerminal as TerminalToggleIcon } from "lucide-react";
+import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, ClipboardCheck, Inbox as InboxIcon, MessageCircleMore as WhispersIcon, FileEdit as DraftsIcon, Users as PeopleIcon, Radio as LiveIcon, LogOut, SquareTerminal as TerminalToggleIcon, GitBranchPlus as HandoffsIcon } from "lucide-react";
 import { ChannelWelcome } from "./ChannelWelcome";
 import EtheralShadow from "./EtheralShadow";
 import { useComposerAutosize } from "./useComposerAutosize";
@@ -786,7 +786,7 @@ function PanelResizeHandle({ label, handleProps }: { label: string; handleProps:
  * read in it (B1: a promoted file diff). The panel stays mounted underneath
  * on purpose -- it owns the relay subscription that feeds live steps and the
  * unsent draft, and unmounting it to show a diff would drop both. */
-export default function ConversationPanel({ agents, workspaceId, viewerUserId, onFileStep, sidePanel, mainOverlay, filePanel, onOpenReview, reviewActive, pendingReviewCount, onOpenWhispers, whispersActive, onOpenDrafts, draftsActive, onOpenPeople, peopleActive, onOpenLive, liveActive }: { agents: AgentView[]; workspaceId: string | null; viewerUserId: string | null; onFileStep?: (step: WorkspaceStep) => void; sidePanel?: ReactNode; mainOverlay?: ReactNode; filePanel?: ReactNode; onOpenReview?: () => void; reviewActive?: boolean; pendingReviewCount?: number; onOpenWhispers?: () => void; whispersActive?: boolean; onOpenDrafts?: () => void; draftsActive?: boolean; onOpenPeople?: () => void; peopleActive?: boolean; onOpenLive?: () => void; liveActive?: boolean }) {
+export default function ConversationPanel({ agents, workspaceId, viewerUserId, onFileStep, sidePanel, mainOverlay, filePanel, onOpenReview, reviewActive, pendingReviewCount, onOpenWhispers, whispersActive, onOpenDrafts, draftsActive, onOpenPeople, peopleActive, onOpenLive, liveActive, onOpenHandoffs, handoffsActive }: { agents: AgentView[]; workspaceId: string | null; viewerUserId: string | null; onFileStep?: (step: WorkspaceStep) => void; sidePanel?: ReactNode; mainOverlay?: ReactNode; filePanel?: ReactNode; onOpenReview?: () => void; reviewActive?: boolean; pendingReviewCount?: number; onOpenWhispers?: () => void; whispersActive?: boolean; onOpenDrafts?: () => void; draftsActive?: boolean; onOpenPeople?: () => void; peopleActive?: boolean; onOpenLive?: () => void; liveActive?: boolean; onOpenHandoffs?: () => void; handoffsActive?: boolean }) {
   // Drag-to-resize widths for the two right-hand panel slots -- one storage
   // key per slot, shared across whichever content currently occupies it
   // (Files vs. Ready for Review both use the side slot, so they share one
@@ -2307,6 +2307,11 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 {onOpenLive && (
                   <button type="button" className="wf-chat-panel-toggle" data-active={liveActive} onClick={onOpenLive} aria-pressed={liveActive} aria-label="Live Sessions">
                     <LiveIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Live</span>
+                  </button>
+                )}
+                {onOpenHandoffs && (
+                  <button type="button" className="wf-chat-panel-toggle" data-active={handoffsActive} onClick={onOpenHandoffs} aria-pressed={handoffsActive} aria-label="Goal Handoffs">
+                    <HandoffsIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Handoffs</span>
                   </button>
                 )}
                 {TERMINAL_ENABLED && (
