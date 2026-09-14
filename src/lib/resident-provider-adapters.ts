@@ -93,6 +93,11 @@ function extractProviderUsage(events: Array<Record<string, unknown>>): ProviderU
 const MAX_CAPTURE_BYTES = 1024 * 1024;
 const CONTEXT_REF = /^(?:diff|rule|decision|file|finding):\/\/[a-zA-Z0-9._~:/#-]{1,500}$/;
 
+// Codex treats zero as "do not load project instructions". Keep the normal
+// bounded project-doc budget explicit for resident launches so AGENTS.md stays
+// available without allowing unbounded instruction growth.
+const CODEX_PROJECT_DOC_MAX_BYTES = 32_768;
+
 function normalizedBoundedList(values: unknown, options: { name: string; maxItems: number; maxLength: number }): string[] {
   if (!Array.isArray(values) || values.length > options.maxItems) throw new Error(`${options.name} must be a bounded list.`);
   const normalized = values.map((value) => {
@@ -188,6 +193,7 @@ function providerPrompt(grant: ProviderLaunchGrant, provider: string): string {
   return [
     "You are executing a bounded M9R launch grant.",
     `Delegated provider identity: ${label}.`,
+    "Resident child launch marker: OATHLOCK_RESIDENT_CHILD=1. The parent controlled run owns M9R governance for this assignment.",
     "The parent controlled run already owns M9R governance for this assignment.",
     "Do not run the repository's normal M9R automatic workflow, start another run, or produce an M9R Evidence Draft.",
     "Work packet (authoritative JSON):",
@@ -256,7 +262,7 @@ export function buildCodexLaunchSpec(input: ProviderLaunchGrant, executable = "c
       "exec",
       "--ignore-user-config",
       "-c", "mcp_servers={}",
-      "-c", "project_doc_max_bytes=0",
+      "-c", `project_doc_max_bytes=${CODEX_PROJECT_DOC_MAX_BYTES}`,
       ...(grant.modelTier ? ["-c", `model_reasoning_effort=${JSON.stringify(reasoningEffort[grant.modelTier])}`] : []),
       ...(grant.requestedModel ? ["--model", grant.requestedModel] : []),
       "--json", "--ephemeral", "--sandbox", grant.executionMode === "read_only" ? "read-only" : "workspace-write", "-C", grant.repositoryRoot, "-",

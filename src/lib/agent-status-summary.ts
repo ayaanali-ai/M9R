@@ -7,7 +7,7 @@
  * never invents a status.
  */
 import { createClient } from "@/lib/supabase/server";
-import { isRecentlySeenConnection, type ConnectionRow } from "@/lib/agent-dashboard-presenter";
+import { connectionLiveness, type ConnectionLiveness, type ConnectionRow } from "@/lib/agent-dashboard-presenter";
 import { agentDisplayLabel, normalizeAgentKind } from "@/lib/agent-workspace-data";
 
 export interface ConnectedAgentNavItem {
@@ -16,15 +16,19 @@ export interface ConnectedAgentNavItem {
   connectionId: string;
   agentKind: string;
   label: string;
+  /** Durable registration exists until the human explicitly disconnects it. */
+  registered: boolean;
+  /** Current heartbeat lease state, kept separate from registration. */
+  liveness: ConnectionLiveness;
   connected: boolean;
   live: boolean;
   lastSeenAt: string | null;
 }
 
 export interface AgentStatusSummary {
-  /** Legacy provider lookup retained for status dots on older consumers. */
-  byKey: Record<string, { connected: boolean; live: boolean }>;
-  /** Only agents that are actually connected and recently seen belong in navigation. */
+  /** Provider lookup retained for status dots on older consumers. */
+  byKey: Record<string, { registered: boolean; connected: boolean; live: boolean }>;
+  /** Active durable registrations stay in navigation, including offline ones. */
   agents: ConnectedAgentNavItem[];
 }
 
@@ -52,24 +56,33 @@ export async function loadAgentStatusSummary(workspaceId: string | null): Promis
     if (error) return { byKey: {}, agents: [] };
 
     const connections = (data ?? []) as ConnectionRow[];
-    const agents = connections
-      .filter((connection) => isRecentlySeenConnection(connection))
-      .map((connection) => ({
+    const agents = connections.map((connection) => {
+      const liveness = connectionLiveness(connection.last_seen_at);
+      const live = liveness === "active";
+      return {
         key: `connection:${connection.id}`,
         connectionId: connection.id,
         agentKind: connection.agent_kind,
         label: agentDisplayLabel(connection.agent_kind),
-        connected: true,
-        live: true,
+        registered: true,
+        liveness,
+        connected: live,
+        live,
         lastSeenAt: connection.last_seen_at,
-      }))
+      };
+    })
       .sort((a, b) => displayRank(a.agentKind) - displayRank(b.agentKind)
         || a.label.localeCompare(b.label)
         || a.connectionId.localeCompare(b.connectionId));
     const byKey: AgentStatusSummary["byKey"] = {};
     for (const agent of agents) {
       const key = normalizeAgentKind(agent.agentKind);
-      byKey[key] = { connected: true, live: true };
+      const existing = byKey[key];
+      byKey[key] = {
+        registered: true,
+        connected: Boolean(existing?.connected || agent.connected),
+        live: Boolean(existing?.live || agent.live),
+      };
     }
     return { byKey, agents };
   } catch {

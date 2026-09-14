@@ -30,7 +30,8 @@
  * with heuristics on.
  */
 
-import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { resolve, join, dirname } from "node:path";
 import { redactSession } from "@/lib/session-redaction";
 
@@ -71,6 +72,85 @@ export type CaptureJob =
 export interface CaptureTranscriptMessage {
   sender: string;
   body: string;
+}
+
+/**
+ * Stable content identity shared by local capture and dashboard-exported
+ * memory. Sender labels are intentionally excluded: a local transcript says
+ * `User`/`Assistant`, while a dashboard transcript says a person's/provider's
+ * display name. Requiring two substantive messages keeps a short repeated
+ * greeting from collapsing unrelated sessions by accident.
+ */
+export function transcriptFingerprint(transcript: Array<{ sender: string; body: string }>): string | null {
+  const bodies = transcript
+    .filter((message) => typeof message?.body === "string" && message.body.trim())
+    .map((message) => message.body.replace(/\r\n?/g, "\n").trim());
+  if (bodies.length < 2 || bodies.join("\n").length < 32) return null;
+  return createHash("sha256").update(JSON.stringify(bodies)).digest("hex");
+}
+
+const MEMORY_FINGERPRINT_PATTERN = /<!--\s*m9r-memory-fingerprint:([0-9a-f]{64})\s*-->/i;
+
+/** Reads the marker emitted by either memory writer, with a fallback parser for files created before item #4. */
+export function fingerprintFromMemoryMarkdown(markdown: string): string | null {
+  const marker = markdown.match(MEMORY_FINGERPRINT_PATTERN)?.[1];
+  if (marker) return marker.toLowerCase();
+
+  const messages: CaptureTranscriptMessage[] = [];
+  let sender: string | null = null;
+  let bodyLines: string[] = [];
+  const flush = () => {
+    if (sender && bodyLines.join("\n").trim()) messages.push({ sender, body: bodyLines.join("\n").trim() });
+    sender = null;
+    bodyLines = [];
+  };
+  for (const line of markdown.split(/\r?\n/)) {
+    const header = line.match(/^\*\*(.+):\*\*$/);
+    if (header) {
+      flush();
+      sender = header[1];
+      continue;
+    }
+    if (sender) bodyLines.push(line);
+  }
+  flush();
+  return transcriptFingerprint(messages);
+}
+
+async function listMarkdownFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return files;
+  }
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) files.push(...await listMarkdownFiles(path));
+    else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) files.push(path);
+  }
+  return files;
+}
+
+/** Finds an identical transcript already stored by the other memory path. */
+export async function findMemoryFingerprintMatch(options: {
+  repositoryRoot: string;
+  fingerprint: string;
+  excludePath?: string;
+}): Promise<string | null> {
+  const root = join(resolve(options.repositoryRoot), ".oathlock", "memory");
+  const excluded = options.excludePath ? resolve(options.excludePath) : null;
+  for (const path of await listMarkdownFiles(root)) {
+    if (excluded && resolve(path).toLowerCase() === excluded.toLowerCase()) continue;
+    try {
+      const markdown = await readFile(path, "utf8");
+      if (fingerprintFromMemoryMarkdown(markdown) === options.fingerprint.toLowerCase()) return path;
+    } catch {
+      /* a file removed during the scan is not a dedup failure */
+    }
+  }
+  return null;
 }
 
 /** One line in, one job or null out. Never throws -- a malformed spool line must never crash the drain loop or take down the rest of the batch. */
@@ -279,6 +359,7 @@ const PROVIDER_LABEL: Record<CaptureProvider, string> = {
 /** Redacts every message and renders the same markdown shape memory-export-core.ts writes, so search_memory/the Sessions catalog and a plain grep both keep working unchanged for terminal-captured work. */
 export function renderCaptureMarkdown(job: CaptureJob, transcript: CaptureTranscriptMessage[]): string {
   const reason = job.provider === "opencode" ? "session finished" : job.reason;
+  const fingerprint = transcriptFingerprint(transcript);
   const lines = [
     `# ${PROVIDER_LABEL[job.provider]} session (${job.sessionId.slice(0, 12)})`,
     "",
@@ -288,6 +369,7 @@ export function renderCaptureMarkdown(job: CaptureJob, transcript: CaptureTransc
     `- Reason: ${reason}`,
     `- Session id: ${job.sessionId}`,
   ];
+  if (fingerprint) lines.push(`<!-- m9r-memory-fingerprint:${fingerprint} -->`);
 
   const redacted = transcript.map((m) => ({ sender: m.sender, ...redactSession(m.body, { includeHeuristics: true }) }));
   const totalRedactions = redacted.reduce((sum, m) => sum + Object.values(m.countsByType).reduce((a, n) => a + n, 0), 0);
@@ -349,6 +431,8 @@ export async function drainCaptureSpool(options: DrainCaptureSpoolOptions): Prom
 
   let drained = 0;
   let failed = 0;
+  let deduped = 0;
+  const prepared = new Map<string, { job: CaptureJob; transcript: CaptureTranscriptMessage[]; markdown: string; fingerprint: string | null }>();
   for (const line of lines) {
     const job = parseSpoolLine(line);
     if (!job) {
@@ -359,18 +443,35 @@ export async function drainCaptureSpool(options: DrainCaptureSpoolOptions): Prom
       const rawTranscript = job.provider === "opencode" ? null : await options.readTranscript(job.transcriptPath);
       const transcript = extractTranscript(job, rawTranscript);
       const markdown = renderCaptureMarkdown(job, transcript);
+      const fingerprint = transcriptFingerprint(transcript);
+      const key = `${job.provider}:${job.sessionId}`;
+      const existing = prepared.get(key);
+      const messageSize = transcript.reduce((sum, message) => sum + message.body.length, 0);
+      const existingSize = existing?.transcript.reduce((sum, message) => sum + message.body.length, 0) ?? -1;
+      if (existing) deduped += 1;
+      if (!existing || transcript.length > existing.transcript.length || (transcript.length === existing.transcript.length && messageSize >= existingSize)) {
+        prepared.set(key, { job, transcript, markdown, fingerprint });
+      }
+    } catch (error) {
+      failed += 1;
+      await logCaptureFailure(options.repositoryRoot, job, error);
+    }
+  }
+
+  for (const { job, markdown, fingerprint } of prepared.values()) {
+    try {
       const outPath = captureMemoryPath(options.repositoryRoot, job);
-      await mkdir(dirname(outPath), { recursive: true });
-      await writeFile(outPath, markdown, "utf8");
+      const duplicate = fingerprint
+        ? await findMemoryFingerprintMatch({ repositoryRoot: options.repositoryRoot, fingerprint, excludePath: outPath })
+        : null;
+      if (!duplicate) {
+        await mkdir(dirname(outPath), { recursive: true });
+        await writeFile(outPath, markdown, "utf8");
+      } else deduped += 1;
       drained += 1;
     } catch (error) {
       failed += 1;
-      await mkdir(captureDir(options.repositoryRoot), { recursive: true }).catch(() => undefined);
-      await appendFile(
-        errorLogPath(options.repositoryRoot),
-        `${new Date().toISOString()} ${job.provider} ${job.sessionId}: ${error instanceof Error ? error.message : String(error)}\n`,
-        "utf8",
-      ).catch(() => undefined);
+      await logCaptureFailure(options.repositoryRoot, job, error);
     }
   }
 
@@ -379,8 +480,17 @@ export async function drainCaptureSpool(options: DrainCaptureSpoolOptions): Prom
   // job this repo genuinely can't process (a transcript file already
   // deleted, say) will never become processable by being retried forever.
   await writeFile(path, "", "utf8").catch(() => undefined);
-  if (drained > 0 || failed > 0) log(`drained ${drained} captured session(s)${failed > 0 ? `, ${failed} failed` : ""}`);
+  if (drained > 0 || failed > 0) log(`drained ${drained} captured session(s)${deduped > 0 ? `, ${deduped} duplicate(s) skipped` : ""}${failed > 0 ? `, ${failed} failed` : ""}`);
   return { drained, failed };
+}
+
+async function logCaptureFailure(repositoryRoot: string, job: CaptureJob, error: unknown): Promise<void> {
+  await mkdir(captureDir(repositoryRoot), { recursive: true }).catch(() => undefined);
+  await appendFile(
+    errorLogPath(repositoryRoot),
+    `${new Date().toISOString()} ${job.provider} ${job.sessionId}: ${error instanceof Error ? error.message : String(error)}\n`,
+    "utf8",
+  ).catch(() => undefined);
 }
 
 /** Started once per machine, alongside startMemoryExportLoop, from `m9r-cli terminal runtime`. */

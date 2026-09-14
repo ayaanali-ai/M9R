@@ -15,13 +15,16 @@
  *    (the two providers' SessionEnd payloads are field-identical per the
  *    research this was built from), without a `matcher` field, since that
  *    field's exact semantics for Codex weren't independently confirmed.
- *  - OpenCode's plugin uses only the one API confirmed by reading its own
- *    source (`client.session.messages({ sessionID })`); it does not also
- *    fetch session metadata via any unconfirmed method.
+ *  - OpenCode's live plugin uses the generated SDK path shape for
+ *    `client.session.messages({ path: { id: sessionID } })`, with a narrow
+ *    compatibility fallback for older internal clients. Recovery of sessions
+ *    that never emitted an idle event lives in the resident's CLI backfill,
+ *    not in an unconfirmed plugin API.
  */
 
 export const CAPTURE_HOOK_RELATIVE_PATH = ".oathlock/bin/m9r-capture.mjs";
-const HOOK_MARKER = "m9r-capture.mjs";
+export const CAPTURE_HOOK_MARKER = "m9r-capture.mjs";
+export const OPENCODE_CAPTURE_MARKER = "M9rMemoryPlugin";
 
 /**
  * The actual SessionEnd hook script, written into every repo that connects
@@ -124,7 +127,7 @@ function mergeSessionEndHook(
 
   const alreadyPresent = sessionEndGroups.some((group) => {
     if (!isRecord(group) || !Array.isArray(group.hooks)) return false;
-    return group.hooks.some((h) => isRecord(h) && typeof h.command === "string" && h.command.includes(HOOK_MARKER));
+    return group.hooks.some((h) => isRecord(h) && typeof h.command === "string" && h.command.includes(CAPTURE_HOOK_MARKER));
   });
   if (alreadyPresent) {
     return { content: JSON.stringify(root, null, 2) + "\n", changed: false };
@@ -183,23 +186,51 @@ export function buildOpenCodeMemoryPlugin(): string {
 // .oathlock/memory/local/opencode/<session-id>.md). Safe to delete; a
 // missing plugin just means this repo's OpenCode sessions aren't captured.
 //
-// Only one OpenCode API is used here (client.session.messages), the one
-// this generator's own tests confirmed against OpenCode's real source. If a
-// future OpenCode version changes that shape, this plugin fails closed
-// (logs to app.log, never throws into the host process) rather than
-// spooling malformed data.
+// The generated SDK path shape is the primary API. A narrow direct-session
+// compatibility fallback keeps older OpenCode clients working. If a future
+// OpenCode version changes both shapes, this plugin fails closed (logs to
+// app.log, never throws into the host process) rather than spooling malformed
+// data.
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const seen = new Set();
+const inFlight = new Set();
+const emptyRetryScheduled = new Set();
 
 export const M9rMemoryPlugin = async ({ client, directory, project }) => {
   async function captureIdleSession(sessionID) {
-    if (!sessionID || seen.has(sessionID)) return;
-    seen.add(sessionID);
+    if (!sessionID || seen.has(sessionID) || inFlight.has(sessionID)) return;
+    inFlight.add(sessionID);
     try {
-      const result = await client.session.messages({ sessionID });
-      const messages = Array.isArray(result?.data) ? result.data : Array.isArray(result) ? result : [];
+      // OpenCode's plugin client uses the generated SDK path shape. Keep the
+      // older direct-session shape as a compatibility fallback for versions
+      // that exposed the internal client instead.
+      let result = await client.session.messages({ path: { id: sessionID } });
+      let messages = Array.isArray(result?.data) ? result.data : Array.isArray(result) ? result : null;
+      if (messages === null) {
+        result = await client.session.messages({ sessionID });
+        messages = Array.isArray(result?.data) ? result.data : Array.isArray(result) ? result : [];
+      }
+      // OpenCode can emit an idle event when a session is first created, before
+      // its first user message exists. Do not consume that event permanently:
+      // the completed prompt will emit another idle/status event with content.
+      // Empty sessions have no memory value, and a failed spool write must be
+      // retried on the next lifecycle event rather than being marked captured.
+      if (messages.length === 0) {
+        // The initial idle event can race session creation. Give that
+        // creation one short, bounded retry window so a later lifecycle event
+        // cannot be lost behind the in-flight request.
+        if (!emptyRetryScheduled.has(sessionID)) {
+          emptyRetryScheduled.add(sessionID);
+          const timer = setTimeout(() => {
+            emptyRetryScheduled.delete(sessionID);
+            void captureIdleSession(sessionID);
+          }, 100);
+          timer.unref?.();
+        }
+        return;
+      }
       const root = directory || project?.worktree || process.cwd();
       const spoolPath = join(root, ".oathlock", "capture", "pending.jsonl");
       const job = {
@@ -211,21 +242,35 @@ export const M9rMemoryPlugin = async ({ client, directory, project }) => {
       };
       await mkdir(dirname(spoolPath), { recursive: true });
       await appendFile(spoolPath, JSON.stringify(job) + "\\n", "utf8");
+      seen.add(sessionID);
     } catch (error) {
       try {
         await client.app.log({ service: "m9r-memory", level: "error", message: String(error?.message || error) });
       } catch {
         /* logging is best-effort; never let capture failures surface to the user */
       }
+    } finally {
+      inFlight.delete(sessionID);
     }
   }
 
   return {
     event: async ({ event }) => {
       if (event?.type === "session.idle" && event.properties?.sessionID) {
-        await captureIdleSession(event.properties.sessionID);
-      } else if (event?.type === "session.status" && event.properties?.info?.status?.type === "idle") {
-        await captureIdleSession(event.properties.info.id);
+        // Never hold OpenCode's event dispatcher open while asking its API for
+        // messages. The first idle event can occur inside session creation;
+        // awaiting here deadlocks POST /session on a fresh server.
+        void captureIdleSession(event.properties.sessionID);
+      } else if (event?.type === "session.status") {
+        // OpenCode has emitted both shapes over its supported plugin API:
+        // { sessionID, status } and { info: { sessionID, status } }.
+        // Older builds used info.id. Accept all three so a completed turn
+        // cannot be mistaken for an unrelated status event or dropped.
+        const properties = event.properties || {};
+        const info = properties.info || {};
+        const status = info.status || properties.status;
+        if (status?.type !== "idle") return;
+        void captureIdleSession(properties.sessionID || info.sessionID || info.id || properties.part?.sessionID);
       }
     },
   };

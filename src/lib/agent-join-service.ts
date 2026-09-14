@@ -21,6 +21,7 @@
 
 import { supabase } from "@/lib/supabase";
 import { createClient } from "@/lib/supabase/server";
+import { randomUUID } from "node:crypto";
 import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
 import { assertCanConnectAgent } from "@/lib/plan-limits-service";
 import {
@@ -32,6 +33,7 @@ import {
   hashSecret,
   sanitizeString,
   buildClaimUrl,
+  buildClaimBatchUrl,
   claimExpiry,
   isExpired,
 } from "@/lib/agent-join";
@@ -70,6 +72,19 @@ export interface RegisterResult {
   expires_at: string;
 }
 
+export interface BatchRegisterClaim {
+  claim_id: string;
+  agent_kind: string;
+  setup_code: string;
+  expires_at: string;
+}
+
+export interface BatchRegisterResult {
+  batch_id: string;
+  batch_url: string;
+  claims: BatchRegisterClaim[];
+}
+
 /** Create a pending claim. Returns the one-time setup_code (raw) to the agent. */
 export async function registerClaim(input: RegisterInput, baseUrl: string): Promise<RegisterResult> {
   const db = requireService();
@@ -104,6 +119,59 @@ export async function registerClaim(input: RegisterInput, baseUrl: string): Prom
   };
 }
 
+/**
+ * Create one independently-authenticated claim per provider under a shared
+ * batch id. Raw setup codes stay paired with their own claim and are returned
+ * only to the calling CLI; the human approval page receives only the safe
+ * batch URL and public claim metadata.
+ */
+export async function registerClaimBatch(inputs: RegisterInput[], baseUrl: string): Promise<BatchRegisterResult> {
+  const db = requireService();
+  const batchId = randomUUID();
+  const prepared = inputs.map((input) => ({
+    input,
+    setupCode: generateSetupCode(),
+    expiresAt: claimExpiry(),
+  }));
+
+  const { data, error } = await db
+    .from("agent_claims")
+    .insert(prepared.map(({ input, setupCode, expiresAt }) => ({
+      batch_id: batchId,
+      setup_code_hash: hashSecret(setupCode),
+      agent_kind: input.agentKind,
+      repo_hint: input.repoHint,
+      rule_targets: input.ruleTargets,
+      capabilities: input.capabilities,
+      consent_mode: input.consentMode,
+      status: "pending",
+      expires_at: expiresAt,
+    })))
+    .select("id, agent_kind, expires_at");
+
+  if (error || !data || data.length !== prepared.length) {
+    console.error("registerClaimBatch insert failed:", error?.message, error?.code);
+    throw new AgentJoinError("Could not create the connection claims.", "REGISTER_BATCH_FAILED", 500);
+  }
+
+  const rowByKind = new Map<string, { id: string; expires_at: string }>();
+  for (const row of data) {
+    rowByKind.set(String(row.agent_kind), { id: String(row.id), expires_at: String(row.expires_at) });
+  }
+  const claims = prepared.map(({ input, setupCode, expiresAt }) => {
+    const row = rowByKind.get(input.agentKind);
+    if (!row) throw new AgentJoinError("Could not create the connection claims.", "REGISTER_BATCH_FAILED", 500);
+    return {
+      claim_id: row.id,
+      agent_kind: input.agentKind,
+      setup_code: setupCode,
+      expires_at: row.expires_at || expiresAt,
+    };
+  });
+
+  return { batch_id: batchId, batch_url: buildClaimBatchUrl(baseUrl, batchId), claims };
+}
+
 // ---------------------------------------------------------------------------
 // Claim — public read (for the human approval page; no secrets)
 // ---------------------------------------------------------------------------
@@ -118,6 +186,11 @@ export interface ClaimPublicView {
   status: "pending" | "approved" | "rejected" | "expired";
   expires_at: string;
   expired: boolean;
+}
+
+export interface ClaimBatchPublicView {
+  batch_id: string;
+  claims: ClaimPublicView[];
 }
 
 /** Safe subset for the human claim page. Never returns setup_code or token. */
@@ -148,6 +221,40 @@ export async function getClaimPublic(claimId: string): Promise<ClaimPublicView |
     status,
     expires_at: data.expires_at as string,
     expired,
+  };
+}
+
+/** Safe public view for a batch approval page. Never returns setup codes/tokens. */
+export async function getClaimBatchPublic(batchId: string): Promise<ClaimBatchPublicView | null> {
+  const db = requireService();
+  const { data, error } = await db
+    .from("agent_claims")
+    .select("id, batch_id, agent_kind, repo_hint, rule_targets, capabilities, status, expires_at")
+    .eq("batch_id", batchId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    console.error("getClaimBatchPublic failed:", error.message, error.code);
+    return null;
+  }
+  if (!data || data.length === 0) return null;
+
+  return {
+    batch_id: batchId,
+    claims: data.map((row) => {
+      const expired = isExpired(row.expires_at as string);
+      return {
+        claim_id: row.id as string,
+        agent_kind: row.agent_kind as AgentKind,
+        repo_hint: row.repo_hint as string,
+        rule_targets: (row.rule_targets as string[]) ?? [],
+        capabilities: (row.capabilities as string[]) ?? [],
+        requested_scopes: [...DEFAULT_AGENT_SCOPES],
+        status: (expired && row.status === "pending" ? "expired" : row.status) as ClaimPublicView["status"],
+        expires_at: row.expires_at as string,
+        expired,
+      };
+    }),
   };
 }
 
@@ -235,6 +342,145 @@ export async function approveClaim(claimId: string): Promise<ApproveResult> {
     workspace_id: result.approved_workspace_id,
     connection_id: result.approved_connection_id,
   };
+}
+
+export const MAX_BATCH_CLAIMS = 8;
+
+export type BatchApprovalItemStatus = "approved" | "rejected" | "already_resolved" | "expired" | "not_found" | "failed";
+
+export interface BatchApprovalItem {
+  claim_id: string;
+  agent_kind: string;
+  status: BatchApprovalItemStatus;
+  connection_id?: string;
+}
+
+export interface BatchApprovalResult {
+  status: "approved" | "partial" | "failed";
+  results: BatchApprovalItem[];
+}
+
+async function humanApprovalContext(action: string) {
+  const cookieDb = await createClient();
+  if (!cookieDb) throw new AgentJoinError("M9R is not configured.", "DB_NOT_CONFIGURED", 503);
+  const {
+    data: { user },
+  } = await cookieDb.auth.getUser();
+  if (!user) throw new AgentJoinError(`Sign in to ${action} these connections.`, "UNAUTHENTICATED", 401);
+
+  const workspaceId = await resolveActiveOrDefaultProjectId(cookieDb, {
+    id: user.id,
+    email: user.email,
+    name: (user.user_metadata?.name as string | undefined) ?? null,
+  });
+  return { db: requireService(), userId: user.id, workspaceId };
+}
+
+function batchClaimId(raw: string): string {
+  const value = sanitizeString(raw, 80);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new AgentJoinError("Connection batch id is invalid.", "BAD_REQUEST", 400);
+  }
+  return value;
+}
+
+/**
+ * Approve every pending claim in one human-authenticated request. Each claim
+ * still gets its own atomic token/connection transaction and setup code; a
+ * failure is reported per provider instead of being hidden behind a blanket
+ * success. Plan limits are checked for the whole pending set before any
+ * approval starts, preventing an avoidable mid-batch limit failure.
+ */
+export async function approveClaimBatch(rawBatchId: string): Promise<BatchApprovalResult> {
+  const batchId = batchClaimId(rawBatchId);
+  const { db, userId, workspaceId } = await humanApprovalContext("approve");
+  const { data: claims, error: lookupError } = await db
+    .from("agent_claims")
+    .select("id, agent_kind, status, expires_at")
+    .eq("batch_id", batchId)
+    .order("created_at", { ascending: true })
+    .limit(MAX_BATCH_CLAIMS + 1);
+
+  if (lookupError) {
+    console.error("approveClaimBatch lookup failed:", lookupError.message, lookupError.code);
+    throw new AgentJoinError("Could not load the connection claims.", "APPROVE_BATCH_FAILED", 500);
+  }
+  if (!claims || claims.length === 0) throw new AgentJoinError("Connection batch not found.", "NOT_FOUND", 404);
+  if (claims.length > MAX_BATCH_CLAIMS) throw new AgentJoinError("This connection batch is too large.", "BAD_REQUEST", 400);
+
+  const pending = claims.filter((claim) => claim.status === "pending" && !isExpired(String(claim.expires_at)));
+  for (const claim of pending) {
+    await assertCanConnectAgent(db, userId, workspaceId, String(claim.agent_kind));
+  }
+
+  const results: BatchApprovalItem[] = [];
+  for (const claim of claims) {
+    const claimId = String(claim.id);
+    const agentKind = String(claim.agent_kind);
+    if (claim.status !== "pending") {
+      results.push({
+        claim_id: claimId,
+        agent_kind: agentKind,
+        status: claim.status === "approved" ? "approved" : claim.status === "rejected" ? "rejected" : claim.status === "expired" ? "expired" : "already_resolved",
+      });
+      continue;
+    }
+
+    const rawToken = generateAgentToken();
+    const { data, error } = await db.rpc("approve_agent_claim_atomic", {
+      p_claim_id: claimId,
+      p_user_id: userId,
+      p_workspace_id: workspaceId,
+      p_token_hash: hashSecret(rawToken),
+      p_one_time_token: rawToken,
+      p_scopes: [...DEFAULT_AGENT_SCOPES],
+      p_approved_at: new Date().toISOString(),
+    });
+    const result = Array.isArray(data)
+      ? data[0] as { accepted?: boolean; reason?: string | null; claim_status?: string | null; approved_connection_id?: string | null } | undefined
+      : undefined;
+    if (error || !result) {
+      console.error("approveClaimBatch atomic RPC failed:", error?.message, error?.code);
+      results.push({ claim_id: claimId, agent_kind: agentKind, status: "failed" });
+      continue;
+    }
+    if (result.accepted && result.approved_connection_id) {
+      results.push({ claim_id: claimId, agent_kind: agentKind, status: "approved", connection_id: result.approved_connection_id });
+    } else if (result.reason === "expired") {
+      results.push({ claim_id: claimId, agent_kind: agentKind, status: "expired" });
+    } else if (result.reason === "already_resolved") {
+      results.push({ claim_id: claimId, agent_kind: agentKind, status: result.claim_status === "approved" ? "approved" : result.claim_status === "rejected" ? "rejected" : "already_resolved" });
+    } else if (result.reason === "not_found") {
+      results.push({ claim_id: claimId, agent_kind: agentKind, status: "not_found" });
+    } else {
+      results.push({ claim_id: claimId, agent_kind: agentKind, status: "failed" });
+    }
+  }
+
+  const successful = results.filter((result) => result.status === "approved").length;
+  return {
+    status: successful === results.length ? "approved" : successful === 0 ? "failed" : "partial",
+    results,
+  };
+}
+
+/** Reject all still-live pending claims in a batch with one human action. */
+export async function rejectClaimBatch(rawBatchId: string): Promise<{ status: "rejected"; rejected: number }> {
+  const batchId = batchClaimId(rawBatchId);
+  const { db } = await humanApprovalContext("reject");
+  const { data, error } = await db
+    .from("agent_claims")
+    .update({ status: "rejected", rejected_at: new Date().toISOString() })
+    .eq("batch_id", batchId)
+    .eq("status", "pending")
+    .gt("expires_at", new Date().toISOString())
+    .select("id");
+  if (error) {
+    console.error("rejectClaimBatch update failed:", error.message, error.code);
+    throw new AgentJoinError("Could not reject these connections.", "REJECT_BATCH_FAILED", 500);
+  }
+  if (!data || data.length === 0) throw new AgentJoinError("No pending connections remain in this batch.", "BAD_STATE", 409);
+  return { status: "rejected", rejected: data.length };
 }
 
 /** Reject a claim as the signed-in human. */
@@ -332,6 +578,15 @@ export interface AuthedAgent {
   repoHint: string | null;
   /** The agent_tokens row id this request authenticated with — needed to revoke exactly this token on rotation, never a different one. Null for dashboard-initiated (cookie-authenticated) synthetic agent contexts that never had a bearer token to begin with. */
   tokenId: string | null;
+}
+
+export interface AuthenticatedAgentActivity {
+  connectionId: string;
+  agentKind: AgentKind;
+  /** Null means this approved token has never authenticated a provider process. */
+  lastUsedAt: string | null;
+  /** Connection-level lease signal, updated alongside token use/heartbeats. */
+  lastSeenAt: string | null;
 }
 
 export interface DisconnectAgentConnectionResult {
@@ -556,6 +811,39 @@ export async function authenticateAgent(rawToken: string | null): Promise<Authed
     scopes: (data.scopes as string[]) ?? [],
     repoHint: (conn.repo_hint as string | null) ?? null,
     tokenId: data.id as string,
+  };
+}
+
+/**
+ * Read the calling token's prior authentication signal without touching it.
+ * This is intentionally separate from authenticateAgent(): `m9r connect`
+ * needs to distinguish an approved-but-never-used token from a provider that
+ * has actually authenticated, and the status read itself must not manufacture
+ * that evidence by bumping last_used_at.
+ */
+export async function readAuthenticatedAgentActivity(rawToken: string | null): Promise<AuthenticatedAgentActivity | null> {
+  if (!rawToken) return null;
+  const db = requireService();
+  const { data, error } = await db
+    .from("agent_tokens")
+    .select("connection_id, last_used_at, expires_at, revoked_at")
+    .eq("token_hash", hashSecret(rawToken))
+    .maybeSingle();
+  if (error || !data) return null;
+  if (data.revoked_at || (data.expires_at && isExpired(data.expires_at as string))) return null;
+
+  const { data: connection } = await db
+    .from("agent_connections")
+    .select("status, agent_kind, last_seen_at")
+    .eq("id", data.connection_id)
+    .maybeSingle();
+  if (!connection || connection.status !== "active") return null;
+
+  return {
+    connectionId: data.connection_id as string,
+    agentKind: connection.agent_kind as AgentKind,
+    lastUsedAt: (data.last_used_at as string | null) ?? null,
+    lastSeenAt: (connection.last_seen_at as string | null) ?? null,
   };
 }
 

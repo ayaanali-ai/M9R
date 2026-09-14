@@ -6181,6 +6181,7 @@ details.wf-fold > div { padding: 0.25rem 0.8rem 0.8rem; }
   background: var(--ol-text-faint);
 }
 .wf-agent-dot[data-connected="true"] { background: var(--ol-border-strong); }
+.wf-agent-dot[data-registered="true"][data-live="false"] { background: var(--ol-text-faint); outline: 1px solid var(--ol-border-strong); outline-offset: 1px; }
 .wf-agent-dot[data-live="true"] {
   background: var(--wf-live, var(--ol-ok));
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--wf-live, var(--ol-ok)) 55%, transparent);

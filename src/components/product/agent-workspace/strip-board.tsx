@@ -10,13 +10,6 @@ import type { RunPassport } from "@/lib/run-passport-service";
 import { base64UrlToUint8Array } from "@/lib/push-subscription";
 import { relAt, short, agentForRun, CopyButton, type Selected } from "./shared";
 
-const LIVENESS_LABEL: Record<string, string> = {
-  active: "Connected",
-  stale: "Stale",
-  not_seen: "Connected, not seen yet",
-  none: "Not connected",
-};
-
 // ---------------------------------------------------------------------------
 // Agent dock — vertical on desktop, horizontal rail on smaller screens.
 // ---------------------------------------------------------------------------
@@ -71,7 +64,7 @@ export function ConnectCeremony({ agent }: { agent: AgentView }) {
     const id = window.setTimeout(() => setClock(Date.now()), 0);
     return () => window.clearTimeout(id);
   }, []);
-  const approved = agent.connected;
+  const approved = agent.registered;
   const seen = approved && Boolean(agent.lastSeenAt);
   const steps: Array<{ label: string; state: "done" | "active" | "pending"; detail: string }> = [
     {
@@ -145,15 +138,17 @@ export function ControlStrip({
         {agent ? (
           <>
             <span className="flex min-w-0 items-center gap-2">
-              <AgentMark agentKey={agent.key} size={24} status={!agent.connected ? undefined : agent.liveness === "active" ? "active" : "idle"} />
+              <AgentMark agentKey={agent.key} size={24} status={!agent.registered ? undefined : agent.connected ? "active" : "idle"} />
               <span className="truncate text-[length:var(--ol-text-sm)] font-medium text-[color:var(--ol-text-primary)]">{agent.label}</span>
             </span>
             <span className="ol-mono text-[length:var(--ol-text-2xs)] text-[color:var(--ol-text-muted)]">
-              {agent.connected
-                ? `${LIVENESS_LABEL[agent.liveness]} · ${agent.repoHint || "workspace"} · seen ${relAt(agent.lastSeenAt, clock)}`
-                : "Not connected"}
+              {!agent.registered
+                ? "Not registered"
+                : agent.connected
+                  ? `M9R online · ${agent.repoHint || "workspace"} · seen ${relAt(agent.lastSeenAt, clock)} · ${agent.providerReadiness === "ready" ? "Provider session ready" : "Provider session unverified"}`
+                  : `Registered · Offline · ${agent.repoHint || "workspace"} · seen ${relAt(agent.lastSeenAt, clock)} · Provider session unverified`}
             </span>
-            {agent.connected && (
+            {agent.registered && (
               // Disconnect/revoke lives in Settings now, not on the strip --
               // this is a quiet navigational pointer to it (not a mutating
               // action, so it belongs in this identity block, not the action

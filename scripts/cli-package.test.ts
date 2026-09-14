@@ -123,15 +123,18 @@ test("built entry has the correct shebang and a relative core import", () => {
   const entry = readFileSync(resolve(distDir, "m9r.js"), "utf8");
   const compatibilityEntry = readFileSync(resolve(distDir, "oathlock.js"), "utf8");
   const builtCore = readFileSync(resolve(distDir, "oathlock-cli-core.js"), "utf8");
+  const memoryExportCore = readFileSync(resolve(distDir, "memory-export-core.js"), "utf8");
   assert.ok(entry.startsWith("#!/usr/bin/env node\n"), "missing shebang");
   assert.match(entry, /from "\.\/oathlock-cli-core\.js"/);
   assert.ok(!entry.includes("@/lib/"), "alias import must be rewritten");
   assert.ok(!builtCore.includes("@/lib/"), "compiled core must not retain repository-only aliases");
+  assert.ok(!memoryExportCore.includes("@/lib/"), "compiled memory exporter must not retain repository-only aliases");
   assert.match(builtCore, /from "\.\/adapter-contract\.js"/);
   assert.ok(existsSync(resolve(distDir, "oathlock-cli-core.js")));
   assert.equal(compatibilityEntry, entry, "legacy oathlock entry must remain the same compiled CLI");
   assert.ok(existsSync(resolve(distDir, "adapter-contract.js")));
   assert.ok(existsSync(resolve(distDir, "agent-task-routing.js")));
+  assert.ok(existsSync(resolve(distDir, "opencode-capture-backfill-core.js")));
   assert.ok(!readFileSync(resolve(distDir, "resident-provider-adapters.js"), "utf8").includes("@/lib/"));
   assert.ok(!readFileSync(resolve(distDir, "oathlock-resident-core.js"), "utf8").includes("@/lib/"));
 });
@@ -150,6 +153,7 @@ test("built CLI ships the local terminal bridge and routes terminal bridge to it
     "resident-supervisor.js",
     "resident-profile-source.js",
     "oathlock-terminal-bridge.js",
+    "opencode-capture-backfill-core.js",
   ];
 
   assert.match(entry, /\.\/oathlock-terminal-bridge\.js/);
@@ -366,13 +370,17 @@ test("compiled CLI: init writes local files under the EXTERNAL cwd, not the repo
 test("compiled CLI: connect --agents runs through the real packaged agent-detection-core module, not a stub", async () => {
   const { deps, files } = makeDeps({});
   deps.fetch = (async (url: string, init?: RequestInit) => {
-    if (String(url).includes("/api/agent/register")) {
-      const body = JSON.parse(String(init?.body ?? "{}")) as { agent_kind?: string };
+    if (String(url).includes("/api/agent/register-batch")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { agents?: Array<{ agent_kind?: string }> };
       return jsonResponse(201, {
-        claim_url: `https://oathlock.vercel.app/claim/${body.agent_kind}`,
-        claim_id: `claim-${body.agent_kind}`,
-        setup_code: `setup-${body.agent_kind}`,
-        expires_at: "2030-01-01T00:00:00Z",
+        batch_id: "batch-packaged",
+        batch_url: "https://oathlock.vercel.app/claim/batch/batch-packaged",
+        claims: (body.agents ?? []).map((agent) => ({
+          agent_kind: agent.agent_kind,
+          claim_id: `claim-${agent.agent_kind}`,
+          setup_code: `setup-${agent.agent_kind}`,
+          expires_at: "2030-01-01T00:00:00Z",
+        })),
       });
     }
     const claimId = new URL(String(url)).searchParams.get("claim_id") ?? "";
@@ -388,13 +396,17 @@ test("compiled CLI: connect --agents runs through the real packaged agent-detect
 test("compiled CLI: connect installs cross-agent memory capture through the real packaged cross-agent-capture-setup-core module", async () => {
   const { deps, files } = makeDeps({});
   deps.fetch = (async (url: string, init?: RequestInit) => {
-    if (String(url).includes("/api/agent/register")) {
-      const body = JSON.parse(String(init?.body ?? "{}")) as { agent_kind?: string };
+    if (String(url).includes("/api/agent/register-batch")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { agents?: Array<{ agent_kind?: string }> };
       return jsonResponse(201, {
-        claim_url: `https://oathlock.vercel.app/claim/${body.agent_kind}`,
-        claim_id: `claim-${body.agent_kind}`,
-        setup_code: `setup-${body.agent_kind}`,
-        expires_at: "2030-01-01T00:00:00Z",
+        batch_id: "batch-capture",
+        batch_url: "https://oathlock.vercel.app/claim/batch/batch-capture",
+        claims: (body.agents ?? []).map((agent) => ({
+          agent_kind: agent.agent_kind,
+          claim_id: `claim-${agent.agent_kind}`,
+          setup_code: `setup-${agent.agent_kind}`,
+          expires_at: "2030-01-01T00:00:00Z",
+        })),
       });
     }
     const claimId = new URL(String(url)).searchParams.get("claim_id") ?? "";

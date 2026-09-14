@@ -50,6 +50,13 @@ test("workspace relay refreshes short-lived credentials and keeps HTTP fallback 
   assert.match(productConversation, /setRelayHttpFallback\(true\)/);
 });
 
+test("workspace relay forwards terminal typing and cursor frames to pane listeners", () => {
+  const onFrame = productConversation.slice(productConversation.indexOf("onFrame: (frame: RelayFrame) =>"));
+  assert.match(onFrame, /if \(frame\.type === "participant\.typing" \|\| frame\.type === "presence\.cursor"\) \{[\s\S]*for \(const listener of ptyFrameListenersRef\.current\) listener\(frame\);/);
+  assert.match(onFrame, /if \(frame\.type === "presence\.cursor"\) return;/);
+  assert.match(onFrame, /if \(frame\.type === "participant\.typing"\) \{[\s\S]*setTypingParticipantIds/);
+});
+
 test("Mission conversation workspace exposes channels and agent context without a separate diagnostics section", () => {
   assert.match(workspace, /Channels/);
   assert.match(workspace, /Agent roster/);

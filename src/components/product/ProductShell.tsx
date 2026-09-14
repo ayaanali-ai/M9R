@@ -36,9 +36,10 @@ const RAIL_ITEMS = [
 // have nothing meaningful to show there, so the rail is Chat-only.
 const REVIEWER_RAIL_HREFS = new Set<string>(["/dashboard/agents"]);
 
-// Agent picker entries are derived from live connections, never from a
+// Agent picker entries are derived from durable registrations, never from a
 // provider allowlist. A connection-scoped key keeps two copies of one
-// provider independently addressable and lets any valid agent kind appear.
+// provider independently addressable and lets any valid agent kind appear;
+// the row's dot still distinguishes registered/offline from live.
 type AgentLink = { key: string; label: string; agentKind?: string; connectionId?: string };
 
 function agentLinksForStatus(status: AgentStatusSummary): AgentLink[] {
@@ -274,7 +275,11 @@ export default function ProductShell({
               avatar/sign-out and page identity are already covered here and by
               the nav itself, so it moved in next to the account row instead of
               floating at the top of every page. */}
-          <MachineConnectionBanner hasLiveConnection={agentStatus.agents.length > 0} reviewerDemo={reviewerDemo} />
+          <MachineConnectionBanner
+            hasLiveConnection={agentStatus.agents.some((agent) => agent.live)}
+            hasRegisteredConnection={agentStatus.agents.some((agent) => agent.registered)}
+            reviewerDemo={reviewerDemo}
+          />
           <div className="product-account">
             <span className="product-avatar">{initial}</span>
             <span className="product-account-email min-w-0 flex-1 truncate text-[11px] text-[color:var(--ol-text-muted)]">{displayName}</span>
@@ -618,6 +623,7 @@ function SidebarAgentPicker({
               {status && (
                 <span
                   className="wf-agent-dot"
+                  data-registered={status.registered}
                   data-connected={status.connected}
                   data-live={status.live}
                   aria-hidden

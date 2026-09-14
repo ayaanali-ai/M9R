@@ -78,6 +78,25 @@ const PAGE = "src/app/dashboard/agents/page.tsx";
 const PASSPORT_LOADER = "src/lib/run-passport-loader.ts";
 const HOME_PAGE = "src/app/page.tsx";
 const MEMORY_VIEW = "src/components/product/MemoryView.tsx";
+
+test("Herd-grade navigation preserves durable registrations while separating live leases", () => {
+  const summary = read("src/lib/agent-status-summary.ts");
+  assert.match(summary, /registered: boolean/);
+  assert.match(summary, /liveness: ConnectionLiveness/);
+  assert.match(summary, /connections\.map\(/, "all active registrations should remain visible in navigation");
+  assert.match(summary, /const live = liveness === "active"/);
+  assert.match(summary, /connected: live/);
+  assert.match(summary, /live,/);
+  assert.match(summary, /registered: true/);
+});
+
+test("Herd-grade connection banner distinguishes reconnecting registrations from first setup", () => {
+  const banner = read("src/components/product/MachineConnectionBanner.tsx");
+  assert.match(banner, /hasRegisteredConnection/);
+  assert.match(banner, /Registered agents are offline/);
+  assert.match(banner, /No new approval is required/);
+  assert.match(banner, /No agent runtime is currently reaching this workspace/);
+});
 const DRAFT_TOOLS = "src/components/product/RuleDraftTools.tsx";
 const WORKSPACE_UI = "src/components/product/WorkspaceUI.tsx";
 const CONFIRM_DIALOG = "src/components/product/ProductConfirmDialog.tsx";
@@ -315,13 +334,23 @@ test("a disconnected agent gets the connect ceremony, keyed off real state", () 
   const workspace = read(WORKSPACE);
   assert.match(workspace, /function ConnectCeremony/);
   assert.match(workspace, /\{selectedAgent && !selectedAgent\.connected &&/);
-  // Steps are derived from real server state — approval creates the connection,
-  // last_seen lights verification. Nothing pretends to be connected.
-  assert.match(workspace, /const approved = agent\.connected;/);
+  // Registration, online presence, and provider account readiness are distinct
+  // state axes. A stale heartbeat never erases a human-approved registration.
+  assert.match(workspace, /const approved = agent\.registered;/);
   assert.match(workspace, /const seen = approved && Boolean\(agent\.lastSeenAt\);/);
   assert.match(workspace, /Nothing connects until a human approves\./);
   assert.match(workspace, /Approve in the browser/);
   assert.match(workspace, /automatic M9R workflow was installed/);
+});
+
+test("registered offline connections remain on the Watchfloor but never enter relay membership", () => {
+  const page = read("src/app/dashboard/agents/page.tsx");
+  const workspace = read(WORKSPACE);
+  assert.match(page, /const visibleConnectionGroups = connectionGroups/);
+  assert.match(page, /const wsConnections: WsConnection\[\] = visibleConnectionGroups\.map/);
+  assert.match(page, /status: g\.latest\.status/);
+  assert.match(page, /ensureWorkspaceChannelsForDashboard\([\s\S]*liveConnectionGroups/);
+  assert.match(workspace, /Provider session unverified/);
 });
 
 test("disconnected agent shows the setup command for the correct agent kind", () => {

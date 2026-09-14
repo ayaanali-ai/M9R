@@ -19,6 +19,7 @@ import {
   buildAgentViews,
   buildWorkspaceStatus,
   CURRENT_RUN_STALE_AFTER_MS,
+  deriveAgentWorkspace,
   deriveRunDisplayState,
   selectCurrentRun,
   type RunDisplayStateInput,
@@ -126,6 +127,33 @@ test("two arbitrary providers stay separate instead of collapsing into Other", (
 test("live Watchfloor mode can omit disconnected provider placeholders", () => {
   const views = buildAgentViews({ connections: [], runs: [], sessions: [], reviewRules: [], activeRules: [], includeDisconnectedDescriptors: false });
   assert.deepEqual(views, []);
+});
+
+test("a registered offline agent remains visible without being eligible for live work", () => {
+  const views = buildAgentViews({
+    connections: [{
+      id: "conn-registered-offline",
+      workspace_id: "ws-codex",
+      agent_kind: "codex",
+      repo_hint: "runleak",
+      last_seen_at: "2026-06-30T02:50:00Z",
+      liveness: "stale",
+      status: "active",
+    }],
+    runs: [], sessions: [], reviewRules: [], activeRules: [], includeDisconnectedDescriptors: false,
+  });
+
+  assert.equal(views.length, 1);
+  const agent = views[0]!;
+  assert.equal(agent.registered, true);
+  assert.equal(agent.connected, false, "stale presence must not be routable as live");
+  assert.equal(agent.connectionId, "conn-registered-offline", "management must remain available after the heartbeat expires");
+  assert.equal(agent.providerReadiness, "unverified", "a M9R heartbeat cannot prove the provider account is signed in");
+
+  const workspace = deriveAgentWorkspace(agent, Date.parse(now));
+  assert.equal(workspace.stateLabel, "Registered · Offline");
+  assert.equal(workspace.currentPhase, "Waiting for an authenticated runtime check-in");
+  assert.equal(workspace.linked, true);
 });
 
 test("setupCommandFor uses the agent kind in the PowerShell env form", () => {

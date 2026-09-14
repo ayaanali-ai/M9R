@@ -53,8 +53,6 @@ export interface TerminalPaneProps {
   roster?: Map<string, string>;
 }
 
-/** Server expiry for a typing record is 2.5s (mission-relay-service.ts); stopping to re-announce at 2s keeps a continuously-typing viewer's tag from ever lapsing on the recipient's side. */
-const TYPING_REANNOUNCE_MS = 2_000;
 /** Matches the chat composer's own stop-after-idle window (ConversationPanel.tsx) so typing behaves identically whether the pane is a terminal or the chat composer. */
 const TYPING_STOP_AFTER_MS = 3_000;
 /** Phase 5b's mandatory throttle -- the server also rate-limits at 20/s per connection (CursorRateLimiter), so sending faster than this would just be dropped, not delivered faster. */

@@ -53,6 +53,7 @@ import {
   type AutostartLaunchSpec,
 } from "@/lib/oathlock-autostart";
 import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, shouldRelaunch, stillHoldsWatchdogLock } from "@/lib/oathlock-watchdog";
+import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
 
 const execFileAsync = promisify(execFile);
 
@@ -92,6 +93,10 @@ const deps: CliDeps = {
   err: (line) => process.stderr.write(line + "\n"),
   openUrl,
   probeVersion,
+  drainCapture: () => drainCaptureSpool({
+    repositoryRoot: process.cwd(),
+    readTranscript: (path) => readFile(path, "utf8"),
+  }),
 };
 
 /**
@@ -615,6 +620,13 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
   {
     const { startCaptureDrainLoop } = await import("../src/lib/cross-agent-capture-core");
     startCaptureDrainLoop({ repositoryRoot: process.cwd() });
+  }
+  // Item #3: recover OpenCode sessions whose process died before the plugin
+  // received an idle event. This uses OpenCode's own persisted-session CLI,
+  // not provider authentication, and feeds the same spool as live capture.
+  if (!localOnly) {
+    const { startOpenCodeCaptureBackfillLoop } = await import("../src/lib/opencode-capture-backfill-core");
+    startOpenCodeCaptureBackfillLoop({ repositoryRoot: process.cwd() });
   }
   await import("./oathlock-terminal-bridge");
   return 0;
