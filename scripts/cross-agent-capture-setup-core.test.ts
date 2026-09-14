@@ -28,7 +28,11 @@ test("mergeClaudeCodeLocalSettings preserves the user's existing hooks and setti
   const parsed = JSON.parse(content);
   assert.deepEqual(parsed.permissions, { allow: ["Bash(git *)"] });
   assert.equal(parsed.hooks.SessionEnd.length, 2, "the user's own SessionEnd hook must survive alongside ours");
-  assert.ok(parsed.hooks.SessionEnd.some((g: any) => g.hooks.some((h: any) => h.command === "my-own-script.sh")));
+  assert.ok(
+    parsed.hooks.SessionEnd.some((group: { hooks: { command: string }[] }) =>
+      group.hooks.some((hook) => hook.command === "my-own-script.sh"),
+    ),
+  );
 });
 
 test("mergeClaudeCodeLocalSettings is idempotent -- running it twice does not duplicate the hook", () => {
