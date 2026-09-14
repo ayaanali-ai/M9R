@@ -202,6 +202,11 @@ export function buildClaimUrl(baseUrl: string, claimId: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/claim/${claimId}`;
 }
 
+/** Build the single human approval URL for a multi-provider connect request. */
+export function buildClaimBatchUrl(baseUrl: string, batchId: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}/claim/batch/${batchId}`;
+}
+
 export function claimExpiry(now = Date.now()): string {
   return new Date(now + CLAIM_TTL_MS).toISOString();
 }

@@ -49,6 +49,7 @@ function makeDeps(opts: {
   router?: Router;
   files?: Record<string, string>;
   probeVersion?: (binary: string) => Promise<string | null>;
+  drainCapture?: () => Promise<{ drained: number; failed: number }>;
 }) {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
   const out: string[] = [];
@@ -83,6 +84,7 @@ function makeDeps(opts: {
     maxPolls: 3,
     sleep: async () => {},
     probeVersion: opts.probeVersion,
+    drainCapture: opts.drainCapture,
   };
 
   return { deps, files, out, err, requests };
@@ -793,22 +795,62 @@ test("init writes token to local.json and non-secret metadata to config.json", a
 test("init reuses an existing connection and creates no new claim", async () => {
   const TOKEN = "oak_existing_TOKEN_zzzz";
   const { deps, requests, out } = makeDeps({
-    env: { CODEX_HOME: "1" },
+    env: { CODEX_HOME: "1", OATHLOCK_API_URL: "http://localhost:3000" },
     files: { [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: TOKEN, scopes: ["rules:read"] }) },
-    // Any network call here would be a bug — init should short-circuit.
-    router: () => jsonResponse(500, { error: "should not be called" }),
+    router: (url) => url.includes("/api/agent/connection-status")
+      ? jsonResponse(200, { agentKind: "codex", authenticated: true, lastUsedAt: "2030-01-01T00:00:00Z" })
+      : jsonResponse(500, { error: "should not be called" }),
   });
 
   const code = await run(["init"], deps);
 
   assert.equal(code, 0);
-  assert.equal(requests.length, 0, "must not create a new claim when already connected");
+  assert.equal(requests.length, 1, "reuse must make one read-only server status check");
+  assert.match(requests[0].url, /\/api\/agent\/connection-status$/);
   const text = out.join("\n");
-  assert.match(text, /already appears connected/i);
+  assert.match(text, /connected to M9R/i);
+  assert.match(text, /real provider authentication was observed/i);
   assert.match(text, /npx m9r-cli doctor/);
   assert.match(text, /npx m9r-cli rules/);
   assert.match(text, /--force/);
   assert.ok(!text.includes(TOKEN), "must not print the token");
+});
+
+test("init does not call an approved token connected until the server observes provider use", async () => {
+  const TOKEN = "oak_registered_only_TOKEN_zzzz";
+  const { deps, requests, out } = makeDeps({
+    env: { CODEX_HOME: "1", OATHLOCK_API_URL: "http://localhost:3000" },
+    files: { [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: TOKEN }) },
+    router: (url) => url.includes("/api/agent/connection-status")
+      ? jsonResponse(200, { agentKind: "codex", authenticated: false, lastUsedAt: null })
+      : jsonResponse(500, { error: "should not be called" }),
+  });
+
+  const code = await run(["init"], deps);
+
+  assert.equal(code, 0);
+  assert.equal(requests.length, 1);
+  const text = out.join("\n");
+  assert.match(text, /registered with M9R, but no provider process has authenticated/i);
+  assert.doesNotMatch(text, /This workspace is connected to M9R\./);
+});
+
+test("init fails closed when a saved token is no longer active", async () => {
+  const TOKEN = "oak_revoked_TOKEN_zzzz";
+  const { deps, requests, err } = makeDeps({
+    env: { CODEX_HOME: "1", OATHLOCK_API_URL: "http://localhost:3000" },
+    files: { [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: TOKEN }) },
+    router: (url) => url.includes("/api/agent/connection-status")
+      ? jsonResponse(401, { error: "Invalid or inactive agent token." })
+      : jsonResponse(500, { error: "should not be called" }),
+  });
+
+  const code = await run(["init"], deps);
+
+  assert.equal(code, 1);
+  assert.equal(requests.length, 1, "an inactive token must not silently create a duplicate claim");
+  assert.match(err.join("\n"), /could not verify it as active/i);
+  assert.match(err.join("\n"), /--force --agent-kind codex/);
 });
 
 test("init --force starts a fresh claim even when a token already exists", async () => {
@@ -1045,7 +1087,7 @@ test("heartbeat reports linked presence with a monotonic adapter sequence", asyn
   });
   assert.equal(await run(["heartbeat"], deps), 0);
   const body = JSON.parse(requests[0].init!.body as string);
-  assert.equal(body.protocolVersion, "oathlock.presence.v1");
+  assert.equal(body.protocolVersion, "m9r.presence.v1");
   assert.equal(body.executionOrigin, "linked");
   assert.equal(body.provider, "codex");
   assert.equal(body.sequence, 1);
@@ -1649,6 +1691,79 @@ test("doctor negotiates its implemented actions against the live server contract
   assert.match(text, /"work_signal_ack" is not recognized/);
 });
 
+test("doctor reports a fully wired Claude Code capture hook as installed and active", async () => {
+  const TOKEN = "oak_doctor_capture_TOKEN_1234";
+  const { deps, out } = makeDeps({
+    env: { OATHLOCK_AGENT_KIND: "claude-code" },
+    files: {
+      [agentLocalPath(CWD, "claude-code")]: JSON.stringify({ token: TOKEN }),
+      [join(CWD, ".oathlock", "bin", "m9r-capture.mjs")]: "pending.jsonl",
+      [join(CWD, ".claude", "settings.local.json")]: JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ command: "node m9r-capture.mjs claude-code" }] }] } }),
+    },
+    router: (url) => {
+      if (url.includes("/api/agent/whoami")) return jsonResponse(200, { agentKind: "claude-code" });
+      if (url.includes("/api/agent/rules")) return jsonResponse(200, { mode: "baseline", rules: [] });
+      if (url.includes("/api/agent/contract")) return jsonResponse(200, { actions: [] });
+      return jsonResponse(404, { error: "unexpected route" });
+    },
+  });
+
+  const code = await run(["doctor"], deps);
+  assert.equal(code, 0);
+  const text = out.join("\n");
+  assert.match(text, /memory capture installed: yes \(Claude\)/);
+  assert.match(text, /memory capture active: yes/);
+});
+
+test("doctor distinguishes an installed Codex hook from activation trust", async () => {
+  const TOKEN = "oak_doctor_codex_capture_TOKEN_1234";
+  const { deps, out } = makeDeps({
+    env: { OATHLOCK_AGENT_KIND: "codex" },
+    files: {
+      [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: TOKEN }),
+      [join(CWD, ".oathlock", "bin", "m9r-capture.mjs")]: "pending.jsonl",
+      [join(CWD, ".codex", "hooks.json")]: JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ command: "node .oathlock/bin/m9r-capture.mjs codex" }] }] } }),
+    },
+    router: (url) => {
+      if (url.includes("/api/agent/whoami")) return jsonResponse(200, { agentKind: "codex" });
+      if (url.includes("/api/agent/rules")) return jsonResponse(200, { mode: "baseline", rules: [] });
+      if (url.includes("/api/agent/contract")) return jsonResponse(200, { actions: [] });
+      return jsonResponse(404, { error: "unexpected route" });
+    },
+  });
+
+  const code = await run(["doctor"], deps);
+  assert.equal(code, 0);
+  const text = out.join("\n");
+  assert.match(text, /memory capture installed: yes \(Codex\)/);
+  assert.match(text, /memory capture active: not verified/);
+  assert.match(text, /run \/hooks in Codex/);
+});
+
+test("doctor reports the OpenCode plugin and recovery path", async () => {
+  const TOKEN = "oak_doctor_opencode_capture_TOKEN_1234";
+  const { deps, out } = makeDeps({
+    env: { OATHLOCK_AGENT_KIND: "opencode" },
+    files: {
+      [agentLocalPath(CWD, "opencode")]: JSON.stringify({ token: TOKEN }),
+      [join(CWD, ".opencode", "plugins", "m9r-memory.js")]: "M9rMemoryPlugin; pending.jsonl",
+    },
+    router: (url) => {
+      if (url.includes("/api/agent/whoami")) return jsonResponse(200, { agentKind: "opencode" });
+      if (url.includes("/api/agent/rules")) return jsonResponse(200, { mode: "baseline", rules: [] });
+      if (url.includes("/api/agent/contract")) return jsonResponse(200, { actions: [] });
+      return jsonResponse(404, { error: "unexpected route" });
+    },
+  });
+
+  const code = await run(["doctor"], deps);
+  assert.equal(code, 0);
+  const text = out.join("\n");
+  assert.match(text, /memory capture installed: yes \(OpenCode\)/);
+  assert.match(text, /memory capture active: yes/);
+  assert.match(text, /resident backfill covers sessions/);
+});
+
 test("rotate-token refuses without a local token and makes no request", async () => {
   const { deps, requests, err } = makeDeps({});
   const code = await run(["rotate-token"], deps);
@@ -1715,21 +1830,25 @@ test("signal command output never leaks the token", async () => {
 // connect: one command, multiple agent kinds
 // ---------------------------------------------------------------------------
 
-test("connect --agents registers every listed kind in one command, each through the real claim cycle", async () => {
+test("connect --agents registers every listed kind in one batch and uses one approval URL", async () => {
   // Claim status is looked up by claim_id/setup_code alone (no agent_kind in
   // that call), so the claim_id itself must encode which kind it belongs to
   // for this fake router to answer each poll with the right token.
   const { deps, files, requests, out } = makeDeps({
     env: { OATHLOCK_API_URL: "http://localhost:3000" },
     router: (url, init) => {
-      if (url.includes("/api/agent/register")) {
-        const body = JSON.parse(String(init?.body ?? "{}")) as { agent_kind?: string };
-        const kind = body.agent_kind ?? "unknown";
+      if (url.includes("/api/agent/register-batch")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { agents?: Array<{ agent_kind?: string }> };
+        const agents = body.agents ?? [];
         return jsonResponse(201, {
-          claim_url: `http://localhost:3000/claim/${kind}`,
-          claim_id: `claim-${kind}`,
-          setup_code: `setup-${kind}`,
-          expires_at: "2030-01-01T00:00:00Z",
+          batch_id: "batch-1",
+          batch_url: "http://localhost:3000/claim/batch/batch-1",
+          claims: agents.map((agent) => ({
+            agent_kind: agent.agent_kind,
+            claim_id: `claim-${agent.agent_kind}`,
+            setup_code: `setup-${agent.agent_kind}`,
+            expires_at: "2030-01-01T00:00:00Z",
+          })),
         });
       }
       if (url.includes("/api/agent/claim-status")) {
@@ -1746,12 +1865,15 @@ test("connect --agents registers every listed kind in one command, each through 
   assert.equal(code, 0);
   assert.ok(files.has(agentLocalPath(CWD, "claude-code")), "claude-code must be connected");
   assert.ok(files.has(agentLocalPath(CWD, "codex")), "codex must be connected");
-  const registerCalls = requests.filter((r) => r.url.includes("/api/agent/register"));
-  assert.equal(registerCalls.length, 2, "each kind gets its own real claim -- no shared/batched bypass");
+  const registerCalls = requests.filter((r) => r.url.includes("/api/agent/register-batch"));
+  assert.equal(registerCalls.length, 1, "all new kinds use one grouped registration request");
+  assert.equal(requests.filter((r) => r.url.includes("/api/agent/claim-status")).length, 2);
   const text = out.join("\n");
   assert.match(text, /Connecting 2 agents: claude-code, codex/);
-  assert.match(text, /claude-code: connected/);
-  assert.match(text, /codex: connected/);
+  assert.match(text, /approve all new connections once/);
+  assert.match(text, /claim\/batch\/batch-1/);
+  assert.match(text, /claude-code: registered/);
+  assert.match(text, /codex: registered/);
 });
 
 test("connect with no --agents and no probe support fails honestly instead of silently connecting nothing", async () => {
@@ -1767,8 +1889,8 @@ test("connect auto-detects via probeVersion when --agents is omitted", async () 
     env: { OATHLOCK_API_URL: "http://localhost:3000" },
     probeVersion: async (binary) => (binary === "opencode" ? "opencode, 1.2.3" : null),
     router: (url) => {
-      if (url.includes("/api/agent/register")) {
-        return jsonResponse(201, { claim_url: "http://localhost:3000/claim/oc", claim_id: "oc", setup_code: "oc-code", expires_at: "2030-01-01T00:00:00Z" });
+      if (url.includes("/api/agent/register-batch")) {
+        return jsonResponse(201, { batch_id: "batch-oc", batch_url: "http://localhost:3000/claim/batch/batch-oc", claims: [{ agent_kind: "opencode", claim_id: "oc", setup_code: "oc-code", expires_at: "2030-01-01T00:00:00Z" }] });
       }
       if (url.includes("/api/agent/claim-status")) {
         return jsonResponse(200, { status: "approved", token: "oak_oc_token", scopes: ["rules:read"] });
@@ -1788,6 +1910,83 @@ test("connect auto-detects via probeVersion when --agents is omitted", async () 
 // ---------------------------------------------------------------------------
 // connect / init: cross-agent memory-capture wiring (item #35)
 // ---------------------------------------------------------------------------
+
+test("capture install repairs a Claude Code hook from an existing M9R connection without opening a new claim", async () => {
+  const { deps, files, out, requests } = makeDeps({
+    env: { CODEX_HOME: "/codex" },
+    files: { [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: "oak_existing_connection" }) },
+  });
+
+  const code = await run(["capture", "install", "--agent-kind", "claude-code"], deps);
+
+  assert.equal(code, 0);
+  assert.equal(requests.length, 0, "repairing local capture must not create or poll a server-side claim");
+  assert.ok(files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  const settings = JSON.parse(files.get(join(CWD, ".claude", "settings.local.json"))!);
+  assert.match(settings.hooks.SessionEnd[0].hooks[0].command, /claude-code/);
+  assert.match(out.join("\n"), /Installed local capture for Claude Code/);
+  assert.match(out.join("\n"), /does not register or authenticate Claude Code/);
+});
+
+test("capture install fails closed without an existing M9R connection", async () => {
+  const { deps, files, err, requests } = makeDeps({ env: { CODEX_HOME: "/codex" } });
+
+  const code = await run(["capture", "install", "--agent-kind", "claude-code"], deps);
+
+  assert.equal(code, 1);
+  assert.equal(requests.length, 0);
+  assert.ok(!files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.ok(!files.has(join(CWD, ".claude", "settings.local.json")));
+  assert.match(err.join("\n"), /requires an existing M9R connection/);
+});
+
+test("capture install rejects unknown provider kinds without writing a partial capture artifact", async () => {
+  const { deps, files, err } = makeDeps({
+    env: { CODEX_HOME: "/codex" },
+    files: { [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: "oak_existing_connection" }) },
+  });
+
+  const code = await run(["capture", "install", "--agent-kind", "aider"], deps);
+
+  assert.equal(code, 1);
+  assert.ok(!files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.match(err.join("\n"), /no local capture integration is available for aider/);
+});
+
+test("capture install honors an explicit OpenCode target when another provider identity is inherited", async () => {
+  const { deps, files, out } = makeDeps({
+    env: { CODEX_HOME: "/codex", OATHLOCK_AGENT_KIND: "opencode" },
+    files: { [agentLocalPath(CWD, "opencode")]: JSON.stringify({ token: "oak_opencode_connection" }) },
+  });
+
+  const code = await run(["capture", "install", "--agent-kind", "opencode"], deps);
+
+  assert.equal(code, 0);
+  assert.ok(files.has(join(CWD, ".opencode", "plugins", "m9r-memory.js")));
+  assert.match(out.join("\n"), /Installed local capture for OpenCode/);
+});
+
+test("capture drain drains the local capture spool without requiring a provider token", async () => {
+  const { deps, out, requests } = makeDeps({
+    drainCapture: async () => ({ drained: 2, failed: 1 }),
+  });
+
+  const code = await run(["capture", "drain"], deps);
+
+  assert.equal(code, 1, "a failed spool record must be visible to scripts and operators");
+  assert.equal(requests.length, 0, "local capture draining must not call the server");
+  assert.match(out.join("\n"), /drained 2 captured session\(s\), 1 failed/);
+});
+
+test("capture drain reports when the local drain implementation is unavailable", async () => {
+  const { deps, err, requests } = makeDeps({});
+
+  const code = await run(["capture", "drain"], deps);
+
+  assert.equal(code, 1);
+  assert.equal(requests.length, 0);
+  assert.match(err.join("\n"), /local capture drain is unavailable/);
+});
 
 function approvedRouter(): Router {
   return (url) => {
@@ -1862,14 +2061,22 @@ test("init for an agent kind with no capture mechanism (e.g. grok-build) connect
 test("connect reports a failure summary and a non-zero exit when one of several agents fails to connect", async () => {
   const { deps, out, err } = makeDeps({
     env: { OATHLOCK_API_URL: "http://localhost:3000" },
-    router: (url, init) => {
-      if (url.includes("/api/agent/register")) {
-        const body = JSON.parse(String(init?.body ?? "{}"));
-        if (body.agent_kind === "codex") return jsonResponse(500, { error: "registration refused" });
-        return jsonResponse(201, { claim_url: "http://localhost:3000/claim/ok", claim_id: "ok", setup_code: "ok-code", expires_at: "2030-01-01T00:00:00Z" });
+    router: (url) => {
+      if (url.includes("/api/agent/register-batch")) {
+        return jsonResponse(201, {
+          batch_id: "batch-mixed",
+          batch_url: "http://localhost:3000/claim/batch/batch-mixed",
+          claims: [
+            { agent_kind: "claude-code", claim_id: "ok-claude", setup_code: "ok-code-claude", expires_at: "2030-01-01T00:00:00Z" },
+            { agent_kind: "codex", claim_id: "ok-codex", setup_code: "ok-code-codex", expires_at: "2030-01-01T00:00:00Z" },
+          ],
+        });
       }
       if (url.includes("/api/agent/claim-status")) {
-        return jsonResponse(200, { status: "approved", token: "oak_ok_token", scopes: ["rules:read"] });
+        const claimId = new URL(url).searchParams.get("claim_id");
+        return claimId === "ok-codex"
+          ? jsonResponse(200, { status: "rejected" })
+          : jsonResponse(200, { status: "approved", token: "oak_ok_token", scopes: ["rules:read"] });
       }
       return jsonResponse(404, { error: "nope" });
     },
@@ -1878,7 +2085,23 @@ test("connect reports a failure summary and a non-zero exit when one of several 
   const code = await run(["connect", "--agents", "claude-code,codex"], deps);
 
   assert.equal(code, 1);
-  assert.match(out.join("\n"), /claude-code: connected/);
+  assert.match(out.join("\n"), /claude-code: registered/);
   assert.match(out.join("\n"), /codex: failed/);
   assert.match(err.join("\n"), /1 of 2 agent connection\(s\) failed/);
+});
+
+test("init reports M9R registration without claiming that the provider process is ready", async () => {
+  const { deps, out } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    router: approvedRouter(),
+  });
+
+  const code = await run(["init", "--agent-kind", "codex", "--skip-bootstrap", "--skip-memory-capture"], deps);
+
+  assert.equal(code, 0);
+  const text = out.join("\n");
+  assert.match(text, /M9R registration approved\./);
+  assert.match(text, /Runtime verification: pending/);
+  assert.match(text, /does not prove provider sign-in or a running provider process/);
+  assert.doesNotMatch(text, /Connected agent:/);
 });

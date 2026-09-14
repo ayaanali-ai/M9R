@@ -118,7 +118,7 @@ test("successful Codex init bootstraps AGENTS.md by default", async () => {
   assert.ok(agentsMd, "AGENTS.md must be created");
   assert.match(agentsMd!, /OATHLOCK:AUTOMATIC-WORKFLOW:START/);
   const text = out.join("\n");
-  assert.match(text, /Connected agent: Codex/);
+  assert.match(text, /Registered agent: Codex/);
   assert.match(text, /Automatic M9R workflow installed in AGENTS\.md/);
   assert.match(text, /Agents can now use M9R during normal repo tasks\./);
 });
@@ -129,7 +129,7 @@ test("successful Claude Code init bootstraps CLAUDE.md", async () => {
   assert.equal(code, 0);
   assert.ok(files.get(join(CWD, "CLAUDE.md")));
   assert.ok(!files.has(join(CWD, "AGENTS.md")), "Claude Code must not write AGENTS.md");
-  assert.match(out.join("\n"), /Connected agent: Claude/);
+  assert.match(out.join("\n"), /Registered agent: Claude/);
   assert.match(out.join("\n"), /Automatic M9R workflow installed in CLAUDE\.md/);
 });
 
@@ -149,6 +149,8 @@ test("bootstrap --agent-kind codex writes the managed block into AGENTS.md", asy
   const content = files.get(join(CWD, "AGENTS.md"))!;
   assert.match(content, /OATHLOCK:AUTOMATIC-WORKFLOW:START v\d+/);
   assert.match(content, /OATHLOCK:AUTOMATIC-WORKFLOW:END/);
+  assert.match(content, /OATHLOCK_RESIDENT_CHILD=1/);
+  assert.match(content, /parent controlled run owns M9R governance/i);
   assert.match(out.join("\n"), /installed in AGENTS\.md/);
 });
 

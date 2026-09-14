@@ -57,6 +57,9 @@ workspace is already connected, reuse the existing connection.
 # First-time setup (no .oathlock/local.json yet):
 npx m9r-cli init                                  # connect this workspace (one-time)
 
+# Connect multiple installed provider CLIs from one shell:
+npx m9r-cli connect --agents claude-code,codex,opencode  # one approval page, one claim per provider
+
 # Every agent run (returning workspace — already connected):
 npx m9r-cli doctor                                # verify setup + API reachability
 npx m9r-cli run start --task "Fix the build"      # makes this run visible in the dashboard
@@ -92,6 +95,9 @@ What the commands do:
   approval before saving a scoped token. If the workspace is already connected,
   \`init\` does nothing and points you to \`doctor\`/\`rules\` — pass \`--force\` only
   to deliberately start a brand-new claim.
+- \`npx m9r-cli connect --agents <kind,kind,...>\` groups new provider claims
+  into one approval page. The page is one human decision, while each provider
+  still receives a separate scoped token and polls its own setup code.
 - On approval the token is written **once** to \`.oathlock/local.json\` in the
   workspace. This file holds your local token — **do not commit it**. Add
   \`.oathlock/\` to \`.gitignore\` (the CLI never prints the full token, only a

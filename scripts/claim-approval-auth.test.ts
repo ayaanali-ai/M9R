@@ -32,6 +32,45 @@ test("AuthForm redirects post-login with a full document navigation", async () =
   assert.doesNotMatch(src, /router\.replace\(/);
 });
 
+test("connect batch keeps per-provider secrets while sharing one human approval URL", async () => {
+  const service = await readFile("src/lib/agent-join-service.ts", "utf8");
+  const registerRoute = await readFile("src/app/api/agent/register-batch/route.ts", "utf8");
+  const cli = await readFile("src/lib/oathlock-cli-core.ts", "utf8");
+  assert.match(service, /registerClaimBatch/);
+  assert.match(service, /setupCode: generateSetupCode\(\)/);
+  assert.match(service, /buildClaimBatchUrl/);
+  assert.match(registerRoute, /validateRegisterInput/);
+  assert.match(registerRoute, /MAX_BATCH_CLAIMS/);
+  assert.match(cli, /\/api\/agent\/register-batch/);
+  assert.match(cli, /approve all new connections once/);
+  assert.match(cli, /claimByKind/);
+  assert.doesNotMatch(registerRoute, /one_time_token|token_hash/);
+});
+
+test("batch approval is one signed-in human action and never exposes token material", async () => {
+  const service = await readFile("src/lib/agent-join-service.ts", "utf8");
+  const route = await readFile("src/app/api/agent/claim/batch/route.ts", "utf8");
+  const page = await readFile("src/app/claim/batch/[batchId]/page.tsx", "utf8");
+  const actions = await readFile("src/components/ClaimBatchActions.tsx", "utf8");
+  assert.match(service, /export async function approveClaimBatch/);
+  assert.match(service, /humanApprovalContext\("approve"\)/);
+  assert.match(service, /assertCanConnectAgent/);
+  assert.match(route, /approveClaimBatch/);
+  assert.match(route, /body\.decision === "approve"/);
+  assert.match(page, /getClaimBatchPublic/);
+  assert.match(actions, /Approve \$\{pendingCount\} connection/);
+  assert.doesNotMatch(page + actions, /setup_code|one_time_token|token_hash|Bearer/);
+});
+
+test("batch claim schema is additive and indexed for public claim-page lookup", async () => {
+  const migration = await readFile("supabase/migrations/20260913010000_agent_claim_batches.sql", "utf8");
+  const baseline = await readFile("supabase-agent-join.sql", "utf8");
+  assert.match(migration, /add column if not exists batch_id uuid/i);
+  assert.match(migration, /idx_agent_claims_batch_id/i);
+  assert.match(baseline, /batch_id UUID/i);
+  assert.match(baseline, /idx_agent_claims_batch_id/i);
+});
+
 test("AuthForm sends sign-in to a safe, validated destination", async () => {
   const src = await readFile("src/components/product/AuthForm.tsx", "utf8");
   assert.match(src, /safeRelativePath\(next\)/);

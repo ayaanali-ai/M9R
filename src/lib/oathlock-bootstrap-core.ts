@@ -20,7 +20,7 @@
 
 import type { SupportedAgentKind } from "@/lib/oathlock-cli-core";
 
-export const OATHLOCK_WORKFLOW_BLOCK_VERSION = 5;
+export const OATHLOCK_WORKFLOW_BLOCK_VERSION = 6;
 
 export const WORKFLOW_START_MARKER = "<!-- OATHLOCK:AUTOMATIC-WORKFLOW:START";
 export const WORKFLOW_END_MARKER = "<!-- OATHLOCK:AUTOMATIC-WORKFLOW:END -->";
@@ -106,6 +106,9 @@ export function buildWorkflowBlock(kind: string): string {
     "Your identity is resolved from your authenticated M9R connection; never infer it from this file or another agent's local files.",
     "Runs and evidence are attributed to that approved connection automatically —",
     "never claim a different agent identity.",
+    "",
+    "Resident provider launches: when `OATHLOCK_RESIDENT_CHILD=1` is present, the parent controlled run owns M9R governance for this task.",
+    "In that case, do not run M9R doctor, rules, whoami, run, inbox, or status commands and do not prepare an M9R Evidence Draft; follow the supplied bounded assignment and return its requested result.",
     ...manualNote,
     "",
     "Apply this workflow automatically to any task that modifies or analyzes this",

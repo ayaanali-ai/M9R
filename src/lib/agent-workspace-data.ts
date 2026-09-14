@@ -402,6 +402,10 @@ export interface WsRule {
 // ---------------------------------------------------------------------------
 
 export type RunBReadiness = "blocked" | "ready" | "mismatch";
+/** Provider authentication is independently observed by a live ACP session.
+ * A M9R registration or heartbeat alone must never be represented as a
+ * provider account being ready. */
+export type ProviderReadiness = "ready" | "unverified";
 
 export interface RunBReadinessView {
   state: RunBReadiness;
@@ -418,8 +422,13 @@ export interface AgentView {
   connectionId: string | null;
   workspaceId: string | null;
   setupCommand: string;
+  /** A human-approved, non-revoked M9R connection row exists. */
+  registered: boolean;
+  /** A recent authenticated M9R runtime is present and can receive live work. */
   connected: boolean;
   connectionStatus?: RunConnectionState;
+  /** Separate from M9R registration/presence; only ACP model discovery proves it. */
+  providerReadiness: ProviderReadiness;
   liveness: ConnectionLiveness | "none";
   repoHint: string | null;
   lastSeenAt: string | null;
@@ -477,16 +486,28 @@ function relativeObservation(value: string | null, nowMs: number): string | null
 /** Pure sourced-state derivation for one Watchfloor workspace. */
 export function deriveAgentWorkspace(agent: AgentView, nowMs = Date.now()): AgentWorkspaceView {
   const current = selectCurrentRun(agent.runs, { agentConnected: agent.connected, nowMs });
+  if (!agent.registered) {
+    return {
+      key: agent.key,
+      label: agent.label,
+      state: "offline",
+      stateLabel: agent.connectionStatus === "revoked" ? "Revoked" : "Not registered",
+      task: "No registered workspace",
+      currentPhase: "Run the connect command and approve it in M9R",
+      confirmed: relativeObservation(agent.lastSeenAt, nowMs),
+      linked: false,
+    };
+  }
   if (!agent.connected) {
     return {
       key: agent.key,
       label: agent.label,
       state: "offline",
-      stateLabel: agent.connectionStatus === "revoked" ? "Revoked" : "Disconnected",
-      task: "No connected workspace",
-      currentPhase: "Connect this provider to M9R",
+      stateLabel: "Registered · Offline",
+      task: "No live authenticated runtime",
+      currentPhase: "Waiting for an authenticated runtime check-in",
       confirmed: relativeObservation(agent.lastSeenAt, nowMs),
-      linked: false,
+      linked: true,
     };
   }
   if (!current) {
@@ -658,7 +679,8 @@ export function buildAgentViews(input: {
   const buildView = (key: AgentKindKey, initial: string, label: string, conn: WsConnection | null): AgentView => {
     // `status = active` is durable registration state. Only a fresh heartbeat
     // makes this connection live on the Watchfloor or eligible for interaction.
-    const connectionActive = conn ? conn.liveness === "active" && (conn.status === "active" || !conn.status) : false;
+    const registered = Boolean(conn && (conn.status === "active" || !conn.status));
+    const connectionActive = registered && conn?.liveness === "active";
     const id = conn ? `connection:${conn.id}` : `kind:${key}`;
     const fallbackRuns = firstConnectionByKind.get(key) === conn?.id ? fallbackRunsByKind.get(key) ?? [] : [];
     const fallbackSessions = firstConnectionByKind.get(key) === conn?.id ? fallbackSessionsByKind.get(key) ?? [] : [];
@@ -696,11 +718,13 @@ export function buildAgentViews(input: {
       label: displayLabel,
       ownerUserId: conn?.owner_user_id ?? null,
       initial,
-      connectionId: connectionActive && conn ? conn.id : null,
+      connectionId: conn?.id ?? null,
       workspaceId: conn?.workspace_id ?? null,
       setupCommand: setupCommandFor(conn?.agent_kind ?? key),
+      registered,
       connected: connectionActive,
       connectionStatus: conn?.status === "revoked" ? "revoked" : connectionActive ? "active" : "unavailable",
+      providerReadiness: conn?.available_models?.length ? "ready" : "unverified",
       liveness: conn ? conn.liveness : "none",
       repoHint: conn?.repo_hint ?? null,
       lastSeenAt: conn?.last_seen_at ?? null,

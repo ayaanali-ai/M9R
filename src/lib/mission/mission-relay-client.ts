@@ -973,6 +973,16 @@ export class MissionRelayClient {
    */
   private armWorkspacePostTimeout(pending: { frame: RelayFrame; resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; attempts: number }): void {
     clearTimeout(pending.timer);
+    // The first confirmation deadline is intentionally short so a dead
+    // socket is detected quickly. Once we have spent that deadline on the
+    // reconnect retry, give the new authenticated socket up to the normal
+    // connection timeout to complete its handshake. A fixed 50ms retry
+    // window made a legitimate reconnect look like a lost post whenever the
+    // host was under load, even though the exact idempotent frame was already
+    // queued for resend.
+    const timeoutMs = pending.attempts === 0
+      ? this.workspacePostTimeoutMs
+      : Math.max(this.workspacePostTimeoutMs, this.connectTimeoutMs);
     pending.timer = setTimeout(() => {
       const queue = this.pendingWorkspacePosts.get(pending.frame.correlationId);
       const index = queue ? queue.indexOf(pending) : -1;
@@ -988,7 +998,7 @@ export class MissionRelayClient {
       if (socket?.readyState === WebSocket.OPEN) socket.terminate();
       else this.scheduleReconnect("Workspace post confirmation timed out; reconnecting to retry the idempotent post.");
       this.armWorkspacePostTimeout(pending);
-    }, this.workspacePostTimeoutMs);
+    }, timeoutMs);
   }
 
   private sendWorkspacePost(socket: WebSocket, pending: { frame: RelayFrame }): void {

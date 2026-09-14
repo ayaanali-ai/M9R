@@ -180,6 +180,15 @@ test("Codex launch uses stdin, JSONL, an ephemeral session, and a bounded sandbo
   assert.equal(spec.shell, false);
 });
 
+test("Codex resident launch keeps project instructions enabled while isolating user config", () => {
+  const spec = buildCodexLaunchSpec(grant);
+  const projectDocIndex = spec.args.indexOf("project_doc_max_bytes=32768");
+  assert.ok(projectDocIndex > -1, "resident Codex must receive a bounded project-doc budget");
+  assert.equal(spec.args[projectDocIndex - 1], "-c");
+  assert.ok(!spec.args.some((arg) => arg === "project_doc_max_bytes=0"), "zero disables AGENTS.md loading");
+  assert.ok(spec.args.includes("--ignore-user-config"), "user config isolation must not disable project instructions");
+});
+
 test("Windows Codex launch avoids the non-executable npm cmd shim without enabling a shell", () => {
   const spec = buildCodexLaunchSpec(grant);
   assert.equal(spec.shell, false);
@@ -212,9 +221,10 @@ test("Claude Code launch is noninteractive, structured, read-only, and does not 
   assert.equal(spec.shell, false);
 });
 
-test("Codex delegated launches disable project instructions and retain Codex identity", () => {
+test("Codex delegated launches retain bounded project instructions and Codex identity", () => {
   const spec = buildCodexLaunchSpec(grant);
-  assert.ok(spec.args.includes("project_doc_max_bytes=0"));
+  assert.ok(spec.args.includes("project_doc_max_bytes=32768"));
+  assert.ok(!spec.args.includes("project_doc_max_bytes=0"));
   assert.match(spec.stdin, /Delegated provider identity: Codex/);
   assert.match(spec.stdin, /Do not run the repository's normal M9R automatic workflow/);
 });

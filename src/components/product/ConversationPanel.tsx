@@ -1131,6 +1131,15 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
           },
           onFrame: (frame: RelayFrame) => {
             if (cancelled) return;
+            // Terminal presence rides the same channel socket as chat
+            // presence. Forward both cosmetic frame types to pane listeners
+            // before the chat-only typing projection consumes its copy;
+            // otherwise the chat branch's return strands terminal tags, and
+            // cursor frames never reach TerminalPane at all.
+            if (frame.type === "participant.typing" || frame.type === "presence.cursor") {
+              for (const listener of ptyFrameListenersRef.current) listener(frame);
+              if (frame.type === "presence.cursor") return;
+            }
             if (frame.type.startsWith("pty.")) {
               if (frame.type === "pty.state") {
                 const payload = frame.payload && typeof frame.payload === "object" ? frame.payload as { sessionId?: unknown; status?: unknown; title?: unknown; ownerParticipantId?: unknown; shared?: unknown; linkedSessionIds?: unknown } : {};

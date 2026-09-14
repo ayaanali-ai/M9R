@@ -43,9 +43,12 @@ import {
   buildOpenCodeMemoryPlugin,
   CAPTURE_HOOK_SCRIPT_SOURCE,
   CAPTURE_HOOK_RELATIVE_PATH,
+  CAPTURE_HOOK_MARKER,
+  OPENCODE_CAPTURE_MARKER,
 } from "@/lib/cross-agent-capture-setup-core";
+import { HEARTBEAT_PROTOCOL_VERSION } from "@/lib/agent-heartbeat";
 
-/** Actions this CLI currently implements. Heartbeat is intentionally excluded — this CLI never calls it. */
+/** Actions this CLI currently implements. */
 const CLI_IMPLEMENTED_ACTIONS = ["heartbeat", "rules_read", "inbox_read", "assignment_lifecycle", "run_lifecycle", "work_signal_emit", "work_signal_replay", "work_signal_ack", "evidence_submit", "token_rotation"];
 
 export const DEFAULT_API_URL = "https://m9r-dashboard.onrender.com";
@@ -95,6 +98,8 @@ export interface CliDeps {
    * rather than silently reporting nothing installed.
    */
   probeVersion?: VersionProbe;
+  /** Local-only capture spool drain, wired by the real entrypoint and injected in tests. */
+  drainCapture?(): Promise<{ drained: number; failed: number }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +219,12 @@ interface LocalState {
   scopes?: string[];
   claim_id?: string;
   saved_at?: string;
+}
+
+interface PreRegisteredClaim {
+  claim_id: string;
+  setup_code: string;
+  expires_at?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -880,6 +891,75 @@ async function installCrossAgentCapture(deps: CliDeps, kind: string): Promise<{ 
   }
 }
 
+/**
+ * Repair the local capture integration without repeating the human approval
+ * claim. This deliberately authorizes from the *current runtime's* existing
+ * local M9R token, while allowing an explicitly named target provider: the
+ * operation only writes repo-local hook/plugin files and never represents the
+ * target as registered or authenticated with the M9R service.
+ */
+async function cmdCapture(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
+  const sub = parsed.positionals[0];
+  if (sub === "drain" && parsed.positionals.length === 1 && !parsed.agentKind) {
+    if (!deps.drainCapture) {
+      deps.err("capture drain: local capture drain is unavailable in this CLI build.");
+      return 1;
+    }
+    try {
+      const result = await deps.drainCapture();
+      deps.out(`drained ${result.drained} captured session(s)${result.failed > 0 ? `, ${result.failed} failed` : ""}`);
+      return result.failed > 0 ? 1 : 0;
+    } catch (error) {
+      deps.err(`capture drain: ${error instanceof Error ? error.message : "local capture drain failed"}`);
+      return 1;
+    }
+  }
+  if (sub !== "install" || parsed.positionals.length !== 1) {
+    deps.err("Usage: m9r-cli capture install [--agent-kind claude-code|codex|opencode]\n       m9r-cli capture drain");
+    return 1;
+  }
+
+  const requested = parsed.agentKind?.trim().toLowerCase();
+  if (requested && !AGENT_KIND_SLUG_PATTERN.test(requested)) {
+    deps.err("agent kind must be lowercase letters, numbers, and hyphens only (1-40 characters, no leading/trailing hyphen).");
+    return 1;
+  }
+  // An explicit target may be a sibling provider in the same repo. Prefer its
+  // scoped profile when present, then fall back to the current runtime's
+  // profile so `codex capture install --agent-kind claude-code` remains a
+  // valid local repair operation without creating a new claim.
+  const local = await readLocal(deps, requested) ?? await readLocal(deps);
+  if (!local?.token) {
+    deps.err("capture install requires an existing M9R connection for this runtime. Reconnect with: npx m9r-cli init");
+    return 1;
+  }
+
+  const inferred = requested ? { kind: requested } : resolveAgentKind(undefined, deps.env);
+  if (!inferred.kind) {
+    deps.err(`capture install: ${inferred.error}`);
+    return 1;
+  }
+  if (inferred.kind !== "claude-code" && inferred.kind !== "codex" && inferred.kind !== "opencode") {
+    deps.err(`capture install: no local capture integration is available for ${inferred.kind}. Supported providers: claude-code, codex, opencode.`);
+    return 1;
+  }
+
+  const capture = await installCrossAgentCapture(deps, inferred.kind);
+  if (!capture.installed) {
+    deps.err("capture install: local capture could not be installed. The existing M9R connection was not changed.");
+    return 1;
+  }
+  const providerLabel = inferred.kind === "claude-code"
+    ? "Claude Code"
+    : inferred.kind === "opencode"
+      ? "OpenCode"
+      : "Codex";
+  deps.out(`Installed local capture for ${providerLabel}.`);
+  if (capture.note) deps.out(capture.note);
+  deps.out(`This local setup does not register or authenticate ${providerLabel} with M9R.`);
+  return 0;
+}
+
 /** Install/update the managed workflow block. Shared by bootstrap and init. */
 async function installWorkflow(deps: CliDeps, kind: string): Promise<{ ok: boolean; file: string; action: string }> {
   const target = bootstrapTargetFor(kind);
@@ -999,7 +1079,13 @@ async function cmdInit(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
  * downstream (that's the one-time-consume claim token, unchanged here), so
  * looping this same sequence per detected kind introduces no new bypass.
  */
-async function connectOneAgent(deps: CliDeps, agentKind: string, parsed: ParsedArgs): Promise<number> {
+async function connectOneAgent(
+  deps: CliDeps,
+  agentKind: string,
+  parsed: ParsedArgs,
+  preRegistered?: PreRegisteredClaim,
+  options: { showApprovalPrompt?: boolean } = {},
+): Promise<number> {
   let adapterConfig: ProviderAdapterConfig | null = null;
   if (parsed.adapterCommand || parsed.adapterArgs || parsed.adapterShell) {
     let args: unknown = [];
@@ -1032,8 +1118,19 @@ async function connectOneAgent(deps: CliDeps, agentKind: string, parsed: ParsedA
   if (!parsed.force) {
     const existing = await readLocal(deps, agentKind);
     if (existing?.token) {
-      deps.out("This workspace already appears connected to M9R.");
-      deps.out("  (token present in the current runtime's agent profile)");
+      const activity = await readConnectionActivity(deps, existing.token, agentKind);
+      if (!activity.ok) {
+        deps.err(`This workspace has a local ${agentKindLabel(agentKind)} token, but M9R could not verify it as active.`);
+        deps.err(`No new claim was created. Reconnect explicitly with: npx m9r-cli init --force --agent-kind ${agentKind}`);
+        return 1;
+      }
+      if (activity.authenticated) {
+        deps.out("This workspace is connected to M9R.");
+        deps.out("  (a real provider authentication was observed by the server)");
+      } else {
+        deps.out("This workspace is registered with M9R, but no provider process has authenticated yet.");
+        deps.out("  (the local token exists; the server has not observed its first provider use)");
+      }
       deps.out("No new claim was created. To use the existing connection:");
       deps.out("  npx m9r-cli doctor   # verify setup + API reachability");
       deps.out("  npx m9r-cli rules    # fetch active workspace rules");
@@ -1055,11 +1152,13 @@ async function connectOneAgent(deps: CliDeps, agentKind: string, parsed: ParsedA
     consent_mode: "human_required",
   };
 
-  const reg = await apiFetch(deps, `${base}/api/agent/register`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(registerBody),
-  });
+  const reg: ApiResult = preRegistered
+    ? { ok: true, status: 201, json: preRegistered as unknown as Record<string, unknown>, text: "" }
+    : await apiFetch(deps, `${base}/api/agent/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(registerBody),
+      });
   if (!reg.ok || !reg.json) {
     deps.err(`init failed: ${describeFailure(reg)}`);
     return 1;
@@ -1068,21 +1167,23 @@ async function connectOneAgent(deps: CliDeps, agentKind: string, parsed: ParsedA
   const claimUrl = String(reg.json.claim_url || "");
   const claimId = String(reg.json.claim_id || "");
   const setupCode = String(reg.json.setup_code || ""); // secret, kept in memory only
-  if (!claimUrl || !claimId || !setupCode) {
+  if ((!preRegistered && !claimUrl) || !claimId || !setupCode) {
     deps.err("init failed: register response missing claim_url/claim_id/setup_code.");
     return 1;
   }
 
-  deps.out("");
-  deps.out("Have the repo owner approve this connection:");
-  deps.out(`  ${claimUrl}`);
-  if (reg.json.expires_at) deps.out(`  (expires ${String(reg.json.expires_at)})`);
-  deps.out("");
-  if (deps.openUrl) {
-    try {
-      await deps.openUrl(claimUrl);
-    } catch {
-      /* opening the browser is best-effort */
+  if (options.showApprovalPrompt !== false) {
+    deps.out("");
+    deps.out("Have the repo owner approve this connection:");
+    deps.out(`  ${claimUrl}`);
+    if (reg.json.expires_at) deps.out(`  (expires ${String(reg.json.expires_at)})`);
+    deps.out("");
+    if (deps.openUrl && claimUrl) {
+      try {
+        await deps.openUrl(claimUrl);
+      } catch {
+        /* opening the browser is best-effort */
+      }
     }
   }
 
@@ -1144,10 +1245,11 @@ async function connectOneAgent(deps: CliDeps, agentKind: string, parsed: ParsedA
       }
 
       deps.out("");
-      deps.out("Connection approved.");
+      deps.out("M9R registration approved.");
       deps.out(`  token  ${maskToken(token)} (saved to ${M9R_DIR}/agents/${agentKind}/local.json)`);
       deps.out(`  scopes ${scopes.join(", ") || "(none)"}`);
-      deps.out(`Connected agent: ${agentKindLabel(agentKind)}`);
+      deps.out(`Registered agent: ${agentKindLabel(agentKind)}`);
+      deps.out("Runtime verification: pending — this confirms the M9R registration; it does not prove provider sign-in or a running provider process.");
 
       // Install the repo-native automatic workflow so the connected agent uses
       // M9R during normal tasks. Opt out with --skip-bootstrap. A bootstrap
@@ -1195,7 +1297,8 @@ async function connectOneAgent(deps: CliDeps, agentKind: string, parsed: ParsedA
  * `m9r connect` — one command that discovers which coding-agent CLIs are
  * actually installed on this machine (Claude Code, Codex, OpenCode) and
  * connects every one the human wants, instead of requiring `init` to be
- * re-run separately from inside each agent's own terminal.
+ * re-run separately from inside each agent's own terminal. New providers are
+ * grouped into one human approval page; their provider tokens remain separate.
  *
  * Honest about what this does and does not prove: detection (a real
  * `--version` probe finding the binary on PATH) only means that CLI is
@@ -1234,21 +1337,86 @@ async function cmdConnect(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
     kinds = detected.map((a) => a.kind);
   }
 
+  kinds = [...new Set(kinds)];
+
   deps.out("");
   deps.out(`Connecting ${kinds.length} agent${kinds.length === 1 ? "" : "s"}: ${kinds.join(", ")}`);
 
+  // Keep already-connected providers on their existing connection. Only new
+  // providers enter the grouped claim flow, so reconnecting one provider does
+  // not unexpectedly create a new claim for every other provider in the repo.
   const results: Array<{ kind: string; code: number }> = [];
+  const pendingKinds: string[] = [];
   for (const kind of kinds) {
+    if (!parsed.force && (await readLocal(deps, kind))?.token) {
+      deps.out("");
+      deps.out(`--- ${agentKindLabel(kind)} (${kind}) ---`);
+      results.push({ kind, code: await connectOneAgent(deps, kind, parsed) });
+    } else {
+      pendingKinds.push(kind);
+    }
+  }
+
+  if (pendingKinds.length > 0) {
+    const base = apiBase(deps.env);
+    const repoHint = parsed.repo || deps.env.OATHLOCK_REPO_HINT || basename(deps.cwd) || "workspace";
+    const registerBodies = pendingKinds.map((agentKind) => ({
+      agent_kind: agentKind,
+      repo_hint: repoHint,
+      rule_targets: DEFAULT_RULE_TARGETS,
+      capabilities: DEFAULT_CAPABILITIES,
+      consent_mode: "human_required",
+    }));
     deps.out("");
-    deps.out(`--- ${agentKindLabel(kind)} (${kind}) ---`);
-    const code = await connectOneAgent(deps, kind, parsed);
-    results.push({ kind, code });
+    deps.out(`Creating one approval page for ${pendingKinds.length} new provider connection${pendingKinds.length === 1 ? "" : "s"}…`);
+    const reg = await apiFetch(deps, `${base}/api/agent/register-batch`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agents: registerBodies }),
+    });
+    if (!reg.ok || !reg.json) {
+      deps.err(`connect failed while creating the approval batch: ${describeFailure(reg)}`);
+      for (const kind of pendingKinds) results.push({ kind, code: 1 });
+    } else {
+      const batchUrl = String(reg.json.batch_url || "");
+      const claims = Array.isArray(reg.json.claims) ? reg.json.claims as Array<Record<string, unknown>> : [];
+      const claimByKind = new Map<string, PreRegisteredClaim>();
+      for (const claim of claims) {
+        const kind = String(claim.agent_kind || "");
+        const claimId = String(claim.claim_id || "");
+        const setupCode = String(claim.setup_code || "");
+        if (kind && claimId && setupCode) claimByKind.set(kind, { claim_id: claimId, setup_code: setupCode, expires_at: String(claim.expires_at || "") });
+      }
+      if (!batchUrl || claimByKind.size !== pendingKinds.length) {
+        deps.err("connect failed: batch registration returned incomplete approval data.");
+        for (const kind of pendingKinds) results.push({ kind, code: 1 });
+      } else {
+        deps.out("");
+        deps.out("Have the repo owner approve all new connections once:");
+        deps.out(`  ${batchUrl}`);
+        if (reg.json.expires_at) deps.out(`  (claims expire ${String(reg.json.expires_at)})`);
+        deps.out("");
+        if (deps.openUrl) {
+          try {
+            await deps.openUrl(batchUrl);
+          } catch {
+            /* opening the browser is best-effort */
+          }
+        }
+        for (const kind of pendingKinds) {
+          deps.out("");
+          deps.out(`--- ${agentKindLabel(kind)} (${kind}) ---`);
+          const claim = claimByKind.get(kind);
+          results.push({ kind, code: claim ? await connectOneAgent(deps, kind, parsed, claim, { showApprovalPrompt: false }) : 1 });
+        }
+      }
+    }
   }
 
   deps.out("");
   deps.out("Summary:");
   for (const result of results) {
-    deps.out(`  ${result.kind}: ${result.code === 0 ? "connected" : "failed"}`);
+    deps.out(`  ${result.kind}: ${result.code === 0 ? "registered" : "failed"}`);
   }
   const failures = results.filter((r) => r.code !== 0);
   if (failures.length > 0) {
@@ -1423,7 +1591,7 @@ async function cmdHeartbeat(deps: CliDeps): Promise<number> {
     method: "POST",
     headers: { authorization: `Bearer ${local.token}`, "content-type": "application/json" },
     body: JSON.stringify({
-      protocolVersion: "oathlock.presence.v1",
+      protocolVersion: HEARTBEAT_PROTOCOL_VERSION,
       adapterInstanceId,
       sequence: clientSequence,
       executionOrigin: "linked",
@@ -2499,6 +2667,8 @@ async function cmdDoctor(deps: CliDeps): Promise<number> {
   const hasToken = Boolean(local?.token);
   check(hasToken, "token present");
 
+  await reportCaptureStatus(deps);
+
   // API base is informational, but always reported.
   deps.out(`[INFO] API base: ${base}`);
 
@@ -2543,6 +2713,118 @@ async function cmdDoctor(deps: CliDeps): Promise<number> {
   }
 
   return failed ? 1 : 0;
+}
+
+async function readConnectionActivity(
+  deps: CliDeps,
+  token: string,
+  expectedAgentKind: string,
+): Promise<{ ok: boolean; authenticated: boolean }> {
+  const res = await apiFetch(deps, `${apiBase(deps.env)}/api/agent/connection-status`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!res.ok || !res.json) return { ok: false, authenticated: false };
+  const actualKind = typeof res.json.agentKind === "string" ? res.json.agentKind.trim().toLowerCase() : "";
+  if (actualKind !== expectedAgentKind.trim().toLowerCase()) {
+    deps.err(`connection status refused: this token authenticates as ${actualKind || "an unknown provider"}, not ${expectedAgentKind}.`);
+    return { ok: false, authenticated: false };
+  }
+  return { ok: true, authenticated: res.json.authenticated === true && typeof res.json.lastUsedAt === "string" };
+}
+
+type CaptureDoctorStatus = {
+  kind: string;
+  installed: boolean;
+  active: "yes" | "no" | "unknown";
+  detail: string;
+};
+
+async function fileContains(deps: CliDeps, path: string, marker: string): Promise<boolean> {
+  if (!(await deps.fileExists(path))) return false;
+  try {
+    return (await deps.readFile(path)).includes(marker);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Inspect only the current runtime's provider artifact. Capture is an
+ * additive convenience, so a missing artifact is a warning rather than a
+ * failed authentication/connection check. "Active" is deliberately honest:
+ * Codex exposes a local hook trust gate that cannot be inferred from the
+ * presence of hooks.json alone.
+ */
+async function inspectCaptureStatus(deps: CliDeps): Promise<CaptureDoctorStatus | null> {
+  const kind = detectedAgentKind(deps.env);
+  if (!kind) return null;
+
+  if (kind === "claude-code") {
+    const script = await fileContains(deps, join(deps.cwd, CAPTURE_HOOK_RELATIVE_PATH), "pending.jsonl");
+    const settings = await fileContains(deps, join(deps.cwd, ".claude", "settings.local.json"), CAPTURE_HOOK_MARKER);
+    return {
+      kind,
+      installed: script && settings,
+      active: script && settings ? "yes" : "no",
+      detail: script && settings
+        ? "SessionEnd hook configured in .claude/settings.local.json"
+        : "SessionEnd hook or shared capture script is missing",
+    };
+  }
+
+  if (kind === "codex") {
+    const script = await fileContains(deps, join(deps.cwd, CAPTURE_HOOK_RELATIVE_PATH), "pending.jsonl");
+    const hooks = await fileContains(deps, join(deps.cwd, ".codex", "hooks.json"), CAPTURE_HOOK_MARKER);
+    const installed = script && hooks;
+    return {
+      kind,
+      installed,
+      active: installed ? "unknown" : "no",
+      detail: installed
+        ? "SessionEnd hook configured; run /hooks in Codex once to review and trust it"
+        : "SessionEnd hook or shared capture script is missing",
+    };
+  }
+
+  if (kind === "opencode") {
+    const plugin = await fileContains(deps, join(deps.cwd, ".opencode", "plugins", "m9r-memory.js"), OPENCODE_CAPTURE_MARKER);
+    return {
+      kind,
+      installed: plugin,
+      active: plugin ? "yes" : "no",
+      detail: plugin
+        ? "memory plugin configured; resident backfill covers sessions that miss an idle event"
+        : "memory plugin is missing",
+    };
+  }
+
+  return null;
+}
+
+async function reportCaptureStatus(deps: CliDeps): Promise<void> {
+  const kind = detectedAgentKind(deps.env);
+  const status = await inspectCaptureStatus(deps);
+  if (!kind) {
+    deps.out("[INFO] memory capture: runtime provider not detected; use --agent-kind with capture install to configure it");
+    return;
+  }
+  if (!status) {
+    deps.out(`[INFO] memory capture: no local integration for ${kind}`);
+    return;
+  }
+  if (!status.installed) {
+    deps.out(`[WARN] memory capture installed: no (${agentKindLabel(status.kind)} — ${status.detail}; run m9r-cli capture install --agent-kind ${status.kind})`);
+    deps.out(`[WARN] memory capture active: no`);
+    return;
+  }
+  deps.out(`[PASS] memory capture installed: yes (${agentKindLabel(status.kind)})`);
+  if (status.active === "yes") {
+    deps.out(`[PASS] memory capture active: yes — ${status.detail}`);
+  } else if (status.active === "unknown") {
+    deps.out(`[WARN] memory capture active: not verified — ${status.detail}`);
+  } else {
+    deps.out(`[WARN] memory capture active: no — ${status.detail}`);
+  }
 }
 
 async function cmdWhoami(deps: CliDeps): Promise<number> {
@@ -2650,6 +2932,9 @@ Usage:
   m9r-cli bootstrap [--agent-kind <kind>]   Install/update the automatic agent workflow in repo instructions
   m9r-cli bootstrap status                  Report integration file, installed/missing/outdated, block version
   m9r-cli bootstrap remove                  Remove only the M9R-managed block (user content preserved)
+  m9r-cli capture install [--agent-kind <kind>]
+                                         Install/repair local Claude Code, Codex, or OpenCode memory capture without a new approval claim
+  m9r-cli capture drain                      Drain locally captured sessions into the shared memory catalog (no network call)
   m9r-cli doctor                            Check local setup + API reachability
   m9r-cli whoami                            Show the server-authenticated provider identity
   m9r-cli rotate-token                      Rotate this connection's token (no re-approval needed)
@@ -2726,6 +3011,8 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
       return cmdConnect(deps, parsed);
     case "bootstrap":
       return cmdBootstrap(deps, parsed);
+    case "capture":
+      return cmdCapture(deps, parsed);
     case "rules":
       return cmdRules(deps);
     case "inbox":

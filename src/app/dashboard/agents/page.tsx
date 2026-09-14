@@ -138,20 +138,20 @@ export default async function AgentsDashboardPage() {
   const sessionLinks = sessionRunLinks(runs);
   const { linked: linkedSessions } = partitionSessionsByLink(sessions, sessionLinks);
 
-  // `agent_connections` is a durable registration history. Only fresh
-  // heartbeat-backed connections belong on the live Watchfloor; stale rows
-  // remain in the database for audit/history but must not become cards,
-  // channel members, or relay workspace selectors.
-  const liveConnectionGroups = connectionGroups
-    .filter((group) => group.liveness === "active")
+  // `agent_connections` is durable registration state. Keep every active
+  // registration visible so a quiet runtime is "Registered · Offline", never
+  // falsely "Disconnected". Relay/channel membership remains strictly live.
+  const visibleConnectionGroups = connectionGroups
     .sort((a, b) => {
       const rank = (kind: string) => ({ codex: 0, "claude-code": 1, opencode: 2, "grok-build": 3 }[kind.trim().toLowerCase()] ?? 4);
       return rank(a.agent_kind) - rank(b.agent_kind)
         || a.agent_kind.localeCompare(b.agent_kind)
         || a.latest.id.localeCompare(b.latest.id);
     });
+  const liveConnectionGroups = visibleConnectionGroups
+    .filter((group) => group.liveness === "active");
   const workspaceIds = Array.from(
-    new Set(liveConnectionGroups.map((g) => g.latest.workspace_id).filter((id): id is string => Boolean(id))),
+    new Set(visibleConnectionGroups.map((g) => g.latest.workspace_id).filter((id): id is string => Boolean(id))),
   );
   let relayWorkspaceId: string | null = humanWorkspaceId ?? workspaceIds[0] ?? null;
   if (user) {
@@ -198,7 +198,7 @@ export default async function AgentsDashboardPage() {
   // the normal per-request client. Read-only, and no new exposure: teammate
   // emails are already visible to each other in Settings -> Team.
   const ownerIds = Array.from(
-    new Set(liveConnectionGroups.map((g) => g.latest.created_by).filter((id): id is string => Boolean(id))),
+    new Set(visibleConnectionGroups.map((g) => g.latest.created_by).filter((id): id is string => Boolean(id))),
   );
   const ownerLabelById = new Map<string, string>();
   if (ownerIds.length > 0 && adminDb) {
@@ -210,13 +210,14 @@ export default async function AgentsDashboardPage() {
   }
 
   // --- Shape inputs for the agent-first workspace model ---------------------
-  const wsConnections: WsConnection[] = liveConnectionGroups.map((g) => ({
+  const wsConnections: WsConnection[] = visibleConnectionGroups.map((g) => ({
     id: g.latest.id,
     workspace_id: g.latest.workspace_id,
     agent_kind: g.agent_kind,
     repo_hint: g.repo_hint,
     last_seen_at: g.latest.last_seen_at,
     liveness: g.liveness,
+    status: g.latest.status,
     model: g.latest.model ?? null,
     available_models: g.latest.available_models ?? null,
     owner_label: g.latest.created_by ? ownerLabelById.get(g.latest.created_by) ?? null : null,

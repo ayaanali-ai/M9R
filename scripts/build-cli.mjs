@@ -57,6 +57,10 @@ function build() {
   const captureCoreJs = transpile(captureCoreTs)
     .replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"');
   writeFileSync(resolve(outDir, "cross-agent-capture-core.js"), captureCoreJs);
+  const opencodeBackfillTs = readFileSync(resolve(repoRoot, "src/lib/opencode-capture-backfill-core.ts"), "utf8");
+  const opencodeBackfillJs = transpile(opencodeBackfillTs)
+    .replace(/["']@\/lib\/cross-agent-capture-core["']/g, '"./cross-agent-capture-core.js"');
+  writeFileSync(resolve(outDir, "opencode-capture-backfill-core.js"), opencodeBackfillJs);
 
   const providerAdapterConfigTs = readFileSync(resolve(repoRoot, "packages/runtime-core/src/provider-adapter-config.ts"), "utf8");
   writeFileSync(resolve(outDir, "provider-adapter-config.js"), transpile(providerAdapterConfigTs));
@@ -314,7 +318,8 @@ function build() {
   // writing it to disk, so it gained one real "@/" import.
   const memoryExportCoreTs = readFileSync(resolve(repoRoot, "src/lib/memory-export-core.ts"), "utf8");
   const memoryExportCoreJs = transpile(memoryExportCoreTs)
-    .replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"');
+    .replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"')
+    .replace(/["']@\/lib\/cross-agent-capture-core["']/g, '"./cross-agent-capture-core.js"');
   writeFileSync(resolve(outDir, "memory-export-core.js"), memoryExportCoreJs);
 
   // Item #9 Phase 1a — resident-served real files, no Tauri needed.
@@ -394,7 +399,8 @@ function build() {
     .replace(/["']@\/lib\/adapter-contract["']/g, '"./adapter-contract.js"')
     .replace(/["']@\/lib\/provider-adapter-config["']/g, '"./provider-adapter-config.js"')
     .replace(/["']@\/lib\/agent-detection-core["']/g, '"./agent-detection-core.js"')
-    .replace(/["']@\/lib\/cross-agent-capture-setup-core["']/g, '"./cross-agent-capture-setup-core.js"');
+    .replace(/["']@\/lib\/cross-agent-capture-setup-core["']/g, '"./cross-agent-capture-setup-core.js"')
+    .replace(/["']@\/lib\/agent-heartbeat["']/g, '"./agent-heartbeat.js"');
   writeFileSync(resolve(outDir, "oathlock-cli-core.js"), coreJs);
 
   // 4. Entry — rewrite the "@/lib/oathlock-cli-core" alias to a relative import,
@@ -437,6 +443,10 @@ function build() {
     '"./oathlock-watchdog.js"',
   );
   entryJs = entryJs.replace(
+    /["']@\/lib\/cross-agent-capture-core["']/g,
+    '"./cross-agent-capture-core.js"',
+  );
+  entryJs = entryJs.replace(
     /["']@\/lib\/local-terminal-protocol["']/g,
     '"./local-terminal-protocol.js"',
   );
@@ -463,6 +473,10 @@ function build() {
   entryJs = entryJs.replace(
     /["']\.\.\/src\/lib\/cross-agent-capture-core["']/g,
     '"./cross-agent-capture-core.js"',
+  );
+  entryJs = entryJs.replace(
+    /["']\.\.\/src\/lib\/opencode-capture-backfill-core["']/g,
+    '"./opencode-capture-backfill-core.js"',
   );
   if (!entryJs.startsWith(SHEBANG)) entryJs = SHEBANG + entryJs;
   const entryPath = resolve(outDir, "m9r.js");

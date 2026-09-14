@@ -23,6 +23,7 @@ import {
   DEFAULT_AGENT_SCOPES,
   FORBIDDEN_AGENT_SCOPES,
   buildClaimUrl,
+  buildClaimBatchUrl,
   isExpired,
   claimExpiry,
 } from "../src/lib/agent-join.ts";
@@ -251,6 +252,7 @@ test("baseline response is honest and never invents rules", () => {
 test("claim URL + expiry helpers", () => {
   assert.equal(buildClaimUrl(BASE, "abc"), `${BASE}/claim/abc`);
   assert.equal(buildClaimUrl(BASE + "/", "abc"), `${BASE}/claim/abc`);
+  assert.equal(buildClaimBatchUrl(BASE + "/", "batch-1"), `${BASE}/claim/batch/batch-1`);
   const future = claimExpiry();
   assert.equal(isExpired(future), false);
   assert.equal(isExpired(new Date(Date.now() - 1000).toISOString()), true);

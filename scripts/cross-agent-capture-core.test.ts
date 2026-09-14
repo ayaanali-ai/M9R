@@ -14,6 +14,7 @@ import {
   captureMemoryPath,
   drainCaptureSpool,
   spoolPath,
+  transcriptFingerprint,
   type CaptureJob,
 } from "../src/lib/cross-agent-capture-core.ts";
 
@@ -273,6 +274,58 @@ test("drainCaptureSpool records a failure and clears its line when a transcript 
     assert.equal(result.failed, 1);
     const errorLog = await readFile(join(dir, ".oathlock", "capture", "errors.log"), "utf8");
     assert.match(errorLog, /thr_bad/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("drainCaptureSpool collapses repeated lifecycle jobs for one provider session and keeps the richest export", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m9r-capture-dedup-session-"));
+  try {
+    const sessionId = "ses_duplicate";
+    const shortJob = { provider: "opencode", sessionId, cwd: dir, capturedAtIso: "2026-09-12T00:00:00.000Z", export: { messages: [{ info: { role: "user" }, parts: [{ type: "text", text: "short prompt" }] }] } };
+    const richJob = { provider: "opencode", sessionId, cwd: dir, capturedAtIso: "2026-09-12T00:00:01.000Z", export: { messages: [
+      { info: { role: "user" }, parts: [{ type: "text", text: "short prompt" }] },
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "the complete assistant response survived the duplicate lifecycle events" }] },
+    ] } };
+    await mkdir(join(dir, ".oathlock", "capture"), { recursive: true });
+    await writeFile(spoolPath(dir), `${JSON.stringify(shortJob)}\n${JSON.stringify(richJob)}\n`, "utf8");
+
+    const result = await drainCaptureSpool({ repositoryRoot: dir, readTranscript: async () => "" });
+    assert.deepEqual(result, { drained: 1, failed: 0 });
+    const written = await readFile(join(dir, ".oathlock", "memory", "local", "opencode", `${sessionId}.md`), "utf8");
+    assert.match(written, /complete assistant response survived/);
+    assert.equal((written.match(/\*\*User:\*\*/g) ?? []).length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("drainCaptureSpool skips a local export when an older dashboard-memory file has the same transcript", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m9r-capture-dedup-dashboard-"));
+  try {
+    const transcript = [
+      { sender: "User", body: "Please reconcile the durable capture path for this workspace." },
+      { sender: "Assistant", body: "The dashboard session already contains the completed reconciliation result." },
+    ];
+    const fingerprint = transcriptFingerprint(transcript);
+    assert.ok(fingerprint);
+    const dashboardPath = join(dir, ".oathlock", "memory", "Ayaan", "general", "dashboard-session.md");
+    await mkdir(join(dir, ".oathlock", "memory", "Ayaan", "general"), { recursive: true });
+    await writeFile(dashboardPath, `# Existing dashboard session\n\n**Ayaan:**\n\n${transcript[0].body}\n\n**Claude:**\n\n${transcript[1].body}\n`, "utf8");
+
+    const job = {
+      provider: "opencode",
+      sessionId: "ses_same_transcript",
+      cwd: dir,
+      capturedAtIso: "2026-09-12T00:00:00.000Z",
+      export: { messages: transcript.map((message) => ({ info: { role: message.sender === "User" ? "user" : "assistant" }, parts: [{ type: "text", text: message.body }] })) },
+    };
+    await mkdir(join(dir, ".oathlock", "capture"), { recursive: true });
+    await writeFile(spoolPath(dir), JSON.stringify(job) + "\n", "utf8");
+
+    assert.deepEqual(await drainCaptureSpool({ repositoryRoot: dir, readTranscript: async () => "" }), { drained: 1, failed: 0 });
+    assert.equal(await (async () => { try { await readFile(join(dir, ".oathlock", "memory", "local", "opencode", "ses_same_transcript.md")); return true; } catch { return false; } })(), false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

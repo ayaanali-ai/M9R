@@ -24,6 +24,10 @@
 CREATE TABLE IF NOT EXISTS agent_claims (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
+  -- Shared by claims created in one CLI `connect` invocation. It is only a
+  -- grouping/display key; each claim retains its own setup secret and token.
+  batch_id UUID,
+
   -- Secret the agent uses to poll claim status / retrieve the one-time token.
   -- Stored hashed; the raw value is returned to the agent once at register time.
   setup_code_hash TEXT NOT NULL,
@@ -60,6 +64,7 @@ COMMENT ON TABLE agent_claims IS
 
 CREATE INDEX IF NOT EXISTS idx_agent_claims_status ON agent_claims(status);
 CREATE INDEX IF NOT EXISTS idx_agent_claims_expires ON agent_claims(expires_at);
+CREATE INDEX IF NOT EXISTS idx_agent_claims_batch_id ON agent_claims(batch_id, created_at);
 
 -- ---------------------------------------------------------------------------
 -- agent_connections — a human-approved, persistent agent↔workspace link.
