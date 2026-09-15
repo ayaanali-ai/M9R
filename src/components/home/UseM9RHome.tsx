@@ -8,15 +8,7 @@ import styles from "./UseM9RHome.module.css";
 const GITHUB_URL = "https://github.com/ayaanali-ai/M9R";
 const X_URL = "https://x.com/useM9R";
 
-// The CLI ships one cross-platform entry point -- InstallCommand.tsx in the
-// product surface uses the same line for every host -- so the selector picks
-// the label, not a different command.
-const OSES = ["macOS", "Linux", "Windows"] as const;
 const COMMAND = "npx m9r-cli connect";
-
-// Face height / 2 / tan(60deg): the radius that seats three faces on a drum
-// with no gap or overlap at the seams.
-const DRUM_RADIUS = 11;
 
 /**
  * This page opens its own sheet rather than HomeAuthModal: that modal ships a
@@ -27,26 +19,7 @@ type Panel = "login" | "signup";
 
 export default function UseM9RHome({ configured }: { configured: boolean }) {
   const [panel, setPanel] = useState<Panel | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [rotation, setRotation] = useState(0);
   const [copied, setCopied] = useState(false);
-  const markRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (event: PointerEvent) => {
-      if (markRef.current && !markRef.current.contains(event.target as Node)) setMenuOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
-    };
-    window.addEventListener("pointerdown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
 
   useEffect(() => {
     if (!panel) return;
@@ -73,54 +46,13 @@ export default function UseM9RHome({ configured }: { configured: boolean }) {
     }
   }
 
-  const activeIndex = ((Math.round(rotation / 120) % 3) + 3) % 3;
-
   return (
     <div className={styles.home}>
-      <div className={styles.mark} ref={markRef}>
-        <button
-          type="button"
-          className={styles.markTrigger}
-          aria-expanded={menuOpen}
-          data-open={menuOpen ? "true" : "false"}
-          onClick={() => setMenuOpen((open) => !open)}
-        >
-          <span className={styles.markText}>&quot;@useM9R&quot;</span>
-          <svg className={styles.markChevron} viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" strokeWidth="1.5" />
-          </svg>
-        </button>
-        <div className={styles.menu} data-open={menuOpen ? "true" : "false"} aria-hidden={!menuOpen} />
+      <div className={styles.mark}>
+        <span className={styles.markText}>&quot;@useM9R&quot;</span>
       </div>
 
       <main className={styles.center}>
-        <div className={styles.selector}>
-          <button type="button" className={styles.spin} aria-label="Previous operating system" onClick={() => setRotation((r) => r - 120)}>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 10l5-5 5 5" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg>
-          </button>
-          <div className={styles.drumViewport}>
-            <div className={styles.drum} style={{ transform: `rotateX(${-rotation}deg)` }}>
-              {OSES.map((os, index) => {
-                const angle = index * 120 - rotation;
-                const opacity = Math.max(0, Math.cos((angle * Math.PI) / 180));
-                return (
-                  <span
-                    key={os}
-                    className={styles.face}
-                    style={{ transform: `rotateX(${index * 120}deg) translateZ(${DRUM_RADIUS}px)`, opacity }}
-                    aria-hidden={index !== activeIndex}
-                  >
-                    {os}
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-          <button type="button" className={styles.spin} aria-label="Next operating system" onClick={() => setRotation((r) => r + 120)}>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg>
-          </button>
-        </div>
-
         <div className={styles.commandRow}>
           <span className={styles.commandUnderlined}>
             <code className={styles.command}>{COMMAND}</code>

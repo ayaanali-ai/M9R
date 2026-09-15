@@ -29,64 +29,15 @@
   z-index: 2;
 }
 
-.markTrigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.markText {
+  display: inline-block;
   padding: 4px 8px;
-  border: 0;
-  background: none;
   color: var(--blue);
   font-family: var(--font-caveat), cursive;
   font-weight: 600;
   font-size: 26px;
   line-height: 1;
-  cursor: pointer;
-}
-
-.markText {
   white-space: pre;
-}
-
-.markChevron {
-  width: 13px;
-  height: 13px;
-  transition: transform 160ms ease;
-}
-
-.markTrigger[data-open="true"] .markChevron {
-  transform: rotate(180deg);
-}
-
-/* Borderless, boxless: the dropdown is text on the canvas. */
-.menu {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-4px);
-  transition: opacity 160ms ease, transform 160ms ease;
-}
-
-.menu[data-open="true"] {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(6px);
-}
-
-.menuItem {
-  border: 0;
-  background: none;
-  padding: 4px 8px;
-  color: var(--ink);
-  font: inherit;
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.menuItem:hover {
-  color: var(--ink-soft);
 }
 
 /* 1 -- the command, dead center. */
@@ -101,61 +52,6 @@
   align-items: center;
   justify-content: center;
   gap: 46px;
-}
-
-/* The drum and the command read as one unit, so this pair sits tight. */
-.selector + .commandRow {
-  margin-top: -32px;
-}
-
-.selector {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.spin {
-  display: inline-flex;
-  padding: 4px;
-  border: 0;
-  background: none;
-  color: var(--ink-soft);
-  cursor: pointer;
-}
-
-.spin svg {
-  width: 14px;
-  height: 14px;
-}
-
-.spin:hover {
-  color: var(--ink);
-}
-
-.drumViewport {
-  position: relative;
-  width: 108px;
-  height: 22px;
-  perspective: 300px;
-}
-
-.drum {
-  position: absolute;
-  inset: 0;
-  transform-style: preserve-3d;
-  transition: transform 320ms ease;
-}
-
-.face {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  letter-spacing: 0.02em;
-  color: var(--ink-soft);
-  transition: opacity 320ms ease;
 }
 
 .commandRow {
