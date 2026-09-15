@@ -1,0 +1,427 @@
+/* Six elements on a gray field. 4px base unit, ~46px between floating
+   groups -- the spacing rhythm is the only thing borrowed from the Saigon
+   pass; no display type, no long easing curves. */
+.home {
+  --canvas: #cdcdca;
+  --ink: #101010;
+  --ink-soft: #5a5a57;
+  --blue: #1d4ed8;
+
+  position: relative;
+  min-height: 100vh;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-inter), system-ui, sans-serif;
+  font-weight: 500;
+  overflow-x: hidden;
+}
+
+/* 2 / 3 -- the mark, center-top, and the only color on the page. */
+.mark {
+  position: absolute;
+  top: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  z-index: 2;
+}
+
+.markText {
+  display: inline-block;
+  padding: 4px 8px;
+  color: var(--blue);
+  font-family: var(--font-caveat), cursive;
+  font-weight: 600;
+  font-size: 26px;
+  line-height: 1;
+  white-space: pre;
+}
+
+/* 1 -- the command, dead center. */
+.center {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 46px;
+}
+
+.commandRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.commandUnderlined {
+  position: relative;
+  display: inline-block;
+}
+
+.underline {
+  position: absolute;
+  left: -6px;
+  right: -6px;
+  bottom: -7px;
+  width: calc(100% + 12px);
+  height: 11px;
+  color: var(--ink);
+  overflow: visible;
+}
+
+.command {
+  font-family: var(--font-inter), system-ui, sans-serif;
+  font-weight: 500;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.copy {
+  display: inline-flex;
+  padding: 4px;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.copy svg {
+  width: 15px;
+  height: 15px;
+}
+
+.copy:hover {
+  color: var(--ink);
+}
+
+/* 5 -- bare text, top-right, mirroring the icons opposite it. */
+.getStarted {
+  position: absolute;
+  right: 46px;
+  top: 46px;
+  z-index: 2;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font-family: var(--font-inter), system-ui, sans-serif;
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 160ms ease;
+}
+
+.getStarted:hover {
+  color: var(--ink-soft);
+}
+
+/* 4 -- floating in their own fixed spot, separate from the dropdown. */
+.social {
+  position: absolute;
+  left: 46px;
+  top: 46px;
+  display: flex;
+  gap: 16px;
+  z-index: 2;
+}
+
+.social a {
+  display: inline-flex;
+  color: var(--ink-soft);
+}
+
+.social a:hover {
+  color: var(--ink);
+}
+
+.social svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* 6 */
+.footer {
+  position: absolute;
+  right: 46px;
+  bottom: 46px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.footer a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.footer a:hover {
+  color: var(--ink);
+}
+
+/* --- Auth sheet ---------------------------------------------------------
+   No card: the form sits on a deepened version of the same gray the page
+   already uses, so the sheet reads as the canvas coming forward rather than
+   a white box landing on top of it. Sharp corners, one rule as the only
+   divider, everything else carried by space and weight. */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(16, 16, 16, 0.32);
+  backdrop-filter: blur(6px);
+  animation: sheetDim 160ms ease both;
+}
+
+.sheet {
+  position: relative;
+  width: min(100%, 380px);
+  max-height: min(88dvh, 720px);
+  overflow: auto;
+  padding: 26px 30px 32px;
+  background: var(--canvas);
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  animation: sheetIn 160ms ease both;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(16, 16, 16, 0.28) transparent;
+}
+
+.sheet::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sheet::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sheet::-webkit-scrollbar-thumb {
+  background: rgba(16, 16, 16, 0.28);
+}
+
+.sheetHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 20px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid rgba(16, 16, 16, 0.18);
+}
+
+.sheetMark {
+  font-family: var(--font-caveat), cursive;
+  font-weight: 600;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--blue);
+}
+
+.sheetClose {
+  display: inline-flex;
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.sheetClose svg {
+  width: 14px;
+  height: 14px;
+}
+
+.sheetClose:hover {
+  color: var(--ink);
+}
+
+.sheetForm {
+  min-width: 0;
+}
+
+.sheetForm :global(.auth-card) {
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  gap: 16px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  animation: none;
+  color: var(--ink);
+  font-family: var(--font-inter), system-ui, sans-serif;
+}
+
+.sheetForm :global(.auth-mode-switch) {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid rgba(16, 16, 16, 0.18);
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+  gap: 18px;
+}
+
+.sheetForm :global(.auth-mode-switch button) {
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0 0 10px;
+  margin-bottom: -1px;
+  border-bottom: 1px solid transparent;
+  color: var(--ink-soft);
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.sheetForm :global(.auth-mode-switch .auth-mode-active) {
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+
+.sheetForm :global(.auth-oauth-grid) {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.sheetForm :global(.auth-oauth-btn),
+.sheetForm :global(.auth-input),
+.sheetForm :global(.auth-submit) {
+  border-radius: 0;
+  box-shadow: none;
+  min-height: 42px;
+  background: transparent;
+  border: 1px solid rgba(16, 16, 16, 0.22);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 13.5px;
+}
+
+.sheetForm :global(.auth-oauth-btn) {
+  justify-content: center;
+  gap: 10px;
+}
+
+/* The provider marks ship in brand color; this page has exactly one color. */
+.sheetForm :global(.auth-oauth-btn) svg {
+  filter: grayscale(1);
+}
+
+.sheetForm :global(.auth-oauth-btn:hover),
+.sheetForm :global(.auth-input:focus),
+.sheetForm :global(.auth-submit:hover) {
+  border-color: var(--ink);
+}
+
+.sheetForm :global(.auth-input) {
+  padding-inline: 12px;
+}
+
+.sheetForm :global(.auth-input::placeholder) {
+  color: rgba(16, 16, 16, 0.32);
+}
+
+.sheetForm :global(.auth-submit) {
+  justify-content: center;
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--canvas);
+}
+
+.sheetForm :global(.auth-submit:disabled) {
+  background: transparent;
+  color: rgba(16, 16, 16, 0.32);
+  border-color: rgba(16, 16, 16, 0.22);
+  opacity: 1;
+}
+
+.sheetForm :global(.auth-divider) {
+  color: var(--ink-soft);
+  font-family: var(--font-inter), system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+.sheetForm :global(.auth-divider)::before,
+.sheetForm :global(.auth-divider)::after {
+  background: rgba(16, 16, 16, 0.18);
+}
+
+.sheetForm :global(.auth-divider) span {
+  background: var(--canvas);
+  color: inherit;
+  padding-inline: 10px;
+}
+
+.sheetForm :global(.auth-field label) {
+  color: var(--ink-soft);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.sheetForm :global(.auth-forgot-password),
+.sheetForm :global(.auth-switch-copy button) {
+  color: var(--ink);
+}
+
+.sheetForm :global(.auth-switch-copy),
+.sheetForm :global(.auth-trust-note),
+.sheetForm :global(.auth-requirements) {
+  color: var(--ink-soft);
+}
+
+@keyframes sheetDim {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sheetIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scrim,
+  .sheet {
+    animation: none;
+  }
+}
+
+@media (max-width: 620px) {
+  .getStarted {
+    right: 24px;
+    top: 24px;
+  }
+
+  .social {
+    left: 24px;
+    top: 24px;
+  }
+
+  .footer {
+    left: 24px;
+    right: 24px;
+    bottom: 36px;
+    justify-content: flex-start;
+  }
+}

@@ -1,0 +1,20 @@
+.dot {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 60;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  margin-top: -5px;
+  border-radius: 9999px;
+  background: #0a0a0a;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 150ms ease;
+  will-change: transform;
+}
+
+@media (hover: none) {
+  .dot { display: none; }
+}

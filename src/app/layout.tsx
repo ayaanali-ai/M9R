@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono, Fraunces, Hanken_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Fraunces, Hanken_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono, Inter, Instrument_Serif, PT_Mono, Caveat } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 import AmbientBackground from "@/components/AmbientBackground";
 import PwaRuntime from "@/components/PwaRuntime";
@@ -61,6 +62,49 @@ const ibmPlexMono = IBM_Plex_Mono({
   weight: ["400", "500", "600"],
 });
 
+// Homepage type system: Inter carries nav/body/buttons (500+ only -- the tight
+// tracking needs the extra weight), Instrument Serif appears exactly once inside
+// the headline, PT Mono sets the 11px museum labels.
+const inter = Inter({
+  variable: "--font-inter",
+  subsets: ["latin"],
+  weight: ["500", "600"],
+});
+
+const instrumentSerif = Instrument_Serif({
+  variable: "--font-instrument-serif",
+  subsets: ["latin"],
+  weight: ["400"],
+  style: ["normal", "italic"],
+});
+
+// The homepage "@useM9R" mark is a freehand signature, not set type; Caveat
+// keeps the double quotes legible at 15px where the looser script faces blur.
+const caveat = Caveat({
+  variable: "--font-caveat",
+  subsets: ["latin"],
+  weight: ["500", "600"],
+});
+
+const ptMono = PT_Mono({
+  variable: "--font-pt-mono",
+  subsets: ["latin"],
+  weight: ["400"],
+});
+
+// Stand-in for Agrandir (a licensed Pangram Pangram face -- no free/Google
+// distribution) on the homepage's bold headline. Unbounded is the closest
+// free geometric-display match; swap in real Agrandir woff2 files via
+// next/font/local once licensed, same --font-headline variable name.
+const headlineFont = localFont({
+  variable: "--font-headline",
+  src: [
+    { path: "../../public/m9r-condensed-light.ttf", weight: "200", style: "normal" },
+    { path: "../../public/m9r-condensed-medium.ttf", weight: "500", style: "normal" },
+  ],
+  display: "swap",
+});
+
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title,
@@ -118,7 +162,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} ${fraunces.variable} ${hankenGrotesk.variable} ${ibmPlexSans.variable} ${ibmPlexMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} ${fraunces.variable} ${hankenGrotesk.variable} ${ibmPlexSans.variable} ${ibmPlexMono.variable} ${inter.variable} ${instrumentSerif.variable} ${ptMono.variable} ${caveat.variable} ${headlineFont.variable} h-full antialiased`}
       suppressHydrationWarning
     >
       <head>
