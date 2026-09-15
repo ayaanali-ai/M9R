@@ -1,0 +1,37 @@
+.wrap {
+  position: relative;
+  display: inline-block;
+}
+
+.headline {
+  margin: 0;
+  max-width: 16ch;
+  font-size: clamp(34px, 4.4vw, 62px);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.02;
+  /* Agrandir is a licensed Pangram Pangram face -- swap this stack for the
+     real woff2 files once licensed. Unbounded is the closest free stand-in:
+     a geometric display face with its own quirky character. */
+  font-family: var(--font-headline), var(--font-inter), system-ui, sans-serif;
+  color: var(--ink);
+}
+
+/* The colored duplicate sits exactly on top of the base text and is masked
+   down to a soft blob that trails the cursor -- liquid catching up to the
+   pointer, not lights switching on letter by letter. */
+.colorLayer {
+  position: absolute;
+  inset: 0;
+  color: transparent;
+  background: linear-gradient(120deg,
+    hsl(calc(var(--hue, 0) - 40) 82% 55%),
+    hsl(var(--hue, 0) 82% 52%),
+    hsl(calc(var(--hue, 0) + 40) 82% 55%));
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-mask-image: radial-gradient(var(--radius) circle at var(--lx, -9999px) var(--ly, -9999px), #000 0%, #000 45%, transparent 78%);
+  mask-image: radial-gradient(var(--radius) circle at var(--lx, -9999px) var(--ly, -9999px), #000 0%, #000 45%, transparent 78%);
+  filter: blur(0.4px);
+}

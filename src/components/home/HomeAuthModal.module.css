@@ -1,0 +1,156 @@
+/* Overlay supplies the scrim/rise/back-button shell; this file only styles
+   what sits inside its .content. */
+.grid { display: grid; gap: 0; width: 100%; }
+.grid[data-size="wide"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+
+.pane { padding: 10px 6px 26px; min-width: 0; }
+.mark { display: block; font-size: 20px; line-height: 1; color: #b90020; }
+
+.greeting {
+  margin: 20px 0 22px;
+  font-family: var(--font-inter), system-ui, sans-serif;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.12;
+  color: #0a0a0a;
+}
+.greeting span { display: block; font-weight: 500; color: rgba(10, 10, 10, 0.42); }
+
+.aside {
+  border-left: 1px solid rgba(0, 0, 0, 0.12);
+  padding: 54px 30px 30px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+.asideLabel {
+  margin: 0 0 18px;
+  font-family: var(--font-pt-mono), ui-monospace, monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: rgba(10, 10, 10, 0.5);
+}
+/* Agent plan: a checklist, not a stack of cards. */
+.plan { margin: 0; padding: 0; list-style: none; display: grid; gap: 16px; }
+.plan li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  font-family: var(--font-inter), system-ui, sans-serif;
+}
+.dot {
+  margin-top: 1px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 9999px;
+  font-size: 10px;
+  line-height: 1;
+}
+.plan li[data-live="true"] .dot { background: #0a0a0a; color: #ffffff; }
+.plan li[data-live="false"] .dot { border: 1px solid rgba(0, 0, 0, 0.22); background: transparent; }
+
+.planText { display: grid; gap: 3px; min-width: 0; }
+.planLabel { font-size: 13.5px; font-weight: 500; line-height: 1.35; color: #0a0a0a; }
+.plan li[data-live="false"] .planLabel { color: rgba(10, 10, 10, 0.5); }
+.planNote { font-size: 12px; font-weight: 400; line-height: 1.4; color: rgba(10, 10, 10, 0.5); }
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* --- Restyle the shared AuthForm to this page's chrome rules ------------- */
+.form { min-width: 0; }
+.form :global(.auth-card) {
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  gap: 14px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: #0a0a0a;
+  font-family: var(--font-inter), system-ui, sans-serif;
+}
+.form :global(.auth-mode-switch) {
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 9999px;
+  box-shadow: none;
+}
+.form :global(.auth-mode-switch button) {
+  color: rgba(10, 10, 10, 0.55);
+  font-weight: 500;
+  border-radius: 9999px;
+}
+.form :global(.auth-mode-switch .auth-mode-active) {
+  color: #0a0a0a;
+  background: rgba(0, 0, 0, 0.05);
+  box-shadow: none;
+}
+.form :global(.auth-oauth-grid) { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.form :global(.auth-oauth-btn) {
+  justify-content: center;
+  gap: 10px;
+  min-height: 44px;
+  color: #0a0a0a;
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 9999px;
+  box-shadow: none;
+  font-weight: 500;
+  font-size: 14px;
+}
+.form :global(.auth-divider) {
+  color: rgba(10, 10, 10, 0.45);
+  font-size: 11px;
+  font-family: var(--font-pt-mono), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+.form :global(.auth-divider)::before,
+.form :global(.auth-divider)::after { background: rgba(0, 0, 0, 0.12); }
+.form :global(.auth-divider) span { background: #ffffff; color: inherit; padding-inline: 10px; }
+.form :global(.auth-field label) { color: rgba(10, 10, 10, 0.62); font-weight: 500; }
+.form :global(.auth-input) {
+  color: #0a0a0a;
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 9999px;
+  padding-inline: 18px;
+  min-height: 44px;
+  box-shadow: none;
+}
+.form :global(.auth-input::placeholder) { color: rgba(10, 10, 10, 0.35); }
+.form :global(.auth-submit) {
+  justify-content: center;
+  min-height: 44px;
+  color: #0a0a0a;
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 9999px;
+  box-shadow: none;
+  font-weight: 500;
+}
+.form :global(.auth-submit:disabled) { color: rgba(10, 10, 10, 0.35); background: transparent; opacity: 1; }
+.form :global(.auth-forgot-password),
+.form :global(.auth-switch-copy button) { color: #0a0a0a; }
+.form :global(.auth-switch-copy),
+.form :global(.auth-trust-note),
+.form :global(.auth-requirements) { color: rgba(10, 10, 10, 0.55); }
+
+@media (max-width: 760px) {
+  .grid[data-size="wide"] { grid-template-columns: 1fr; }
+  .aside { border-left: 0; border-top: 1px solid rgba(0, 0, 0, 0.12); padding: 24px; }
+  .pane { padding: 10px 0 22px; }
+}
