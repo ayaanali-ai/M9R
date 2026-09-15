@@ -396,9 +396,23 @@ export class MissionRelayClient {
       });
       socket.on("message", (raw) => {
         try {
+          if (this.socket !== socket) return;
           const parsed = parseRelayFrame(JSON.parse(raw.toString()));
           if (!parsed.ok) return fail(new Error(parsed.error));
-          if (parsed.frame.type === "relay.error") return fail(new Error("Mission Relay rejected Bridge authentication."));
+          if (parsed.frame.type === "relay.error") {
+            const payload = parsed.frame.payload && typeof parsed.frame.payload === "object" ? parsed.frame.payload as { message?: unknown } : {};
+            const message = typeof payload.message === "string" ? payload.message : "Mission Relay rejected the request.";
+            // Authentication errors happen before `relay.ready` and must fail
+            // the connection attempt. Once authenticated, relay.error is a
+            // request-scoped validation/application response: it must reject
+            // only the matching post and leave the healthy socket alive.
+            if (this.socket !== socket || this.connectionState !== "connected") return fail(new Error("Mission Relay rejected Bridge authentication."));
+            if (this.rejectPendingWorkspacePost(parsed.frame.correlationId, message)) return;
+            void Promise.resolve(this.options.onFrame?.(parsed.frame)).catch((error) => {
+              console.error("Mission Relay relay.error observer threw:", error instanceof Error ? error.message : error);
+            });
+            return;
+          }
           if (parsed.frame.type === "relay.ready") {
             clearTimeout(timeout);
             this.reconnectAttempt = 0;
@@ -453,12 +467,15 @@ export class MissionRelayClient {
       });
       socket.once("close", () => {
         this.stopHeartbeat(socket);
-        if (this.ready) this.ready = null;
-        if (this.socket === socket) this.socket = null;
+        const isCurrentSocket = this.socket === socket;
+        if (isCurrentSocket) {
+          this.ready = null;
+          this.socket = null;
+        }
         // Keep unconfirmed posts in memory. The exact same frame is resent
         // after authentication on the next socket, and the server's
         // idempotency key makes a lost response safe to replay.
-        if (!this.explicitlyClosed) this.scheduleReconnect("Mission Relay socket closed.");
+        if (isCurrentSocket && !this.explicitlyClosed) this.scheduleReconnect("Mission Relay socket closed.");
       });
     }).catch((error) => {
       this.ready = null;
@@ -1007,6 +1024,16 @@ export class MissionRelayClient {
       // A send callback error is followed by the socket close path in ws.
       // Leave the pending frame intact so the reconnect can retry it.
     });
+  }
+
+  private rejectPendingWorkspacePost(correlationId: string, message: string): boolean {
+    const queue = this.pendingWorkspacePosts.get(correlationId);
+    const pending = queue?.shift();
+    if (!pending) return false;
+    if (queue && queue.length === 0) this.pendingWorkspacePosts.delete(correlationId);
+    clearTimeout(pending.timer);
+    pending.reject(new Error(message));
+    return true;
   }
 
   private async sendParticipantPresence(socket: WebSocket, input: { missionId: string; participantId: string; state: MissionPresenceState }, workspaceId: string): Promise<void> {

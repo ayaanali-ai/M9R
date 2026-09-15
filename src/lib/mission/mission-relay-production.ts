@@ -28,6 +28,7 @@ import type { WorkspaceTurnTimingEvent, WorkspaceTurnTimingStage, WorkspaceTurnT
 import { decodeWorkspaceCursor, workspaceCursorFromMessage } from "./workspace-cursor";
 import { findPendingEvidenceDecisionTarget, decideChatEvidenceRequestFromMessage } from "../bridge/chat-evidence-service";
 import { buildBoundedWorkspaceSnapshot } from "./workspace-relay-snapshot";
+import { idempotencyIdentityMatches } from "../conversation-idempotency";
 
 interface RelayProductionConfig {
   tokenSecret: string;
@@ -43,7 +44,9 @@ function stringValue(value: unknown, name: string, maxLength = 512): string {
 }
 
 function optionalString(value: unknown, maxLength = 512): string | null {
-  return typeof value === "string" && value.trim().length > 0 && value.length <= maxLength ? value.trim() : null;
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > maxLength) throw new Error("Optional relay field is invalid.");
+  return value.trim();
 }
 
 const WORKSPACE_TIMING_STAGES: readonly WorkspaceTurnTimingStage[] = [
@@ -383,14 +386,17 @@ async function postWorkspaceMessage(input: { principal: MissionRelayPrincipal; f
   const parentMessageId = optionalString(payload.parentMessageId, 256);
   const recipientConnectionId = optionalString(payload.recipientConnectionId ?? payload.recipient_connection_id, 256);
   const idempotencyKey = optionalString(input.frame.idempotencyKey, 256);
+  const kind = payload.kind === undefined || payload.kind === null
+    ? "message"
+    : typeof payload.kind === "string" && ["message", "handoff", "ack", "result", "notice"].includes(payload.kind)
+      ? payload.kind
+      : (() => { throw new Error("Workspace message kind is invalid."); })();
+  const outcome = payload.outcome === undefined || payload.outcome === null
+    ? null
+    : typeof payload.outcome === "string" && ["ok", "failed", "incomplete"].includes(payload.outcome)
+      ? payload.outcome
+      : (() => { throw new Error("Workspace message outcome is invalid."); })();
   const db = workspaceDb();
-  if (idempotencyKey) {
-    const { data: existing, error: existingError } = await db.from("conversation_messages")
-      .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at, correlation_id, idempotency_key")
-      .eq("workspace_id", input.frame.workspaceId).eq("idempotency_key", idempotencyKey).maybeSingle();
-    if (existingError) throw new Error("Workspace message idempotency lookup failed.");
-    if (existing) return { message: { ...existing, reactions: [] }, activity: [], cursor: workspaceCursorFromMessage(existing), idempotentReplay: true };
-  }
   if (parentMessageId) {
     const { data: parent } = await db.from("conversation_messages").select("id").eq("id", parentMessageId).eq("workspace_id", input.frame.workspaceId).eq("conversation_id", input.frame.channelId).maybeSingle();
     if (!parent) throw new Error("parentMessageId must belong to this channel.");
@@ -424,19 +430,53 @@ async function postWorkspaceMessage(input: { principal: MissionRelayPrincipal; f
         return null;
       })
     : null;
+  let dmRecipientConnectionId: string | null = null;
+  if (input.principal.kind === "human" && !evidenceDecisionTarget && channel.channel_kind === "dm") {
+    const { data: participant } = await db.from("conversation_participants")
+      .select("connection_id")
+      .eq("workspace_id", input.frame.workspaceId)
+      .eq("conversation_id", channel.id)
+      .limit(1)
+      .maybeSingle();
+    dmRecipientConnectionId = (participant?.connection_id as string | undefined) ?? null;
+    if (!dmRecipientConnectionId) throw new Error("Direct-message recipient is unavailable.");
+  }
+  const effectiveRecipientConnectionId = recipientConnectionId ?? evidenceDecisionTarget?.agentConnectionId ?? dmRecipientConnectionId;
+  const senderConnectionId = input.principal.kind === "bridge" ? input.principal.id : null;
+  const senderUserId = input.principal.kind === "human" ? input.principal.id : null;
+  if (idempotencyKey) {
+    const { data: existing, error: existingError } = await db.from("conversation_messages")
+      .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at, correlation_id, idempotency_key")
+      .eq("workspace_id", input.frame.workspaceId).eq("idempotency_key", idempotencyKey).maybeSingle();
+    if (existingError) throw new Error("Workspace message idempotency lookup failed.");
+    if (existing) {
+      if (!idempotencyIdentityMatches(existing as Record<string, unknown>, {
+        conversationId: channel.id,
+        senderConnectionId,
+        senderUserId,
+        recipientConnectionId: effectiveRecipientConnectionId,
+        kind,
+        body,
+        parentMessageId,
+        outcome,
+      })) throw new Error("idempotencyKey is already used by another message.");
+      return { message: { ...existing, reactions: [] }, activity: [], cursor: workspaceCursorFromMessage(existing), idempotentReplay: true };
+    }
+  }
   const insert = {
     workspace_id: input.frame.workspaceId,
     conversation_id: channel.id,
-    sender_connection_id: input.principal.kind === "bridge" ? input.principal.id : null,
-    sender_user_id: input.principal.kind === "human" ? input.principal.id : null,
+    sender_connection_id: senderConnectionId,
+    sender_user_id: senderUserId,
     sender_display_name: input.principal.kind === "human" ? "You" : null,
-    recipient_connection_id: recipientConnectionId ?? evidenceDecisionTarget?.agentConnectionId ?? null,
-    kind: typeof payload.kind === "string" && ["message", "handoff", "ack", "result", "notice"].includes(payload.kind) ? payload.kind : "message",
+    sender_kind: input.principal.kind === "human" ? "user" : "connection",
+    recipient_connection_id: effectiveRecipientConnectionId,
+    kind,
     body,
     parent_message_id: parentMessageId,
     correlation_id: input.frame.correlationId,
     idempotency_key: idempotencyKey,
-    outcome: typeof payload.outcome === "string" && ["ok", "failed", "incomplete"].includes(payload.outcome) ? payload.outcome : null,
+    outcome,
   };
   const { data: message, error } = await db.from("conversation_messages").insert(insert).select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at, correlation_id, idempotency_key").single();
   if (error || !message) {
@@ -447,7 +487,17 @@ async function postWorkspaceMessage(input: { principal: MissionRelayPrincipal; f
       const { data: existing } = await db.from("conversation_messages")
         .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at, correlation_id, idempotency_key")
         .eq("workspace_id", input.frame.workspaceId).eq("idempotency_key", idempotencyKey).maybeSingle();
-      if (existing) return { message: { ...existing, reactions: [] }, activity: [], cursor: workspaceCursorFromMessage(existing), idempotentReplay: true };
+      if (existing && idempotencyIdentityMatches(existing as Record<string, unknown>, {
+        conversationId: channel.id,
+        senderConnectionId,
+        senderUserId,
+        recipientConnectionId: effectiveRecipientConnectionId,
+        kind,
+        body,
+        parentMessageId,
+        outcome,
+      })) return { message: { ...existing, reactions: [] }, activity: [], cursor: workspaceCursorFromMessage(existing), idempotentReplay: true };
+      if (existing) throw new Error("idempotencyKey is already used by another message.");
     }
     throw new Error("Workspace message could not be saved.");
   }

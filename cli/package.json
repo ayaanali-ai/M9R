@@ -1,6 +1,6 @@
 {
   "name": "m9r-cli",
-  "version": "0.6.8",
+  "version": "0.6.10",
   "description": "M9R CLI — connect coding agents, report live presence, coordinate bounded assignments, and record human-approved evidence.",
   "type": "module",
   "bin": {

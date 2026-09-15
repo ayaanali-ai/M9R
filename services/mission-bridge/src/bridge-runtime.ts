@@ -932,14 +932,10 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
   } });
   const dynamicSessionStarts = new Map<string, Promise<"not_mentioned" | "available" | "deferred">>();
   // Per-conversation rolling count for the closed-loop nudge (see
-  // buildWorkspaceLoopNudgePrompt above). REST-poll path only for now: this
-  // counter is still only fed from scanWorkspaceMessages's poll loop, not
-  // the two relay handlers below -- a message arriving only via relay isn't
-  // scored here until the next poll catches up. `kind` itself now reaches
-  // handleWorkspaceMessage from all three paths (poll, workspace.event,
-  // workspace.snapshot) as of the loop-prevention fix
-  // (agentAmbientMessageMayWake), so wiring recordWorkspaceLoopSignal into
-  // the relay paths too is a real remaining gap, just not this one.
+  // buildWorkspaceLoopNudgePrompt above). All delivery paths funnel through
+  // handleWorkspaceMessage, which records each message once before routing;
+  // relay-only delivery therefore participates in loop protection immediately
+  // instead of waiting for the next REST poll.
   const workspaceLoopConsecutiveCount = new Map<string, { count: number; lastSignalAtMs: number }>();
   /**
    * A counter with no clock ever conflated "still churning" with "went
@@ -1708,6 +1704,14 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       kind: typeof message.kind === "string" ? message.kind : null,
       outcome: typeof message.outcome === "string" ? message.outcome : null,
     };
+    // A live event can arrive before the first conversation scan has loaded
+    // the channel metadata needed for routing. Do not process or advance it in
+    // that window; the REST scan will re-offer it from the durable cursor.
+    // The cursor check must also happen synchronously before any async session
+    // start, so a poll/relay race cannot process an old event twice.
+    if (!workspaceConversationCreatedAt.has(frame.channelId)) return;
+    const current = decodeWorkspaceCursor(workspaceMessageCursors.get(frame.channelId));
+    if (current && !cursorIsAfter(current, workspaceMessage)) return;
     for (const provider of mentionedWorkspaceProviders(workspaceMessage.body)) workspaceTurnTimingPendingFor({ conversationId: frame.channelId, messageId: workspaceMessage.id, provider, source: "relay" });
     void (async () => {
       const missionId = workspaceConversationMissionIds.get(frame.channelId!) ?? null;

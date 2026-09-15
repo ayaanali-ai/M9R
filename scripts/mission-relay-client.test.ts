@@ -328,6 +328,48 @@ test("Mission Relay retries one unconfirmed workspace post over a reconnect with
   }
 });
 
+test("Mission Relay rejects a request-scoped workspace error without disconnecting the authenticated bridge", async () => {
+  let postCalls = 0;
+  const { server, webSocketServer } = createMissionRelayServer({
+    port: 0,
+    host: "127.0.0.1",
+    authenticator: { authenticate: async ({ workspaceId }) => ({ kind: "bridge", id: "bridge-1", workspaceIds: [workspaceId] }) },
+    loadMissionSnapshot: async () => ({ missionId: "mission-1", activity: [] }),
+    loadWorkspaceSnapshot: async () => ({ cursor: null, messages: [] }),
+    postWorkspaceMessage: async ({ frame }) => {
+      postCalls += 1;
+      const payload = frame.payload as { body?: unknown };
+      if (payload.body === "reject this") throw new Error("workspace message was rejected");
+      return { message: { id: "message-good", recipient_connection_id: null }, frameId: frame.frameId };
+    },
+  });
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Relay did not expose a bound address.");
+  const client = new MissionRelayClient({
+    url: `ws://127.0.0.1:${address.port}`,
+    workspaceId: "workspace-1",
+    credential: "bridge-credential",
+    autoReconnect: false,
+    workspacePostTimeoutMs: 100,
+    connectTimeoutMs: 200,
+  });
+  try {
+    await client.subscribeWorkspace("channel-1");
+    await assert.rejects(
+      client.postWorkspaceMessage({ channelId: "channel-1", kind: "message", body: "reject this", correlationId: "reject-correlation" }),
+      /workspace message was rejected/,
+    );
+    assert.equal(client.isConnected, true, "a request error must not tear down the authenticated bridge socket");
+    const result = await client.postWorkspaceMessage({ channelId: "channel-1", kind: "message", body: "accept this", correlationId: "accept-correlation" });
+    assert.equal((result.message as { id?: string } | undefined)?.id, "message-good");
+    assert.equal(postCalls, 2);
+  } finally {
+    await client.close();
+    await new Promise<void>((resolve) => webSocketServer.close(() => server.close(() => resolve())));
+  }
+});
+
 test("two posts that share one correlationId (bridge-runtime.ts's ack + real reply, by design) both resolve -- neither silently hangs forever", async () => {
   // Regression test for a real production incident: bridge-runtime.ts
   // intentionally threads one correlationId across an entire turn's ack and

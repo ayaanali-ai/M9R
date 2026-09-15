@@ -75,14 +75,24 @@ test("scanWorkspaceMessages reads the workspace cursor before ensureDynamicSessi
   assert.doesNotMatch(between, /\bawait\b/, "no await may sit between the cursor read and ensureDynamicSessionForConversation");
 });
 
-test("the workspace.event relay handler already checks the cursor before ensureDynamicSessionForConversation (unaffected by this bug, kept correct)", () => {
+test("the workspace.event relay handler defers until metadata is loaded and checks cursor freshness before ensureDynamicSessionForConversation", () => {
   const src = read("services/mission-bridge/src/bridge-runtime.ts");
   const handlerStart = src.indexOf('if (frame.type !== "workspace.event") return;');
   assert.ok(handlerStart > -1, "workspace.event handler not found");
   const handlerEnd = src.indexOf("\n  }", handlerStart);
   const handlerBody = src.slice(handlerStart, handlerEnd);
+  const metadataGuardIndex = handlerBody.indexOf("workspaceConversationCreatedAt.has(frame.channelId)");
+  const cursorReadIndex = handlerBody.indexOf("decodeWorkspaceCursor(workspaceMessageCursors.get(frame.channelId))");
+  const freshnessGuardIndex = handlerBody.indexOf("cursorIsAfter(current, workspaceMessage)");
   const ensureIndex = handlerBody.indexOf("await ensureDynamicSessionForConversation(frame.channelId!, missionId, workspaceMessage)");
+  assert.ok(metadataGuardIndex > -1, "workspace.event must wait for the conversation metadata loaded by the REST scan");
+  assert.ok(cursorReadIndex > -1, "workspace.event cursor read not found");
+  assert.ok(freshnessGuardIndex > -1, "workspace.event cursor freshness check not found");
   assert.ok(ensureIndex > -1, "ensureDynamicSessionForConversation call not found in workspace.event handler");
+  assert.ok(metadataGuardIndex < ensureIndex, "metadata must be loaded before the relay event is routed");
+  assert.ok(cursorReadIndex < ensureIndex, "cursor freshness must be decided before async session creation");
+  assert.ok(freshnessGuardIndex < ensureIndex, "stale relay events must be skipped before async session creation");
+  assert.doesNotMatch(handlerBody.slice(cursorReadIndex, ensureIndex), /\bawait\b/, "no await may sit between the relay cursor read and session creation");
 });
 
 test("the workspace-cursor and workspace-scan fetches carry an AbortSignal timeout, so a hung production response can no longer stall a poll cycle forever", () => {

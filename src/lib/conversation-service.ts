@@ -33,6 +33,7 @@ import { requestCancelTurn, latestCancelTurnStatus } from "@/lib/bridge/bridge-c
 import { listMessageTodosForConversations, normalizeMessageTodoEntries, upsertMessageTodos, type MessageTodoState } from "@/lib/bridge/message-todo-service";
 import { listDraftsForConversation, upsertDraftSection, setDraftStatus, type Draft, type DraftStatus } from "@/lib/bridge/conversation-draft-service";
 import type { WorkspaceRole } from "@/lib/workspace-membership-service";
+import { idempotencyIdentityMatches } from "@/lib/conversation-idempotency";
 
 export const ALLOWED_ATTACHMENT_MEDIA_TYPES = new Set([
   "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
@@ -50,6 +51,16 @@ export type ConversationMessageKind = (typeof CONVERSATION_MESSAGE_KINDS)[number
 
 export function isConversationMessageKind(value: unknown): value is ConversationMessageKind {
   return typeof value === "string" && (CONVERSATION_MESSAGE_KINDS as readonly string[]).includes(value);
+}
+
+const CONVERSATION_MESSAGE_OUTCOMES = ["ok", "failed", "incomplete"] as const;
+
+function normalizeOptionalMessageId(value: unknown, field: string, errorCode: "INVALID_PARENT" | "INVALID_RECIPIENT" | "INVALID_RELATED_RUN"): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 256) {
+    throw new AgentJoinError(`${field} is invalid.`, errorCode, 400);
+  }
+  return value.trim();
 }
 
 export interface ConversationMessage {
@@ -251,11 +262,21 @@ export async function sendConversationMessage(
   if (!isConversationMessageKind(input.kind)) {
     throw new AgentJoinError(`kind must be one of: ${CONVERSATION_MESSAGE_KINDS.join(", ")}.`, "INVALID_KIND", 400);
   }
+  const recipientConnectionId = normalizeOptionalMessageId(input.recipientConnectionId, "recipientConnectionId", "INVALID_RECIPIENT");
+  const parentMessageId = normalizeOptionalMessageId(input.parentMessageId, "parentMessageId", "INVALID_PARENT");
+  const relatedRunId = normalizeOptionalMessageId(input.relatedRunId, "relatedRunId", "INVALID_RELATED_RUN");
   const sanitized = sanitizeBody(input.body);
   if (!sanitized.ok) throw new AgentJoinError(sanitized.error, "INVALID_BODY", 400);
   sanitized.body = reformatRunOnListReply(sanitized.body);
+  if (input.idempotencyKey !== undefined && input.idempotencyKey !== null && typeof input.idempotencyKey !== "string") {
+    throw new AgentJoinError("idempotencyKey is invalid.", "INVALID_IDEMPOTENCY_KEY", 400);
+  }
   const idempotencyKey = typeof input.idempotencyKey === "string" ? input.idempotencyKey.trim() : "";
   if (idempotencyKey.length > 256) throw new AgentJoinError("idempotencyKey exceeds 256 characters.", "INVALID_IDEMPOTENCY_KEY", 400);
+  if (input.outcome !== undefined && input.outcome !== null && !CONVERSATION_MESSAGE_OUTCOMES.includes(input.outcome as typeof CONVERSATION_MESSAGE_OUTCOMES[number])) {
+    throw new AgentJoinError(`outcome must be one of: ${CONVERSATION_MESSAGE_OUTCOMES.join(", ")}.`, "INVALID_OUTCOME", 400);
+  }
+  const normalizedOutcome = input.outcome ?? null;
 
   const { assertMayPost } = await import("@/lib/moderation-service");
   try {
@@ -265,7 +286,7 @@ export async function sendConversationMessage(
   }
 
   const participantIds = await requireParticipant(db, agent, input.conversationId);
-  if (input.recipientConnectionId && !participantIds.has(input.recipientConnectionId)) {
+  if (recipientConnectionId && !participantIds.has(recipientConnectionId)) {
     throw new AgentJoinError("recipient is not a participant in this conversation.", "INVALID_RECIPIENT", 400);
   }
   // Anti-loop guard for raw agent-to-agent messaging: this connection's own
@@ -276,18 +297,18 @@ export async function sendConversationMessage(
   // a fresh directed message to someone new always starts back at 0, this
   // is depth-of-one-exchange, not a lifetime message count.
   let replyDepth = 0;
-  if (input.parentMessageId) {
+  if (parentMessageId) {
     const { data: parent } = await db
       .from("conversation_messages")
       .select("id, sender_connection_id, recipient_connection_id, reply_depth")
-      .eq("id", input.parentMessageId)
+      .eq("id", parentMessageId)
       .eq("workspace_id", agent.workspaceId)
       .eq("conversation_id", input.conversationId)
       .maybeSingle();
     if (!parent) throw new AgentJoinError("parent_message_id must reference a message in this conversation.", "INVALID_PARENT", 400);
     const isContinuation = Boolean(
-      input.recipientConnectionId
-      && parent.sender_connection_id === input.recipientConnectionId
+      recipientConnectionId
+      && parent.sender_connection_id === recipientConnectionId
       && parent.recipient_connection_id === agent.connectionId,
     );
     if (isContinuation) {
@@ -304,7 +325,7 @@ export async function sendConversationMessage(
 
   if (idempotencyKey) {
     const { data: existing, error: existingError } = await db.from("conversation_messages")
-      .select("id, conversation_id, sender_connection_id, recipient_connection_id, kind, body, outcome, created_at, parent_message_id, edited_at, deleted_at")
+      .select("id, conversation_id, sender_connection_id, recipient_connection_id, kind, body, outcome, created_at, parent_message_id, edited_at, deleted_at, related_run_id")
       .eq("workspace_id", agent.workspaceId)
       .eq("idempotency_key", idempotencyKey)
       .maybeSingle();
@@ -313,7 +334,16 @@ export async function sendConversationMessage(
       throw new AgentJoinError("Could not verify whether this message was already sent.", "MESSAGE_READ_FAILED", 500);
     }
     if (existing) {
-      if (existing.conversation_id !== input.conversationId || existing.sender_connection_id !== agent.connectionId) throw new AgentJoinError("idempotencyKey is already used by another message.", "IDEMPOTENCY_KEY_CONFLICT", 409);
+      if (!idempotencyIdentityMatches(existing as Record<string, unknown>, {
+        conversationId: input.conversationId,
+        senderConnectionId: agent.connectionId,
+        recipientConnectionId,
+        kind: input.kind,
+        body: sanitized.body,
+        parentMessageId,
+        outcome: normalizedOutcome,
+        relatedRunId,
+      })) throw new AgentJoinError("idempotencyKey is already used by another message.", "IDEMPOTENCY_KEY_CONFLICT", 409);
       return existing as ConversationMessage;
     }
   }
@@ -324,25 +354,36 @@ export async function sendConversationMessage(
       workspace_id: agent.workspaceId,
       conversation_id: input.conversationId,
       sender_connection_id: agent.connectionId,
-      recipient_connection_id: input.recipientConnectionId,
+      recipient_connection_id: recipientConnectionId,
       kind: input.kind,
       body: sanitized.body,
-      parent_message_id: input.parentMessageId ?? null,
+      parent_message_id: parentMessageId,
       idempotency_key: idempotencyKey || null,
-      outcome: input.outcome && ["ok", "failed", "incomplete"].includes(input.outcome) ? input.outcome : null,
-      related_run_id: input.relatedRunId ?? null,
+      outcome: normalizedOutcome,
+      related_run_id: relatedRunId,
       reply_depth: replyDepth,
+      sender_kind: "connection",
     })
     .select("id, conversation_id, sender_connection_id, recipient_connection_id, kind, body, outcome, created_at, parent_message_id, edited_at, deleted_at, related_run_id")
     .single();
   if (error || !message) {
     if (idempotencyKey && error?.code === "23505") {
       const { data: existing } = await db.from("conversation_messages")
-        .select("id, conversation_id, sender_connection_id, recipient_connection_id, kind, body, outcome, created_at, parent_message_id, edited_at, deleted_at")
+        .select("id, conversation_id, sender_connection_id, recipient_connection_id, kind, body, outcome, created_at, parent_message_id, edited_at, deleted_at, related_run_id")
         .eq("workspace_id", agent.workspaceId)
         .eq("idempotency_key", idempotencyKey)
         .maybeSingle();
-      if (existing && existing.conversation_id === input.conversationId && existing.sender_connection_id === agent.connectionId) return existing as ConversationMessage;
+      if (existing && idempotencyIdentityMatches(existing as Record<string, unknown>, {
+        conversationId: input.conversationId,
+        senderConnectionId: agent.connectionId,
+        recipientConnectionId,
+        kind: input.kind,
+        body: sanitized.body,
+        parentMessageId,
+        outcome: normalizedOutcome,
+        relatedRunId,
+      })) return existing as ConversationMessage;
+      if (existing) throw new AgentJoinError("idempotencyKey is already used by another message.", "IDEMPOTENCY_KEY_CONFLICT", 409);
     }
     throw new AgentJoinError("Could not send the message.", "MESSAGE_SEND_FAILED", 500);
   }
@@ -1417,21 +1458,6 @@ export async function sendDashboardConversationMessage(input: { conversationId: 
   const idempotencyKey = typeof input.idempotencyKey === "string" ? input.idempotencyKey.trim() : "";
   if (idempotencyKey.length > 256) throw new AgentJoinError("idempotencyKey exceeds 256 characters.", "INVALID_IDEMPOTENCY_KEY", 400);
   const db = requireService();
-  if (idempotencyKey) {
-    const { data: existing, error: existingError } = await db.from("conversation_messages")
-      .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at")
-      .eq("workspace_id", conversation.workspace_id)
-      .eq("idempotency_key", idempotencyKey)
-      .maybeSingle();
-    if (existingError) {
-      if (isMissingColumnError(existingError)) throw new AgentJoinError("Message retry protection is not available until the latest database migration is applied.", "MIGRATION_REQUIRED", 503);
-      throw new AgentJoinError("Could not verify whether this message was already sent.", "MESSAGE_READ_FAILED", 500);
-    }
-    if (existing) {
-      if (existing.conversation_id !== conversation.id || existing.sender_user_id !== context.user.id) throw new AgentJoinError("idempotencyKey is already used by another message.", "IDEMPOTENCY_KEY_CONFLICT", 409);
-      return { ...(existing as unknown as DashboardConversationMessage), reactions: [], attachments: [], todos: [] };
-    }
-  }
   const { assertMayPost } = await import("@/lib/moderation-service");
   try {
     await assertMayPost(context.workspaceId, "user", context.user.id, conversation.id);
@@ -1469,18 +1495,53 @@ export async function sendDashboardConversationMessage(input: { conversationId: 
     const { data: participant } = await context.auth.from("conversation_participants").select("connection_id").eq("conversation_id", conversation.id).limit(1).maybeSingle();
     dmRecipientConnectionId = (participant?.connection_id as string | undefined) ?? null;
   }
+  const recipientConnectionId = evidenceDecisionTarget?.agentConnectionId ?? dmRecipientConnectionId;
+  if (idempotencyKey) {
+    const { data: existing, error: existingError } = await db.from("conversation_messages")
+      .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at")
+      .eq("workspace_id", conversation.workspace_id)
+      .eq("idempotency_key", idempotencyKey)
+      .maybeSingle();
+    if (existingError) {
+      if (isMissingColumnError(existingError)) throw new AgentJoinError("Message retry protection is not available until the latest database migration is applied.", "MIGRATION_REQUIRED", 503);
+      throw new AgentJoinError("Could not verify whether this message was already sent.", "MESSAGE_READ_FAILED", 500);
+    }
+    if (existing) {
+      if (!idempotencyIdentityMatches(existing as Record<string, unknown>, {
+        conversationId: conversation.id,
+        senderConnectionId: null,
+        senderUserId: context.user.id,
+        recipientConnectionId,
+        kind: "message",
+        body: sanitized.body,
+        parentMessageId: input.parentMessageId ?? null,
+        outcome: null,
+      })) throw new AgentJoinError("idempotencyKey is already used by another message.", "IDEMPOTENCY_KEY_CONFLICT", 409);
+      return { ...(existing as unknown as DashboardConversationMessage), reactions: [], attachments: [], todos: [] };
+    }
+  }
   const { data: message, error } = await db.from("conversation_messages").insert({
     workspace_id: conversation.workspace_id, conversation_id: conversation.id, sender_user_id: context.user.id,
-    sender_display_name: displayNameForUser(context.user), recipient_connection_id: evidenceDecisionTarget?.agentConnectionId ?? dmRecipientConnectionId, kind: "message", body: sanitized.body,
+    sender_display_name: displayNameForUser(context.user), sender_kind: "user", recipient_connection_id: recipientConnectionId, kind: "message", body: sanitized.body,
     parent_message_id: input.parentMessageId ?? null,
     idempotency_key: idempotencyKey || null,
   }).select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at").single();
   if (error || !message) {
     if (idempotencyKey && error?.code === "23505") {
       const { data: existing } = await db.from("conversation_messages")
-        .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at")
+        .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at")
         .eq("workspace_id", conversation.workspace_id).eq("idempotency_key", idempotencyKey).maybeSingle();
-      if (existing && existing.conversation_id === conversation.id && existing.sender_user_id === context.user.id) return { ...(existing as unknown as DashboardConversationMessage), reactions: [], attachments: [], todos: [] };
+      if (existing && idempotencyIdentityMatches(existing as Record<string, unknown>, {
+        conversationId: conversation.id,
+        senderConnectionId: null,
+        senderUserId: context.user.id,
+        recipientConnectionId,
+        kind: "message",
+        body: sanitized.body,
+        parentMessageId: input.parentMessageId ?? null,
+        outcome: null,
+      })) return { ...(existing as unknown as DashboardConversationMessage), reactions: [], attachments: [], todos: [] };
+      if (existing) throw new AgentJoinError("idempotencyKey is already used by another message.", "IDEMPOTENCY_KEY_CONFLICT", 409);
     }
     throw new AgentJoinError("Could not send the message.", "MESSAGE_SEND_FAILED", 500);
   }

@@ -91,7 +91,7 @@ export class MissionRelayBrowserClient {
   private desiredPresence: MissionPresenceState | null = null;
   private desiredTyping = false;
   private readonly huddleMemberships = new Map<string, { muted: boolean }>();
-  private readonly pendingPosts = new Map<string, { resolve: (result: BrowserMissionRelayPostResult) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private readonly pendingPosts = new Map<string, { frame: RelayFrame; resolve: (result: BrowserMissionRelayPostResult) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(options: BrowserMissionRelayClientOptions) {
     this.options = options;
@@ -127,6 +127,7 @@ export class MissionRelayBrowserClient {
       });
       socket.addEventListener("message", (event) => {
         try {
+          if (this.socket !== socket) return;
           const parsed = parseRelayFrame(JSON.parse(String(event.data)));
           if (!parsed.ok) throw new Error(parsed.error);
           const frame = parsed.frame;
@@ -142,6 +143,7 @@ export class MissionRelayBrowserClient {
             }));
             this.syncEphemeralState(socket);
             this.syncHuddleState(socket);
+            for (const pending of this.pendingPosts.values()) this.sendFrame(socket, pending.frame);
             finish();
             return;
           }
@@ -170,19 +172,14 @@ export class MissionRelayBrowserClient {
               ? String((frame.payload as { message: string }).message)
               : "Mission Relay rejected the request.";
             this.options.onStatus?.("error", message);
-            const error = new Error(message);
-            const pending = frame.correlationId ? this.pendingPosts.get(frame.correlationId) : undefined;
-            if (pending) {
-              clearTimeout(pending.timer);
-              this.pendingPosts.delete(frame.correlationId);
-              pending.reject(error);
+            if (this.authenticated && this.socket === socket) {
+              if (frame.correlationId) this.rejectPendingPost(frame.correlationId, message);
+              this.options.onFrame?.(frame);
+              return;
             }
+            const error = new Error(message);
             finish(error);
-            // A relay error is terminal for this socket. Closing it is what
-            // lets the close handler clear transport state and schedule the
-            // bounded reconnect path; leaving it open strands the browser in
-            // a permanent "connection issue" state.
-            closeAfterClientError(socket, "Mission Relay rejected the request.");
+            closeAfterClientError(socket, "Mission Relay authentication failed.");
             return;
           }
           this.options.onFrame?.(frame);
@@ -197,10 +194,14 @@ export class MissionRelayBrowserClient {
         closeAfterClientError(socket, "Mission Relay connection failed.");
       });
       socket.addEventListener("close", () => {
-        this.socket = null;
-        this.authenticated = false;
+        const isCurrentSocket = this.socket === socket;
+        if (isCurrentSocket) {
+          this.socket = null;
+          this.authenticated = false;
+          if (this.options.reconnect === false) this.rejectPendingPosts("Mission Relay connection closed.");
+        }
         if (!settled) finish(new Error("Mission Relay connection closed before authentication."));
-        if (!this.closed && this.options.reconnect !== false) this.scheduleReconnect();
+        if (isCurrentSocket && !this.closed && this.options.reconnect !== false) this.scheduleReconnect();
       });
     }).finally(() => { this.connectTask = null; });
     return this.connectTask;
@@ -220,13 +221,21 @@ export class MissionRelayBrowserClient {
         this.pendingPosts.delete(frame.correlationId);
         reject(new Error("Mission Relay did not confirm the message post in time."));
       }, 15_000);
-      this.pendingPosts.set(frame.correlationId, { resolve, reject, timer });
+      this.pendingPosts.set(frame.correlationId, { frame, resolve, reject, timer });
       try {
-        this.sendFrame(this.socket!, frame);
+        const socket = this.socket;
+        if (!socket) throw new Error("Mission Relay is not connected.");
+        this.sendFrame(socket, frame);
       } catch (error) {
-        clearTimeout(timer);
-        this.pendingPosts.delete(frame.correlationId);
-        reject(error instanceof Error ? error : new Error("Mission Relay message post failed."));
+        if (this.options.reconnect === false) {
+          clearTimeout(timer);
+          this.pendingPosts.delete(frame.correlationId);
+          reject(error instanceof Error ? error : new Error("Mission Relay message post failed."));
+        } else {
+          const socket = this.socket;
+          if (socket) closeAfterClientError(socket, "Mission Relay post send failed.");
+          else this.scheduleReconnect();
+        }
       }
     });
   }
@@ -331,6 +340,23 @@ export class MissionRelayBrowserClient {
       missionId: this.options.missionId,
       payload: { credential },
     }));
+  }
+
+  private rejectPendingPosts(message: string): void {
+    for (const pending of this.pendingPosts.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
+    this.pendingPosts.clear();
+  }
+
+  private rejectPendingPost(correlationId: string, message: string): boolean {
+    const pending = this.pendingPosts.get(correlationId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this.pendingPosts.delete(correlationId);
+    pending.reject(new Error(message));
+    return true;
   }
 
   private sendFrame(socket: WebSocket, frame: RelayFrame): void {
@@ -455,6 +481,7 @@ export class WorkspaceRelayBrowserClient {
       });
       socket.addEventListener("message", (event) => {
         try {
+          if (this.socket !== socket) return;
           const parsed = parseRelayFrame(JSON.parse(String(event.data)));
           if (!parsed.ok) throw new Error(parsed.error);
           const frame = parsed.frame;
@@ -491,16 +518,17 @@ export class WorkspaceRelayBrowserClient {
           if (frame.type === "relay.error") {
             const message = frame.payload && typeof frame.payload === "object" && typeof (frame.payload as { message?: unknown }).message === "string" ? String((frame.payload as { message: string }).message) : "Workspace relay rejected the request.";
             this.options.onStatus?.("error", message);
-            // A relay error is definitive for the queued post. Reject it now
-            // so the caller can use the durable HTTP fallback; waiting for the
-            // 15-second timeout made the composer look stuck. The shared
-            // idempotency key makes that fallback safe if the relay persisted
-            // the post before returning its error.
-            this.rejectPendingPosts(message);
+            // After authentication this is a request-scoped response. Reject
+            // only the post named by the relay correlation id; closing the
+            // whole socket and rejecting every queued composer request made a
+            // single bad post look like a workspace-wide disconnect.
+            if (this.authenticated && this.socket === socket) {
+              if (frame.correlationId) this.rejectPendingPost(frame.correlationId, message);
+              this.options.onFrame?.(frame);
+              return;
+            }
             finish(new Error(message));
-            // Force the close handler to run so transient relay failures can
-            // reconnect instead of leaving the browser socket half-alive.
-            closeAfterClientError(socket, "Workspace relay rejected the request.");
+            closeAfterClientError(socket, "Workspace relay authentication failed.");
             return;
           }
           this.options.onFrame?.(frame);
@@ -513,11 +541,14 @@ export class WorkspaceRelayBrowserClient {
         closeAfterClientError(socket, error.message);
       });
       socket.addEventListener("close", () => {
-        this.socket = null;
-        this.authenticated = false;
-        if (this.options.reconnect === false) this.rejectPendingPosts("Workspace relay connection closed.");
+        const isCurrentSocket = this.socket === socket;
+        if (isCurrentSocket) {
+          this.socket = null;
+          this.authenticated = false;
+          if (this.options.reconnect === false) this.rejectPendingPosts("Workspace relay connection closed.");
+        }
         if (!settled) finish(new Error("Workspace relay closed before authentication."));
-        if (!this.closed && this.options.reconnect !== false) this.scheduleReconnect();
+        if (isCurrentSocket && !this.closed && this.options.reconnect !== false) this.scheduleReconnect();
       });
     }).finally(() => { this.connectTask = null; });
     return this.connectTask;
@@ -531,12 +562,22 @@ export class WorkspaceRelayBrowserClient {
       const pending = { frame, resolve, reject, timer };
       this.pendingPosts.set(frame.correlationId, pending);
       try {
-        this.send(this.socket!, frame);
+        const socket = this.socket;
+        if (!socket) throw new Error("Workspace relay is not connected.");
+        this.send(socket, frame);
       } catch (error) {
         if (this.options.reconnect === false) {
           clearTimeout(timer);
           this.pendingPosts.delete(frame.correlationId);
           reject(error instanceof Error ? error : new Error("Workspace relay message post failed."));
+        } else {
+          // A close can race the post between `connect()` and `send()`. Keep
+          // the exact idempotent frame queued for the reconnect path instead
+          // of leaving a promise waiting for the timeout with no socket able
+          // to deliver it.
+          const socket = this.socket;
+          if (socket) closeAfterClientError(socket, "Workspace relay post send failed.");
+          else this.scheduleReconnect();
         }
       }
     });
@@ -589,6 +630,15 @@ export class WorkspaceRelayBrowserClient {
       pending.reject(new Error(message));
     }
     this.pendingPosts.clear();
+  }
+
+  private rejectPendingPost(correlationId: string, message: string): boolean {
+    const pending = this.pendingPosts.get(correlationId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this.pendingPosts.delete(correlationId);
+    pending.reject(new Error(message));
+    return true;
   }
 
   private syncState(socket: WebSocket): void {

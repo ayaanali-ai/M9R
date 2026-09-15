@@ -26,6 +26,7 @@
  *  - Any token value is redacted from error output before it is shown.
  */
 
+import { randomUUID } from "node:crypto";
 import { join, extname, basename, dirname } from "node:path";
 import {
   agentKindLabel,
@@ -2144,7 +2145,7 @@ async function cmdConversationSend(deps: CliDeps, parsed: ParsedArgs): Promise<n
 
   const res = await apiFetch(deps, `${apiBase(deps.env)}/api/agent/conversations/${encodeURIComponent(parsed.conversation)}/messages`, {
     method: "POST",
-    headers: { authorization: `Bearer ${local.token}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${local.token}`, "content-type": "application/json", "idempotency-key": randomUUID() },
     body: JSON.stringify({ recipient_connection_id: recipientConnectionId, kind, body: parsed.text }),
   });
   if (!res.ok || !res.json) {

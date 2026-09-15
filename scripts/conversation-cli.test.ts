@@ -95,6 +95,7 @@ test("conversation send resolves --to and defaults kind to message, broadcasts w
   ], h.deps);
   assert.equal(code, 0);
   const sendReq = h.requests.find((r) => r.url.includes("/messages"));
+  assert.match(String((sendReq?.init?.headers as Record<string, string>)?.["idempotency-key"]), /^[0-9a-f-]{36}$/i);
   assert.deepEqual(JSON.parse(String(sendReq?.init?.body)), {
     recipient_connection_id: "conn-codex",
     kind: "handoff",

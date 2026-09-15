@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { authenticateAgent, bearerFrom } from "@/lib/agent-join-service";
+import { AgentJoinError, authenticateAgent, bearerFrom } from "@/lib/agent-join-service";
 import { sendConversationMessage, listConversationMessagesForAgent } from "@/lib/conversation-service";
 import { handleAgentError } from "../../../_shared";
 
@@ -12,6 +12,18 @@ import { handleAgentError } from "../../../_shared";
 // messages), optionally only those after ?since=<workspace cursor>.
 // Bearer-token only; caller must be a participant in the conversation.
 // ---------------------------------------------------------------------------
+
+const MESSAGE_OUTCOMES = ["ok", "failed", "incomplete"] as const;
+type MessageOutcome = (typeof MESSAGE_OUTCOMES)[number];
+
+function optionalMessageString(body: Record<string, unknown>, field: string, label: string): string | null {
+  const value = body[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 256) {
+    throw new AgentJoinError(`${label} is invalid.`, `INVALID_${field.toUpperCase()}`, 400);
+  }
+  return value.trim();
+}
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -33,16 +45,34 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // conversation-service.ts) was silently dead here. A retried
     // send_message/postWorkspaceResult call had no protection against
     // posting a genuine duplicate.
-    const idempotencyKey = req.headers.get("idempotency-key")
-      ?? (typeof body.idempotency_key === "string" ? body.idempotency_key : null);
+    const headerIdempotencyKey = req.headers.get("idempotency-key");
+    const bodyIdempotencyKey = body.idempotency_key;
+    if (headerIdempotencyKey !== null && (headerIdempotencyKey.trim().length === 0 || headerIdempotencyKey.length > 256)) {
+      throw new AgentJoinError("idempotency-key header is invalid.", "INVALID_IDEMPOTENCY_KEY", 400);
+    }
+    if (bodyIdempotencyKey !== undefined && bodyIdempotencyKey !== null && (typeof bodyIdempotencyKey !== "string" || bodyIdempotencyKey.trim().length === 0 || bodyIdempotencyKey.length > 256)) {
+      throw new AgentJoinError("idempotency_key is invalid.", "INVALID_IDEMPOTENCY_KEY", 400);
+    }
+    const normalizedHeaderIdempotencyKey = headerIdempotencyKey?.trim() ?? null;
+    const normalizedBodyIdempotencyKey = typeof bodyIdempotencyKey === "string" ? bodyIdempotencyKey.trim() : null;
+    if (normalizedHeaderIdempotencyKey && normalizedBodyIdempotencyKey && normalizedHeaderIdempotencyKey !== normalizedBodyIdempotencyKey) {
+      throw new AgentJoinError("idempotency-key header and idempotency_key body field must match.", "IDEMPOTENCY_KEY_CONFLICT", 409);
+    }
+    const idempotencyKey = normalizedHeaderIdempotencyKey ?? normalizedBodyIdempotencyKey;
+    if (typeof body.kind !== "string") throw new AgentJoinError("kind is required.", "INVALID_KIND", 400);
+    if (typeof body.body !== "string") throw new AgentJoinError("body is required.", "INVALID_BODY", 400);
+    const rawOutcome = body.outcome;
+    if (rawOutcome !== undefined && rawOutcome !== null && (!MESSAGE_OUTCOMES.includes(rawOutcome as MessageOutcome))) {
+      throw new AgentJoinError(`outcome must be one of: ${MESSAGE_OUTCOMES.join(", ")}.`, "INVALID_OUTCOME", 400);
+    }
     const message = await sendConversationMessage(agent, {
       conversationId,
-      recipientConnectionId: typeof body.recipient_connection_id === "string" ? body.recipient_connection_id : null,
-      kind: typeof body.kind === "string" ? body.kind : "",
-      body: typeof body.body === "string" ? body.body : "",
-      parentMessageId: typeof body.parent_message_id === "string" ? body.parent_message_id : null,
+      recipientConnectionId: optionalMessageString(body, "recipient_connection_id", "recipient_connection_id"),
+      kind: body.kind,
+      body: body.body,
+      parentMessageId: optionalMessageString(body, "parent_message_id", "parent_message_id"),
       idempotencyKey,
-      outcome: typeof body.outcome === "string" ? body.outcome as "ok" | "failed" | "incomplete" : null,
+      outcome: rawOutcome as MessageOutcome | null | undefined,
     });
     return NextResponse.json({ message }, { status: 201 });
   } catch (err) {

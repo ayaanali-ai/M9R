@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import { MISSION_RELAY_FRAME_VERSION, type RelayFrame } from "@/lib/mission/mission-relay-protocol";
-import { WorkspaceRelayBrowserClient } from "@/lib/mission/mission-relay-browser-client";
+import { MissionRelayBrowserClient, WorkspaceRelayBrowserClient } from "@/lib/mission/mission-relay-browser-client";
 
 type Listener = (event: { data?: string }) => void;
 
@@ -206,7 +206,7 @@ test("workspace relay resends the same pending post after reconnect", async () =
   client.close();
 });
 
-test("workspace relay closes after a relay error so a later connection can recover", async () => {
+test("workspace relay keeps the socket alive after a request error and reconnects after a real close", async () => {
   const client = new WorkspaceRelayBrowserClient({ url: "wss://relay.test", workspaceId: "workspace-1", channelId: "channel-1", credential: "credential", reconnect: false });
   const connect = client.connect();
   const firstSocket = FakeWebSocket.instances[0];
@@ -220,15 +220,55 @@ test("workspace relay closes after a relay error so a later connection can recov
     type: "relay.error",
     payload: { message: "temporary relay failure" },
   });
-  assert.equal(firstSocket.readyState, FakeWebSocket.CLOSED);
-  assert.equal(firstSocket.closeCode, 4000, "browser-originated relay errors must use a valid client close code");
+  assert.equal(firstSocket.readyState, FakeWebSocket.OPEN, "a request error must not disconnect the authenticated workspace socket");
 
+  firstSocket.close();
   const retry = client.connect();
   const secondSocket = FakeWebSocket.instances[1];
   secondSocket.open();
   secondSocket.receive(relayReady());
   await retry;
   assert.equal(client.isOpen, true);
+  client.close();
+});
+
+test("workspace relay rejects only the post named by a request error and keeps sibling posts alive", async () => {
+  const client = new WorkspaceRelayBrowserClient({ url: "wss://relay.test", workspaceId: "workspace-1", channelId: "channel-1", credential: "credential", reconnect: true });
+  const connect = client.connect();
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+  socket.receive(relayReady());
+  await connect;
+
+  const firstPost = client.postMessage({ body: "reject me", clientRequestId: "request-1" }).then(() => "resolved", () => "rejected");
+  const secondPost = client.postMessage({ body: "keep me", clientRequestId: "request-2" });
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const sentPosts = socket.sent.map((raw) => JSON.parse(raw) as RelayFrame).filter((frame) => frame.type === "workspace.post");
+  assert.equal(sentPosts.length, 2);
+
+  socket.receive({
+    ...relayReady(),
+    frameId: "relay-error-request-1",
+    type: "relay.error",
+    correlationId: sentPosts[0].correlationId,
+    payload: { message: "first post rejected" },
+  });
+  assert.equal(await firstPost, "rejected");
+  assert.equal(socket.readyState, FakeWebSocket.OPEN, "a request error must not disconnect the live workspace socket");
+
+  const stillPending = await Promise.race([
+    secondPost.then(() => "resolved"),
+    new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 25)),
+  ]);
+  assert.equal(stillPending, "pending", "the unrelated queued post must not be rejected by the first error");
+  socket.receive({
+    ...relayReady(),
+    frameId: "workspace-event-request-2",
+    type: "workspace.event",
+    correlationId: sentPosts[1].correlationId,
+    payload: { message: { id: "message-2", created_at: "2026-08-09T00:00:13.000Z" }, cursor: "cursor-13" },
+  });
+  await secondPost;
   client.close();
 });
 
@@ -248,5 +288,49 @@ test("workspace relay surfaces low-level connection errors to the status observe
 
   await assert.rejects(connect, /Workspace relay connection failed/);
   assert.deepEqual(statuses.at(-1), ["error", "Workspace relay connection failed."]);
+  client.close();
+});
+
+test("mission relay browser keeps the authenticated socket alive for request errors and replays pending posts after reconnect", async () => {
+  const client = new MissionRelayBrowserClient({ url: "wss://relay.test", workspaceId: "workspace-1", missionId: "mission-1", credential: "credential", reconnect: true });
+  const connect = client.connect();
+  const firstSocket = FakeWebSocket.instances[0];
+  firstSocket.open();
+  firstSocket.receive(relayReady());
+  await connect;
+
+  const pending = client.postMessage({ body: "retry me", clientRequestId: "mission-request-1" });
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const firstPost = lastSentFrame(firstSocket, "message.post");
+  firstSocket.receive({
+    ...relayReady(),
+    frameId: "mission-relay-error",
+    type: "relay.error",
+    correlationId: firstPost.correlationId,
+    payload: { message: "request rejected" },
+  });
+  await assert.rejects(pending, /request rejected/);
+  assert.equal(firstSocket.readyState, FakeWebSocket.OPEN, "a mission request error must not disconnect the authenticated browser socket");
+
+  const secondPending = client.postMessage({ body: "survive reconnect", clientRequestId: "mission-request-2" });
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const secondPost = lastSentFrame(firstSocket, "message.post");
+  firstSocket.close();
+  const reconnect = client.connect();
+  const secondSocket = FakeWebSocket.instances[1];
+  secondSocket.open();
+  secondSocket.receive(relayReady());
+  await reconnect;
+  const resent = lastSentFrame(secondSocket, "message.post");
+  assert.equal(resent.idempotencyKey, secondPost.idempotencyKey);
+  assert.deepEqual(resent.payload, secondPost.payload);
+  secondSocket.receive({
+    ...relayReady(),
+    frameId: "mission-event-request-2",
+    type: "mission.event",
+    correlationId: resent.correlationId,
+    payload: { message: { id: "mission-message-2" } },
+  });
+  await secondPending;
   client.close();
 });
