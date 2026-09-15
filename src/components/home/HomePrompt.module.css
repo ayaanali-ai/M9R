@@ -1,0 +1,374 @@
+.dock {
+  position: absolute;
+  bottom: 34px;
+  left: 46px;
+  z-index: 4;
+  width: min(46rem, calc(100vw - 92px));
+  color: var(--ink);
+  font-family: var(--font-ibm-plex-mono), var(--font-geist-mono), ui-monospace, monospace;
+  font-size: clamp(17px, 1.31vw, 20px);
+  font-weight: 400;
+  line-height: 1.33;
+  letter-spacing: -0.025em;
+}
+
+.dock.expanded {
+  position: relative;
+  bottom: auto;
+  left: auto;
+  min-height: 100dvh;
+  margin-left: 46px;
+  padding-top: max(15rem, calc(100dvh - 17.25rem));
+  padding-bottom: 46px;
+}
+
+.intro {
+  display: grid;
+  gap: 1px;
+  max-width: 34ch;
+  margin: 0 0 22px;
+  text-wrap: pretty;
+}
+
+.intro strong {
+  font-weight: 600;
+}
+
+.intro span,
+.oldPrompt,
+.executed,
+.planPath,
+.priceLine span {
+  color: var(--ink-soft);
+}
+
+.oldPrompt {
+  margin: 0 0 14px;
+}
+
+.commandList {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-bottom: 20px;
+}
+
+.commandList button,
+.billing button,
+.planList button,
+.faq button,
+.action,
+.endButton {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.commandList button::before {
+  display: inline-block;
+  width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  content: "> ";
+  transition: width 120ms ease;
+}
+
+.commandList button:hover::before,
+.commandList button:focus-visible::before,
+.commandList button[data-pending="true"]::before {
+  width: 1.25em;
+}
+
+.commandList button:disabled {
+  cursor: default;
+}
+
+.commandList button:disabled:not([data-pending="true"]) {
+  opacity: 0.48;
+}
+
+.commandList button:hover,
+.commandList button:focus-visible,
+.billing button:hover,
+.billing button:focus-visible,
+.planList button:hover,
+.planList button:focus-visible,
+.faq button:hover,
+.faq button:focus-visible,
+.action:hover,
+.action:focus-visible,
+.endButton:hover,
+.endButton:focus-visible {
+  color: var(--ink);
+  outline: none;
+}
+
+.prompt {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.transcript:empty + .prompt {
+  margin-top: 0;
+}
+
+.prompt label {
+  flex: none;
+  color: var(--ink-soft);
+}
+
+.prompt input {
+  width: min(18rem, 45vw);
+  min-width: 4rem;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  caret-color: var(--blue);
+  font: inherit;
+}
+
+.endButton {
+  flex: none;
+  margin-left: auto;
+  color: var(--blue);
+}
+
+.endButton::before {
+  content: "[";
+}
+
+.endButton::after {
+  content: "]";
+}
+
+.endButton:disabled {
+  color: var(--ink-soft);
+  cursor: default;
+}
+
+.transcript[data-rewinding="true"] {
+  overflow: hidden;
+  pointer-events: none;
+  animation: unprint 760ms steps(14, end) both;
+}
+
+.entry {
+  margin-top: 20px;
+}
+
+.executed {
+  margin: 0 0 20px;
+}
+
+.response {
+  max-width: 100%;
+  animation: printIn 180ms ease both;
+}
+
+.response p {
+  max-width: 63ch;
+}
+
+.prose {
+  display: grid;
+  gap: 20px;
+}
+
+.prose p,
+.pricing > p {
+  margin: 0;
+}
+
+.notice {
+  margin-top: 18px !important;
+  color: var(--blue);
+}
+
+.billing {
+  display: flex;
+  gap: 22px;
+  margin-top: 18px;
+}
+
+.billing button {
+  color: var(--ink-soft);
+}
+
+.billing button[data-active="true"] {
+  color: var(--blue);
+}
+
+.planConsole {
+  max-width: 42rem;
+  margin-top: 26px;
+  border-top: 1px solid rgba(16, 16, 16, 0.24);
+  border-bottom: 1px solid rgba(16, 16, 16, 0.24);
+}
+
+.planList {
+  display: flex;
+  flex-direction: column;
+}
+
+.planList button {
+  display: grid;
+  grid-template-columns: 1.4em 1fr auto;
+  gap: 8px;
+  padding: 11px 0;
+  border-bottom: 1px solid rgba(16, 16, 16, 0.14);
+  color: var(--ink-soft);
+}
+
+.planList button[data-active="true"] {
+  color: var(--blue);
+}
+
+.planDetail {
+  padding: 22px 0 26px;
+}
+
+.planPath {
+  margin: 0 0 13px;
+  font-size: 0.72em;
+}
+
+.priceLine {
+  margin: 0 0 18px;
+}
+
+.priceLine strong {
+  font-weight: 600;
+}
+
+.priceLine span {
+  margin-left: 8px;
+  font-size: 0.72em;
+}
+
+.planDetail > p:not(.planPath, .priceLine) {
+  margin: 0 0 18px;
+}
+
+.planDetail ul {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 20px;
+  padding: 0;
+  color: var(--ink-soft);
+  list-style: none;
+}
+
+.action {
+  display: inline-block;
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.action:disabled,
+.disabledAction {
+  color: var(--ink-soft);
+  cursor: default;
+}
+
+.faqs {
+  max-width: 42rem;
+  border-top: 1px solid rgba(16, 16, 16, 0.24);
+}
+
+.faq {
+  border-bottom: 1px solid rgba(16, 16, 16, 0.24);
+}
+
+.faq button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 1.5em 1fr;
+  padding: 12px 0;
+  color: var(--ink);
+}
+
+.faq button[aria-expanded="true"] {
+  color: var(--blue);
+}
+
+.faq p {
+  margin: 0 0 16px 1.5em;
+  color: var(--ink-soft);
+}
+
+.error {
+  margin: 10px 0 0;
+  color: var(--blue);
+}
+
+@keyframes printIn {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes unprint {
+  0% { clip-path: inset(0 0 0 0); opacity: 1; }
+  82% { clip-path: inset(0 0 100% 0); opacity: 0.22; }
+  100% { clip-path: inset(0 0 100% 0); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .response,
+  .transcript[data-rewinding="true"],
+  .commandList button::before {
+    animation: none;
+    transition: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .dock {
+    right: 24px;
+    bottom: 84px;
+    left: 24px;
+    width: auto;
+  }
+
+  .dock.expanded {
+    right: auto;
+    bottom: auto;
+    left: auto;
+    width: calc(100% - 48px);
+    margin-left: 24px;
+    padding-top: max(15rem, calc(100dvh - 17rem));
+    padding-bottom: 84px;
+  }
+
+  .intro {
+    margin-bottom: 14px;
+  }
+
+  .oldPrompt {
+    margin-bottom: 10px;
+  }
+
+  .commandList {
+    margin-bottom: 12px;
+  }
+
+  .planList button {
+    grid-template-columns: 1.2em minmax(0, 1fr) auto;
+  }
+
+  .prompt {
+    gap: 8px;
+  }
+
+  .prompt input {
+    width: auto;
+    flex: 1;
+  }
+}

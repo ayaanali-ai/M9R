@@ -42,12 +42,21 @@ export default function AuthForm({
   configured,
   next = "/dashboard",
   initialNotice = null,
+  initialMode = "login",
+  hideHeading = false,
+  oauthLabelPrefix = "",
 }: {
   configured: boolean;
   /** Safe, same-origin relative path to land on after auth (e.g. a claim URL). */
   next?: string;
   /** Message to show on first render, e.g. after a failed email confirmation. */
   initialNotice?: Notice | null;
+  /** Which tab opens first — the homepage's wide modal opens on signup. */
+  initialMode?: AuthMode;
+  /** Suppress the built-in heading when the host surface prints its own greeting. */
+  hideHeading?: boolean;
+  /** Prefix for the social buttons, e.g. "Continue with" → "Continue with Google". */
+  oauthLabelPrefix?: string;
 }) {
   // Re-validate on the client so a tampered prop can never become an open redirect.
   const destination = safeRelativePath(next);
@@ -57,7 +66,7 @@ export default function AuthForm({
   const usernameId = useId();
   const passwordId = useId();
   const passwordHelpId = useId();
-  const [mode, setMode] = useState<AuthMode>("login");
+  const [mode, setMode] = useState<AuthMode>(initialMode);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [username, setUsername] = useState("");
@@ -318,15 +327,17 @@ export default function AuthForm({
         </button>
       </div>
 
-      <header className="auth-heading">
-        <p className="auth-eyebrow">{mode === "login" ? "Welcome back" : "Private by default"}</p>
-        <h1>{mode === "login" ? "Enter your workspace" : "Create your workspace"}</h1>
-        <p>
-          {mode === "login"
-            ? "Access your records, reports, and workspace rules."
-            : "Start a secure workspace for your AI coding agents."}
-        </p>
-      </header>
+      {!hideHeading && (
+        <header className="auth-heading">
+          <p className="auth-eyebrow">{mode === "login" ? "Welcome back" : "Private by default"}</p>
+          <h1>{mode === "login" ? "Enter your workspace" : "Create your workspace"}</h1>
+          <p>
+            {mode === "login"
+              ? "Access your records, reports, and workspace rules."
+              : "Start a secure workspace for your AI coding agents."}
+          </p>
+        </header>
+      )}
 
       {/* --- Social sign-in — fast, one-click ----------------------------- */}
       <div className="auth-oauth-grid">
@@ -337,7 +348,7 @@ export default function AuthForm({
           disabled={busy || oauthBusy !== null}
         >
           {oauthBusy === "google" ? <span className="auth-spinner" aria-hidden /> : <GoogleMark />}
-          <span>Google</span>
+          <span>{`${oauthLabelPrefix} Google`.trim()}</span>
         </button>
         <button
           type="button"
@@ -346,7 +357,7 @@ export default function AuthForm({
           disabled={busy || oauthBusy !== null}
         >
           {oauthBusy === "github" ? <span className="auth-spinner" aria-hidden /> : <GitHubMark />}
-          <span>GitHub</span>
+          <span>{`${oauthLabelPrefix} GitHub`.trim()}</span>
         </button>
       </div>
 
