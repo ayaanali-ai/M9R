@@ -4,9 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { useRouter, useSearchParams } from "next/navigation";
 import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, ClipboardCheck, Inbox as InboxIcon, MessageCircleMore as WhispersIcon, FileEdit as DraftsIcon, Users as PeopleIcon, Radio as LiveIcon, LogOut, SquareTerminal as TerminalToggleIcon, GitBranchPlus as HandoffsIcon } from "lucide-react";
 import { ChannelWelcome } from "./ChannelWelcome";
-import EtheralShadow from "./EtheralShadow";
 import { useComposerAutosize } from "./useComposerAutosize";
-import MetalSendButton from "./MetalSendButton";
 import { BorderBeam } from "border-beam";
 import { TerminalWorkspace, type PtyRoomSession } from "./TerminalWorkspace";
 import { TERMINAL_ENABLED } from "@/lib/terminal-config";
@@ -2275,7 +2273,6 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
           />
         ) : selected ? (
           <>
-            <EtheralShadow />
             {/* The open channel's name used to be legible only as the
                 highlighted row in this panel's own sidebar. That sidebar now
                 lives in the primary nav (ProductShell), so the feed carries
@@ -2925,11 +2922,9 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                       <Square size={14} fill="currentColor" />
                     </button>
                   ) : (
-                    <MetalSendButton theme="auto">
-                      <button className="wf-chat-send-button" type="submit" disabled={!draft.trim()} aria-label="Send message">
-                        <SendIcon size={16} />
-                      </button>
-                    </MetalSendButton>
+                    <button className="wf-chat-send-button" type="submit" disabled={!draft.trim()} aria-label="Send message">
+                      <SendIcon size={16} />
+                    </button>
                   )}
                 </div>
               </div>

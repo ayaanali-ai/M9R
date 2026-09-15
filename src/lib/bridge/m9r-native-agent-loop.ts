@@ -128,8 +128,8 @@ const MAX_TURN_STEPS = 24;
 function buildTools(root: string, channel: M9rNativeLoopChannel | undefined, emit: (event: M9rNativeActivityEvent) => void): ToolSet {
   return {
     read_file: tool({
-      description: "Read a UTF-8 text file within the working directory. Refuses paths outside it and files over 10MB.",
-      inputSchema: z.object({ path: z.string().describe("Absolute or working-directory-relative path.") }),
+      description: "Read a UTF-8 text file in the assigned working directory. Use this when you need to inspect existing code or documentation before making a decision. Paths outside the directory and files over 10MB are refused.",
+      inputSchema: z.object({ path: z.string().describe("The file to inspect, as an absolute path or a path relative to the working directory.") }),
       execute: async ({ path }) => {
         const text = await readGovernedFile(root, path);
         emit({ activityKind: "file.read", summary: `Read ${path}`, filePath: path });
@@ -137,10 +137,10 @@ function buildTools(root: string, channel: M9rNativeLoopChannel | undefined, emi
       },
     }),
     str_replace: tool({
-      description: "Replace one exact, unique occurrence of oldText with newText in a file within the working directory.",
+      description: "Make one precise edit in a file in the assigned working directory. Use this only after reading the file and include enough oldText to identify exactly one intended location.",
       inputSchema: z.object({
         path: z.string(),
-        oldText: z.string().describe("Must match exactly once in the file."),
+        oldText: z.string().describe("The exact existing text to replace; it must occur once, never zero or multiple times."),
         newText: z.string(),
       }),
       execute: async ({ path, oldText, newText }) => {
@@ -150,12 +150,12 @@ function buildTools(root: string, channel: M9rNativeLoopChannel | undefined, emi
       },
     }),
     tree: tool({
-      description: "List files and directories under a path within the working directory, up to a bounded depth.",
+      description: "Get your bearings in the assigned working directory. Use this before searching when you do not yet know where the relevant files live; the result is bounded and excludes dependency and Git internals.",
       inputSchema: z.object({ path: z.string().default("."), maxDepth: z.number().int().min(1).max(8).default(3) }),
       execute: async ({ path, maxDepth }) => listGovernedTree(root, path, maxDepth),
     }),
     rg: tool({
-      description: "Search file contents within the working directory using ripgrep-compatible regex.",
+      description: "Find relevant code or text in the assigned working directory. Prefer this over guessing filenames, then read the strongest matches before acting.",
       inputSchema: z.object({
         pattern: z.string(),
         path: z.string().default("."),
@@ -165,7 +165,7 @@ function buildTools(root: string, channel: M9rNativeLoopChannel | undefined, emi
       execute: async ({ pattern, path, caseInsensitive, maxMatches }) => ripgrepSearch(root, pattern, path, caseInsensitive, maxMatches),
     }),
     git_read: tool({
-      description: "Run one bounded, read-only Git inspection in the working directory. Allowed operations are status, log, diff_stat, and branch.",
+      description: "Check repository state without changing it. Use this to understand the current branch, recent commits, or local diff before reporting work; the allowed operations are status, log, diff_stat, and branch.",
       inputSchema: z.object({
         operation: z.enum(["status", "log", "diff_stat", "branch"]),
         limit: z.number().int().min(1).max(20).default(1),
@@ -179,9 +179,7 @@ function buildTools(root: string, channel: M9rNativeLoopChannel | undefined, emi
     ...(channel ? {
       send_message: tool({
         description:
-          "Post a real message into this Mission's channel -- the same channel a human would type in, visible to everyone there. " +
-          "Use this to hand off work, answer a question, or bring in another connected agent by writing its @provider-slug mention in the text. " +
-          "Only use this when there's something worth saying to the channel.",
+          "Say something useful to the people and agents in this Mission's channel. Use this for a real handoff, a direct answer, or a meaningful progress or verification update; write it like a concise teammate, not a log line. Mention another provider only when you want that agent to act, and do not post every minor step.",
         inputSchema: z.object({
           text: z.string().min(1).max(2_000),
           parentMessageId: z.string().min(1).max(200).optional(),

@@ -665,15 +665,22 @@ interface ChannelRosterRow {
  * #19 session-sharing: "who can see this channel," editable after the fact
  * -- the creation flow's own human picker only ever covered day one. Every
  * workspace member is listed (not just current channel members) so adding
- * someone is a single click, not a separate "invite" step; the workspace
- * invite flow (Settings > Team) is still the only way to bring in someone
- * who isn't a workspace member yet at all, on purpose -- channel membership
- * is a subset of workspace membership, never a way around it.
+ * someone already in the workspace is a single click, not a separate
+ * "invite" step.
+ *
+ * Bringing in someone who isn't a workspace member yet used to require
+ * leaving this panel for Settings > Team -- real, reported friction, fixed
+ * here directly: the same inviteToWorkspace call Settings uses, just
+ * reachable from where people actually look for it.
  */
 export function ChannelPeoplePanel({ conversationId, onClose }: { conversationId: string | null; onClose: () => void }) {
   const [roster, setRoster] = useState<ChannelRosterRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"member" | "admin">("member");
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteNotice, setInviteNotice] = useState<string | null>(null);
 
   const load = useCallback(() => {
     if (!conversationId) { setRoster([]); return; }
@@ -710,12 +717,50 @@ export function ChannelPeoplePanel({ conversationId, onClose }: { conversationId
     }
   }
 
+  async function sendInvite(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = inviteEmail.trim();
+    if (!trimmed) return;
+    setInviteBusy(true);
+    setInviteNotice(null);
+    try {
+      const res = await fetch("/api/workspace/members", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: trimmed, role: inviteRole }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || "Could not send that invite.");
+      setInviteNotice(`Invited ${trimmed}.`);
+      setInviteEmail("");
+    } catch (err) {
+      setInviteNotice(err instanceof Error ? err.message : "Could not send that invite.");
+    } finally {
+      setInviteBusy(false);
+    }
+  }
+
   return (
     <>
       <div className="wf-files-rail-header">
         <span>People</span>
         <button type="button" className="wf-files-rail-collapse" onClick={onClose} aria-label="Collapse people panel">×</button>
       </div>
+      <form className="wf-people-invite" onSubmit={sendInvite}>
+        <input
+          type="email"
+          placeholder="Invite by email…"
+          value={inviteEmail}
+          onChange={(event) => setInviteEmail(event.target.value)}
+          disabled={inviteBusy}
+        />
+        <select value={inviteRole} onChange={(event) => setInviteRole(event.target.value as "member" | "admin")} disabled={inviteBusy}>
+          <option value="member">Member</option>
+          <option value="admin">Admin</option>
+        </select>
+        <button type="submit" disabled={inviteBusy || !inviteEmail.trim()}>Invite</button>
+      </form>
+      {inviteNotice && <p className="wf-people-invite-notice">{inviteNotice}</p>}
       <div className="wf-activity-feed scrollbar-thin">
         {!conversationId ? (
           <p className="text-[length:var(--ol-text-sm)] text-[color:var(--ol-text-muted)]">Select a channel to manage who can see it.</p>
@@ -724,7 +769,7 @@ export function ChannelPeoplePanel({ conversationId, onClose }: { conversationId
         ) : !roster ? (
           <p className="text-[length:var(--ol-text-sm)] text-[color:var(--ol-text-muted)]">Loading…</p>
         ) : roster.length === 0 ? (
-          <p className="text-[length:var(--ol-text-sm)] text-[color:var(--ol-text-muted)]">No other workspace members yet -- invite people from Settings &gt; Team first.</p>
+          <p className="text-[length:var(--ol-text-sm)] text-[color:var(--ol-text-muted)]">No other workspace members yet -- invite someone above.</p>
         ) : (
           <ul className="wf-activity-feed-list">
             {roster.map((row) => (

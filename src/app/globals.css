@@ -4005,6 +4005,11 @@ html {
   pointer-events: none;
   background: var(--background);
 }
+/* Dashboard redesign: the grid/blur-field/scan-sweep effect is real and
+   intentional elsewhere (homepage/marketing), but it's too heavy against
+   the new flat gray canvas -- reported directly, not a guess. Suppressed
+   wherever the dashboard shell is actually on the page. */
+body:has(.product-shell) .ambient { display: none; }
 
 /* 1) Fine technical grid, drifting almost imperceptibly and masked to fade. */
 /* Atmospheric depth (replaces the technical grid): layered soft blooms that
@@ -5136,6 +5141,12 @@ html.lp-js .lp-reveal.lp-in { opacity: 1; transform: none; }
 }
 .wf-chat-file-slot { min-height: 0; overflow: hidden; border-left: 1px solid var(--ol-border-subtle); background: var(--ol-surface-0); display: flex; flex-direction: column; }
 .wf-files-rail-header { display: flex; align-items: center; justify-content: space-between; padding: 16px; border-bottom: 1px solid var(--ol-border-subtle); font-size: 14px; font-weight: 600; color: var(--ol-text-primary); letter-spacing: -0.005em; }
+.wf-people-invite { display: flex; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--ol-border-subtle); }
+.wf-people-invite input { flex: 1; min-width: 0; font: inherit; font-size: 12.5px; padding: 6px 8px; border: 1px solid var(--ol-border-default); border-radius: var(--ol-radius-sm, 6px); background: var(--ol-surface-0); color: var(--ol-text-primary); }
+.wf-people-invite select { font: inherit; font-size: 12px; padding: 6px 4px; border: 1px solid var(--ol-border-default); border-radius: var(--ol-radius-sm, 6px); background: var(--ol-surface-0); color: var(--ol-text-secondary); }
+.wf-people-invite button { font: inherit; font-size: 12.5px; font-weight: 600; padding: 6px 12px; border: none; border-radius: var(--ol-radius-sm, 6px); background: var(--accent); color: #fff; cursor: pointer; }
+.wf-people-invite button:disabled { opacity: 0.5; cursor: default; }
+.wf-people-invite-notice { margin: 0; padding: 0 12px 10px; font-size: 12px; color: var(--ol-text-muted); }
 /* Real observability stat, not a claim -- see whisper-activity-service.ts. */
 .wf-whispers-activity-stat { margin: 0; padding: 7px 12px; border-bottom: 1px solid var(--ol-border-subtle); font-size: 11px; color: var(--ol-text-muted); }
 .wf-files-rail-collapse { border: 0; background: transparent; color: var(--ol-text-faint); font-size: 16px; line-height: 1; cursor: pointer; padding: 2px 6px; }
@@ -7813,6 +7824,11 @@ details.wf-fold > div { padding: 0.25rem 0.8rem 0.8rem; }
 .wf-task-card-whisper-sender { font-weight: 600; color: var(--ol-text-secondary); }
 .wf-task-card-whisper-sender::after { content: ": "; }
 .wf-task-card-whisper-body { color: var(--ol-text-muted); }
+.wf-task-card-change-request { flex-basis: 100%; margin: 2px 0 0 22px; padding: 9px 10px; border-left: 2px solid var(--ol-danger); background: color-mix(in srgb, var(--ol-danger) 8%, var(--ol-surface-2)); display: flex; flex-direction: column; gap: 5px; color: var(--ol-text-secondary); font-size: var(--ol-text-2xs); }
+.wf-task-card-change-request strong { color: var(--ol-text-primary); }
+.wf-task-card-change-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.wf-task-card-change-actions select { min-width: 150px; border: 1px solid var(--ol-border-default); border-radius: 6px; background: var(--ol-surface-1); color: var(--ol-text-primary); padding: 5px 7px; font-size: var(--ol-text-2xs); }
+.wf-task-card-change-error { color: var(--ol-danger); }
 .wf-chat-attachment-file { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--ol-border-subtle); border-radius: 8px; background: var(--ol-surface-2); color: var(--ol-text-secondary); font-size: 12px; text-decoration: none; }
 .wf-chat-attachment-file:hover { border-color: var(--ol-border-strong); color: var(--ol-text-primary); }
 .wf-chat-attachment-file small { color: var(--ol-text-faint); }

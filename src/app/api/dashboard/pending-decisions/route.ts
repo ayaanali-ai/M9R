@@ -115,6 +115,13 @@ export interface PendingTaskContractItem {
   assignedConnectionId: string | null;
   reassignmentCount: number;
   resultMessageId: string | null;
+  changeRequest: {
+    reason: string;
+    detail: string;
+    suggestedConnectionId: string | null;
+    requestedByConnectionId: string;
+    requestedAt: string;
+  } | null;
 }
 
 export interface PendingTaskContract {
@@ -149,7 +156,7 @@ async function loadTaskContracts(workspaceId: string): Promise<PendingTaskContra
 
   const contractIds = contracts.map((row) => row.id as string);
   const { data: items, error: itemsError } = await supabase.from("task_contract_items")
-    .select("id, contract_id, description, assigned_connection_id, status, reassignment_count, result_message_id")
+    .select("id, contract_id, description, assigned_connection_id, status, reassignment_count, result_message_id, change_request")
     .in("contract_id", contractIds);
   if (itemsError) throw itemsError;
 
@@ -164,6 +171,7 @@ async function loadTaskContracts(workspaceId: string): Promise<PendingTaskContra
       assignedConnectionId: (item.assigned_connection_id as string | null) ?? null,
       reassignmentCount: Number(item.reassignment_count ?? 0),
       resultMessageId: (item.result_message_id as string | null) ?? null,
+      changeRequest: (item.change_request as PendingTaskContractItem["changeRequest"] | null) ?? null,
     });
     itemsByContractId.set(contractId, bucket);
   }

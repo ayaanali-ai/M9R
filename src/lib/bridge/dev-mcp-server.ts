@@ -84,8 +84,8 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
   server.registerTool(
     "read_file",
     {
-      description: "Read a UTF-8 text file within the working directory. Refuses paths outside it and files over 10MB.",
-      inputSchema: { path: z.string().describe("Absolute or working-directory-relative path.") },
+      description: "Read a UTF-8 text file in the assigned working directory. Use this when you need to inspect existing code or documentation before making a decision. Paths outside the directory and files over 10MB are refused.",
+      inputSchema: { path: z.string().describe("The file to inspect, as an absolute path or a path relative to the working directory.") },
     },
     async ({ path }) => {
       const text = await readGovernedFile(root, path);
@@ -96,10 +96,10 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
   server.registerTool(
     "str_replace",
     {
-      description: "Replace one exact, unique occurrence of oldText with newText in a file within the working directory.",
+      description: "Make one precise edit in a file in the assigned working directory. Use this only after reading the file and include enough oldText to identify exactly one intended location.",
       inputSchema: {
         path: z.string(),
-        oldText: z.string().describe("Must match exactly once in the file."),
+        oldText: z.string().describe("The exact existing text to replace; it must occur once, never zero or multiple times."),
         newText: z.string(),
       },
     },
@@ -112,7 +112,7 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
   server.registerTool(
     "tree",
     {
-      description: "List files and directories under a path within the working directory, up to a bounded depth.",
+      description: "Get your bearings in the assigned working directory. Use this before searching when you do not yet know where the relevant files live; the result is bounded and excludes dependency and Git internals.",
       inputSchema: { path: z.string().default("."), maxDepth: z.number().int().min(1).max(8).default(3) },
     },
     async ({ path, maxDepth }) => {
@@ -124,7 +124,7 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
   server.registerTool(
     "rg",
     {
-      description: "Search file contents within the working directory using ripgrep-compatible regex.",
+      description: "Find relevant code or text in the assigned working directory. Prefer this over guessing filenames, then read the strongest matches before acting.",
       inputSchema: {
         pattern: z.string(),
         path: z.string().default("."),
@@ -142,7 +142,8 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
     "git_read",
     {
       description:
-        "Run one bounded, read-only Git inspection in the working directory. Allowed operations are status, log, diff_stat, and branch. " +
+        "Check repository state without changing it. Use this to understand the current branch, recent commits, or local diff before reporting work; " +
+        "the allowed operations are status, log, diff_stat, and branch. " +
         "This never invokes a shell and cannot write, push, fetch, checkout, or address a path outside the working directory.",
       inputSchema: {
         operation: z.enum(["status", "log", "diff_stat", "branch"]),
@@ -159,7 +160,7 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
   server.registerTool(
     "todo",
     {
-      description: "Manage a bounded, in-session todo list for this agent's own tracked work. list | add | complete.",
+      description: "Keep a short checklist for your own active work in this session. Use it to make progress visible and close items when they are actually verified; list, add, or complete only.",
       inputSchema: {
         action: z.enum(["list", "add", "complete"]),
         text: z.string().optional().describe("Required for action=add."),
@@ -176,10 +177,8 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
     "send_message",
     {
         description:
-        "Post a real message into this Mission's M9R channel -- the same channel a human would type in, visible to everyone there. " +
-        "Use this to hand off work, answer a question, or bring in another connected agent by writing its @provider-slug mention in the text " +
-        "(that agent's own resident process sees the mention and picks up work the same way it would from a human). Only use this when " +
-        "there's something worth saying to the channel -- posting a message for every minor step would be noise, not collaboration. " +
+        "Say something useful to the people and agents in this Mission's channel. Use this for a real handoff, a direct answer, or a meaningful progress or verification update; " +
+        "write it like a concise teammate, not a log line. Mention another provider only when you want that agent to act, and do not post every minor step. " +
         "For an answer or delegated-work report, pass parentMessageId for the triggering message so the result stays in its thread. " +
         "For one-to-one delegated work, use recipientConnectionId from the direct-handoff target list in the prompt. The target @mention is optional for a direct handoff and only helps humans scan the transcript. Mentions without recipientConnectionId intentionally wake every matching agent; use that broadcast behavior only when the whole team should act. " +
         "Threading is handled structurally by parentMessageId alone -- never restate it, a message id, or \"requested by <name>\" inside text itself; the visible message should read as one plain sentence a human teammate would actually type, not an audit trail of its own routing.",
@@ -200,12 +199,8 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
     "search_memory",
     {
       description:
-        "Search this workspace's own past, already-archived work before starting something unfamiliar -- real cross-session, cross-provider " +
-        "memory, not a fresh guess every time. Matches against archived Sessions' titles and the actual text of their messages, and returns a " +
-        "short transcript excerpt per match (who said what) plus which channel and whose agent it was. Confirmed real prior art for this exact " +
-        "pattern: a competitor's own demo showed an agent searching a shared team catalog and pulling a relevant quote from a DIFFERENT " +
-        "provider's session into its answer -- this is the same idea, backed by this workspace's own session history. Leave query empty to see " +
-        "the most recently archived work instead of searching for something specific.",
+        "Look through this workspace's archived sessions before starting unfamiliar work. This is shared memory across providers, so use it to recover decisions, prior fixes, and useful context instead of asking people to repeat themselves. " +
+        "The result includes short transcript excerpts with speakers, channel, agent, and archive time. Leave query empty for recent archived work.",
       inputSchema: {
         query: z.string().max(160).default("").describe("Keywords to search past session titles/messages for. Empty returns the most recently archived sessions."),
         limit: z.number().int().min(1).max(25).default(8).describe("Maximum number of past sessions to return."),
@@ -237,7 +232,8 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
     "draft_section",
     {
       description:
-        "Write (or revise) one named section of a shared draft document in this channel -- co-drafting (#13), for narrative artifacts multiple " +
+        "Write or revise one named section of a shared draft document in this channel. Use it when the team is building a spec, PR description, or other narrative artifact together; " +
+        "keep raw code and diffs in the repository. " +
         "agents and the human build together over time: a PR description, a spec, a shared writeup. This is NOT for raw code or diffs -- those " +
         "belong in the repo itself, not this document. Sections are found by heading (case-insensitive): writing the same heading again revises " +
         "it in place and you become its new attributed author, so only reuse a heading you actually mean to rewrite. A new draftTitle creates a " +
@@ -270,8 +266,7 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
     "request_evidence_review",
     {
       description:
-        "Ask the human for permission to submit structured evidence after you finish meaningful work. " +
-        "This creates no evidence record yet. The human must explicitly reply yes/okay in the channel before submit_evidence will be accepted.",
+        "Ask the human to review your completed work before you submit structured evidence. Summarize what changed in plain language; this creates no evidence record, and you must wait for explicit approval.",
       inputSchema: { summary: z.string().min(1).max(500).describe("A concise description of the completed work that the human is being asked to review.") },
     },
     async ({ summary }) => {
@@ -296,8 +291,7 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
     "submit_evidence",
     {
       description:
-        "Submit structured facts after the matching evidence request was approved in-channel. Include concrete work, paths or links, " +
-        "and observed command results. A free-form completion claim is rejected; this is still pending final human review after submission.",
+        "Submit concrete, structured facts after the matching evidence request was approved in-channel. Include what changed, relevant paths or links, and observed verification results; do not turn this into a vague completion claim.",
       inputSchema: {
         requestId: z.string().min(1).describe("The request id returned by request_evidence_review."),
         evidence: z.object({
@@ -331,9 +325,8 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
     "request_assignment_change",
     {
       description:
-        "Ask a human to change how your currently-assigned task-contract item is handled -- you cannot reassign, re-decompose, or resolve this " +
-        "yourself, this only flags the item for a human to act on and immediately blocks it so you stop working on something you just flagged as " +
-        "wrong. Only usable on an item currently assigned to you.",
+        "Tell the human that your current task-contract item needs a different assignment. Use this when the scope, dependency, capability, or ownership is wrong; explain the situation in one plain sentence. " +
+        "This only flags the item and blocks your work. You cannot reassign or resolve it yourself, and it works only for an item currently assigned to you.",
       inputSchema: {
         itemId: z.string().min(1).max(200).describe("The task_contract_items id currently assigned to you."),
         reason: z.enum(["wrong_scope", "blocked_by_dependency", "outside_capability", "already_done_by_other", "needs_split"])
