@@ -322,6 +322,96 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
   );
 
   server.registerTool(
+    "submit_task_split",
+    {
+      description:
+        "Propose how a multi-agent request should be split, when you were the first agent mentioned and the system told you a task contract is waiting on your decomposition. " +
+        "Break the request into one item per agent (including yourself if you're doing part of it), each with its own assignedConnectionId from the direct-handoff target list in your prompt. " +
+        "Every other mentioned agent stays blocked until you call this -- do not restate the split in a chat message instead of calling this tool, that leaves the contract stuck open with nothing dispatched. " +
+        "Call this once per contract; it cannot be edited afterward, only individual items can be reassigned by a human.",
+      inputSchema: {
+        conversationId: z.string().min(1).max(200).optional().describe("Defaults to this session's own channel; only pass this to target a different conversation."),
+        anchorMessageId: z.string().min(1).max(200).optional().describe("The message id that triggered this split, if you have it. Not required."),
+        items: z.array(z.object({
+          description: z.string().min(1).max(2_000).describe("What this piece of work is, written for the assigned agent to act on directly."),
+          expectedFilePaths: z.array(z.string().min(1).max(500)).max(50).optional().describe("Paths this item is expected to touch, if known."),
+          assignedConnectionId: z.string().min(1).max(200).describe("The connection id from your prompt's direct-handoff target list -- who does this piece."),
+        })).min(1).max(16).describe("One entry per piece of work. Every mentioned agent needs at least one item or it never gets woken."),
+      },
+    },
+    async ({ conversationId, anchorMessageId, items }) => {
+      if (!channel) throw new Error("submit_task_split is not available in this session (no channel connection was provided).");
+      const resolvedConversationId = conversationId
+        ?? (channel.missionId.startsWith("channel-") ? channel.missionId.slice("channel-".length) : null);
+      if (!resolvedConversationId) throw new Error("This Mission isn't bound to a chat channel, so there's no conversation to split work in.");
+      const response = await fetch(`${channel.appUrl.replace(/\/$/, "")}/api/bridge/task-contracts`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${channel.agentToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ conversationId: resolvedConversationId, anchorMessageId, items }),
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`Could not submit the task split (HTTP ${response.status}): ${detail.slice(0, 300)}`);
+      }
+      const body = await response.json().catch(() => ({})) as { dispatched?: number };
+      return { content: [{ type: "text", text: `Split submitted: ${items.length} item(s), ${body.dispatched ?? 0} agent(s) woken with their own piece.` }] };
+    },
+  );
+
+  server.registerTool(
+    "update_task_item_status",
+    {
+      description:
+        "Report progress or completion on a task-contract item assigned to you (from a 'Your part of this task' dispatch notice, which includes the itemId to use here). " +
+        "Call this with status 'in_progress' when you start and 'done' or 'failed' when you finish -- the contract will not close and the human will not see completion until every assigned item reports in. " +
+        "Only works for an item currently assigned to your own connection.",
+      inputSchema: {
+        itemId: z.string().min(1).max(200).describe("The task_contract_items id from your dispatch notice."),
+        status: z.enum(["in_progress", "done", "failed"]),
+        resultMessageId: z.string().min(1).max(200).optional().describe("Optional: the id of a send_message you posted summarizing the result, linked for the human's review."),
+      },
+    },
+    async ({ itemId, status, resultMessageId }) => {
+      if (!channel) throw new Error("update_task_item_status is not available in this session (no channel connection was provided).");
+      const response = await fetch(`${channel.appUrl.replace(/\/$/, "")}/api/bridge/task-contracts/${encodeURIComponent(itemId)}`, {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${channel.agentToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ status, resultMessageId }),
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`Could not update that task item (HTTP ${response.status}): ${detail.slice(0, 300)}`);
+      }
+      return { content: [{ type: "text", text: `Item marked ${status}.` }] };
+    },
+  );
+
+  server.registerTool(
+    "list_my_task_items",
+    {
+      description:
+        "List your own active (pending or in-progress) task-contract items across every open contract in this workspace. " +
+        "Use this if you've lost track of an itemId from an earlier dispatch notice, or to check whether you have outstanding split work before ending your turn.",
+      inputSchema: {},
+    },
+    async () => {
+      if (!channel) throw new Error("list_my_task_items is not available in this session (no channel connection was provided).");
+      const response = await fetch(`${channel.appUrl.replace(/\/$/, "")}/api/bridge/task-contracts`, {
+        headers: { authorization: `Bearer ${channel.agentToken}` },
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`Could not list your task items (HTTP ${response.status}): ${detail.slice(0, 300)}`);
+      }
+      const body = await response.json().catch(() => ({})) as { items?: Array<{ id: string; description: string; status: string }> };
+      const items = body.items ?? [];
+      if (items.length === 0) return { content: [{ type: "text", text: "No active task-contract items assigned to you right now." }] };
+      const rendered = items.map((item) => `- ${item.id} [${item.status}]: ${item.description}`).join("\n");
+      return { content: [{ type: "text", text: rendered }] };
+    },
+  );
+
+  server.registerTool(
     "request_assignment_change",
     {
       description:

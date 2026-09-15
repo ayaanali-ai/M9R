@@ -197,7 +197,7 @@ test("server exposes exactly the governed tool set (no unrestricted shell or vie
       // handoff_to_terminal is registered only while the terminal multiplayer
       // view is enabled (NEXT_PUBLIC_M9R_TERMINAL_ENABLED), which is off by
       // default -- so the governed set shrinks by exactly that one tool.
-      const expected = ["draft_section", "git_read", "read_file", "request_assignment_change", "request_evidence_review", "rg", "search_memory", "send_message", "str_replace", "submit_evidence", "todo", "tree"];
+      const expected = ["draft_section", "git_read", "list_my_task_items", "read_file", "request_assignment_change", "request_evidence_review", "rg", "search_memory", "send_message", "str_replace", "submit_evidence", "submit_task_split", "todo", "tree", "update_task_item_status"];
       if (TERMINAL_ENABLED) expected.push("handoff_to_terminal");
       assert.deepEqual(names, expected.sort());
     });
@@ -452,6 +452,129 @@ test("submit_evidence surfaces a clear error when the API call fails", async () 
       assert.equal(result.isError, true);
       assert.match(textOf(result), /HTTP 404/);
       assert.match(textOf(result), /workspace not found/);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Regression coverage for the real bug found live 2026-09-15: a multi-agent
+ * task split got stuck at 0 items forever because the backend (auto-trigger,
+ * POST /api/bridge/task-contracts, PATCH .../[itemId]) was fully built and
+ * authenticated but no MCP tool ever called it -- the decomposer agent
+ * correctly reported itself blocked rather than fabricate the split. These
+ * three tests exist so a future capability described in a dispatch/system
+ * message, persona doc, or tool description can never again silently lack a
+ * matching registered tool without a test failing here first.
+ */
+
+test("submit_task_split refuses when no channel connection was provided", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oathlock-devmcp-"));
+  try {
+    await withClient(root, async (client) => {
+      const result = await client.callTool({ name: "submit_task_split", arguments: {
+        items: [{ description: "Do the thing.", assignedConnectionId: "conn-1" }],
+      } }) as any;
+      assert.equal(result.isError, true);
+      assert.match(textOf(result), /no channel connection/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("submit_task_split posts to the bridge task-contracts endpoint with the channel's own conversation id", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oathlock-devmcp-"));
+  const originalFetch = globalThis.fetch;
+  let capturedUrl: string | null = null;
+  let capturedAuth: string | null = null;
+  let capturedBody: unknown = null;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    capturedUrl = String(url);
+    capturedAuth = (init?.headers as Record<string, string>)?.authorization ?? null;
+    capturedBody = JSON.parse(String(init?.body ?? "{}"));
+    return new Response(JSON.stringify({ ok: true, contract: { id: "c1" }, dispatched: 2 }), { status: 201 });
+  }) as typeof fetch;
+  try {
+    const server = createDevMcpServer(root, { appUrl: "https://oathlock.example", agentToken: "agent-tok-123", missionId: "channel-abc-123" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const items = [
+        { description: "Review the diff.", assignedConnectionId: "conn-codex" },
+        { description: "Check the tests.", assignedConnectionId: "conn-opencode" },
+      ];
+      const result = await client.callTool({ name: "submit_task_split", arguments: { anchorMessageId: "m-1", items } }) as any;
+      assert.equal(isSuccess(result), true);
+      assert.match(textOf(result), /2 item\(s\), 2 agent\(s\)/);
+      assert.equal(capturedUrl, "https://oathlock.example/api/bridge/task-contracts");
+      assert.equal(capturedAuth, "Bearer agent-tok-123");
+      assert.deepEqual(capturedBody, { conversationId: "abc-123", anchorMessageId: "m-1", items });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("update_task_item_status PATCHes the item endpoint with itemId and status", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oathlock-devmcp-"));
+  const originalFetch = globalThis.fetch;
+  let capturedUrl: string | null = null;
+  let capturedMethod: string | null = null;
+  let capturedBody: unknown = null;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    capturedUrl = String(url);
+    capturedMethod = init?.method ?? null;
+    capturedBody = JSON.parse(String(init?.body ?? "{}"));
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const server = createDevMcpServer(root, { appUrl: "https://oathlock.example", agentToken: "agent-tok-123", missionId: "channel-abc-123" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: "update_task_item_status", arguments: { itemId: "item-1", status: "done" } }) as any;
+      assert.equal(isSuccess(result), true);
+      assert.match(textOf(result), /marked done/);
+      assert.equal(capturedUrl, "https://oathlock.example/api/bridge/task-contracts/item-1");
+      assert.equal(capturedMethod, "PATCH");
+      assert.deepEqual(capturedBody, { status: "done" });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("list_my_task_items renders the connection's own active items", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oathlock-devmcp-"));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    items: [{ id: "item-1", description: "Review the diff.", status: "pending" }],
+  }), { status: 200 })) as typeof fetch;
+  try {
+    const server = createDevMcpServer(root, { appUrl: "https://oathlock.example", agentToken: "agent-tok-123", missionId: "channel-abc-123" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: "list_my_task_items", arguments: {} }) as any;
+      assert.equal(isSuccess(result), true);
+      assert.match(textOf(result), /item-1 \[pending\]: Review the diff\./);
     } finally {
       await client.close();
       await server.close();

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, ClipboardCheck, Inbox as InboxIcon, MessageCircleMore as WhispersIcon, FileEdit as DraftsIcon, Users as PeopleIcon, Radio as LiveIcon, LogOut, SquareTerminal as TerminalToggleIcon, GitBranchPlus as HandoffsIcon } from "lucide-react";
+import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, Inbox as InboxIcon, LogOut } from "lucide-react";
 import { ChannelWelcome } from "./ChannelWelcome";
 import { useComposerAutosize } from "./useComposerAutosize";
 import { BorderBeam } from "border-beam";
@@ -2284,51 +2284,49 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 sidePanelMode) -- both used to be buried in a "more actions"
                 dropdown or a full-screen modal; this is the one consistent
                 mechanism for both. */}
-            <header className="wf-chat-header">
+            <header className="m9r-channel-header">
               <div className="min-w-0 m9r-channel-heading">
-                <span className="m9r-channel-heading__eyebrow">{selected.channel_kind === "dm" ? "Direct conversation" : "Channel"}</span>
-                <h2>{selected.channel_kind === "dm" ? channelDisplayName(selected) : `#${channelDisplayName(selected)}`}</h2>
+                <h2>{channelDisplayName(selected)}</h2>
                 {selected.description && <p>{selected.description}</p>}
               </div>
-              <div className="wf-chat-actions">
-                {onOpenReview && (
-                  <button type="button" className="wf-chat-panel-toggle" data-active={reviewActive} onClick={onOpenReview} aria-pressed={reviewActive} aria-label={pendingReviewCount ? `Ready for Review, ${pendingReviewCount} pending` : "Ready for Review"}>
-                    <ClipboardCheck size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Review</span>
-                    {Boolean(pendingReviewCount) && <b aria-hidden>{pendingReviewCount! > 99 ? "99+" : pendingReviewCount}</b>}
-                  </button>
-                )}
-                {onOpenWhispers && (
-                  <button type="button" className="wf-chat-panel-toggle" data-active={whispersActive} onClick={onOpenWhispers} aria-pressed={whispersActive} aria-label="Agent Whispers">
-                    <WhispersIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Whispers</span>
-                  </button>
-                )}
-                {onOpenDrafts && (
-                  <button type="button" className="wf-chat-panel-toggle" data-active={draftsActive} onClick={onOpenDrafts} aria-pressed={draftsActive} aria-label="Shared Drafts">
-                    <DraftsIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Drafts</span>
-                  </button>
-                )}
-                {onOpenPeople && (
-                  <button type="button" className="wf-chat-panel-toggle" data-active={peopleActive} onClick={onOpenPeople} aria-pressed={peopleActive} aria-label="People">
-                    <PeopleIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">People</span>
-                  </button>
-                )}
-                {onOpenLive && (
-                  <button type="button" className="wf-chat-panel-toggle" data-active={liveActive} onClick={onOpenLive} aria-pressed={liveActive} aria-label="Live Sessions">
-                    <LiveIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Live</span>
-                  </button>
-                )}
-                {onOpenHandoffs && (
-                  <button type="button" className="wf-chat-panel-toggle" data-active={handoffsActive} onClick={onOpenHandoffs} aria-pressed={handoffsActive} aria-label="Goal Handoffs">
-                    <HandoffsIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Handoffs</span>
-                  </button>
-                )}
-                {TERMINAL_ENABLED && (
-                  <button type="button" className="wf-chat-panel-toggle" data-active={terminalActive} onClick={() => setTerminalActive(true)} aria-pressed={terminalActive} aria-label="Terminal">
-                    <TerminalToggleIcon size={14} aria-hidden /><span className="wf-chat-panel-toggle__label">Terminal</span>
-                  </button>
-                )}
-              </div>
             </header>
+            <nav className="m9r-channel-dock" aria-label="Channel panels">
+              {onOpenReview && (
+                <button type="button" className="m9r-channel-dock__item" data-active={reviewActive} onClick={onOpenReview} aria-pressed={reviewActive} aria-label={pendingReviewCount ? `Ready for Review, ${pendingReviewCount} pending` : "Ready for Review"}>
+                  Review{Boolean(pendingReviewCount) && <b aria-hidden>{pendingReviewCount! > 99 ? "99+" : pendingReviewCount}</b>}
+                </button>
+              )}
+              {onOpenWhispers && (
+                <button type="button" className="m9r-channel-dock__item" data-active={whispersActive} onClick={onOpenWhispers} aria-pressed={whispersActive} aria-label="Agent Whispers">
+                  Whispers
+                </button>
+              )}
+              {onOpenDrafts && (
+                <button type="button" className="m9r-channel-dock__item" data-active={draftsActive} onClick={onOpenDrafts} aria-pressed={draftsActive} aria-label="Shared Drafts">
+                  Drafts
+                </button>
+              )}
+              {onOpenPeople && (
+                <button type="button" className="m9r-channel-dock__item" data-active={peopleActive} onClick={onOpenPeople} aria-pressed={peopleActive} aria-label="People">
+                  People
+                </button>
+              )}
+              {onOpenLive && (
+                <button type="button" className="m9r-channel-dock__item" data-active={liveActive} onClick={onOpenLive} aria-pressed={liveActive} aria-label="Live Sessions">
+                  Live
+                </button>
+              )}
+              {onOpenHandoffs && (
+                <button type="button" className="m9r-channel-dock__item" data-active={handoffsActive} onClick={onOpenHandoffs} aria-pressed={handoffsActive} aria-label="Goal Handoffs">
+                  Handoffs
+                </button>
+              )}
+              {TERMINAL_ENABLED && (
+                <button type="button" className="m9r-channel-dock__item" data-active={terminalActive} onClick={() => setTerminalActive(true)} aria-pressed={terminalActive} aria-label="Terminal">
+                  Terminal
+                </button>
+              )}
+            </nav>
             <ol ref={messagesListRef} className="wf-chat-messages scrollbar-thin" data-verbosity={verbosity}>
               {/* Step groups now render inline, per-message, right where
                   MessageTodoList already does -- see stepGroupByMessageId

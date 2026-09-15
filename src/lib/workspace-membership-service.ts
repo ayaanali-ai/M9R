@@ -34,6 +34,7 @@ export interface WorkspaceInvite {
   workspaceId: string;
   email: string;
   role: "admin" | "member";
+  token: string;
   createdAt: string;
   expiresAt: string;
   acceptedAt: string | null;
@@ -201,7 +202,7 @@ export async function listWorkspaceInvites(workspaceId: string): Promise<Workspa
   await requireRole(db, workspaceId, userId);
   const { data, error } = await db
     .from("workspace_invites")
-    .select("id, workspace_id, email, role, created_at, expires_at, accepted_at, revoked_at")
+    .select("id, workspace_id, email, role, token, created_at, expires_at, accepted_at, revoked_at")
     .eq("workspace_id", workspaceId)
     .is("accepted_at", null)
     .is("revoked_at", null)
@@ -212,6 +213,7 @@ export async function listWorkspaceInvites(workspaceId: string): Promise<Workspa
     workspaceId: row.workspace_id,
     email: row.email,
     role: row.role as "admin" | "member",
+    token: row.token,
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     acceptedAt: row.accepted_at,
@@ -237,7 +239,7 @@ export async function inviteToWorkspace(
   const { data, error } = await svc
     .from("workspace_invites")
     .insert({ workspace_id: workspaceId, email: trimmed, role, invited_by: userId })
-    .select("id, workspace_id, email, role, created_at, expires_at, accepted_at, revoked_at")
+    .select("id, workspace_id, email, role, token, created_at, expires_at, accepted_at, revoked_at")
     .single();
   if (error) throw new WorkspaceMembershipError(`Could not create invite: ${error.message}`, "WRITE_FAILED", 500);
   return {
@@ -245,6 +247,7 @@ export async function inviteToWorkspace(
     workspaceId: data.workspace_id,
     email: data.email,
     role: data.role,
+    token: data.token,
     createdAt: data.created_at,
     expiresAt: data.expires_at,
     acceptedAt: data.accepted_at,
@@ -266,12 +269,18 @@ export async function revokeWorkspaceInvite(workspaceId: string, inviteId: strin
   if (error) throw new WorkspaceMembershipError(`Could not revoke invite: ${error.message}`, "WRITE_FAILED", 500);
 }
 
-/** Accept an invite by token. The signed-in user's own email must match the
- * invite's -- this is the entire authorization check for who may accept it,
- * the token alone is not treated as sufficient (a forwarded email is not
- * proof the forwarder was the intended recipient). */
+/** Accept an invite by token. Possession of the token is the whole
+ * authorization check -- there is no separate email-match gate. That gate
+ * used to block acceptance whenever the signed-in account's email didn't
+ * exactly match the address the invite was created under (a different
+ * provider, a typo'd invite email, a teammate who already has an account
+ * under a different address), with no email ever actually sent to explain
+ * why. The invite link itself (single-use: it's consumed by setting
+ * accepted_at below) is now the credential, the same model Slack/Discord/
+ * Linear invite links use, not an identity check email delivery can't be
+ * relied on to gate. */
 export async function acceptWorkspaceInvite(token: string): Promise<{ workspaceId: string }> {
-  const { userId, email } = await requireUser();
+  const { userId } = await requireUser();
   const svc = requireAdmin();
 
   const { data: invite, error } = await svc
@@ -284,9 +293,6 @@ export async function acceptWorkspaceInvite(token: string): Promise<{ workspaceI
   if (invite.revoked_at) throw new WorkspaceMembershipError("This invite was revoked.", "REVOKED", 410);
   if (invite.accepted_at) throw new WorkspaceMembershipError("This invite was already accepted.", "ALREADY_ACCEPTED", 410);
   if (Date.parse(invite.expires_at) < Date.now()) throw new WorkspaceMembershipError("This invite has expired.", "EXPIRED", 410);
-  if (!email || email.toLowerCase() !== invite.email.toLowerCase()) {
-    throw new WorkspaceMembershipError(`This invite was sent to ${invite.email}. Sign in with that email to accept it.`, "EMAIL_MISMATCH", 403);
-  }
 
   const { error: insertError } = await svc
     .from("workspace_members")

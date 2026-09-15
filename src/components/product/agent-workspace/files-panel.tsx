@@ -681,6 +681,8 @@ export function ChannelPeoplePanel({ conversationId, onClose }: { conversationId
   const [inviteRole, setInviteRole] = useState<"member" | "admin">("member");
   const [inviteBusy, setInviteBusy] = useState(false);
   const [inviteNotice, setInviteNotice] = useState<string | null>(null);
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
+  const [inviteLinkCopied, setInviteLinkCopied] = useState(false);
 
   const load = useCallback(() => {
     if (!conversationId) { setRoster([]); return; }
@@ -723,6 +725,8 @@ export function ChannelPeoplePanel({ conversationId, onClose }: { conversationId
     if (!trimmed) return;
     setInviteBusy(true);
     setInviteNotice(null);
+    setInviteLink(null);
+    setInviteLinkCopied(false);
     try {
       const res = await fetch("/api/workspace/members", {
         method: "POST",
@@ -730,13 +734,29 @@ export function ChannelPeoplePanel({ conversationId, onClose }: { conversationId
         body: JSON.stringify({ email: trimmed, role: inviteRole }),
       });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json.error || "Could not send that invite.");
-      setInviteNotice(`Invited ${trimmed}.`);
+      if (!res.ok) throw new Error(json.error || "Could not create that invite.");
+      // No email is sent -- the link below is the entire delivery mechanism.
+      // Whoever holds it can accept regardless of which account/email they
+      // sign in with; the field above is just a note for your own roster.
+      const token = (json.invite as { token?: string } | undefined)?.token;
+      setInviteLink(token ? `${window.location.origin}/invite/${token}` : null);
+      setInviteNotice(token ? null : `Invite created for ${trimmed}, but no link came back -- copy it from Settings > Team.`);
       setInviteEmail("");
     } catch (err) {
-      setInviteNotice(err instanceof Error ? err.message : "Could not send that invite.");
+      setInviteNotice(err instanceof Error ? err.message : "Could not create that invite.");
     } finally {
       setInviteBusy(false);
+    }
+  }
+
+  async function copyInviteLink() {
+    if (!inviteLink) return;
+    try {
+      await navigator.clipboard.writeText(inviteLink);
+      setInviteLinkCopied(true);
+      setTimeout(() => setInviteLinkCopied(false), 1500);
+    } catch {
+      /* clipboard can be unavailable; the link stays selectable text either way */
     }
   }
 
@@ -760,6 +780,13 @@ export function ChannelPeoplePanel({ conversationId, onClose }: { conversationId
         </select>
         <button type="submit" disabled={inviteBusy || !inviteEmail.trim()}>Invite</button>
       </form>
+      {inviteLink && (
+        <div className="wf-people-invite-link">
+          <input type="text" readOnly value={inviteLink} onFocus={(event) => event.currentTarget.select()} />
+          <button type="button" onClick={() => void copyInviteLink()}>{inviteLinkCopied ? "Copied" : "Copy link"}</button>
+          <p>Send this to them any way you want -- text, Slack, DM. Whoever opens it and signs in joins this workspace.</p>
+        </div>
+      )}
       {inviteNotice && <p className="wf-people-invite-notice">{inviteNotice}</p>}
       <div className="wf-activity-feed scrollbar-thin">
         {!conversationId ? (

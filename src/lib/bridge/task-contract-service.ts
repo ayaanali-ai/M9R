@@ -268,7 +268,7 @@ export async function dispatchContractItems(contractId: string): Promise<number>
       sender_user_id: null,
       recipient_connection_id: item.assigned_connection_id,
       kind: "notice",
-      body: `Your part of this task: ${String(item.description)}.${filesLine} Other agents are handling the rest — do only this piece.`,
+      body: `Your part of this task: ${String(item.description)}.${filesLine} Other agents are handling the rest — do only this piece. When you're done, call update_task_item_status with itemId "${item.id}" and status "done" (or "failed" if it can't be completed) — the contract stays open until every item reports in.`,
       idempotency_key: `task-item-dispatch:${item.id}`,
     });
     // 23505 = this item was already dispatched (idempotency key); not an error.

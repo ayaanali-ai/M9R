@@ -5147,6 +5147,10 @@ html.lp-js .lp-reveal.lp-in { opacity: 1; transform: none; }
 .wf-people-invite button { font: inherit; font-size: 12.5px; font-weight: 600; padding: 6px 12px; border: none; border-radius: var(--ol-radius-sm, 6px); background: var(--accent); color: #fff; cursor: pointer; }
 .wf-people-invite button:disabled { opacity: 0.5; cursor: default; }
 .wf-people-invite-notice { margin: 0; padding: 0 12px 10px; font-size: 12px; color: var(--ol-text-muted); }
+.wf-people-invite-link { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 10px; border-bottom: 1px solid var(--ol-border-subtle); }
+.wf-people-invite-link input { flex: 1; min-width: 0; font: inherit; font-size: 11.5px; padding: 6px 8px; border: 1px solid var(--ol-border-default); border-radius: var(--ol-radius-sm, 6px); background: var(--ol-surface-0); color: var(--ol-text-secondary); }
+.wf-people-invite-link button { font: inherit; font-size: 12px; font-weight: 600; padding: 6px 10px; border: 1px solid var(--ol-border-default); border-radius: var(--ol-radius-sm, 6px); background: var(--ol-surface-1); color: var(--ol-text-primary); cursor: pointer; }
+.wf-people-invite-link p { flex-basis: 100%; margin: 2px 0 0; font-size: 11px; color: var(--ol-text-faint); }
 /* Real observability stat, not a claim -- see whisper-activity-service.ts. */
 .wf-whispers-activity-stat { margin: 0; padding: 7px 12px; border-bottom: 1px solid var(--ol-border-subtle); font-size: 11px; color: var(--ol-text-muted); }
 .wf-files-rail-collapse { border: 0; background: transparent; color: var(--ol-text-faint); font-size: 16px; line-height: 1; cursor: pointer; padding: 2px 6px; }
@@ -7400,6 +7404,47 @@ details.wf-fold > div { padding: 0.25rem 0.8rem 0.8rem; }
 .wf-chat-header p { margin: 2px 0 0; color: var(--ol-text-faint); font-size: 13px; }
 .wf-chat-actions { display: flex; align-items: center; gap: 2px; padding: 3px; background: var(--ol-surface-1); border: 1px solid var(--ol-border-subtle); border-radius: var(--ol-radius-pill); }
 .wf-chat-actions b { margin-left: 5px; min-width: 16px; display: inline-block; padding: 1px 5px; border-radius: 999px; background: var(--ol-text-primary); color: var(--ol-surface-0); font-size: 11px; font-weight: 700; text-align: center; }
+
+/* Channel header, kept flavor: no hashtag, panel toggles as flat text (not
+   icon buttons) in a right-edge dock instead of the inline actions row.
+   Token-driven like everything above it -- no hardcoded colors, so this
+   doesn't fight whatever theme/mode is active. */
+.m9r-channel-header { display: flex; align-items: center; padding: 12px 24px 4px; }
+.m9r-channel-heading h2 { margin: 0; color: var(--ol-text-primary); font-family: var(--font-display, var(--font-fraunces)), Georgia, serif; font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
+.m9r-channel-heading p { margin: 2px 0 0; color: var(--ol-text-faint); font-size: 13px; }
+
+.m9r-channel-dock {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 0 24px 10px;
+}
+.m9r-channel-dock__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: var(--ol-radius-pill);
+  color: var(--ol-text-muted);
+  font-size: 12px;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+.m9r-channel-dock__item:hover { color: var(--ol-text-primary); background: var(--ol-surface-2); }
+.m9r-channel-dock__item[data-active="true"] { color: var(--ol-text-primary); background: var(--ol-surface-3); border: 1px solid var(--ol-border-strong); }
+.m9r-channel-dock__item b { min-width: 16px; padding: 1px 5px; border-radius: 999px; background: var(--ol-text-primary); color: var(--ol-surface-0); font-size: 10px; font-weight: 700; text-align: center; }
+@media (min-width: 901px) {
+  .m9r-channel-dock {
+    position: fixed;
+    top: 50%;
+    right: 16px;
+    z-index: 30;
+    flex-direction: column;
+    align-items: flex-end;
+    padding: 0;
+    transform: translateY(-50%);
+  }
+}
 
 /* Side-nav channel list + create-channel dialog (ChannelSwitcher.tsx). Lives
    next to the agent picker in the primary nav, not anchored to the feed
