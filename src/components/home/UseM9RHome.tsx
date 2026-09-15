@@ -12,7 +12,7 @@ const X_URL = "https://x.com/useM9R";
 // product surface uses the same line for every host -- so the selector picks
 // the label, not a different command.
 const OSES = ["macOS", "Linux", "Windows"] as const;
-const COMMAND = "npx m9r-cli init";
+const COMMAND = "npx m9r-cli connect";
 
 // Face height / 2 / tan(60deg): the radius that seats three faces on a drum
 // with no gap or overlap at the seams.
