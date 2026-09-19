@@ -77,7 +77,7 @@ export async function loadWorkspaceOverview(): Promise<WorkspaceOverview> {
     ? await Promise.all([
         supabase
           .from("agent_connections")
-          .select("id, workspace_id, agent_kind, repo_hint, status, created_at, last_seen_at")
+          .select("id, workspace_id, agent_kind, repo_hint, status, created_at, last_seen_at, model, available_models, display_name, title, avatar_url, mascot_body, voice, speak_replies, soul, section, chief_of_staff, managed_sections, peers")
           .eq("status", "active")
           .order("last_seen_at", { ascending: false })
           .limit(50),
@@ -123,13 +123,29 @@ export async function loadWorkspaceOverview(): Promise<WorkspaceOverview> {
     linkedSessionIds,
   );
 
-  const wsConnections: WsConnection[] = connectionGroups.map((g) => ({
+const wsConnections: WsConnection[] = connectionGroups.map((g) => ({
     id: g.latest.id,
     workspace_id: g.latest.workspace_id,
-    agent_kind: g.agent_kind,
-    repo_hint: g.repo_hint,
+    agent_kind: g.latest.agent_kind,
+    repo_hint: g.latest.repo_hint,
     last_seen_at: g.latest.last_seen_at,
     liveness: g.liveness,
+    status: g.latest.status,
+    model: (g.latest as any).model ?? null,
+    available_models: (g.latest as any).available_models ?? null,
+    owner_label: (g.latest as any).owner_label ?? null,
+    owner_user_id: (g.latest as any).owner_user_id ?? null,
+    display_name: (g.latest as any).display_name ?? null,
+    title: (g.latest as any).title ?? null,
+    avatar_url: (g.latest as any).avatar_url ?? null,
+    mascot_body: (g.latest as any).mascot_body ?? null,
+    voice: (g.latest as any).voice ?? null,
+    speak_replies: (g.latest as any).speak_replies ?? null,
+    soul: (g.latest as any).soul ?? null,
+    section: (g.latest as any).section ?? null,
+    chief_of_staff: (g.latest as any).chief_of_staff ?? null,
+    managed_sections: (g.latest as any).managed_sections ?? null,
+    peers: (g.latest as any).peers ?? null,
   }));
   const wsRuns: WsRun[] = runs.map((r: DashboardRun) => ({
     id: r.id,

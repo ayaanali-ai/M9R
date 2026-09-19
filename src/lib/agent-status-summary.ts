@@ -48,7 +48,7 @@ export async function loadAgentStatusSummary(workspaceId: string | null): Promis
   try {
     const { data, error } = await supabase
       .from("agent_connections")
-      .select("id, workspace_id, agent_kind, repo_hint, status, created_at, last_seen_at")
+      .select("id, workspace_id, agent_kind, repo_hint, status, created_at, last_seen_at, model, available_models, display_name, title, avatar_url, mascot_body, voice, speak_replies, soul, section, chief_of_staff, managed_sections, peers")
       .eq("workspace_id", workspaceId)
       .eq("status", "active")
       .order("last_seen_at", { ascending: false })

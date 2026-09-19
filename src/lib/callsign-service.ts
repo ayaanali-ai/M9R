@@ -73,6 +73,23 @@ export async function setAvailableModels(agent: AuthedAgent, raw: unknown): Prom
   return { ok: true, availableModels: result.normalized, errors: [] };
 }
 
+/** The provider's own id for the newest session M9R started for this connection, so a person can resume it natively. */
+export async function setProviderSession(agent: AuthedAgent, raw: unknown): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (typeof raw !== "string") return { ok: false, error: "provider_session_ref must be a string." };
+  const ref = raw.trim();
+  if (!ref || ref.length > 256 || ref.split("").some((c) => c.charCodeAt(0) <= 32 || c.charCodeAt(0) === 127)) return { ok: false, error: "provider_session_ref must be 1-256 characters with no whitespace." };
+  const db = requireService();
+  const { error } = await db.from("agent_connections")
+    .update({ last_provider_session_ref: ref, last_provider_session_at: new Date().toISOString() })
+    .eq("id", agent.connectionId);
+  if (error) {
+    if (isMissingColumnError(error)) return { ok: true };
+    console.error("setProviderSession failed:", error.message, error.code);
+    return { ok: false, error: error.message };
+  }
+  return { ok: true };
+}
+
 /**
  * Build the Service Record for one agent_kind within one workspace. Grouped
  * by agent_kind rather than a single connection id, matching how the rest of
@@ -165,6 +182,7 @@ export async function listCallsignsForUser(): Promise<CallsignView[]> {
   const { data, error } = await db
     .from("agent_connections")
     .select("id, workspace_id, agent_kind, repo_hint, status, capabilities, last_seen_at, created_at")
+    .neq("status", "revoked")
     .order("last_seen_at", { ascending: false })
     .limit(50);
   if (error) {
@@ -173,6 +191,7 @@ export async function listCallsignsForUser(): Promise<CallsignView[]> {
       const { data: fallback, error: fallbackError } = await db
         .from("agent_connections")
         .select("id, workspace_id, agent_kind, repo_hint, status, last_seen_at, created_at")
+        .neq("status", "revoked")
         .order("last_seen_at", { ascending: false })
         .limit(50);
       if (fallbackError) throw fallbackError;
