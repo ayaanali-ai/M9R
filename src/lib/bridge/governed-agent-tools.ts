@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * Governed tool implementations, extracted from dev-mcp-server.ts so both
  * that MCP surface (spawned per-session for the ACP-driven providers --
@@ -190,22 +191,41 @@ export async function postAgentMessage(channel: { appUrl: string; agentToken: st
 }): Promise<string> {
   const conversationId = channel.missionId.startsWith("channel-") ? channel.missionId.slice("channel-".length) : null;
   if (!conversationId) throw new Error("This Mission isn't bound to a chat channel, so there's nowhere to post this message.");
-  // Generated once per call so a future retry of this exact fetch (not a
-  // fresh model-chosen call) replays safely instead of posting twice.
-  const idempotencyKey = crypto.randomUUID();
-  const response = await fetch(`${channel.appUrl.replace(/\/$/, "")}/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${channel.agentToken}`, "content-type": "application/json", "idempotency-key": idempotencyKey },
-    body: JSON.stringify({
-      kind: "message",
-      body: input.text,
-      ...(input.parentMessageId ? { parent_message_id: input.parentMessageId } : {}),
-      ...(input.recipientConnectionId ? { recipient_connection_id: input.recipientConnectionId } : {}),
-    }),
+  // Derived from what is being said, not from the call: a model re-issuing the
+  // same tool call after a timeout, or a transport retry, must land on the same
+  // durable identity instead of posting twice. The 5-minute bucket keeps a
+  // deliberate repeat of the same words later from being swallowed forever.
+  const idempotencyKey = `agent-post:${createHash("sha256")
+    .update([conversationId, input.parentMessageId ?? "", input.recipientConnectionId ?? "", input.text, Math.floor(Date.now() / 300_000)].join(String.fromCharCode(0)))
+    .digest("hex")
+    .slice(0, 40)}`;
+  const url = `${channel.appUrl.replace(/\/$/, "")}/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`;
+  const body = JSON.stringify({
+    kind: "message",
+    body: input.text,
+    ...(input.parentMessageId ? { parent_message_id: input.parentMessageId } : {}),
+    ...(input.recipientConnectionId ? { recipient_connection_id: input.recipientConnectionId } : {}),
   });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`Could not post the message (HTTP ${response.status}): ${detail.slice(0, 300)}`);
+  let lastFailure = "unknown network error";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { authorization: `Bearer ${channel.agentToken}`, "content-type": "application/json", "idempotency-key": idempotencyKey },
+        body,
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (response.ok) return "Message posted to the channel.";
+      const detail = await response.text().catch(() => "");
+      lastFailure = `HTTP ${response.status}: ${detail.slice(0, 300)}`;
+      // Retry only transient server/rate-limit responses. A validation or
+      // authorization failure is deterministic and should reach the model
+      // immediately instead of being retried pointlessly.
+      if (response.status < 500 && response.status !== 429) break;
+    } catch (error) {
+      lastFailure = error instanceof Error ? error.message : "network error";
+    }
+    if (attempt === 0) await new Promise<void>((resolve) => setTimeout(resolve, 250));
   }
-  return "Message posted to the channel.";
+  throw new Error(`Could not post the message after a bounded retry (${lastFailure}).`);
 }

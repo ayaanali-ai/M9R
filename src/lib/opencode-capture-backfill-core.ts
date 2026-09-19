@@ -139,6 +139,9 @@ function defaultRunOpenCodeCommand(): OpenCodeCommandRunner {
     const result = await execFileAsync("opencode", args, {
       cwd,
       shell: process.platform === "win32",
+      // Without this, every `opencode session list`/`export` (one per session, every minute) opens
+      // a visible console window on Windows.
+      windowsHide: true,
       timeout: 20_000,
       maxBuffer: 16 * 1024 * 1024,
     });

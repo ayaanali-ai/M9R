@@ -58,6 +58,7 @@ export function guardApiRequest(request: NextRequest): NextResponse | null {
     fetchSite: request.headers.get("sec-fetch-site"),
     allowedOrigins: configuredOrigins(request),
     hasBearerAuthorization: Boolean(request.headers.get("authorization")),
+    hasCookies: Boolean(request.headers.get("cookie")),
   })) {
     return NextResponse.json({ error: "Cross-site request rejected." }, { status: 403 });
   }
