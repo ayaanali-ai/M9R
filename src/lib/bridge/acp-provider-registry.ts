@@ -1,5 +1,6 @@
 import type { InteractiveProviderAdapter } from "./interactive-provider-adapter";
 import { createClaudeAcpAdapter, createCodexAcpAdapter, createGenericAcpAdapter, createOpenCodeAcpAdapter } from "./acp-stdio-adapter";
+import { createCodexAppServerAdapter } from "./codex-app-server-adapter";
 import type { ProviderAdapterConfig } from "@/lib/provider-adapter-config";
 
 export class AcpProviderRegistry {
@@ -27,7 +28,8 @@ export class AcpProviderRegistry {
 export function createDefaultAcpProviderRegistry(genericProvider?: ProviderAdapterConfig): AcpProviderRegistry {
   const registry = new AcpProviderRegistry();
   registry.register(createClaudeAcpAdapter());
-  registry.register(createCodexAcpAdapter());
+  // Opt-in while the native adapter is proven live: same adapter id, so nothing else routes differently.
+  registry.register(process.env.M9R_CODEX_APP_SERVER === "1" ? createCodexAppServerAdapter({ id: "codex-acp" }) : createCodexAcpAdapter());
   registry.register(createOpenCodeAcpAdapter());
   if (genericProvider?.protocol === "acp-stdio" && !["codex", "claude-code", "opencode"].includes(genericProvider.provider)) {
     registry.register(createGenericAcpAdapter(genericProvider));
