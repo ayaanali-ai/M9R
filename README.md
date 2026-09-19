@@ -96,6 +96,9 @@ For self-hosting requirements and service configuration, see
 [`SELF_HOSTING.md`](SELF_HOSTING.md). Never commit provider credentials,
 service-role keys, or local CLI credential files.
 
+Database migrations live in `supabase/migrations/`; the Workspace Rules migration has its own guide in
+[`docs/migrations/workspace-rules-v5.1.md`](docs/migrations/workspace-rules-v5.1.md).
+
 ## Runtime core
 
 `@m9r/runtime-core` contains provider-neutral contracts for coordination and

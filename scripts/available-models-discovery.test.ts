@@ -51,7 +51,7 @@ test("the bridge reports discovered models to the app, best-effort, never blocki
 
 test("the dashboard reads available_models from agent_connections and passes it through to AgentView", () => {
   const pageSource = readFileSync("src/app/dashboard/agents/page.tsx", "utf8");
-  assert.match(pageSource, /select\("id, workspace_id, agent_kind, repo_hint, status, created_at, last_seen_at, model, available_models, created_by"\)/);
+  assert.match(pageSource, /select\("id, workspace_id, agent_kind, repo_hint, status, created_at, last_seen_at, model, available_models, last_provider_session_ref, created_by"\)/);
   assert.match(pageSource, /available_models: g\.latest\.available_models \?\? null,/);
 
   const dataSource = readFileSync("src/lib/agent-workspace-data.ts", "utf8");
