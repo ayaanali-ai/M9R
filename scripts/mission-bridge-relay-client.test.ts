@@ -3,6 +3,8 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 
 const source = readFileSync("services/mission-bridge/src/bridge-runtime.ts", "utf8");
+const conversationSource = readFileSync("src/lib/conversation-service.ts", "utf8");
+const browserRelaySource = readFileSync("src/lib/mission/mission-relay-browser-client.ts", "utf8");
 
 test("mission bridge uses one authenticated relay client for mission and workspace traffic", () => {
   assert.equal((source.match(/new MissionRelayClient\(/g) ?? []).length, 1);
@@ -39,5 +41,31 @@ test("a real 'is typing' indicator, refreshed for the whole turn, replaces the o
 });
 
 test("postedOwnMessageSince no longer needs an ack id to exclude -- it's always called with null", () => {
-  assert.match(source, /postedOwnMessageSince\(conversationId, promptCallStartedAt, null\)/);
+  assert.match(source, /postedOwnMessageSince\(\s*conversationId,\s*promptCallStartedAt,\s*null,/);
+});
+
+test("stateless agent message writes publish the durable row into live workspace rooms", () => {
+  assert.match(conversationSource, /publishInternalRelayFrame/);
+  assert.match(conversationSource, /type: "workspace\.event"/);
+  assert.match(conversationSource, /durable message remains available/);
+});
+
+test("browser workspace posts fail over quickly and never retry when reconnect is disabled", () => {
+  assert.match(browserRelaySource, /BROWSER_POST_CONFIRMATION_TIMEOUT_MS = 5_000/);
+  assert.match(browserRelaySource, /BROWSER_POST_RETRY_TIMEOUT_MS = 10_000/);
+  assert.match(browserRelaySource, /this\.options\.reconnect === false/);
+});
+
+test("workspace result delivery cannot advance the source cursor before durable output confirmation", () => {
+  assert.match(source, /const workspaceResultOutbox = new Map/);
+  assert.match(source, /pendingWorkspaceOutputParents\.has\(item\.message\.id\)/);
+  assert.match(source, /scheduleWorkspaceResultRetry\(entry\)/);
+  assert.match(source, /WORKSPACE_RESULT_RETRY_MAX_MS = 60_000/);
+  assert.match(source, /await advanceWorkspaceCursor\(entry\.conversationId, \{ id: entry\.parentMessageId/);
+});
+
+test("workspace result idempotency is scoped to the durable provider connection", () => {
+  assert.match(source, /function workspaceResultIdempotencyKey\(parentMessageId: string\)/);
+  assert.match(source, /ownConnectionId \?\? `\$\{config\.localProvider/);
+  assert.match(source, /result:\$\{parentMessageId\}:\$\{identity\}/);
 });

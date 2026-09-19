@@ -29,6 +29,15 @@ import { decodeWorkspaceCursor, workspaceCursorFromMessage } from "./workspace-c
 import { findPendingEvidenceDecisionTarget, decideChatEvidenceRequestFromMessage } from "../bridge/chat-evidence-service";
 import { buildBoundedWorkspaceSnapshot } from "./workspace-relay-snapshot";
 import { idempotencyIdentityMatches } from "../conversation-idempotency";
+import {
+  agentAvailabilityUnknownNoticeBody,
+  explicitlyMentionedAgentKinds,
+  RECENT_CONNECTION_MAX_AGE_MS,
+  unavailableAgentNoticeBody,
+  unavailableExplicitAgentKinds,
+} from "../conversation-routing";
+import { scheduleShadowJudgment } from "../jev-shadow";
+import { providerMention } from "../provider-adapter-config";
 
 interface RelayProductionConfig {
   tokenSecret: string;
@@ -206,6 +215,7 @@ function workspaceTimingFromFrame(frame: RelayFrame): WorkspaceTurnTimingEvent {
     ...(typeof payload.batchSize === "number" ? { batchSize: Math.max(0, Math.min(1_000_000, Math.trunc(payload.batchSize))) } : {}),
     ...(optionalString(payload.providerEventType, 128) ? { providerEventType: optionalString(payload.providerEventType, 128)! } : {}),
     ...(outcome ? { outcome } : {}),
+    ...(payload.ledger === true ? { ledger: true } : {}),
   };
   if (event.workspaceId !== frame.workspaceId || event.conversationId !== frame.channelId) throw new Error("Workspace timing scope does not match its relay frame.");
   return event;
@@ -259,6 +269,7 @@ async function receiveWorkspaceTiming(input: { principal: MissionRelayPrincipal;
       ...(event.batchSize !== undefined ? { batchSize: event.batchSize } : {}),
       ...(event.providerEventType ? { providerEventType: event.providerEventType } : {}),
       ...(event.outcome ? { outcome: event.outcome } : {}),
+      ...(event.ledger === true ? { ledger: true } : {}),
     },
     occurred_at: new Date(event.atMs).toISOString(),
   }, { onConflict: "workspace_id,event_id", ignoreDuplicates: true });
@@ -444,6 +455,97 @@ async function postWorkspaceMessage(input: { principal: MissionRelayPrincipal; f
   const effectiveRecipientConnectionId = recipientConnectionId ?? evidenceDecisionTarget?.agentConnectionId ?? dmRecipientConnectionId;
   const senderConnectionId = input.principal.kind === "bridge" ? input.principal.id : null;
   const senderUserId = input.principal.kind === "human" ? input.principal.id : null;
+  const ensureAvailabilityNotice = async (messageId: string): Promise<Record<string, unknown> | null> => {
+    if (input.principal.kind !== "human") return null;
+    const noticeIdempotencyKey = `agent-availability:${messageId}`;
+    // Recover a notice that was already durably inserted before a relay
+    // response was lost. Availability may have changed by the time the
+    // idempotent replay arrives, but the original warning still needs to be
+    // replayed to the live browser once.
+    const { data: existingNotice } = await db.from("conversation_messages")
+      .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at, correlation_id, idempotency_key")
+      .eq("workspace_id", input.frame.workspaceId)
+      .eq("idempotency_key", noticeIdempotencyKey)
+      .maybeSingle();
+    if (existingNotice) return { ...existingNotice, reactions: [] };
+    // The live browser normally reaches this relay path, while the older
+    // dashboard HTTP path has its own equivalent check. Keep the diagnostic
+    // here too: a saved human message must never look successful while every
+    // named provider is missing, stale, or absent from this channel.
+    const [{ data: connections, error: connectionsError }, { data: participants, error: participantsError }] = await Promise.all([
+      db.from("agent_connections")
+        .select("id, agent_kind, status, last_seen_at")
+        .eq("workspace_id", input.frame.workspaceId)
+        .eq("status", "active"),
+      db.from("conversation_participants")
+        .select("connection_id")
+        .eq("workspace_id", input.frame.workspaceId)
+        .eq("conversation_id", channel.id),
+    ]);
+    let noticeBody: string | null = null;
+    if (connectionsError || participantsError) {
+      console.warn(`Agent availability lookup failed for conversation ${channel.id}:`, connectionsError?.message ?? participantsError?.message);
+      noticeBody = agentAvailabilityUnknownNoticeBody();
+    } else {
+      const memberIds = new Set((participants ?? []).map((row) => String(row.connection_id)));
+      const rows = (connections ?? []).map((row) => ({ ...row, is_channel_member: memberIds.has(String(row.id)) }));
+      const unavailable = unavailableExplicitAgentKinds(body, rows);
+      if (unavailable.length > 0) noticeBody = unavailableAgentNoticeBody(unavailable);
+      // Shadow-mode Jev judgment (off unless M9R_JEV_MODE is set). The live browser reaches this path,
+      // not the dashboard HTTP route, so it needs its own hook; it only logs and never changes routing.
+      const nowMs = Date.now();
+      scheduleShadowJudgment({
+        messageId,
+        workspaceId: input.frame.workspaceId,
+        conversationId: channel.id,
+        source: "relay",
+        body,
+        agents: rows
+          .filter((row) => row.agent_kind)
+          .map((row) => ({
+            kind: providerMention(String(row.agent_kind)),
+            connected: Number.isFinite(Date.parse(String(row.last_seen_at ?? ""))) && nowMs - Date.parse(String(row.last_seen_at)) <= RECENT_CONNECTION_MAX_AGE_MS,
+            isChannelMember: row.is_channel_member,
+          })),
+        actualMentionedKinds: explicitlyMentionedAgentKinds(body, rows),
+      });
+    }
+    if (!noticeBody) return null;
+    const noticeInsert = {
+      workspace_id: input.frame.workspaceId,
+      conversation_id: channel.id,
+      sender_user_id: null,
+      sender_connection_id: null,
+      sender_display_name: "M9R",
+      sender_kind: "system",
+      recipient_connection_id: null,
+      kind: "notice",
+      body: noticeBody,
+      parent_message_id: messageId,
+      correlation_id: null,
+      idempotency_key: noticeIdempotencyKey,
+      outcome: null,
+    };
+    const { data: notice, error: noticeError } = await db.from("conversation_messages")
+      .insert(noticeInsert)
+      .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at, correlation_id, idempotency_key")
+      .single();
+    if (notice) return { ...notice, reactions: [] };
+    if (noticeError?.code === "23505") {
+      // A retry of the same human post may race this diagnostic insert. The
+      // unique idempotency key is the authority; recover the existing notice
+      // so a replay still returns the warning to the live relay publisher.
+      const { data: existingNotice } = await db.from("conversation_messages")
+        .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at, correlation_id, idempotency_key")
+        .eq("workspace_id", input.frame.workspaceId)
+        .eq("idempotency_key", noticeInsert.idempotency_key)
+        .maybeSingle();
+      if (existingNotice) return { ...existingNotice, reactions: [] };
+    } else if (noticeError) {
+      console.warn(`Agent availability notice failed for conversation ${channel.id}:`, noticeError.message);
+    }
+    return null;
+  };
   if (idempotencyKey) {
     const { data: existing, error: existingError } = await db.from("conversation_messages")
       .select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at, correlation_id, idempotency_key")
@@ -460,7 +562,8 @@ async function postWorkspaceMessage(input: { principal: MissionRelayPrincipal; f
         parentMessageId,
         outcome,
       })) throw new Error("idempotencyKey is already used by another message.");
-      return { message: { ...existing, reactions: [] }, activity: [], cursor: workspaceCursorFromMessage(existing), idempotentReplay: true };
+      const availabilityNotice = await ensureAvailabilityNotice(String(existing.id));
+      return { message: { ...existing, reactions: [] }, messages: availabilityNotice ? [availabilityNotice] : [], activity: [], cursor: workspaceCursorFromMessage(existing), idempotentReplay: true };
     }
   }
   const insert = {
@@ -496,11 +599,15 @@ async function postWorkspaceMessage(input: { principal: MissionRelayPrincipal; f
         body,
         parentMessageId,
         outcome,
-      })) return { message: { ...existing, reactions: [] }, activity: [], cursor: workspaceCursorFromMessage(existing), idempotentReplay: true };
+      })) {
+        const availabilityNotice = await ensureAvailabilityNotice(String(existing.id));
+        return { message: { ...existing, reactions: [] }, messages: availabilityNotice ? [availabilityNotice] : [], activity: [], cursor: workspaceCursorFromMessage(existing), idempotentReplay: true };
+      }
       if (existing) throw new Error("idempotencyKey is already used by another message.");
     }
     throw new Error("Workspace message could not be saved.");
   }
+  const availabilityNotice = await ensureAvailabilityNotice(String(message.id));
   if (input.principal.kind === "bridge") {
     const { data: project } = await db.from("projects").select("owner_id").eq("id", input.frame.workspaceId).maybeSingle();
     if (project?.owner_id) await db.from("workspace_notifications").upsert({ workspace_id: input.frame.workspaceId, recipient_user_id: project.owner_id, conversation_id: channel.id, message_id: message.id, kind: "agent_activity", title: "Agent activity", body: body.slice(0, 2048), payload: { channelId: channel.id } }, { onConflict: "recipient_user_id,message_id,kind", ignoreDuplicates: true });
@@ -573,7 +680,15 @@ async function postWorkspaceMessage(input: { principal: MissionRelayPrincipal; f
       console.warn(`Task contract open failed for conversation ${channel.id}:`, contractError instanceof Error ? contractError.message : contractError);
     });
   }
-  return { message: { ...message, reactions: [] }, activity: [], cursor: workspaceCursorFromMessage(message) };
+  return {
+    message: { ...message, reactions: [] },
+    // The relay service publishes these as additional workspace.event frames
+    // so the browser sees an availability diagnostic immediately, without a
+    // refresh. The persisted row remains the source of truth on reconnect.
+    messages: availabilityNotice ? [availabilityNotice] : [],
+    activity: [],
+    cursor: workspaceCursorFromMessage(message),
+  };
 }
 
 /**

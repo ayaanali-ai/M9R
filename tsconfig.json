@@ -38,6 +38,7 @@
     "**/*.mts"
   ],
   "exclude": [
+    "services/relay-do",
     "node_modules",
     "extensions",
     "runleak-analyzer-mvp"

@@ -108,6 +108,14 @@ export function createMissionRelayServer(options: MissionRelayServerOptions): { 
   webSocketServer.once("close", () => clearInterval(heartbeatTimer));
   webSocketServer.on("connection", (socket: WebSocket) => {
     const connectionId = `ws-${randomUUID()}`;
+    // WebSocket messages arrive in order, but invoking service.receive with
+    // `void` lets async handlers race each other. In particular, the
+    // browser sends workspace.subscribe and its first workspace.post back to
+    // back after relay.ready; the post could persist and publish before the
+    // subscription finished loading, losing the only live confirmation.
+    // Serialize one socket's protocol frames while keeping other clients
+    // independent. Durable idempotency still protects a reconnect retry.
+    let receiveChain = Promise.resolve();
     socketLiveness.set(socket, true);
     socket.on("pong", () => socketLiveness.set(socket, true));
     service.connect({ connectionId, send: (frame) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame)); } });
@@ -118,7 +126,14 @@ export function createMissionRelayServer(options: MissionRelayServerOptions): { 
       } catch {
         payload = null;
       }
-      void service.receive(connectionId, payload);
+      receiveChain = receiveChain
+        .then(() => service.receive(connectionId, payload))
+        .catch((error) => {
+          // `MissionRelayService.receive` normally converts request failures
+          // into relay.error frames. Keep the transport chain alive even if
+          // an unexpected adapter error escapes that boundary.
+          console.error("Mission Relay connection frame handling failed.", error instanceof Error ? error.message : error);
+        });
     });
     socket.on("close", () => { socketLiveness.delete(socket); service.disconnect(connectionId); });
     socket.on("error", () => { socketLiveness.delete(socket); service.disconnect(connectionId); });

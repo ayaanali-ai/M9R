@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schemas.cloudflare.com/wrangler.json",
+  "name": "m9r-relay-do",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "WorkspaceHub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorkspaceHub"] }],
+  // Database and product logic lives in the web app (services/relay-do never talks to Supabase).
+  "services": [{ "binding": "WEB", "service": "m9r-web-staging" }],
+  "vars": {
+    "WEB_RPC_URL": "https://m9r-web-staging.m9r.workers.dev/api/internal/relay/rpc"
+  },
+  "observability": { "enabled": true }
+}

@@ -86,8 +86,8 @@ export interface OwnerPtyRuntimeOptions {
  * nothing to do yet. Retries on the same discovery interval, so connecting
  * an agent later picks this up on its own without a restart. */
 export async function startOwnerPtyRuntime(options: OwnerPtyRuntimeOptions): Promise<void> {
-  const appUrl = (options.appUrl ?? process.env.OATHLOCK_API_URL ?? "https://m9r-dashboard.onrender.com").replace(/\/+$/, "");
-  const relayPublicUrl = options.relayPublicUrl ?? process.env.MISSION_RELAY_PUBLIC_URL?.trim() ?? "https://m9r-mission-relay.onrender.com";
+  const appUrl = (options.appUrl ?? process.env.OATHLOCK_API_URL ?? "https://m9r-web-staging.m9r.workers.dev").replace(/\/+$/, "");
+  const relayPublicUrl = options.relayPublicUrl ?? process.env.MISSION_RELAY_PUBLIC_URL?.trim() ?? "https://m9r-relay.m9r.workers.dev";
   const discoveryIntervalMs = options.discoveryIntervalMs ?? 15_000;
   const log = options.onLog ?? ((message: string) => console.log(`[owner-terminal] ${message}`));
 

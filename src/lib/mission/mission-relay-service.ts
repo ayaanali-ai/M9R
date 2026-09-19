@@ -333,9 +333,10 @@ export class MissionRelayService {
       case "workspace.post": {
         if (!frame.channelId || !this.options.postWorkspaceMessage) return this.sendError(state, "workspace_unavailable", "Workspace message posting is not configured for this relay.", frame);
         const result = await this.options.postWorkspaceMessage({ principal, frame });
-        const resultMessage = result && typeof result === "object" && !Array.isArray(result)
-          ? (result as { message?: unknown }).message
+        const resultRecord = result && typeof result === "object" && !Array.isArray(result)
+          ? result as { message?: unknown; messages?: unknown[] }
           : null;
+        const resultMessage = resultRecord?.message ?? null;
         const recipientPrincipalId = resultMessage && typeof resultMessage === "object" && !Array.isArray(resultMessage)
           ? typeof (resultMessage as { recipient_connection_id?: unknown }).recipient_connection_id === "string"
             ? (resultMessage as { recipient_connection_id: string }).recipient_connection_id
@@ -345,6 +346,35 @@ export class MissionRelayService {
           recipientPrincipalId,
           senderConnectionId: state.connection.connectionId,
         });
+        // Some durable side effects need to become visible immediately on the
+        // same live socket as the original post (for example, the M9R notice
+        // explaining that an explicitly named provider is offline). Keep
+        // these as separate message events so existing post confirmations and
+        // cursor handling remain unchanged. The rows are already persisted;
+        // reconnect snapshots still recover them if a socket drops here.
+        let additionalIndex = 0;
+        for (const additionalMessage of resultRecord?.messages ?? []) {
+          if (!additionalMessage || typeof additionalMessage !== "object" || Array.isArray(additionalMessage)) continue;
+          const extra = additionalMessage as { recipient_connection_id?: unknown };
+          const extraRecipient = typeof extra.recipient_connection_id === "string" ? extra.recipient_connection_id : null;
+          // A side-effect event is not the confirmation for the original
+          // workspace.post. Give it its own correlation id so a bridge that
+          // has another post in flight with the same tracing correlation
+          // cannot resolve that other promise from this diagnostic event.
+          const sideEffectSource = {
+            ...frame,
+            correlationId: `workspace-side-effect:${frame.frameId}:${additionalIndex}`.slice(0, 256),
+          };
+          additionalIndex += 1;
+          this.subscriptions.publish(frame.workspaceId, frame.channelId, this.serverFrame(sideEffectSource, "workspace.event", {
+            message: additionalMessage,
+            activity: [],
+            cursor: null,
+          }), {
+            recipientPrincipalId: extraRecipient,
+            senderConnectionId: state.connection.connectionId,
+          });
+        }
         return;
       }
       case "workspace.timing": {

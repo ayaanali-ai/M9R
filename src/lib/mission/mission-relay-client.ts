@@ -347,7 +347,8 @@ export class MissionRelayClient {
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatTimeoutMs: number;
   private readonly reconnectBackoffMs: readonly number[];
-  private readonly maxReconnectAttempts: number;
+   /** Null means keep trying with capped backoff until the bridge is closed. */
+   private readonly maxReconnectAttempts: number | null;
   private readonly autoReconnect: boolean;
   private readonly workspacePostTimeoutMs: number;
   private readonly heartbeatTimers = new Map<WebSocket, ReturnType<typeof setInterval>>();
@@ -365,9 +366,19 @@ export class MissionRelayClient {
     this.heartbeatIntervalMs = Math.max(100, options.heartbeatIntervalMs ?? 30_000);
     this.heartbeatTimeoutMs = Math.max(50, options.heartbeatTimeoutMs ?? 10_000);
     this.reconnectBackoffMs = options.reconnectBackoffMs?.length ? options.reconnectBackoffMs.map((delay) => Math.max(0, delay)) : [250, 1_000, 3_000, 10_000, 30_000];
-    this.maxReconnectAttempts = Math.max(1, options.maxReconnectAttempts ?? 12);
+    // A local runtime is expected to survive temporary network outages,
+    // laptop sleep, relay deploys, and provider restarts without requiring a
+    // human to reconnect it. A finite circuit is still available to callers
+    // that explicitly need one (tests/controlled shutdown), but the product
+    // default must not turn a temporary outage into a permanent disconnect.
+    this.maxReconnectAttempts = options.maxReconnectAttempts === undefined
+      ? null
+      : Math.max(1, options.maxReconnectAttempts);
     this.autoReconnect = options.autoReconnect ?? true;
-    this.workspacePostTimeoutMs = Math.max(50, options.workspacePostTimeoutMs ?? 15_000);
+    // A provider reply should not sit behind a dead relay for 15 seconds
+    // before the bridge uses its HTTP fallback. The first 5s catches a normal
+    // relay response; the reconnect retry gets the larger connection window.
+    this.workspacePostTimeoutMs = Math.max(50, options.workspacePostTimeoutMs ?? 5_000);
   }
 
   async connect(): Promise<void> {
@@ -940,7 +951,7 @@ export class MissionRelayClient {
 
   private scheduleReconnect(detail: string): void {
     if (!this.autoReconnect || this.explicitlyClosed || this.reconnectTimer) return;
-    if (this.reconnectAttempt >= this.maxReconnectAttempts) {
+    if (this.maxReconnectAttempts !== null && this.reconnectAttempt >= this.maxReconnectAttempts) {
       this.emitConnectionState("failed", `Mission Relay reconnect circuit opened after ${this.maxReconnectAttempts} attempts.`);
       return;
     }

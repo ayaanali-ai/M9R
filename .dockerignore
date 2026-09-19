@@ -1,0 +1,78 @@
+# Dependencies
+**/node_modules/
+
+# Git
+.git/
+.gitignore
+
+# Build outputs
+.next/
+dist/
+build/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test
+coverage/
+.nyc_output/
+
+# Temporary
+tmp/
+temp/
+*.tmp
+
+# Docker
+.dockerignore
+Dockerfile*
+docker-compose*
+
+# Cloudflare
+.wrangler/
+.open-next/
+
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Large directories
+runleak-analyzer-mvp/
+scratchpad_local/
+.claude/
+.oathlock/
+test-fixtures/
+
+# Documentation
+*.md
+!README.md
+
+# Additional patterns for comprehensive exclusion
+**/.git/
+**/.next/
+**/dist/
+**/build/
+**/.claude/
+**/.oathlock/
+**/test-fixtures/
+**/runleak-analyzer-mvp/
+**/scratchpad_local/
+**/node_modules/
+*.tar
+*.docx
+*.png
+M9R_*

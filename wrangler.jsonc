@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schemas.cloudflare.com/wrangler.json",
+  "name": "m9r-web",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2024-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    "NEXT_PUBLIC_SITE_URL": "https://m9r-web-staging.m9r.workers.dev",
+    "NEXT_PUBLIC_SUPABASE_URL": "https://eymtshaxpkmojsggdtkh.supabase.co",
+    "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_XGgzhm1N8caXP8Aj11SjQw_gmeRZOP0",
+    "MISSION_RELAY_PUBLIC_URL": "wss://m9r-relay.m9r.workers.dev",
+    "NEXT_PUBLIC_M9R_BILLING_ENABLED": "false",
+    "NEXT_PUBLIC_M9R_TERMINAL_ENABLED": "true",
+    "NEXT_PUBLIC_VAPID_PUBLIC_KEY": "",
+    "VAPID_SUBJECT": "mailto:admin@m9r.app"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

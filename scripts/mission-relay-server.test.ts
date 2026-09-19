@@ -82,3 +82,42 @@ test("Mission Relay WebSocket transport authenticates and fans out normalized ru
     await new Promise<void>((resolve) => webSocketServer.close(() => server.close(() => resolve())));
   }
 });
+
+test("Mission Relay serializes subscribe then post so the first message cannot outrun its subscription", async () => {
+  let snapshotFinished = false;
+  const { server, webSocketServer } = createMissionRelayServer({
+    port: 0,
+    host: "127.0.0.1",
+    authenticator: { authenticate: async ({ workspaceId }) => ({ kind: "human", id: "human-1", workspaceIds: [workspaceId] }) },
+    loadMissionSnapshot: async () => ({ missionId: "mission-1" }),
+    loadWorkspaceSnapshot: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      snapshotFinished = true;
+      return { cursor: null, messages: [] };
+    },
+    postWorkspaceMessage: async () => {
+      assert.equal(snapshotFinished, true, "workspace.post must wait for the earlier workspace.subscribe on this socket");
+      return { message: { id: "message-1", recipient_connection_id: null } };
+    },
+  });
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  if (!address || typeof address === "string") throw new Error("Relay did not expose a bound address.");
+  const socket = new WebSocket(`ws://127.0.0.1:${address.port}`);
+  try {
+    await new Promise<void>((resolve, reject) => { socket.once("open", () => resolve()); socket.once("error", reject); });
+    socket.send(JSON.stringify(frame("auth.browser", { credential: "human-1" })));
+    await nextFrame(socket, (received) => received.type === "relay.ready");
+    const snapshotPromise = nextFrame(socket, (received) => received.type === "workspace.snapshot");
+    const postedPromise = nextFrame(socket, (received) => received.type === "workspace.event");
+    socket.send(JSON.stringify(frame("workspace.subscribe", { cursor: null }, { channelId: "channel-1", frameId: "subscribe-first" })));
+    socket.send(JSON.stringify(frame("workspace.post", { kind: "message", body: "@codex hello" }, { channelId: "channel-1", frameId: "post-second", idempotencyKey: "post-key-1" })));
+    await snapshotPromise;
+    const posted = await postedPromise;
+    assert.equal((posted.payload as { message?: { id?: string } }).message?.id, "message-1");
+  } finally {
+    socket.close();
+    await new Promise<void>((resolve) => webSocketServer.close(() => server.close(() => resolve())));
+  }
+});

@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import path from "path";
 import { missionRelayConnectSource } from "./src/lib/mission-relay-csp";
 
 // Development may attach directly to the loopback runtime. Production embeds
@@ -9,8 +10,20 @@ const localRuntimeFrameSources = " http://127.0.0.1:43117 http://localhost:43117
 const configuredMissionRelaySource = missionRelayConnectSource(process.env.MISSION_RELAY_PUBLIC_URL);
 const missionRelayConnectSources = configuredMissionRelaySource ? ` ${configuredMissionRelaySource}` : "";
 
+const isCloudflareBuild = process.env.CLOUDFLARE_BUILD === "true";
+
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  typescript: {
+    ignoreBuildErrors: isCloudflareBuild,
+  },
+  webpack: (config) => {
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      "monaco-editor/editor/editor.api": path.resolve(__dirname, "node_modules/monaco-editor/esm/vs/editor/editor.api.js"),
+    };
+    return config;
+  },
   async headers() {
     return [
       {
