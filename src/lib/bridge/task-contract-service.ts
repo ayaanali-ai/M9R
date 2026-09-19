@@ -22,6 +22,7 @@
  * item stops and waits for a human -- no auto-retry with a different agent.
  */
 import { supabase } from "@/lib/supabase";
+import { reassignItemCas, setItemStatusCas, type ReassignResult } from "@/lib/bridge/task-item-cas";
 
 function requireService() {
   if (!supabase) throw new Error("M9R backend is not configured.");
@@ -112,7 +113,8 @@ export async function createTaskContract(input: {
     ? (await db.from("task_contracts").select("id, workspace_id, conversation_id, anchor_message_id, decomposed_by_connection_id, status").eq("anchor_message_id", input.anchorMessageId).maybeSingle()).data
     : null;
 
-  const contract = existing ?? (await db
+  let raced: typeof existing = null;
+  const inserted = existing ? null : await db
     .from("task_contracts")
     .insert({
       workspace_id: input.workspaceId,
@@ -122,9 +124,13 @@ export async function createTaskContract(input: {
       status: "executing",
     })
     .select("id, workspace_id, conversation_id, anchor_message_id, decomposed_by_connection_id, status")
-    .single()).data;
+    .single();
+  if (inserted?.error?.code === "23505" && input.anchorMessageId) {
+    raced = (await db.from("task_contracts").select("id, workspace_id, conversation_id, anchor_message_id, decomposed_by_connection_id, status").eq("anchor_message_id", input.anchorMessageId).maybeSingle()).data;
+  }
+  const contract = existing ?? raced ?? inserted?.data;
   if (!contract) throw new Error("Could not create the task contract.");
-  if (existing) {
+  if (existing || raced) {
     await db.from("task_contracts").update({ status: "executing", updated_at: new Date().toISOString() }).eq("id", contract.id);
   }
 
@@ -177,6 +183,12 @@ export async function openTaskContractForMultiMention(input: {
     decomposed_by_connection_id: input.decomposerConnectionId,
     status: "decomposing",
   }).select("id").single();
+  // Two deliveries of one message can both pass the select above; the unique
+  // index on anchor_message_id makes the loser fail, and it adopts the winner's row.
+  if (error?.code === "23505") {
+    const { data: winner } = await db.from("task_contracts").select("id").eq("anchor_message_id", input.anchorMessageId).maybeSingle();
+    if (winner) return { contractId: String(winner.id), created: false };
+  }
   if (error || !data) throw new Error("Could not open the task contract.");
   return { contractId: String(data.id), created: true };
 }
@@ -318,22 +330,11 @@ export async function listActiveItemsForConnection(connectionId: string): Promis
 }
 
 export async function setItemStatus(input: { itemId: string; status: ItemStatus; resultMessageId?: string | null }): Promise<void> {
-  const db = requireService();
-  const { error } = await db.from("task_contract_items").update({
-    status: input.status,
-    // Any explicit status change (including the "Fail it" change-request
-    // resolution path) clears a stale open request rather than leaving it
-    // to dangle against a status it no longer describes.
-    change_request: null,
-    updated_at: new Date().toISOString(),
-    ...(input.resultMessageId !== undefined ? { result_message_id: input.resultMessageId } : {}),
-  }).eq("id", input.itemId);
-  if (error) throw new Error("Could not update the task item's status.");
+  // Compare-and-set: a finished item can no longer be regressed by a stale write (see task-item-cas.ts).
+  await setItemStatusCas(requireService(), input);
 }
 
-export type ReassignResult =
-  | { ok: true }
-  | { ok: false; reason: "already_held" | "max_reassignments" };
+export type { ReassignResult } from "@/lib/bridge/task-item-cas";
 
 /**
  * Reassign one item to a new connection. Only ever called after a human has
@@ -341,41 +342,12 @@ export type ReassignResult =
  * function does not itself gate on approval, callers must not invoke it
  * from an unconfirmed agent request). Both loop-safety rules are enforced
  * here regardless of caller, since they must hold independent of how
- * carefully anything upstream is checking.
+ * carefully anything upstream is checking; the write itself is a
+ * compare-and-set so two racing confirmations cannot both spend the same
+ * reassignment slot.
  */
 export async function reassignTaskItem(input: { itemId: string; newConnectionId: string }): Promise<ReassignResult> {
-  const db = requireService();
-  const { data: item, error: readError } = await db
-    .from("task_contract_items")
-    .select("id, assignment_history, reassignment_count")
-    .eq("id", input.itemId)
-    .maybeSingle();
-  if (readError || !item) throw new Error("Could not read the task item.");
-
-  const history = (item.assignment_history as string[] | null) ?? [];
-  const count = Number(item.reassignment_count ?? 0);
-
-  // Rule 1: no-repeat. Deterministic, not agent judgment.
-  if (history.includes(input.newConnectionId)) {
-    await db.from("task_contract_items").update({ status: "blocked", updated_at: new Date().toISOString() }).eq("id", input.itemId);
-    return { ok: false, reason: "already_held" };
-  }
-  // Rule 2: hard cap.
-  if (count >= MAX_REASSIGNMENTS) {
-    await db.from("task_contract_items").update({ status: "blocked", updated_at: new Date().toISOString() }).eq("id", input.itemId);
-    return { ok: false, reason: "max_reassignments" };
-  }
-
-  const { error: updateError } = await db.from("task_contract_items").update({
-    assigned_connection_id: input.newConnectionId,
-    assignment_history: [...history, input.newConnectionId],
-    reassignment_count: count + 1,
-    status: "pending",
-    change_request: null,
-    updated_at: new Date().toISOString(),
-  }).eq("id", input.itemId);
-  if (updateError) throw new Error("Could not reassign the task item.");
-  return { ok: true };
+  return reassignItemCas(requireService(), input, MAX_REASSIGNMENTS);
 }
 
 /**
