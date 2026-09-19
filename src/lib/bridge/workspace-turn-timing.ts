@@ -49,6 +49,8 @@ export interface WorkspaceTurnTimingEvent extends WorkspaceTurnTimingMetadata {
   stage: WorkspaceTurnTimingStage;
   atMs: number;
   elapsedMs: number;
+  /** Set by the Bridge on `message.received` when it wrote the receipt to its local delivery ledger first. */
+  ledger?: boolean;
 }
 
 export interface WorkspaceTurnTimingDurations {

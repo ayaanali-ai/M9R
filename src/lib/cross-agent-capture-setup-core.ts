@@ -142,6 +142,30 @@ function mergeSessionEndHook(
 }
 
 /**
+ * Inverse of `mergeSessionEndHook`: drops only hook entries whose command references our capture
+ * script and leaves every other SessionEnd hook, and every unrelated setting, exactly as found.
+ */
+export function removeCaptureHook(existingJsonText: string | null): { content: string; changed: boolean } {
+  const root = parseJsonObject(existingJsonText);
+  if (!isRecord(root.hooks) || !Array.isArray(root.hooks.SessionEnd)) return { content: existingJsonText ?? "", changed: false };
+  let changed = false;
+  const groups: unknown[] = [];
+  for (const group of root.hooks.SessionEnd as unknown[]) {
+    if (!isRecord(group) || !Array.isArray(group.hooks)) { groups.push(group); continue; }
+    const kept = group.hooks.filter((h) => !(isRecord(h) && typeof h.command === "string" && h.command.includes(CAPTURE_HOOK_MARKER)));
+    if (kept.length === group.hooks.length) { groups.push(group); continue; }
+    changed = true;
+    if (kept.length > 0) groups.push({ ...group, hooks: kept });
+  }
+  if (!changed) return { content: existingJsonText ?? "", changed: false };
+  const hooks: Record<string, unknown> = { ...root.hooks };
+  if (groups.length > 0) hooks.SessionEnd = groups; else delete hooks.SessionEnd;
+  const next: Record<string, unknown> = { ...root, hooks };
+  if (Object.keys(hooks).length === 0) delete next.hooks;
+  return { content: JSON.stringify(next, null, 2) + "\n", changed: true };
+}
+
+/**
  * `.claude/settings.local.json` — deliberately the gitignored local file,
  * not the committed `.claude/settings.json`. A hook written to the committed
  * file would silently run for every teammate who clones the repo, before

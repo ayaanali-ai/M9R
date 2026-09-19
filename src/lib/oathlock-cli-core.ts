@@ -26,7 +26,7 @@
  *  - Any token value is redacted from error output before it is shown.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join, extname, basename, dirname } from "node:path";
 import {
   agentKindLabel,
@@ -46,13 +46,14 @@ import {
   CAPTURE_HOOK_RELATIVE_PATH,
   CAPTURE_HOOK_MARKER,
   OPENCODE_CAPTURE_MARKER,
+  removeCaptureHook,
 } from "@/lib/cross-agent-capture-setup-core";
 import { HEARTBEAT_PROTOCOL_VERSION } from "@/lib/agent-heartbeat";
 
 /** Actions this CLI currently implements. */
 const CLI_IMPLEMENTED_ACTIONS = ["heartbeat", "rules_read", "inbox_read", "assignment_lifecycle", "run_lifecycle", "work_signal_emit", "work_signal_replay", "work_signal_ack", "evidence_submit", "token_rotation"];
 
-export const DEFAULT_API_URL = "https://m9r-dashboard.onrender.com";
+export const DEFAULT_API_URL = "https://m9r-web-staging.m9r.workers.dev";
 // NOT renamed to ".m9r" -- confirmed live against a real connected repo that
 // the actual persisted directory on disk is still ".oathlock" (real token,
 // config.json, run.json all present there). The master plan explicitly
@@ -276,6 +277,13 @@ async function readLocal(deps: CliDeps, explicit?: string): Promise<LocalState |
 async function writeJson(deps: CliDeps, path: string, value: unknown): Promise<void> {
   await deps.mkdir(dirname(path));
   await deps.writeFile(path, JSON.stringify(value, null, 2) + "\n");
+}
+
+async function ensureSelfIgnoredDir(deps: CliDeps): Promise<void> {
+  const path = join(deps.cwd, M9R_DIR, ".gitignore");
+  if (await deps.fileExists(path)) return;
+  await deps.mkdir(dirname(path));
+  await deps.writeFile(path, "# Local M9R state: tokens and runtime files. Never commit.\n*\n");
 }
 
 async function removeExistingFile(deps: CliDeps, path: string): Promise<boolean> {
@@ -550,6 +558,10 @@ interface ParsedArgs {
   force: boolean;
   skipBootstrap: boolean;
   skipMemoryCapture: boolean;
+  withMemoryCapture: boolean;
+  channel: string | undefined;
+  wait: boolean;
+  timeoutSeconds: number | undefined;
   file?: string;
   repo?: string;
   agentKind?: string;
@@ -607,6 +619,10 @@ function parseArgs(args: string[]): ParsedArgs {
   let force = false;
   let skipBootstrap = false;
   let skipMemoryCapture = false;
+  let withMemoryCapture = false;
+  let channel: string | undefined;
+  let wait = false;
+  let timeoutSeconds: number | undefined;
   let file: string | undefined;
   let repo: string | undefined;
   let agentKind: string | undefined;
@@ -667,6 +683,16 @@ function parseArgs(args: string[]): ParsedArgs {
       skipBootstrap = true;
     } else if (a === "--skip-memory-capture") {
       skipMemoryCapture = true;
+    } else if (a === "--memory-capture") {
+      withMemoryCapture = true;
+    } else if (a === "--wait") {
+      wait = true;
+    } else if (a === "--channel" || a.startsWith("--channel=")) {
+      channel = a.includes("=") ? a.split("=").slice(1).join("=") : args[++i];
+    } else if (a === "--timeout" || a.startsWith("--timeout=")) {
+      const raw = a.includes("=") ? a.split("=").slice(1).join("=") : args[++i];
+      const seconds = Number(raw);
+      timeoutSeconds = Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 900) : undefined;
     } else if (a === "--file" || a.startsWith("--file=")) {
       file = a.includes("=") ? a.split("=").slice(1).join("=") : args[++i];
     } else if (a === "--repo" || a.startsWith("--repo=")) {
@@ -770,7 +796,7 @@ function parseArgs(args: string[]): ParsedArgs {
     }
     // Unknown --flags are ignored on purpose (forward-compatible).
   }
-  return { positionals, approved, force, skipBootstrap, skipMemoryCapture, file, repo, agentKind, agents, task, phase, baselineRun, laterRun, type, summary, scope, correlationId, parentEventId, since, limit, through, run, evidenceRecord, evidenceContract, mode, need, intent, criteria, binding, allow, deny, capability, preferredProvider, maxTokens, maxDurationMs, maxLatencyMs, decision, rationale, planEffect, topic, with: withArg, to, text, conversation, title, environment, observed, evidenceLevel, suggested, limitations, adapterCommand, adapterArgs, adapterProtocol, adapterShell };
+  return { positionals, approved, force, skipBootstrap, skipMemoryCapture, withMemoryCapture, channel, wait, timeoutSeconds, file, repo, agentKind, agents, task, phase, baselineRun, laterRun, type, summary, scope, correlationId, parentEventId, since, limit, through, run, evidenceRecord, evidenceContract, mode, need, intent, criteria, binding, allow, deny, capability, preferredProvider, maxTokens, maxDurationMs, maxLatencyMs, decision, rationale, planEffect, topic, with: withArg, to, text, conversation, title, environment, observed, evidenceLevel, suggested, limitations, adapterCommand, adapterArgs, adapterProtocol, adapterShell };
 }
 
 // ---------------------------------------------------------------------------
@@ -892,6 +918,36 @@ async function installCrossAgentCapture(deps: CliDeps, kind: string): Promise<{ 
   }
 }
 
+/** Removes every capture artifact `capture install` can write in this repo, touching nothing else. */
+async function uninstallCrossAgentCapture(deps: CliDeps): Promise<number> {
+  const removed: string[] = [];
+  for (const rel of [join(".claude", "settings.local.json"), join(".codex", "hooks.json")]) {
+    const path = join(deps.cwd, rel);
+    if (!(await deps.fileExists(path))) continue;
+    const { content, changed } = removeCaptureHook(await deps.readFile(path));
+    if (!changed) continue;
+    await deps.writeFile(path, content);
+    removed.push(`${rel} (M9R hook entry)`);
+  }
+  const pluginPath = join(deps.cwd, ".opencode", "plugins", "m9r-memory.js");
+  if (deps.removeFile && (await deps.fileExists(pluginPath)) && (await deps.readFile(pluginPath)).includes(OPENCODE_CAPTURE_MARKER)) {
+    await deps.removeFile(pluginPath);
+    removed.push(join(".opencode", "plugins", "m9r-memory.js"));
+  }
+  const scriptPath = join(deps.cwd, CAPTURE_HOOK_RELATIVE_PATH);
+  if (deps.removeFile && (await deps.fileExists(scriptPath))) {
+    await deps.removeFile(scriptPath);
+    removed.push(CAPTURE_HOOK_RELATIVE_PATH);
+  }
+  if (removed.length === 0) deps.out("Nothing to remove: no M9R capture integration found in this repo.");
+  else {
+    deps.out("Removed M9R session capture:");
+    for (const item of removed) deps.out(`  ${item}`);
+    deps.out("Already-captured memory under .oathlock/memory is left in place; delete it yourself if you want it gone.");
+  }
+  return 0;
+}
+
 /**
  * Repair the local capture integration without repeating the human approval
  * claim. This deliberately authorizes from the *current runtime's* existing
@@ -915,8 +971,9 @@ async function cmdCapture(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
       return 1;
     }
   }
+  if (sub === "uninstall" && parsed.positionals.length === 1) return uninstallCrossAgentCapture(deps);
   if (sub !== "install" || parsed.positionals.length !== 1) {
-    deps.err("Usage: m9r-cli capture install [--agent-kind claude-code|codex|opencode]\n       m9r-cli capture drain");
+    deps.err("Usage: m9r-cli capture install [--agent-kind claude-code|codex|opencode]\n       m9r-cli capture uninstall\n       m9r-cli capture drain");
     return 1;
   }
 
@@ -1224,6 +1281,10 @@ async function connectOneAgent(
       }
       const scopes = Array.isArray(poll.json.scopes) ? (poll.json.scopes as string[]) : [];
 
+      // Self-ignoring directory: `.oathlock/.gitignore` ignores everything inside, so the plaintext
+      // token can never be committed even if the repo's own .gitignore says nothing about it.
+      await ensureSelfIgnoredDir(deps);
+
       // Store the token ONCE in the gitignored local.json. Never printed in full.
       await writeJson(deps, agentLocalPath(deps.cwd, agentKind), {
         token,
@@ -1250,6 +1311,8 @@ async function connectOneAgent(
       deps.out(`  token  ${maskToken(token)} (saved to ${M9R_DIR}/agents/${agentKind}/local.json)`);
       deps.out(`  scopes ${scopes.join(", ") || "(none)"}`);
       deps.out(`Registered agent: ${agentKindLabel(agentKind)}`);
+      deps.out(`What leaves this machine: workspace messages and agent replies (including anything an agent quotes from your files), activity and permission events, and heartbeats, sent to ${base}.`);
+      deps.out("What stays: your repo files, your provider logins, and finished-session transcripts (unless you turn on capture).");
       deps.out("Runtime verification: pending — this confirms the M9R registration; it does not prove provider sign-in or a running provider process.");
 
       // Install the repo-native automatic workflow so the connected agent uses
@@ -1275,6 +1338,8 @@ async function connectOneAgent(
 
       if (parsed.skipMemoryCapture) {
         deps.out("Skipped shared-memory capture setup (--skip-memory-capture).");
+      } else if (!parsed.withMemoryCapture) {
+        deps.out("Session-transcript capture is OFF. To upload finished sessions from this repo into shared memory, run: m9r-cli capture install");
       } else {
         const capture = await installCrossAgentCapture(deps, agentKind);
         if (capture.note) deps.out(capture.note);
@@ -2074,6 +2139,231 @@ function resolveConnectionId(peers: PeerConnection[], reference: string): string
   if (exact) return exact.connection_id;
   const byKind = peers.find((peer) => peer.agent_kind === reference);
   return byKind?.connection_id ?? null;
+}
+
+/**
+ * `ask` is the "out" path for a session M9R did not start: it posts to the workspace from whatever
+ * agent runs it, addressed to one connected agent, and can wait for that agent's reply. It only uses
+ * the agent-facing API this connection already has a token for.
+ */
+const ASK_DEFAULT_TIMEOUT_SECONDS = 120;
+const ASK_POLL_INTERVAL_MS = 2_000;
+
+function askCursor(createdAt: string, messageId: string): string | null {
+  // Same shape as workspace-cursor.ts (kept inline: the CLI build transpiles files one by one).
+  if (!Number.isFinite(Date.parse(createdAt)) || !/^[0-9a-f-]{1,128}$/i.test(messageId)) return null;
+  return `workspace-cursor.v1:${Buffer.from(JSON.stringify({ createdAt, messageId }), "utf8").toString("base64url")}`;
+}
+
+async function cmdAsk(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
+  const usage = 'Usage: m9r-cli ask <agent> "<message>" [--channel general] [--wait] [--timeout <seconds>] [--agent-kind <your kind>]';
+  const requested = parsed.agentKind?.trim().toLowerCase();
+  if (requested && !AGENT_KIND_SLUG_PATTERN.test(requested)) {
+    deps.err("agent kind must be lowercase letters, numbers, and hyphens only (1-40 characters, no leading/trailing hyphen).");
+    return 1;
+  }
+  const local = await readLocal(deps, requested);
+  if (!local?.token) {
+    deps.err("No token found. Run: m9r-cli init");
+    return 1;
+  }
+  const target = (parsed.positionals[0] ?? "").replace(/^@/, "").trim();
+  const message = (parsed.text ?? parsed.positionals.slice(1).join(" ")).trim();
+  if (!target || !message) {
+    deps.err(usage);
+    return 1;
+  }
+  if (message.length > 2_000) {
+    deps.err("ask: the message is over 2,000 characters; send a shorter question and point to a file instead.");
+    return 1;
+  }
+
+  const peers = await listPeerConnections(deps, local.token);
+  if (!peers) {
+    deps.err("ask failed: could not list the connected agents in this workspace.");
+    return 1;
+  }
+  const recipientConnectionId = resolveConnectionId(peers, target);
+  if (!recipientConnectionId) {
+    const known = [...new Set(peers.map((peer) => peer.agent_kind))].join(", ") || "none connected";
+    deps.err(`ask failed: no connected agent matches "${target}". Connected agents: ${known}.`);
+    return 1;
+  }
+
+  const base = apiBase(deps.env);
+  const conversations = await apiFetch(deps, `${base}/api/agent/conversations`, { headers: { authorization: `Bearer ${local.token}` } });
+  if (!conversations.ok || !conversations.json || !Array.isArray(conversations.json.conversations)) {
+    deps.err(`ask failed: could not list channels (${describeFailure(conversations, local.token)}).`);
+    return 1;
+  }
+  const channels = (conversations.json.conversations as Array<Record<string, unknown>>)
+    .filter((conversation) => conversation.channel_kind === "channel" && conversation.status === "open" && typeof conversation.id === "string");
+  const wanted = (parsed.channel ?? "general").replace(/^#/, "").trim().toLowerCase();
+  const channel = channels.find((candidate) => String(candidate.topic ?? "").trim().toLowerCase() === wanted);
+  if (!channel) {
+    const names = channels.map((candidate) => `#${String(candidate.topic ?? "").trim()}`).join(", ") || "none";
+    deps.err(`ask failed: no open channel named "${wanted}". Open channels: ${names}. Pass --channel <name>.`);
+    return 1;
+  }
+  const conversationId = String(channel.id);
+
+  // Same words to the same agent inside five minutes are one message (a retried tool call must not post twice).
+  const idempotencyKey = `ask:${createHash("sha256").update([conversationId, recipientConnectionId, message, Math.floor(Date.now() / 300_000)].join(String.fromCharCode(0))).digest("hex").slice(0, 40)}`;
+  const posted = await apiFetch(deps, `${base}/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${local.token}`, "content-type": "application/json", "idempotency-key": idempotencyKey },
+    body: JSON.stringify({ kind: "message", body: `@${target} ${message}`, recipient_connection_id: recipientConnectionId }),
+  });
+  const sent = posted.json?.message as Record<string, unknown> | undefined;
+  if (!posted.ok || !sent || typeof sent.id !== "string") {
+    deps.err(`ask failed: ${describeFailure(posted, local.token)}`);
+    return 1;
+  }
+  deps.out(`Sent to @${target} in #${wanted}.`);
+  if (!parsed.wait) {
+    deps.out(`Their reply will appear in #${wanted}. Add --wait to wait for it here, or track it: m9r-cli delivery ${sent.id}`);
+    return 0;
+  }
+
+  const cursor = typeof sent.created_at === "string" ? askCursor(sent.created_at, sent.id) : null;
+  const timeoutSeconds = parsed.timeoutSeconds ?? ASK_DEFAULT_TIMEOUT_SECONDS;
+  const deadline = Date.now() + timeoutSeconds * 1_000;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms)));
+  while (Date.now() < deadline) {
+    const url = new URL(`${base}/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`);
+    if (cursor) url.searchParams.set("since", cursor);
+    const poll = await apiFetch(deps, url.toString(), { headers: { authorization: `Bearer ${local.token}` } });
+    const messages = poll.ok && Array.isArray(poll.json?.messages) ? (poll.json!.messages as Array<Record<string, unknown>>) : [];
+    const reply = messages.find((candidate) => candidate.id !== sent.id
+      && (candidate.parent_message_id === sent.id
+        || (candidate.sender_connection_id === recipientConnectionId && candidate.kind === "result" && String(candidate.created_at ?? "") > String(sent.created_at ?? ""))));
+    if (reply) {
+      deps.out(`@${target} replied:`);
+      deps.out(safeCliLine(reply.body, local.token, 4_000));
+      const report = await fetchDelivery(deps, local.token, sent.id);
+      if (report) {
+        deps.out("");
+        deps.out("Delivery:");
+        for (const line of deliveryLines(report, local.token)) deps.out(line);
+      }
+      return reply.outcome === "failed" ? 1 : 0;
+    }
+    await sleep(ASK_POLL_INTERVAL_MS);
+  }
+  deps.err(`ask: no reply from @${target} within ${timeoutSeconds}s. The message was sent; the reply will appear in #${wanted}.`);
+  return 2;
+}
+
+function endpointLines(endpoint: Record<string, unknown>, token: string): string[] {
+  const presence = (endpoint.presence ?? {}) as Record<string, unknown>;
+  const fidelity = (endpoint.fidelity ?? {}) as Record<string, unknown>;
+  const seen = typeof presence.lastSeenAt === "string" ? Date.parse(presence.lastSeenAt) : NaN;
+  const ago = Number.isFinite(seen) ? `${Math.max(0, Math.round((Date.now() - seen) / 1000))}s ago` : "never";
+  return [
+    `${safeCliLine(endpoint.address, token, 60)}  (${safeCliLine(endpoint.id, token, 60)})`,
+    `  provider: ${safeCliLine(endpoint.provider, token, 60)}   generation: ${safeCliLine(endpoint.generation, token, 12)}${endpoint.mine ? "   yours" : ""}`,
+    `  reachability: ${safeCliLine(endpoint.reachability, token, 20)}`,
+    `  presence: ${safeCliLine(presence.state, token, 20)} (${safeCliLine(presence.confidence, token, 20)}), last seen ${ago}`,
+    `  fidelity: ${safeCliLine(fidelity.level, token, 30)} (${safeCliLine(fidelity.basis, token, 40)}) - ${safeCliLine(fidelity.note, token, 300)}`,
+  ];
+}
+
+/** `resolve <address>`: what M9R knows about one endpoint, read-only. */
+async function cmdResolve(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
+  const requested = parsed.agentKind?.trim().toLowerCase();
+  const local = await readLocal(deps, requested && AGENT_KIND_SLUG_PATTERN.test(requested) ? requested : undefined);
+  if (!local?.token) {
+    deps.err("No token found. Run: m9r-cli init");
+    return 1;
+  }
+  const address = parsed.positionals[0];
+  if (!address) {
+    deps.err("Usage: m9r-cli resolve <@agent | endpoint id> [--agent-kind <your kind>]");
+    return 1;
+  }
+  const url = new URL(`${apiBase(deps.env)}/api/agent/endpoints/resolve`);
+  url.searchParams.set("address", address);
+  const res = await apiFetch(deps, url.toString(), { headers: { authorization: `Bearer ${local.token}` } });
+  if (!res.ok || !res.json) {
+    const detail = typeof res.json?.error === "string" ? safeCliLine(res.json.error, local.token, 300) : describeFailure(res, local.token);
+    deps.err(`resolve failed: ${detail}`);
+    const candidates = Array.isArray(res.json?.candidates) ? (res.json!.candidates as unknown[]) : [];
+    for (const candidate of candidates) deps.err(`  candidate: ${safeCliLine(candidate, local.token, 60)}`);
+    return 1;
+  }
+  for (const line of endpointLines((res.json.endpoint ?? {}) as Record<string, unknown>, local.token)) deps.out(line);
+  return 0;
+}
+
+/** `endpoints`: every endpoint in this workspace. */
+async function cmdEndpoints(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
+  const requested = parsed.agentKind?.trim().toLowerCase();
+  const local = await readLocal(deps, requested && AGENT_KIND_SLUG_PATTERN.test(requested) ? requested : undefined);
+  if (!local?.token) {
+    deps.err("No token found. Run: m9r-cli init");
+    return 1;
+  }
+  const res = await apiFetch(deps, `${apiBase(deps.env)}/api/agent/endpoints`, { headers: { authorization: `Bearer ${local.token}` } });
+  if (!res.ok || !res.json || !Array.isArray(res.json.endpoints)) {
+    deps.err(`endpoints failed: ${describeFailure(res, local.token)}`);
+    return 1;
+  }
+  const endpoints = res.json.endpoints as Array<Record<string, unknown>>;
+  deps.out(`endpoints: ${endpoints.length}`);
+  for (const endpoint of endpoints) {
+    for (const line of endpointLines(endpoint, local.token)) deps.out(line);
+  }
+  return 0;
+}
+
+function deliveryLines(report: Record<string, unknown>, token: string): string[] {
+  const deliveries = Array.isArray(report.deliveries) ? (report.deliveries as Array<Record<string, unknown>>) : [];
+  if (deliveries.length === 0) return ["No agent was addressed by this message, so there is nothing to deliver."];
+  const lines: string[] = [];
+  for (const delivery of deliveries) {
+    const recipient = (delivery.recipient ?? {}) as Record<string, unknown>;
+    const flags = [delivery.viaConsultation ? "via consultation" : null, delivery.pendingUntilTurnBoundary ? "waiting for the turn boundary" : null, delivery.failureCode ? `failure: ${safeCliLine(delivery.failureCode, token, 40)}` : null].filter(Boolean);
+    lines.push(`${safeCliLine(recipient.address, token, 60)}: ${safeCliLine(delivery.state, token, 30)} (attempt ${safeCliLine(delivery.attempt, token, 6)})${flags.length ? ` - ${flags.join(", ")}` : ""}`);
+    const timeline = Array.isArray(delivery.timeline) ? (delivery.timeline as Array<Record<string, unknown>>) : [];
+    for (const entry of timeline) {
+      const time = typeof entry.at === "string" && Number.isFinite(Date.parse(entry.at)) ? new Date(entry.at).toISOString().slice(11, 19) : "--:--:--";
+      const note = entry.persisted === false ? " (bridge memory only; not saved to a local ledger)" : entry.persisted === true ? " (saved in the bridge's local ledger first)" : "";
+      lines.push(`  ${time}  ${safeCliLine(entry.state, token, 24).padEnd(22)} ${safeCliLine(entry.basis, token, 10).padEnd(9)} ${safeCliLine(entry.evidence, token, 80)}${note}`);
+    }
+    const notes = Array.isArray(delivery.notes) ? (delivery.notes as Array<Record<string, unknown>>) : [];
+    if (notes.length > 0) {
+      lines.push(`  note: the Bridge declined to run this ${notes.length} time${notes.length === 1 ? "" : "s"} (${safeCliLine(notes[0].evidence, token, 40)}): ${safeCliLine(notes[0].meaning, token, 200)}`);
+    }
+    if (delivery.declined) lines.push("  waiting: the latest evidence is a decline and nothing has progressed since; check the channel for a notice.");
+  }
+  return lines;
+}
+
+async function fetchDelivery(deps: CliDeps, token: string, messageId: string): Promise<Record<string, unknown> | null> {
+  const res = await apiFetch(deps, `${apiBase(deps.env)}/api/agent/messages/${encodeURIComponent(messageId)}/delivery`, { headers: { authorization: `Bearer ${token}` } });
+  return res.ok && res.json ? res.json : null;
+}
+
+/** `delivery <message id>`: how far one message got, per recipient. Read-only. */
+async function cmdDelivery(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
+  const requested = parsed.agentKind?.trim().toLowerCase();
+  const local = await readLocal(deps, requested && AGENT_KIND_SLUG_PATTERN.test(requested) ? requested : undefined);
+  if (!local?.token) {
+    deps.err("No token found. Run: m9r-cli init");
+    return 1;
+  }
+  const messageId = parsed.positionals[0];
+  if (!messageId) {
+    deps.err("Usage: m9r-cli delivery <message id> [--agent-kind <your kind>]");
+    return 1;
+  }
+  const res = await apiFetch(deps, `${apiBase(deps.env)}/api/agent/messages/${encodeURIComponent(messageId)}/delivery`, { headers: { authorization: `Bearer ${local.token}` } });
+  if (!res.ok || !res.json) {
+    deps.err(`delivery failed: ${typeof res.json?.error === "string" ? safeCliLine(res.json.error, local.token, 300) : describeFailure(res, local.token)}`);
+    return 1;
+  }
+  for (const line of deliveryLines(res.json, local.token)) deps.out(line);
+  return 0;
 }
 
 async function cmdConversationStart(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
@@ -2935,6 +3225,11 @@ Usage:
   m9r-cli bootstrap remove                  Remove only the M9R-managed block (user content preserved)
   m9r-cli capture install [--agent-kind <kind>]
                                          Install/repair local Claude Code, Codex, or OpenCode memory capture without a new approval claim
+  m9r-cli delivery <message id>              Show how far a message got, per recipient (read-only)
+  m9r-cli resolve <@agent>                   Show one endpoint: reachability, presence, fidelity (read-only)
+  m9r-cli endpoints                          List the endpoints in this workspace
+  m9r-cli ask <agent> "<message>" [--wait]   Ask a connected agent (for example codex) in #general; --wait prints its reply
+  m9r-cli capture uninstall                  Remove the capture hooks/plugin from this repo
   m9r-cli capture drain                      Drain locally captured sessions into the shared memory catalog (no network call)
   m9r-cli doctor                            Check local setup + API reachability
   m9r-cli whoami                            Show the server-authenticated provider identity
@@ -3032,6 +3327,14 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
       return cmdSignal(deps, parsed);
     case "coordinate":
       return cmdCoordinate(deps, parsed);
+    case "ask":
+      return cmdAsk(deps, parsed);
+    case "delivery":
+      return cmdDelivery(deps, parsed);
+    case "resolve":
+      return cmdResolve(deps, parsed);
+    case "endpoints":
+      return cmdEndpoints(deps, parsed);
     case "conversation":
       return cmdConversation(deps, parsed);
     case "compare":

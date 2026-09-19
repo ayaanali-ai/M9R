@@ -96,7 +96,11 @@ startLocalMissionBridge(repositoryRoot).then((result) => {
   } else if (result.reason !== "acp_bridge_disabled" && result.reason !== "no_local_token") {
     process.stderr.write(`Mission ACP Bridge did not start (${result.reason}${result.detail ? `: ${result.detail}` : ""}).\n`);
   }
-  process.exit(0);
+  // A clean, deliberate stop (exit 0 is "stopped" to the supervisor, not a crash to retry). The short
+  // delay lets any in-flight fetch/abort-signal handle finish closing first: exiting in the middle of
+  // that trips a libuv assertion on Windows (exit 0xC0000409), which the supervisor then reads as a
+  // crash and retries.
+  setTimeout(() => process.exit(0), 250);
 }).catch((error) => {
   process.stderr.write(`Mission ACP Bridge crashed: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(0);
