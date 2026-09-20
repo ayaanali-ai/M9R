@@ -260,7 +260,7 @@ async function runResidentCli(argv: string[]): Promise<number> {
     }
     const persistedCandidate = {
       name: profileName,
-      apiUrl: (process.env.OATHLOCK_API_URL ?? "https://m9r-web-staging.m9r.workers.dev").replace(/\/+$/, ""),
+      apiUrl: (process.env.OATHLOCK_API_URL ?? "https://app.m9r.workers.dev").replace(/\/+$/, ""),
       provider,
       ...(adapter ? { adapter } : {}),
       instanceKey: `${provider}-${randomUUID()}`,

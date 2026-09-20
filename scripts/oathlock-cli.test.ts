@@ -104,7 +104,7 @@ test("inferSessionFormat maps extensions to API formats", () => {
 });
 
 test("apiBase honors OATHLOCK_API_URL and defaults to the M9R production API", () => {
-  assert.equal(apiBase({}), "https://m9r-web-staging.m9r.workers.dev");
+  assert.equal(apiBase({}), "https://app.m9r.workers.dev");
   assert.equal(apiBase({ OATHLOCK_API_URL: "http://localhost:3000/" }), "http://localhost:3000");
 });
 
@@ -1290,9 +1290,9 @@ test("run start exposes the server-issued cookie dashboard approval destination 
   const code = await run(["run", "start", "--task", "a narrowly scoped task"], deps);
 
   assert.equal(code, 1);
-  assert.deepEqual(opened, [`https://m9r-web-staging.m9r.workers.dev/dashboard/approvals/${requestId}`]);
+  assert.deepEqual(opened, [`https://app.m9r.workers.dev/dashboard/approvals/${requestId}`]);
   const output = err.join("\n");
-  assert.match(output, new RegExp(`Human action required: approve this run at https://m9r-web-staging\\.m9r\\.workers\\.dev/dashboard/approvals/${requestId}`));
+  assert.match(output, new RegExp(`Human action required: approve this run at https://app\\.m9r\\.workers\\.dev/dashboard/approvals/${requestId}`));
   assert.match(output, new RegExp(`Approval request: ${requestId}`));
   assert.ok(!output.includes(TOKEN));
 });

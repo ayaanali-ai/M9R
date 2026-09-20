@@ -21,7 +21,7 @@ import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, 
 import { M9R_DIR } from "../oathlock-cli-core";
 
 const DEFAULT_RELAY_PUBLIC_URL = "https://m9r-relay.m9r.workers.dev";
-const DEFAULT_APP_URL = "https://m9r-web-staging.m9r.workers.dev";
+const DEFAULT_APP_URL = "https://app.m9r.workers.dev";
 const LOCAL_TOKEN_PROVIDER_ORDER = ["claude-code", "codex", "opencode"] as const;
 
 interface LocalAgentToken {

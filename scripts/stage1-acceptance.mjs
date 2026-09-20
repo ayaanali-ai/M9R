@@ -17,7 +17,7 @@ const opt = (name, fallback) => { const i = args.indexOf(`--${name}`); return i 
 const TARGET = opt("target", "claude-code");
 const SENDER = opt("sender", "codex");
 const RESTART = args.includes("--restart-bridges");
-const API = process.env.OATHLOCK_API_URL ?? "https://m9r-web-staging.m9r.workers.dev";
+const API = process.env.OATHLOCK_API_URL ?? "https://app.m9r.workers.dev";
 const root = resolve(import.meta.dirname, "..");
 const cli = resolve(root, "cli/dist/m9r.js");
 const token = JSON.parse(readFileSync(resolve(root, `.oathlock/agents/${SENDER}/local.json`), "utf8")).token;

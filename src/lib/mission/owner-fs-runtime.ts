@@ -62,7 +62,7 @@ export interface OwnerFsRuntimeOptions {
 
 /** Started once per machine. Resolves quietly (does nothing) if no provider is connected yet, same posture as owner-pty-runtime.ts. */
 export async function startOwnerFsRuntime(options: OwnerFsRuntimeOptions): Promise<void> {
-  const appUrl = (options.appUrl ?? process.env.OATHLOCK_API_URL ?? "https://m9r-web-staging.m9r.workers.dev").replace(/\/+$/, "");
+  const appUrl = (options.appUrl ?? process.env.OATHLOCK_API_URL ?? "https://app.m9r.workers.dev").replace(/\/+$/, "");
   const relayPublicUrl = options.relayPublicUrl ?? process.env.MISSION_RELAY_PUBLIC_URL?.trim() ?? "https://m9r-relay.m9r.workers.dev";
   const discoveryIntervalMs = options.discoveryIntervalMs ?? 15_000;
   const log = options.onLog ?? ((message: string) => console.log(`[owner-fs] ${message}`));

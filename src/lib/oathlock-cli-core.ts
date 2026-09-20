@@ -53,7 +53,7 @@ import { HEARTBEAT_PROTOCOL_VERSION } from "@/lib/agent-heartbeat";
 /** Actions this CLI currently implements. */
 const CLI_IMPLEMENTED_ACTIONS = ["heartbeat", "rules_read", "inbox_read", "assignment_lifecycle", "run_lifecycle", "work_signal_emit", "work_signal_replay", "work_signal_ack", "evidence_submit", "token_rotation"];
 
-export const DEFAULT_API_URL = "https://m9r-web-staging.m9r.workers.dev";
+export const DEFAULT_API_URL = "https://app.m9r.workers.dev";
 // NOT renamed to ".m9r" -- confirmed live against a real connected repo that
 // the actual persisted directory on disk is still ".oathlock" (real token,
 // config.json, run.json all present there). The master plan explicitly

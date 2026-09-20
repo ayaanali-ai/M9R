@@ -6,7 +6,7 @@
 # Requires the local runtime running from a build that includes restart recovery.
 $ErrorActionPreference = 'Stop'
 $repo = 'C:\RunLeak\runleak'
-$env:OATHLOCK_API_URL = 'https://m9r-web-staging.m9r.workers.dev'
+$env:OATHLOCK_API_URL = 'https://app.m9r.workers.dev'
 $out = & node "$repo\cli\dist\m9r.js" ask '@claude-code' 'Write the numbers 1 to 5000, one per line, with no other text at all.' --agent-kind codex
 $mid = ($out | Select-String -Pattern 'delivery ([0-9a-f-]{36})').Matches[0].Groups[1].Value
 "message $mid sent"

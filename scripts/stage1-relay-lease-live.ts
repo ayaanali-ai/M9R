@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { WebSocket } from "ws";
 
 const RELAY = "m9r-relay.m9r.workers.dev";
-const WEB = "https://m9r-web-staging.m9r.workers.dev";
+const WEB = "https://app.m9r.workers.dev";
 const token = JSON.parse(readFileSync(".oathlock/agents/codex/local.json", "utf8")).token as string;
 const who = await fetch(`${WEB}/api/agent/whoami`, { headers: { authorization: `Bearer ${token}` } }).then((r) => r.json()) as { workspaceId: string };
 const WS_ID = who.workspaceId;
