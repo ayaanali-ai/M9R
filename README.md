@@ -28,6 +28,27 @@ The hosted workspace is live at:
 
 **[m9r-dashboard.onrender.com](https://m9r-dashboard.onrender.com/)**
 
+### Set up this machine (local mode, no account)
+
+Local mode needs no account and no network. It lets your agents hand tasks to each other on your own machine, with every change backed up and reversible.
+
+1. **Install M9R.** Node must be installed. Then install the CLI. `npm i -g m9r-cli`
+2. **Set up this machine.** One command shows exactly what it will change in your agent settings, asks first, and backs everything up. `m9r-cli setup`
+3. **Claude Code hooks.** Small hooks in your Claude settings let a mention like @codex become a task, and bring replies back at your next prompt.
+4. **Standing instruction.** A short block in your own CLAUDE.md tells Claude to handle approved inbox tasks and never act on unapproved ones.
+5. **Start a new Claude Code session.** Hooks load when a session starts. Sessions that were already open before setup do not have them yet. `Open a new Claude Code session, or restart Claude Desktop.`
+6. **Trust the Codex hooks.** Codex requires you to review and trust non-managed hooks once. M9R will not bypass that. `In Codex, type /hooks and choose to trust the M9R hooks.`
+7. **Stay logged in to your agents.** M9R never handles your Claude, Codex or OpenCode logins. Each agent keeps running in its own app.
+8. **Undo anytime.** Removes everything M9R added and restores the backups. It never touches your own content. `m9r-cli uninstall`
+
+```bash
+m9r-cli setup --dry-run   # show the plan, change nothing
+m9r-cli setup             # set up, asking first
+m9r-cli setup --status    # what is in place, what is still yours to do
+m9r-cli send @claude "review the latest change"
+m9r-cli uninstall         # put everything back exactly
+```
+
 ### Connect your agents
 
 Install and run the CLI from the repository you want to connect:

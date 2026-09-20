@@ -49,6 +49,7 @@ import {
   removeCaptureHook,
 } from "@/lib/cross-agent-capture-setup-core";
 import { HEARTBEAT_PROTOCOL_VERSION } from "@/lib/agent-heartbeat";
+import { printNativeStatus, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
 
 /** Actions this CLI currently implements. */
 const CLI_IMPLEMENTED_ACTIONS = ["heartbeat", "rules_read", "inbox_read", "assignment_lifecycle", "run_lifecycle", "work_signal_emit", "work_signal_replay", "work_signal_ack", "evidence_submit", "token_rotation"];
@@ -100,6 +101,8 @@ export interface CliDeps {
    * rather than silently reporting nothing installed.
    */
   probeVersion?: VersionProbe;
+  /** Interactive yes/no for setup and uninstall; absent without a terminal. */
+  confirm?(question: string): Promise<boolean>;
   /** Local-only capture spool drain, wired by the real entrypoint and injected in tests. */
   drainCapture?(): Promise<{ drained: number; failed: number }>;
 }
@@ -2943,6 +2946,7 @@ async function cmdSubmitSession(deps: CliDeps, parsed: ParsedArgs): Promise<numb
 }
 
 async function cmdDoctor(deps: CliDeps): Promise<number> {
+  if (deps.env.USERPROFILE ?? deps.env.HOME) printNativeStatus(nativeIo(deps));
   const base = apiBase(deps.env);
   let failed = false;
   const check = (ok: boolean, label: string) => {
@@ -3223,6 +3227,13 @@ Usage:
   m9r-cli bootstrap [--agent-kind <kind>]   Install/update the automatic agent workflow in repo instructions
   m9r-cli bootstrap status                  Report integration file, installed/missing/outdated, block version
   m9r-cli bootstrap remove                  Remove only the M9R-managed block (user content preserved)
+  m9r-cli connect [--agents claude-code,codex,opencode]
+                                         Detect installed agents and start one human-approved connection
+  m9r-cli setup [--dry-run] [--yes] [--status]
+                                         Set up this machine locally (no account): hooks and a standing instruction, with backups
+  m9r-cli uninstall [--yes] [--purge]       Remove everything setup added and restore your files exactly
+  m9r-cli send @<agent> "<message>" [--from <name>]
+                                         Send a task to an agent on this machine (shows at its next prompt)
   m9r-cli capture install [--agent-kind <kind>]
                                          Install/repair local Claude Code, Codex, or OpenCode memory capture without a new approval claim
   m9r-cli delivery <message id>              Show how far a message got, per recipient (read-only)
@@ -3295,6 +3306,12 @@ Environment:
   OATHLOCK_AGENT_KIND  Agent-kind fallback when --agent-kind is omitted
   OATHLOCK_REPO_HINT   Override repo hint for init`;
 
+/** Adapts the CLI's dependencies for the native front-door commands; undefined without a home directory (tests). */
+function nativeIo(deps: CliDeps): NativeIo {
+  const homeDir = deps.env.USERPROFILE ?? deps.env.HOME ?? "";
+  return { env: deps.env, homeDir, out: (l) => deps.out(l), err: (l) => deps.err(l), confirm: deps.confirm };
+}
+
 /** Run the CLI. Returns a process exit code. */
 export async function run(argv: string[], deps: CliDeps): Promise<number> {
   const [command, ...rest] = argv;
@@ -3305,6 +3322,10 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
       return cmdInit(deps, parsed);
     case "connect":
       return cmdConnect(deps, parsed);
+    case "setup":
+    case "uninstall":
+    case "send":
+      return runNativeCommand(command, rest, nativeIo(deps));
     case "bootstrap":
       return cmdBootstrap(deps, parsed);
     case "capture":

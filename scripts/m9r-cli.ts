@@ -54,6 +54,7 @@ import {
 } from "@/lib/oathlock-autostart";
 import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, shouldRelaunch, stillHoldsWatchdogLock } from "@/lib/oathlock-watchdog";
 import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
+import { createInterface } from "node:readline/promises";
 
 const execFileAsync = promisify(execFile);
 
@@ -93,6 +94,17 @@ const deps: CliDeps = {
   err: (line) => process.stderr.write(line + "\n"),
   openUrl,
   probeVersion,
+  confirm: process.stdin.isTTY
+    ? async (question) => {
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        try {
+          const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
+          return answer === "y" || answer === "yes";
+        } finally {
+          rl.close();
+        }
+      }
+    : undefined,
   drainCapture: () => drainCaptureSpool({
     repositoryRoot: process.cwd(),
     readTranscript: (path) => readFile(path, "utf8"),
