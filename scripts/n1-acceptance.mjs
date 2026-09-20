@@ -27,7 +27,7 @@ writeFileSync(join(project, ".claude", "settings.json"), mergeHooks(null, [
 ]).content);
 writeFileSync(join(project, "CLAUDE.md"), applyStandingInstruction(null).content);
 
-const env = { ...process.env, M9R_HOME: m9rHome };
+const env = { ...process.env, M9R_HOME: m9rHome, M9R_SEND_AS_HUMAN: "1" };
 const store = createLocalStore(m9rHome);
 let failures = 0;
 const check = (name, ok, detail = "") => { if (!ok) failures += 1; console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  -- ${detail}` : ""}`); };

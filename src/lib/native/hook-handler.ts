@@ -10,7 +10,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { renderInboxInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
+import { renderInboxInjection, renderResultsInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
+import { canQueue, isM9rPushedPrompt } from "./codex-delivery-core";
 import { findEndpointMentions } from "./mention-core";
 import { findMemoryHints, renderMemoryHint } from "./memory-hint-core";
 import { handleForProvider, type LocalStore } from "./local-store";
@@ -30,6 +31,10 @@ export interface HookContext {
   pathExists?: (absolutePath: string) => boolean;
   /** Returns the text of the project's memory index, or null. Injected for tests; the default reads it with a size cap. */
   readIndex?: (cwd: string) => string | null;
+  /** N2: starts pushing a task into the target Codex session (fire and forget; the hook never waits for Codex). */
+  dispatch?: (taskId: string) => void;
+  /** N2: reads back answers for tasks already pushed into Codex sessions, before results are shown. */
+  collect?: () => void;
   /** Endpoints seen more recently than this count as "active now" on the card. */
   activeWindowMs?: number;
   now?: () => Date;
@@ -69,7 +74,9 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const pending = renderInboxInjection(ctx.store.tasksFor(self), ctx.store.cursorFor(self, input.session_id)).includedIds.length;
       // Only mention memory if the index file really exists here (the earlier card pointed at a file that did not).
       const memoryDir = ctx.memoryDir ?? (input.cwd && (ctx.pathExists ?? existsSync)(join(input.cwd, ".oathlock", "memory", "index.md")) ? ".oathlock/memory" : undefined);
-      return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, memoryDir }));
+      ctx.store.sweepExpired();
+      const awaitingApproval = ctx.store.pendingApprovals().length;
+      return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir }));
     }
 
     if (event === "UserPromptSubmit") {
@@ -80,18 +87,25 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const parts: string[] = [];
 
       // 1. Human-typed mentions become tasks. Never our own handle; never an existing file or folder.
-      const targets = findEndpointMentions(prompt, {
+      // A prompt M9R pushed in ("[M9R T3] Task from @claude ...") names its sender; routing that would bounce it back.
+      const targets = isM9rPushedPrompt(prompt) ? [] : findEndpointMentions(prompt, {
         aliases: ctx.store.knownAliases().filter((a) => a !== self),
         pathExists: (token) => exists(resolve(join(cwd, token))),
       });
       for (const to of targets) {
         const goal = goalFor(prompt, to);
         if (!goal) continue;
-        const { task } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
+        const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
         parts.push(renderSentAck(task.id, to));
+        if (created && to === "codex" && canQueue(task)) ctx.dispatch?.(task.id);
       }
 
-      // 2. Anything new in our own inbox, delta-only.
+      // 2a. Answers to tasks we sent, once.
+      try { ctx.collect?.(); } catch { /* a collect failure must never touch the prompt */ }
+      const results = renderResultsInjection(ctx.store.tasksFrom(self), self);
+      if (results.text) { parts.push(results.text); ctx.store.markResultShown(results.ids); }
+
+      // 2b. Anything new in our own inbox, delta-only.
       const cursor = ctx.store.cursorFor(self, input.session_id);
       const injection = renderInboxInjection(ctx.store.tasksFor(self), cursor);
       if (injection.text) {

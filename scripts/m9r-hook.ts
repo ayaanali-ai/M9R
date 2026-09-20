@@ -7,16 +7,20 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { handleHookEvent, type HookInput } from "@/lib/native/hook-handler";
+import { collectCodexResults, deliverToCodex, realDeps, spawnDeliveryRunner } from "@/lib/native/codex-delivery";
 
-try {
-  const [event, provider = "claude-code"] = process.argv.slice(2);
+async function main() {
+  const [event, provider = "claude-code", extra] = process.argv.slice(2);
+  const store = createLocalStore(defaultStoreRoot(homedir(), process.env));
+  // Runner mode (started detached by a hook): push one task into Codex, then exit. Never prints.
+  if (event === "queue" && extra) { await deliverToCodex(store, extra, realDeps()); return; }
+  const entry = process.argv[1] ?? "";
+  const deps = realDeps();
   let input: HookInput = {};
   try { input = JSON.parse(readFileSync(0, "utf8")) as HookInput; } catch { /* no or invalid stdin: fall back to the argument */ }
   if (!input.hook_event_name && event) input.hook_event_name = event;
-  const store = createLocalStore(defaultStoreRoot(homedir(), process.env));
-  const result = handleHookEvent(input, { provider, store });
+  const result = handleHookEvent(input, { provider, store, dispatch: (id) => spawnDeliveryRunner(entry, id), collect: () => { collectCodexResults(store, deps); } });
   if (result) process.stdout.write(JSON.stringify(result));
-} catch {
-  /* silent by design */
 }
-process.exit(0);
+
+main().catch(() => { /* silent by design */ }).finally(() => process.exit(0));

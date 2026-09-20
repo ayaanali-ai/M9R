@@ -42,6 +42,19 @@ export interface Task {
   /** Set when the task was first shown to its target agent. */
   deliveredAt?: string;
   resultSummary?: string;
+  /** Set when the sender was first shown the result (once). */
+  resultShownAt?: string;
+  /** Native push (N2): how far pushing this task into the target session got. Absent for plain inbox tasks. */
+  delivery?: TaskDelivery;
+}
+
+export interface TaskDelivery {
+  /** `queued` = pushed into the target session; `done` = the answer came back; `failed` = fell back to the inbox. */
+  state: "queued" | "failed" | "done";
+  attempts: number;
+  threadId?: string;
+  queuedAt?: string;
+  error?: string;
 }
 
 export interface NewTaskInput {
@@ -109,6 +122,17 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
   };
 }
 
+const RESULT_ITEMS = 3;
+const RESULT_CHARS = 400;
+
+/** Answers to tasks this agent sent, shown once at its next prompt. Empty when there are none (zero tokens). */
+export function renderResultsInjection(tasks: readonly Task[], handle: string): { text: string; ids: string[] } {
+  const ready = tasks.filter((t) => t.from === handle && t.resultSummary && !t.resultShownAt).slice(0, RESULT_ITEMS);
+  if (ready.length === 0) return { text: "", ids: [] };
+  const lines = ready.map((t) => `[${t.id} finished by @${t.to}] ${clip(t.resultSummary ?? "", RESULT_CHARS).text}`);
+  return { text: `M9R results (${ready.length})\n${lines.join("\n")}`, ids: ready.map((t) => t.id) };
+}
+
 /** Same key means the same task: a repeated send must not create or deliver a second one. */
 export function findByIdempotencyKey(tasks: readonly Task[], to: string, key: string): Task | undefined {
   return tasks.find((t) => t.to === to && t.idempotencyKey === key);
@@ -135,7 +159,8 @@ function approvalLabel(t: Task): string {
  */
 export function renderInboxInjection(tasks: readonly Task[], cursor: number): InjectionResult {
   const visible = tasks
-    .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired")
+    // A task already pushed into the session as a real prompt must not be injected a second time from the inbox.
+    .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired" && t.delivery?.state !== "queued" && t.delivery?.state !== "done")
     .sort((a, b) => a.seq - b.seq);
   const shown = visible.slice(0, CAPS.inboxItems);
   if (shown.length === 0) return { text: "", includedIds: [], newCursor: cursor, omitted: 0 };
@@ -162,6 +187,8 @@ export interface CardInput {
   handle: string;
   others: ReadonlyArray<{ handle: string; activity?: string }>;
   pendingCount: number;
+  /** Tasks waiting for the user's yes (N5); the agent is told so it can say so. */
+  awaitingApproval?: number;
   /** Only set when the folder really exists; otherwise the card says nothing about memory. */
   memoryDir?: string;
 }
@@ -173,6 +200,7 @@ export function renderSessionCard(input: CardInput): string {
     `M9R connected as @${input.handle}.`,
     others.length ? `Active now: ${others.join(", ")}.` : "No other agents active.",
     input.pendingCount > 0 ? `${input.pendingCount} pending inbox item(s); they appear at your next prompt.` : "",
+    input.awaitingApproval ? `${input.awaitingApproval} task(s) are waiting for the user's approval; if it comes up, tell the user to run: m9r-cli tasks.` : "",
     input.memoryDir ? `Earlier agent sessions on this project are indexed in ${input.memoryDir}/index.md; read a short summary there before re-deriving earlier work.` : "",
   ].filter(Boolean);
   const card = lines.join(" ");

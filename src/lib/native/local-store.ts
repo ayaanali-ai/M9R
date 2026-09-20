@@ -7,7 +7,8 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, redactSecrets, type Approval, type NewTaskInput, type Task } from "./inbox-core";
+import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
+import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
 
 export interface EndpointRecord {
   handle: string;
@@ -19,7 +20,7 @@ export interface EndpointRecord {
 
 export interface EventRecord {
   at: string;
-  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.approved" | "task.denied" | "task.result";
+  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked";
   handle?: string;
   taskId?: string;
   text: string;
@@ -35,9 +36,12 @@ interface StoreState {
   cursors: Record<string, number>;
   endpoints: Record<string, EndpointRecord>;
   events: EventRecord[];
+  /** N5 standing rules: an agent may hand work to another without asking each time, for a limited time. */
+  rules: StandingRule[];
+  nextRuleNo: number;
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [] });
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1 });
 
 const KNOWN_PROVIDER_HANDLES: Readonly<Record<string, string>> = { "claude-code": "claude", claude: "claude", codex: "codex", opencode: "opencode" };
 
@@ -146,8 +150,10 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         s.nextSeq[input.to] = seq;
         const id = `T${s.nextTaskNo}`;
         s.nextTaskNo += 1;
-        const task = newTask(input, { id, seq }, now().toISOString());
+        const rule = input.origin === "agent_initiated" && input.standingRuleApplies === undefined ? ruleCovers(s.rules, { from: input.from, to: input.to, goal: input.goal }, now()) : undefined;
+        const task = newTask({ ...input, standingRuleApplies: input.standingRuleApplies ?? !!rule }, { id, seq }, now().toISOString());
         s.tasks.push(task);
+        if (rule) pushEvent(s, { kind: "task.approved", taskId: id, handle: task.to, text: `${id} approved by standing rule ${rule.id}` });
         pushEvent(s, { kind: "task.created", taskId: id, handle: task.to, text: `@${task.from} to @${task.to}: ${task.goal.slice(0, 120)}` });
         return { task, created: true };
       });
@@ -166,6 +172,51 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
+    addRule(input: { from: string; to: string; ttlMs: number; note?: string }): StandingRule {
+      return update((s) => {
+        const created = now();
+        const rule: StandingRule = { id: `R${s.nextRuleNo}`, from: input.from, to: input.to, createdAt: created.toISOString(), expiresAt: new Date(created.getTime() + input.ttlMs).toISOString(), note: input.note };
+        s.nextRuleNo += 1;
+        s.rules.push(rule);
+        pushEvent(s, { kind: "rule.created", handle: rule.to, text: `@${rule.from} may hand work to @${rule.to} until ${rule.expiresAt}` });
+        return rule;
+      });
+    },
+
+    revokeRule(id: string): boolean {
+      return update((s) => {
+        const before = s.rules.length;
+        s.rules = s.rules.filter((r) => r.id !== id);
+        if (s.rules.length !== before) pushEvent(s, { kind: "rule.revoked", text: `${id} revoked` });
+        return s.rules.length !== before;
+      });
+    },
+
+    /** Rules that have not expired yet. */
+    activeRules(): StandingRule[] {
+      return readState().rules.filter((r) => Date.parse(r.expiresAt) > now().getTime());
+    },
+
+    /** Lets pending approvals older than the limit lapse. Cheap when nothing is pending. */
+    sweepExpired(ttlMs?: number): string[] {
+      const current = readState();
+      if (!current.tasks.some((t) => t.approval === "pending")) return [];
+      return update((s) => {
+        const ids = lapsedPending(s.tasks, now(), ttlMs);
+        for (const id of ids) {
+          const t = s.tasks.find((x) => x.id === id);
+          if (t) { t.approval = "expired"; pushEvent(s, { kind: "task.expired", taskId: id, handle: t.to, text: `${id} lapsed without an answer` }); }
+        }
+        return ids;
+      });
+    },
+
+    /** Tasks waiting for the user's yes (not lapsed). */
+    pendingApprovals(): Task[] {
+      const lapsed = new Set(lapsedPending(readState().tasks, now()));
+      return readState().tasks.filter((t) => t.approval === "pending" && !lapsed.has(t.id));
+    },
+
     /** Endpoints, tasks, events and cursors in one read (used when syncing to the web app). */
     snapshot(): { endpoints: EndpointRecord[]; tasks: Task[]; events: EventRecord[]; cursors: Record<string, number> } {
       const s = readState();
@@ -174,6 +225,10 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     getTask(id: string): Task | undefined {
       return readState().tasks.find((t) => t.id === id);
+    },
+
+    tasksFrom(handle: string): Task[] {
+      return readState().tasks.filter((t) => t.from === handle);
     },
 
     tasksFor(handle: string): Task[] {
@@ -191,11 +246,41 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
+    /** Records how far native delivery got (queued, failed, done); attempts are counted for the ledger. */
+    setDelivery(id: string, patch: Partial<TaskDelivery> & Pick<TaskDelivery, "state">): Task | undefined {
+      return update((s) => {
+        const t = s.tasks.find((x) => x.id === id);
+        if (!t) return undefined;
+        t.delivery = { attempts: 0, ...t.delivery, ...patch };
+        if (patch.state === "queued" && !t.deliveredAt) {
+          t.deliveredAt = now().toISOString();
+          pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `${id} pushed into @${t.to}'s session` });
+        }
+        return t;
+      });
+    },
+
+    /** Tasks pushed into a session that have not produced a result yet. */
+    awaitingResults(): Task[] {
+      return readState().tasks.filter((t) => t.delivery?.state === "queued" && !t.resultSummary);
+    },
+
+    markResultShown(ids: readonly string[]): void {
+      if (ids.length === 0) return;
+      update((s) => {
+        for (const id of ids) {
+          const t = s.tasks.find((x) => x.id === id);
+          if (t && !t.resultShownAt) t.resultShownAt = now().toISOString();
+        }
+      });
+    },
+
     setResult(id: string, summary: string): Task | undefined {
       return update((s) => {
         const t = s.tasks.find((x) => x.id === id);
         if (!t) return undefined;
         const clean = redactSecrets(summary.trim());
+        if (t.delivery?.state === "queued") t.delivery = { ...t.delivery, state: "done" };
         t.resultSummary = clean.length > MAX_RESULT_SUMMARY_CHARS ? clean.slice(0, MAX_RESULT_SUMMARY_CHARS - TRUNCATION_MARKER.length) + TRUNCATION_MARKER : clean;
         pushEvent(s, { kind: "task.result", taskId: id, handle: t.from, text: `${id} finished: ${t.resultSummary.slice(0, 120)}` });
         return t;

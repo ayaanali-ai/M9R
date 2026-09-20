@@ -186,7 +186,7 @@ function runtimeSandbox() {
   const home = mkdtempSync(join(tmpdir(), "m9r-rt-"));
   const source = join(home, "cli-dist");
   mkdirSync(source, { recursive: true });
-  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js"]) writeFileSync(join(source, f), `// ${f} v1\n`, "utf8");
+  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "approval-core.js"]) writeFileSync(join(source, f), `// ${f} v1\n`, "utf8");
   const out: string[] = [];
   const err: string[] = [];
   const io: NativeIo = { homeDir: home, env: { M9R_HOME: join(home, ".m9r"), CLAUDE_CONFIG_DIR: join(home, ".claude"), M9R_HOOK_SOURCE: source }, out: (l) => out.push(l), err: (l) => err.push(l) };
@@ -197,12 +197,12 @@ function runtimeSandbox() {
 test("setup copies the hook program into ~/.m9r/bin and points the hooks there, not at where the CLI happens to live", async () => {
   const s = runtimeSandbox();
   assert.equal(await s.run("setup", ["--yes"]), 0);
-  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "package.json"]) assert.equal(existsSync(join(s.bin, f)), true, f);
+  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "approval-core.js", "package.json"]) assert.equal(existsSync(join(s.bin, f)), true, f);
   assert.equal(JSON.parse(readFileSync(join(s.bin, "package.json"), "utf8")).type, "module");
   const command: string = JSON.parse(readFileSync(s.p.settings, "utf8")).hooks.UserPromptSubmit[0].hooks[0].command;
   assert.equal(command.includes(s.bin.split(String.fromCharCode(92)).join("/")), true, command);
   assert.equal(command.includes("cli-dist"), false, "the hook must not point at the CLI's own location");
-  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles.length, 7);
+  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles.length, 10);
   s.done();
 });
 
@@ -247,5 +247,32 @@ test("a dry run announces the copy and writes nothing; status is open before set
   assert.equal(nativeStatus(s.io).find((r) => r.id === "hook-entry")?.state, "todo");
   await s.run("setup", ["--yes"]);
   assert.equal(nativeStatus(s.io).find((r) => r.id === "hook-entry")?.state, "ok");
+  s.done();
+});
+
+test("when Codex is installed, setup also adds its hooks and standing block, keeps the user's own hook, and uninstall restores every file exactly", async () => {
+  const s = sandbox();
+  const codex = s.p.codex;
+  mkdirSync(codex, { recursive: true });
+  const ownHooks = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "node my-own-hook.js" }] }] } }, null, 2) + "\n";
+  writeFileSync(s.p.codexHooks, ownHooks, "utf8");
+  writeFileSync(s.p.codexAgents, "# Codex rules\nBe brief.\n", "utf8");
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const hooks = JSON.parse(readFileSync(s.p.codexHooks, "utf8"));
+  assert.equal(hooks.hooks.Stop[0].hooks[0].command, "node my-own-hook.js", "the user's own hook is untouched");
+  assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /m9r-hook.* UserPromptSubmit codex$/);
+  assert.match(readFileSync(s.p.codexAgents, "utf8"), /^# Codex rules\nBe brief\.\n\n<!-- M9R:STANDING-INSTRUCTION:START/);
+  assert.equal(nativeStatus(s.io).find((r) => r.id === "codex-hooks")?.state, "ok");
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(readFileSync(s.p.codexHooks, "utf8"), ownHooks);
+  assert.equal(readFileSync(s.p.codexAgents, "utf8"), "# Codex rules\nBe brief.\n");
+  s.done();
+});
+
+test("without Codex installed, setup never creates its folder", async () => {
+  const s = sandbox();
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  assert.equal(existsSync(s.p.codex), false);
+  assert.equal(nativeStatus(s.io).some((r) => r.id === "codex-hooks"), false);
   s.done();
 });

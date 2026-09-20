@@ -25,6 +25,10 @@ import {
   type ManifestEntry,
 } from "./install-core";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
+import { deliverToCodex, realDeps, type DeliveryDeps } from "./codex-delivery";
+import { canQueue } from "./codex-delivery-core";
+import { isHumanContext, isProtectedAction } from "./approval-core";
+import { runAllow, runDecision, runRevoke, runRules, runTasks } from "./approval-commands";
 import { USER_STEPS } from "./onboarding-steps";
 
 export interface NativeIo {
@@ -34,6 +38,8 @@ export interface NativeIo {
   err(line: string): void;
   /** Interactive yes/no; absent when there is no terminal, in which case `--yes` is required. */
   confirm?(question: string): Promise<boolean>;
+  /** Codex delivery dependencies; tests inject fakes, production uses the real `codex queue`. */
+  codexDeps?: DeliveryDeps;
 }
 
 type Kind = "hooks-json" | "markdown-block";
@@ -42,7 +48,8 @@ interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEnt
 export function nativePaths(io: Pick<NativeIo, "env" | "homeDir">) {
   const m9r = defaultStoreRoot(io.homeDir, io.env);
   const claude = io.env.CLAUDE_CONFIG_DIR?.trim() || join(io.homeDir, ".claude");
-  return { m9r, claude, settings: join(claude, "settings.json"), claudeMd: join(claude, "CLAUDE.md"), manifest: join(m9r, "install-manifest.json"), backups: join(m9r, "backups") };
+  const codex = io.env.CODEX_HOME?.trim() || join(io.homeDir, ".codex");
+  return { m9r, claude, codex, codexHooks: join(codex, "hooks.json"), codexAgents: join(codex, "AGENTS.md"), settings: join(claude, "settings.json"), claudeMd: join(claude, "CLAUDE.md"), manifest: join(m9r, "install-manifest.json"), backups: join(m9r, "backups") };
 }
 
 /** The tiny hook entry sits next to this module in `cli/dist`; tests and dev can override it. */
@@ -55,7 +62,7 @@ export function hookEntryPath(env: Record<string, string | undefined>): string {
  * The hook must not run from where the CLI happens to live: `npx` runs it from a cache that is later cleared, which
  * would silently kill the hooks. Setup copies this small runtime into M9R's own folder and points the hooks there.
  */
-export const HOOK_RUNTIME_FILES = ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js"] as const;
+export const HOOK_RUNTIME_FILES = ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "approval-core.js"] as const;
 
 function hookSourceDir(env: Record<string, string | undefined>): string {
   return env.M9R_HOOK_SOURCE?.trim() || dirname(hookEntryPath(env));
@@ -90,8 +97,8 @@ function copyRuntime(plan: { sourceDir: string; targetDir: string }): string[] {
 const slash = (p: string) => p.replace(/\\/g, "/");
 const readText = (path: string): string | null => (existsSync(path) ? readFileSync(path, "utf8") : null);
 
-function hookSpecs(entry: string): HookSpec[] {
-  const command = (event: string) => `node "${slash(entry)}" ${event} claude-code`;
+function hookSpecs(entry: string, provider = "claude-code"): HookSpec[] {
+  const command = (event: string) => `node "${slash(entry)}" ${event} ${provider}`;
   return [
     { event: "SessionStart", command: command("SessionStart"), timeoutSec: 5 },
     { event: "UserPromptSubmit", command: command("UserPromptSubmit"), timeoutSec: 5 },
@@ -106,10 +113,22 @@ function plan(io: NativeIo): PlannedFile[] {
   const settings = mergeHooks(settingsBefore, hookSpecs(activeHookEntry(io)), p.settings);
   const mdBefore = readText(p.claudeMd);
   const md = applyStandingInstruction(mdBefore);
-  return [
+  const files: PlannedFile[] = [
     { path: p.settings, kind: "hooks-json", before: settingsBefore, after: settings.content, changed: settings.changed, summary: `add 2 hooks (session start, prompt submit) to ${p.settings}` },
     { path: p.claudeMd, kind: "markdown-block", before: mdBefore, after: md.content, changed: md.changed, summary: `${mdBefore == null ? "create" : "add a short block to"} ${p.claudeMd}` },
   ];
+  // Codex is only touched when it is installed here (its folder exists); M9R never creates ~/.codex.
+  if (existsSync(p.codex)) {
+    const hooksBefore = readText(p.codexHooks);
+    const codexHooks = mergeHooks(hooksBefore, hookSpecs(activeHookEntry(io), "codex"), p.codexHooks);
+    const agentsBefore = readText(p.codexAgents);
+    const agents = applyStandingInstruction(agentsBefore);
+    files.push(
+      { path: p.codexHooks, kind: "hooks-json", before: hooksBefore, after: codexHooks.content, changed: codexHooks.changed, summary: `add 2 hooks (session start, prompt submit) to ${p.codexHooks} (Codex; you trust them once with /hooks)` },
+      { path: p.codexAgents, kind: "markdown-block", before: agentsBefore, after: agents.content, changed: agents.changed, summary: `${agentsBefore == null ? "create" : "add a short block to"} ${p.codexAgents}` },
+    );
+  }
+  return files;
 }
 
 function readManifest(path: string): Manifest | null {
@@ -212,11 +231,23 @@ export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?:
   return 0;
 }
 
-export function runSend(io: NativeIo, input: { to: string; text: string; from?: string; key?: string }): number {
+export async function runSend(io: NativeIo, input: { to: string; text: string; from?: string; key?: string }): Promise<number> {
   const to = input.to.replace(/^@/, "").toLowerCase();
   if (!to || !input.text.trim()) { io.err("Usage: m9r-cli send @<agent> \"<message>\" [--from <name>]"); return 1; }
   const store = createLocalStore(nativePaths(io).m9r);
-  const { task, created } = store.addTask({ from: input.from ?? "you", to: handleForProvider(to), goal: input.text, origin: "human_typed", idempotencyKey: input.key ?? randomUUID() });
+  // Typed by a person only with a real terminal and no agent markers; an agent running this command is agent-initiated.
+  const human = isHumanContext({ hasTerminal: !!io.confirm, env: io.env });
+  const { task, created } = store.addTask({ from: input.from ?? (human ? "you" : "agent"), to: handleForProvider(to), goal: input.text, origin: human ? "human_typed" : "agent_initiated", idempotencyKey: input.key ?? randomUUID() });
+  if (task.approval === "pending") {
+    io.out(`Task ${task.id} to @${task.to} is waiting for the user's approval; nothing was delivered.`);
+    io.out(`Tell the user to run: m9r-cli approve ${task.id}${isProtectedAction(task.goal) ? "  (it looks like a protected action, so a standing rule would not cover it)" : ""}`);
+    return 0;
+  }
+  if (task.to === "codex" && created && canQueue(task)) {
+    const outcome = await deliverToCodex(store, task.id, io.codexDeps ?? realDeps(io.env));
+    if (outcome.state === "queued") { io.out(`Sent to @codex as task ${task.id} and pushed into its session; it runs there now. The answer reaches ${task.from === "you" ? "your" : `@${task.from}'s`} inbox.`); return 0; }
+    if (outcome.state === "failed") { io.out(`Sent to @codex as task ${task.id}, but it could not be pushed: ${outcome.reason}`); io.out("It will show at Codex's next prompt instead."); return 0; }
+  }
   io.out(`${created ? "Sent" : "Already sent"} to @${task.to} as task ${task.id}. It appears at that agent's next prompt.`);
   return 0;
 }
@@ -231,6 +262,9 @@ export function nativeStatus(io: NativeIo): StatusRow[] {
   rows.push(hasOurHooks(settings, HOOK_MARKER) ? { id: "claude-hooks", state: "ok", label: "Claude Code hooks installed" } : { id: "claude-hooks", state: "todo", label: "Claude Code hooks not installed", fix: "m9r-cli setup" });
   const md = standingInstructionStatus(readText(p.claudeMd));
   rows.push(md.present ? { id: "standing", state: md.current ? "ok" : "todo", label: md.current ? "Standing instruction in CLAUDE.md" : "Standing instruction is out of date", ...(md.current ? {} : { fix: "m9r-cli setup" }) } : { id: "standing", state: "todo", label: "Standing instruction missing from CLAUDE.md", fix: "m9r-cli setup" });
+  if (existsSync(p.codex)) {
+    rows.push(hasOurHooks(readText(p.codexHooks), HOOK_MARKER) ? { id: "codex-hooks", state: "ok", label: "Codex hooks installed (trust them once with /hooks)" } : { id: "codex-hooks", state: "todo", label: "Codex hooks not installed", fix: "m9r-cli setup" });
+  }
   const entry = activeHookEntry(io);
   rows.push(existsSync(entry) ? { id: "hook-entry", state: "ok", label: "Hook program present" } : { id: "hook-entry", state: "todo", label: `Hook program missing at ${entry}`, fix: "npm i -g m9r-cli, then m9r-cli setup" });
   const store = createLocalStore(p.m9r);
@@ -252,13 +286,19 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   const has = (...names: string[]) => rest.some((a) => names.includes(a));
   const value = (name: string) => { const i = rest.indexOf(name); return i >= 0 ? rest[i + 1] : undefined; };
   const positionals: string[] = [];
-  for (let i = 0; i < rest.length; i += 1) { if (rest[i].startsWith("-")) { if (["--from", "--key"].includes(rest[i])) i += 1; continue; } positionals.push(rest[i]); }
+  for (let i = 0; i < rest.length; i += 1) { if (rest[i].startsWith("-")) { if (["--from", "--key", "--for"].includes(rest[i])) i += 1; continue; } positionals.push(rest[i]); }
   if (command === "setup") {
     if (has("--status")) { printNativeStatus(io); return 0; }
     return runSetup(io, { yes: has("--yes", "-y"), dryRun: has("--dry-run") });
   }
   if (command === "uninstall") return runUninstall(io, { yes: has("--yes", "-y"), purge: has("--purge") });
   if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key") });
+  const root = nativePaths(io).m9r;
+  if (command === "tasks") return runTasks(io, root);
+  if (command === "approve" || command === "deny") return runDecision(io, root, command === "approve" ? "approved" : "denied", positionals[0], has("--yes", "-y"));
+  if (command === "allow") return runAllow(io, root, positionals[0], positionals[1], value("--for"));
+  if (command === "standing") return runRules(io, root);
+  if (command === "revoke") return runRevoke(io, root, positionals[0]);
   io.err(`Unknown native command: ${command}`);
   return 1;
 }
