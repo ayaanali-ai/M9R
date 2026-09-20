@@ -39,6 +39,9 @@
   ],
   "exclude": [
     "services/relay-do",
+    "services/mission-bridge/src/worker-wrapper.ts",
+    "services/mission-relay/src/worker-wrapper.ts",
+    "services/mission-worker/src/worker-wrapper.ts",
     "node_modules",
     "extensions",
     "runleak-analyzer-mvp"

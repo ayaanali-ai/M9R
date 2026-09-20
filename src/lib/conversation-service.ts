@@ -1966,7 +1966,7 @@ export async function listConversationsForDashboard(selectedConversationId?: str
   ]);
   if (participantsError || humanMembersError || reactionsError || markersError || messageResults.error || attachmentsError) {
     const error = participantsError || humanMembersError || reactionsError || markersError || attachmentsError || messageResults.error;
-    if (isMissingTableError(error)) throw migrationRequiredError();
+    if (isMissingTableError(error as Parameters<typeof isMissingTableError>[0])) throw migrationRequiredError();
     throw new AgentJoinError("Could not load workspace conversation details.", "CONVERSATION_READ_FAILED", 500);
   }
   // Each per-conversation result came back newest-first (see the query above);

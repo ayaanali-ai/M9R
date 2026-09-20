@@ -22,7 +22,7 @@ test("jevJudge never throws: failures, timeouts and off all read as 'no judgment
   assert.equal(await jevJudge("x", q, { mode: "off" }), null);
   const boom: JevTransport = (async () => { throw new Error("api key sk-secret leaked in message"); }) as never;
   assert.equal(await jevJudge("x", q, { mode: "shadow", transport: boom }), null);
-  const hang: JevTransport = ((_r, o) => new Promise((_res, rej) => o.signal?.addEventListener("abort", () => rej(new Error("aborted"))))) as never;
+  const hang: JevTransport = ((_r: unknown, o: { signal?: AbortSignal }) => new Promise((_res, rej) => o.signal?.addEventListener("abort", () => rej(new Error("aborted"))))) as never;
   assert.equal(await jevJudge("x", q, { mode: "shadow", transport: hang, timeoutMs: 20 }), null);
   const ok = await jevJudge("x", q, { mode: "shadow", transport: fake(0.8, "codex") });
   assert.equal(ok?.answers.is_task.noul, 0.8);

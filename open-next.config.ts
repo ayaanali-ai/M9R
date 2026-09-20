@@ -1,6 +1,6 @@
 import { defineCloudflareConfig } from "@opennextjs/cloudflare";
 
-export default defineCloudflareConfig({
+export default defineCloudflareConfig(({
   default: {
     override: {
       wrapper: "cloudflare-node",
@@ -20,4 +20,4 @@ export default defineCloudflareConfig({
   dangerous: {
     enableCacheInterception: false,
   },
-});
+}) as never);
