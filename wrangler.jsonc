@@ -18,7 +18,7 @@
     "NEXT_PUBLIC_VAPID_PUBLIC_KEY": "",
     "VAPID_SUBJECT": "mailto:admin@m9r.app",
     "MISSION_RELAY_ENABLED": "1",
-    "RESEND_FROM": "OathLock <onboarding@resend.dev>"
+    "RESEND_FROM": "M9R <onboarding@resend.dev>"
   },
   "observability": {
     "enabled": true
