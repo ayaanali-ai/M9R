@@ -47,17 +47,23 @@ function openTui(threadId) {
 }
 
 const tuis = [];
+const ENTER = String.fromCharCode(13);
+async function startLive(threadId) {
+  const tui = openTui(threadId); tuis.push(tui);
+  await sleep(12_000);
+  // A live session sitting on a modal takes the keyboard and does not consume pushed tasks. Codex shows an "Update available"
+  // dialog on some starts; choose "Skip" (option 2: installs nothing, persists nothing) so the session reaches its idle prompt.
+  if (/Update available/.test(tui.screen())) { tui.term.write("2"); await sleep(500); tui.term.write(ENTER); console.log("INFO  dismissed the Codex update dialog with Skip (a session left on it would not consume pushed tasks)"); }
+  await sleep(6000);
+  return tui;
+}
+
 try {
   const threadId = newThread();
   check("0 a real thread was created, and the trusted hook registered it by itself", !!threadId && store.listEndpoints().some((e) => e.sessionId === threadId), threadId);
   if (!threadId) throw new Error("no thread");
 
-  const tui = openTui(threadId); tuis.push(tui);
-  await sleep(12_000);
-  // A live session sitting on a modal takes the keyboard and does not consume pushed tasks. Codex shows an "Update available"
-  // dialog on some starts; choose "Skip" (option 2: installs nothing, persists nothing) so the session reaches its idle prompt.
-  if (/Update available/.test(tui.screen())) { tui.term.write("2"); await sleep(500); tui.term.write("\r"); console.log("INFO  dismissed the Codex update dialog with Skip (a session left on it would not consume pushed tasks)"); }
-  await sleep(6000);
+  const tui = await startLive(threadId);
   console.log(`(TUI drew ${tui.screen().length} bytes; the live session is running)`);
 
   if (args.includes("--busy")) {
@@ -79,16 +85,28 @@ try {
     // A second Codex session appears (a finished `exec` one) while the first is still the live interactive session.
     const second = newThread();
     check("T0 a second Codex session exists, and the first is still remembered", !!second && second !== threadId && store.sessionsFor("codex").length === 2, second);
-    const unaimed = send("Reply with only the word: unaimed");
-    const t1 = store.tasksFor("codex").find((t) => /unaimed/.test(t.goal));
-    check("T1 an unaimed push with two sessions is NOT sent to a guess", t1?.delivery?.state === "failed" && /2 Codex sessions/.test(t1?.delivery?.error ?? ""), unaimed.stdout.trim().slice(0, 140));
-    const codexPrompt = spawnSync(process.execPath, [join(dist, "m9r-hook.js"), "UserPromptSubmit", "codex"], { env, input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: second, cwd: project, prompt: "hello" }), encoding: "utf8", windowsHide: true });
-    check("T2 it waits in the inbox and shows at the next Codex prompt instead of being lost", /M9R inbox[\s\S]*unaimed/.test(codexPrompt.stdout), codexPrompt.stdout.slice(0, 120));
+    const unaimed = send("Reply with only the word: unaimed-live");
+    const t1 = store.tasksFor("codex").find((t) => /unaimed-live/.test(t.goal));
+    check("T1 an unaimed push goes to the session that is actually open (not the newest, finished one)", t1?.delivery?.state === "queued" && t1?.delivery?.threadId === threadId, `${unaimed.stdout.trim().slice(0, 90)} -> ${t1?.delivery?.threadId}`);
+    check("T2 the live interactive session consumed it", await waitFor(() => (rolloutText(threadId).match(/unaimed-live/g) ?? []).length >= 3, 90_000));
     const listed = spawnSync(process.execPath, [join(dist, "m9r.js"), "sessions", "@codex"], { env, encoding: "utf8", windowsHide: true }).stdout;
     check("T3 `m9r-cli sessions` lists both", listed.includes(threadId) && listed.includes(second), `${listed.length} chars`);
-    const pinned = send("Reply with only the word: aimed-at-live", {}, threadId.slice(0, 14));
-    check("T4 a pinned push goes to the live session", /pushed into its session/.test(pinned.stdout) && store.tasksFor("codex").at(-1)?.delivery?.threadId === threadId, pinned.stdout.trim().slice(0, 100));
-    check("T5 the live interactive session consumed the pinned task", await waitFor(() => (rolloutText(threadId).match(/aimed-at-live/g) ?? []).length >= 3, 90_000));
+    if (args.includes("--both-live")) {
+      // Now the second session is open too: two open sessions is a real choice, so M9R must not guess.
+      const tui2 = await startLive(second);
+      const amb = send("Reply with only the word: both-open");
+      const t5 = store.tasksFor("codex").find((t) => /both-open/.test(t.goal));
+      check("T4 with two sessions really open, the push is not guessed", t5?.delivery?.state === "failed" && /2 Codex sessions/.test(t5?.delivery?.error ?? ""), amb.stdout.trim().slice(0, 100));
+      const pinned = send("Reply with only the word: aimed-at-second", {}, second.slice(0, 14));
+      const t6 = store.tasksFor("codex").find((t) => /aimed-at-second/.test(t.goal));
+      check("T5a the pinned push to the second live session is accepted", /pushed into its session/.test(pinned.stdout) && t6?.delivery?.threadId === second, `${pinned.stdout.trim().slice(0, 100)} -> ${t6?.delivery?.threadId}`);
+      const ok = await waitFor(() => (rolloutText(second).match(/aimed-at-second/g) ?? []).length >= 3, 90_000);
+      check("T5b the second live session consumed it", ok);
+      if (!ok) {
+        const flat = tui2.screen().split("").filter((ch) => ch >= " " && ch <= "~").join("").slice(-500);
+        console.log("INFO  second TUI screen tail:", flat);
+      }
+    }
   }
 } finally {
   for (const t of tuis) { try { t.term.kill(); } catch { /* already gone */ } }

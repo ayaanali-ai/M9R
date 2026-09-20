@@ -8,6 +8,7 @@ import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
+import { windowsFileHolders, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
 
 export interface DeliveryDeps {
@@ -15,6 +16,8 @@ export interface DeliveryDeps {
   runCodex(command: CodexCommand, args: string[]): Promise<{ code: number | null; stderr: string; spawnError?: string }>;
   /** Last bytes of the rollout file for a thread, or null when it cannot be found. */
   readRolloutTail(threadId: string): string | null;
+  /** Which of these threads are open right now. Optional: without it (or with `unknown`) recency decides. */
+  sessionLiveness?(threadIds: string[]): Promise<Record<string, Liveness>>;
 }
 
 export type DeliveryOutcome =
@@ -35,7 +38,10 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
     store.setDelivery(taskId, { state: "failed", attempts, error: reason });
     return { state: "failed", reason };
   };
-  const choice = pickSession(store.sessionsFor("codex"), { pinned: task.targetSession, senderCwd: task.cwd, now: new Date() });
+  const known = store.sessionsFor("codex");
+  // Asking the machine costs about a second, so only when there is a choice to make and nobody pinned one.
+  const liveness = !task.targetSession && known.length > 1 && deps.sessionLiveness ? await deps.sessionLiveness(known.map((s) => s.sessionId)).catch(() => undefined) : undefined;
+  const choice = pickSession(known, { pinned: task.targetSession, senderCwd: task.cwd, now: new Date(), liveness });
   if (choice.kind === "none") return fail(task.targetSession ? `No Codex session matches "${task.targetSession}". See: m9r-cli sessions` : "No Codex session is known yet. Open Codex once with the M9R hooks trusted, then send again.");
   if (choice.kind === "ambiguous") return fail(`${choice.sessions.length} Codex sessions are open here and M9R cannot tell which you mean, so it will show at the next prompt in whichever you use. To aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
   const endpoint = choice.session;
@@ -123,6 +129,14 @@ export function realDeps(env: Record<string, string | undefined> = process.env):
     readRolloutTail: (threadId) => {
       const file = findRolloutFile(codexHome(env), threadId);
       return file ? readTail(file, TAIL_BYTES) : null;
+    },
+    sessionLiveness: async (threadIds) => {
+      const byFile = new Map<string, string>();
+      for (const id of threadIds) { const f = findRolloutFile(codexHome(env), id); if (f) byFile.set(f, id); }
+      const verdicts = await windowsFileHolders([...byFile.keys()]);
+      const out: Record<string, Liveness> = Object.fromEntries(threadIds.map((id) => [id, "unknown" as Liveness]));
+      for (const [file, id] of byFile) out[id] = verdicts[file] ?? "unknown";
+      return out;
     },
   };
 }

@@ -100,6 +100,10 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
         if (created && to === "codex" && canQueue(task)) ctx.dispatch?.(task.id);
       }
 
+      // A prompt M9R pushed in is a task by itself: nothing else (older inbox items, results) is mixed into it, or the agent
+      // may answer the wrong one. Those items wait for the user's next real prompt.
+      if (isM9rPushedPrompt(prompt)) return out(event, parts.join("\n"));
+
       // 2a. Answers to tasks we sent, once.
       try { ctx.collect?.(); } catch { /* a collect failure must never touch the prompt */ }
       const results = renderResultsInjection(ctx.store.tasksFrom(self), self);

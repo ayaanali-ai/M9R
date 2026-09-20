@@ -247,3 +247,53 @@ test("`sessions` lists what was seen and how to aim a task", async () => {
   assert.match(text, new RegExp(B));
   assert.match(text, /send @codex --session/);
 });
+
+test("open sessions are preferred when the machine can say which are open; otherwise recency decides as before", () => {
+  const recent = "2026-09-20T11:50:00Z";
+  const two = [sess(A, "C:/proj/a", recent), sess(B, "C:/proj/b", recent)];
+  assert.deepEqual(pickSession(two, { now: NOW, liveness: { [A]: "live", [B]: "free" } }), { kind: "one", session: two[0] }, "the finished one is not a candidate");
+  assert.deepEqual(pickSession(two, { now: NOW, liveness: { [A]: "free", [B]: "live" } }), { kind: "one", session: two[1] });
+  assert.equal(pickSession(two, { now: NOW, liveness: { [A]: "live", [B]: "live" } }).kind, "ambiguous", "two open sessions is still a real choice");
+  assert.deepEqual(pickSession(two, { now: NOW, senderCwd: "C:/proj/b", liveness: { [A]: "live", [B]: "live" } }), { kind: "one", session: two[1] }, "two open: the sender's folder decides");
+  assert.equal(pickSession(two, { now: NOW, liveness: { [A]: "free", [B]: "free" } }).kind, "ambiguous", "none reported open: no one is ruled out on a hunch");
+  assert.equal(pickSession(two, { now: NOW, liveness: { [A]: "unknown", [B]: "unknown" } }).kind, "ambiguous", "unknown is no information, not closed");
+  assert.deepEqual(pickSession([two[0]], { now: NOW, liveness: { [A]: "free" } }), { kind: "one", session: two[0] }, "a lone session that does not hold its file (a Desktop thread, say) is still used");
+});
+
+test("with two sessions the push goes to the one that is open, and the machine is asked only when there is a choice", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj/a" });
+  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/b" });
+  const asked: string[][] = [];
+  const deps = fakeDeps({ sessionLiveness: async (ids) => { asked.push(ids); return { [A]: "live", [B]: "free" }; } });
+  const t = store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "human_typed", idempotencyKey: "live1", cwd: "C:/elsewhere" }).task;
+  assert.deepEqual(await deliverToCodex(store, t.id, deps), { state: "queued", threadId: A });
+  assert.equal(asked.length, 1);
+  const pinned = store.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "live2", targetSession: B.slice(0, 12) }).task;
+  assert.deepEqual(await deliverToCodex(store, pinned.id, deps), { state: "queued", threadId: B });
+  assert.equal(asked.length, 1, "a pinned push never asks");
+  const solo = newStore(); seedCodex(solo);
+  const t3 = typed(solo);
+  let soloAsked = 0;
+  await deliverToCodex(solo, t3.id, fakeDeps({ sessionLiveness: async () => { soloAsked += 1; return {}; } }));
+  assert.equal(soloAsked, 0, "one session: nothing to choose, so no check");
+  const failing = newStore();
+  failing.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/a" });
+  failing.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/b" });
+  const t4 = failing.addTask({ from: "claude", to: "codex", goal: "x", origin: "human_typed", idempotencyKey: "f" }).task;
+  const r = await deliverToCodex(failing, t4.id, fakeDeps({ sessionLiveness: async () => { throw new Error("powershell missing"); } }));
+  assert.equal(r.state, "failed", "a failing liveness check falls back to the safe ambiguous path");
+});
+
+test("an older inbox item is not mixed into a prompt M9R pushed; it waits for the user's next real prompt", () => {
+  const store = newStore(); seedCodex(store);
+  const waiting = store.addTask({ from: "claude", to: "codex", goal: "Older item that fell back to the inbox", origin: "human_typed", idempotencyKey: "old" }).task;
+  store.setDelivery(waiting.id, { state: "failed", error: "ambiguous" });
+  const pushedTask = store.addTask({ from: "claude", to: "codex", goal: "Reply with only: pushed-one", origin: "human_typed", idempotencyKey: "new" }).task;
+  store.setDelivery(pushedTask.id, { state: "queued", threadId: THREAD });
+  const ctx = { provider: "codex", store, pathExists: () => false, readIndex: () => null };
+  const pushed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: buildQueueMessage(pushedTask) }, ctx);
+  assert.equal(pushed, null, "the pushed prompt gets nothing added");
+  const real = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "what next?" }, ctx);
+  assert.match(real?.hookSpecificOutput.additionalContext ?? "", /Older item that fell back to the inbox/, "it arrives at the user's own next prompt");
+});

@@ -186,7 +186,7 @@ function runtimeSandbox() {
   const home = mkdtempSync(join(tmpdir(), "m9r-rt-"));
   const source = join(home, "cli-dist");
   mkdirSync(source, { recursive: true });
-  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "approval-core.js"]) writeFileSync(join(source, f), `// ${f} v1\n`, "utf8");
+  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js"]) writeFileSync(join(source, f), `// ${f} v1\n`, "utf8");
   const out: string[] = [];
   const err: string[] = [];
   const io: NativeIo = { homeDir: home, env: { M9R_HOME: join(home, ".m9r"), CLAUDE_CONFIG_DIR: join(home, ".claude"), M9R_HOOK_SOURCE: source }, out: (l) => out.push(l), err: (l) => err.push(l) };
@@ -197,12 +197,12 @@ function runtimeSandbox() {
 test("setup copies the hook program into ~/.m9r/bin and points the hooks there, not at where the CLI happens to live", async () => {
   const s = runtimeSandbox();
   assert.equal(await s.run("setup", ["--yes"]), 0);
-  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "approval-core.js", "package.json"]) assert.equal(existsSync(join(s.bin, f)), true, f);
+  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "package.json"]) assert.equal(existsSync(join(s.bin, f)), true, f);
   assert.equal(JSON.parse(readFileSync(join(s.bin, "package.json"), "utf8")).type, "module");
   const command: string = JSON.parse(readFileSync(s.p.settings, "utf8")).hooks.UserPromptSubmit[0].hooks[0].command;
   assert.equal(command.includes(s.bin.split(String.fromCharCode(92)).join("/")), true, command);
   assert.equal(command.includes("cli-dist"), false, "the hook must not point at the CLI's own location");
-  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles.length, 10);
+  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles.length, 11);
   s.done();
 });
 

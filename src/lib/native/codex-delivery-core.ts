@@ -64,18 +64,22 @@ const SESSION_WINDOW_MS = 24 * 60 * 60_000;
 const normCwd = (p: string | undefined) => (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 
 /**
- * Which session to push into. Codex gives no reliable "still open" signal (no session-end hook fired in testing, and the
- * hook payload has no process id), so this never guesses between several: a pinned id wins; one recent session is used;
+ * Which session to push into. Codex has no session-end hook and its hook payload has no process id, but a live session
+ * holds its rollout file open (see codex-liveness). Open sessions are preferred; between several this never guesses: a pinned id wins; one recent session is used;
  * with several, the one in the sender's own working directory is used if it is the only one there; otherwise the caller
  * gets `ambiguous` and the task falls back to the inbox (delivered at the next prompt of whichever session the user uses).
  */
-export function pickSession(sessions: readonly SessionLike[], input: { pinned?: string; senderCwd?: string; now: Date; windowMs?: number }): SessionChoice {
+export function pickSession(sessions: readonly SessionLike[], input: { pinned?: string; senderCwd?: string; now: Date; windowMs?: number; liveness?: Readonly<Record<string, "live" | "free" | "unknown">> }): SessionChoice {
   if (input.pinned) {
     const hits = sessions.filter((s) => s.sessionId.startsWith(input.pinned as string));
     return hits.length === 1 ? { kind: "one", session: hits[0] } : hits.length === 0 ? { kind: "none" } : { kind: "ambiguous", sessions: [...hits] };
   }
   const cutoff = input.now.getTime() - (input.windowMs ?? SESSION_WINDOW_MS);
-  const fresh = sessions.filter((s) => Date.parse(s.lastSeenAt) >= cutoff);
+  let fresh = sessions.filter((s) => Date.parse(s.lastSeenAt) >= cutoff);
+  // If the machine can say which sessions are open, only those are candidates. When it says none are (or says nothing),
+  // recency decides as before, so a Desktop thread that does not hold its file is never wrongly ruled out.
+  const open = fresh.filter((s) => input.liveness?.[s.sessionId] === "live");
+  if (open.length > 0) fresh = open;
   if (fresh.length === 0) return { kind: "none" };
   if (fresh.length === 1) return { kind: "one", session: fresh[0] };
   const here = input.senderCwd ? fresh.filter((s) => normCwd(s.cwd) === normCwd(input.senderCwd)) : [];
