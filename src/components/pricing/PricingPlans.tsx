@@ -15,6 +15,7 @@
  * moderation — not the earlier trace-analyzer product's feature set.
  */
 
+import { CONTACT_MAILTO } from "@/lib/contact";
 import Link from "next/link";
 import { useState } from "react";
 
@@ -72,7 +73,7 @@ const TIERS: Tier[] = [
     price: () => "Custom",
     tagline: "Shared workspaces, SSO, and full moderation and audit control.",
     proof: "Proves accountability across a whole team.",
-    cta: { label: "Talk to us", href: "mailto:hello@m9r.dev" },
+    cta: { label: "Talk to us", href: CONTACT_MAILTO },
     features: [
       "Everything in Pro",
       "SSO / SAML",

@@ -16,7 +16,7 @@
     "NEXT_PUBLIC_M9R_BILLING_ENABLED": "false",
     "NEXT_PUBLIC_M9R_TERMINAL_ENABLED": "true",
     "NEXT_PUBLIC_VAPID_PUBLIC_KEY": "",
-    "VAPID_SUBJECT": "mailto:admin@m9r.app",
+    "VAPID_SUBJECT": "mailto:runleak@proton.me",
     "MISSION_RELAY_ENABLED": "1",
     "RESEND_FROM": "M9R <onboarding@resend.dev>"
   },
