@@ -90,7 +90,7 @@ test("the standing instruction is created, appended with a separator, and never 
   assert.equal(created.content.startsWith(STANDING_START), true);
   const appended = applyStandingInstruction("# My rules\nBe terse.");
   assert.equal(appended.action, "installed");
-  assert.match(appended.content, /^# My rules\nBe terse\.\n\n<!-- M9R:STANDING-INSTRUCTION:START v1 -->/);
+  assert.match(appended.content, /^# My rules\nBe terse\.\n\n<!-- M9R:STANDING-INSTRUCTION:START v2 -->/);
   const again = applyStandingInstruction(appended.content);
   assert.equal(again.action, "unchanged");
   assert.equal((again.content.match(/STANDING-INSTRUCTION:START/g) ?? []).length, 1);

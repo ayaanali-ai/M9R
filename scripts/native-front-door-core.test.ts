@@ -145,8 +145,7 @@ test("the session card is a few lines of pointers within its cap, and never carr
   assert.match(card, /M9R connected as @claude\./);
   assert.match(card, /@codex \(editing relay\/hub\.ts\)/);
   assert.match(card, /2 pending inbox item/);
-  assert.match(card, /saved as markdown files in \.oathlock\/memory/);
-  assert.doesNotMatch(card, /index\.md/, "never point at a file that does not exist");
+  assert.match(card, /indexed in \.oathlock\/memory\/index\.md/);
   assert.doesNotMatch(renderSessionCard({ handle: "claude", others: [], pendingCount: 0 }), /memory/i, "no memory line when there is no folder");
   assert.equal(approxTokens(card) <= CAPS.cardTokens, true);
   const crowded = renderSessionCard({ handle: "a", others: Array.from({ length: 30 }, (_, i) => ({ handle: `agent${i}`, activity: "z".repeat(200) })), pendingCount: 0, memoryDir: "m" });

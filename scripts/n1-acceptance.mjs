@@ -61,6 +61,22 @@ try {
   const forCodex = store.tasksFor("codex");
   check("4a a typed @codex mention creates a task for codex", forCodex.length === 1 && /largest files/.test(forCodex[0].goal) && forCodex[0].origin === "human_typed", JSON.stringify(forCodex.map((t) => t.goal)));
   check("4b the sending Claude tells the user it was handed to codex instead of doing it", /codex/i.test(mention) && !/\d+\s?(kb|bytes|mb)/i.test(mention), JSON.stringify(mention.slice(0, 140)));
+
+  // 5. Shared memory: an earlier session's summary is found and used, without re-deriving the work (C1).
+  const { buildSummary, buildIndex, parseSummary } = await load("memory-distill-core.js");
+  const memDir = join(project, ".oathlock", "memory", "local", "codex");
+  mkdirSync(memDir, { recursive: true });
+  const summary = buildSummary({ provider: "Codex", sessionId: "earlier-1", cwd: project, capturedAtIso: "2026-09-19T10:00:00Z",
+    transcript: [{ sender: "User", body: "Fix the lease renewal race in relay/lease.ts" }, { sender: "Assistant", body: "Fixed: renewal now compares the fencing token zebra-quartz-77 before extending. All tests pass." }],
+    facts: { files: [join(project, "relay", "lease.ts")], commands: ["npm run test:relay"] } });
+  writeFileSync(join(memDir, "earlier-1.summary.md"), summary);
+  writeFileSync(join(project, ".oathlock", "memory", "index.md"), buildIndex([parseSummary(summary, "local/codex/earlier-1.summary.md")]));
+  const hookOut = runHook("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "mem", cwd: project, prompt: "What did we change in relay/lease.ts?" });
+  check("5a the hook points at the earlier session's summary on a matching prompt", /M9R memory:/.test(hookOut.stdout) && /earlier-1\.summary\.md/.test(hookOut.stdout), hookOut.stdout.slice(0, 120));
+  const quiet = runHook("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "mem2", cwd: project, prompt: "What is 5+5?" });
+  check("5b an unrelated prompt gets no memory hint", quiet.stdout === "", JSON.stringify(quiet.stdout.slice(0, 60)));
+  const answer = claude("What did the earlier session change in relay/lease.ts? Quote the specific detail it recorded.");
+  check("5c Claude uses the earlier session's summary (finds the recorded detail)", /zebra-quartz-77/.test(answer), JSON.stringify(answer.slice(0, 160)));
 } finally {
   for (const dir of [project, m9rHome]) {
     // Windows can keep a scratch folder locked for a moment after a child exits; never let that hide the results.

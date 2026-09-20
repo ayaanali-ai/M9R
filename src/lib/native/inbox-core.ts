@@ -173,7 +173,7 @@ export function renderSessionCard(input: CardInput): string {
     `M9R connected as @${input.handle}.`,
     others.length ? `Active now: ${others.join(", ")}.` : "No other agents active.",
     input.pendingCount > 0 ? `${input.pendingCount} pending inbox item(s); they appear at your next prompt.` : "",
-    input.memoryDir ? `Earlier agent sessions on this project are saved as markdown files in ${input.memoryDir}; search them only if you need earlier context.` : "",
+    input.memoryDir ? `Earlier agent sessions on this project are indexed in ${input.memoryDir}/index.md; read a short summary there before re-deriving earlier work.` : "",
   ].filter(Boolean);
   const card = lines.join(" ");
   return approxTokens(card) <= CAPS.cardTokens ? card : clip(card, CAPS.cardTokens * 4).text;

@@ -50,6 +50,7 @@ import {
 } from "@/lib/cross-agent-capture-setup-core";
 import { HEARTBEAT_PROTOCOL_VERSION } from "@/lib/agent-heartbeat";
 import { printNativeStatus, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
+import { runMemory } from "@/lib/native/memory-command";
 
 /** Actions this CLI currently implements. */
 const CLI_IMPLEMENTED_ACTIONS = ["heartbeat", "rules_read", "inbox_read", "assignment_lifecycle", "run_lifecycle", "work_signal_emit", "work_signal_replay", "work_signal_ack", "evidence_submit", "token_rotation"];
@@ -3232,6 +3233,7 @@ Usage:
   m9r-cli setup [--dry-run] [--yes] [--status]
                                          Set up this machine locally (no account): hooks and a standing instruction, with backups
   m9r-cli uninstall [--yes] [--purge]       Remove everything setup added and restore your files exactly
+  m9r-cli memory [--rebuild]                Show where shared memory lives; --rebuild writes summaries and the index
   m9r-cli send @<agent> "<message>" [--from <name>]
                                          Send a task to an agent on this machine (shows at its next prompt)
   m9r-cli capture install [--agent-kind <kind>]
@@ -3326,6 +3328,8 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "uninstall":
     case "send":
       return runNativeCommand(command, rest, nativeIo(deps));
+    case "memory":
+      return runMemory(rest, { cwd: deps.cwd, out: (l) => deps.out(l), err: (l) => deps.err(l) });
     case "bootstrap":
       return cmdBootstrap(deps, parsed);
     case "capture":

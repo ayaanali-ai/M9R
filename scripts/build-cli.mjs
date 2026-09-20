@@ -55,8 +55,11 @@ function build() {
   writeFileSync(resolve(outDir, "cross-agent-capture-setup-core.js"), transpile(captureSetupCoreTs));
   const captureCoreTs = readFileSync(resolve(repoRoot, "src/lib/cross-agent-capture-core.ts"), "utf8");
   const captureCoreJs = transpile(captureCoreTs)
-    .replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"');
+    .replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"')
+    .replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"');
   writeFileSync(resolve(outDir, "cross-agent-capture-core.js"), captureCoreJs);
+  const distillTs = readFileSync(resolve(repoRoot, "src/lib/memory-distill-core.ts"), "utf8");
+  writeFileSync(resolve(outDir, "memory-distill-core.js"), transpile(distillTs).replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"'));
   const opencodeBackfillTs = readFileSync(resolve(repoRoot, "src/lib/opencode-capture-backfill-core.ts"), "utf8");
   const opencodeBackfillJs = transpile(opencodeBackfillTs)
     .replace(/["']@\/lib\/cross-agent-capture-core["']/g, '"./cross-agent-capture-core.js"');
@@ -272,9 +275,9 @@ function build() {
 
   // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["mention-core", "inbox-core", "local-store", "hook-handler", "install-core", "onboarding-steps", "native-commands"]) {
+  for (const name of ["mention-core", "inbox-core", "memory-hint-core", "memory-command", "local-store", "hook-handler", "install-core", "onboarding-steps", "native-commands"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
-    const js = transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"');
+    const js = transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"').replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"');
     writeFileSync(resolve(outDir, `${name}.js`), js);
   }
   const hookEntryTs = readFileSync(resolve(repoRoot, "scripts/m9r-hook.ts"), "utf8");
@@ -453,7 +456,8 @@ function build() {
     .replace(/["']@\/lib\/agent-detection-core["']/g, '"./agent-detection-core.js"')
     .replace(/["']@\/lib\/cross-agent-capture-setup-core["']/g, '"./cross-agent-capture-setup-core.js"')
     .replace(/["']@\/lib\/agent-heartbeat["']/g, '"./agent-heartbeat.js"')
-    .replace(/["']@\/lib\/native\/native-commands["']/g, '"./native-commands.js"');
+    .replace(/["']@\/lib\/native\/native-commands["']/g, '"./native-commands.js"')
+    .replace(/["']@\/lib\/native\/memory-command["']/g, '"./memory-command.js"');
   writeFileSync(resolve(outDir, "oathlock-cli-core.js"), coreJs);
 
   // 4. Entry — rewrite the "@/lib/oathlock-cli-core" alias to a relative import,
