@@ -76,6 +76,16 @@ export function runAllow(io: ApprovalIo, storeRoot: string, from: string | undef
   return 0;
 }
 
+/** Lists the sessions M9R has seen for an agent, so a task can be aimed with `send --session`. */
+export function runSessions(io: ApprovalIo, storeRoot: string, handle: string | undefined): number {
+  const who = handleForProvider((handle ?? "codex").replace(/^@/, ""));
+  const sessions = createLocalStore(storeRoot).sessionsFor(who);
+  if (sessions.length === 0) { io.out(`No @${who} sessions seen yet.`); return 0; }
+  for (const s of sessions) io.out(`${s.sessionId}  last seen ${s.lastSeenAt}  ${s.cwd ?? ""}`);
+  if (sessions.length > 1) io.out(`Aim a task at one: m9r-cli send @${who} --session <first characters of the id> "..."`);
+  return 0;
+}
+
 export function runRules(io: ApprovalIo, storeRoot: string): number {
   const rules = createLocalStore(storeRoot).activeRules();
   if (rules.length === 0) { io.out("No standing rules."); return 0; }

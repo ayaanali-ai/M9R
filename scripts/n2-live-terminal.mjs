@@ -26,7 +26,7 @@ const check = (name, ok, detail = "") => { if (!ok) failures += 1; console.log(`
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const codexJs = join(process.env.APPDATA ?? "", "npm", "node_modules", "@openai", "codex", "bin", "codex.js");
 const codexArgs = existsSync(codexJs) ? { cmd: process.execPath, pre: [codexJs] } : { cmd: "codex", pre: [] };
-const send = (text, extraEnv = {}) => spawnSync(process.execPath, [join(dist, "m9r.js"), "send", "@codex", text, "--from", "claude"], { env: { ...env, M9R_SEND_AS_HUMAN: "1", ...extraEnv }, encoding: "utf8", windowsHide: true });
+const send = (text, extraEnv = {}, session) => spawnSync(process.execPath, [join(dist, "m9r.js"), "send", "@codex", text, "--from", "claude", ...(session ? ["--session", session] : [])], { env: { ...env, M9R_SEND_AS_HUMAN: "1", ...extraEnv }, encoding: "utf8", windowsHide: true });
 const hook = (sid, prompt) => spawnSync(process.execPath, [join(dist, "m9r-hook.js"), "UserPromptSubmit", "claude-code"], { env, input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: sid, cwd: project, prompt }), encoding: "utf8", windowsHide: true });
 function rollout(threadId) {
   const root = join(homedir(), ".codex", "sessions");
@@ -76,13 +76,19 @@ try {
   check("3 the answer reaches Claude's next prompt", /M9R results \(1\)/.test(back) && /(live-terminal-ok|pushed-while-busy)/.test(back), back.slice(0, 160));
 
   if (args.includes("--two")) {
+    // A second Codex session appears (a finished `exec` one) while the first is still the live interactive session.
     const second = newThread();
-    check("T0 a second Codex session exists", !!second && second !== threadId, second);
-    const ends = store.listEndpoints().filter((e) => e.handle === "codex");
-    console.log(`INFO  the store knows ${ends.length} codex endpoint(s); it keeps only the most recent session: ${ends[0]?.sessionId}`);
-    const r = send("Reply with only the word: which-session");
-    console.log(`INFO  push went to ${store.tasksFor("codex").at(-1)?.delivery?.threadId} (first=${threadId}, second=${second})`);
-    check("T1 with two sessions the push goes to the most recently active one (documented limit; see N4)", store.tasksFor("codex").at(-1)?.delivery?.threadId === second, r.stdout.trim().slice(0, 80));
+    check("T0 a second Codex session exists, and the first is still remembered", !!second && second !== threadId && store.sessionsFor("codex").length === 2, second);
+    const unaimed = send("Reply with only the word: unaimed");
+    const t1 = store.tasksFor("codex").find((t) => /unaimed/.test(t.goal));
+    check("T1 an unaimed push with two sessions is NOT sent to a guess", t1?.delivery?.state === "failed" && /2 Codex sessions/.test(t1?.delivery?.error ?? ""), unaimed.stdout.trim().slice(0, 140));
+    const codexPrompt = spawnSync(process.execPath, [join(dist, "m9r-hook.js"), "UserPromptSubmit", "codex"], { env, input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: second, cwd: project, prompt: "hello" }), encoding: "utf8", windowsHide: true });
+    check("T2 it waits in the inbox and shows at the next Codex prompt instead of being lost", /M9R inbox[\s\S]*unaimed/.test(codexPrompt.stdout), codexPrompt.stdout.slice(0, 120));
+    const listed = spawnSync(process.execPath, [join(dist, "m9r.js"), "sessions", "@codex"], { env, encoding: "utf8", windowsHide: true }).stdout;
+    check("T3 `m9r-cli sessions` lists both", listed.includes(threadId) && listed.includes(second), `${listed.length} chars`);
+    const pinned = send("Reply with only the word: aimed-at-live", {}, threadId.slice(0, 14));
+    check("T4 a pinned push goes to the live session", /pushed into its session/.test(pinned.stdout) && store.tasksFor("codex").at(-1)?.delivery?.threadId === threadId, pinned.stdout.trim().slice(0, 100));
+    check("T5 the live interactive session consumed the pinned task", await waitFor(() => (rolloutText(threadId).match(/aimed-at-live/g) ?? []).length >= 3, 90_000));
   }
 } finally {
   for (const t of tuis) { try { t.term.kill(); } catch { /* already gone */ } }

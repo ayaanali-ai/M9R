@@ -3234,11 +3234,12 @@ Usage:
                                          Set up this machine locally (no account): hooks and a standing instruction, with backups
   m9r-cli uninstall [--yes] [--purge]       Remove everything setup added and restore your files exactly
   m9r-cli tasks                             List tasks and what is waiting for your approval
+  m9r-cli sessions [@agent]                 List the sessions of an agent seen on this machine (aim a task with send --session)
   m9r-cli approve|deny <task id>            Approve or deny a task an agent started (needs you at a terminal)
   m9r-cli allow @<from> @<to> [--for 2h]    Let one agent hand work to another without asking, for a limited time
   m9r-cli standing | revoke <rule id>       List or remove standing rules
   m9r-cli memory [--rebuild]                Show where shared memory lives; --rebuild writes summaries and the index
-  m9r-cli send @<agent> "<message>" [--from <name>]
+  m9r-cli send @<agent> "<message>" [--from <name>] [--session <id>]
                                          Send a task to an agent on this machine (shows at its next prompt)
   m9r-cli capture install [--agent-kind <kind>]
                                          Install/repair local Claude Code, Codex, or OpenCode memory capture without a new approval claim
@@ -3332,6 +3333,7 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "uninstall":
     case "send":
     case "tasks":
+    case "sessions":
     case "approve":
     case "deny":
     case "allow":

@@ -28,7 +28,7 @@ import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-s
 import { deliverToCodex, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { canQueue } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
-import { runAllow, runDecision, runRevoke, runRules, runTasks } from "./approval-commands";
+import { runAllow, runDecision, runRevoke, runRules, runSessions, runTasks } from "./approval-commands";
 import { USER_STEPS } from "./onboarding-steps";
 
 export interface NativeIo {
@@ -40,6 +40,8 @@ export interface NativeIo {
   confirm?(question: string): Promise<boolean>;
   /** Codex delivery dependencies; tests inject fakes, production uses the real `codex queue`. */
   codexDeps?: DeliveryDeps;
+  /** Where the command was run; the default is the process's own folder. Used to pick between several open sessions. */
+  cwd?: string;
 }
 
 type Kind = "hooks-json" | "markdown-block";
@@ -231,13 +233,13 @@ export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?:
   return 0;
 }
 
-export async function runSend(io: NativeIo, input: { to: string; text: string; from?: string; key?: string }): Promise<number> {
+export async function runSend(io: NativeIo, input: { to: string; text: string; from?: string; key?: string; session?: string }): Promise<number> {
   const to = input.to.replace(/^@/, "").toLowerCase();
   if (!to || !input.text.trim()) { io.err("Usage: m9r-cli send @<agent> \"<message>\" [--from <name>]"); return 1; }
   const store = createLocalStore(nativePaths(io).m9r);
   // Typed by a person only with a real terminal and no agent markers; an agent running this command is agent-initiated.
   const human = isHumanContext({ hasTerminal: !!io.confirm, env: io.env });
-  const { task, created } = store.addTask({ from: input.from ?? (human ? "you" : "agent"), to: handleForProvider(to), goal: input.text, origin: human ? "human_typed" : "agent_initiated", idempotencyKey: input.key ?? randomUUID() });
+  const { task, created } = store.addTask({ from: input.from ?? (human ? "you" : "agent"), to: handleForProvider(to), goal: input.text, origin: human ? "human_typed" : "agent_initiated", cwd: io.cwd ?? process.cwd(), ...(input.session ? { targetSession: input.session } : {}), idempotencyKey: input.key ?? randomUUID() });
   if (task.approval === "pending") {
     io.out(`Task ${task.id} to @${task.to} is waiting for the user's approval; nothing was delivered.`);
     io.out(`Tell the user to run: m9r-cli approve ${task.id}${isProtectedAction(task.goal) ? "  (it looks like a protected action, so a standing rule would not cover it)" : ""}`);
@@ -286,15 +288,16 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   const has = (...names: string[]) => rest.some((a) => names.includes(a));
   const value = (name: string) => { const i = rest.indexOf(name); return i >= 0 ? rest[i + 1] : undefined; };
   const positionals: string[] = [];
-  for (let i = 0; i < rest.length; i += 1) { if (rest[i].startsWith("-")) { if (["--from", "--key", "--for"].includes(rest[i])) i += 1; continue; } positionals.push(rest[i]); }
+  for (let i = 0; i < rest.length; i += 1) { if (rest[i].startsWith("-")) { if (["--from", "--key", "--for", "--session"].includes(rest[i])) i += 1; continue; } positionals.push(rest[i]); }
   if (command === "setup") {
     if (has("--status")) { printNativeStatus(io); return 0; }
     return runSetup(io, { yes: has("--yes", "-y"), dryRun: has("--dry-run") });
   }
   if (command === "uninstall") return runUninstall(io, { yes: has("--yes", "-y"), purge: has("--purge") });
-  if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key") });
+  if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key"), session: value("--session") });
   const root = nativePaths(io).m9r;
   if (command === "tasks") return runTasks(io, root);
+  if (command === "sessions") return runSessions(io, root, positionals[0]);
   if (command === "approve" || command === "deny") return runDecision(io, root, command === "approve" ? "approved" : "denied", positionals[0], has("--yes", "-y"));
   if (command === "allow") return runAllow(io, root, positionals[0], positionals[1], value("--for"));
   if (command === "standing") return runRules(io, root);

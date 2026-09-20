@@ -18,6 +18,16 @@ export interface EndpointRecord {
   lastSeenAt: string;
 }
 
+/** One agent session seen on this machine. An agent can have several open at once (N4). */
+export interface SessionRecord {
+  handle: string;
+  provider: string;
+  sessionId: string;
+  cwd?: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
 export interface EventRecord {
   at: string;
   kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked";
@@ -39,9 +49,10 @@ interface StoreState {
   /** N5 standing rules: an agent may hand work to another without asking each time, for a limited time. */
   rules: StandingRule[];
   nextRuleNo: number;
+  sessions: SessionRecord[];
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1 });
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [] });
 
 const KNOWN_PROVIDER_HANDLES: Readonly<Record<string, string>> = { "claude-code": "claude", claude: "claude", codex: "codex", opencode: "opencode" };
 
@@ -125,10 +136,24 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         const previous = s.endpoints[handle];
         const record: EndpointRecord = { handle, provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, lastSeenAt: now().toISOString() };
         s.endpoints[handle] = record;
+        if (input.sessionId) {
+          const at = now().toISOString();
+          const known = s.sessions.find((x) => x.handle === handle && x.sessionId === input.sessionId);
+          if (known) { known.lastSeenAt = at; if (input.cwd) known.cwd = input.cwd; }
+          else s.sessions.push({ handle, provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, firstSeenAt: at, lastSeenAt: at });
+          // Keep the list small: the 30 most recent sessions, nothing older than a week.
+          const cutoff = now().getTime() - 7 * 86_400_000;
+          s.sessions = s.sessions.filter((x) => Date.parse(x.lastSeenAt) >= cutoff).sort((a, b) => Date.parse(a.lastSeenAt) - Date.parse(b.lastSeenAt)).slice(-30);
+        }
         if (!previous) pushEvent(s, { kind: "agent.connected", handle, text: `@${handle} connected (${input.provider})` });
         else if (input.sessionId && previous.sessionId !== input.sessionId) pushEvent(s, { kind: "session.started", handle, text: `@${handle} started a new session` });
         return record;
       });
+    },
+
+    /** Sessions of one agent, most recently seen first. */
+    sessionsFor(handle: string): SessionRecord[] {
+      return readState().sessions.filter((x) => x.handle === handle).sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
     },
 
     listEndpoints(): EndpointRecord[] {

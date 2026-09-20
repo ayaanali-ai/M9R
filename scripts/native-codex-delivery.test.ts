@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
 import { collectCodexResults, deliverToCodex, type DeliveryDeps } from "../src/lib/native/codex-delivery";
 import { renderInboxInjection, renderResultsInjection } from "../src/lib/native/inbox-core";
 import { handleHookEvent } from "../src/lib/native/hook-handler";
@@ -185,4 +185,65 @@ test("a prompt M9R pushed into Codex is not routed as a new mention (it names it
   // A person's own prompt with a mention still routes, so the guard is only for M9R's own pushed prompts.
   const own = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "@claude please look at this" }, { provider: "codex", store, pathExists: () => false, readIndex: () => null });
   assert.match(own?.hookSpecificOutput.additionalContext ?? "", /already sent your message to @claude/);
+});
+
+const A = "01a0bfd8-4e13-76d3-9077-fdef973a978c";
+const B = "01a0bfd8-fb78-74a3-b665-56653655b87b";
+const NOW = new Date("2026-09-20T12:00:00Z");
+const sess = (sessionId: string, cwd: string, lastSeenAt: string) => ({ sessionId, cwd, lastSeenAt });
+
+test("the session chooser never guesses between several: pinned, then the only one, then the only one in the sender's folder, else ambiguous", () => {
+  const recent = "2026-09-20T11:50:00Z";
+  assert.deepEqual(pickSession([], { now: NOW }), { kind: "none" });
+  assert.equal(pickSession([sess(A, "C:/p", recent)], { now: NOW }).kind, "one");
+  assert.equal(pickSession([sess(A, "C:/p", "2026-09-18T00:00:00Z")], { now: NOW }).kind, "none", "a session not seen for over a day is not a target");
+  const two = [sess(A, "C:/proj/a", recent), sess(B, "C:/proj/b", recent)];
+  assert.equal(pickSession(two, { now: NOW }).kind, "ambiguous");
+  assert.deepEqual(pickSession(two, { now: NOW, senderCwd: "c:\\proj\\a\\" }), { kind: "one", session: two[0] }, "same folder wins, slashes and case ignored");
+  assert.equal(pickSession(two, { now: NOW, senderCwd: "C:/elsewhere" }).kind, "ambiguous");
+  assert.equal(pickSession([sess(A, "C:/p", recent), sess(B, "C:/p", recent)], { now: NOW, senderCwd: "C:/p" }).kind, "ambiguous", "two in the same folder is still a guess");
+  assert.deepEqual(pickSession(two, { now: NOW, pinned: "01a0bfd8-fb" }), { kind: "one", session: two[1] }, "a pinned id prefix wins");
+  assert.equal(pickSession(two, { now: NOW, pinned: "01a0bfd8" }).kind, "ambiguous", "a prefix that matches both is not enough");
+  assert.equal(pickSession(two, { now: NOW, pinned: "zzz" }).kind, "none");
+});
+
+test("with two open Codex sessions an unaimed task is not pushed at random; it falls back to the inbox and says how to aim it", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj/a" });
+  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/b" });
+  assert.equal(store.sessionsFor("codex").length, 2, "both sessions are remembered, the newer no longer hides the older");
+  const deps = fakeDeps();
+  const t = store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "human_typed", idempotencyKey: "amb", cwd: "C:/elsewhere" }).task;
+  const r = await deliverToCodex(store, t.id, deps);
+  assert.equal(r.state, "failed");
+  assert.match(r.state === "failed" ? r.reason : "", /2 Codex sessions.*m9r-cli send @codex --session/);
+  assert.equal(deps.calls.length, 0, "nothing was queued anywhere");
+  assert.match(renderInboxInjection(store.tasksFor("codex"), 0).text, /Review lease\.ts/, "it shows at the next prompt in whichever session the user uses");
+});
+
+test("the sender's own folder aims the push, and --session pins it exactly", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj/a" });
+  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/b" });
+  const deps = fakeDeps();
+  const inA = store.addTask({ from: "claude", to: "codex", goal: "one", origin: "human_typed", idempotencyKey: "a", cwd: "C:/proj/a" }).task;
+  assert.deepEqual(await deliverToCodex(store, inA.id, deps), { state: "queued", threadId: A });
+  const pinned = store.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "b", cwd: "C:/nowhere", targetSession: B.slice(0, 12) }).task;
+  assert.deepEqual(await deliverToCodex(store, pinned.id, deps), { state: "queued", threadId: B });
+  assert.deepEqual(deps.calls.map((c) => c[2]), [A, B]);
+});
+
+test("`sessions` lists what was seen and how to aim a task", async () => {
+  const { runNativeCommand, nativePaths } = await import("../src/lib/native/native-commands");
+  const home = mkdtempSync(join(tmpdir(), "m9r-sess-"));
+  const out: string[] = [];
+  const io = { homeDir: home, env: { M9R_HOME: join(home, ".m9r") }, out: (l: string) => out.push(l), err: (l: string) => out.push(l) };
+  const s = createLocalStore(nativePaths(io).m9r);
+  s.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj/a" });
+  s.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/b" });
+  assert.equal(await runNativeCommand("sessions", ["@codex"], io), 0);
+  const text = out.join("\n");
+  assert.match(text, new RegExp(A));
+  assert.match(text, new RegExp(B));
+  assert.match(text, /send @codex --session/);
 });

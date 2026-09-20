@@ -53,6 +53,35 @@ export function resolveCodexCommand(input: {
   return null;
 }
 
+export interface SessionLike { sessionId: string; cwd?: string; lastSeenAt: string }
+
+export type SessionChoice =
+  | { kind: "one"; session: SessionLike }
+  | { kind: "ambiguous"; sessions: SessionLike[] }
+  | { kind: "none" };
+
+const SESSION_WINDOW_MS = 24 * 60 * 60_000;
+const normCwd = (p: string | undefined) => (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+
+/**
+ * Which session to push into. Codex gives no reliable "still open" signal (no session-end hook fired in testing, and the
+ * hook payload has no process id), so this never guesses between several: a pinned id wins; one recent session is used;
+ * with several, the one in the sender's own working directory is used if it is the only one there; otherwise the caller
+ * gets `ambiguous` and the task falls back to the inbox (delivered at the next prompt of whichever session the user uses).
+ */
+export function pickSession(sessions: readonly SessionLike[], input: { pinned?: string; senderCwd?: string; now: Date; windowMs?: number }): SessionChoice {
+  if (input.pinned) {
+    const hits = sessions.filter((s) => s.sessionId.startsWith(input.pinned as string));
+    return hits.length === 1 ? { kind: "one", session: hits[0] } : hits.length === 0 ? { kind: "none" } : { kind: "ambiguous", sessions: [...hits] };
+  }
+  const cutoff = input.now.getTime() - (input.windowMs ?? SESSION_WINDOW_MS);
+  const fresh = sessions.filter((s) => Date.parse(s.lastSeenAt) >= cutoff);
+  if (fresh.length === 0) return { kind: "none" };
+  if (fresh.length === 1) return { kind: "one", session: fresh[0] };
+  const here = input.senderCwd ? fresh.filter((s) => normCwd(s.cwd) === normCwd(input.senderCwd)) : [];
+  return here.length === 1 ? { kind: "one", session: here[0] } : { kind: "ambiguous", sessions: [...fresh] };
+}
+
 export const queueArgs = (threadId: string, message: string) => ["queue", "--thread", threadId, "--message", message];
 
 /** Thread ids are UUIDs; refuse anything else so an odd session id can never become an odd argument. */

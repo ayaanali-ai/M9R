@@ -95,7 +95,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       for (const to of targets) {
         const goal = goalFor(prompt, to);
         if (!goal) continue;
-        const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
+        const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", cwd: input.cwd, idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
         parts.push(renderSentAck(task.id, to));
         if (created && to === "codex" && canQueue(task)) ctx.dispatch?.(task.id);
       }

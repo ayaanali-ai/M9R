@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
 import type { LocalStore } from "./local-store";
 
 export interface DeliveryDeps {
@@ -35,8 +35,11 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
     store.setDelivery(taskId, { state: "failed", attempts, error: reason });
     return { state: "failed", reason };
   };
-  const endpoint = store.listEndpoints().find((e) => e.handle === "codex");
-  if (!isThreadId(endpoint?.sessionId)) return fail("No Codex session is known yet. Open Codex once with the M9R hooks trusted, then send again.");
+  const choice = pickSession(store.sessionsFor("codex"), { pinned: task.targetSession, senderCwd: task.cwd, now: new Date() });
+  if (choice.kind === "none") return fail(task.targetSession ? `No Codex session matches "${task.targetSession}". See: m9r-cli sessions` : "No Codex session is known yet. Open Codex once with the M9R hooks trusted, then send again.");
+  if (choice.kind === "ambiguous") return fail(`${choice.sessions.length} Codex sessions are open here and M9R cannot tell which you mean, so it will show at the next prompt in whichever you use. To aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
+  const endpoint = choice.session;
+  if (!isThreadId(endpoint.sessionId)) return fail("The Codex session id looks wrong; open Codex again and retry.");
   const command = deps.resolveCodex();
   if (!command) return fail("The codex command was not found on this machine.");
 

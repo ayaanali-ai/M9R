@@ -46,6 +46,10 @@ export interface Task {
   resultShownAt?: string;
   /** Native push (N2): how far pushing this task into the target session got. Absent for plain inbox tasks. */
   delivery?: TaskDelivery;
+  /** Working directory of the sender; used to pick the target's session when several are open. */
+  cwd?: string;
+  /** Session id (or unique prefix) the sender pinned, so a push never has to guess. */
+  targetSession?: string;
 }
 
 export interface TaskDelivery {
@@ -67,6 +71,8 @@ export interface NewTaskInput {
   idempotencyKey: string;
   /** Standing rule already covers this pair, so an agent-initiated task needs no approval. */
   standingRuleApplies?: boolean;
+  cwd?: string;
+  targetSession?: string;
 }
 
 /** Approximate token count; good enough to enforce a budget without a tokenizer dependency. */
@@ -119,6 +125,8 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
     replyDepth: input.replyDepth ?? 0,
     idempotencyKey: input.idempotencyKey,
     createdAt: nowIso,
+    ...(input.cwd ? { cwd: input.cwd } : {}),
+    ...(input.targetSession ? { targetSession: input.targetSession } : {}),
   };
 }
 
