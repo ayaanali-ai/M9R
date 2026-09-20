@@ -96,7 +96,7 @@ check("3c the same session accepts a new turn after an interrupt", replyText(aft
 
 // 4. native steer: input added to a turn that is already running
 const steerSession = await secondAdapter.createSession({ server: second.server, assignment });
-let steerAccepted: boolean | string = false;
+let steerAccepted = false as boolean | string;
 let steerDone = false;
 const steerEvents = await run(secondAdapter, steerSession, "Write a very long, detailed story about a lighthouse, at least 1500 words. No tools.", async (event) => {
   if (event.type === "provider.reply_text" && !steerDone) {

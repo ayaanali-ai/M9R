@@ -148,7 +148,7 @@ export function deriveDelivery(input: {
   const ttlMs = input.ttlMs ?? DEFAULT_QUEUE_TTL_MS;
   const timeline: TimelineEntry[] = [{ state: "accepted", at: input.messageCreatedAt, attempt: 1, basis: "derived", evidence: "message stored" }];
   let attempt = 1;
-  let state: DeliveryState = "accepted";
+  let state = "accepted" as DeliveryState; // assigned inside push(); the cast stops TypeScript narrowing it to the literal
   let failureCode: string | null = null;
   let reachedNode = false;
 
