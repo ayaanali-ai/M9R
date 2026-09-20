@@ -9,9 +9,9 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorkspaceHub"] }],
   // Database and product logic lives in the web app (services/relay-do never talks to Supabase).
-  "services": [{ "binding": "WEB", "service": "m9r-web-staging" }],
+  "services": [{ "binding": "WEB", "service": "app" }],
   "vars": {
-    "WEB_RPC_URL": "https://m9r-web-staging.m9r.workers.dev/api/internal/relay/rpc"
+    "WEB_RPC_URL": "https://app.m9r.workers.dev/api/internal/relay/rpc"
   },
   "observability": { "enabled": true }
 }

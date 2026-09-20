@@ -13,9 +13,9 @@
     { "tag": "v2", "deleted_classes": ["MissionRelayContainer"] },
     { "tag": "v3", "new_sqlite_classes": ["WorkspaceHub"] }
   ],
-  "services": [{ "binding": "WEB", "service": "m9r-web-staging" }],
+  "services": [{ "binding": "WEB", "service": "app" }],
   "vars": {
-    "WEB_RPC_URL": "https://m9r-web-staging.m9r.workers.dev/api/internal/relay/rpc"
+    "WEB_RPC_URL": "https://app.m9r.workers.dev/api/internal/relay/rpc"
   },
   "observability": { "enabled": true }
 }
