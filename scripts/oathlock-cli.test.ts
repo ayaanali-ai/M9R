@@ -104,7 +104,7 @@ test("inferSessionFormat maps extensions to API formats", () => {
 });
 
 test("apiBase honors OATHLOCK_API_URL and defaults to the M9R production API", () => {
-  assert.equal(apiBase({}), "https://m9r-dashboard.onrender.com");
+  assert.equal(apiBase({}), "https://app.m9r.workers.dev");
   assert.equal(apiBase({ OATHLOCK_API_URL: "http://localhost:3000/" }), "http://localhost:3000");
 });
 
@@ -792,6 +792,20 @@ test("init writes token to local.json and non-secret metadata to config.json", a
   assert.ok(!("token" in config), "config.json must never contain the token");
 });
 
+test("init makes .oathlock ignore itself so the token cannot be committed", async () => {
+  const { deps, files } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    router: (url) => {
+      if (url.includes("/api/agent/register")) return jsonResponse(201, { claim_url: "http://localhost:3000/claim/c1", claim_id: "c1", setup_code: "s", expires_at: "2030-01-01T00:00:00Z" });
+      if (url.includes("/api/agent/claim-status")) return jsonResponse(200, { status: "approved", token: "oak_issued_TOKEN_abcd", scopes: [] });
+      return jsonResponse(404, { error: "nope" });
+    },
+  });
+  assert.equal(await run(["init", "--repo", "me/demo", "--agent-kind", "codex"], deps), 0);
+  const ignore = files.get(join(CWD, ".oathlock", ".gitignore"));
+  assert.ok(ignore && /^\*$/m.test(ignore));
+});
+
 test("init reuses an existing connection and creates no new claim", async () => {
   const TOKEN = "oak_existing_TOKEN_zzzz";
   const { deps, requests, out } = makeDeps({
@@ -1276,9 +1290,9 @@ test("run start exposes the server-issued cookie dashboard approval destination 
   const code = await run(["run", "start", "--task", "a narrowly scoped task"], deps);
 
   assert.equal(code, 1);
-  assert.deepEqual(opened, [`https://m9r-dashboard.onrender.com/dashboard/approvals/${requestId}`]);
+  assert.deepEqual(opened, [`https://app.m9r.workers.dev/dashboard/approvals/${requestId}`]);
   const output = err.join("\n");
-  assert.match(output, new RegExp(`Human action required: approve this run at https://m9r-dashboard\\.onrender\\.com/dashboard/approvals/${requestId}`));
+  assert.match(output, new RegExp(`Human action required: approve this run at https://app\\.m9r\\.workers\\.dev/dashboard/approvals/${requestId}`));
   assert.match(output, new RegExp(`Approval request: ${requestId}`));
   assert.ok(!output.includes(TOKEN));
 });
@@ -2003,7 +2017,7 @@ function approvedRouter(): Router {
 test("init for claude-code installs the SessionEnd hook script and merges .claude/settings.local.json", async () => {
   const { deps, files, out } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, router: approvedRouter() });
 
-  const code = await run(["init", "--agent-kind", "claude-code"], deps);
+  const code = await run(["init", "--agent-kind", "claude-code", "--memory-capture"], deps);
 
   assert.equal(code, 0);
   const hookScript = files.get(join(CWD, ".oathlock", "bin", "m9r-capture.mjs"));
@@ -2017,7 +2031,7 @@ test("init for claude-code installs the SessionEnd hook script and merges .claud
 test("init for codex installs the SessionEnd hook script and writes .codex/hooks.json", async () => {
   const { deps, files, out } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, router: approvedRouter() });
 
-  const code = await run(["init", "--agent-kind", "codex"], deps);
+  const code = await run(["init", "--agent-kind", "codex", "--memory-capture"], deps);
 
   assert.equal(code, 0);
   assert.ok(files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
@@ -2029,7 +2043,7 @@ test("init for codex installs the SessionEnd hook script and writes .codex/hooks
 test("init for opencode writes the memory plugin, and does not write a Claude/Codex hook file", async () => {
   const { deps, files, out } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, router: approvedRouter() });
 
-  const code = await run(["init", "--agent-kind", "opencode"], deps);
+  const code = await run(["init", "--agent-kind", "opencode", "--memory-capture"], deps);
 
   assert.equal(code, 0);
   const plugin = files.get(join(CWD, ".opencode", "plugins", "m9r-memory.js"));
@@ -2047,6 +2061,36 @@ test("init --skip-memory-capture connects the agent without installing any captu
   assert.ok(!files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
   assert.ok(!files.has(join(CWD, ".claude", "settings.local.json")));
   assert.match(out.join("\n"), /Skipped shared-memory capture setup/);
+});
+
+test("init tells the user what leaves the machine and what stays", async () => {
+  const { deps, out } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, router: approvedRouter() });
+  assert.equal(await run(["init", "--agent-kind", "codex"], deps), 0);
+  const text = out.join(String.fromCharCode(10));
+  assert.match(text, /What leaves this machine:.*http:\/\/localhost:3000/);
+  assert.match(text, /What stays: your repo files/);
+});
+
+test("init leaves session capture OFF unless asked, and says how to turn it on", async () => {
+  const { deps, files, out } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, router: approvedRouter() });
+  assert.equal(await run(["init", "--agent-kind", "claude-code"], deps), 0);
+  assert.ok(!files.has(join(CWD, ".claude", "settings.local.json")));
+  assert.match(out.join("\n"), /capture is OFF/);
+});
+
+test("capture uninstall removes only M9R's hook entry and script, keeping other hooks", async () => {
+  const other = { type: "command", command: "echo mine" };
+  const { deps, files } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    router: approvedRouter(),
+    files: { [join(CWD, ".claude", "settings.local.json")]: JSON.stringify({ model: "x", hooks: { SessionEnd: [{ hooks: [other] }] } }) },
+  });
+  assert.equal(await run(["init", "--agent-kind", "claude-code", "--memory-capture"], deps), 0);
+  assert.equal(await run(["capture", "uninstall"], deps), 0);
+  const settings = JSON.parse(files.get(join(CWD, ".claude", "settings.local.json"))!);
+  assert.equal(settings.model, "x");
+  assert.deepEqual(settings.hooks.SessionEnd, [{ hooks: [other] }]);
+  assert.ok(!files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
 });
 
 test("init for an agent kind with no capture mechanism (e.g. grok-build) connects cleanly with no capture files", async () => {
@@ -2104,4 +2148,267 @@ test("init reports M9R registration without claiming that the provider process i
   assert.match(text, /Runtime verification: pending/);
   assert.match(text, /does not prove provider sign-in or a running provider process/);
   assert.doesNotMatch(text, /Connected agent:/);
+});
+
+// ---------------------------------------------------------------------------
+// ask: post to one connected agent from any session, optionally wait for the reply
+// ---------------------------------------------------------------------------
+
+function askRouter(opts: { replies?: Array<Record<string, unknown>>; onPost?: (body: Record<string, unknown>, headers: Record<string, string>) => void } = {}): Router {
+  return (url, init) => {
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/agent/connections")) {
+      return jsonResponse(200, { connections: [{ connection_id: "conn-claude", agent_kind: "claude-code" }, { connection_id: "conn-opencode", agent_kind: "opencode" }] });
+    }
+    if (url.endsWith("/api/agent/conversations")) {
+      return jsonResponse(200, { conversations: [
+        { id: "conv-general", topic: "general", status: "open", channel_kind: "channel" },
+        { id: "conv-dm", topic: "claude-code", status: "open", channel_kind: "dm" },
+        { id: "conv-review", topic: "Review", status: "open", channel_kind: "channel" },
+      ] });
+    }
+    if (url.includes("/api/agent/conversations/") && url.includes("/messages") && method === "POST") {
+      opts.onPost?.(JSON.parse(String(init?.body)), init?.headers as Record<string, string>);
+      return jsonResponse(201, { message: { id: "0a1b2c3d-0000-4000-8000-000000000001", created_at: "2026-09-19T05:00:00.000Z" } });
+    }
+    if (url.includes("/api/agent/conversations/") && url.includes("/messages")) {
+      return jsonResponse(200, { messages: opts.replies ?? [] });
+    }
+    return jsonResponse(404, { error: "nope" });
+  };
+}
+
+function askFiles(): Record<string, string> {
+  return { [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: "oak_codex_token_1234", scopes: [] }) };
+}
+
+test("ask posts to #general addressed to the agent, with a mention, and does not wait by default", async () => {
+  let posted: Record<string, unknown> | null = null;
+  let headers: Record<string, string> = {};
+  const { deps, out, requests } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, files: askFiles(), router: askRouter({ onPost: (body, h) => { posted = body; headers = h; } }) });
+
+  const code = await run(["ask", "@claude-code", "review", "the", "relay", "diff", "--agent-kind", "codex"], deps);
+
+  assert.equal(code, 0);
+  assert.deepEqual(posted, { kind: "message", body: "@claude-code review the relay diff", recipient_connection_id: "conn-claude" });
+  assert.match(headers["idempotency-key"], /^ask:[0-9a-f]{40}$/);
+  assert.match(out.join("\n"), /Sent to @claude-code in #general/);
+  assert.equal(requests.some((r) => r.url.includes("since=")), false, "no polling without --wait");
+});
+
+test("ask --wait prints the target's threaded reply and exits 0", async () => {
+  const replies = [{ id: "msg-2", parent_message_id: "0a1b2c3d-0000-4000-8000-000000000001", sender_connection_id: "conn-claude", kind: "result", body: "Looks fine.", created_at: "2026-09-19T05:00:05.000Z" }];
+  const { deps, out, requests } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, files: askFiles(), router: askRouter({ replies }) });
+
+  const code = await run(["ask", "claude-code", "is this ok?", "--wait", "--agent-kind", "codex"], deps);
+
+  assert.equal(code, 0);
+  assert.match(out.join("\n"), /@claude-code replied:/);
+  assert.match(out.join("\n"), /Looks fine\./);
+  assert.ok(requests.some((r) => r.url.includes("since=workspace-cursor.v1%3A") || r.url.includes("since=workspace-cursor.v1:")), "polls from the sent message's cursor");
+});
+
+test("ask --wait exits 2 when the agent does not answer in time, and says the message was still sent", async () => {
+  const { deps, err } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, files: askFiles(), router: askRouter({ replies: [] }) });
+
+  const code = await run(["ask", "claude-code", "hello?", "--wait", "--timeout", "1", "--agent-kind", "codex"], deps);
+
+  assert.equal(code, 2);
+  assert.match(err.join("\n"), /no reply from @claude-code within 1s.*was sent/);
+});
+
+test("ask names the connected agents when the target is unknown, and posts nothing", async () => {
+  const { deps, err, requests } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, files: askFiles(), router: askRouter() });
+
+  const code = await run(["ask", "gemini", "hi", "--agent-kind", "codex"], deps);
+
+  assert.equal(code, 1);
+  assert.match(err.join("\n"), /no connected agent matches "gemini".*claude-code, opencode/);
+  assert.equal(requests.some((r) => r.init?.method === "POST"), false);
+});
+
+test("ask lists the open channels when the channel does not exist, ignoring DMs", async () => {
+  const { deps, err } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, files: askFiles(), router: askRouter() });
+
+  const code = await run(["ask", "claude-code", "hi", "--channel", "#nope", "--agent-kind", "codex"], deps);
+
+  assert.equal(code, 1);
+  assert.match(err.join("\n"), /no open channel named "nope".*#general, #Review/);
+  assert.doesNotMatch(err.join("\n"), /#claude-code/);
+});
+
+test("ask can target a named channel, and refuses an empty or oversized message", async () => {
+  let conversation = "";
+  const router = askRouter();
+  const { deps, err } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, files: askFiles(), router: (url, init) => { if (init?.method === "POST") conversation = url; return router(url, init); } });
+
+  assert.equal(await run(["ask", "claude-code", "look", "--channel", "review", "--agent-kind", "codex"], deps), 0);
+  assert.match(conversation, /conversations\/conv-review\/messages/);
+  assert.equal(await run(["ask", "claude-code", "--agent-kind", "codex"], deps), 1);
+  assert.equal(await run(["ask", "claude-code", "x".repeat(2_001), "--agent-kind", "codex"], deps), 1);
+  assert.match(err.join("\n"), /over 2,000 characters/);
+});
+
+// ---------------------------------------------------------------------------
+// resolve / endpoints: read-only view of the durable endpoints
+// ---------------------------------------------------------------------------
+
+const CODEX_ENDPOINT = {
+  id: "ep_0a1b2c3d000040008000000000000001",
+  address: "@codex",
+  provider: "codex",
+  alias: "codex",
+  generation: 7,
+  status: "active",
+  reachability: "live",
+  presence: { state: "idle", confidence: "inferred", lastSeenAt: new Date().toISOString() },
+  fidelity: { level: "LIVE_NATIVE", basis: "m9r_hosted_session", note: "M9R runs this session." },
+  mine: true,
+};
+
+test("resolve prints reachability, presence confidence and fidelity for one endpoint", async () => {
+  let asked = "";
+  const { deps, out } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    files: askFiles(),
+    router: (url) => {
+      if (url.includes("/api/agent/endpoints/resolve")) {
+        asked = new URL(url).searchParams.get("address") ?? "";
+        return jsonResponse(200, { endpoint: CODEX_ENDPOINT });
+      }
+      return jsonResponse(404, { error: "nope" });
+    },
+  });
+
+  const code = await run(["resolve", "@codex", "--agent-kind", "codex"], deps);
+
+  assert.equal(code, 0);
+  assert.equal(asked, "@codex");
+  const text = out.join("\n");
+  assert.match(text, /@codex {2}\(ep_0a1b2c3d000040008000000000000001\)/);
+  assert.match(text, /generation: 7 {3}yours/);
+  assert.match(text, /reachability: live/);
+  assert.match(text, /presence: idle \(inferred\)/);
+  assert.match(text, /fidelity: LIVE_NATIVE \(m9r_hosted_session\)/);
+});
+
+test("resolve shows the server's reason and any ambiguous candidates, and exits 1", async () => {
+  const { deps, err } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    files: askFiles(),
+    router: () => jsonResponse(409, { error: "More than one @codex is connected in this workspace.", code: "AMBIGUOUS_ENDPOINT", candidates: ["ep_aaa", "ep_bbb"] }),
+  });
+
+  const code = await run(["resolve", "codex", "--agent-kind", "codex"], deps);
+
+  assert.equal(code, 1);
+  assert.match(err.join("\n"), /More than one @codex is connected/);
+  assert.match(err.join("\n"), /candidate: ep_aaa/);
+  assert.match(err.join("\n"), /candidate: ep_bbb/);
+});
+
+test("resolve without an address prints usage and makes no request", async () => {
+  const { deps, err, requests } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, files: askFiles() });
+  assert.equal(await run(["resolve", "--agent-kind", "codex"], deps), 1);
+  assert.match(err.join("\n"), /Usage: m9r-cli resolve/);
+  assert.equal(requests.length, 0);
+});
+
+test("endpoints lists every endpoint in the workspace", async () => {
+  const { deps, out } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    files: askFiles(),
+    router: (url) => url.endsWith("/api/agent/endpoints")
+      ? jsonResponse(200, { endpoints: [CODEX_ENDPOINT, { ...CODEX_ENDPOINT, id: "ep_0a1b2c3d000040008000000000000002", address: "@claude-code", provider: "claude-code", mine: false, reachability: "queue", presence: { state: "offline", confidence: "unknown", lastSeenAt: null } }] })
+      : jsonResponse(404, { error: "nope" }),
+  });
+
+  assert.equal(await run(["endpoints", "--agent-kind", "codex"], deps), 0);
+  const text = out.join("\n");
+  assert.match(text, /endpoints: 2/);
+  assert.match(text, /@claude-code/);
+  assert.match(text, /reachability: queue/);
+  assert.match(text, /last seen never/);
+});
+
+// ---------------------------------------------------------------------------
+// delivery: per-recipient timeline of one message
+// ---------------------------------------------------------------------------
+
+const DELIVERY_REPORT = {
+  messageId: "0a1b2c3d-0000-4000-8000-000000000001",
+  conversationId: "conv-general",
+  createdAt: "2026-09-19T05:00:00.000Z",
+  deliveries: [{
+    recipient: { address: "@claude-code", endpointId: "ep_1", provider: "claude-code" },
+    state: "completed", terminal: true, attempt: 1, viaConsultation: false, pendingUntilTurnBoundary: false, failureCode: null,
+    timeline: [
+      { state: "accepted", at: "2026-09-19T05:00:00.000Z", attempt: 1, basis: "derived", evidence: "message stored" },
+      { state: "delivered_to_node", at: "2026-09-19T05:00:01.000Z", attempt: 1, basis: "observed", evidence: "message.received", persisted: false },
+      { state: "completed", at: "2026-09-19T05:00:09.000Z", attempt: 1, basis: "observed", evidence: "turn.completed" },
+    ],
+  }],
+};
+
+test("delivery prints each recipient's state and timeline, and says when the receipt is not persisted", async () => {
+  let asked = "";
+  const { deps, out } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    files: askFiles(),
+    router: (url) => { asked = url; return jsonResponse(200, DELIVERY_REPORT); },
+  });
+
+  const code = await run(["delivery", "0a1b2c3d-0000-4000-8000-000000000001", "--agent-kind", "codex"], deps);
+
+  assert.equal(code, 0);
+  assert.match(asked, /\/api\/agent\/messages\/0a1b2c3d-0000-4000-8000-000000000001\/delivery$/);
+  const text = out.join("\n");
+  assert.match(text, /@claude-code: completed \(attempt 1\)/);
+  assert.match(text, /05:00:01 {2}delivered_to_node +observed +message\.received \(bridge memory only; not saved to a local ledger\)/);
+  assert.match(text, /05:00:09 {2}completed +observed +turn\.completed/);
+});
+
+test("delivery for a message that addressed no agent says so, and a missing id prints usage", async () => {
+  const { deps, out, err } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    files: askFiles(),
+    router: () => jsonResponse(200, { ...DELIVERY_REPORT, deliveries: [] }),
+  });
+  assert.equal(await run(["delivery", "0a1b2c3d-0000-4000-8000-000000000001", "--agent-kind", "codex"], deps), 0);
+  assert.match(out.join("\n"), /nothing to deliver/);
+  assert.equal(await run(["delivery", "--agent-kind", "codex"], deps), 1);
+  assert.match(err.join("\n"), /Usage: m9r-cli delivery/);
+});
+
+test("delivery surfaces the server's not-found without leaking the token", async () => {
+  const { deps, err } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    files: askFiles(),
+    router: () => jsonResponse(404, { error: "Message was not found." }),
+  });
+  assert.equal(await run(["delivery", "0a1b2c3d-0000-4000-8000-000000000009", "--agent-kind", "codex"], deps), 1);
+  assert.match(err.join("\n"), /Message was not found\./);
+  assert.doesNotMatch(err.join("\n"), /oak_codex_token/);
+});
+
+test("ask --wait appends the delivery timeline after the reply when the server can provide it", async () => {
+  const replies = [{ id: "msg-2", parent_message_id: "0a1b2c3d-0000-4000-8000-000000000001", sender_connection_id: "conn-claude", kind: "result", body: "Done.", created_at: "2026-09-19T05:00:09.000Z" }];
+  const base = askRouter({ replies });
+  const { deps, out } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    files: askFiles(),
+    router: (url, init) => url.includes("/delivery") ? jsonResponse(200, DELIVERY_REPORT) : base(url, init),
+  });
+
+  assert.equal(await run(["ask", "claude-code", "status?", "--wait", "--agent-kind", "codex"], deps), 0);
+  const text = out.join("\n");
+  assert.match(text, /Done\./);
+  assert.match(text, /Delivery:\n@claude-code: completed/);
+});
+
+test("delivery says when the bridge saved the receipt to its local ledger first", async () => {
+  const report = { ...DELIVERY_REPORT, deliveries: [{ ...DELIVERY_REPORT.deliveries[0], timeline: DELIVERY_REPORT.deliveries[0].timeline.map((entry) => entry.state === "delivered_to_node" ? { ...entry, persisted: true } : entry) }] };
+  const { deps, out } = makeDeps({ env: { OATHLOCK_API_URL: "http://localhost:3000" }, files: askFiles(), router: () => jsonResponse(200, report) });
+  assert.equal(await run(["delivery", "0a1b2c3d-0000-4000-8000-000000000001", "--agent-kind", "codex"], deps), 0);
+  assert.match(out.join("\n"), /saved in the bridge's local ledger first/);
 });

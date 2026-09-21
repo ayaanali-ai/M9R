@@ -75,3 +75,24 @@ test("postAgentMessage (send_message's real mechanism) is the exact function bot
   void governed;
   void loop;
 });
+
+test("postAgentMessage retries transient transport failure with the same idempotency key", async () => {
+  const { postAgentMessage } = await import("../src/lib/bridge/governed-agent-tools");
+  const originalFetch = globalThis.fetch;
+  const seenKeys: string[] = [];
+  let attempts = 0;
+  globalThis.fetch = (async (_input, init) => {
+    attempts += 1;
+    seenKeys.push(new Headers(init?.headers).get("idempotency-key") ?? "");
+    if (attempts === 1) throw new Error("temporary socket reset");
+    return new Response(JSON.stringify({ message: { id: "message-1" } }), { status: 201, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    await assert.doesNotReject(postAgentMessage({ appUrl: "https://example.test", agentToken: "token", missionId: "channel-conversation-1" }, { text: "hello", parentMessageId: "parent-1" }));
+    assert.equal(attempts, 2);
+    assert.equal(seenKeys[0], seenKeys[1]);
+    assert.ok(seenKeys[0]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

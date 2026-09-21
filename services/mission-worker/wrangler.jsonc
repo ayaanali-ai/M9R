@@ -1,0 +1,42 @@
+// DO NOT DEPLOY (2026-09-19): Cloudflare Containers are not covered by the Startup credits and bill the card.
+// The live Relay is services/relay-do (Durable Objects). This container config is kept for reference only.
+{
+  "$schema": "https://schemas.cloudflare.com/wrangler.json",
+  "name": "m9r-worker",
+  "main": "src/worker-wrapper.ts",
+  "compatibility_date": "2024-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "containers": [
+    {
+      "class_name": "MissionWorkerContainer",
+      "image": "./Dockerfile",
+      "image_build_context": "../..",
+      "max_instances": 1,
+      "instance_type": "standard-2"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MISSION_WORKER_CONTAINER",
+        "class_name": "MissionWorkerContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MissionWorkerContainer"]
+    }
+  ],
+  // No cron: the placeholder worker does nothing yet and an always-on container bills even when idle.
+  // Containers are not on the Startup credit list, so keep it stopped until it has real work.
+  "triggers": { "crons": [] },
+  "vars": {
+    "MISSION_WORKER_ENABLED": "true",
+    "MISSION_RUNTIME_EVENTS_ENABLED": "true",
+    "MISSION_REPOSITORY_ROOT": "/workspace/repo",
+    "MISSION_WORKER_INSTANCE_ID": "m9r-worker-staging",
+    "MISSION_WORKSPACE_IDS": "00000000-0000-0000-0000-000000000000"
+  }
+}

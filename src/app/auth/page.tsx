@@ -1,9 +1,7 @@
 import { redirect } from "next/navigation";
-import AuthForm from "@/components/product/AuthForm";
-import BackLink from "@/components/product/BackLink";
+import M9RAuthCard from "@/components/product/M9RAuthCard";
 import { createClient } from "@/lib/supabase/server";
 import { safeRelativePath } from "@/lib/safe-redirect";
-import AuthDebugBadge from "@/components/AuthDebugBadge";
 
 export const dynamic = "force-dynamic";
 
@@ -28,16 +26,16 @@ function noticeForError(code: string | undefined) {
 }
 
 /**
- * OAuth restored alongside email/password (AuthForm.tsx, unchanged), per
- * explicit reversal of the earlier OAuth-only pass. Keeps the minimal shell
- * (no marketing editorial panel) since that part of the rebuild stands.
+ * Authentication remains handled by AuthForm; this route only supplies the
+ * centered auth card and keeps the existing safe destination/confirmation flow.
  */
 export default async function AuthPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string | string[]; error?: string | string[] }>;
+  searchParams: Promise<{ next?: string | string[]; error?: string | string[]; mode?: string | string[] }>;
 }) {
-  const { next, error } = await searchParams;
+  const { next, error, mode } = await searchParams;
+  const modeParam = Array.isArray(mode) ? mode[0] : mode;
   const nextParam = Array.isArray(next) ? next[0] : next;
   const errorParam = Array.isArray(error) ? error[0] : error;
   const initialNotice = noticeForError(errorParam);
@@ -47,11 +45,5 @@ export default async function AuthPage({
   const { data } = supabase ? await supabase.auth.getUser() : { data: { user: null } };
   if (data.user) redirect(destination);
 
-  return (
-    <main className="auth-min-shell">
-      <AuthDebugBadge />
-      <BackLink href="/" label="Back to home" className="auth-back" />
-      <AuthForm configured={Boolean(supabase)} next={destination} initialNotice={initialNotice} />
-    </main>
-  );
+  return <M9RAuthCard configured={Boolean(supabase)} next={destination} initialNotice={initialNotice} initialMode={modeParam === "signup" ? "signup" : "login"} />;
 }

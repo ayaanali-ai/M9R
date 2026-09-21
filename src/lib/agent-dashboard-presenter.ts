@@ -10,6 +10,8 @@
  * Kept separate from the React page so the truthfulness rules are unit-testable.
  */
 
+import { RECENT_CONNECTION_MAX_AGE_MS } from "@/lib/conversation-routing";
+
 export interface ConnectionRow {
   id: string;
   workspace_id: string;
@@ -20,20 +22,48 @@ export interface ConnectionRow {
   last_seen_at: string | null;
   model?: string | null;
   available_models?: { id: string; label: string }[] | null;
+  /** agent_connections.last_provider_session_ref: the provider's own id for the newest session M9R started. */
+  last_provider_session_ref?: string | null;
   /** Who connected this agent (agent_connections.created_by). Null for older
    * rows predating that column's use, or a connection nobody attributed. */
   created_by?: string | null;
+  /** Custom display name (agent_connections.display_name). */
+  display_name?: string | null;
+  /** Short role/title (agent_connections.title). */
+  title?: string | null;
+  /** Custom avatar URL (agent_connections.avatar_url). */
+  avatar_url?: string | null;
+  /** Mascot body variant (agent_connections.mascot_body). */
+  mascot_body?: string | null;
+  /** TTS voice identifier (agent_connections.voice). */
+  voice?: string | null;
+  /** Speak replies aloud (agent_connections.speak_replies). */
+  speak_replies?: boolean | null;
+  /** Standing instructions (agent_connections.soul). */
+  soul?: string | null;
+  /** Team section (agent_connections.section). */
+  section?: string | null;
+  /** Chief of Staff flag (agent_connections.chief_of_staff). */
+  chief_of_staff?: boolean | null;
+  /** Managed sections for Chiefs (agent_connections.managed_sections). */
+  managed_sections?: string[] | null;
+  /** Explicit peer allow-list (agent_connections.peers). */
+  peers?: string[] | null;
+  /** Resolved owner display name (from created_by join). */
+  owner_label?: string | null;
+  /** Raw owner user ID (agent_connections.created_by). */
+  owner_user_id?: string | null;
 }
 
 export type ConnectionLiveness = "active" | "stale" | "not_seen";
 
 /**
  * A connection is live only while its server-issued heartbeat lease is fresh.
- * The presence contract grants a 90-second lease; allowing two missed leases
- * keeps the Watchfloor tolerant of a short poll delay without presenting old
- * registrations as online agents.
+ * The presence contract grants a single 90-second lease. That same boundary
+ * is shared with message routing so the dashboard never calls a connection
+ * live that the bridge would refuse to route to.
  */
-export const STALE_AFTER_MS = 3 * 60 * 1000;
+export const STALE_AFTER_MS = RECENT_CONNECTION_MAX_AGE_MS;
 
 /**
  * Classify a connection's liveness from last_seen_at. Never reports a stale or

@@ -100,3 +100,13 @@ cli/.oathlock/watchdog.log
 
 # Supabase CLI machine/project linkage cache
 /supabase/.temp/
+
+# Cloudflare / local artifacts
+.wrangler/
+services/*/.wrangler/
+.open-next/
+.dev.vars
+*.tar
+scratchpad_local/
+Screenshot*.png
+M9R_COMPLETE_HANDOFF*.docx

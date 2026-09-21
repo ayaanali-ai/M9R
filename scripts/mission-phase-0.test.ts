@@ -57,7 +57,7 @@ test("resident provider prompts permit bounded Mission requests without direct p
     executionMode: "read_only",
   }, "codex");
 
-  assert.match(spec.stdin, /request bounded work from authorized Mission participants through OathLock's collaboration protocol/i);
+  assert.match(spec.stdin, /request bounded work from authorized Mission participants through (?:OathLock|M9R)'s collaboration protocol/i);
   assert.match(spec.stdin, /do not launch another provider directly/i);
   assert.doesNotMatch(spec.stdin, /Do not delegate to another agent\./);
 });

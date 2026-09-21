@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, Inbox as InboxIcon, LogOut } from "lucide-react";
 import { ChannelWelcome } from "./ChannelWelcome";
@@ -12,6 +13,7 @@ import { AttachIcon, MentionIcon, SendIcon } from "@/components/product/wf-icons
 import { AgentMark, AGENT_BRAND_COLOR } from "@/components/product/WorkspaceUI";
 import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import { type AgentView } from "@/lib/agent-workspace-data";
+import { getAgentDisplayName } from "@/lib/agent-identity";
 import { WorkspaceRelayBrowserClient, type BrowserMissionRelayStatus } from "@/lib/mission/mission-relay-browser-client";
 import type { RelayFrame } from "@/lib/mission/mission-relay-protocol";
 import { initialsFor, identityHue } from "@/lib/identity-color";
@@ -1027,7 +1029,14 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // Extracted so the channel switcher/create-channel dialog can trigger an
   // immediate refresh after creating or leaving a channel, instead of
   // waiting for the next 8-30s poll tick to notice.
+  const loadSeqRef = useRef(0);
+  const selectedIdRef = useRef(selectedId);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
   const loadConversations = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
+    const requestedFor = selectedId;
     try {
       // Only the open channel needs its full message history from this
       // endpoint (see the route's own comment) -- everyone else is a
@@ -1036,7 +1045,22 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
       const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) return;
       const data = (await res.json()) as { conversations?: Conversation[] };
-      setConversations(data.conversations ?? []);
+      // A newer load (or a channel switch) superseded this one: applying it
+      // would snap the UI back to the channel that was open when it started.
+      if (seq !== loadSeqRef.current) return;
+      const incoming = data.conversations ?? [];
+      const current = selectedIdRef.current;
+      setConversations((previous) => incoming.map((conversation) => {
+        // This response carried only a preview line for the channel the user
+        // has since opened; keep the history already loaded for it.
+        if (conversation.id === current && requestedFor !== current) {
+          const existing = previous.find((candidate) => candidate.id === conversation.id);
+          if (existing && existing.messages.length > conversation.messages.length) {
+            return { ...conversation, messages: existing.messages };
+          }
+        }
+        return conversation;
+      }));
     } catch {
       setNotice("Channels are temporarily unavailable.");
     }
@@ -1053,11 +1077,11 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     // workspace relay and merge immediately. Keep a slower HTTP refresh as a
     // durable fallback for direct API writers and reconnect gaps; use the
     // faster cadence only while the relay is unavailable.
-    // Was 10s/2s -- the live relay is the real sync path; this HTTP poll only
-    // needs to catch reconnect gaps, not double as the primary channel. At
-    // 2s with a full-history refetch per open tab this was the dominant
-    // source of Supabase egress, not real user traffic.
-    const intervalMs = relayStatus === "subscribed" ? 30_000 : 8_000;
+    // The live relay is still the primary sync path, but agent MCP replies
+    // are written by a stateless API route and may miss the relay during a
+    // restart. Keep the durable fallback under ten seconds so a missed live
+    // event never looks like a silent reply for half a minute.
+    const intervalMs = relayStatus === "subscribed" ? 10_000 : 8_000;
     const id = window.setInterval(() => void load(), intervalMs);
     return () => { cancelled = true; window.clearInterval(id); };
   }, [relayStatus, loadConversations]);
@@ -1708,11 +1732,21 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // updating should always scroll the reader to what just happened, not
   // leave them wherever the list last rendered.
   const latestMessageId = selected?.messages[selected.messages.length - 1]?.id ?? null;
+  const selectedMessageCount = selected?.messages.length ?? 0;
+  const scrollMemoRef = useRef<{ id: string | null; latest: string | null; count: number }>({ id: null, latest: null, count: 0 });
   useEffect(() => {
     const list = messagesListRef.current;
     if (!list) return;
-    list.scrollTop = list.scrollHeight;
-  }, [selected?.id, latestMessageId]);
+    const id = selected?.id ?? null;
+    const memo = scrollMemoRef.current;
+    // Also re-anchor when full history replaces the 1-message preview a
+    // freshly opened channel starts with -- otherwise the list stays at the top.
+    const historyArrived = memo.id === id && memo.count <= 1 && selectedMessageCount > memo.count;
+    if (memo.id !== id || memo.latest !== latestMessageId || historyArrived) {
+      list.scrollTop = list.scrollHeight;
+    }
+    scrollMemoRef.current = { id, latest: latestMessageId, count: selectedMessageCount };
+  }, [selected?.id, latestMessageId, selectedMessageCount]);
 
   // Runs after the "scroll to latest" effect above has already fired for
   // this conversation -- a deep link (from the old standalone approval
@@ -1870,7 +1904,39 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // "@co" to find Codex would stop matching once the label starts with an
   // owner's name instead of the provider name. agent.key never changes, so
   // @mentions stay exactly as reliable as before this feature existed.
-  const mentionSuggestions = mentionToken === null ? [] : agents.filter((agent) => agent.connected && agent.key.toLowerCase().startsWith(mentionToken.toLowerCase().replace(/\s+/g, "-"))).slice(0, 5);
+  const mentionNeedle = mentionToken === null ? null : mentionToken.toLowerCase().replace(/\s+/g, "-");
+  // Offline agents stay in the list (marked offline) so a typed @name never just
+  // vanishes; reachable ones sort first. Matches the provider key or any word of the label.
+  const mentionSuggestions = mentionNeedle === null ? [] : agents
+    .filter((agent) => agent.key.toLowerCase().startsWith(mentionNeedle)
+      || agent.label.toLowerCase().split(/[^a-z0-9]+/).some((word) => word.length > 0 && word.startsWith(mentionNeedle)))
+    .sort((left, right) => Number(right.connected) - Number(left.connected))
+    .slice(0, 6);
+  // The menu renders in a portal on <body>, positioned from the composer's
+  // rect: inside the composer it could be clipped or covered by whatever
+  // sits above it in the chat stack.
+  const composerFieldRef = useRef<HTMLDivElement | null>(null);
+  const [mentionMenuRect, setMentionMenuRect] = useState<{ left: number; bottom: number; width: number } | null>(null);
+  const hasMentionMenu = mentionSuggestions.length > 0;
+  useEffect(() => {
+    if (!hasMentionMenu) {
+      // This effect synchronizes the portal anchor with the composer DOM node.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setMentionMenuRect(null);
+      return;
+    }
+    const measure = () => {
+      const field = composerFieldRef.current;
+      if (!field) return;
+      const rect = field.getBoundingClientRect();
+      // The menu is portaled to body, so its position must follow layout changes.
+      setMentionMenuRect({ left: rect.left, bottom: window.innerHeight - rect.top + 6, width: rect.width });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => { window.removeEventListener("resize", measure); window.removeEventListener("scroll", measure, true); };
+  }, [hasMentionMenu, draft]);
   const activeMentionIndex = mentionSuggestions.length > 0 ? mentionActiveIndex % mentionSuggestions.length : 0;
 
   /** Typing "/" at the start of an empty draft opens the same shortcut menu the toolbar icon does, filtered as you type -- mirrors mentionToken's pattern above. */
@@ -1899,7 +1965,11 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // (viewer's own messages/typing are excluded before this is called). A
   // missing connectionId means the sender has no known identity at all.
   function labelFor(connectionId: string | null): string {
-    return connectionId ? byConnectionId.get(connectionId)?.label ?? "Agent" : "Someone";
+    const agent = connectionId ? byConnectionId.get(connectionId) : undefined;
+    if (!agent) return "Someone";
+    // AgentView.label already has the "Owner's Provider" format when disambiguated,
+    // or just "Provider" when unique. This matches getAgentDisplayName's output.
+    return agent.label;
   }
 
   function selectMention(agent: AgentView) {
@@ -2777,9 +2847,14 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                   ))}
                 </div>
               )}
-              <div className="wf-chat-composer-field">
-                {mentionSuggestions.length > 0 && (
-                  <div className="wf-chat-mention-menu" role="listbox" aria-label="Mention an agent">
+              <div ref={composerFieldRef} className="wf-chat-composer-field">
+                {mentionMenuRect && typeof document !== "undefined" && createPortal(
+                  <div
+                    className="wf-chat-mention-menu wf-chat-mention-menu--floating"
+                    role="listbox"
+                    aria-label="Mention an agent"
+                    style={{ left: mentionMenuRect.left, bottom: mentionMenuRect.bottom, width: Math.min(320, Math.max(220, mentionMenuRect.width)) }}
+                  >
                     {mentionSuggestions.map((agent, index) => (
                       <button
                         key={agent.id}
@@ -2787,15 +2862,17 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                         role="option"
                         aria-selected={index === activeMentionIndex}
                         className={index === activeMentionIndex ? "is-active" : ""}
+                        onMouseDown={(event) => event.preventDefault()}
                         onMouseEnter={() => setMentionActiveIndex(index)}
-                        onClick={() => selectMention(agent)}
+                        onClick={() => { selectMention(agent); textareaRef.current?.focus(); }}
                       >
-                        <i data-live="true" aria-hidden />
+                        <i data-live={agent.connected ? "true" : "false"} aria-hidden />
                         <span className="wf-chat-mention-name">{agent.label}</span>
                         <small>{agent.connected ? "online" : "offline"}</small>
                       </button>
                     ))}
-                  </div>
+                  </div>,
+                  document.body,
                 )}
                 {shortcutMenuOpen && slashSuggestions.length > 0 && (
                   <div className="wf-chat-shortcut-menu" role="listbox" aria-label="Message types">

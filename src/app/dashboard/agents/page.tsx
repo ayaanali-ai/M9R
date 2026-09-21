@@ -104,7 +104,7 @@ export default async function AgentsDashboardPage() {
   const connectionRequest = supabase && humanWorkspaceId
     ? supabase
         .from("agent_connections")
-        .select("id, workspace_id, agent_kind, repo_hint, status, created_at, last_seen_at, model, available_models, created_by")
+        .select("id, workspace_id, agent_kind, repo_hint, status, created_at, last_seen_at, model, available_models, last_provider_session_ref, created_by")
         .eq("workspace_id", humanWorkspaceId)
         .eq("status", "active")
         .order("last_seen_at", { ascending: false })
@@ -121,12 +121,17 @@ export default async function AgentsDashboardPage() {
   // query failure (handled below via `?? []`) but the underlying fetch can
   // still reject outright on a real network drop/timeout -- same crash risk
   // as loadAgentApprovalData above, guarded the same way.
+  // Runs and the whisper summary depend on neither the connection rows nor each
+  // other, so they start now and overlap with the queries above instead of
+  // adding two more serial round trips before the page can render.
+  const runsRequest = listAgentRunsForUser().catch(() => []);
+  const whisperRequest = whisperActivitySummary().catch(() => null);
   const [connResult, sessionResult] = await Promise.all([connectionRequest, sessionRequest]).catch(() => [{ data: [] }, { data: [] }]);
 
   const connections = ((connResult.data ?? []) as ConnectionRow[])
     .filter((connection) => Boolean(humanWorkspaceId && connection.workspace_id === humanWorkspaceId));
   const sessions = (sessionResult.data ?? []) as SessionRow[];
-  const runs = await listAgentRunsForUser().catch(() => []);
+  const runs = await runsRequest;
   // The Watchfloor is a live multi-agent surface: preserve each distinct
   // connection so two Codex/Claude/OpenCode residents cannot collapse into
   // one visible slot. Callsigns may still use stable provider grouping.
@@ -220,6 +225,7 @@ export default async function AgentsDashboardPage() {
     status: g.latest.status,
     model: g.latest.model ?? null,
     available_models: g.latest.available_models ?? null,
+    last_provider_session_ref: g.latest.last_provider_session_ref ?? null,
     owner_label: g.latest.created_by ? ownerLabelById.get(g.latest.created_by) ?? null : null,
     owner_user_id: g.latest.created_by ?? null,
   }));
@@ -296,12 +302,8 @@ export default async function AgentsDashboardPage() {
   // all when there's something to show, same as Review's badge count. Best
   // effort: a failure here should never block the page from rendering.
   let hasWhispers = false;
-  try {
-    const whisperActivity = await whisperActivitySummary();
-    hasWhispers = whisperActivity.totalCount30d > 0;
-  } catch {
-    hasWhispers = false;
-  }
+  const whisperActivity = await whisperRequest;
+  hasWhispers = Boolean(whisperActivity && whisperActivity.totalCount30d > 0);
   const agents = baseAgents.map((agent) => ({
     ...agent,
     approvalCount: approvalCenter.by_agent[agent.key],

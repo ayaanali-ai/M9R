@@ -17,8 +17,12 @@ const COMMAND = "npx m9r-cli connect";
  */
 type Panel = "login" | "signup";
 
-export default function UseM9RHome({ configured }: { configured: boolean }) {
-  const [panel, setPanel] = useState<Panel | null>(null);
+export default function UseM9RHome({
+  configured,
+  initialPanel = null,
+  authNext,
+}: { configured: boolean; initialPanel?: Panel | null; authNext?: string }) {
+  const [panel, setPanel] = useState<Panel | null>(initialPanel);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -139,6 +143,7 @@ export default function UseM9RHome({ configured }: { configured: boolean }) {
                 hideHeading
                 oauthLabelPrefix="Continue with"
                 initialMode={panel}
+                next={authNext}
               />
             </div>
           </div>

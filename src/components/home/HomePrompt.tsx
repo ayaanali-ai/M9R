@@ -1,5 +1,6 @@
 "use client";
 
+import { CONTACT_MAILTO } from "@/lib/contact";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import styles from "./HomePrompt.module.css";
 
@@ -247,7 +248,7 @@ export default function HomePrompt({ onSignup }: { onSignup: () => void }) {
             {selectedPlan === "pro" && !BILLING_ENABLED && (
               <span className={styles.disabledAction}>[checkout returns after Stripe is re-verified]</span>
             )}
-            {selectedPlan === "team" && <a className={styles.action} href="mailto:hello@m9r.dev">[talk to us]</a>}
+            {selectedPlan === "team" && <a className={styles.action} href={CONTACT_MAILTO}>[talk to us]</a>}
             {checkoutState === "error" && <p className={styles.error}>checkout unavailable. try again.</p>}
           </article>
         </div>

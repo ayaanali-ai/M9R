@@ -625,6 +625,23 @@ async function revokeAgentConnection(
     throw new AgentJoinError("Agent was disconnected, but token revocation could not be confirmed.", "TOKEN_REVOKE_FAILED", 500);
   }
 
+  // Best-effort: a soft revoke never fires FK cascades, so release what the
+  // connection still holds. Failures are logged, not surfaced — the revoke itself succeeded.
+  const [locks, sessions] = await Promise.all([
+    db
+      .from("file_locks")
+      .update({ released_at: now, released_reason: "agent_disconnected" })
+      .eq("holder_connection_id", connectionId)
+      .is("released_at", null),
+    db
+      .from("conversation_sessions")
+      .update({ status: "archived" })
+      .eq("connection_id", connectionId)
+      .neq("status", "archived"),
+  ]);
+  if (locks.error) console.error("disconnectAgentConnection lock release failed:", locks.error.message);
+  if (sessions.error) console.error("disconnectAgentConnection session archive failed:", sessions.error.message);
+
   return {
     ok: true,
     connection_id: connectionId,

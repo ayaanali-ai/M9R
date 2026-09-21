@@ -22,7 +22,8 @@ import { ensureChannelMission, missionOwnerParticipantId, missionAgentParticipan
 import { postMissionMessage } from "@/lib/mission/mission-application-service";
 import { runChannelWorkflowsForMessage } from "@/lib/mission/mission-workflow-executor";
 import { normalizeAgentKind } from "@/lib/agent-workspace-data";
-import { explicitlyMentionedAgentKinds, unavailableAgentNoticeBody, unavailableExplicitAgentKinds } from "@/lib/conversation-routing";
+import { agentAvailabilityUnknownNoticeBody, explicitlyMentionedAgentKinds, RECENT_CONNECTION_MAX_AGE_MS, unavailableAgentNoticeBody, unavailableExplicitAgentKinds } from "@/lib/conversation-routing";
+import { scheduleShadowJudgment } from "@/lib/jev-shadow";
 import { providerMention } from "@/lib/provider-adapter-config";
 import { MISSION_BROADCAST_CHANNEL } from "@/lib/mission/mission-domain";
 import { decideChatEvidenceRequestFromMessage, findPendingEvidenceDecisionTarget } from "@/lib/bridge/chat-evidence-service";
@@ -34,6 +35,8 @@ import { listMessageTodosForConversations, normalizeMessageTodoEntries, upsertMe
 import { listDraftsForConversation, upsertDraftSection, setDraftStatus, type Draft, type DraftStatus } from "@/lib/bridge/conversation-draft-service";
 import type { WorkspaceRole } from "@/lib/workspace-membership-service";
 import { idempotencyIdentityMatches } from "@/lib/conversation-idempotency";
+import { publishInternalRelayFrame } from "@/lib/mission/mission-relay-internal-publish";
+import { loadDashboardMessageWindows, loadDashboardUnreadCounts } from "@/lib/dashboard-list-batching";
 
 export const ALLOWED_ATTACHMENT_MEDIA_TYPES = new Set([
   "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
@@ -113,6 +116,97 @@ function requireService() {
     throw new AgentJoinError("M9R agent backend is not configured.", "DB_NOT_CONFIGURED", 503);
   }
   return supabase;
+}
+
+/**
+ * The agent MCP tool writes through the stateless Next.js API route. That
+ * route has no WebSocket of its own, so without this server-to-server publish
+ * the row is durable but every already-open dashboard waits for its fallback
+ * poll to see the reply. Keep the publish additive: the database row remains
+ * authoritative, and a relay outage must never turn a successful message
+ * write into a failed provider turn.
+ *
+ * The message id is the UI's deduplication key. Replaying an idempotent HTTP
+ * request may publish the same row more than once, but the UI merge collapses
+ * that safely and the row is never duplicated.
+ */
+async function publishAgentWorkspaceMessage(input: { workspaceId: string; conversationId: string; message: Record<string, unknown> }): Promise<void> {
+  try {
+    await publishInternalRelayFrame({
+      workspaceId: input.workspaceId,
+      channelId: input.conversationId,
+      type: "workspace.event",
+      payload: { message: { ...input.message, reactions: [] }, activity: [], cursor: null },
+    });
+  } catch (error) {
+    console.warn(`Live workspace publish failed for conversation ${input.conversationId}; durable message remains available:`, error instanceof Error ? error.message : error);
+  }
+}
+
+/** Keep the no-consumer diagnostic attached to a durable human post even when
+ * the request is an idempotent replay after the original response was lost.
+ * Without this shared helper, a crash between the human-message insert and
+ * the notice insert left the retry looking successful while the channel still
+ * had no explanation for its silence. */
+async function ensureAgentAvailabilityNotice(input: { db: ReturnType<typeof requireService>; workspaceId: string; conversationId: string; messageId: string; body: string }): Promise<void> {
+  const [{ data: connections, error: connectionsError }, { data: participants, error: participantsError }] = await Promise.all([
+    input.db.from("agent_connections")
+      .select("id, agent_kind, status, last_seen_at")
+      .eq("workspace_id", input.workspaceId)
+      .eq("status", "active"),
+    input.db.from("conversation_participants")
+      .select("connection_id")
+      .eq("workspace_id", input.workspaceId)
+      .eq("conversation_id", input.conversationId),
+  ]);
+  const channelMemberIds = new Set((participants ?? []).map((row) => String(row.connection_id)));
+  const availabilityRows = (connections ?? []).map((row) => ({
+    ...row,
+    is_channel_member: channelMemberIds.has(String(row.id)),
+  }));
+  // Shadow-mode Jev judgment of this same message (off unless M9R_JEV_MODE is set): it only logs how
+  // its call compares with the explicit-@mention routing below and changes nothing.
+  if (!connectionsError && !participantsError) {
+    const nowMs = Date.now();
+    scheduleShadowJudgment({
+      messageId: input.messageId,
+      workspaceId: input.workspaceId,
+      conversationId: input.conversationId,
+      source: "http",
+      body: input.body,
+      agents: availabilityRows
+        .filter((row) => row.agent_kind)
+        .map((row) => ({
+          kind: providerMention(String(row.agent_kind)),
+          connected: Number.isFinite(Date.parse(String(row.last_seen_at ?? ""))) && nowMs - Date.parse(String(row.last_seen_at)) <= RECENT_CONNECTION_MAX_AGE_MS,
+          isChannelMember: row.is_channel_member,
+        })),
+      actualMentionedKinds: explicitlyMentionedAgentKinds(input.body, availabilityRows),
+    });
+  }
+  const noticeBody = connectionsError || participantsError
+    ? agentAvailabilityUnknownNoticeBody()
+    : (() => {
+        const unavailable = unavailableExplicitAgentKinds(input.body, availabilityRows);
+        return unavailable.length > 0 ? unavailableAgentNoticeBody(unavailable) : null;
+      })();
+  if (!noticeBody) return;
+  const { error: noticeError } = await input.db.from("conversation_messages").insert({
+    workspace_id: input.workspaceId,
+    conversation_id: input.conversationId,
+    sender_user_id: null,
+    sender_connection_id: null,
+    sender_display_name: "M9R",
+    sender_kind: "system",
+    recipient_connection_id: null,
+    kind: "notice",
+    body: noticeBody,
+    parent_message_id: input.messageId,
+    idempotency_key: `agent-availability:${input.messageId}`,
+  });
+  if (noticeError && noticeError.code !== "23505") {
+    console.warn(`Agent availability notice failed for conversation ${input.conversationId}:`, noticeError.message);
+  }
 }
 
 /** Same table-not-migrated-yet detection as dispatch-service.ts. */
@@ -344,6 +438,10 @@ export async function sendConversationMessage(
         outcome: normalizedOutcome,
         relatedRunId,
       })) throw new AgentJoinError("idempotencyKey is already used by another message.", "IDEMPOTENCY_KEY_CONFLICT", 409);
+      // A retry may be the first request whose relay publication succeeds
+      // (the original writer can lose only the live-ingest response). Replay
+      // the durable row into the live room; the UI deduplicates by message id.
+      void publishAgentWorkspaceMessage({ workspaceId: agent.workspaceId, conversationId: input.conversationId, message: existing as Record<string, unknown> });
       return existing as ConversationMessage;
     }
   }
@@ -382,17 +480,31 @@ export async function sendConversationMessage(
         parentMessageId,
         outcome: normalizedOutcome,
         relatedRunId,
-      })) return existing as ConversationMessage;
+      })) {
+        void publishAgentWorkspaceMessage({ workspaceId: agent.workspaceId, conversationId: input.conversationId, message: existing as Record<string, unknown> });
+        return existing as ConversationMessage;
+      }
       if (existing) throw new AgentJoinError("idempotencyKey is already used by another message.", "IDEMPOTENCY_KEY_CONFLICT", 409);
     }
     throw new AgentJoinError("Could not send the message.", "MESSAGE_SEND_FAILED", 500);
   }
+  // Persist first, then fan the same durable row out to already-open browser
+  // rooms. This is intentionally fire-and-forget: the API response must not
+  // become slow or fail merely because the optional live relay is restarting;
+  // the bridge/browser polling paths still recover the database row.
+  void publishAgentWorkspaceMessage({ workspaceId: agent.workspaceId, conversationId: input.conversationId, message: message as Record<string, unknown> });
   await createAgentActivityNotification(db, {
     workspaceId: agent.workspaceId,
     conversationId: input.conversationId,
     messageId: message.id as string,
     body: sanitized.body,
     kind: input.kind as ConversationMessageKind,
+  }).catch((notificationError) => {
+    // The conversation row is already the durable source of truth. A
+    // notification projection outage must not turn a successfully posted
+    // agent message into a 500, which prompts the provider to retry and can
+    // make a live reply appear lost or duplicated.
+    console.warn(`Agent activity notification failed for conversation ${input.conversationId}:`, notificationError instanceof Error ? notificationError.message : notificationError);
   });
   await bindAgentReplyToMission({ agent, conversationId: input.conversationId, body: sanitized.body }).catch((bindError) => {
     console.warn(`Agent reply Mission binding failed for conversation ${input.conversationId}:`, bindError instanceof Error ? bindError.message : bindError);
@@ -1517,6 +1629,13 @@ export async function sendDashboardConversationMessage(input: { conversationId: 
         parentMessageId: input.parentMessageId ?? null,
         outcome: null,
       })) throw new AgentJoinError("idempotencyKey is already used by another message.", "IDEMPOTENCY_KEY_CONFLICT", 409);
+      await ensureAgentAvailabilityNotice({
+        db,
+        workspaceId: conversation.workspace_id,
+        conversationId: conversation.id,
+        messageId: String(existing.id),
+        body: sanitized.body,
+      });
       return { ...(existing as unknown as DashboardConversationMessage), reactions: [], attachments: [], todos: [] };
     }
   }
@@ -1540,16 +1659,35 @@ export async function sendDashboardConversationMessage(input: { conversationId: 
         body: sanitized.body,
         parentMessageId: input.parentMessageId ?? null,
         outcome: null,
-      })) return { ...(existing as unknown as DashboardConversationMessage), reactions: [], attachments: [], todos: [] };
+      })) {
+        await ensureAgentAvailabilityNotice({
+          db,
+          workspaceId: conversation.workspace_id,
+          conversationId: conversation.id,
+          messageId: String(existing.id),
+          body: sanitized.body,
+        });
+        return { ...(existing as unknown as DashboardConversationMessage), reactions: [], attachments: [], todos: [] };
+      }
       if (existing) throw new AgentJoinError("idempotencyKey is already used by another message.", "IDEMPOTENCY_KEY_CONFLICT", 409);
     }
     throw new AgentJoinError("Could not send the message.", "MESSAGE_SEND_FAILED", 500);
   }
+  // The normal browser path publishes through the authenticated relay socket.
+  // The HTTP fallback still needs to fan out to other open dashboards when
+  // their own socket is the thing that is restarting; durable polling remains
+  // the recovery path if this optional publish cannot reach the relay.
+  void publishAgentWorkspaceMessage({ workspaceId: conversation.workspace_id, conversationId: conversation.id, message: message as Record<string, unknown> });
 
-  const connections = await db.from("agent_connections").select("id, agent_kind, status, last_seen_at").eq("workspace_id", conversation.workspace_id).eq("status", "active");
+  const [connections, participants] = await Promise.all([
+    db.from("agent_connections").select("id, agent_kind, status, last_seen_at").eq("workspace_id", conversation.workspace_id).eq("status", "active"),
+    db.from("conversation_participants").select("connection_id").eq("workspace_id", conversation.workspace_id).eq("conversation_id", conversation.id),
+  ]);
+  const channelMemberIds = new Set((participants.data ?? []).map((row) => String(row.connection_id)));
   const normalizedBody = sanitized.body.toLowerCase();
   const explicitlyMentioned = new Set(explicitlyMentionedAgentKinds(sanitized.body, connections.data ?? []));
   const mentionedConnections = (connections.data ?? []).filter((row) => {
+    if (!channelMemberIds.has(String(row.id))) return false;
     if (!isRecentlySeenConnection({ last_seen_at: row.last_seen_at as string | null })) return false;
     const names = agentMentionNames(String(row.agent_kind));
     return explicitlyMentioned.has(providerMention(String(row.agent_kind)))
@@ -1559,34 +1697,16 @@ export async function sendDashboardConversationMessage(input: { conversationId: 
   if (mentionRows.length > 0) await db.from("conversation_message_mentions").insert(mentionRows);
 
   // A human message can be persisted successfully while no local runtime is
-  // listening for the named provider. Previously that exact state looked like
-  // a silent product failure: the message appeared, the relay badge stayed
-  // green, and no agent ever had a chance to consume it. Add one durable,
-  // non-agent-authored notice so the user gets the real boundary immediately.
-  // The notice deliberately does not repeat the provider token, so it cannot
-  // wake another bridge through the mention router.
-  if (!connections.error) {
-    const unavailable = unavailableExplicitAgentKinds(sanitized.body, connections.data ?? []);
-    if (unavailable.length > 0) {
-      const noticeBody = unavailableAgentNoticeBody(unavailable);
-      const { error: noticeError } = await db.from("conversation_messages").insert({
-        workspace_id: conversation.workspace_id,
-        conversation_id: conversation.id,
-        sender_user_id: null,
-        sender_connection_id: null,
-        sender_display_name: "M9R",
-        sender_kind: "system",
-        recipient_connection_id: null,
-        kind: "notice",
-        body: noticeBody,
-        parent_message_id: message.id,
-        idempotency_key: `agent-availability:${message.id}`,
-      });
-      if (noticeError && noticeError.code !== "23505") {
-        console.warn(`Agent availability notice failed for conversation ${conversation.id}:`, noticeError.message);
-      }
-    }
-  }
+  // listening for the named provider. Keep that state visible and durable;
+  // the helper also repairs the diagnostic when this request is a retry whose
+  // first attempt lost the response before reaching this point.
+  await ensureAgentAvailabilityNotice({
+    db,
+    workspaceId: conversation.workspace_id,
+    conversationId: conversation.id,
+    messageId: String(message.id),
+    body: sanitized.body,
+  });
   if (input.parentMessageId) await db.from("workspace_notifications").upsert({
     workspace_id: conversation.workspace_id, recipient_user_id: context.user.id, conversation_id: conversation.id,
     message_id: message.id, kind: "reply", title: "New reply", body: sanitized.body.slice(0, 2048), payload: { parentMessageId: input.parentMessageId },
@@ -1815,6 +1935,7 @@ export async function listConversationsForDashboard(selectedConversationId?: str
   if (!conversations) return [];
   const ids = conversations.map((row) => row.id as string);
   if (ids.length === 0) return [];
+  const detailIds = selectedConversationId && ids.includes(selectedConversationId) ? [selectedConversationId] : ids;
   const [{ data: participants, error: participantsError }, { data: humanMembers, error: humanMembersError }, messageResults, { data: reactions, error: reactionsError }, { data: markers, error: markersError }, { data: attachmentRows, error: attachmentsError }] = await Promise.all([
     context.auth.from("conversation_participants").select("conversation_id, connection_id").eq("workspace_id", context.workspaceId).in("conversation_id", ids),
     context.auth.from("conversation_human_members").select("conversation_id, user_id").eq("workspace_id", context.workspaceId).in("conversation_id", ids),
@@ -1834,21 +1955,24 @@ export async function listConversationsForDashboard(selectedConversationId?: str
     // selectedConversationId keeps the exact same response shape (still an
     // array under `messages`) so no client change is needed beyond passing
     // which channel is open.
-    Promise.all(ids.map((conversationId) => context.auth.from("conversation_messages").select("id, conversation_id, sender_connection_id, sender_user_id, sender_display_name, recipient_connection_id, kind, body, outcome, created_at, spawned_run_id, related_run_id, parent_message_id, edited_at, deleted_at").eq("workspace_id", context.workspaceId).eq("conversation_id", conversationId).order("created_at", { ascending: false }).limit(conversationId === selectedConversationId ? 80 : 1))),
-    context.auth.from("conversation_message_reactions").select("id, message_id, emoji, actor_user_id, actor_connection_id").eq("workspace_id", context.workspaceId).in("conversation_id", ids),
+    loadDashboardMessageWindows(context.auth, context.workspaceId, ids, selectedConversationId),
+    // Reactions and attachments only render on messages the viewer can see, i.e. the
+    // open channel's 80-message window. Every other channel contributes one preview
+    // line, so scoping these to the open channel drops the cross-channel scans (and the
+    // per-attachment signed URLs below) from every poll.
+    context.auth.from("conversation_message_reactions").select("id, message_id, emoji, actor_user_id, actor_connection_id").eq("workspace_id", context.workspaceId).in("conversation_id", detailIds),
     context.auth.from("conversation_read_markers").select("conversation_id, read_at").eq("workspace_id", context.workspaceId).eq("user_id", context.user.id).in("conversation_id", ids),
-    requireService().from("conversation_message_attachments").select("id, message_id, name, media_type, size_bytes, storage_path").in("conversation_id", ids),
+    requireService().from("conversation_message_attachments").select("id, message_id, name, media_type, size_bytes, storage_path").in("conversation_id", detailIds),
   ]);
-  const messageErrors = messageResults.map((result) => result.error).filter(Boolean);
-  if (participantsError || humanMembersError || reactionsError || markersError || messageErrors.length > 0 || attachmentsError) {
-    const error = participantsError || humanMembersError || reactionsError || markersError || attachmentsError || messageErrors[0];
-    if (isMissingTableError(error)) throw migrationRequiredError();
+  if (participantsError || humanMembersError || reactionsError || markersError || messageResults.error || attachmentsError) {
+    const error = participantsError || humanMembersError || reactionsError || markersError || attachmentsError || messageResults.error;
+    if (isMissingTableError(error as Parameters<typeof isMissingTableError>[0])) throw migrationRequiredError();
     throw new AgentJoinError("Could not load workspace conversation details.", "CONVERSATION_READ_FAILED", 500);
   }
   // Each per-conversation result came back newest-first (see the query above);
   // reverse each one back to ascending before flattening so display order is
   // unaffected by the egress fix.
-  const rawMessagesUnfiltered = messageResults.flatMap((result) => [...(result.data ?? [])].reverse());
+  const rawMessagesUnfiltered = messageResults.rows;
   // Shared Live Sessions v2: an archived session's messages leave the
   // normal channel view entirely (not just Live Sessions) -- they're only
   // reachable via the Archived tab or an agent's recall lookup. This is the
@@ -1897,7 +2021,8 @@ export async function listConversationsForDashboard(selectedConversationId?: str
   const todosBy = await listMessageTodosForConversations(ids);
   const messagesBy = new Map<string, DashboardConversationMessage[]>();
   for (const row of rawMessages ?? []) {
-    const message = { ...row, reactions: reactionsBy.get(row.id) ?? [], attachments: attachmentsBy.get(row.id) ?? [], todos: todosBy.get(row.id as string) ?? [] } as unknown as DashboardConversationMessage & { conversation_id: string };
+    if (typeof row.id !== "string" || typeof row.conversation_id !== "string") continue;
+    const message = { ...row, reactions: reactionsBy.get(row.id) ?? [], attachments: attachmentsBy.get(row.id) ?? [], todos: todosBy.get(row.id) ?? [] } as unknown as DashboardConversationMessage & { conversation_id: string };
     messagesBy.set(row.conversation_id, [...(messagesBy.get(row.conversation_id) ?? []), message]);
   }
   // Unread counts for non-selected channels can no longer be derived from
@@ -1910,18 +2035,7 @@ export async function listConversationsForDashboard(selectedConversationId?: str
   // An archived message must stay excluded from unread counts the same way
   // it's excluded from the message list above (rawMessages), or a channel
   // with an unread archived message would show a phantom badge count.
-  const archivedIdList = archivedIds.size > 0 ? `(${[...archivedIds].join(",")})` : null;
-  const unreadCountsBy = new Map<string, number>();
-  await Promise.all(visibleConversations.map(async (row) => {
-    if (row.id === selectedConversationId) return; // computed from the full array below instead
-    const readAt = readBy.get(row.id);
-    let query = context.auth.from("conversation_messages").select("id", { count: "exact", head: true })
-      .eq("workspace_id", context.workspaceId).eq("conversation_id", row.id);
-    if (readAt) query = query.gt("created_at", readAt);
-    if (archivedIdList) query = query.not("id", "in", archivedIdList);
-    const { count } = await query;
-    unreadCountsBy.set(row.id, count ?? 0);
-  }));
+  const unreadCountsBy = await loadDashboardUnreadCounts(context.auth, context.workspaceId, context.user.id, visibleConversations.filter((row) => row.id !== selectedConversationId).map((row) => row.id as string), [...archivedIds], readBy);
   return visibleConversations.map((row) => {
     const messages = messagesBy.get(row.id) ?? [];
     const readAt = readBy.get(row.id);

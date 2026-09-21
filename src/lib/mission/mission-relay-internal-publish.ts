@@ -10,7 +10,7 @@ import type { RelayServerFrameType } from "./mission-relay-protocol";
  */
 
 function relayBaseUrl(): string {
-  const configured = process.env.MISSION_RELAY_PUBLIC_URL?.trim() || "https://m9r-mission-relay.onrender.com";
+  const configured = process.env.MISSION_RELAY_PUBLIC_URL?.trim() || "https://m9r-relay.m9r.workers.dev";
   return configured.replace(/\/+$/, "");
 }
 

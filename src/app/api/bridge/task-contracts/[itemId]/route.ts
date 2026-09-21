@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authenticateAgent, bearerFrom } from "@/lib/agent-join-service";
 import { supabase } from "@/lib/supabase";
 import { setItemStatus, recomputeContractStatus } from "@/lib/bridge/task-contract-service";
+import { TaskItemConflictError } from "@/lib/bridge/task-item-cas";
 import { handleAgentError } from "@/app/api/agent/_shared";
 
 /**
@@ -35,6 +36,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ it
     await recomputeContractStatus(String(item.contract_id));
     return NextResponse.json({ ok: true });
   } catch (err) {
+    // A finished item cannot be moved again, and a lost race is retried a few times before it is reported: 409, not a server error.
+    if (err instanceof TaskItemConflictError) return NextResponse.json({ error: err.message, code: err.code, currentStatus: err.current }, { status: 409 });
     return handleAgentError(err);
   }
 }

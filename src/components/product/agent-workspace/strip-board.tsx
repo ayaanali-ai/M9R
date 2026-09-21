@@ -8,6 +8,7 @@ import { AgentMark, Button, StatusLozenge } from "@/components/product/Workspace
 import { workspaceRunState, type AgentView, type WsRun } from "@/lib/agent-workspace-data";
 import type { RunPassport } from "@/lib/run-passport-service";
 import { base64UrlToUint8Array } from "@/lib/push-subscription";
+import { nativeResumeCommand } from "@/lib/native-resume-command";
 import { relAt, short, agentForRun, CopyButton, type Selected } from "./shared";
 
 // ---------------------------------------------------------------------------
@@ -169,6 +170,7 @@ export function ControlStrip({
       <div className="flex shrink-0 items-center gap-2">
         <NotifyOptIn />
         <ModelOverrideControl agent={agent} />
+        <NativeSessionControl agent={agent} />
         <FileAccessControl agent={agent} />
         <ReconnectAgentsButton />
       </div>
@@ -353,6 +355,17 @@ const MODEL_CATALOG: Record<string, { id: string; label: string }[]> = {
   // the real list is confirmed.
   codex: [{ id: "gpt-5.5", label: "GPT-5.5" }],
 };
+
+/** Lets a person continue the newest M9R-started session in their own terminal, with the provider's own CLI. */
+function NativeSessionControl({ agent }: { agent: AgentView | null }) {
+  const command = agent ? nativeResumeCommand(agent.key, agent.providerSessionRef) : null;
+  if (!command) return null;
+  return (
+    <CopyButton text={command} label="Copy the command to resume this agent's latest session in your own terminal" copiedLabel="Copied">
+      Resume natively
+    </CopyButton>
+  );
+}
 
 function ModelOverrideControl({ agent }: { agent: AgentView | null }) {
   const router = useRouter();

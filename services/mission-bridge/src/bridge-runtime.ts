@@ -13,6 +13,7 @@
 
 import { createServer, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
+import { join as joinPath } from "node:path";
 import { EventEmitter } from "node:events";
 import { BRIDGE_PROTOCOL_VERSION } from "../../../src/lib/bridge/bridge-protocol";
 import { HEARTBEAT_PROTOCOL_VERSION } from "../../../src/lib/agent-heartbeat";
@@ -25,6 +26,10 @@ import {
   type WorkspaceTurnTiming,
   type WorkspaceTurnTimingEvent,
 } from "../../../src/lib/bridge/workspace-turn-timing";
+import { DeliveryLedger } from "../../../src/lib/bridge/delivery-ledger";
+import { truncateWorkspaceResult } from "../../../src/lib/bridge/result-truncation";
+import { RESTART_INTERRUPTED_EVENT, RESTART_INTERRUPTED_NOTE, classifyRestartRecovery, restartInterruptedNotice } from "../../../src/lib/bridge/restart-recovery";
+import { stateForTimingStage } from "../../../src/lib/delivery-state";
 import { WorkspacePromptQueue, type WorkspacePromptDeadLetter } from "../../../src/lib/bridge/workspace-prompt-queue";
 import type { ProviderAssignment } from "../../../src/lib/mission/mission-provider-adapter";
 /** Type-only: the store module reaches the Supabase client, which the bridge process has no business loading. */
@@ -33,6 +38,7 @@ import { missionAgentParticipantId } from "../../../src/lib/mission/mission-part
 import { isMissionFeatureEnabled } from "../../../src/lib/mission/mission-feature-flags";
 import { MissionRelayClient } from "../../../src/lib/mission/mission-relay-client";
 import { compareWorkspaceCursor, cursorIsAfter, decodeWorkspaceCursor, encodeWorkspaceCursor, workspaceCursorFromMessage } from "../../../src/lib/mission/workspace-cursor";
+import { isAgentAvailabilityNoticeBody } from "../../../src/lib/conversation-routing";
 
 /**
  * Confirmed live tonight: three real agents, given a task with an explicit
@@ -276,6 +282,12 @@ export function buildWorkspaceLoopNudgePrompt(input: { conversationId: string; c
 
 export const WORKSPACE_REPORT_OBSERVATION_GRACE_MS = 10_000;
 export const WORKSPACE_REPORT_OBSERVATION_POLL_MS = 250;
+/** A provider's streamed prose is already a usable answer; do not wait ten
+ * seconds or spend another model turn just to discover whether send_message
+ * was also called. */
+export const WORKSPACE_REPLY_TEXT_OBSERVATION_GRACE_MS = 3_000;
+/** Activity context is optional and must never delay the actual provider turn. */
+export const WORKSPACE_ACTIVITY_NOTE_BUDGET_MS = 500;
 export const MAX_TRACKED_WORKSPACE_IDS = 10_000;
 
 /**
@@ -319,6 +331,26 @@ export async function waitForWorkspaceMessageObservation(input: {
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
     await sleep(Math.min(intervalMs, remaining));
+  }
+}
+
+/** Resolve optional context quickly without allowing a slow app read to stall a
+ * provider response. The underlying operation is caught so a late rejection
+ * cannot become an unhandled promise after the turn has already started. */
+export async function fetchWorkspaceActivityNoteWithinBudget(
+  fetchNote: () => Promise<string | null>,
+  budgetMs = WORKSPACE_ACTIVITY_NOTE_BUDGET_MS,
+): Promise<string | null> {
+  const boundedBudgetMs = Math.max(0, budgetMs);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), boundedBudgetMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(fetchNote).catch(() => null), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -409,7 +441,27 @@ export function workspaceRoutingBodyForConnection(input: {
   if (input.recipientConnectionId && input.recipientConnectionId === input.ownConnectionId && input.localProvider) {
     return `@${providerMention(input.localProvider)}`;
   }
-  return input.body;
+  return canonicalizeProviderMentionAliases(input.body);
+}
+
+/**
+ * The composer inserts "@claude-code", but people type "@claude" (the product's own display
+ * name). mentionedWorkspaceProviders already resolved that alias for turn timing, while the
+ * session start and routing checks matched the literal slug -- so a typed "@claude" was
+ * counted, then dropped with no notice. Resolve the alias once, here, for every routing check.
+ * Only whole @tokens are rewritten, so "name@claude.com" is left alone.
+ */
+const PROVIDER_MENTION_ALIASES: Readonly<Record<string, string>> = {
+  "claude": "claude-code",
+  "claude-agent-acp": "claude-code",
+  "codex-acp": "codex",
+  "opencode-acp": "opencode",
+};
+export function canonicalizeProviderMentionAliases(body: string): string {
+  return body.replace(/(^|[^a-z0-9_-])@([a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?)(?=$|[^a-z0-9_-])/gi, (match, lead: string, token: string) => {
+    const canonical = PROVIDER_MENTION_ALIASES[token.toLowerCase()];
+    return canonical ? `${lead}@${canonical}` : match;
+  });
 }
 
 /**
@@ -591,11 +643,11 @@ export function messageIsFromHuman(message: { sender_user_id?: string | null }):
  * unlike messageIsFromHuman's own doc comment, that absence IS the correct
  * question for this one narrow case, not an inference standing in for it.
  */
-export function agentAmbientMessageMayWake(message: { sender_user_id?: string | null; sender_connection_id?: string | null; kind?: string | null }): boolean {
+export function agentAmbientMessageMayWake(message: { sender_user_id?: string | null; sender_connection_id?: string | null; kind?: string | null; body?: string | null }): boolean {
   if (message.sender_user_id) return true;
   const kind = message.kind ?? "message";
   if (kind === "result" || kind === "handoff") return true;
-  return kind === "notice" && !message.sender_connection_id;
+  return kind === "notice" && !message.sender_connection_id && !isAgentAvailabilityNoticeBody(message.body ?? "");
 }
 
 export interface MissionAcpSessionConfig {
@@ -921,7 +973,18 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
   const sessionLastTurnEndedAtMs = new Map<string, number>();
   const POSSIBLE_DUPLICATE_WINDOW_MS = 5 * 60_000;
   const workspaceTurnTimings = new Map<string, WorkspaceTurnTiming>();
-  const workspaceTelemetry = createWorkspaceTurnTelemetry({ emit: (event) => {
+  // The local delivery ledger (spec 7.3 #7): each stage is written to disk before it is reported, so a receipt can
+  // honestly be called persisted. Only a local runtime has one; a cloud Bridge reports without the flag.
+  const deliveryLedger = config.localProvider
+    ? new DeliveryLedger(joinPath(repositoryRoot, ".oathlock", "runtime", `delivery-ledger-${config.localProvider.replace(/[^a-z0-9-]/gi, "-").slice(0, 40)}.jsonl`))
+    : null;
+  const workspaceTelemetry = createWorkspaceTurnTelemetry({ emit: (rawEvent) => {
+    let event = rawEvent;
+    if (deliveryLedger && event.provider) {
+      const state = stateForTimingStage(event.stage, event.outcome);
+      const persisted = state ? deliveryLedger.record(event.messageId, event.provider, state, event.atMs, event.providerEventType === RESTART_INTERRUPTED_EVENT ? RESTART_INTERRUPTED_NOTE : undefined) : false;
+      if (persisted && event.stage === "message.received") event = { ...event, ledger: true };
+    }
     console.log(`[timing] ${JSON.stringify(event)}`);
     try {
       config.onWorkspaceTurnTiming?.(event);
@@ -930,7 +993,42 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     }
     enqueueWorkspaceTiming(event);
   } });
-  const dynamicSessionStarts = new Map<string, Promise<"not_mentioned" | "available" | "deferred">>();
+  /**
+   * Restart recovery (spec 7.3 #7). The durable cursor only advances when a turn finishes, so a message whose turn
+   * was cut off by a restart is offered again. If the previous process had already handed it to a session it is
+   * not run a second time (repeated edits, commands or posts): the human is told once and decides. A turn that
+   * finished but whose cursor advance was missed is skipped. Decided synchronously from the local ledger, and only
+   * for entries written by an earlier process, so this process's own in-flight work is never touched.
+   */
+  const restartRecoveryHandled = new Set<string>();
+  function restartRecoveryFor(messageId: string): { kind: "interrupted" | "already_handled"; provider: string } | null {
+    if (!deliveryLedger || !config.localProvider) return null;
+    for (const provider of new Set([config.localProvider, providerMention(config.localProvider)])) {
+      const entry = deliveryLedger.entryOf(messageId, provider);
+      const decision = classifyRestartRecovery(entry, bridgeStartedAtMs);
+      if (decision !== "run") return { kind: decision, provider };
+    }
+    return null;
+  }
+
+  async function recoverWorkspaceMessageAfterRestart(conversationId: string, message: { id: string; created_at: string }, recovery: { kind: "interrupted" | "already_handled"; provider: string }): Promise<void> {
+    const handledKey = `${recovery.provider}:${message.id}`;
+    if (restartRecoveryHandled.has(handledKey)) return;
+    rememberBoundedWorkspaceId(restartRecoveryHandled, handledKey);
+    if (recovery.kind === "interrupted") {
+      console.warn(`[restart-recovery] Message ${message.id} in ${conversationId} was mid-turn when the previous ${recovery.provider} process stopped; not re-running it.`);
+      // The result idempotency key is per parent message, so a repeat (another restart, another delivery path) replays one row.
+      await postWorkspaceResult(conversationId, message.id, restartInterruptedNotice(recovery.provider), undefined, "failed", message.created_at);
+      const timing = workspaceTelemetry.create({ workspaceId, conversationId, messageId: message.id, provider: recovery.provider, source: "poll", bridgeInstanceId });
+      timing.mark("turn.failed", { provider: recovery.provider, outcome: "failed", providerEventType: RESTART_INTERRUPTED_EVENT });
+      workspaceTelemetry.finish(timing.snapshot().timingId);
+    } else {
+      console.log(`[restart-recovery] Message ${message.id} in ${conversationId} was already handled by the previous ${recovery.provider} process; skipping it.`);
+    }
+    await advanceWorkspaceCursor(conversationId, message);
+  }
+
+  const dynamicSessionStarts = new Map<string, Promise<"not_mentioned" | "available" | "deferred" | "failed">>();
   // Per-conversation rolling count for the closed-loop nudge (see
   // buildWorkspaceLoopNudgePrompt above). All delivery paths funnel through
   // handleWorkspaceMessage, which records each message once before routing;
@@ -1077,21 +1175,17 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
    * the durable-pause race -- see that function's own comment.
    */
   async function postWorkspaceLoopHardStopNotice(conversationId: string, parentMessageId: string): Promise<void> {
+    if (stopping) return;
     const body = `This channel looks like it's stuck in a loop -- ${WORKSPACE_LOOP_HARD_STOP_THRESHOLD}+ consecutive agent-to-agent messages with no human input and no real result. Pausing agent replies here until a human posts in this channel.`;
-    if (workspaceRelayClient.isConnected) {
-      try {
-        await workspaceRelayClient.postWorkspaceMessage({ channelId: conversationId, kind: "notice", body, parentMessageId });
-        return;
-      } catch (error) {
-        console.error("[loop-hard-stop] relay notice post failed, falling back to HTTP.", error instanceof Error ? error.message : error);
-      }
-    }
-    await fetch(`${appUrl}/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json", "idempotency-key": `loop-hard-stop:${conversationId}` },
-      body: JSON.stringify({ kind: "notice", body, parent_message_id: parentMessageId }),
-      signal: AbortSignal.timeout(10_000),
-    }).catch(() => undefined);
+    const idempotencyKey = `loop-hard-stop:${conversationId}`;
+    const posted = await postWorkspaceNotice(conversationId, parentMessageId, body, idempotencyKey);
+    if (posted) return;
+    // The durable pause is already active, but its explanatory message must
+    // not vanish just because the relay and HTTP fallback failed together.
+    // Retry with the same key so a later success creates/reuses one notice.
+    console.error(`[loop-hard-stop] could not publish the pause notice for ${conversationId}; scheduling a retry.`);
+    const retryTimer = setTimeout(() => { void postWorkspaceLoopHardStopNotice(conversationId, parentMessageId); }, 5_000);
+    retryTimer.unref?.();
   }
 
   function workspaceLoopNudgeIfDue(conversationId: string): string | null {
@@ -1285,6 +1379,16 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     // ACP's newSession response already carries them, this is just giving
     // the dashboard somewhere to read them from instead of discarding them.
     // Never blocks the session on a failed report.
+    if (result.session.providerSessionRef) {
+      void fetch(`${appUrl}/api/agent/provider-session`, {
+        method: "POST",
+        signal: AbortSignal.timeout(10_000),
+        headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ provider_session_ref: result.session.providerSessionRef }),
+      }).catch((error) => {
+        console.warn(`[provider-session] could not report the provider session id for ${sessionConfig.sessionId}:`, error instanceof Error ? error.message : error);
+      });
+    }
     if (result.session.availableModels) {
       void fetch(`${appUrl}/api/agent/available-models`, {
         method: "POST",
@@ -1303,7 +1407,13 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     await relayClient.subscribeMission(sessionConfig.missionId).catch((error) => {
       console.warn(`[relay] subscribeMission failed for mission ${sessionConfig.missionId}, session ${sessionConfig.sessionId}; falling back to HTTP polling:`, error instanceof Error ? error.message : error);
     });
-    await relayClient.setParticipantPresence({ missionId: sessionConfig.missionId, participantId: sessionConfig.participantId, state: "online" });
+    await relayClient.setParticipantPresence({ missionId: sessionConfig.missionId, participantId: sessionConfig.participantId, state: "online" }).catch((error) => {
+      // The provider session is already live and HTTP polling remains the
+      // durable message path. A relay/presence outage must not turn a
+      // successful session start into a rejected dynamic start, which would
+      // leave the triggering message deferred at the cursor forever.
+      console.warn(`[relay] initial presence publish failed for session ${sessionConfig.sessionId}; continuing with the live provider session:`, error instanceof Error ? error.message : error);
+    });
     return { ok: true };
   }
 
@@ -1408,29 +1518,184 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     }
   }
 
-  async function postWorkspaceResult(conversationId: string, parentMessageId: string, body: string, correlationId?: string, outcome?: "ok" | "failed" | "incomplete"): Promise<boolean> {
+  type WorkspaceResultOutboxEntry = {
+    idempotencyKey: string;
+    conversationId: string;
+    parentMessageId: string;
+    parentCreatedAt?: string;
+    body: string;
+    correlationId?: string;
+    outcome?: "ok" | "failed" | "incomplete";
+    attempts: number;
+    deliveryConfirmed: boolean;
+    inFlight: boolean;
+    retryTimer: ReturnType<typeof setTimeout> | null;
+  };
+  // A provider turn is not complete merely because its output write timed
+  // out. This in-process outbox keeps retrying the same idempotent result and
+  // holds the source cursor until the result is durable. If this process dies,
+  // the parked cursor makes the source message eligible again after restart;
+  // the stable key prevents that replay from creating a duplicate result.
+  const workspaceResultOutbox = new Map<string, WorkspaceResultOutboxEntry>();
+  const pendingWorkspaceOutputParents = new Set<string>();
+  const WORKSPACE_RESULT_RETRY_BASE_MS = 1_000;
+  const WORKSPACE_RESULT_RETRY_MAX_MS = 60_000;
+  const WORKSPACE_OUTPUT_REQUEST_TIMEOUT_MS = 5_000;
+
+  function workspaceResultIdempotencyKey(parentMessageId: string): string {
+    // Connection ids are durable per linked agent. The bridge/provider
+    // fallback is only used before identity refresh completes, and the
+    // bridge-instance suffix prevents two hosted bridges from colliding.
+    const identity = ownConnectionId ?? `${config.localProvider ?? "bridge"}:${bridgeInstanceId}`;
+    return `result:${parentMessageId}:${identity}`.slice(0, 256);
+  }
+
+  async function postWorkspaceResultOnce(entry: WorkspaceResultOutboxEntry): Promise<boolean> {
     if (workspaceRelayClient.isConnected) {
       try {
-        await workspaceRelayClient.postWorkspaceMessage({ channelId: conversationId, kind: "result", body: body.slice(0, 2_000), parentMessageId, correlationId, outcome });
+        await workspaceRelayClient.postWorkspaceMessage({ channelId: entry.conversationId, kind: "result", body: entry.body, parentMessageId: entry.parentMessageId, correlationId: entry.correlationId, idempotencyKey: entry.idempotencyKey, outcome: entry.outcome });
         return true;
       } catch (error) {
-        console.error("Workspace Relay result post failed; not retrying over HTTP to avoid a duplicate message.", error instanceof Error ? error.message : error);
-        return false;
+        // The relay may have accepted the write and lost only its response,
+        // or it may have failed before persistence. The identical key makes
+        // the HTTP retry safe in both cases: it replays one row instead of
+        // duplicating it, while recovering from a real transport failure.
+        console.error("Workspace Relay result post failed; retrying the same idempotent result over HTTP.", error instanceof Error ? error.message : error);
       }
     }
     try {
-      // The agent messages route previously never read an idempotency key at
-      // all (fixed alongside this), so a retried HTTP-fallback post had zero
-      // duplicate protection. Keyed on parentMessageId so a genuine retry of
-      // this same turn's result replays the first post instead of duplicating.
+      // The agent messages route consumes the same key as the relay path.
+      // Both transports therefore converge on one durable row even when the
+      // relay accepted the write but its response was lost.
+      const response = await fetch(`${appUrl}/api/agent/conversations/${encodeURIComponent(entry.conversationId)}/messages`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json", "idempotency-key": entry.idempotencyKey },
+        body: JSON.stringify({ kind: "result", body: entry.body, parent_message_id: entry.parentMessageId, outcome: entry.outcome }),
+        signal: AbortSignal.timeout(WORKSPACE_OUTPUT_REQUEST_TIMEOUT_MS),
+      });
+      if (!response.ok) console.error(`Workspace result HTTP post failed with HTTP ${response.status}; retrying the same idempotent result.`);
+      return response.ok;
+    } catch (error) {
+      console.error("Workspace result HTTP post failed; retrying the same idempotent result.", error instanceof Error ? error.message : error);
+      return false;
+    }
+  }
+
+  function removeWorkspaceResultOutboxEntry(entry: WorkspaceResultOutboxEntry): void {
+    if (entry.retryTimer) clearTimeout(entry.retryTimer);
+    entry.retryTimer = null;
+    workspaceResultOutbox.delete(entry.idempotencyKey);
+    const remaining = [...workspaceResultOutbox.values()].some((candidate) => candidate.parentMessageId === entry.parentMessageId);
+    if (!remaining) pendingWorkspaceOutputParents.delete(entry.parentMessageId);
+  }
+
+  function scheduleWorkspaceResultRetry(entry: WorkspaceResultOutboxEntry): void {
+    if (entry.retryTimer || stopping) return;
+    const delay = Math.min(WORKSPACE_RESULT_RETRY_MAX_MS, WORKSPACE_RESULT_RETRY_BASE_MS * 2 ** Math.min(Math.max(entry.attempts - 1, 0), 6));
+    entry.retryTimer = setTimeout(() => {
+      entry.retryTimer = null;
+      void flushWorkspaceResultOutboxEntry(entry);
+    }, delay);
+    entry.retryTimer.unref?.();
+  }
+
+  async function flushWorkspaceResultOutboxEntry(entry: WorkspaceResultOutboxEntry): Promise<void> {
+    if (stopping || entry.inFlight || !workspaceResultOutbox.has(entry.idempotencyKey)) return;
+    entry.inFlight = true;
+    entry.attempts += 1;
+    try {
+      if (!entry.deliveryConfirmed) entry.deliveryConfirmed = await postWorkspaceResultOnce(entry);
+      if (entry.deliveryConfirmed) {
+        // A result can be confirmed before the provider turn's finally block
+        // runs. Persisting the cursor here is safe: the result's durable write
+        // is the completion barrier, not the cleanup order in this process.
+        const cursorSaved = entry.parentCreatedAt
+          ? await advanceWorkspaceCursor(entry.conversationId, { id: entry.parentMessageId, created_at: entry.parentCreatedAt })
+          : true;
+        if (cursorSaved) {
+          removeWorkspaceResultOutboxEntry(entry);
+          return;
+        }
+        console.error(`Workspace result delivered for ${entry.parentMessageId}, but cursor persistence failed; retrying cursor confirmation.`);
+      }
+    } catch (error) {
+      console.error(`Workspace result outbox attempt failed for ${entry.parentMessageId}.`, error instanceof Error ? error.message : error);
+    } finally {
+      entry.inFlight = false;
+    }
+    scheduleWorkspaceResultRetry(entry);
+  }
+
+  function enqueueWorkspaceResultRetry(input: Omit<WorkspaceResultOutboxEntry, "attempts" | "deliveryConfirmed" | "inFlight" | "retryTimer">): void {
+    const existing = workspaceResultOutbox.get(input.idempotencyKey);
+    if (existing) {
+      if (existing.body !== input.body || existing.conversationId !== input.conversationId) {
+        console.error(`Workspace result key ${input.idempotencyKey} was reused with different content; retaining the first result.`);
+      }
+      return;
+    }
+    const entry: WorkspaceResultOutboxEntry = { ...input, attempts: 0, deliveryConfirmed: false, inFlight: false, retryTimer: null };
+    workspaceResultOutbox.set(entry.idempotencyKey, entry);
+    pendingWorkspaceOutputParents.add(entry.parentMessageId);
+    scheduleWorkspaceResultRetry(entry);
+  }
+
+  async function postWorkspaceResult(conversationId: string, parentMessageId: string, body: string, correlationId?: string, outcome?: "ok" | "failed" | "incomplete", parentCreatedAt?: string): Promise<boolean> {
+    const resultBody = truncateWorkspaceResult(body);
+    const idempotencyKey = workspaceResultIdempotencyKey(parentMessageId);
+    if (workspaceResultOutbox.has(idempotencyKey)) return false;
+    const entry = {
+      idempotencyKey,
+      conversationId,
+      parentMessageId,
+      parentCreatedAt,
+      body: resultBody,
+      correlationId,
+      outcome,
+    } satisfies Omit<WorkspaceResultOutboxEntry, "attempts" | "deliveryConfirmed" | "inFlight" | "retryTimer">;
+    if (await postWorkspaceResultOnce({ ...entry, attempts: 0, deliveryConfirmed: false, inFlight: false, retryTimer: null })) return true;
+    enqueueWorkspaceResultRetry(entry);
+    return false;
+  }
+
+  /**
+   * Persist an operational diagnostic for a message that cannot be handled.
+   *
+   * A dynamic provider start is the one point where a message can be routed
+   * correctly, but no session can exist to consume it. Logging that failure
+   * and advancing the cursor is a silent drop from the user's perspective;
+   * retrying forever without telling them head-of-line-blocks the channel.
+   * This follows the same relay-first/HTTP-fallback and stable-idempotency
+   * contract as result delivery. If both transports fail, the caller keeps
+   * the message deferred so a later scan can retry the diagnostic instead of
+   * pretending the message was handled.
+   */
+  async function postWorkspaceNotice(conversationId: string, parentMessageId: string, body: string, idempotencyKey: string): Promise<boolean> {
+    const noticeBody = body.slice(0, 2_000);
+    if (workspaceRelayClient.isConnected) {
+      try {
+        await workspaceRelayClient.postWorkspaceMessage({
+          channelId: conversationId,
+          kind: "notice",
+          body: noticeBody,
+          parentMessageId,
+          idempotencyKey,
+        });
+        return true;
+      } catch (error) {
+        console.error("Workspace Relay diagnostic post failed; retrying the same idempotent diagnostic over HTTP.", error instanceof Error ? error.message : error);
+      }
+    }
+    try {
       const response = await fetch(`${appUrl}/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`, {
         method: "POST",
-        headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json", "idempotency-key": `result:${parentMessageId}` },
-        body: JSON.stringify({ kind: "result", body: body.slice(0, 2_000), parent_message_id: parentMessageId, outcome }),
+        headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json", "idempotency-key": idempotencyKey },
+        body: JSON.stringify({ kind: "notice", body: noticeBody, parent_message_id: parentMessageId, idempotency_key: idempotencyKey }),
         signal: AbortSignal.timeout(10_000),
       });
       return response.ok;
-    } catch {
+    } catch (error) {
+      console.error("Workspace diagnostic HTTP post failed; the triggering message remains deferred for retry.", error instanceof Error ? error.message : error);
       return false;
     }
   }
@@ -1529,7 +1794,12 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
    * code change in between. Filtering the ack out by its own id removes the
    * race entirely, regardless of which side of `since` it lands on.
    */
-  async function postedOwnMessageSince(conversationId: string, since: Date, excludeMessageId: string | null): Promise<boolean> {
+  async function postedOwnMessageSince(
+    conversationId: string,
+    since: Date,
+    excludeMessageId: string | null,
+    timeoutMs = WORKSPACE_REPORT_OBSERVATION_GRACE_MS,
+  ): Promise<boolean> {
     // A cold-start bridge (or one whose whoami lease briefly lapsed) can
     // reach the end of its very first turn before the startup
     // refreshOwnConnectionId() call or the 30s identity timer has landed --
@@ -1543,6 +1813,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     if (!ownConnectionId) await refreshOwnConnectionId();
     if (!ownConnectionId) return false;
     return waitForWorkspaceMessageObservation({
+      timeoutMs,
       observe: async () => {
         try {
           const response = await fetch(`${appUrl}/api/agent/conversations/${encodeURIComponent(conversationId)}/messages?since=${encodeURIComponent(since.toISOString())}`, {
@@ -1665,8 +1936,16 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
           };
           const current = decodeWorkspaceCursor(workspaceMessageCursors.get(frame.channelId!));
           if (current && !cursorIsAfter(current, workspaceMessage)) continue;
+          const snapshotRecovery = restartRecoveryFor(workspaceMessage.id);
+          if (snapshotRecovery) {
+            void recoverWorkspaceMessageAfterRestart(frame.channelId!, workspaceMessage, snapshotRecovery).catch((error) => console.error("Restart recovery failed.", error instanceof Error ? error.message : error));
+            continue;
+          }
           for (const provider of mentionedWorkspaceProviders(workspaceMessage.body)) workspaceTurnTimingPendingFor({ conversationId: frame.channelId!, messageId: workspaceMessage.id, provider, source: "relay" });
-          if (missionId && (await ensureDynamicSessionForConversation(frame.channelId!, missionId, workspaceMessage)) === "deferred") {
+          const dynamicSessionStatus = missionId
+            ? await ensureDynamicSessionForConversation(frame.channelId!, missionId, workspaceMessage)
+            : "available";
+          if (dynamicSessionStatus === "deferred") {
             // Stop the scan here. `continue` used to move on to the next
             // message, whose successful cursor advance then carried the durable
             // high-water mark PAST this deferred message -- so it was never
@@ -1676,9 +1955,25 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
             break;
           }
           const result = await handleWorkspaceMessage(frame.channelId!, workspaceMessage, "relay");
-          if (result === "deferred" || result === "pending" || !(await advanceWorkspaceCursor(frame.channelId!, workspaceMessage))) {
+          if (result === "deferred" || result === "pending" || result === "accepted" || !(await advanceWorkspaceCursor(frame.channelId!, workspaceMessage))) {
+            // accepted/pending means a provider turn owns this message and
+            // will advance the cursor from its finally/reconciliation path.
+            // Advancing here used to mark a queued message complete before
+            // the provider had produced a result; a bridge crash or turn
+            // failure then made the durable high-water mark skip it forever.
             deferred = true;
             break;
+          }
+          if (dynamicSessionStatus === "failed") {
+            // The diagnostic was durably posted, so this source message has
+            // a visible terminal outcome and may be committed without ever
+            // reaching the provider-routing path.
+            rejectPendingWorkspaceTiming(workspaceMessage.id, workspaceMessage.body);
+            if (!(await advanceWorkspaceCursor(frame.channelId!, workspaceMessage))) {
+              deferred = true;
+              break;
+            }
+            continue;
           }
         }
         if (!deferred && nextCursor) {
@@ -1712,15 +2007,28 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     if (!workspaceConversationCreatedAt.has(frame.channelId)) return;
     const current = decodeWorkspaceCursor(workspaceMessageCursors.get(frame.channelId));
     if (current && !cursorIsAfter(current, workspaceMessage)) return;
+    const eventRecovery = restartRecoveryFor(workspaceMessage.id);
+    if (eventRecovery) {
+      void recoverWorkspaceMessageAfterRestart(frame.channelId, workspaceMessage, eventRecovery).catch((error) => console.error("Restart recovery failed.", error instanceof Error ? error.message : error));
+      return;
+    }
     for (const provider of mentionedWorkspaceProviders(workspaceMessage.body)) workspaceTurnTimingPendingFor({ conversationId: frame.channelId, messageId: workspaceMessage.id, provider, source: "relay" });
     void (async () => {
       const missionId = workspaceConversationMissionIds.get(frame.channelId!) ?? null;
-      if (missionId && (await ensureDynamicSessionForConversation(frame.channelId!, missionId, workspaceMessage)) === "deferred") {
+      const dynamicSessionStatus = missionId
+        ? await ensureDynamicSessionForConversation(frame.channelId!, missionId, workspaceMessage)
+        : "available";
+      if (dynamicSessionStatus === "deferred") {
         rejectPendingWorkspaceTiming(workspaceMessage.id, workspaceMessage.body);
         return;
       }
+      if (dynamicSessionStatus === "failed") {
+        rejectPendingWorkspaceTiming(workspaceMessage.id, workspaceMessage.body);
+        await advanceWorkspaceCursor(frame.channelId!, workspaceMessage);
+        return;
+      }
       const result = await handleWorkspaceMessage(frame.channelId!, workspaceMessage, "relay");
-      if (result !== "deferred" && result !== "pending") await advanceWorkspaceCursor(frame.channelId!, workspaceMessage);
+      if (result !== "deferred" && result !== "pending" && result !== "accepted") await advanceWorkspaceCursor(frame.channelId!, workspaceMessage);
     })().catch((error) => console.error("Workspace Relay message handling failed.", error instanceof Error ? error.message : error));
   }
 
@@ -1790,6 +2098,11 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       if (waiting.size > 0) return;
       pendingWorkspaceMessageSessions.delete(item.message.id);
     }
+    // A provider turn may have completed while both output transports were
+    // unavailable. Keep the source cursor parked until the outbox confirms a
+    // durable result; otherwise the next bridge restart would skip the task
+    // even though the user never saw a reply.
+    if (pendingWorkspaceOutputParents.has(item.message.id)) return;
     if (item.message.created_at) await advanceWorkspaceCursor(item.conversationId, { id: item.message.id, created_at: item.message.created_at });
   }
 
@@ -1923,7 +2236,9 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
         const parentId = item.message.parent_message_id;
         return Boolean(parentId) && !batchMessageIds.has(parentId!) && Boolean(priorThreadIds?.has(parentId!));
       });
-    const otherAgentActivityNote = await fetchOtherAgentActivityNote(conversationId);
+    const otherAgentActivityNote = await fetchWorkspaceActivityNoteWithinBudget(
+      () => fetchOtherAgentActivityNote(conversationId),
+    );
     const combinedText = buildWorkspaceTurnPrompt({
       provider: mentionNameForAdapter(session?.providerAdapterId ?? ""),
       participantId,
@@ -1960,7 +2275,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     const postTurnFallbackOnce = async (body: string, outcome: "ok" | "failed" | "incomplete"): Promise<void> => {
       const anchor = batch[batch.length - 1];
       const anchorTiming = workspaceTurnTimings.get(workspaceTurnTimingKey(anchor.message.id, sessionId));
-      const posted = await postWorkspaceResult(anchor.conversationId, anchor.message.id, body, anchorTiming?.snapshot().correlationId, outcome);
+      const posted = await postWorkspaceResult(anchor.conversationId, anchor.message.id, body, anchorTiming?.snapshot().correlationId, outcome, anchor.message.created_at);
       markBatch("fallback_report.posted", { outcome: posted ? "ok" : "failed" });
     };
     let typingHeartbeat: ReturnType<typeof setInterval> | null = null;
@@ -2130,11 +2445,20 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       // this reads as dishonest ("...recorded above" when there's nothing
       // above) and redundant when a real message IS there. Only fall back
       // to it if this session genuinely posted nothing during its own turn.
+      const initialReplyText = replyTextAccum.trim();
       let reportObserved = providerFailureReason
         ? false
-        : await postedOwnMessageSince(conversationId, promptCallStartedAt, null);
+        : await postedOwnMessageSince(
+            conversationId,
+            promptCallStartedAt,
+            null,
+            initialReplyText ? WORKSPACE_REPLY_TEXT_OBSERVATION_GRACE_MS : WORKSPACE_REPORT_OBSERVATION_GRACE_MS,
+          );
       let reportRecoveryFailureReason: string | null = null;
-      if (!reportObserved && !providerFailureReason && isMissionFeatureEnabled("devMcpTools")) {
+      // Plain ACP prose is already the provider's answer and is posted by the
+      // fallback below. A second model turn is only justified when the first
+      // turn produced neither a channel post nor any usable answer at all.
+      if (!reportObserved && !providerFailureReason && !initialReplyText && isMissionFeatureEnabled("devMcpTools")) {
         const recoveryStartedAt = new Date();
         console.warn(`[timing] session ${sessionId} completed without a channel report; requesting one report-only recovery turn.`);
         for await (const event of withStallTimeout(controller.prompt(sessionId, buildWorkspaceReportRecoveryPrompt({
@@ -2214,13 +2538,30 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       if (typingHeartbeat) clearInterval(typingHeartbeat);
       await workspaceRelayClient.setWorkspaceTyping({ channelId: conversationId, participantId, typing: false }).catch(() => undefined);
       await workspaceRelayClient.setWorkspacePresence({ channelId: conversationId, participantId, state: "online" }).catch(() => undefined);
+      // Cleanup must be failure-isolated. A cursor write or telemetry sink
+      // failure after a provider turn used to escape this finally block and
+      // leave sessionBusy set forever, making every later message look like a
+      // duplicate/queued turn with no worker able to drain it.
       for (const item of batch) {
         activeWorkspacePrompts.delete(`${item.message.id}\u0000${sessionId}`);
         const key = workspaceTurnTimingKey(item.message.id, sessionId);
         const timing = workspaceTurnTimings.get(key);
-        if (timing) workspaceTelemetry.finish(timing.snapshot().timingId);
+        if (timing) {
+          try {
+            workspaceTelemetry.finish(timing.snapshot().timingId);
+          } catch (error) {
+            console.error(`[timing] could not finish workspace turn ${item.message.id}:`, error instanceof Error ? error.message : error);
+          }
+        }
         workspaceTurnTimings.delete(key);
-        await reconcileWorkspaceMessageDelivery(item, sessionId);
+        try {
+          await reconcileWorkspaceMessageDelivery(item, sessionId);
+        } catch (error) {
+          // Do not let a transient cursor/reconciliation failure wedge the
+          // session worker. The next poll still has the durable message and
+          // can reconcile it again once the app is reachable.
+          console.error(`[workspace-delivery] reconciliation failed for ${item.message.id}; session worker will continue:`, error instanceof Error ? error.message : error);
+        }
       }
       sessionBusy.delete(sessionId);
     }
@@ -2245,6 +2586,18 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       rememberBoundedWorkspaceId(workspaceLoopScoredMessages, message.id);
       recordWorkspaceLoopSignal(conversationId, { id: message.id, sender_connection_id: message.sender_connection_id, sender_user_id: message.sender_user_id, kind: message.kind ?? null, outcome: message.outcome ?? null });
     }
+    // Availability diagnostics are durable system output, not work. The
+    // topic of a dedicated agent channel can itself name the provider, so
+    // the normal explicit-topic routing rule would otherwise wake that
+    // provider from the diagnostic that says it could not be reached.
+    if (message.kind === "notice" && isAgentAvailabilityNoticeBody(message.body)) {
+      rejectPendingWorkspaceTiming(message.id, message.body);
+      return "ignored";
+    }
+    // A prior provider turn already did the work, but its result is waiting
+    // in the output outbox. Do not start a second provider turn while the
+    // same source message is intentionally parked behind that retry.
+    if (pendingWorkspaceOutputParents.has(message.id)) return "accepted";
     // Loop-prevention Layer 3 -- the human kill switch. A hard stop, checked
     // before anything else including explicit @mentions: a human pausing a
     // channel means exactly that, the same way Slack's !mute or Claude
@@ -2403,9 +2756,18 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
         timing.mark("turn.rejected", { provider: providerLabel, outcome: "rejected" });
         if (queued.reason === "queue_overflow") {
           const persisted = queued.deadLetter ? await persistWorkspaceDeadLetter(queued.deadLetter) : false;
-          await postWorkspaceResult(conversationId, message.id, persisted
+          const posted = await postWorkspaceResult(conversationId, message.id, persisted
             ? "This mention was not queued because this agent already has 50 workspace messages waiting. The bridge recorded a durable dead letter for investigation instead of silently dropping it."
-            : "This mention was not queued because this agent already has 50 workspace messages waiting. The bridge retained a bounded dead-letter record locally, but durable persistence is currently unavailable.", timing.snapshot().correlationId, "failed");
+            : "This mention was not queued because this agent already has 50 workspace messages waiting. The bridge retained a bounded dead-letter record locally, but durable persistence is currently unavailable.", timing.snapshot().correlationId, "failed", message.created_at);
+          if (!posted) {
+            // Treat the undelivered diagnostic as accepted-but-pending. The
+            // outbox owns its retry and cursor commit; re-enqueuing the same
+            // source message on every poll would create duplicate dead-letter
+            // records while the output transport is down.
+            workspaceTelemetry.finish(timing.snapshot().timingId);
+            workspaceTurnTimings.delete(workspaceTurnTimingKey(message.id, session.sessionId));
+            return "accepted";
+          }
         }
         workspaceTelemetry.finish(timing.snapshot().timingId);
         workspaceTurnTimings.delete(workspaceTurnTimingKey(message.id, session.sessionId));
@@ -2445,7 +2807,11 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
    * that binding already created. This is what makes a chat @mention
    * actually start live work instead of only registering Mission records.
    */
-  async function ensureDynamicSessionForConversation(conversationId: string, missionId: string, message: { id: string; body: string; sender_connection_id: string | null; recipient_connection_id?: string | null; sender_user_id?: string | null; kind?: string | null }): Promise<"not_mentioned" | "available" | "deferred"> {
+  async function ensureDynamicSessionForConversation(conversationId: string, missionId: string, message: { id: string; body: string; sender_connection_id: string | null; recipient_connection_id?: string | null; sender_user_id?: string | null; kind?: string | null }): Promise<"not_mentioned" | "available" | "deferred" | "failed"> {
+    // Keep the cold-start path aligned with handleWorkspaceMessage: a
+    // durable M9R availability diagnostic must never start a provider just
+    // because a dedicated channel's topic names that provider.
+    if (message.kind === "notice" && isAgentAvailabilityNoticeBody(message.body)) return "not_mentioned";
     // Loop-prevention Layer 3 -- see the matching check in
     // handleWorkspaceMessage. A cold-start must never spawn a brand-new
     // session in a channel a human has paused, same as it must not wake an
@@ -2472,7 +2838,15 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       // permanently turn a valid @mention into a silent no-op: refresh the
       // server-authenticated identity on the message path before deferring.
       await refreshOwnConnectionId();
-      if (!ownConnectionId) return "deferred";
+      if (!ownConnectionId) {
+        const posted = await postWorkspaceNotice(
+          conversationId,
+          message.id,
+          "M9R could not identify this connected runtime for the message. Reconnect this provider's M9R Runtime, then retry.",
+          `runtime-identity:${message.id}:${config.localProvider}`,
+        );
+        return posted ? "failed" : "deferred";
+      }
     }
     const normalizedBody = workspaceRoutingBodyForConnection({
       body: message.body,
@@ -2536,7 +2910,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     const dynamicKey = `${conversationId}\u0000${identityKey}`;
     const inFlight = dynamicSessionStarts.get(dynamicKey);
     if (inFlight) return inFlight;
-    const start = (async (): Promise<"available" | "deferred"> => {
+    const start = (async (): Promise<"available" | "deferred" | "failed"> => {
       const participantId = ownConnectionId
         ? missionAgentParticipantId(missionId, ownConnectionId)
         : `${missionId}-agent-${mentioned}`;
@@ -2549,9 +2923,18 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
         // and the scan is single-flight, so an unbounded hang here stops the poll
         // loop entirely rather than just losing one mission lookup.
         const conversationResponse = await fetch(`${appUrl}/api/missions/${encodeURIComponent(missionId)}`, { headers: { authorization: `Bearer ${agentToken}` }, cache: "no-store", signal: AbortSignal.timeout(10_000) }).catch((error: unknown) => { console.error(`[dynamic-session] mission lookup request failed: ${error instanceof Error ? error.message : error}`); return null; });
-        if (!conversationResponse?.ok) { console.error(`[dynamic-session] mission lookup returned ${conversationResponse?.status ?? "no response"} -- refusing to start a session without confirmed mission data.`); return "deferred"; }
+        if (!conversationResponse?.ok) {
+          const reason = `mission lookup returned ${conversationResponse?.status ?? "no response"}`;
+          console.error(`[dynamic-session] ${reason} -- refusing to start a session without confirmed mission data.`);
+          const posted = await postWorkspaceNotice(conversationId, message.id, `M9R could not prepare this message because its mission context was unavailable (${reason}). Retry after the workspace is reachable.`, `dynamic-session-mission:${message.id}:${identityKey}`);
+          return posted ? "failed" : "deferred";
+        }
         const missionBody = await conversationResponse.json().catch(() => null) as { mission?: { repository?: string; objective?: string } } | null;
-        if (!missionBody?.mission) { console.error(`[dynamic-session] mission lookup succeeded but the response body had no mission.`); return "deferred"; }
+        if (!missionBody?.mission) {
+          console.error(`[dynamic-session] mission lookup succeeded but the response body had no mission.`);
+          const posted = await postWorkspaceNotice(conversationId, message.id, "M9R could not prepare this message because its mission context was unavailable. Retry after the workspace is reachable.", `dynamic-session-mission:${message.id}:${identityKey}`);
+          return posted ? "failed" : "deferred";
+        }
         objective = missionBody.mission.objective || objective;
       }
       // Deliberately NOT folding a loop nudge into `objective` here: this
@@ -2573,8 +2956,25 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
         dispatchKey: `dynamic:${missionId}:${identityKey}`,
         goal: objective,
         conversationId,
+      }).catch((error) => {
+        // startRegistered is normally converted to { ok: false } inside
+        // startSession. Keep this outer boundary defensive as well: an
+        // unexpected setup-side error must not abort the whole channel scan
+        // and leave the triggering message looking silently consumed.
+        const reason = error instanceof Error ? error.message.slice(0, 256) : "provider_session_start_failed";
+        console.error(`[dynamic-session] session startup threw for ${conversationId}:`, reason);
+        return { ok: false as const, reason };
       });
-      if (!started.ok) { console.error(`[dynamic-session] Dynamic ACP session for Mission ${missionId} refused: ${started.reason}`); return "deferred"; }
+      if (!started.ok) {
+        console.error(`[dynamic-session] Dynamic ACP session for Mission ${missionId} refused: ${started.reason}`);
+        const posted = await postWorkspaceNotice(
+          conversationId,
+          message.id,
+          `M9R could not start ${mentionNameForAdapter(adapterId)} for this message: ${started.reason}. Reconnect that provider's M9R Runtime, then retry.`,
+          `dynamic-session-start:${message.id}:${identityKey}`,
+        );
+        return posted ? "failed" : "deferred";
+      }
       console.log(`[dynamic-session] started a real ${adapterId} session for mission ${missionId} (participant ${participantId}).`);
       return "available";
     })();
@@ -2669,6 +3069,11 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
         // that window -- nothing else can run between these two statements.
         const current = decodeWorkspaceCursor(workspaceMessageCursors.get(conversation.id));
         if (current && !cursorIsAfter(current, workspaceMessage)) continue;
+        const pollRecovery = restartRecoveryFor(workspaceMessage.id);
+        if (pollRecovery) {
+          void recoverWorkspaceMessageAfterRestart(conversation.id, workspaceMessage, pollRecovery).catch((error) => console.error("Restart recovery failed.", error instanceof Error ? error.message : error));
+          continue;
+        }
         // On this bridge's very first scan of a conversation (no durable cursor
         // yet), skip only messages that actually predate this bridge starting --
         // checked against the MESSAGE's own timestamp, not the conversation's.
@@ -2687,7 +3092,10 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
         // and only a message this bridge is actually about to act on may
         // ever reach the counter, never replayed history.
         for (const provider of mentionedWorkspaceProviders(message.body)) workspaceTurnTimingPendingFor({ conversationId: conversation.id, messageId: message.id, provider, source: "poll" });
-        if (missionId && (await ensureDynamicSessionForConversation(conversation.id, missionId, { id: message.id, body: message.body, sender_connection_id: message.sender_connection_id ?? null, recipient_connection_id: message.recipient_connection_id ?? null, sender_user_id: message.sender_user_id ?? null, kind: message.kind ?? null })) === "deferred") {
+        const dynamicSessionStatus = missionId
+          ? await ensureDynamicSessionForConversation(conversation.id, missionId, { id: message.id, body: message.body, sender_connection_id: message.sender_connection_id ?? null, recipient_connection_id: message.recipient_connection_id ?? null, sender_user_id: message.sender_user_id ?? null, kind: message.kind ?? null })
+          : "available";
+        if (dynamicSessionStatus === "deferred") {
           rejectPendingWorkspaceTiming(message.id, message.body);
           // Stop the scan here. `continue` used to move on to the next message,
           // whose successful cursor advance then carried the durable high-water
@@ -2699,8 +3107,20 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
           deferred = true;
           break;
         }
+        if (dynamicSessionStatus === "failed") {
+          rejectPendingWorkspaceTiming(message.id, message.body);
+          if (!(await advanceWorkspaceCursor(conversation.id, workspaceMessage))) {
+            deferred = true;
+            break;
+          }
+          continue;
+        }
         const result = await handleWorkspaceMessage(conversation.id, workspaceMessage, "poll");
-        if (result === "deferred" || result === "pending" || !(await advanceWorkspaceCursor(conversation.id, workspaceMessage))) {
+        if (result === "deferred" || result === "pending" || result === "accepted" || !(await advanceWorkspaceCursor(conversation.id, workspaceMessage))) {
+          // accepted/pending is not a completed delivery. The provider turn
+          // owns the cursor advance once its cleanup/reconciliation runs.
+          // This preserves the triggering message across a bridge crash or a
+          // provider failure instead of treating enqueue as success.
           console.warn(`[workspace-scan] Message ${message.id} in ${conversation.id} not committed (${result}); leaving the cursor before it so the next scan re-offers it.`);
           deferred = true;
           break;
@@ -2728,6 +3148,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
           bridgeInstanceId,
           sessions: controller.listSessions().length,
           workspaceQueue: sessionQueues.snapshot(),
+          workspaceResultOutbox: { queued: workspaceResultOutbox.size, pendingParents: pendingWorkspaceOutputParents.size },
           workspaceTiming: workspaceTelemetry.snapshot(),
           workspaceTimingOutbox: { queued: pendingWorkspaceTimingEvents.length, retryAttempt: timingRetryAttempt },
           relay: relayClient.liveness,
@@ -3029,6 +3450,10 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     runtimeRetryTimer = null;
     if (timingRetryTimer) clearTimeout(timingRetryTimer);
     timingRetryTimer = null;
+    for (const entry of workspaceResultOutbox.values()) {
+      if (entry.retryTimer) clearTimeout(entry.retryTimer);
+      entry.retryTimer = null;
+    }
     if (workspacePollTimer) clearTimeout(workspacePollTimer);
     if (permissionPollTimer) clearInterval(permissionPollTimer);
     if (cancelTurnPollTimer) clearInterval(cancelTurnPollTimer);
@@ -3142,6 +3567,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
         failureStreak: workspaceScanFailureStreak,
       },
       timingOutbox: { flushActive: timingFlushActive, queuedCount: pendingWorkspaceTimingEvents.length },
+      workspaceResultOutbox: { queued: workspaceResultOutbox.size, pendingParents: pendingWorkspaceOutputParents.size },
       sessionBusyCount: sessionBusy.size,
       activeWorkspacePromptsCount: activeWorkspacePrompts.size,
       dynamicSessionStartsCount: dynamicSessionStarts.size,

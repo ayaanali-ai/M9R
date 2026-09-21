@@ -12,7 +12,7 @@
  * functionality, which has nothing to do with this.
  */
 
-import { readdir, readFile, writeFile, unlink, mkdir } from "node:fs/promises";
+import { readdir, readFile, writeFile, unlink, mkdir, rename } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { startMissionBridge, describeConnectionError, type MissionBridgeHandle } from "../../../services/mission-bridge/src/bridge-runtime";
@@ -20,8 +20,8 @@ import { parseProviderAdapterConfig, type ProviderAdapterConfig, PROVIDER_SLUG_P
 import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, stillHoldsWatchdogLock } from "../oathlock-watchdog";
 import { M9R_DIR } from "../oathlock-cli-core";
 
-const DEFAULT_RELAY_PUBLIC_URL = "https://oathlock-mission-relay.onrender.com";
-const DEFAULT_APP_URL = "https://m9r-dashboard.onrender.com";
+const DEFAULT_RELAY_PUBLIC_URL = "https://m9r-relay.m9r.workers.dev";
+const DEFAULT_APP_URL = "https://app.m9r.workers.dev";
 const LOCAL_TOKEN_PROVIDER_ORDER = ["claude-code", "codex", "opencode"] as const;
 
 interface LocalAgentToken {
@@ -93,15 +93,49 @@ export async function readLocalProviderAdapter(repositoryRoot: string, provider:
   }
 }
 
-async function resolveWorkspaceId(appUrl: string, token: string): Promise<string | null> {
+export type WhoamiOutcome = { kind: "ok"; workspaceId: string } | { kind: "revoked" } | { kind: "unresolved" };
+
+/**
+ * Only a 401 whose body says the agent token itself is invalid/expired/revoked counts as
+ * "revoked". Any other failure (network error, 5xx, a 401 from a proxy in front of the wrong
+ * host) is "unresolved" and must never cause a valid local token to be retired.
+ */
+export function classifyWhoamiResponse(status: number, bodyText: string): WhoamiOutcome {
+  if (status === 401 && /invalid or expired agent token|revoked/i.test(bodyText)) return { kind: "revoked" };
+  if (status < 200 || status >= 300) return { kind: "unresolved" };
+  try {
+    const body = JSON.parse(bodyText) as { workspaceId?: unknown };
+    return typeof body.workspaceId === "string" && body.workspaceId ? { kind: "ok", workspaceId: body.workspaceId } : { kind: "unresolved" };
+  } catch {
+    return { kind: "unresolved" };
+  }
+}
+
+async function resolveWorkspace(appUrl: string, token: string): Promise<WhoamiOutcome> {
   try {
     const response = await fetch(`${appUrl.replace(/\/$/, "")}/api/agent/whoami`, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) return null;
-    const body = await response.json() as { workspaceId?: string };
-    return typeof body.workspaceId === "string" && body.workspaceId ? body.workspaceId : null;
+    return classifyWhoamiResponse(response.status, await response.text().catch(() => ""));
+  } catch {
+    return { kind: "unresolved" };
+  }
+}
+
+/**
+ * A revoked connection's token can never work again, so leaving it as local.json makes the
+ * runtime keep launching a bridge for it forever (and shows the provider as connected).
+ * Move it aside rather than delete it: reversible, and `m9r init` writes a fresh local.json.
+ */
+export async function retireRevokedLocalToken(repositoryRoot: string, provider: string): Promise<string | null> {
+  if (!PROVIDER_SLUG_PATTERN.test(provider)) return null;
+  const dir = join(repositoryRoot, M9R_DIR, "agents", provider);
+  const from = join(dir, "local.json");
+  const to = join(dir, "local.revoked.json");
+  try {
+    await rename(from, to);
+    return to;
   } catch {
     return null;
   }
@@ -114,7 +148,7 @@ export interface LocalMissionBridgeStartResult {
 }
 export interface LocalMissionBridgeSkipResult {
   ok: false;
-  reason: "acp_bridge_disabled" | "no_local_token" | "workspace_unresolvable" | "start_failed" | "already_running";
+  reason: "acp_bridge_disabled" | "no_local_token" | "workspace_unresolvable" | "connection_revoked" | "start_failed" | "already_running";
   detail?: string;
 }
 
@@ -197,7 +231,9 @@ export async function startLocalMissionBridge(repositoryRoot: string): Promise<L
   }
   const localAdapter = await readLocalProviderAdapter(repositoryRoot, local.provider);
 
-  const appUrl = process.env.OATHLOCK_APP_URL?.trim() || DEFAULT_APP_URL;
+  // OATHLOCK_API_URL is what the rest of the CLI (init, whoami, the terminal bridge) reads, so a
+  // user who set it must not have the bridge silently talk to a different host.
+  const appUrl = (process.env.OATHLOCK_APP_URL?.trim() || process.env.OATHLOCK_API_URL?.trim() || DEFAULT_APP_URL).replace(/\/+$/, "");
   // Real bug fixed here: this read a var name (OATHLOCK_MISSION_RELAY_URL)
   // nothing else in the codebase sets -- MISSION_RELAY_PUBLIC_URL is the
   // actual documented name (.env.example, services/mission-bridge/src/index.ts's
@@ -211,8 +247,18 @@ export async function startLocalMissionBridge(repositoryRoot: string): Promise<L
   // logged but easy to miss, and message delivery itself works fine over
   // plain HTTP regardless, so nothing else looked broken).
   const relayPublicUrl = process.env.MISSION_RELAY_PUBLIC_URL?.trim() || DEFAULT_RELAY_PUBLIC_URL;
-  const workspaceId = await resolveWorkspaceId(appUrl, local.token);
-  if (!workspaceId) { await releaseBridgeLock(repositoryRoot, local.provider); return { ok: false, reason: "workspace_unresolvable" }; }
+  const workspace = await resolveWorkspace(appUrl, local.token);
+  if (workspace.kind === "revoked") {
+    await releaseBridgeLock(repositoryRoot, local.provider);
+    const moved = await retireRevokedLocalToken(repositoryRoot, local.provider);
+    return {
+      ok: false,
+      reason: "connection_revoked",
+      detail: `the ${local.provider} connection was disconnected/revoked${moved ? ` -- its local token was moved to ${moved}` : ""}. Run: m9r init --agent-kind ${local.provider}`,
+    };
+  }
+  if (workspace.kind !== "ok") { await releaseBridgeLock(repositoryRoot, local.provider); return { ok: false, reason: "workspace_unresolvable" }; }
+  const workspaceId = workspace.workspaceId;
 
   try {
     const handle = await startMissionBridge({

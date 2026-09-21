@@ -16,7 +16,7 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
   const { token } = await params;
   const db = await createClient();
   const { data } = db ? await db.auth.getUser() : { data: { user: null } };
-  if (!data.user) redirect(`/auth?next=${encodeURIComponent(`/invite/${token}`)}`);
+  if (!data.user) redirect(`/?invite=${encodeURIComponent(token)}`);
 
   return (
     <main className="auth-min-shell">

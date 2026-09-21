@@ -15,6 +15,8 @@ export function isCrossSiteWrite(input: {
   fetchSite: string | null;
   allowedOrigins: ReadonlySet<string>;
   hasBearerAuthorization: boolean;
+  /** Whether the request carries ambient browser credentials. Defaults to true (fail closed) when a caller does not say. */
+  hasCookies?: boolean;
 }): boolean {
   if (SAFE_METHODS.has(input.method.toUpperCase())) return false;
   if (input.origin) return !input.allowedOrigins.has(input.origin);
@@ -26,5 +28,8 @@ export function isCrossSiteWrite(input: {
   // because a cross-site request forged via a victim's cookies can never
   // carry a bearer Authorization header the attacker doesn't have. Anything
   // else with both headers missing fails closed.
-  return !input.hasBearerAuthorization;
+  // A CSRF attack rides the victim's ambient cookies, so a request with neither a
+  // bearer token nor any cookie has nothing to forge (e.g. the CLI's unauthenticated
+  // POST /api/agent/register, whose approval step still needs a logged-in human).
+  return !input.hasBearerAuthorization && (input.hasCookies ?? true);
 }

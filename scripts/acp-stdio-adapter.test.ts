@@ -10,6 +10,8 @@ import {
   openCodeConfigContent,
   matchesDenyPattern,
   commandTouchesDeniedPath,
+  responseForPermission,
+  shouldResetPermissionMode,
 } from "@/lib/bridge/acp-stdio-adapter";
 
 test("Codex ACP uses an explicit CODEX_PATH before every platform fallback", () => {
@@ -317,4 +319,24 @@ test("a failed prompt's reason reads the JSON-RPC error's own .data field, not j
   const promptBody = src.slice(promptStart, promptEnd);
   assert.match(promptBody, /"data" in error/, "the catch handler must check for a .data field on the thrown error");
   assert.match(promptBody, /dataRecord\.message/, "an object .data with its own .message field (the shape Codex sends) must be read out");
+});
+
+test("approving a permission selects allow_once, never a listed allow_always", () => {
+  const params = { options: [
+    { optionId: "always", name: "Always allow", kind: "allow_always" },
+    { optionId: "once", name: "Allow once", kind: "allow_once" },
+    { optionId: "no", name: "Reject", kind: "reject_once" },
+  ] } as never;
+  assert.deepEqual(responseForPermission(params, true), { outcome: { outcome: "selected", optionId: "once" } });
+});
+
+test("approving with no allow_once option cancels instead of guessing", () => {
+  const params = { options: [{ optionId: "always", name: "Always allow", kind: "allow_always" }] } as never;
+  assert.deepEqual(responseForPermission(params, true), { outcome: { outcome: "cancelled" } });
+  assert.deepEqual(responseForPermission(params, false), { outcome: { outcome: "cancelled" } });
+});
+
+test("only bypassPermissions is reset to default; the user's other modes are respected", () => {
+  assert.equal(shouldResetPermissionMode("bypassPermissions"), true);
+  for (const mode of ["default", "acceptEdits", "plan", undefined]) assert.equal(shouldResetPermissionMode(mode), false);
 });

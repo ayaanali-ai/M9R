@@ -32,8 +32,9 @@
 
 import { mkdir, readFile, writeFile, appendFile, readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { resolve, join, dirname } from "node:path";
+import { resolve, join, dirname, relative, sep } from "node:path";
 import { redactSession } from "@/lib/session-redaction";
+import { SUMMARY_SUFFIX, buildIndex, buildSummary, emptyFacts, extractClaudeFacts, extractCodexFacts, extractOpenCodeFacts, parseSummary, type IndexEntry, type SessionFacts } from "@/lib/memory-distill-core";
 
 export const CAPTURE_DIR_NAME = "capture";
 export const SPOOL_FILE_NAME = "pending.jsonl";
@@ -432,7 +433,7 @@ export async function drainCaptureSpool(options: DrainCaptureSpoolOptions): Prom
   let drained = 0;
   let failed = 0;
   let deduped = 0;
-  const prepared = new Map<string, { job: CaptureJob; transcript: CaptureTranscriptMessage[]; markdown: string; fingerprint: string | null }>();
+  const prepared = new Map<string, { job: CaptureJob; transcript: CaptureTranscriptMessage[]; markdown: string; fingerprint: string | null; facts: SessionFacts }>();
   for (const line of lines) {
     const job = parseSpoolLine(line);
     if (!job) {
@@ -450,7 +451,7 @@ export async function drainCaptureSpool(options: DrainCaptureSpoolOptions): Prom
       const existingSize = existing?.transcript.reduce((sum, message) => sum + message.body.length, 0) ?? -1;
       if (existing) deduped += 1;
       if (!existing || transcript.length > existing.transcript.length || (transcript.length === existing.transcript.length && messageSize >= existingSize)) {
-        prepared.set(key, { job, transcript, markdown, fingerprint });
+        prepared.set(key, { job, transcript, markdown, fingerprint, facts: extractFacts(job, rawTranscript) });
       }
     } catch (error) {
       failed += 1;
@@ -458,7 +459,7 @@ export async function drainCaptureSpool(options: DrainCaptureSpoolOptions): Prom
     }
   }
 
-  for (const { job, markdown, fingerprint } of prepared.values()) {
+  for (const { job, markdown, fingerprint, transcript, facts } of prepared.values()) {
     try {
       const outPath = captureMemoryPath(options.repositoryRoot, job);
       const duplicate = fingerprint
@@ -467,6 +468,7 @@ export async function drainCaptureSpool(options: DrainCaptureSpoolOptions): Prom
       if (!duplicate) {
         await mkdir(dirname(outPath), { recursive: true });
         await writeFile(outPath, markdown, "utf8");
+        await writeFile(outPath.replace(/\.md$/, SUMMARY_SUFFIX), buildSummary({ provider: PROVIDER_LABEL[job.provider], sessionId: job.sessionId, cwd: job.cwd, capturedAtIso: job.capturedAtIso, transcript, facts }), "utf8");
       } else deduped += 1;
       drained += 1;
     } catch (error) {
@@ -480,6 +482,7 @@ export async function drainCaptureSpool(options: DrainCaptureSpoolOptions): Prom
   // job this repo genuinely can't process (a transcript file already
   // deleted, say) will never become processable by being retried forever.
   await writeFile(path, "", "utf8").catch(() => undefined);
+  if (drained > 0) await rebuildMemoryIndex(options.repositoryRoot).catch(() => undefined);
   if (drained > 0 || failed > 0) log(`drained ${drained} captured session(s)${deduped > 0 ? `, ${deduped} duplicate(s) skipped` : ""}${failed > 0 ? `, ${failed} failed` : ""}`);
   return { drained, failed };
 }
@@ -491,6 +494,38 @@ async function logCaptureFailure(repositoryRoot: string, job: CaptureJob, error:
     `${new Date().toISOString()} ${job.provider} ${job.sessionId}: ${error instanceof Error ? error.message : String(error)}\n`,
     "utf8",
   ).catch(() => undefined);
+}
+
+function extractFacts(job: CaptureJob, rawTranscript: string | null): SessionFacts {
+  try {
+    if (job.provider === "opencode") return extractOpenCodeFacts(job.export);
+    if (rawTranscript == null) return emptyFacts();
+    return job.provider === "claude-code" ? extractClaudeFacts(rawTranscript) : extractCodexFacts(rawTranscript);
+  } catch {
+    return emptyFacts();
+  }
+}
+
+/** Rebuilds `.oathlock/memory/index.md` from every `*.summary.md` on disk, so it needs no state and self-heals. */
+export async function rebuildMemoryIndex(repositoryRoot: string): Promise<number> {
+  const root = join(repositoryRoot, ".oathlock", "memory");
+  const entries: IndexEntry[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    let items;
+    try { items = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const item of items) {
+      const full = join(dir, item.name);
+      if (item.isDirectory()) await walk(full);
+      else if (item.name.endsWith(SUMMARY_SUFFIX)) {
+        const entry = parseSummary(await readFile(full, "utf8").catch(() => ""), relative(root, full).split(sep).join("/"));
+        if (entry) entries.push(entry);
+      }
+    }
+  };
+  await walk(root);
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, "index.md"), buildIndex(entries), "utf8");
+  return entries.length;
 }
 
 /** Started once per machine, alongside startMemoryExportLoop, from `m9r-cli terminal runtime`. */

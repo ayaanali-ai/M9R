@@ -5,8 +5,8 @@
 //
 // Required env to actually send:
 //   RESEND_API_KEY  — your Resend API key
-//   RESEND_FROM     — verified sender, e.g. "OathLock <noreply@yourdomain.com>"
-//                     (for testing you may use "OathLock <onboarding@resend.dev>",
+//   RESEND_FROM     — verified sender, e.g. "M9R <noreply@yourdomain.com>"
+//                     (for testing you may use "M9R <onboarding@resend.dev>",
 //                      which can only send to your own Resend account email)
 
 const RESEND_ENDPOINT = "https://api.resend.com/emails";

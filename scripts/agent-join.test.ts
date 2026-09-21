@@ -30,7 +30,7 @@ import {
 import { buildAgentMarkdown, buildSkillMarkdown } from "../src/lib/agent-md.ts";
 import { analyzeAgentSession } from "../src/lib/agent-session-analysis.ts";
 
-const BASE = "https://m9r-dashboard.onrender.com";
+const BASE = "https://app.m9r.workers.dev";
 
 // ---------------------------------------------------------------------------
 // agent.md content contract

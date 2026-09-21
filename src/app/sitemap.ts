@@ -11,7 +11,7 @@ const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, "") || 
 // (single-use flows, not destinations), /report/session and /resume/[slug]
 // (dynamic pages with no fixed set of valid params to enumerate here).
 export default function sitemap(): MetadataRoute.Sitemap {
-  const staticRoutes = ["", "/pricing", "/security", "/roadmap", "/hackathon", "/terms", "/privacy", "/acceptable-use", "/data-processing"];
+  const staticRoutes = ["", "/how-it-works", "/pricing", "/docs/get-started", "/open-core", "/faq", "/cookies", "/security", "/roadmap", "/hackathon", "/terms", "/privacy", "/acceptable-use", "/data-processing"];
   return staticRoutes.map((route) => ({
     url: `${siteUrl}${route}`,
     lastModified: new Date(),

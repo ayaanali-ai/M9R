@@ -1,3 +1,4 @@
+import { CONTACT_MAILTO } from "@/lib/contact";
 import Link from "next/link";
 import Footer from "@/components/Footer";
 import M9RMark from "@/components/M9RMark";
@@ -23,7 +24,7 @@ export default function AgentsPage() {
         <div className="lp-wrap lp-min-nav-in">
           <Link href="/">M9R</Link>
           <Link href="/auth">Sign in</Link>
-          <Link href="mailto:contact@m9r.dev">Contact</Link>
+          <Link href={CONTACT_MAILTO}>Contact</Link>
           <LpThemeToggle />
         </div>
       </nav>

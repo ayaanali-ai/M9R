@@ -413,7 +413,7 @@ test("compiled CLI: connect installs cross-agent memory capture through the real
     return jsonResponse(200, { status: "approved", token: `token-${claimId}`, scopes: ["rules:read"] });
   }) as unknown as typeof deps.fetch;
 
-  const code = await core.run(["connect", "--agents", "claude-code,codex,opencode"], deps);
+  const code = await core.run(["connect", "--agents", "claude-code,codex,opencode", "--memory-capture"], deps);
   assert.equal(code, 0, "the packaged cross-agent-capture-setup-core.js import must actually resolve");
   assert.ok(files.has(join(EXTERNAL_CWD, ".oathlock", "bin", "m9r-capture.mjs")));
   assert.ok(files.has(join(EXTERNAL_CWD, ".claude", "settings.local.json")));

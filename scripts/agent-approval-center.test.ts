@@ -291,7 +291,7 @@ test("Ready for Review opens inline in the shared side panel, defaults to five r
   assert.match(workspace, /onOpenReview=\{\(\) => toggleSidePanel\("review"\)\}/);
   assert.match(workspace, /pendingReviewCount=\{approvalCenter\.counts\.total\}/);
   assert.match(workspace, /wf-review-panel-body/);
-  assert.match(conversationPanel, /wf-chat-panel-toggle/);
+  assert.match(conversationPanel, /m9r-channel-dock__item/); // the header toggle class after the channel dock redesign
   assert.match(conversationPanel, /onOpenReview && \(/);
   assert.match(workspace, /overflow-y-auto/);
   assert.match(workspace, /Approval type filters/);

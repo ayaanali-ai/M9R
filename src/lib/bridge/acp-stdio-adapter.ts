@@ -470,9 +470,17 @@ function pathMatchesPermission(params: acp.RequestPermissionRequest, candidate: 
   });
 }
 
-function responseForPermission(params: acp.RequestPermissionRequest, approved: boolean): acp.RequestPermissionResponse {
+export function shouldResetPermissionMode(currentModeId: string | undefined): boolean {
+  return currentModeId === "bypassPermissions";
+}
+
+export function responseForPermission(params: acp.RequestPermissionRequest, approved: boolean): acp.RequestPermissionResponse {
   if (!approved || params.options.length === 0) return { outcome: { outcome: "cancelled" } };
-  return { outcome: { outcome: "selected", optionId: params.options[0].optionId } };
+  // Never fall back to options[0]: a provider may list "always allow" first, which would turn one
+  // approval into a standing grant. No allow_once option means we cannot honor the approval safely.
+  const allowOnce = params.options.find((option) => option.kind === "allow_once");
+  if (!allowOnce) return { outcome: { outcome: "cancelled" } };
+  return { outcome: { outcome: "selected", optionId: allowOnce.optionId } };
 }
 
 /**
@@ -611,11 +619,11 @@ export function openCodeConfigContent(workingDirectory: string, missionId: strin
  * regardless of which channel a human was actually chatting in when the
  * permission was requested -- a human sitting in a real multi-agent channel
  * never saw the card show up where they were looking. */
-function conversationIdForChannelMission(missionId: string): string | null {
+export function conversationIdForChannelMission(missionId: string): string | null {
   return missionId.startsWith("channel-") ? missionId.slice("channel-".length) : null;
 }
 
-async function reportPendingPermissionToApp(input: { missionId: string; executionId: string; requestId: string; summary: string; command: string | null; filePath: string | null }): Promise<void> {
+export async function reportPendingPermissionToApp(input: { missionId: string; executionId: string; requestId: string; summary: string; command: string | null; filePath: string | null }): Promise<void> {
   const appUrl = process.env.OATHLOCK_APP_URL?.trim();
   const agentToken = process.env.OATHLOCK_AGENT_TOKEN?.trim();
   if (!appUrl || !agentToken) return;
@@ -641,7 +649,7 @@ async function reportPendingPermissionToApp(input: { missionId: string; executio
  * silently bricking all local work to achieve it is a worse failure than the
  * one being prevented. A dropped check is logged, never hidden.
  */
-async function requestFileLockFromApp(input: { path: string; conversationId: string | null }): Promise<{ holderConnectionId: string; heldSince: string } | null> {
+export async function requestFileLockFromApp(input: { path: string; conversationId: string | null }): Promise<{ holderConnectionId: string; heldSince: string } | null> {
   const appUrl = process.env.OATHLOCK_APP_URL?.trim();
   const agentToken = process.env.OATHLOCK_AGENT_TOKEN?.trim();
   if (!appUrl || !agentToken) return null;
@@ -729,6 +737,7 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
       cwd: input.environment.workingDirectory,
       env: { ...process.env, ...this.env, ...serverEnv },
       shell: this.shell,
+      windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams;
     const handle: AgentServerHandle = { serverId, adapterId: this.id };
@@ -864,6 +873,7 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
       ...(meta ? { _meta: meta } : {}),
     });
     await this.applyModelOverride(connection, created, input.assignment.model);
+    await this.enforceGovernedPermissionMode(connection, created.sessionId, created);
     return this.registerSession(state, created.sessionId, input.executionId ?? created.sessionId, input.assignment.missionId, this.discoveredModelOptions(created));
   }
 
@@ -880,6 +890,21 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
    * doesn't have the requested value available) must not have its session
    * blocked over this, only lose the override.
    */
+  /**
+   * The Claude wrapper starts sessions in whatever `permissions.defaultMode` the user's own settings
+   * name. `bypassPermissions` never calls requestPermission, so M9R's deny-list, file locks and
+   * human approvals would silently not apply. Put the session back in `default` and say so.
+   */
+  private async enforceGovernedPermissionMode(connection: acp.ClientSideConnection, sessionId: string, response: { modes?: { currentModeId?: string } | null } | null | undefined): Promise<void> {
+    if (!shouldResetPermissionMode(response?.modes?.currentModeId)) return;
+    try {
+      await connection.setSessionMode({ sessionId, modeId: "default" });
+      console.warn(`[permission-mode] session ${sessionId} started in bypassPermissions from the user's settings; reset to "default" so M9R approvals and the deny-list apply.`);
+    } catch (error) {
+      throw new Error(`Session ${sessionId} is in bypassPermissions and could not be reset to default, so M9R will not run it: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   /**
    * The real, live model choices this session's own ACP server just
    * reported -- surfaced so the dashboard can render a real dropdown
@@ -934,7 +959,8 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
     const meta = input.server.adapterId === "claude-agent-acp"
       ? { _meta: { claudeCode: { options: { disallowedTools: ["SendMessage"] } } } }
       : {};
-    await connection.resumeSession({ sessionId: input.providerSessionRef, cwd: state.workingDirectory, mcpServers: devMcpServerDescriptor(state.workingDirectory, input.assignment.missionId), ...meta });
+    const resumed = await connection.resumeSession({ sessionId: input.providerSessionRef, cwd: state.workingDirectory, mcpServers: devMcpServerDescriptor(state.workingDirectory, input.assignment.missionId), ...meta });
+    await this.enforceGovernedPermissionMode(connection, input.providerSessionRef, resumed);
     return this.registerSession(state, input.providerSessionRef, input.executionId ?? input.providerSessionRef, input.assignment.missionId);
   }
 
@@ -1343,9 +1369,14 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
 }
 
 function providerEntry(provider: "codex" | "claude"): string {
-  return resolve(process.cwd(), provider === "codex"
-    ? "node_modules/@agentclientprotocol/codex-acp/dist/index.js"
-    : "node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js");
+  const pkg = provider === "codex" ? "@agentclientprotocol/codex-acp" : "@agentclientprotocol/claude-agent-acp";
+  // Resolve from where this code is installed, not from the process's working directory:
+  // the packaged CLI runs inside the user's own repo, which has no such node_modules.
+  try {
+    return resolve(dirname(require.resolve(`${pkg}/package.json`)), "dist/index.js");
+  } catch {
+    return resolve(process.cwd(), `node_modules/${pkg}/dist/index.js`);
+  }
 }
 
 /**

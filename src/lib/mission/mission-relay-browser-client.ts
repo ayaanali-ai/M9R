@@ -48,6 +48,8 @@ export interface BrowserMissionRelayPostResult {
 // client-originated error close in the application range and bound the reason
 // to the browser's 123-byte limit.
 const BROWSER_CLIENT_ERROR_CLOSE_CODE = 4000;
+const BROWSER_POST_CONFIRMATION_TIMEOUT_MS = 5_000;
+const BROWSER_POST_RETRY_TIMEOUT_MS = 10_000;
 
 function closeAfterClientError(socket: WebSocket, reason: string): void {
   if (socket.readyState !== WebSocket.CLOSED) socket.close(BROWSER_CLIENT_ERROR_CLOSE_CODE, reason.slice(0, 123));
@@ -91,7 +93,7 @@ export class MissionRelayBrowserClient {
   private desiredPresence: MissionPresenceState | null = null;
   private desiredTyping = false;
   private readonly huddleMemberships = new Map<string, { muted: boolean }>();
-  private readonly pendingPosts = new Map<string, { frame: RelayFrame; resolve: (result: BrowserMissionRelayPostResult) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private readonly pendingPosts = new Map<string, { frame: RelayFrame; resolve: (result: BrowserMissionRelayPostResult) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; attempts: number }>();
 
   constructor(options: BrowserMissionRelayClientOptions) {
     this.options = options;
@@ -123,7 +125,15 @@ export class MissionRelayBrowserClient {
       const socket = new WebSocket(this.options.url);
       this.socket = socket;
       socket.addEventListener("open", () => {
-        void this.authenticate(socket).catch((error) => finish(error instanceof Error ? error : new Error("Relay authentication failed.")));
+        void this.authenticate(socket).catch((error) => {
+          const failure = error instanceof Error ? error : new Error("Relay authentication failed.");
+          this.options.onStatus?.("error", failure.message);
+          finish(failure);
+          // An auth-token fetch failure used to leave this unauthenticated
+          // socket open forever. That leaked a server-side connection and
+          // left reconnect state ambiguous for the next post.
+          closeAfterClientError(socket, "Relay authentication failed.");
+        });
       });
       socket.addEventListener("message", (event) => {
         try {
@@ -217,18 +227,16 @@ export class MissionRelayBrowserClient {
       payload,
     });
     return new Promise<BrowserMissionRelayPostResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingPosts.delete(frame.correlationId);
-        reject(new Error("Mission Relay did not confirm the message post in time."));
-      }, 15_000);
-      this.pendingPosts.set(frame.correlationId, { frame, resolve, reject, timer });
+      const pending = { frame, resolve, reject, timer: setTimeout(() => undefined, 0), attempts: 0 };
+      this.pendingPosts.set(frame.correlationId, pending);
+      this.armPendingPostTimeout(pending);
       try {
         const socket = this.socket;
         if (!socket) throw new Error("Mission Relay is not connected.");
         this.sendFrame(socket, frame);
       } catch (error) {
         if (this.options.reconnect === false) {
-          clearTimeout(timer);
+          clearTimeout(pending.timer);
           this.pendingPosts.delete(frame.correlationId);
           reject(error instanceof Error ? error : new Error("Mission Relay message post failed."));
         } else {
@@ -359,6 +367,29 @@ export class MissionRelayBrowserClient {
     return true;
   }
 
+  /** Keep one idempotent post alive across a dropped socket/slow reconnect. */
+  private armPendingPostTimeout(pending: { frame: RelayFrame; resolve: (result: BrowserMissionRelayPostResult) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; attempts: number }): void {
+    clearTimeout(pending.timer);
+    pending.timer = setTimeout(() => {
+      if (this.pendingPosts.get(pending.frame.correlationId) !== pending) return;
+      if (this.options.reconnect === false) {
+        this.pendingPosts.delete(pending.frame.correlationId);
+        pending.reject(new Error("Mission Relay did not confirm the message post."));
+        return;
+      }
+      if (pending.attempts >= 1) {
+        this.pendingPosts.delete(pending.frame.correlationId);
+        pending.reject(new Error("Mission Relay did not confirm the message post after one reconnect retry."));
+        return;
+      }
+      pending.attempts += 1;
+      const socket = this.socket;
+      if (socket?.readyState === WebSocket.OPEN) closeAfterClientError(socket, "Message post confirmation timed out; reconnecting.");
+      else this.scheduleReconnect();
+      this.armPendingPostTimeout(pending);
+    }, pending.attempts === 0 ? BROWSER_POST_CONFIRMATION_TIMEOUT_MS : BROWSER_POST_RETRY_TIMEOUT_MS);
+  }
+
   private sendFrame(socket: WebSocket, frame: RelayFrame): void {
     if (socket.readyState !== WebSocket.OPEN) throw new Error("Mission Relay is not connected.");
     socket.send(JSON.stringify(frame));
@@ -400,7 +431,7 @@ export class MissionRelayBrowserClient {
   }
 
   private scheduleReconnect(): void {
-    if (this.reconnectTimer || this.closed) return;
+    if (this.reconnectTimer || this.closed || this.options.reconnect === false) return;
     const delay = Math.min(30_000, 500 * 2 ** Math.min(this.reconnectAttempt, 6));
     this.reconnectAttempt += 1;
     this.reconnectTimer = setTimeout(() => {
@@ -436,7 +467,7 @@ export class WorkspaceRelayBrowserClient {
   private cursor: string | null;
   private desiredPresence: MissionPresenceState | null = null;
   private desiredTyping = false;
-  private readonly pendingPosts = new Map<string, { frame: RelayFrame; resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private readonly pendingPosts = new Map<string, { frame: RelayFrame; resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; attempts: number }>();
 
   constructor(options: BrowserWorkspaceRelayOptions) {
     this.options = options;
@@ -477,6 +508,9 @@ export class WorkspaceRelayBrowserClient {
           const detail = error instanceof Error ? error.message : "Workspace relay authentication failed.";
           this.options.onStatus?.("error", detail);
           finish(new Error(detail));
+          // Do not strand an unauthenticated socket when refreshing a
+          // short-lived browser credential fails during reconnect.
+          closeAfterClientError(socket, "Workspace relay authentication failed.");
         });
       });
       socket.addEventListener("message", (event) => {
@@ -558,16 +592,16 @@ export class WorkspaceRelayBrowserClient {
     await this.connect();
     const frame = this.frame("workspace.post", payload, typeof payload.clientRequestId === "string" ? payload.clientRequestId : id("workspace-message"));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pendingPosts.delete(frame.correlationId); reject(new Error("Workspace relay did not confirm the message post in time.")); }, 15_000);
-      const pending = { frame, resolve, reject, timer };
+      const pending = { frame, resolve, reject, timer: setTimeout(() => undefined, 0), attempts: 0 };
       this.pendingPosts.set(frame.correlationId, pending);
+      this.armPendingPostTimeout(pending);
       try {
         const socket = this.socket;
         if (!socket) throw new Error("Workspace relay is not connected.");
         this.send(socket, frame);
       } catch (error) {
         if (this.options.reconnect === false) {
-          clearTimeout(timer);
+          clearTimeout(pending.timer);
           this.pendingPosts.delete(frame.correlationId);
           reject(error instanceof Error ? error : new Error("Workspace relay message post failed."));
         } else {
@@ -641,6 +675,29 @@ export class WorkspaceRelayBrowserClient {
     return true;
   }
 
+  /** Keep one idempotent post alive across a dropped socket/slow reconnect. */
+  private armPendingPostTimeout(pending: { frame: RelayFrame; resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; attempts: number }): void {
+    clearTimeout(pending.timer);
+    pending.timer = setTimeout(() => {
+      if (this.pendingPosts.get(pending.frame.correlationId) !== pending) return;
+      if (this.options.reconnect === false) {
+        this.pendingPosts.delete(pending.frame.correlationId);
+        pending.reject(new Error("Workspace Relay did not confirm the message post."));
+        return;
+      }
+      if (pending.attempts >= 1) {
+        this.pendingPosts.delete(pending.frame.correlationId);
+        pending.reject(new Error("Workspace Relay did not confirm the message post after one reconnect retry."));
+        return;
+      }
+      pending.attempts += 1;
+      const socket = this.socket;
+      if (socket?.readyState === WebSocket.OPEN) closeAfterClientError(socket, "Message post confirmation timed out; reconnecting.");
+      else this.scheduleReconnect();
+      this.armPendingPostTimeout(pending);
+    }, pending.attempts === 0 ? BROWSER_POST_CONFIRMATION_TIMEOUT_MS : BROWSER_POST_RETRY_TIMEOUT_MS);
+  }
+
   private syncState(socket: WebSocket): void {
     if (!this.options.participantId) return;
     if (this.desiredPresence) this.send(socket, this.frame("participant.presence", { participantId: this.options.participantId, state: this.desiredPresence }));
@@ -648,7 +705,7 @@ export class WorkspaceRelayBrowserClient {
   }
 
   private scheduleReconnect(): void {
-    if (this.reconnectTimer || this.closed) return;
+    if (this.reconnectTimer || this.closed || this.options.reconnect === false) return;
     const delay = Math.min(30_000, 500 * 2 ** Math.min(this.reconnectAttempt, 6));
     this.reconnectAttempt += 1;
     this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; void this.connect().catch(() => undefined); }, delay);

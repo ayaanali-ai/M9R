@@ -13,6 +13,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   agentMentionsSession,
@@ -34,6 +35,9 @@ import {
   agentMentionsSessionExplicitly,
   agentMentionsSessionByBareName,
   waitForWorkspaceMessageObservation,
+  fetchWorkspaceActivityNoteWithinBudget,
+  WORKSPACE_ACTIVITY_NOTE_BUDGET_MS,
+  WORKSPACE_REPLY_TEXT_OBSERVATION_GRACE_MS,
   workspaceMessageIsVisibleToConnection,
   workspaceRoutingBodyForConnection,
   rememberBoundedWorkspaceId,
@@ -384,11 +388,31 @@ test("agentAmbientMessageMayWake's notice exemption is narrower than result/hand
   // The hard-stop notice itself, and other genuinely fixed OathLock text,
   // has no sender_connection_id -- still wake-eligible, same as before.
   assert.equal(agentAmbientMessageMayWake({ sender_user_id: null, sender_connection_id: null, kind: "notice" }), true);
+  assert.equal(agentAmbientMessageMayWake({ sender_user_id: null, sender_connection_id: null, kind: "notice", body: "M9R could not route this message: Codex is offline." }), false);
   // result/handoff are unconditionally wake-eligible regardless of
   // sender_connection_id -- unlike notice, their bodies are always
   // genuinely system-shaped (a real reported outcome, a real delegation).
   assert.equal(agentAmbientMessageMayWake({ sender_user_id: null, sender_connection_id: "connection-1", kind: "result" }), true);
   assert.equal(agentAmbientMessageMayWake({ sender_user_id: null, sender_connection_id: "connection-1", kind: "handoff" }), true);
+});
+
+test("optional activity context cannot hold a provider turn past its small budget", async () => {
+  let resolveSlow!: (value: string | null) => void;
+  const slow = new Promise<string | null>((resolve) => { resolveSlow = resolve; });
+  const result = await fetchWorkspaceActivityNoteWithinBudget(() => slow, 0);
+  assert.equal(result, null);
+  resolveSlow(null);
+  assert.equal(WORKSPACE_ACTIVITY_NOTE_BUDGET_MS, 500);
+  assert.equal(WORKSPACE_REPLY_TEXT_OBSERVATION_GRACE_MS, 3_000);
+});
+
+test("bridge reliability guards preserve provider prose and retry result posts idempotently", async () => {
+  const source = await readFile(new URL("../services/mission-bridge/src/bridge-runtime.ts", import.meta.url), "utf8");
+  assert.match(source, /fetchWorkspaceActivityNoteWithinBudget\(/);
+  assert.match(source, /initialReplyText \? WORKSPACE_REPLY_TEXT_OBSERVATION_GRACE_MS/);
+  assert.match(source, /!initialReplyText && isMissionFeatureEnabled\("devMcpTools"\)/);
+  assert.match(source, /retrying the same idempotent result over HTTP/);
+  assert.match(source, /idempotencyKey, outcome/);
 });
 
 /**
@@ -521,4 +545,13 @@ test("duplicate-delivery tracking is bounded for long-lived bridge processes", (
   assert.deepEqual([...seen], ["second", "third"]);
   rememberBoundedWorkspaceId(seen, "third", 2);
   assert.deepEqual([...seen], ["second", "third"]);
+});
+
+test("a typed @claude alias routes like @claude-code, without touching email addresses", async () => {
+  const { canonicalizeProviderMentionAliases, workspaceRoutingBodyForConnection } = await import("../services/mission-bridge/src/bridge-runtime.ts");
+  assert.equal(canonicalizeProviderMentionAliases("@Claude reply pong"), "@claude-code reply pong");
+  assert.equal(canonicalizeProviderMentionAliases("hey @claude-agent-acp and @codex-acp"), "hey @claude-code and @codex");
+  assert.equal(canonicalizeProviderMentionAliases("mail me at ayaan@claude.com"), "mail me at ayaan@claude.com");
+  assert.equal(canonicalizeProviderMentionAliases("@claude-code stays"), "@claude-code stays");
+  assert.equal(workspaceRoutingBodyForConnection({ body: "@claude hi", recipientConnectionId: null, ownConnectionId: "c1", localProvider: "claude-code" }), "@claude-code hi");
 });

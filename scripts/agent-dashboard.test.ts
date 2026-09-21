@@ -1155,25 +1155,23 @@ test("public homepage does not claim an unimplemented tamper-evident or admissib
   }
 });
 
-test("public homepage uses one focused M9R hero instead of an illustrative card strip", () => {
+// The homepage markup is being redesigned, so these tests pin what must stay true regardless of layout: it is a single
+// server page that renders the current home component, never the retired card strip, and never opens a socket to a
+// visitor's own machine just to render.
+test("public homepage renders one home component and none of the retired card-strip pieces", () => {
   const page = read("src/app/page.tsx");
-  assert.match(page, /Connect your first agent/);
-  assert.match(page, /M9RPersonalMark/);
-  assert.match(page, /InstallCommand/);
+  assert.match(page, /export default/);
+  assert.match(page, /from "@\/components\/home\//, "the page composes a component from components/home");
   assert.doesNotMatch(page, /ProofStrip/);
   assert.doesNotMatch(page, /V2ProductReveal/);
   assert.doesNotMatch(page, /const CTA_PRIMARY = \{ href: "\/analyze", label: "Seal a session"/);
 });
 
-test("public homepage hero is a static product mark, never a live runtime socket", () => {
+test("public homepage is never a live runtime socket", () => {
   const hero = read("src/app/page.tsx");
-  // The hero must not route through WatchfloorOps (which mounts the real
-  // bridge-connected terminal several layers down) — a public marketing page
-  // has no business opening a WebSocket to a visitor's own loopback runtime
-  // just to render. Assert the whole import chain is severed, not just the
-  // deepest link, so a transitive reintroduction still fails this test.
+  // The page must not route through WatchfloorOps (which mounts the real bridge-connected terminal several layers
+  // down): a public marketing page has no business opening a WebSocket to a visitor's own loopback runtime.
   assert.doesNotMatch(hero, /WatchfloorOps|LocalAgentTerminal|new WebSocket/);
-  assert.match(hero, /M9RPersonalMark/);
 });
 
 test("top nav drops the vaporware Future Expansions dropdown; those concepts live on the honest roadmap ledger", () => {
@@ -1765,7 +1763,7 @@ test("promote button calls the existing API route and shows a clear failure", ()
 test("dashboard Codex active rules are scoped to the selected connection workspace", () => {
   const page = read("src/app/dashboard/agents/page.tsx");
   const data = read("src/lib/agent-workspace-data.ts");
-  assert.match(page, /select\("id, workspace_id, agent_kind, repo_hint, status, created_at, last_seen_at, model, available_models, created_by"\)/);
+  assert.match(page, /select\("id, workspace_id, agent_kind, repo_hint, status, created_at, last_seen_at, model, available_models, last_provider_session_ref, created_by"\)/);
   assert.match(page, /listWorkspaceRules\(workspaceId\)/);
   // The workspace scoping used to be asserted against a `visibleActiveRules`
   // filter in AgentWorkspaceClient, which existed only to feed the "Active

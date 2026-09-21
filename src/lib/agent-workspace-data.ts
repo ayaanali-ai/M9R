@@ -91,6 +91,8 @@ export interface WsConnection {
   model?: string | null;
   /** This connection's real, live ACP model options, self-reported by the bridge (agent_connections.available_models). Null until at least one session has started. Never a guessed/hardcoded catalog. */
   available_models?: { id: string; label: string }[] | null;
+  /** Provider's own id for the newest session M9R started for this connection (agent_connections.last_provider_session_ref). */
+  last_provider_session_ref?: string | null;
   /** The connecting human's display name/email, resolved server-side from
    * agent_connections.created_by. Null when unresolved (older row, or no
    * owner recorded) -- disambiguation falls back to a short connection id
@@ -103,6 +105,28 @@ export interface WsConnection {
    * compared against a viewer's own user id, only the real id can.
    */
   owner_user_id?: string | null;
+  /** Custom display name set by the owner (agent_connections.display_name). Falls back to owner_label + agent_kind. */
+  display_name?: string | null;
+  /** Short role/title shown in roster (agent_connections.title). */
+  title?: string | null;
+  /** Custom avatar image URL (agent_connections.avatar_url). */
+  avatar_url?: string | null;
+  /** Mascot body variant for generated avatars (agent_connections.mascot_body). */
+  mascot_body?: string | null;
+  /** TTS voice identifier (agent_connections.voice). */
+  voice?: string | null;
+  /** Whether to read replies aloud in voice mode (agent_connections.speak_replies). */
+  speak_replies?: boolean | null;
+  /** Standing instructions / system prompt addition (agent_connections.soul). Up to 24KB. */
+  soul?: string | null;
+  /** Team section for roster grouping (agent_connections.section). */
+  section?: string | null;
+  /** Whether this connection is the Chief of Staff for its section (agent_connections.chief_of_staff). */
+  chief_of_staff?: boolean | null;
+  /** Additional sections this Chief may coordinate (agent_connections.managed_sections). */
+  managed_sections?: string[] | null;
+  /** Explicit allow-list of connection IDs this bot may reach (agent_connections.peers). NULL = same section. */
+  peers?: string[] | null;
 }
 
 /**
@@ -456,6 +480,8 @@ export interface AgentView {
   model?: string | null;
   /** This connection's real, live ACP model options, self-reported by the bridge. Null until at least one session has started. Never a guessed/hardcoded catalog. */
   availableModels?: { id: string; label: string }[] | null;
+  /** Provider's own session id for the newest M9R-started session; lets the user resume it natively. */
+  providerSessionRef?: string | null;
   /** agent_connections.created_by, carried through past the display-label computation above -- needed to answer "is the current viewer this connection's owner" (e.g. the terminal Sharing toggle), which a display string can never answer. */
   ownerUserId?: string | null;
 }
@@ -739,6 +765,7 @@ export function buildAgentViews(input: {
       readiness: readinessFor(activeRulesCount, runs, rulesForReviewCount, displayLabel),
       model: conn?.model ?? null,
       availableModels: conn?.available_models ?? null,
+      providerSessionRef: conn?.last_provider_session_ref ?? null,
     };
   };
 

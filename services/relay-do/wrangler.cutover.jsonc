@@ -1,0 +1,21 @@
+{
+  // Final config: replaces the container Relay under the SAME Worker name, so every URL stays the same.
+  "$schema": "https://schemas.cloudflare.com/wrangler.json",
+  "name": "m9r-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "WorkspaceHub" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MissionRelayContainer"] },
+    { "tag": "v2", "deleted_classes": ["MissionRelayContainer"] },
+    { "tag": "v3", "new_sqlite_classes": ["WorkspaceHub"] }
+  ],
+  "services": [{ "binding": "WEB", "service": "app" }],
+  "vars": {
+    "WEB_RPC_URL": "https://app.m9r.workers.dev/api/internal/relay/rpc"
+  },
+  "observability": { "enabled": true }
+}

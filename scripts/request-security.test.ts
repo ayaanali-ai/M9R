@@ -54,3 +54,10 @@ test("API guard fails closed when Origin, Sec-Fetch-Site, and bearer auth are al
     hasBearerAuthorization: false,
   }), true, "a state-changing request with none of Origin, Sec-Fetch-Site, or a bearer token must be rejected");
 });
+
+test("API guard admits a cookieless, tokenless non-browser write (nothing to forge) but not one carrying cookies", () => {
+  const allowedOrigins = new Set(["https://oathlock.vercel.app"]);
+  const base = { method: "POST", origin: null, fetchSite: null, allowedOrigins, hasBearerAuthorization: false };
+  assert.equal(isCrossSiteWrite({ ...base, hasCookies: false }), false, "CLI /api/agent/register sends no cookie, no Origin and no bearer");
+  assert.equal(isCrossSiteWrite({ ...base, hasCookies: true }), true, "ambient cookies with no Origin/Sec-Fetch-Site must still fail closed");
+});

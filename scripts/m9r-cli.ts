@@ -54,6 +54,7 @@ import {
 } from "@/lib/oathlock-autostart";
 import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, shouldRelaunch, stillHoldsWatchdogLock } from "@/lib/oathlock-watchdog";
 import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
+import { createInterface } from "node:readline/promises";
 
 const execFileAsync = promisify(execFile);
 
@@ -93,6 +94,17 @@ const deps: CliDeps = {
   err: (line) => process.stderr.write(line + "\n"),
   openUrl,
   probeVersion,
+  confirm: process.stdin.isTTY
+    ? async (question) => {
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        try {
+          const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
+          return answer === "y" || answer === "yes";
+        } finally {
+          rl.close();
+        }
+      }
+    : undefined,
   drainCapture: () => drainCaptureSpool({
     repositoryRoot: process.cwd(),
     readTranscript: (path) => readFile(path, "utf8"),
@@ -112,7 +124,7 @@ const deps: CliDeps = {
  */
 async function probeVersion(binary: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync(binary, ["--version"], { timeout: 3000, shell: true });
+    const { stdout } = await execFileAsync(binary, ["--version"], { timeout: 3000, shell: true, windowsHide: true });
     return stdout;
   } catch {
     return null;
@@ -260,7 +272,7 @@ async function runResidentCli(argv: string[]): Promise<number> {
     }
     const persistedCandidate = {
       name: profileName,
-      apiUrl: (process.env.OATHLOCK_API_URL ?? "https://m9r-dashboard.onrender.com").replace(/\/+$/, ""),
+      apiUrl: (process.env.OATHLOCK_API_URL ?? "https://app.m9r.workers.dev").replace(/\/+$/, ""),
       provider,
       ...(adapter ? { adapter } : {}),
       instanceKey: `${provider}-${randomUUID()}`,
@@ -963,6 +975,20 @@ const execution = argv[0] === "resident"
     ? runWatchdog()
     : run(argv, deps);
 
+/** `--no-autostart` declines; an interactive terminal is asked (default yes); a script keeps the disclosed default. */
+async function autostartConsented(): Promise<boolean> {
+  if (argv.includes("--no-autostart")) return false;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return true;
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question("Start the M9R runtime automatically at login? [Y/n] ")).trim().toLowerCase();
+    return answer === "" || answer === "y" || answer === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
 async function ensureRuntimeAfterAgentCommand(): Promise<void> {
   const result = await ensureLocalTerminalRuntime({
     probe: async (url) => {
@@ -1009,8 +1035,12 @@ async function ensureRuntimeAfterAgentCommand(): Promise<void> {
     // so a refused Scheduled Task / missing launchctl / no-systemd box gets a
     // warning and the manual command, not a failed `init`.
     try {
+      if (!(await autostartConsented())) {
+        deps.out("Login startup skipped. The runtime will not return after a reboot; run: m9r service install");
+        return;
+      }
       const mechanism = await installLoginAutostart();
-      deps.out(`Login startup is installed (${mechanism}); the runtime will return automatically after a reboot.`);
+      deps.out(`Login startup is installed (${mechanism}); the runtime will return automatically after a reboot. Remove it any time with: m9r disconnect`);
     } catch (error) {
       deps.err(`Login startup could not be installed automatically (${error instanceof Error ? error.message : "unknown error"}). Run: oathlock service install`);
     }
@@ -1033,7 +1063,7 @@ async function ensureRuntimeAfterAgentCommand(): Promise<void> {
 
 execution
   .then(async (code) => {
-    const runtimeTrigger = argv[0] === "init" || argv[0] === "doctor" || argv[0] === "rules" || argv[0] === "inbox"
+    const runtimeTrigger = argv[0] === "init" || argv[0] === "rules" || argv[0] === "inbox"
       || (argv[0] === "run" && argv[1] === "start");
     if (code === 0 && runtimeTrigger) {
       await ensureRuntimeAfterAgentCommand();

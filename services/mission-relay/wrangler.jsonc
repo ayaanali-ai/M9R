@@ -1,0 +1,37 @@
+// DO NOT DEPLOY (2026-09-19): Cloudflare Containers are not covered by the Startup credits and bill the card.
+// The live Relay is services/relay-do (Durable Objects). This container config is kept for reference only.
+{
+  "$schema": "https://schemas.cloudflare.com/wrangler.json",
+  "name": "m9r-relay",
+  "main": "src/worker-wrapper.ts",
+  "compatibility_date": "2024-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "containers": [
+    {
+      "class_name": "MissionRelayContainer",
+      "image": "./Dockerfile",
+      "image_build_context": "../..",
+      "max_instances": 1,
+      "instance_type": "standard-1"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MISSION_RELAY_CONTAINER",
+        "class_name": "MissionRelayContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MissionRelayContainer"]
+    }
+  ],
+  "vars": {
+    "MISSION_RELAY_HOST": "0.0.0.0",
+    "MISSION_RELAY_PORT": "8080",
+    "MISSION_RELAY_INSTANCE_ID": "m9r-relay-staging"
+  }
+}

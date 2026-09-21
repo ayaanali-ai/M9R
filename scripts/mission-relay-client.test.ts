@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   createMissionRelayHuddleAnswerFrame,
@@ -326,6 +327,13 @@ test("Mission Relay retries one unconfirmed workspace post over a reconnect with
     await client.close();
     await new Promise<void>((resolve) => webSocketServer.close(() => server.close(() => resolve())));
   }
+});
+
+test("Mission Relay does not permanently open its reconnect circuit by default", async () => {
+  const source = await readFile(new URL("../src/lib/mission/mission-relay-client.ts", import.meta.url), "utf8");
+  assert.match(source, /this\.maxReconnectAttempts = options\.maxReconnectAttempts === undefined\s*\? null/);
+  assert.match(source, /this\.maxReconnectAttempts !== null && this\.reconnectAttempt >= this\.maxReconnectAttempts/);
+  assert.match(source, /keep trying with capped backoff until the bridge is closed/);
 });
 
 test("Mission Relay rejects a request-scoped workspace error without disconnecting the authenticated bridge", async () => {

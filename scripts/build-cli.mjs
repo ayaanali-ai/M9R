@@ -55,8 +55,11 @@ function build() {
   writeFileSync(resolve(outDir, "cross-agent-capture-setup-core.js"), transpile(captureSetupCoreTs));
   const captureCoreTs = readFileSync(resolve(repoRoot, "src/lib/cross-agent-capture-core.ts"), "utf8");
   const captureCoreJs = transpile(captureCoreTs)
-    .replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"');
+    .replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"')
+    .replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"');
   writeFileSync(resolve(outDir, "cross-agent-capture-core.js"), captureCoreJs);
+  const distillTs = readFileSync(resolve(repoRoot, "src/lib/memory-distill-core.ts"), "utf8");
+  writeFileSync(resolve(outDir, "memory-distill-core.js"), transpile(distillTs).replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"'));
   const opencodeBackfillTs = readFileSync(resolve(repoRoot, "src/lib/opencode-capture-backfill-core.ts"), "utf8");
   const opencodeBackfillJs = transpile(opencodeBackfillTs)
     .replace(/["']@\/lib\/cross-agent-capture-core["']/g, '"./cross-agent-capture-core.js"');
@@ -202,8 +205,21 @@ function build() {
   const acpProviderRegistryTs = readFileSync(resolve(repoRoot, "src/lib/bridge/acp-provider-registry.ts"), "utf8");
   const acpProviderRegistryJs = transpile(acpProviderRegistryTs)
     .replace(/['"]\.\/interactive-provider-adapter['"]/g, '"./interactive-provider-adapter.js"')
-    .replace(/['"]\.\/acp-stdio-adapter['"]/g, '"./acp-stdio-adapter.js"');
+    .replace(/['"]\.\/acp-stdio-adapter['"]/g, '"./acp-stdio-adapter.js"')
+    .replace(/['"]\.\/codex-app-server-adapter['"]/g, '"./codex-app-server-adapter.js"');
   writeFileSync(resolve(outDir, "acp-provider-registry.js"), acpProviderRegistryJs);
+
+  const codexAppServerClientTs = readFileSync(resolve(repoRoot, "src/lib/bridge/codex-app-server-client.ts"), "utf8");
+  writeFileSync(resolve(outDir, "codex-app-server-client.js"), transpile(codexAppServerClientTs));
+
+  const codexAppServerAdapterTs = readFileSync(resolve(repoRoot, "src/lib/bridge/codex-app-server-adapter.ts"), "utf8");
+  const codexAppServerAdapterJs = transpile(codexAppServerAdapterTs)
+    .replace(/['"]@\/lib\/mission\/mission-provider-adapter['"]/g, '"./mission-provider-adapter.js"')
+    .replace(/['"]@\/lib\/session-redaction['"]/g, '"./session-redaction.js"')
+    .replace(/['"]\.\/acp-stdio-adapter['"]/g, '"./acp-stdio-adapter.js"')
+    .replace(/['"]\.\/codex-app-server-client['"]/g, '"./codex-app-server-client.js"')
+    .replace(/['"]\.\/interactive-provider-adapter['"]/g, '"./interactive-provider-adapter.js"');
+  writeFileSync(resolve(outDir, "codex-app-server-adapter.js"), codexAppServerAdapterJs);
 
   const acpStdioAdapterTs = readFileSync(resolve(repoRoot, "src/lib/bridge/acp-stdio-adapter.ts"), "utf8");
   const acpStdioAdapterJs = transpile(acpStdioAdapterTs)
@@ -245,6 +261,28 @@ function build() {
   const workspaceTurnTimingTs = readFileSync(resolve(repoRoot, "src/lib/bridge/workspace-turn-timing.ts"), "utf8");
   writeFileSync(resolve(outDir, "workspace-turn-timing.js"), transpile(workspaceTurnTimingTs));
 
+  const deliveryStateTs = readFileSync(resolve(repoRoot, "src/lib/delivery-state.ts"), "utf8");
+  writeFileSync(resolve(outDir, "delivery-state.js"), transpile(deliveryStateTs));
+
+  const resultTruncationTs = readFileSync(resolve(repoRoot, "src/lib/bridge/result-truncation.ts"), "utf8");
+  writeFileSync(resolve(outDir, "result-truncation.js"), transpile(resultTruncationTs));
+
+  const restartRecoveryTs = readFileSync(resolve(repoRoot, "src/lib/bridge/restart-recovery.ts"), "utf8");
+  writeFileSync(resolve(outDir, "restart-recovery.js"), transpile(restartRecoveryTs));
+
+  const deliveryLedgerTs = readFileSync(resolve(repoRoot, "src/lib/bridge/delivery-ledger.ts"), "utf8");
+  writeFileSync(resolve(outDir, "delivery-ledger.js"), transpile(deliveryLedgerTs).replace(/['"]\.\.\/delivery-state['"]/g, '"./delivery-state.js"'));
+
+  // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
+  // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
+  for (const name of ["mention-core", "inbox-core", "approval-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "local-store", "hook-handler", "install-core", "onboarding-steps", "native-commands"]) {
+    const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
+    const js = transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"').replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"');
+    writeFileSync(resolve(outDir, `${name}.js`), js);
+  }
+  const hookEntryTs = readFileSync(resolve(repoRoot, "scripts/m9r-hook.ts"), "utf8");
+  writeFileSync(resolve(outDir, "m9r-hook.js"), transpile(hookEntryTs).replace(/["']@\/lib\/native\/([a-z-]+)["']/g, '"./$1.js"'));
+
   const missionParticipantIdsTs = readFileSync(resolve(repoRoot, "src/lib/mission/mission-participant-ids.ts"), "utf8");
   writeFileSync(resolve(outDir, "mission-participant-ids.js"), transpile(missionParticipantIdsTs));
 
@@ -256,6 +294,18 @@ function build() {
   // than leaving the generated Bridge import pointed at the monorepo source.
   const agentHeartbeatTs = readFileSync(resolve(repoRoot, "src/lib/agent-heartbeat.ts"), "utf8");
   writeFileSync(resolve(outDir, "agent-heartbeat.js"), transpile(agentHeartbeatTs));
+  // bridge-runtime imports conversation-routing (and, through it, agent-presence).
+  // Ship both flattened next to it; without them every provider bridge crashes on
+  // ERR_MODULE_NOT_FOUND the moment the packaged CLI starts it.
+  const agentPresenceTs = readFileSync(resolve(repoRoot, "src/lib/agent-presence.ts"), "utf8");
+  writeFileSync(resolve(outDir, "agent-presence.js"), transpile(agentPresenceTs));
+  const conversationRoutingTs = readFileSync(resolve(repoRoot, "src/lib/conversation-routing.ts"), "utf8");
+  writeFileSync(
+    resolve(outDir, "conversation-routing.js"),
+    transpile(conversationRoutingTs)
+      .replace(/['"]@\/lib\/provider-adapter-config['"]/g, '"./provider-adapter-config.js"')
+      .replace(/['"]@\/lib\/agent-presence['"]/g, '"./agent-presence.js"'),
+  );
   const bridgeRuntimeTs = readFileSync(resolve(repoRoot, "services/mission-bridge/src/bridge-runtime.ts"), "utf8");
   const bridgeRuntimeJs = transpile(bridgeRuntimeTs)
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/bridge-protocol['"]/g, '"./bridge-protocol.js"')
@@ -264,8 +314,13 @@ function build() {
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/mission\/mission-provider-adapter['"]/g, '"./mission-provider-adapter.js"')
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/mission\/mission-feature-flags['"]/g, '"./mission-feature-flags.js"')
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/agent-heartbeat['"]/g, '"./agent-heartbeat.js"')
+    .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/conversation-routing['"]/g, '"./conversation-routing.js"')
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/mission\/mission-relay-client['"]/g, '"./mission-relay-client.js"')
     .replace('"../../../src/lib/bridge/workspace-turn-timing"', '"./workspace-turn-timing.js"')
+    .replace('"../../../src/lib/bridge/delivery-ledger"', '"./delivery-ledger.js"')
+    .replace('"../../../src/lib/bridge/restart-recovery"', '"./restart-recovery.js"')
+    .replace('"../../../src/lib/bridge/result-truncation"', '"./result-truncation.js"')
+    .replace('"../../../src/lib/delivery-state"', '"./delivery-state.js"')
     .replace('"../../../src/lib/mission/mission-participant-ids"', '"./mission-participant-ids.js"')
     .replace('"../../../src/lib/mission/workspace-cursor"', '"./workspace-cursor.js"')
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/workspace-prompt-queue['"]/g, '"./workspace-prompt-queue.js"')
@@ -400,7 +455,9 @@ function build() {
     .replace(/["']@\/lib\/provider-adapter-config["']/g, '"./provider-adapter-config.js"')
     .replace(/["']@\/lib\/agent-detection-core["']/g, '"./agent-detection-core.js"')
     .replace(/["']@\/lib\/cross-agent-capture-setup-core["']/g, '"./cross-agent-capture-setup-core.js"')
-    .replace(/["']@\/lib\/agent-heartbeat["']/g, '"./agent-heartbeat.js"');
+    .replace(/["']@\/lib\/agent-heartbeat["']/g, '"./agent-heartbeat.js"')
+    .replace(/["']@\/lib\/native\/native-commands["']/g, '"./native-commands.js"')
+    .replace(/["']@\/lib\/native\/memory-command["']/g, '"./memory-command.js"');
   writeFileSync(resolve(outDir, "oathlock-cli-core.js"), coreJs);
 
   // 4. Entry — rewrite the "@/lib/oathlock-cli-core" alias to a relative import,

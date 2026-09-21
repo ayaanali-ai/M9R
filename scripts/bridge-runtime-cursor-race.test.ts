@@ -211,6 +211,25 @@ test("a deferred message stops the scan instead of letting the next message carr
   assert.match(relayDeferBranch, /console\.warn\(/);
 });
 
+test("an accepted or pending message keeps the cursor behind the provider turn until reconciliation", () => {
+  // Enqueueing work is not delivery. The provider may still be running when
+  // the scan returns, and a bridge crash in that window must leave the
+  // durable message available for recovery rather than advancing past it.
+  const src = read("services/mission-bridge/src/bridge-runtime.ts");
+  const scanStart = src.indexOf("async function scanWorkspaceMessages");
+  const scanEnd = src.indexOf("\n  async function heartbeat", scanStart);
+  const scanBody = src.slice(scanStart, scanEnd);
+  assert.match(scanBody, /result === "accepted"/);
+  assert.match(scanBody, /result === "pending"/);
+  assert.match(scanBody, /leaving the cursor before it/);
+
+  const relayEventStart = src.indexOf("if (frame.type !== \"workspace.event\"");
+  const relayEventEnd = src.indexOf("\n  /**\n   * At most one prompt", relayEventStart);
+  const relayEventBody = src.slice(relayEventStart, relayEventEnd);
+  assert.match(relayEventBody, /result !== "accepted"/);
+  assert.match(relayEventBody, /result !== "pending"/);
+});
+
 test("one failed turn posts exactly one failure notice, not one per queued message in the batch", () => {
   // Regression test for a confirmed incident: a 43-message backlog batched
   // into ONE combined prompt produced ONE provider timeout, but the fallback

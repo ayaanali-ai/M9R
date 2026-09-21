@@ -92,6 +92,31 @@ test("workspace.post preserves direct recipient routing through the relay servic
   assert.equal(frames.get("bystander-socket")!.some((frame) => frame.type === "workspace.event"), false);
 });
 
+test("workspace.post publishes durable additional messages immediately without changing the post confirmation", async () => {
+  const frames: RelayFrame[] = [];
+  const service = new MissionRelayService({
+    authenticator: {
+      async authenticate({ credential }) { return { kind: "human", id: credential, workspaceIds: ["workspace-1"] }; },
+    },
+    loadMissionSnapshot: async () => ({ mission: "snapshot" }),
+    loadWorkspaceSnapshot: async () => ({ conversation: "snapshot" }),
+    postWorkspaceMessage: async () => ({
+      message: { id: "message-1", recipient_connection_id: null },
+      messages: [{ id: "notice-1", kind: "notice", body: "M9R could not route this message: Codex is offline." }],
+    }),
+  });
+  service.connect({ connectionId: "human-socket", send: (frame) => { frames.push(frame); } });
+  await service.receive("human-socket", { ...baseFrame, type: "auth.browser", frameId: "auth-human", payload: { credential: "human-1" } });
+  await service.receive("human-socket", { ...baseFrame, type: "workspace.subscribe", frameId: "subscribe-human", channelId: "channel-1", payload: { cursor: null } });
+  await service.receive("human-socket", { ...baseFrame, type: "workspace.post", frameId: "post-human", channelId: "channel-1", payload: { body: "@codex hello" } });
+  const events = frames.filter((frame) => frame.type === "workspace.event");
+  assert.equal(events.length, 2);
+  assert.equal((events[0].payload as { message?: { id?: string } }).message?.id, "message-1");
+  assert.equal((events[1].payload as { message?: { id?: string } }).message?.id, "notice-1");
+  assert.equal(events[0].correlationId, "correlation-1");
+  assert.notEqual(events[1].correlationId, events[0].correlationId);
+});
+
 test("production workspace snapshots apply the same recipient visibility rule to bridge principals", async () => {
   const source = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("../src/lib/mission/mission-relay-production.ts", import.meta.url), "utf8"));
   assert.match(source, /input\.principal\.kind === "bridge"/);
