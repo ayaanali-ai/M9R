@@ -45,10 +45,11 @@ function watchSetup() {
   return { day, store, start: () => createCodexWatcher(store, { codexHome: codex }) };
 }
 
-test("a mention typed in a Codex session becomes a task; history is not replayed; the same prompt is never routed twice", () => {
+test("a mention typed in a Codex session becomes a task; history is not replayed; the same prompt is never routed twice", async () => {
   const { day, store, start } = watchSetup();
   const file = join(day, "rollout-2026-09-21T10-00-00-019f-test.jsonl");
   writeFileSync(file, meta() + turn() + user("@claude old mention from before we started"));
+  await new Promise((r) => setTimeout(r, 60)); // file clocks and Date.now() differ by a few ms; a session that pre-dates the watcher must look older
   const watcher = start();
   watcher.refresh();
   assert.equal(watcher.tick(), 0, "history that was already there is skipped");

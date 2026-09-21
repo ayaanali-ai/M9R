@@ -51,4 +51,10 @@ const exe = join(out, exeName);
 copyFileSync(process.execPath, exe);
 r = spawnSync("npx", ["--yes", "postject", exe, "NODE_SEA_BLOB", join(work, "blob.blob"), "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2", ...(process.platform === "darwin" ? ["--macho-segment-name", "NODE_SEA"] : [])], { stdio: "inherit", shell: true });
 if (r.status !== 0) process.exit(r.status ?? 1);
+// The small native hook (hook/): agents run this, not the big engine, so a cold start can never hit their hook time limit.
+const cargoEnv = { ...process.env, PATH: `${process.env.PATH}${process.platform === "win32" ? ";" : ":"}${join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".cargo", "bin")}` };
+r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "hook"), env: cargoEnv, stdio: "inherit", shell: true });
+if (r.status !== 0) process.exit(r.status ?? 1);
+const shimName = process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native";
+copyFileSync(join(root, "hook", "target", "release", process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook"), join(out, shimName));
 console.log(`Built ${exe} (${Math.round(readFileSync(exe).length / 1e6)} MB)`);

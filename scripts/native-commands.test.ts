@@ -186,7 +186,7 @@ function runtimeSandbox() {
   const home = mkdtempSync(join(tmpdir(), "m9r-rt-"));
   const source = join(home, "cli-dist");
   mkdirSync(source, { recursive: true });
-  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js"]) writeFileSync(join(source, f), `// ${f} v1\n`, "utf8");
+  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js"]) writeFileSync(join(source, f), `// ${f} v1\n`, "utf8");
   const out: string[] = [];
   const err: string[] = [];
   const io: NativeIo = { homeDir: home, env: { M9R_HOME: join(home, ".m9r"), CLAUDE_CONFIG_DIR: join(home, ".claude"), M9R_HOOK_SOURCE: source }, out: (l) => out.push(l), err: (l) => err.push(l) };
@@ -197,12 +197,12 @@ function runtimeSandbox() {
 test("setup copies the hook program into ~/.m9r/bin and points the hooks there, not at where the CLI happens to live", async () => {
   const s = runtimeSandbox();
   assert.equal(await s.run("setup", ["--yes"]), 0);
-  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js", "package.json"]) assert.equal(existsSync(join(s.bin, f)), true, f);
+  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js", "package.json"]) assert.equal(existsSync(join(s.bin, f)), true, f);
   assert.equal(JSON.parse(readFileSync(join(s.bin, "package.json"), "utf8")).type, "module");
   const command: string = JSON.parse(readFileSync(s.p.settings, "utf8")).hooks.UserPromptSubmit[0].hooks[0].command;
   assert.equal(command.includes(s.bin.split(String.fromCharCode(92)).join("/")), true, command);
   assert.equal(command.includes("cli-dist"), false, "the hook must not point at the CLI's own location");
-  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles.length, 12);
+  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles.length, 13);
   s.done();
 });
 
@@ -293,5 +293,25 @@ test("with the engine, setup copies it into M9R's folder and the hooks call it (
   assert.match(s.out.join("\n"), /Already set up/);
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(existsSync(installed), false);
+  s.done();
+});
+
+test("with the engine and the native hook side by side, the settings point at the small hook, both are copied, and uninstall removes both", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in native hook", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const bin = join(s.p.m9r, "bin");
+  assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native"), "utf8"), "stand-in native hook");
+  assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine"), "utf8"), "stand-in engine");
+  const settings = readFileSync(s.p.settings, "utf8");
+  assert.match(settings, /m9r-hook(\.exe|-native)?.{1,2} UserPromptSubmit claude-code/);
+  assert.doesNotMatch(settings, /m9r-engine/);
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(existsSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native")), false);
   s.done();
 });

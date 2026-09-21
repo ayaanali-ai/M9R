@@ -15,7 +15,7 @@ const home = mkdtempSync(join(tmpdir(), "m9r-n3-"));
 const project = mkdtempSync(join(tmpdir(), "m9r-n3-proj-"));
 writeFileSync(join(project, "AGENTS.md"), standingInstructionBlock("codex"));
 writeFileSync(join(project, "a.txt"), "PURPLE-ELEPHANT-42 is the secret phrase\nsecond line\n");
-const env = { ...process.env, M9R_HOME: home };
+const env = { ...process.env, M9R_HOME: home, M9R_CODEX_WATCH: "1" };
 for (const k of Object.keys(env)) if (/^(CLAUDECODE|CLAUDE_CODE_|CODEX_|M9R_SEND_AS_HUMAN)/.test(k)) delete env[k];
 const codexJs = join(process.env.APPDATA ?? "", "npm", "node_modules", "@openai", "codex", "bin", "codex.js");
 let failures = 0;
