@@ -207,7 +207,7 @@ test("the session chooser never guesses between several: pinned, then the only o
   assert.equal(pickSession(two, { now: NOW, pinned: "zzz" }).kind, "none");
 });
 
-test("with two open Codex sessions an unaimed task is not pushed at random; it falls back to the inbox and says how to aim it", async () => {
+test("a task from a folder with no Codex session is never pushed into another folder's session; it falls back to the inbox and says how to aim it", async () => {
   const store = newStore();
   store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj/a" });
   store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/b" });
@@ -216,7 +216,7 @@ test("with two open Codex sessions an unaimed task is not pushed at random; it f
   const t = store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "human_typed", idempotencyKey: "amb", cwd: "C:/elsewhere" }).task;
   const r = await deliverToCodex(store, t.id, deps);
   assert.equal(r.state, "failed");
-  assert.match(r.state === "failed" ? r.reason : "", /2 Codex sessions.*m9r-cli send @codex --session/);
+  assert.match(r.state === "failed" ? r.reason : "", /No Codex session is open in C:\/elsewhere.*m9r-cli send @codex --session/);
   assert.equal(deps.calls.length, 0, "nothing was queued anywhere");
   assert.match(renderInboxInjection(store.tasksFor("codex"), 0).text, /Review lease\.ts/, "it shows at the next prompt in whichever session the user uses");
 });
@@ -266,7 +266,7 @@ test("with two sessions the push goes to the one that is open, and the machine i
   store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/b" });
   const asked: string[][] = [];
   const deps = fakeDeps({ sessionLiveness: async (ids) => { asked.push(ids); return { [A]: "live", [B]: "free" }; } });
-  const t = store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "human_typed", idempotencyKey: "live1", cwd: "C:/elsewhere" }).task;
+  const t = store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "human_typed", idempotencyKey: "live1", cwd: "C:/proj" }).task;
   assert.deepEqual(await deliverToCodex(store, t.id, deps), { state: "queued", threadId: A });
   assert.equal(asked.length, 1);
   const pinned = store.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "live2", targetSession: B.slice(0, 12) }).task;
@@ -296,4 +296,17 @@ test("an older inbox item is not mixed into a prompt M9R pushed; it waits for th
   assert.equal(pushed, null, "the pushed prompt gets nothing added");
   const real = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "what next?" }, ctx);
   assert.match(real?.hookSpecificOutput.additionalContext ?? "", /Older item that fell back to the inbox/, "it arrives at the user's own next prompt");
+});
+
+test("the sender's own folder wins over a related folder, and a related folder (project root vs subfolder) is used when it is the only one", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj" });
+  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/term" });
+  const deps = fakeDeps();
+  const inTerm = store.addTask({ from: "claude", to: "codex", goal: "one", origin: "human_typed", idempotencyKey: "t1", cwd: "C:/proj/term" }).task;
+  assert.deepEqual(await deliverToCodex(store, inTerm.id, deps), { state: "queued", threadId: B });
+  const sub = store.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "t2", cwd: "C:/proj/src" }).task;
+  assert.deepEqual(await deliverToCodex(store, sub.id, deps), { state: "queued", threadId: A }, "Codex at the project root serves Claude in a subfolder");
+  const other = store.addTask({ from: "claude", to: "codex", goal: "three", origin: "human_typed", idempotencyKey: "t3", cwd: "C:/other" }).task;
+  assert.equal((await deliverToCodex(store, other.id, deps)).state, "failed");
 });

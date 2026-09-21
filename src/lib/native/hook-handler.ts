@@ -49,7 +49,8 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex").slice(0,
 
 /** The task's goal is what the human wrote, minus the routing token, so the target reads a clean request. */
 function goalFor(prompt: string, handle: string): string {
-  return prompt.replace(new RegExp(`@${handle}\\b`, "gi"), "").replace(/[ \t]{2,}/g, " ").trim();
+  // Claude Code wraps pasted text in <pasted_content ...> tags; they are not part of what the person asked.
+  return prompt.replace(/<\/?pasted_content[^>]*>/gi, " ").replace(new RegExp(`@${handle}\\b`, "gi"), "").replace(/[ \t]{2,}/g, " ").trim();
 }
 
 function readMemoryIndex(cwd: string): string | null {

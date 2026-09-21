@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, nodeForCodex, normCwd, foldersRelated, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
 import { windowsFileHolders, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
 
@@ -39,9 +39,15 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
     return { state: "failed", reason };
   };
   const everySession = store.sessionsFor("codex");
-  // Sessions in the sender's own folder are the likely target; asking the machine about all of them (dozens after a day of use) costs seconds.
-  const sameFolder = task.cwd && !task.targetSession ? everySession.filter((s) => normCwd(s.cwd) === normCwd(task.cwd)) : [];
-  const known = sameFolder.length > 0 ? sameFolder : everySession;
+  // A task is aimed by folder: sessions in the sender's own folder first, then one whose folder contains it or is inside it (Codex opened
+  // at the project root, Claude in a subfolder). A session in an unrelated folder is never picked for the sender: that could be someone's
+  // other project. Only an explicit `--session`, or a sender with no known folder, may reach any session.
+  let known = everySession;
+  if (task.cwd && !task.targetSession) {
+    const exact = everySession.filter((s) => normCwd(s.cwd) === normCwd(task.cwd));
+    known = exact.length > 0 ? exact : everySession.filter((s) => foldersRelated(s.cwd, task.cwd));
+    if (known.length === 0 && everySession.length > 0) return fail(`No Codex session is open in ${task.cwd}. Open Codex there and send it one message (a fresh Codex has no session to push into yet), or aim a task: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
+  }
   // Asking the machine costs about a second, so only when there is a choice to make and nobody pinned one.
   const liveness = !task.targetSession && known.length > 1 && deps.sessionLiveness ? await deps.sessionLiveness(known.map((s) => s.sessionId)).catch(() => undefined) : undefined;
   const choice = pickSession(known, { pinned: task.targetSession, senderCwd: task.cwd, now: new Date(), liveness });

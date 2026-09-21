@@ -28,6 +28,7 @@ function sandbox(opts: { terminal?: boolean; env?: Record<string, string> } = {}
     err: (l) => err.push(l),
     confirm: opts.terminal === false ? undefined : async () => true,
     codexDeps,
+    cwd: "C:/p",
   };
   const store = createLocalStore(nativePaths(io).m9r);
   store.registerEndpoint({ provider: "codex", sessionId: THREAD, cwd: "C:/p" });

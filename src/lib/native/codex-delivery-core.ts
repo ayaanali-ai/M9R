@@ -73,6 +73,12 @@ export type SessionChoice =
 const SESSION_WINDOW_MS = 24 * 60 * 60_000;
 export const normCwd = (p: string | undefined) => (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 
+/** True when one folder is the other or contains it. */
+export const foldersRelated = (a: string | undefined, b: string | undefined): boolean => {
+  const x = normCwd(a), y = normCwd(b);
+  return !!x && !!y && (x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`));
+};
+
 /**
  * Which session to push into. Codex has no session-end hook and its hook payload has no process id, but a live session
  * holds its rollout file open (see codex-liveness). Open sessions are preferred; between several this never guesses: a pinned id wins; one recent session is used;

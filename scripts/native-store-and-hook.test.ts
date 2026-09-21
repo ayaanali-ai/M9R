@@ -175,3 +175,10 @@ test("hook failures are silent: a broken store or unknown event prints nothing a
   assert.equal(handleHookEvent({}, ctx(store)), null);
   done();
 });
+
+test("text pasted into Claude Code arrives wrapped in <pasted_content> tags; the task keeps only what was asked", () => {
+  const store = createLocalStore(mkdtempSync(join(tmpdir(), "m9r-paste-")));
+  store.registerEndpoint({ provider: "codex", sessionId: "01a0aaaa-0000-7000-8000-000000000009", cwd: "C:/p" });
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", cwd: "C:/p", prompt: '@codex <pasted_content id="6b01"> reply with only the word: ok </pasted_content>' }, { provider: "claude-code", store, pathExists: () => false, readIndex: () => null });
+  assert.equal(store.getTask("T1")?.goal, "reply with only the word: ok");
+});
