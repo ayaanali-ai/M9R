@@ -2,6 +2,7 @@
 // Every string from the feed is placed with textContent, never as HTML.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 type AgentState = "open_working" | "open_idle" | "offline" | "unknown" | "seen" | "not_connected";
 interface Agent { handle: string; state: AgentState; since?: string; evidence: string; sessions: Array<{ id: string; cwd?: string; live: boolean | null }> }
@@ -192,8 +193,22 @@ function parse(text: string) {
   try { const f = JSON.parse(text) as Feed; if (f && f.version === 1 && Array.isArray(f.agents)) onFeed(f); } catch { /* keep the last good feed */ }
 }
 
-pill.addEventListener("click", (ev) => {
-  if ((ev.target as HTMLElement).classList.contains("mark")) return; // the mark is the drag handle
+// Drag the pill from anywhere on it: press and move more than a few pixels and the window follows the mouse; a plain click still
+// opens or closes the panel. The window never takes keyboard focus, so this uses the system's own window drag.
+let press: { x: number; y: number } | null = null;
+let dragged = false;
+pill.addEventListener("mousedown", (ev) => { if (ev.button === 0) { press = { x: ev.screenX, y: ev.screenY }; dragged = false; } });
+window.addEventListener("mouseup", () => { press = null; });
+window.addEventListener("mousemove", (ev) => {
+  if (!press || !inTauri || (ev.buttons & 1) === 0) return;
+  if (Math.hypot(ev.screenX - press.x, ev.screenY - press.y) < 5) return;
+  press = null;
+  dragged = true;
+  void getCurrentWindow().startDragging().catch(() => undefined);
+});
+
+pill.addEventListener("click", () => {
+  if (dragged) { dragged = false; return; }
   expanded = !expanded;
   if (expanded) { pingUntil = 0; window.clearTimeout(pingTimer); }
   render();
