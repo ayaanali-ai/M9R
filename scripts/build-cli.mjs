@@ -275,7 +275,7 @@ function build() {
 
   // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["mention-core", "inbox-core", "approval-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "local-store", "hook-handler", "install-core", "onboarding-steps", "native-commands"]) {
+  for (const name of ["mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "local-store", "hook-handler", "install-core", "onboarding-steps", "native-commands"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"').replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"');
     writeFileSync(resolve(outDir, `${name}.js`), js);

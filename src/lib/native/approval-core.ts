@@ -4,6 +4,7 @@
  * agent as a real prompt until a person said so (design section 7).
  */
 import type { Task } from "./inbox-core";
+import { classifyRisk } from "./risk-core";
 
 /** Environment markers an agent's shell tool carries. A person's own terminal has none of them. */
 const AGENT_ENV_MARKERS = ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CODEX_CI", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "OPENCODE", "OPENCODE_SESSION_ID"] as const;
@@ -22,19 +23,9 @@ export function isHumanContext(input: { hasTerminal: boolean; env: Record<string
   return input.hasTerminal && !isAgentContext(input.env);
 }
 
-/** Goals that always need a fresh yes, even with a standing rule (design section 7: protected actions always ask). */
-const PROTECTED: readonly RegExp[] = [
-  /\brm\s+-\w*r/i, /\bdel(?:ete)?\b[^.\n]{0,40}\b(?:file|folder|director|branch|database|table|repo|account|bucket)/i,
-  /\bforce[- ]push\b|\bpush\b[^.\n]{0,20}--force|\breset\s+--hard\b/i,
-  /\bdrop\s+(?:table|database|schema)\b|\btruncate\s+table\b/i,
-  /\b(?:deploy|publish|release|ship)\b/i, /\bnpm\s+publish\b/i,
-  /\b(?:secret|credential|password|api[_ -]?key|private key|token)s?\b/i,
-  /\b(?:pay|payment|charge|refund|invoice|transfer|wire)\b/i,
-  /\b(?:send|post|email|message)\b[^.\n]{0,30}\b(?:to|on)\b[^.\n]{0,30}\b(?:customer|client|slack|discord|twitter|x\.com|everyone|team)\b/i,
-];
-
+/** Goals that always need a fresh yes, even with a standing rule (protected actions always ask). See risk-core.ts. */
 export function isProtectedAction(goal: string): boolean {
-  return PROTECTED.some((re) => re.test(goal));
+  return classifyRisk(goal).risky;
 }
 
 export interface StandingRule {
