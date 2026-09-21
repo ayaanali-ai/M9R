@@ -21,7 +21,15 @@ const specs = [
   { event: "SessionStart", command: cmd("SessionStart"), timeoutSec: 5 },
   { event: "UserPromptSubmit", command: cmd("UserPromptSubmit"), timeoutSec: 5 },
 ];
-const parse = (s: string) => JSON.parse(s) as any;
+type ParsedHook = { hooks: Array<{ command: string; timeout?: number; type?: string }> };
+type ParsedSettings = {
+  model?: string;
+  permissions?: Record<string, unknown>;
+  hooks: Record<string, ParsedHook[]>;
+  theme?: string;
+  [key: string]: unknown;
+};
+const parse = (s: string) => JSON.parse(s) as ParsedSettings;
 
 test("merge into an empty or missing settings file creates just our hooks", () => {
   for (const input of [null, "", "{}"]) {

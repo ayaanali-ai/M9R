@@ -1,24 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isMissingDbFunctionError, loadDashboardMessageWindows, loadDashboardUnreadCounts } from "@/lib/dashboard-list-batching";
+import { isMissingDbFunctionError, loadDashboardMessageWindows, loadDashboardUnreadCounts, type DashboardAuthShape } from "@/lib/dashboard-list-batching";
 
 type Call = { kind: "select" | "rpc"; detail: string };
+type DashboardAuth = DashboardAuthShape;
+type DashboardQuery = ReturnType<DashboardAuth["from"]>;
+type DashboardResult = Awaited<ReturnType<DashboardQuery["limit"]>>;
 
 /** A fake Supabase client that records every query, so the tests can assert how many round trips a list load makes. */
 function fakeAuth(options: { previews?: Array<Record<string, unknown>>; selected?: Array<Record<string, unknown>>; rpcError?: { code?: string; message?: string } | null; unread?: Array<{ conversation_id: string; unread_count: number }> }) {
   const calls: Call[] = [];
-  const chain = (table: string, conversationId: () => string | null) => {
-    const builder: any = {
-      select: () => builder, eq: (column: string, value: string) => { if (column === "conversation_id") state.conversationId = value; return builder; },
-      order: () => builder, gt: () => builder, not: () => builder,
-      limit: (n: number) => { calls.push({ kind: "select", detail: `${table}:${state.conversationId}:limit${n}` }); const rows = n === 80 ? options.selected ?? [] : (options.previews ?? []).filter((row) => row.conversation_id === state.conversationId); return Promise.resolve({ data: rows, error: null }); },
-      then: undefined,
-    };
+  const chain = (table: string) => {
     const state = { conversationId: null as string | null };
+    const builder = {} as DashboardQuery;
+    builder.select = () => builder;
+    builder.eq = (column: string, value: unknown) => { if (column === "conversation_id" && typeof value === "string") state.conversationId = value; return builder; };
+    builder.order = () => builder;
+    builder.gt = () => builder;
+    builder.not = () => builder;
+    builder.limit = (n: number): Promise<DashboardResult> => { calls.push({ kind: "select", detail: `${table}:${state.conversationId}:limit${n}` }); const rows = n === 80 ? options.selected ?? [] : (options.previews ?? []).filter((row) => row.conversation_id === state.conversationId); return Promise.resolve({ data: rows, error: null }); };
     return builder;
   };
-  const auth: any = {
-    from: (table: string) => chain(table, () => null),
+  const auth: DashboardAuth = {
+    from: (table: string) => chain(table),
     rpc: (name: string) => {
       calls.push({ kind: "rpc", detail: name });
       if (options.rpcError) return Promise.resolve({ data: null, error: options.rpcError });
@@ -87,8 +91,19 @@ test("unread counts come from one call, keyed by channel, and count as numbers",
 
 test("unread counts fall back to per-channel counting when the function is missing, and an empty list makes no call", async () => {
   const { auth: missing } = fakeAuth({ rpcError: { code: "42883", message: "function does not exist" } });
-  const chain = (missing as any).from;
-  (missing as any).from = (table: string) => { const b = chain(table); b.select = () => { const c: any = { eq: () => c, gt: () => c, not: () => c, then: (resolve: (v: unknown) => void) => resolve({ count: 4 }) }; return c; }; return b; };
+  const chain = missing.from;
+  missing.from = (table: string) => {
+    const builder = chain(table);
+    const countQuery = {} as DashboardQuery;
+    countQuery.eq = () => countQuery;
+    countQuery.gt = () => countQuery;
+    countQuery.not = () => countQuery;
+    countQuery.select = () => countQuery;
+    countQuery.limit = () => Promise.resolve({ data: [], error: null });
+    countQuery.then = ((resolve) => Promise.resolve(resolve?.({ data: null, error: null, count: 4 }))) as DashboardQuery["then"];
+    builder.select = () => countQuery;
+    return builder;
+  };
   const counts = await loadDashboardUnreadCounts(missing, "w1", "u1", ["c1"], [], new Map());
   assert.equal(counts.get("c1"), 4);
   const { auth, calls } = fakeAuth({});

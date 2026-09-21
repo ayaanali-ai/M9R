@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TaskItemConflictError, canTransitionItem, reassignItemCas, setItemStatusCas } from "@/lib/bridge/task-item-cas";
 
-type Row = Record<string, any>;
+type Row = Record<string, unknown>;
+type ReadQuery = { eq: () => ReadQuery; maybeSingle: () => Promise<{ data: Row; error: null }> };
+type WriteQuery = {
+  eq: (column: string, value: unknown) => WriteQuery;
+  select: () => Promise<{ data: Array<{ id: string }>; error: null }>;
+  then: (resolve: (value: { error: null }) => void) => void;
+};
 
 /**
  * An in-memory stand-in for the one table these functions use. `beforeWrite` runs between the function's read and its
@@ -14,10 +20,10 @@ function fakeDb(initial: Row, hooks: { beforeWrite?: (row: Row, writeIndex: numb
   const log: string[] = [];
   const db = {
     from: () => ({
-      select: () => { const q: any = { eq: () => q, maybeSingle: () => Promise.resolve({ data: { ...row }, error: null }) }; return q; },
+      select: () => { const q: ReadQuery = { eq: () => q, maybeSingle: () => Promise.resolve({ data: { ...row }, error: null }) }; return q; },
       update: (patch: Row) => {
         const filters: Array<[string, unknown]> = [];
-        const q: any = {
+        const q: WriteQuery = {
           eq: (column: string, value: unknown) => { filters.push([column, value]); return q; },
           select: () => {
             hooks.beforeWrite?.(row, writes);
@@ -25,9 +31,9 @@ function fakeDb(initial: Row, hooks: { beforeWrite?: (row: Row, writeIndex: numb
             const matches = filters.every(([column, value]) => row[column] === value);
             if (matches) { Object.assign(row, patch); log.push(`applied ${JSON.stringify(Object.keys(patch))}`); }
             else log.push("rejected: state changed");
-            return Promise.resolve({ data: matches ? [{ id: row.id }] : [], error: null });
+            return Promise.resolve({ data: matches ? [{ id: String(row.id) }] : [], error: null });
           },
-          then: (resolve: (v: unknown) => void) => { Object.assign(row, patch); resolve({ error: null }); },
+          then: (resolve: (v: { error: null }) => void) => { Object.assign(row, patch); resolve({ error: null }); },
         };
         return q;
       },
@@ -115,7 +121,7 @@ test("two racing confirmations cannot both spend the last reassignment slot", as
 });
 
 test("a reassignment that keeps losing the race reports a conflict instead of looping forever", async () => {
-  const { db } = fakeDb({ assignment_history: [], reassignment_count: 0, status: "pending" }, { beforeWrite: (r) => { r.reassignment_count += 0.5; } });
+  const { db } = fakeDb({ assignment_history: [], reassignment_count: 0, status: "pending" }, { beforeWrite: (r) => { r.reassignment_count = Number(r.reassignment_count ?? 0) + 0.5; } });
   const result = await reassignItemCas(db, { itemId: "item-1", newConnectionId: "b" }, 99);
   assert.deepEqual(result, { ok: false, reason: "conflict" });
 });

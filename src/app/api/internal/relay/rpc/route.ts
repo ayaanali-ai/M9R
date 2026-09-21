@@ -41,18 +41,23 @@ function relayOptions(): MissionRelayServiceOptions | null {
   return cached.options;
 }
 
-async function dispatch(options: MissionRelayServiceOptions, op: RelayRpcOp, input: any): Promise<unknown> {
+async function dispatch(options: MissionRelayServiceOptions, op: RelayRpcOp, input: unknown): Promise<unknown> {
   switch (op) {
-    case "authenticate": return options.authenticator.authenticate(input);
-    case "loadMissionSnapshot": return options.loadMissionSnapshot(input);
-    case "loadWorkspaceSnapshot": return options.loadWorkspaceSnapshot ? options.loadWorkspaceSnapshot(input) : null;
-    case "postMessage": return options.postMessage ? options.postMessage(input) : null;
-    case "postWorkspaceMessage": return options.postWorkspaceMessage ? options.postWorkspaceMessage(input) : null;
-    case "receiveWorkspaceTiming": await options.receiveWorkspaceTiming?.(input); return null;
-    case "acknowledgeDelivery": await options.acknowledgeDelivery?.(input); return null;
-    case "receiveRuntimeEvent": return options.receiveRuntimeEvent ? options.receiveRuntimeEvent(input) : null;
-    case "receiveBridgeHeartbeat": await options.receiveBridgeHeartbeat?.(input); return null;
-    case "resolvePtyOwnerHuman": return options.resolvePtyOwnerHuman ? options.resolvePtyOwnerHuman(String(input?.agentConnectionId ?? input)) : null;
+    case "authenticate": return options.authenticator.authenticate(input as Parameters<MissionRelayServiceOptions["authenticator"]["authenticate"]>[0]);
+    case "loadMissionSnapshot": return options.loadMissionSnapshot(input as Parameters<MissionRelayServiceOptions["loadMissionSnapshot"]>[0]);
+    case "loadWorkspaceSnapshot": return options.loadWorkspaceSnapshot ? options.loadWorkspaceSnapshot(input as Parameters<NonNullable<MissionRelayServiceOptions["loadWorkspaceSnapshot"]>>[0]) : null;
+    case "postMessage": return options.postMessage ? options.postMessage(input as Parameters<NonNullable<MissionRelayServiceOptions["postMessage"]>>[0]) : null;
+    case "postWorkspaceMessage": return options.postWorkspaceMessage ? options.postWorkspaceMessage(input as Parameters<NonNullable<MissionRelayServiceOptions["postWorkspaceMessage"]>>[0]) : null;
+    case "receiveWorkspaceTiming": await options.receiveWorkspaceTiming?.(input as Parameters<NonNullable<MissionRelayServiceOptions["receiveWorkspaceTiming"]>>[0]); return null;
+    case "acknowledgeDelivery": await options.acknowledgeDelivery?.(input as Parameters<NonNullable<MissionRelayServiceOptions["acknowledgeDelivery"]>>[0]); return null;
+    case "receiveRuntimeEvent": return options.receiveRuntimeEvent ? options.receiveRuntimeEvent(input as Parameters<NonNullable<MissionRelayServiceOptions["receiveRuntimeEvent"]>>[0]) : null;
+    case "receiveBridgeHeartbeat": await options.receiveBridgeHeartbeat?.(input as Parameters<NonNullable<MissionRelayServiceOptions["receiveBridgeHeartbeat"]>>[0]); return null;
+    case "resolvePtyOwnerHuman": {
+      const value = input && typeof input === "object" && "agentConnectionId" in input
+        ? (input as { agentConnectionId?: unknown }).agentConnectionId
+        : input;
+      return options.resolvePtyOwnerHuman ? options.resolvePtyOwnerHuman(String(value ?? "")) : null;
+    }
   }
 }
 

@@ -2021,7 +2021,8 @@ export async function listConversationsForDashboard(selectedConversationId?: str
   const todosBy = await listMessageTodosForConversations(ids);
   const messagesBy = new Map<string, DashboardConversationMessage[]>();
   for (const row of rawMessages ?? []) {
-    const message = { ...row, reactions: reactionsBy.get(row.id) ?? [], attachments: attachmentsBy.get(row.id) ?? [], todos: todosBy.get(row.id as string) ?? [] } as unknown as DashboardConversationMessage & { conversation_id: string };
+    if (typeof row.id !== "string" || typeof row.conversation_id !== "string") continue;
+    const message = { ...row, reactions: reactionsBy.get(row.id) ?? [], attachments: attachmentsBy.get(row.id) ?? [], todos: todosBy.get(row.id) ?? [] } as unknown as DashboardConversationMessage & { conversation_id: string };
     messagesBy.set(row.conversation_id, [...(messagesBy.get(row.conversation_id) ?? []), message]);
   }
   // Unread counts for non-selected channels can no longer be derived from

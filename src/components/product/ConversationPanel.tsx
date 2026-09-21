@@ -1031,7 +1031,9 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // waiting for the next 8-30s poll tick to notice.
   const loadSeqRef = useRef(0);
   const selectedIdRef = useRef(selectedId);
-  selectedIdRef.current = selectedId;
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
   const loadConversations = useCallback(async () => {
     const seq = ++loadSeqRef.current;
     const requestedFor = selectedId;
@@ -1917,11 +1919,17 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   const [mentionMenuRect, setMentionMenuRect] = useState<{ left: number; bottom: number; width: number } | null>(null);
   const hasMentionMenu = mentionSuggestions.length > 0;
   useEffect(() => {
-    if (!hasMentionMenu) { setMentionMenuRect(null); return; }
+    if (!hasMentionMenu) {
+      // This effect synchronizes the portal anchor with the composer DOM node.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setMentionMenuRect(null);
+      return;
+    }
     const measure = () => {
       const field = composerFieldRef.current;
       if (!field) return;
       const rect = field.getBoundingClientRect();
+      // The menu is portaled to body, so its position must follow layout changes.
       setMentionMenuRect({ left: rect.left, bottom: window.innerHeight - rect.top + 6, width: rect.width });
     };
     measure();

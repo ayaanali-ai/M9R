@@ -82,7 +82,13 @@ test("a stale lock left by a crashed process does not block the store", () => {
 // ---- hook handler ----------------------------------------------------------------------------------------------
 
 const ctx = (store: ReturnType<typeof createLocalStore>, provider = "claude-code", pathExists: (p: string) => boolean = () => false) => ({ provider, store, pathExists, now: () => new Date("2026-09-20T12:00:00Z") });
-const ctxOf = (o: any) => o?.hookSpecificOutput?.additionalContext as string | undefined;
+const ctxOf = (value: unknown): string | undefined => {
+  if (!value || typeof value !== "object") return undefined;
+  const hookSpecificOutput = (value as { hookSpecificOutput?: unknown }).hookSpecificOutput;
+  if (!hookSpecificOutput || typeof hookSpecificOutput !== "object") return undefined;
+  const additionalContext = (hookSpecificOutput as { additionalContext?: unknown }).additionalContext;
+  return typeof additionalContext === "string" ? additionalContext : undefined;
+};
 
 test("SessionStart registers the endpoint and prints a short card that lists recently active others", () => {
   const { store, done } = tempStore(() => new Date("2026-09-20T11:58:00Z"));
