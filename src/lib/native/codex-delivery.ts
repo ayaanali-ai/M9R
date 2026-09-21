@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, nodeForCodex, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
 import { windowsFileHolders, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
 
@@ -77,7 +77,7 @@ export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, 
 
 const TAIL_BYTES = 512 * 1024;
 
-function codexHome(env: Record<string, string | undefined>): string {
+export function codexHome(env: Record<string, string | undefined>): string {
   return env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 }
 
@@ -115,7 +115,7 @@ export function realDeps(env: Record<string, string | undefined> = process.env):
     resolveCodex: () => resolveCodexCommand({
       platform: process.platform,
       pathDirs: (env.PATH ?? env.Path ?? "").split(delimiter).filter(Boolean),
-      nodePath: process.execPath,
+      nodePath: nodeForCodex(process.execPath, (env.PATH ?? env.Path ?? "").split(delimiter).filter(Boolean), existsSync),
       exists: existsSync,
     }),
     runCodex: (command, args) => new Promise((resolve) => {
@@ -150,9 +150,11 @@ export function realDeps(env: Record<string, string | undefined> = process.env):
 /** Starts the delivery in a separate process so a hook never waits for Codex. Fire and forget. */
 export function spawnDeliveryRunner(hookEntry: string, taskId: string, env: Record<string, string | undefined> = process.env): void {
   try {
-    // Inside the engine the hook entry is the engine itself, reached through its "m9r-hook" subcommand.
-    const args = hookEntry === process.execPath ? ["m9r-hook", "queue", "codex", taskId] : [hookEntry, "queue", "codex", taskId];
-    const child = spawn(process.execPath, args, { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...env } });
+    // The engine is its own program: it takes the hook as a subcommand. Otherwise the hook entry is a script for node.
+    const engine = /m9r-engine(\.exe)?$/i.test(hookEntry);
+    const child = engine
+      ? spawn(hookEntry, ["m9r-hook", "queue", "codex", taskId], { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...env } })
+      : spawn(process.execPath, [hookEntry, "queue", "codex", taskId], { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...env } });
     child.unref();
   } catch { /* the task stays in the inbox and shows at Codex's next prompt */ }
 }

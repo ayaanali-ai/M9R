@@ -61,6 +61,35 @@ function readMemoryIndex(cwd: string): string | null {
   }
 }
 
+/**
+ * Human-typed mentions become tasks. Never our own handle; never an existing file or folder. Shared by the hook and the
+ * hook-free Codex watcher, and does nothing else (no inbox, no results), so the watcher can call it without side effects on Codex.
+ * Returns the "sent" acknowledgements the hook shows to the agent.
+ */
+export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "provider" | "store" | "pathExists" | "dispatch">): { acks: string[]; tasks: Array<{ id: string; to: string }> } {
+  const self = handleForProvider(ctx.provider);
+  const prompt = input.prompt ?? "";
+  const cwd = input.cwd ?? process.cwd();
+  const exists = ctx.pathExists ?? existsSync;
+  const acks: string[] = [];
+  const tasks: Array<{ id: string; to: string }> = [];
+  ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: input.cwd });
+  // A prompt M9R pushed in ("[M9R T3] Task from @claude ...") names its sender; routing that would bounce it back.
+  const targets = isM9rPushedPrompt(prompt) ? [] : findEndpointMentions(prompt, {
+    aliases: ctx.store.knownAliases().filter((a) => a !== self),
+    pathExists: (token) => exists(resolve(join(cwd, token))),
+  });
+  for (const to of targets) {
+    const goal = goalFor(prompt, to);
+    if (!goal) continue;
+    const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", cwd: input.cwd, idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
+    acks.push(renderSentAck(task.id, to));
+    tasks.push({ id: task.id, to });
+    if (created && to === "codex" && canQueue(task)) ctx.dispatch?.(task.id);
+  }
+  return { acks, tasks };
+}
+
 export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalContext | null {
   try {
     const event = input.hook_event_name ?? "";
@@ -81,24 +110,10 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
 
     if (event === "UserPromptSubmit") {
       const prompt = input.prompt ?? "";
-      ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: input.cwd });
       const cwd = input.cwd ?? process.cwd();
-      const exists = ctx.pathExists ?? existsSync;
       const parts: string[] = [];
 
-      // 1. Human-typed mentions become tasks. Never our own handle; never an existing file or folder.
-      // A prompt M9R pushed in ("[M9R T3] Task from @claude ...") names its sender; routing that would bounce it back.
-      const targets = isM9rPushedPrompt(prompt) ? [] : findEndpointMentions(prompt, {
-        aliases: ctx.store.knownAliases().filter((a) => a !== self),
-        pathExists: (token) => exists(resolve(join(cwd, token))),
-      });
-      for (const to of targets) {
-        const goal = goalFor(prompt, to);
-        if (!goal) continue;
-        const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", cwd: input.cwd, idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
-        parts.push(renderSentAck(task.id, to));
-        if (created && to === "codex" && canQueue(task)) ctx.dispatch?.(task.id);
-      }
+      parts.push(...routeTypedMentions(input, ctx).acks);
 
       // A prompt M9R pushed in is a task by itself: nothing else (older inbox items, results) is mixed into it, or the agent
       // may answer the wrong one. Those items wait for the user's next real prompt.

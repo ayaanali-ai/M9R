@@ -25,7 +25,8 @@ import {
   type ManifestEntry,
 } from "./install-core";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
-import { deliverToCodex, realDeps, type DeliveryDeps } from "./codex-delivery";
+import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type DeliveryDeps } from "./codex-delivery";
+import { createCodexWatcher } from "./codex-watch";
 import { canQueue } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runRevoke, runRules, runSessions, runTasks } from "./approval-commands";
@@ -148,10 +149,10 @@ function plan(io: NativeIo): PlannedFile[] {
     const hooksBefore = readText(p.codexHooks);
     const codexHooks = mergeHooks(hooksBefore, hookSpecs(activeHookEntry(io), "codex"), p.codexHooks);
     const agentsBefore = readText(p.codexAgents);
-    const agents = applyStandingInstruction(agentsBefore);
+    const agents = applyStandingInstruction(agentsBefore, "codex");
     files.push(
       { path: p.codexHooks, kind: "hooks-json", before: hooksBefore, after: codexHooks.content, changed: codexHooks.changed, summary: `add 2 hooks (session start, prompt submit) to ${p.codexHooks} (Codex; you trust them once with /hooks)` },
-      { path: p.codexAgents, kind: "markdown-block", before: agentsBefore, after: agents.content, changed: agents.changed, summary: `${agentsBefore == null ? "create" : "add a short block to"} ${p.codexAgents}` },
+      { path: p.codexAgents, kind: "markdown-block", before: agentsBefore, after: agents.content, changed: agents.changed, summary: `${agentsBefore == null ? "create" : "add a short block to"} ${p.codexAgents} (it tells Codex to leave @mentions of other agents to M9R, so nothing is done twice)` },
     );
   }
   return files;
@@ -325,7 +326,8 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
     const release = has("--watch") ? acquireFeedLock(root) : () => {};
     if (!release) { io.out("The feed is already being written by another M9R process."); return 0; }
     if (has("--watch")) { process.once("SIGINT", () => controller.abort()); process.once("SIGTERM", () => controller.abort()); io.out(`Writing ${feedPath(root)} (Ctrl+C to stop)`); }
-    await runFeed({ root, watch: has("--watch"), signal: controller.signal, onWrite: has("--watch") ? (f) => io.out(`feed #${f.seq}: ${f.needsYou.length} need you`) : undefined });
+    const watcher = has("--watch") && !io.env.M9R_NO_CODEX_WATCH ? createCodexWatcher(createLocalStore(root), { codexHome: codexHome(io.env), dispatch: (id) => spawnDeliveryRunner(activeHookEntry(io), id, io.env) }) : undefined;
+    await runFeed({ root, watch: has("--watch"), codexWatcher: watcher, signal: controller.signal, onWrite: has("--watch") ? (f) => io.out(`feed #${f.seq}: ${f.needsYou.length} need you`) : undefined });
     release();
     if (!has("--watch")) io.out(`Wrote ${feedPath(root)}`);
     return 0;

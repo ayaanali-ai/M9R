@@ -30,7 +30,7 @@ export interface SessionRecord {
 
 export interface EventRecord {
   at: string;
-  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked";
+  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked" | "mention.double";
   handle?: string;
   taskId?: string;
   text: string;
@@ -129,6 +129,11 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
   return {
     root,
+
+    /** Adds a line to the activity log shown as "Recent" on the pill. */
+    noteEvent(kind: EventRecord["kind"], text: string, taskId?: string): void {
+      update((s) => { pushEvent(s, { kind, text, ...(taskId ? { taskId } : {}) }); });
+    },
 
     registerEndpoint(input: { provider: string; sessionId?: string; cwd?: string }): EndpointRecord {
       const handle = handleForProvider(input.provider);

@@ -24,6 +24,16 @@ export function buildQueueMessage(task: Pick<Task, "id" | "from" | "goal">): str
   return `${queueMarker(task.id)} Task from @${task.from} (sent through M9R). ${task.goal}\n\nDo this now, then reply with a short summary of what you did; M9R returns your final message to @${task.from}.`;
 }
 
+/**
+ * `codex.js` needs a real Node. Normally that is the running process; inside the self-contained engine it is not (the engine
+ * cannot run other scripts), so use the `node` on PATH, which a Codex installed through npm always has.
+ */
+export function nodeForCodex(execPath: string, pathDirs: string[], exists: (p: string) => boolean): string {
+  if (!/^m9r-engine(\.exe)?$/i.test(win32.basename(execPath))) return execPath;
+  for (const dir of pathDirs) for (const name of ["node.exe", "node"]) { const p = win32.join(dir, name); if (exists(p)) return p; }
+  return "node";
+}
+
 export interface CodexCommand {
   command: string;
   args: string[];

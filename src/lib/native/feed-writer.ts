@@ -10,6 +10,7 @@ import { buildFeed, feedBody, lastTurnState, type Feed, type SessionProbe } from
 import { readRolloutTailFor, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { PENDING_TTL_MS } from "./approval-core";
 import { createLocalStore } from "./local-store";
+import type { CodexWatcher } from "./codex-watch";
 
 export const FEED_FILE = "feed.json";
 
@@ -28,6 +29,8 @@ export interface FeedRunOptions {
   /** Milliseconds between checks of state.json in watch mode. */
   pollEveryMs?: number;
   deps?: FeedDeps;
+  /** Hook-free Codex mentions: read new Codex prompts while watching (see codex-watch.ts). */
+  codexWatcher?: CodexWatcher;
   onWrite?: (feed: Feed) => void;
   /** Stops watch mode when aborted. */
   signal?: AbortSignal;
@@ -103,7 +106,12 @@ export async function runFeed(options: FeedRunOptions): Promise<Feed | null> {
   await new Promise<void>((resolve) => {
     const poll = setInterval(() => { const m = mtime(); if (m !== seen) { seen = m; void tick(false); } }, options.pollEveryMs ?? 500);
     const slow = setInterval(() => void tick(true), options.probeEveryMs ?? 8000);
-    const stop = () => { clearInterval(poll); clearInterval(slow); resolve(); };
+    const watcher = options.codexWatcher;
+    const safely = (fn: () => void) => { try { fn(); } catch { /* the watcher must never stop the feed */ } };
+    if (watcher) safely(() => watcher.refresh());
+    const codexRead = watcher ? setInterval(() => safely(() => { watcher.tick(); }), 1500) : undefined;
+    const codexFind = watcher ? setInterval(() => safely(() => watcher.refresh()), 10_000) : undefined;
+    const stop = () => { clearInterval(poll); clearInterval(slow); if (codexRead) clearInterval(codexRead); if (codexFind) clearInterval(codexFind); resolve(); };
     if (options.signal?.aborted) stop(); else options.signal?.addEventListener("abort", stop, { once: true });
   });
   return last;
