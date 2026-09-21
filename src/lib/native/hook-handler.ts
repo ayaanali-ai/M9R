@@ -19,6 +19,7 @@ import { handleForProvider, type LocalStore } from "./local-store";
 export interface HookInput {
   hook_event_name?: string;
   session_id?: string;
+  transcript_path?: string;
   cwd?: string;
   prompt?: string;
 }
@@ -35,6 +36,10 @@ export interface HookContext {
   dispatch?: (taskId: string) => void;
   /** N2: reads back answers for tasks already pushed into Codex sessions, before results are shown. */
   collect?: () => void;
+  /** The final message of this agent's just-finished turn (from its transcript); used to answer tasks it was shown. */
+  lastAnswer?: (input: HookInput) => string | null;
+  /** A task just got its answer: send it back to whoever asked (fire and forget). */
+  answerBack?: (taskId: string) => void;
   /** Endpoints seen more recently than this count as "active now" on the card. */
   activeWindowMs?: number;
   now?: () => Date;
@@ -83,7 +88,7 @@ export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "pro
   for (const to of targets) {
     const goal = goalFor(prompt, to);
     if (!goal) continue;
-    const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", cwd: input.cwd, idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
+    const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", cwd: input.cwd, fromSession: input.session_id, idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
     acks.push(renderSentAck(task.id, to));
     tasks.push({ id: task.id, to });
     if (created && to === "codex" && canQueue(task)) ctx.dispatch?.(task.id);
@@ -109,6 +114,19 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir }));
     }
 
+    // A turn finished. If this session was shown tasks other agents sent, its final message is the answer: record it and send it back.
+    if (event === "Stop") {
+      const waiting = ctx.store.awaitingAnswerFrom(self, input.session_id);
+      if (waiting.length === 0 || !ctx.lastAnswer) return null;
+      const text = ctx.lastAnswer(input);
+      if (!text) return null;
+      for (const t of waiting) {
+        ctx.store.setResult(t.id, text);
+        ctx.answerBack?.(t.id);
+      }
+      return null;
+    }
+
     if (event === "UserPromptSubmit") {
       const prompt = input.prompt ?? "";
       const cwd = input.cwd ?? process.cwd();
@@ -131,7 +149,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       if (injection.text) {
         parts.push(injection.text);
         ctx.store.setCursor(self, input.session_id, injection.newCursor);
-        ctx.store.markDelivered(injection.includedIds);
+        ctx.store.markDelivered(injection.includedIds, input.session_id);
       }
 
       // 3. A pointer to earlier sessions, only when this prompt matches the local memory index.

@@ -64,6 +64,22 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   return { state: "queued", threadId: endpoint.sessionId };
 }
 
+/** Sends the answer to a task back into the Codex session that asked (queued like any pushed message). */
+export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps: Pick<DeliveryDeps, "resolveCodex" | "runCodex">): Promise<DeliveryOutcome> {
+  const task = store.getTask(taskId);
+  if (!task || !task.resultSummary) return { state: "skipped", reason: "no answer yet" };
+  if (task.from !== "codex" || !isThreadId(task.fromSession)) return { state: "skipped", reason: "the asker is not a Codex session we can push into" };
+  if (task.answerPushedAt) return { state: "skipped", reason: "already sent back" };
+  const command = deps.resolveCodex();
+  if (!command) return { state: "failed", reason: "The codex command was not found on this machine." };
+  const goal = task.goal.length > 90 ? `${task.goal.slice(0, 89)}…` : task.goal;
+  const message = `[M9R ${task.id}] Answer from @${task.to} to your task "${goal}":\n${task.resultSummary}\n\nThis is the answer you asked for. Acknowledge it in one short line.`;
+  const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(task.fromSession, message)));
+  if (!outcome.ok) return { state: "failed", reason: outcome.error ?? "codex queue failed" };
+  store.setAnswerPushed(task.id);
+  return { state: "queued", threadId: task.fromSession };
+}
+
 /** Reads back answers for every pushed task that has none yet. Cheap when nothing is waiting (no file is opened). */
 export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, "readRolloutTail">): number {
   let collected = 0;
@@ -171,13 +187,13 @@ export function realDeps(env: Record<string, string | undefined> = process.env):
 }
 
 /** Starts the delivery in a separate process so a hook never waits for Codex. Fire and forget. */
-export function spawnDeliveryRunner(hookEntry: string, taskId: string, env: Record<string, string | undefined> = process.env): void {
+export function spawnDeliveryRunner(hookEntry: string, taskId: string, env: Record<string, string | undefined> = process.env, mode: "queue" | "answer" = "queue"): void {
   try {
     // The engine is its own program: it takes the hook as a subcommand. Otherwise the hook entry is a script for node.
     const engine = /m9r-engine(\.exe)?$/i.test(hookEntry);
     const child = engine
-      ? spawn(hookEntry, ["m9r-hook", "queue", "codex", taskId], { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...env } })
-      : spawn(process.execPath, [hookEntry, "queue", "codex", taskId], { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...env } });
+      ? spawn(hookEntry, ["m9r-hook", mode, "codex", taskId], { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...env } })
+      : spawn(process.execPath, [hookEntry, mode, "codex", taskId], { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...env } });
     child.unref();
   } catch { /* the task stays in the inbox and shows at Codex's next prompt */ }
 }

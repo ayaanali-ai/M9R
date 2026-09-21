@@ -10,7 +10,8 @@ type NeedsYou =
   | { kind: "push_failed"; taskId: string; to: string; reason: string; fix: string }
   | { kind: "answer"; taskId: string; from: string; summary: string };
 interface Ping { id: number; kind: string; taskId: string; text: string }
-interface Feed { version: 1; seq: number; agents: Agent[]; needsYou: NeedsYou[]; recent: Array<{ at: string; taskId?: string; text: string }>; pings: Ping[] }
+interface InProgress { taskId: string; from: string; to: string; goal: string; state: "queued" | "waiting_prompt" | "working"; since: string }
+interface Feed { version: 1; seq: number; agents: Agent[]; needsYou: NeedsYou[]; inProgress?: InProgress[]; recent: Array<{ at: string; taskId?: string; text: string }>; pings: Ping[] }
 
 const COLLAPSED = { w: 220, h: 36 };
 const WIDE = 340;
@@ -49,8 +50,23 @@ function drawDots() {
 
 function drawBadge() {
   const n = feed?.needsYou.length ?? 0;
-  badge.hidden = n === 0;
-  badge.textContent = String(n);
+  const busy = feed?.inProgress?.length ?? 0;
+  // Something needs you: the filled badge. Otherwise, if work is under way, a hollow badge with a pulse, so a pause reads as progress.
+  badge.hidden = n === 0 && busy === 0;
+  badge.textContent = String(n > 0 ? n : busy);
+  badge.classList.toggle("wait", n === 0 && busy > 0);
+}
+
+const secs = (iso: string) => Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+
+function progressRow(p: InProgress) {
+  const row = el("div", "row");
+  const main = el("div", "main");
+  main.append(el("div", "title", `@${p.from} → @${p.to}: ${p.goal}`));
+  const what = p.state === "queued" ? `Queued in @${p.to}, waiting for it to pick up` : p.state === "waiting_prompt" ? `Waiting for @${p.to}'s next prompt` : `@${p.to} is working on it`;
+  main.append(el("div", "sub progress", `${what} · ${secs(p.since)} s`));
+  row.append(main);
+  return row;
 }
 
 function section(title: string, rows: HTMLElement[], emptyText: string) {
@@ -133,6 +149,7 @@ function drawPanel() {
   const recent = feed.recent.slice(0, 6).map((r) => { const row = el("div", "row"); const main = el("div", "main"); main.append(el("div", "sub", `${hhmm(r.at)}  ${r.text}`)); row.append(main); return row; });
   panel.replaceChildren(
     section("Needs you", [...feed.needsYou.map(needsRow), ...ghostRows(feed.needsYou)], "Nothing needs you."),
+    ...((feed.inProgress?.length ?? 0) > 0 ? [section("In progress", (feed.inProgress ?? []).map(progressRow), "")] : []),
     section("Agents", agents, "No agents seen yet."),
     section("Recent", recent, "No activity yet."),
     el("div", "foot", "M9R overlay · a view of ~/.m9r/feed.json"),
@@ -181,6 +198,9 @@ pill.addEventListener("click", (ev) => {
   if (expanded) { pingUntil = 0; window.clearTimeout(pingTimer); }
   render();
 });
+// Keep the "· 12 s" counters moving while work is under way and the panel is open.
+window.setInterval(() => { if (expanded && (feed?.inProgress?.length ?? 0) > 0) { const y = panel.scrollTop; drawPanel(); panel.scrollTop = y; } }, 3000);
+
 window.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && expanded) { expanded = false; render(); } });
 
 async function start() {

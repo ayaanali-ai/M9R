@@ -29,12 +29,24 @@ export type NeedsYou =
 
 export interface FeedPing { id: number; kind: NeedsYou["kind"]; taskId: string; text: string }
 
+/** A task that is under way and needs nothing from the person: the pill shows it so a pause reads as progress. */
+export interface InProgress {
+  taskId: string;
+  from: string;
+  to: string;
+  goal: string;
+  /** `queued`: pushed into the agent's session, waiting for it to pick up; `waiting_prompt`: the agent sees it at its next prompt; `working`: the agent has it. */
+  state: "queued" | "waiting_prompt" | "working";
+  since: string;
+}
+
 export interface Feed {
   version: 1;
   seq: number;
   generatedAt: string;
   agents: FeedAgent[];
   needsYou: NeedsYou[];
+  inProgress: InProgress[];
   recent: Array<{ at: string; taskId?: string; text: string }>;
   pings: FeedPing[];
   reserved: { people: unknown[]; channels: unknown[] };
@@ -127,6 +139,23 @@ function agentFor(handle: string, input: FeedInput): FeedAgent {
   };
 }
 
+const PROGRESS_WINDOW_MS = 60 * 60_000;
+
+function inProgressFrom(input: FeedInput): InProgress[] {
+  const nowMs = input.now.getTime();
+  const out: InProgress[] = [];
+  for (const t of input.tasks) {
+    if (t.dismissedAt || t.resultSummary || t.approval === "pending" || t.approval === "denied" || t.approval === "expired") continue;
+    if (nowMs - Date.parse(t.createdAt) > PROGRESS_WINDOW_MS) continue;
+    const goal = safe(t.goal, 120);
+    if (t.delivery?.state === "queued") out.push({ taskId: t.id, from: t.from, to: t.to, goal, state: "queued", since: t.delivery.queuedAt ?? t.createdAt });
+    else if (t.delivery?.state === "failed") continue; // shown as a failed push instead
+    else if (t.deliveredAt) out.push({ taskId: t.id, from: t.from, to: t.to, goal, state: "working", since: t.deliveredAt });
+    else out.push({ taskId: t.id, from: t.from, to: t.to, goal, state: "waiting_prompt", since: t.createdAt });
+  }
+  return out.sort((a, b) => Number(b.taskId.slice(1)) - Number(a.taskId.slice(1))).slice(0, 4);
+}
+
 const needsKey = (n: NeedsYou) => `${n.kind}:${n.taskId}`;
 
 function needsYouFrom(input: FeedInput): NeedsYou[] {
@@ -153,10 +182,11 @@ export function buildFeed(input: FeedInput, previous: Feed | null): Feed {
   const handles = [...new Set<string>([...KNOWN_AGENTS, ...input.endpoints.map((e) => e.handle), ...input.sessions.map((s) => s.handle)])];
   const agents = handles.map((h) => agentFor(h, input));
   const needsYou = needsYouFrom(input);
+  const inProgress = inProgressFrom(input);
   const recent = input.events.slice(-RECENT_ITEMS).reverse().map((e) => ({ at: e.at, taskId: e.taskId, text: safe(e.text, 140) }));
 
-  const body = { agents, needsYou, recent };
-  const changed = !previous || JSON.stringify({ agents: previous.agents, needsYou: previous.needsYou, recent: previous.recent }) !== JSON.stringify(body);
+  const body = { agents, needsYou, inProgress, recent };
+  const changed = !previous || JSON.stringify({ agents: previous.agents, needsYou: previous.needsYou, inProgress: previous.inProgress ?? [], recent: previous.recent }) !== JSON.stringify(body);
   const seq = previous ? (changed ? previous.seq + 1 : previous.seq) : 1;
 
   const before = new Set((previous?.needsYou ?? []).map(needsKey));
@@ -166,7 +196,7 @@ export function buildFeed(input: FeedInput, previous: Feed | null): Feed {
         text: n.kind === "approval" ? `@${n.from} asks @${n.to}: ${n.goal}` : n.kind === "push_failed" ? `${n.taskId} could not be pushed: ${n.reason}` : `@${n.from} answered ${n.taskId}`,
       }))
     : (previous?.pings ?? []);
-  return { version: 1, seq, generatedAt: input.now.toISOString(), agents, needsYou, recent, pings, reserved: { people: [], channels: [] } };
+  return { version: 1, seq, generatedAt: input.now.toISOString(), agents, needsYou, inProgress, recent, pings, reserved: { people: [], channels: [] } };
 }
 
 /** The part of a feed that matters for "did anything change" (everything but the timestamp). */

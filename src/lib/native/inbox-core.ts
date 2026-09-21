@@ -52,6 +52,12 @@ export interface Task {
   cwd?: string;
   /** Session id (or unique prefix) the sender pinned, so a push never has to guess. */
   targetSession?: string;
+  /** The sender's own session (a Codex thread id, say), so the answer can be pushed back to exactly that session. */
+  fromSession?: string;
+  /** The session the task was shown in (its inbox delivery), so its answer is read from that session's transcript. */
+  deliveredSession?: string;
+  /** Set when the answer was pushed back into the sender's session. */
+  answerPushedAt?: string;
 }
 
 export interface TaskDelivery {
@@ -75,6 +81,7 @@ export interface NewTaskInput {
   standingRuleApplies?: boolean;
   cwd?: string;
   targetSession?: string;
+  fromSession?: string;
 }
 
 /** Approximate token count; good enough to enforce a budget without a tokenizer dependency. */
@@ -129,6 +136,7 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
     createdAt: nowIso,
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(input.targetSession ? { targetSession: input.targetSession } : {}),
+    ...(input.fromSession ? { fromSession: input.fromSession } : {}),
   };
 }
 

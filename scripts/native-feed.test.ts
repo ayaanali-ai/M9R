@@ -208,3 +208,15 @@ test("Claude Code sessions come from Claude's own registry: open ones show as op
   assert.equal(claude?.state, "open_working");
   assert.equal(claude?.sessions[0].cwd, "C:/demo", "the working session's folder is shown first");
 });
+
+test("work under way is listed so a pause reads as progress: queued, waiting for the next prompt, working; answered or failed ones are not", () => {
+  const f = buildFeed(input({ tasks: [
+    task({ id: "T1", createdAt: "2026-09-20T11:59:00Z", delivery: { state: "queued", attempts: 1, threadId: S1, queuedAt: "2026-09-20T11:59:02Z" } }),
+    task({ id: "T2", from: "codex", to: "claude", createdAt: "2026-09-20T11:59:10Z" }),
+    task({ id: "T3", from: "codex", to: "claude", createdAt: "2026-09-20T11:59:20Z", deliveredAt: "2026-09-20T11:59:30Z" }),
+    task({ id: "T4", createdAt: "2026-09-20T11:50:00Z", resultSummary: "done" }),
+    task({ id: "T5", createdAt: "2026-09-20T11:59:40Z", delivery: { state: "failed", attempts: 1, error: "no session" } }),
+    task({ id: "T6", createdAt: "2026-09-20T08:00:00Z" }),
+  ] }), null);
+  assert.deepEqual(f.inProgress.map((p) => [p.taskId, p.state]), [["T3", "working"], ["T2", "waiting_prompt"], ["T1", "queued"]]);
+});

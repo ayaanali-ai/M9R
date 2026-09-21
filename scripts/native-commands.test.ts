@@ -37,7 +37,7 @@ test("a dry run shows the plan and writes nothing at all", async () => {
   assert.equal(existsSync(s.p.settings), false);
   assert.equal(existsSync(s.p.claudeMd), false);
   assert.equal(existsSync(s.p.manifest), false);
-  assert.match(s.out.join("\n"), /add 2 hooks/);
+  assert.match(s.out.join("\n"), /add 3 hooks/);
   assert.match(s.out.join("\n"), /Dry run: nothing was written/);
   s.done();
 });

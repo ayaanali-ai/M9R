@@ -110,3 +110,60 @@ test("every real Codex session of the last day becomes a target for @codex witho
   const ids = store.sessionsFor("codex").map((s) => s.sessionId);
   assert.deepEqual(ids, ["01a0aaaa-0000-7000-8000-000000000001"]);
 });
+
+test("a typed mention in Codex is forwarded only where Codex was told to stand down: user-level note, or an AGENTS.md in the folder or above", async () => {
+  const { codexNoteInEffect } = await import("@/lib/native/codex-watch");
+  const home = mkdtempSync(join(tmpdir(), "m9r-note-"));
+  const codexHome = join(home, "codex");
+  mkdirSync(codexHome, { recursive: true });
+  const proj = join(home, "proj");
+  const sub = join(proj, "sub");
+  mkdirSync(sub, { recursive: true });
+  const t0 = Date.now();
+  assert.equal(codexNoteInEffect(sub, codexHome, () => t0), false);
+  writeFileSync(join(proj, "AGENTS.md"), standingInstructionBlock("codex"));
+  assert.equal(codexNoteInEffect(sub, codexHome, () => t0 + 60_000), true, "a note in a parent folder counts");
+  assert.equal(codexNoteInEffect(join(home, "elsewhere"), codexHome, () => t0), false, "another project without the note does not");
+  writeFileSync(join(codexHome, "AGENTS.md"), standingInstructionBlock("codex"));
+  assert.equal(codexNoteInEffect(join(home, "elsewhere2"), codexHome, () => t0), true, "the user-level note covers every folder");
+});
+
+test("a Codex prompt is not routed when the watcher is told the session's folder has no stand-down note", () => {
+  const { day, store, start } = watchSetup();
+  const file = join(day, "rollout-2026-09-21T10-00-00-019f-test.jsonl");
+  void store;
+  const watcher = createCodexWatcher(store, { codexHome: join(day, "..", "..", "..", ".."), routeMentions: () => false });
+  writeFileSync(file, meta());
+  watcher.refresh();
+  appendFileSync(file, turn() + user("@claude do a thing"));
+  assert.equal(watcher.tick(), 0);
+  assert.equal(store.snapshot().tasks.length, 0);
+  void start;
+});
+
+test("a thread that sat idle for hours and then gets a new prompt still has that prompt read", () => {
+  const { day, store, start } = watchSetup();
+  const file = join(day, "rollout-2026-09-21T09-00-00-019f-idle.jsonl");
+  writeFileSync(file, meta() + turn() + user("an old prompt"));
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000);
+  utimesSync(file, twoHoursAgo, twoHoursAgo);
+  const watcher = start();
+  watcher.refresh();
+  appendFileSync(file, turn() + user("@claude wake up and help"));
+  watcher.refresh();
+  assert.equal(watcher.tick(), 1);
+  assert.equal(store.snapshot().tasks[0].to, "claude");
+});
+
+test("a thread picked up part-way still knows its own folder, so the stand-down check looks at the right project", () => {
+  const { day, store, start } = watchSetup();
+  const file = join(day, "rollout-2026-09-21T09-00-00-019f-mid.jsonl");
+  writeFileSync(file, meta() + turn() + user("earlier prompt"));
+  const seenFolders: Array<string | undefined> = [];
+  const watcher = createCodexWatcher(store, { codexHome: join(day, "..", "..", "..", ".."), routeMentions: (cwd) => { seenFolders.push(cwd); return true; } });
+  void start;
+  watcher.refresh();
+  appendFileSync(file, turn() + user("@claude please help"));
+  assert.equal(watcher.tick(), 1);
+  assert.deepEqual(seenFolders, ["C:/proj"]);
+});

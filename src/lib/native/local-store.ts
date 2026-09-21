@@ -191,16 +191,27 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /** Records that these tasks were shown to their target; the first time only. */
-    markDelivered(ids: readonly string[]): void {
+    markDelivered(ids: readonly string[], sessionId?: string): void {
       if (ids.length === 0) return;
       update((s) => {
         for (const id of ids) {
           const t = s.tasks.find((x) => x.id === id);
           if (!t || t.deliveredAt) continue;
           t.deliveredAt = now().toISOString();
+          if (sessionId) t.deliveredSession = sessionId;
           pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `@${t.to} received ${id}` });
         }
       });
+    },
+
+    /** Tasks shown to this agent's session that have no answer yet: what its next finished turn is (probably) the answer to. */
+    awaitingAnswerFrom(handle: string, sessionId: string | undefined, withinMs = 60 * 60_000): Task[] {
+      const cutoff = now().getTime() - withinMs;
+      return readState().tasks.filter((t) => t.to === handle && t.deliveredAt && !t.resultSummary && (!t.deliveredSession || t.deliveredSession === sessionId) && Date.parse(t.deliveredAt) >= cutoff);
+    },
+
+    setAnswerPushed(id: string): void {
+      update((s) => { const t = s.tasks.find((x) => x.id === id); if (t) t.answerPushedAt = now().toISOString(); });
     },
 
     addRule(input: { from: string; to: string; ttlMs: number; note?: string }): StandingRule {

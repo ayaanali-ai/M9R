@@ -27,7 +27,7 @@ import {
 } from "./install-core";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
 import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type DeliveryDeps } from "./codex-delivery";
-import { createCodexWatcher } from "./codex-watch";
+import { codexNoteInEffect, createCodexWatcher } from "./codex-watch";
 import { hookPipePath, requestShutdown, startHookServer } from "./hook-server";
 import { runHookRequest } from "./hook-run";
 import { canQueue } from "./codex-delivery-core";
@@ -180,6 +180,8 @@ function hookSpecs(entry: string, provider = "claude-code", shim?: string): Hook
   return [
     { event: "SessionStart", command: command("SessionStart"), timeoutSec: 5 },
     { event: "UserPromptSubmit", command: command("UserPromptSubmit"), timeoutSec: 5 },
+    // Claude only: when a turn ends, its final message answers any task another agent handed it.
+    ...(provider === "claude-code" ? [{ event: "Stop", command: command("Stop"), timeoutSec: 5 }] : []),
   ];
 }
 
@@ -195,7 +197,7 @@ function plan(io: NativeIo): PlannedFile[] {
   const mdBefore = readText(p.claudeMd);
   const md = applyStandingInstruction(mdBefore);
   const files: PlannedFile[] = [
-    { path: p.settings, kind: "hooks-json", before: settingsBefore, after: settings.content, changed: settings.changed, summary: `add 2 hooks (session start, prompt submit) to ${p.settings}` },
+    { path: p.settings, kind: "hooks-json", before: settingsBefore, after: settings.content, changed: settings.changed, summary: `add 3 hooks (session start, prompt submit, turn end) to ${p.settings}` },
     { path: p.claudeMd, kind: "markdown-block", before: mdBefore, after: md.content, changed: md.changed, summary: `${mdBefore == null ? "create" : "add a short block to"} ${p.claudeMd}` },
   ];
   // Codex is only touched when it is installed here (its folder exists); M9R never creates ~/.codex.
@@ -410,8 +412,9 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
     if (has("--watch")) { process.once("SIGINT", () => controller.abort()); process.once("SIGTERM", () => controller.abort()); io.out(`Writing ${feedPath(root)} (Ctrl+C to stop)`); }
     // The Codex watcher forwards what a person types in Codex; Codex must be told to stand down or the work is done twice, so it only
     // runs when the stand-down note is installed for Codex (or a test forces it on).
-    const routeMentions = !!(io.env.M9R_CODEX_WATCH === "1" || standingInstructionStatus(readText(nativePaths(io).codexAgents)).current);
-    // Finding Codex sessions (so `@codex` has somewhere to go) always runs while watching; forwarding what a person types in Codex only when the note is there.
+    // Finding Codex sessions (so `@codex` has somewhere to go) always runs while watching. Forwarding what a person types in Codex only
+    // happens for sessions where Codex was told to stand down (its AGENTS.md carries the note), or when a test forces it on.
+    const routeMentions = io.env.M9R_CODEX_WATCH === "1" ? true : (cwd: string | undefined) => codexNoteInEffect(cwd, codexHome(io.env));
     const watcher = has("--watch") && !io.env.M9R_NO_CODEX_WATCH ? createCodexWatcher(createLocalStore(root), { codexHome: codexHome(io.env), routeMentions, dispatch: (id) => spawnDeliveryRunner(activeHookEntry(io), id, io.env) }) : undefined;
     const server = has("--watch") && has("--serve-hooks")
       ? startHookServer({

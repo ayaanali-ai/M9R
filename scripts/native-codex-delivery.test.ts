@@ -310,3 +310,35 @@ test("the sender's own folder wins over a related folder, and a related folder (
   const other = store.addTask({ from: "claude", to: "codex", goal: "three", origin: "human_typed", idempotencyKey: "t3", cwd: "C:/other" }).task;
   assert.equal((await deliverToCodex(store, other.id, deps)).state, "failed");
 });
+
+test("Claude's finished turn answers the task it was shown, and the answer is pushed back into the Codex session that asked (once)", async () => {
+  const { handleHookEvent } = await import("../src/lib/native/hook-handler");
+  const { pushAnswerToCodex } = await import("../src/lib/native/codex-delivery");
+  const store = newStore();
+  const asked = store.addTask({ from: "codex", to: "claude", goal: "Summarise a.txt", origin: "human_typed", idempotencyKey: "rev1", cwd: "C:/p", fromSession: A }).task;
+  const answered: string[] = [];
+  const ctx = { provider: "claude-code", store, pathExists: () => false, readIndex: () => null, lastAnswer: () => "It says: PURPLE-ELEPHANT-42.", answerBack: (id: string) => answered.push(id) };
+  // Before Claude has seen the task, a finished turn answers nothing.
+  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-1" }, ctx);
+  assert.equal(answered.length, 0);
+  // Claude sees it at its next prompt...
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", cwd: "C:/p", prompt: "go" }, ctx);
+  assert.equal(store.getTask(asked.id)?.deliveredSession, "cc-1");
+  // ...and its finished turn is the answer.
+  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-1" }, ctx);
+  assert.deepEqual(answered, [asked.id]);
+  assert.equal(store.getTask(asked.id)?.resultSummary, "It says: PURPLE-ELEPHANT-42.");
+  // A different Claude session's finished turn is not its answer.
+  const other = newStore();
+  const t2 = other.addTask({ from: "codex", to: "claude", goal: "x", origin: "human_typed", idempotencyKey: "rev2", fromSession: A }).task;
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", prompt: "go" }, { ...ctx, store: other });
+  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-OTHER" }, { ...ctx, store: other, answerBack: (id: string) => answered.push("WRONG" + id) });
+  assert.equal(other.getTask(t2.id)?.resultSummary, undefined);
+
+  const deps = fakeDeps();
+  assert.deepEqual(await pushAnswerToCodex(store, asked.id, deps), { state: "queued", threadId: A });
+  assert.equal(deps.calls.length, 1);
+  assert.equal(deps.calls[0][2], A, "the answer goes back into the session that asked");
+  assert.match(deps.calls[0][4], /^\[M9R T1\] Answer from @claude[\s\S]*PURPLE-ELEPHANT-42/);
+  assert.equal((await pushAnswerToCodex(store, asked.id, deps)).state, "skipped", "never sent twice");
+});
