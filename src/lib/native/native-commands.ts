@@ -29,6 +29,7 @@ import { deliverToCodex, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { canQueue } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runRevoke, runRules, runSessions, runTasks } from "./approval-commands";
+import { feedPath, runFeed } from "./feed-writer";
 import { USER_STEPS } from "./onboarding-steps";
 
 export interface NativeIo {
@@ -296,6 +297,14 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   if (command === "uninstall") return runUninstall(io, { yes: has("--yes", "-y"), purge: has("--purge") });
   if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key"), session: value("--session") });
   const root = nativePaths(io).m9r;
+  if (command === "feed") {
+    const controller = new AbortController();
+    if (has("--watch")) { process.once("SIGINT", () => controller.abort()); process.once("SIGTERM", () => controller.abort()); io.out(`Writing ${feedPath(root)} (Ctrl+C to stop)`); }
+    await runFeed({ root, watch: has("--watch"), signal: controller.signal, onWrite: has("--watch") ? (f) => io.out(`feed #${f.seq}: ${f.needsYou.length} need you`) : undefined });
+    if (!has("--watch")) io.out(`Wrote ${feedPath(root)}`);
+    return 0;
+  }
+  if (command === "dismiss") { const n = createLocalStore(root).dismiss(positionals.map((p) => p.toUpperCase())); io.out(n ? `Cleared ${n} from the overlay list.` : "Nothing to clear."); return 0; }
   if (command === "tasks") return runTasks(io, root);
   if (command === "sessions") return runSessions(io, root, positionals[0]);
   if (command === "approve" || command === "deny") return runDecision(io, root, command === "approve" ? "approved" : "denied", positionals[0], has("--yes", "-y"));

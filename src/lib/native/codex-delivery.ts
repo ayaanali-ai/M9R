@@ -81,7 +81,7 @@ function codexHome(env: Record<string, string | undefined>): string {
   return env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 }
 
-function findRolloutFile(home: string, threadId: string): string | null {
+export function findRolloutFile(home: string, threadId: string): string | null {
   const root = join(home, "sessions");
   const suffix = `-${threadId}.jsonl`;
   const list = (dir: string): string[] => { try { return readdirSync(dir).sort().reverse(); } catch { return []; } };
@@ -91,7 +91,7 @@ function findRolloutFile(home: string, threadId: string): string | null {
   return null;
 }
 
-function readTail(path: string, bytes: number): string | null {
+export function readTail(path: string, bytes: number): string | null {
   try {
     const size = statSync(path).size;
     const fd = openSync(path, "r");
@@ -102,6 +102,12 @@ function readTail(path: string, bytes: number): string | null {
       return buf.toString("utf8");
     } finally { closeSync(fd); }
   } catch { return null; }
+}
+
+/** The tail of a session's rollout file, for callers outside the delivery flow (the overlay feed). */
+export function readRolloutTailFor(threadId: string, env: Record<string, string | undefined> = process.env, bytes = 64 * 1024): string | null {
+  const file = findRolloutFile(codexHome(env), threadId);
+  return file ? readTail(file, bytes) : null;
 }
 
 export function realDeps(env: Record<string, string | undefined> = process.env): DeliveryDeps {

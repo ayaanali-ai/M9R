@@ -1,6 +1,6 @@
 # M9R overlay: design (2026-09-20)
 
-Status: **design for approval, nothing built yet.** Builds on `M9R_NATIVE_FRONT_DOOR_DESIGN.md` section 10 and `M9R_NEXT_BUILD_PLAN.md` section 3. Everything marked *proven* was tested on this machine (Windows 11); everything marked *unproven* is a guess that a build slice must test first.
+Status: **design approved 2026-09-20 (owner: top-centre pill; "Start with Windows" off by default; silent pings; overlay-key approvals with the stated limit; separate download; Claude dot shows only "seen at HH:MM" until the O3 spike). O1 built and proven; O2 to O6 not started.** Builds on `M9R_NATIVE_FRONT_DOOR_DESIGN.md` section 10 and `M9R_NEXT_BUILD_PLAN.md` section 3. Everything marked *proven* was tested on this machine (Windows 11); everything marked *unproven* is a guess that a build slice must test first.
 
 ## 1. What it is, in one paragraph
 A small always-on-top window (a pill at the top centre of the screen on Windows first; a notch-style look on Mac later) that shows which agents are open and what they are doing, pings when something needs you (a task waiting for approval, an answer that came back, a push that failed), and expands to a list on click. It is built with Tauri (Rust shell, TypeScript UI). It **displays and asks; it never delivers a task, never types into another app, and the system works exactly the same with it closed.**
@@ -135,6 +135,8 @@ The feed's `reserved.people` and `reserved.channels` are where these plug in, fe
 - **O6. Startup and polish.** Start-with-Windows, fullscreen hiding, hotkey, packaging notes, an acceptance script. PASS: a fresh reboot with "Start with Windows" on shows the pill; the acceptance script drives a real task end to end with the overlay running and with it closed (delivery identical).
 
 Order: O1 first (testable without any window), then O2, O3, O4, O5, O6.
+
+**O1 status (2026-09-20): built, `npm run o1:acceptance` passes 9 of 9 with real processes.** `m9r-cli feed [--watch]` writes `~/.m9r/feed.json` atomically and only when the content changed; `m9r-cli dismiss <task>` clears items from the overlay list. Measured: the file appears about 1.2 s after start; a new task reaches the feed about half a second after it is created; a hard-killed writer catches up on restart with `seq` continuing and no duplicate ping; a corrupt `state.json` does not stop it; idle CPU about 1.3%; a secret in a goal never reaches the file. Unit tests: `scripts/native-feed.test.ts` (8). Not yet measured: the cost of the Codex liveness probe every 8 s with several sessions open (O3).
 
 ## 12. Decisions needed from the owner
 1. **Position:** top centre pill (proposed) or a corner?

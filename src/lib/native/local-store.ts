@@ -243,9 +243,9 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /** Endpoints, tasks, events and cursors in one read (used when syncing to the web app). */
-    snapshot(): { endpoints: EndpointRecord[]; tasks: Task[]; events: EventRecord[]; cursors: Record<string, number> } {
+    snapshot(): { endpoints: EndpointRecord[]; sessions: SessionRecord[]; tasks: Task[]; events: EventRecord[]; cursors: Record<string, number> } {
       const s = readState();
-      return { endpoints: Object.values(s.endpoints), tasks: s.tasks, events: s.events, cursors: s.cursors };
+      return { endpoints: Object.values(s.endpoints), sessions: s.sessions, tasks: s.tasks, events: s.events, cursors: s.cursors };
     },
 
     getTask(id: string): Task | undefined {
@@ -288,6 +288,15 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     /** Tasks pushed into a session that have not produced a result yet. */
     awaitingResults(): Task[] {
       return readState().tasks.filter((t) => t.delivery?.state === "queued" && !t.resultSummary);
+    },
+
+    /** Clears items from the overlay's "needs you" list. Never touches approval, delivery or results. */
+    dismiss(ids: readonly string[]): number {
+      return update((s) => {
+        let n = 0;
+        for (const id of ids) { const t = s.tasks.find((x) => x.id === id); if (t && !t.dismissedAt) { t.dismissedAt = now().toISOString(); n += 1; } }
+        return n;
+      });
     },
 
     markResultShown(ids: readonly string[]): void {

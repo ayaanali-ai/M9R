@@ -44,6 +44,8 @@ export interface Task {
   resultSummary?: string;
   /** Set when the sender was first shown the result (once). */
   resultShownAt?: string;
+  /** Set when the user cleared it from the overlay's "needs you" list. Hides it there; changes nothing about delivery. */
+  dismissedAt?: string;
   /** Native push (N2): how far pushing this task into the target session got. Absent for plain inbox tasks. */
   delivery?: TaskDelivery;
   /** Working directory of the sender; used to pick the target's session when several are open. */
