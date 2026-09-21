@@ -262,8 +262,8 @@ test("open sessions are preferred when the machine can say which are open; other
 
 test("with two sessions the push goes to the one that is open, and the machine is asked only when there is a choice", async () => {
   const store = newStore();
-  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj/a" });
-  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/b" });
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj" });
+  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj" });
   const asked: string[][] = [];
   const deps = fakeDeps({ sessionLiveness: async (ids) => { asked.push(ids); return { [A]: "live", [B]: "free" }; } });
   const t = store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "human_typed", idempotencyKey: "live1", cwd: "C:/proj" }).task;
@@ -298,17 +298,18 @@ test("an older inbox item is not mixed into a prompt M9R pushed; it waits for th
   assert.match(real?.hookSpecificOutput.additionalContext ?? "", /Older item that fell back to the inbox/, "it arrives at the user's own next prompt");
 });
 
-test("the sender's own folder wins over a related folder, and a related folder (project root vs subfolder) is used when it is the only one", async () => {
+test("a task is only ever pushed into a Codex session in the sender's own folder: not a parent, not a child, not another project", async () => {
   const store = newStore();
   store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj" });
   store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/term" });
   const deps = fakeDeps();
   const inTerm = store.addTask({ from: "claude", to: "codex", goal: "one", origin: "human_typed", idempotencyKey: "t1", cwd: "C:/proj/term" }).task;
   assert.deepEqual(await deliverToCodex(store, inTerm.id, deps), { state: "queued", threadId: B });
-  const sub = store.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "t2", cwd: "C:/proj/src" }).task;
-  assert.deepEqual(await deliverToCodex(store, sub.id, deps), { state: "queued", threadId: A }, "Codex at the project root serves Claude in a subfolder");
-  const other = store.addTask({ from: "claude", to: "codex", goal: "three", origin: "human_typed", idempotencyKey: "t3", cwd: "C:/other" }).task;
-  assert.equal((await deliverToCodex(store, other.id, deps)).state, "failed");
+  const fresh = store.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "t2", cwd: "C:/proj/demo" }).task;
+  const r = await deliverToCodex(store, fresh.id, deps);
+  assert.equal(r.state, "failed", "a clean folder with no Codex session yet does not fall back to the parent's old thread");
+  assert.match(r.state === "failed" ? r.reason : "", /No Codex session is open in C:\/proj\/demo.*one message/);
+  assert.equal(deps.calls.length, 1, "nothing else was queued");
 });
 
 test("Claude's finished turn answers the task it was shown, and the answer is pushed back into the Codex session that asked (once)", async () => {
