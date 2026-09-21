@@ -110,3 +110,9 @@ services/*/.wrangler/
 scratchpad_local/
 Screenshot*.png
 M9R_COMPLETE_HANDOFF*.docx
+
+# overlay (Tauri app)
+/overlay/node_modules
+/overlay/dist
+/overlay/src-tauri/target
+/overlay/src-tauri/gen

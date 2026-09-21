@@ -1,0 +1,180 @@
+// M9R overlay shell. It shows a feed and nothing else: all logic (routing, approvals, liveness) stays in m9r-cli, which
+// writes ~/.m9r/feed.json. This file owns only the window: placement, size, staying on top without taking focus, the
+// tray, and telling the UI when the feed file changed.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::{
+    fs,
+    path::PathBuf,
+    time::{Duration, SystemTime},
+};
+
+use serde::{Deserialize, Serialize};
+use tauri::{
+    menu::{CheckMenuItem, Menu, MenuItem},
+    tray::TrayIconBuilder,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent,
+};
+
+const PILL: &str = "pill";
+const COLLAPSED_W: f64 = 220.0;
+const TOP_MARGIN: f64 = 8.0;
+
+/// Where the feed lives: `M9R_FEED` (tests and the mock), else `<M9R_HOME or ~/.m9r>/feed.json`.
+fn feed_path() -> PathBuf {
+    if let Ok(p) = std::env::var("M9R_FEED") {
+        return p.into();
+    }
+    let home = std::env::var("M9R_HOME").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default()).join(".m9r")
+    });
+    home.join("feed.json")
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct Saved {
+    /// Horizontal centre and top of the pill in physical pixels, so growing the panel keeps it where you put it.
+    cx: Option<i32>,
+    y: Option<i32>,
+}
+
+fn saved_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("window.json"))
+}
+
+fn load_saved(app: &AppHandle) -> Saved {
+    saved_path(app)
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_position(app: &AppHandle, cx: i32, y: i32) {
+    if let Some(p) = saved_path(app) {
+        if let Some(dir) = p.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(p, serde_json::to_string(&Saved { cx: Some(cx), y: Some(y) }).unwrap_or_default());
+    }
+}
+
+/// Puts the pill at the top centre of the primary monitor, or where the user last left it if that spot is still on a screen.
+fn place(window: &WebviewWindow, saved: &Saved) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let w = (COLLAPSED_W * scale).round() as i32;
+    let monitors = window.available_monitors().unwrap_or_default();
+    if let (Some(cx), Some(y)) = (saved.cx, saved.y) {
+        let on_screen = monitors.iter().any(|m| {
+            let p = m.position();
+            let s = m.size();
+            cx >= p.x && cx < p.x + s.width as i32 && y >= p.y && y < p.y + s.height as i32
+        });
+        if on_screen {
+            let _ = window.set_position(PhysicalPosition::new(cx - w / 2, y));
+            return;
+        }
+    }
+    if let Ok(Some(m)) = window.primary_monitor() {
+        let p = m.position();
+        let s = m.size();
+        let x = p.x + (s.width as i32 - w) / 2;
+        let y = p.y + (TOP_MARGIN * m.scale_factor()).round() as i32;
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+    }
+}
+
+/// The UI asks for the size that fits its content; the window keeps its horizontal centre and its top edge.
+#[tauri::command]
+fn resize_pill(window: WebviewWindow, width: f64, height: f64) -> Result<(), String> {
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let cx = pos.x + size.width as i32 / 2;
+    let new_w = (width * scale).round() as i32;
+    window.set_size(LogicalSize::new(width, height)).map_err(|e| e.to_string())?;
+    window.set_position(PhysicalPosition::new(cx - new_w / 2, pos.y)).map_err(|e| e.to_string())
+}
+
+/// The current feed text, or nothing when the file does not exist yet.
+#[tauri::command]
+fn read_feed() -> Option<String> {
+    fs::read_to_string(feed_path()).ok()
+}
+
+/// Watches the feed file's modified time and size (a quarter-second poll: no extra dependency, well under 1% CPU) and tells the UI.
+fn spawn_feed_watcher(app: AppHandle) {
+    std::thread::spawn(move || {
+        let path = feed_path();
+        let mut last: Option<(SystemTime, u64)> = None;
+        loop {
+            match fs::metadata(&path) {
+                Ok(meta) => {
+                    let key = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
+                    if last != Some(key) {
+                        last = Some(key);
+                        if let Ok(text) = fs::read_to_string(&path) {
+                            let _ = app.emit("feed", text);
+                        }
+                    }
+                }
+                Err(_) => {
+                    if last.take().is_some() {
+                        let _ = app.emit("feed-missing", ());
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
+}
+
+fn main() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed])
+        .setup(|app| {
+            let window = app.get_webview_window(PILL).expect("pill window");
+            // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
+            let _ = window.set_focusable(false);
+            let _ = window.set_always_on_top(true);
+            place(&window, &load_saved(app.handle()));
+            let _ = window.show();
+
+            let show = MenuItem::with_id(app, "toggle", "Show / hide", true, None::<&str>)?;
+            let dnd = CheckMenuItem::with_id(app, "dnd", "Do not disturb", true, false, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &dnd, &quit])?;
+            let mut tray = TrayIconBuilder::new().tooltip("M9R").menu(&menu);
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.on_menu_event(move |app, event| match event.id.as_ref() {
+                "toggle" => {
+                    if let Some(w) = app.get_webview_window(PILL) {
+                        if w.is_visible().unwrap_or(true) {
+                            let _ = w.hide();
+                        } else {
+                            let _ = w.show();
+                        }
+                    }
+                }
+                "dnd" => {
+                    let _ = app.emit("dnd", dnd.is_checked().unwrap_or(false));
+                }
+                "quit" => app.exit(0),
+                _ => {}
+            })
+            .build(app)?;
+
+            spawn_feed_watcher(app.handle().clone());
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::Moved(pos) = event {
+                if let Ok(size) = window.outer_size() {
+                    save_position(window.app_handle(), pos.x + size.width as i32 / 2, pos.y);
+                }
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running the M9R overlay");
+}

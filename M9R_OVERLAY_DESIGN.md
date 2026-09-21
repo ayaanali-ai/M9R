@@ -1,6 +1,6 @@
 # M9R overlay: design (2026-09-20)
 
-Status: **design approved 2026-09-20 (owner: top-centre pill; "Start with Windows" off by default; silent pings; overlay-key approvals with the stated limit; separate download; Claude dot shows only "seen at HH:MM" until the O3 spike). O1 built and proven; O2 to O6 not started.** Builds on `M9R_NATIVE_FRONT_DOOR_DESIGN.md` section 10 and `M9R_NEXT_BUILD_PLAN.md` section 3. Everything marked *proven* was tested on this machine (Windows 11); everything marked *unproven* is a guess that a build slice must test first.
+Status: **design approved 2026-09-20 (owner: top-centre pill; "Start with Windows" off by default; silent pings; overlay-key approvals with the stated limit; separate download; Claude dot shows only "seen at HH:MM" until the O3 spike). O1 and O2 built and proven; O3 to O6 not started.** Builds on `M9R_NATIVE_FRONT_DOOR_DESIGN.md` section 10 and `M9R_NEXT_BUILD_PLAN.md` section 3. Everything marked *proven* was tested on this machine (Windows 11); everything marked *unproven* is a guess that a build slice must test first.
 
 ## 1. What it is, in one paragraph
 A small always-on-top window (a pill at the top centre of the screen on Windows first; a notch-style look on Mac later) that shows which agents are open and what they are doing, pings when something needs you (a task waiting for approval, an answer that came back, a push that failed), and expands to a list on click. It is built with Tauri (Rust shell, TypeScript UI). It **displays and asks; it never delivers a task, never types into another app, and the system works exactly the same with it closed.**
@@ -112,7 +112,8 @@ The feed's `reserved.people` and `reserved.channels` are where these plug in, fe
 ## 10. Edge cases (each needs a test)
 | Case | Behaviour |
 |---|---|
-| Feed file missing, half-written or corrupt | Overlay keeps the last good feed and shows a small "stale" mark after 20 s; the writer writes atomically (temp file then rename) so a half file is not expected. |
+| Feed file missing, half-written or corrupt | Overlay keeps the last good feed; the writer writes atomically (temp file then rename) so a half file is not expected. |
+| Writer dead vs. simply quiet | The feed is written only when something changes, so its age says nothing. The writer therefore also touches `~/.m9r/feed.heartbeat` every 5 s (a tiny timestamp file); the overlay shows a small "engine stopped" mark when the heartbeat is older than 20 s. **To build in O3/O6; not in O1.** |
 | Feed writer dies | Overlay restarts it; after 3 quick failures shows "M9R engine stopped" and stops retrying. |
 | `state.json` corrupt | The store already sets it aside and starts clean; the feed shows an empty state, not an error loop. |
 | Liveness returns `unknown` (non-Windows, PowerShell blocked) | States show `unknown`, never `offline`. |
@@ -137,6 +138,20 @@ The feed's `reserved.people` and `reserved.channels` are where these plug in, fe
 Order: O1 first (testable without any window), then O2, O3, O4, O5, O6.
 
 **O1 status (2026-09-20): built, `npm run o1:acceptance` passes 9 of 9 with real processes.** `m9r-cli feed [--watch]` writes `~/.m9r/feed.json` atomically and only when the content changed; `m9r-cli dismiss <task>` clears items from the overlay list. Measured: the file appears about 1.2 s after start; a new task reaches the feed about half a second after it is created; a hard-killed writer catches up on restart with `seq` continuing and no duplicate ping; a corrupt `state.json` does not stop it; idle CPU about 1.3%; a secret in a goal never reaches the file. Unit tests: `scripts/native-feed.test.ts` (8). Not yet measured: the cost of the Codex liveness probe every 8 s with several sessions open (O3).
+
+**O2 status (2026-09-20): built (`overlay/`, Tauri 2), `overlay/scripts/verify-window.ps1` passes 14 of 14 on the release build, `overlay/scripts/e2e-live.mjs` passes 8 of 8 with the real feed writer, CLI, hook and window.** Proven on this machine (Windows 11, 125% scaling):
+- Always on top, does not activate (`WS_EX_NOACTIVATE` via `set_focusable(false)`), no taskbar button (checked against the real taskbar with UI Automation), top-centre placement (275x45 physical px = 220x36 logical).
+- Clicking the pill does not take focus from the window you were in; the panel opens and folds back on click and stays centred.
+- **Click-through works by sizing the window to its content, not by a transparent full-screen window or a cursor-polling loop:** the area around the collapsed pill belongs to other windows (hit-tested with `WindowFromPoint`), so no click near it is ever eaten. The 60 fps polling other Tauri overlays use is not needed.
+- End to end: a task created by the real CLI shows a badge and a ping on the real pill 0.5 s later; the ping folds after 6 s; the badge clears when the task is decided elsewhere; a secret in a goal never reaches the screen.
+- Bug found and fixed by walking the pipeline: the pill remembers the last feed `seq` it announced; if the feed was reset the sequence went backwards and pings would have stayed silent. A backwards `seq` is now treated like a first run.
+- Not built in O2 (by design): approve/deny buttons (disabled, O5), the writer heartbeat and "engine stopped" mark, start with Windows, fullscreen hiding, hotkey (O6), position memory is coded but not yet tested by dragging.
+
+**Memory, corrected.** The design's "under 30 MB" target holds only for the overlay's own process (26.4 MB in the release build). The whole thing, counting the 6 WebView2 helper processes Windows runs for it, is about 180 MB private (about 370 MB working set, with shared pages counted once per process). That is far below Electron, but it is not "14 MB", and the design should not claim it. Realistic target: overlay process under 30 MB, whole tree under 200 MB private.
+
+**Not reproduced:** in one early run the panel closed by itself within a second; five later runs (debug and release, plus a debugger trace of the events) all behaved correctly. I attribute it to a stale second instance left by a failed earlier script, but I did not prove that.
+
+**No third-party code was copied.** OpenWispr (Apache-2.0) was only read for which window flags a Tauri pill uses; nothing needs attribution yet.
 
 ## 12. Decisions needed from the owner
 1. **Position:** top centre pill (proposed) or a corner?

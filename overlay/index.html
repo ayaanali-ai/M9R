@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>M9R</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main id="root" aria-live="polite">
+      <div id="pill" class="pill" role="button" tabindex="-1" aria-label="M9R overlay">
+        <span class="mark" data-tauri-drag-region>M9R</span>
+        <span id="dots" class="dots" aria-hidden="true"></span>
+        <span id="ping" class="ping" hidden></span>
+        <span id="badge" class="badge" hidden></span>
+      </div>
+      <section id="panel" class="panel" hidden></section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

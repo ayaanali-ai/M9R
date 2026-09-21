@@ -121,7 +121,7 @@ function agentFor(handle: string, input: FeedInput): FeedAgent {
   return {
     handle, sessions: rows, doing: null, since: lastSeen,
     state: recentlySeen ? "seen" : "unknown",
-    evidence: lastSeen ? `Last seen ${lastSeen}. M9R has no reliable open/closed signal for this agent yet.` : "Seen before, but not recently.",
+    evidence: lastSeen ? "Seen recently. M9R has no reliable open/closed signal for this agent yet." : "Seen before, but not recently.",
   };
 }
 

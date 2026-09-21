@@ -1,0 +1,24 @@
+{
+  "name": "m9r-overlay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "M9R overlay: a small always-on-top pill that shows which agents are open and what needs you. A view only; the logic lives in m9r-cli.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "ui": "vite",
+    "typecheck": "tsc --noEmit -p .",
+    "verify:window": "powershell -NoProfile -File scripts/verify-window.ps1 -Exe src-tauri/target/release/m9r-overlay.exe -Feed public/mock-feed.json",
+    "e2e": "node scripts/e2e-live.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "^5",
+    "vite": "^6"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  }
+}
