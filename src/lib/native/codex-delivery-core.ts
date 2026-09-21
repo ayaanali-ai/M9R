@@ -71,6 +71,8 @@ export type SessionChoice =
   | { kind: "none" };
 
 const SESSION_WINDOW_MS = 24 * 60 * 60_000;
+const CLEAR_WINNER_RECENT_MS = 12 * 60 * 60_000;
+const CLEAR_WINNER_GAP_MS = 5 * 60_000;
 export const normCwd = (p: string | undefined) => (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 
 /** True when one folder is the other or contains it. */
@@ -99,7 +101,15 @@ export function pickSession(sessions: readonly SessionLike[], input: { pinned?: 
   if (fresh.length === 0) return { kind: "none" };
   if (fresh.length === 1) return { kind: "one", session: fresh[0] };
   const here = input.senderCwd ? fresh.filter((s) => normCwd(s.cwd) === normCwd(input.senderCwd)) : [];
-  return here.length === 1 ? { kind: "one", session: here[0] } : { kind: "ambiguous", sessions: [...fresh] };
+  if (here.length === 1) return { kind: "one", session: here[0] };
+  // Several threads in the same place: the one in use right now is the one meant, but only when it is clearly the one in use (used in the
+  // last 12 hours while every other thread in that folder has been quiet for at least 5 minutes longer). Otherwise never guess.
+  const pool = (here.length > 1 ? here : fresh).slice().sort((x, y) => Date.parse(y.lastSeenAt) - Date.parse(x.lastSeenAt));
+  const newest = Date.parse(pool[0].lastSeenAt);
+  const recent = input.now.getTime() - newest <= CLEAR_WINNER_RECENT_MS;
+  const rivalsQuiet = pool.slice(1).every((x) => newest - Date.parse(x.lastSeenAt) > CLEAR_WINNER_GAP_MS);
+  if (recent && rivalsQuiet) return { kind: "one", session: pool[0] };
+  return { kind: "ambiguous", sessions: [...pool] };
 }
 
 export const queueArgs = (threadId: string, message: string) => ["queue", "--thread", threadId, "--message", message];

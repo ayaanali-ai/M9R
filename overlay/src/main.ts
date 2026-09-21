@@ -123,7 +123,7 @@ function needsRow(n: NeedsYou) {
     if (done) main.append(el("div", done.ok ? "result ok" : "result bad", done.text));
     else main.append(actionsFor(n));
   } else if (n.kind === "push_failed") {
-    main.append(el("div", "title", `${n.taskId} could not be pushed`), el("div", "sub", n.reason), el("div", "sub", n.fix));
+    main.append(el("div", "title", `${n.taskId} could not be pushed`), el("div", "sub", n.reason), ...(n.fix ? [el("div", "sub", n.fix)] : []));
   } else {
     main.append(el("div", "title", `@${n.from} answered ${n.taskId}`), el("div", "sub", n.summary));
   }

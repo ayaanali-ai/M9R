@@ -167,7 +167,7 @@ function needsYouFrom(input: FeedInput): NeedsYou[] {
       out.push({ kind: "approval", taskId: t.id, from: t.from, to: t.to, goal: safe(t.goal, GOAL_CHARS), protected: isProtectedAction(t.goal) });
     } else if (t.delivery?.state === "failed" && t.approval !== "denied" && t.approval !== "expired" && nowMs - Date.parse(t.createdAt) < FAILED_WINDOW_MS && !t.deliveredAt) {
       const reason = t.delivery.error ?? "The push failed.";
-      out.push({ kind: "push_failed", taskId: t.id, to: t.to, reason: safe(reason, REASON_CHARS), fix: /sessions are open/.test(reason) ? "m9r-cli sessions, then m9r-cli send @codex --session <id> \"...\"" : "m9r-cli tasks" });
+      out.push({ kind: "push_failed", taskId: t.id, to: t.to, reason: safe(reason, REASON_CHARS), fix: /To aim it/.test(reason) ? "" : /sessions are open/.test(reason) ? "m9r-cli sessions, then m9r-cli send @codex --session <id> \"...\"" : "m9r-cli tasks" });
     } else if (t.resultSummary && nowMs - Date.parse(t.createdAt) < ANSWER_WINDOW_MS && (!t.resultShownAt || nowMs - Date.parse(t.resultShownAt) < SHOWN_ANSWER_WINDOW_MS)) {
       out.push({ kind: "answer", taskId: t.id, from: t.to, summary: safe(t.resultSummary, SUMMARY_CHARS) });
     }

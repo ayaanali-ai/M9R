@@ -155,10 +155,11 @@ test("a thread that sat idle for hours and then gets a new prompt still has that
   assert.equal(store.snapshot().tasks[0].to, "claude");
 });
 
-test("a thread picked up part-way still knows its own folder, so the stand-down check looks at the right project", () => {
+test("a thread picked up part-way still knows its own folder, so the stand-down check looks at the right project", async () => {
   const { day, store, start } = watchSetup();
   const file = join(day, "rollout-2026-09-21T09-00-00-019f-mid.jsonl");
   writeFileSync(file, meta() + turn() + user("earlier prompt"));
+  await new Promise((r) => setTimeout(r, 60)); // the file must look older than the watcher
   const seenFolders: Array<string | undefined> = [];
   const watcher = createCodexWatcher(store, { codexHome: join(day, "..", "..", "..", ".."), routeMentions: (cwd) => { seenFolders.push(cwd); return true; } });
   void start;

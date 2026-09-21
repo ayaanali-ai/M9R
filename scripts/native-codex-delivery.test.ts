@@ -342,3 +342,13 @@ test("Claude's finished turn answers the task it was shown, and the answer is pu
   assert.match(deps.calls[0][4], /^\[M9R T1\] Answer from @claude[\s\S]*PURPLE-ELEPHANT-42/);
   assert.equal((await pushAnswerToCodex(store, asked.id, deps)).state, "skipped", "never sent twice");
 });
+
+test("two threads in the same folder: the one in use right now wins only when it is clearly the one in use; otherwise M9R does not guess", () => {
+  const now = new Date("2026-09-21T23:20:00Z");
+  const at = (min: number) => new Date(now.getTime() - min * 60_000).toISOString();
+  const s = (id: string, min: number) => ({ sessionId: id, cwd: "C:/p", lastSeenAt: at(min) });
+  assert.deepEqual(pickSession([s(A, 240), s(B, 4)], { now, senderCwd: "C:/p" }), { kind: "one", session: s(B, 4) }, "one thread used 4 minutes ago, the other 4 hours ago");
+  assert.equal(pickSession([s(A, 6), s(B, 4)], { now, senderCwd: "C:/p" }).kind, "ambiguous", "both in use lately: it is not clear");
+  assert.equal(pickSession([s(A, 900), s(B, 800)], { now, senderCwd: "C:/p" }).kind, "ambiguous", "neither used in the last 12 hours: it does not pick the least stale");
+  assert.deepEqual(pickSession([s(A, 240), s(B, 60)], { now, senderCwd: "C:/p" }), { kind: "one", session: s(B, 60) }, "the thread used an hour ago beats the one used four hours ago");
+});
