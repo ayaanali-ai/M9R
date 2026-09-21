@@ -116,3 +116,4 @@ M9R_COMPLETE_HANDOFF*.docx
 /overlay/dist
 /overlay/src-tauri/target
 /overlay/src-tauri/gen
+engine/dist/

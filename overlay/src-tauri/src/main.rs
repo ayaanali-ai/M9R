@@ -6,7 +6,9 @@
 use std::{
     fs,
     path::PathBuf,
-    time::{Duration, SystemTime},
+    process::{Child, Command, Stdio},
+    sync::Mutex,
+    time::{Duration, Instant, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +17,9 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent,
 };
+
+/// The engine child the overlay started, so quitting the overlay stops it too.
+static ENGINE: Mutex<Option<Child>> = Mutex::new(None);
 
 const PILL: &str = "pill";
 const COLLAPSED_W: f64 = 220.0;
@@ -101,6 +106,76 @@ fn read_feed() -> Option<String> {
     fs::read_to_string(feed_path()).ok()
 }
 
+fn m9r_home() -> PathBuf {
+    std::env::var("M9R_HOME").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default()).join(".m9r")
+    })
+}
+
+/// The self-contained M9R engine (no Node needed): `M9R_ENGINE`, else the copy `m9r-cli setup` installed, else one next to this program.
+fn find_engine() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "m9r-engine.exe" } else { "m9r-engine" };
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("M9R_ENGINE") {
+        candidates.push(p.into());
+    }
+    candidates.push(m9r_home().join("bin").join(name));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(name));
+        }
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Keeps `m9r-engine feed --watch` running so the pill always has fresh data. The engine refuses to start when another
+/// writer already holds the feed lock, so a second copy exits at once; a fast exit therefore backs off instead of respawning.
+/// Off when `M9R_FEED` points somewhere else (the mock feed and tests own that file).
+fn spawn_engine_supervisor() {
+    if std::env::var("M9R_FEED").is_ok() || std::env::var("M9R_NO_ENGINE").is_ok() {
+        return;
+    }
+    std::thread::spawn(|| loop {
+        let mut wait = Duration::from_secs(5);
+        if let Some(engine) = find_engine() {
+            let mut cmd = Command::new(engine);
+            cmd.args(["feed", "--watch"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            let started = Instant::now();
+            if let Ok(child) = cmd.spawn() {
+                *ENGINE.lock().unwrap() = Some(child);
+                loop {
+                    std::thread::sleep(Duration::from_secs(2));
+                    let mut guard = ENGINE.lock().unwrap();
+                    match guard.as_mut().map(|c| c.try_wait()) {
+                        Some(Ok(None)) => continue,
+                        _ => {
+                            *guard = None;
+                            break;
+                        }
+                    }
+                }
+                if started.elapsed() < Duration::from_secs(3) {
+                    wait = Duration::from_secs(30);
+                }
+            }
+        } else {
+            wait = Duration::from_secs(30);
+        }
+        std::thread::sleep(wait);
+    });
+}
+
+fn stop_engine() {
+    if let Some(mut child) = ENGINE.lock().unwrap().take() {
+        let _ = child.kill();
+    }
+}
+
 /// Watches the feed file's modified time and size (a quarter-second poll: no extra dependency, well under 1% CPU) and tells the UI.
 fn spawn_feed_watcher(app: AppHandle) {
     std::thread::spawn(move || {
@@ -160,12 +235,16 @@ fn main() {
                 "dnd" => {
                     let _ = app.emit("dnd", dnd.is_checked().unwrap_or(false));
                 }
-                "quit" => app.exit(0),
+                "quit" => {
+                    stop_engine();
+                    app.exit(0)
+                }
                 _ => {}
             })
             .build(app)?;
 
             spawn_feed_watcher(app.handle().clone());
+            spawn_engine_supervisor();
             Ok(())
         })
         .on_window_event(|window, event| {

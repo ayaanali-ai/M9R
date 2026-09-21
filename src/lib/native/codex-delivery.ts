@@ -150,7 +150,9 @@ export function realDeps(env: Record<string, string | undefined> = process.env):
 /** Starts the delivery in a separate process so a hook never waits for Codex. Fire and forget. */
 export function spawnDeliveryRunner(hookEntry: string, taskId: string, env: Record<string, string | undefined> = process.env): void {
   try {
-    const child = spawn(process.execPath, [hookEntry, "queue", "codex", taskId], { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...env } });
+    // Inside the engine the hook entry is the engine itself, reached through its "m9r-hook" subcommand.
+    const args = hookEntry === process.execPath ? ["m9r-hook", "queue", "codex", taskId] : [hookEntry, "queue", "codex", taskId];
+    const child = spawn(process.execPath, args, { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...env } });
     child.unref();
   } catch { /* the task stays in the inbox and shows at Codex's next prompt */ }
 }

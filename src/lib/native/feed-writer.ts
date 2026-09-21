@@ -4,7 +4,7 @@
  * turn running) on a timer, off the UI path. Writes are atomic (temp file, then rename) and happen only when the content
  * changed, so the overlay never sees a half file and is not woken for nothing.
  */
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { buildFeed, feedBody, lastTurnState, type Feed, type SessionProbe } from "./feed-core";
 import { readRolloutTailFor, realDeps, type DeliveryDeps } from "./codex-delivery";
@@ -111,3 +111,18 @@ export async function runFeed(options: FeedRunOptions): Promise<Feed | null> {
 
 export const feedPath = (root: string) => join(root, FEED_FILE);
 export const feedExists = (root: string) => existsSync(feedPath(root));
+
+const lockPath = (root: string) => join(root, "feed.lock");
+const pidAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; } };
+
+/** Only one watcher may write the feed (the overlay starts one, and a person may too). Returns a release function, or null when another one is running. */
+export function acquireFeedLock(root: string, pid = process.pid): (() => void) | null {
+  mkdirSync(root, { recursive: true });
+  const path = lockPath(root);
+  try {
+    const other = Number(readFileSync(path, "utf8").trim());
+    if (Number.isInteger(other) && other > 0 && other !== pid && pidAlive(other)) return null;
+  } catch { /* no lock, or unreadable: take it */ }
+  writeFileSync(path, String(pid));
+  return () => { try { if (Number(readFileSync(path, "utf8").trim()) === pid) rmSync(path, { force: true }); } catch { /* already gone */ } };
+}

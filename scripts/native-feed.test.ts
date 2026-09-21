@@ -156,3 +156,16 @@ test("dismiss hides an item from the feed and changes nothing else about the tas
   assert.equal(store.getTask(t.id)?.delivery?.state, "done");
   assert.equal(store.getTask(t.id)?.resultSummary, "Reviewed: fine.");
 });
+
+test("only one feed watcher may run: a live holder blocks a second, a dead one is taken over, release frees it", async () => {
+  const { acquireFeedLock } = await import("@/lib/native/feed-writer");
+  const root = mkdtempSync(join(tmpdir(), "m9r-lock-"));
+  const release = acquireFeedLock(root, process.pid);
+  assert.ok(release);
+  assert.equal(acquireFeedLock(root, process.pid + 1), null, "a live holder blocks another writer");
+  release?.();
+  const again = acquireFeedLock(root, process.pid + 1);
+  assert.ok(again, "released lock can be taken");
+  writeFileSync(join(root, "feed.lock"), "999999999");
+  assert.ok(acquireFeedLock(root, process.pid), "a lock left by a dead process is taken over");
+});

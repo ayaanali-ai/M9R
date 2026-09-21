@@ -276,3 +276,22 @@ test("without Codex installed, setup never creates its folder", async () => {
   assert.equal(nativeStatus(s.io).some((r) => r.id === "codex-hooks"), false);
   s.done();
 });
+
+test("with the engine, setup copies it into M9R's folder and the hooks call it (no node needed), and uninstall removes it", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const installed = join(s.p.m9r, "bin", process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
+  assert.equal(readFileSync(installed, "utf8"), "stand-in engine");
+  const settings = readFileSync(s.p.settings, "utf8");
+  assert.match(settings, /m9r-engine(.exe)?.{1,2} m9r-hook UserPromptSubmit claude-code/);
+  assert.doesNotMatch(settings, /"node /);
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  assert.match(s.out.join("\n"), /Already set up/);
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(existsSync(installed), false);
+  s.done();
+});
