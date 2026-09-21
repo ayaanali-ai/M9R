@@ -380,7 +380,7 @@ export default function AuthForm({
                 value={firstName}
                 onChange={(e) => setFirstName(e.target.value)}
                 className="product-input auth-input"
-                placeholder="Ada"
+                placeholder="John"
                 disabled={busy}
               />
             </div>
@@ -394,7 +394,7 @@ export default function AuthForm({
                 value={lastName}
                 onChange={(e) => setLastName(e.target.value)}
                 className="product-input auth-input"
-                placeholder="Lovelace"
+                placeholder="Smith"
                 disabled={busy}
               />
             </div>
@@ -415,7 +415,7 @@ export default function AuthForm({
               value={username}
               onChange={(event) => setUsername(event.target.value.toLowerCase())}
               className="product-input auth-input"
-              placeholder="ada_lovelace"
+              placeholder="john_smith"
               aria-describedby={`${usernameId}-help`}
               disabled={busy}
             />

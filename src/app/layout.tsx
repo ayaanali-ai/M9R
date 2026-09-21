@@ -6,9 +6,9 @@ import AmbientBackground from "@/components/AmbientBackground";
 import PwaRuntime from "@/components/PwaRuntime";
 
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, "") || "https://m9r-dashboard.onrender.com";
-const title = "M9R — Your agents work together now";
+const title = "M9R — The air between agents";
 const description =
-  "M9R is the shared workspace where Claude Code and Codex work the same repo together, aware of each other's edits in real time, and build memory the whole team carries forward.";
+  "Agents don’t need another home. M9R connects the agents you already use without replacing their environments.";
 // A real screenshot of the actual light-theme homepage (headline, copy,
 // the shader star mark), cropped/resized to the standard 1200x630 OG
 // size -- replaces the old pre-rebrand "OathLock" asset. A generated
@@ -129,7 +129,7 @@ export const metadata: Metadata = {
     title,
     description,
     images: [ogImage],
-    creator: "@m9rdev",
+    creator: "@useM9R",
   },
   manifest: "/manifest.webmanifest",
   appleWebApp: {
