@@ -135,20 +135,21 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       update((s) => { pushEvent(s, { kind, text, ...(taskId ? { taskId } : {}) }); });
     },
 
-    registerEndpoint(input: { provider: string; sessionId?: string; cwd?: string }): EndpointRecord {
+    registerEndpoint(input: { provider: string; sessionId?: string; cwd?: string; /** When it was really last active (from a file); default is now. */ seenAt?: string }): EndpointRecord {
       const handle = handleForProvider(input.provider);
       return update((s) => {
         const previous = s.endpoints[handle];
-        const record: EndpointRecord = { handle, provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, lastSeenAt: now().toISOString() };
+        const seen = input.seenAt ?? now().toISOString();
+        const record: EndpointRecord = { handle, provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, lastSeenAt: previous && Date.parse(previous.lastSeenAt) > Date.parse(seen) ? previous.lastSeenAt : seen };
         s.endpoints[handle] = record;
         if (input.sessionId) {
-          const at = now().toISOString();
+          const at = input.seenAt ?? now().toISOString();
           const known = s.sessions.find((x) => x.handle === handle && x.sessionId === input.sessionId);
-          if (known) { known.lastSeenAt = at; if (input.cwd) known.cwd = input.cwd; }
+          if (known) { if (Date.parse(at) > Date.parse(known.lastSeenAt)) known.lastSeenAt = at; if (input.cwd) known.cwd = input.cwd; }
           else s.sessions.push({ handle, provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, firstSeenAt: at, lastSeenAt: at });
-          // Keep the list small: the 30 most recent sessions, nothing older than a week.
+          // Keep the list small: the 60 most recent sessions, nothing older than a week.
           const cutoff = now().getTime() - 7 * 86_400_000;
-          s.sessions = s.sessions.filter((x) => Date.parse(x.lastSeenAt) >= cutoff).sort((a, b) => Date.parse(a.lastSeenAt) - Date.parse(b.lastSeenAt)).slice(-30);
+          s.sessions = s.sessions.filter((x) => Date.parse(x.lastSeenAt) >= cutoff).sort((a, b) => Date.parse(a.lastSeenAt) - Date.parse(b.lastSeenAt)).slice(-60);
         }
         if (!previous) pushEvent(s, { kind: "agent.connected", handle, text: `@${handle} connected (${input.provider})` });
         else if (input.sessionId && previous.sessionId !== input.sessionId) pushEvent(s, { kind: "session.started", handle, text: `@${handle} started a new session` });

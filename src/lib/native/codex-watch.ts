@@ -11,7 +11,7 @@ import { consumeRollout, newWatchFile, type WatchFile } from "./codex-watch-core
 
 const ACTIVE_WINDOW_MS = 20 * 60_000;
 /** Sessions this recent are offered to `@codex` as targets (the same window delivery uses). */
-const KNOWN_WINDOW_MS = 24 * 60 * 60_000;
+const KNOWN_WINDOW_MS = 12 * 60 * 60_000;
 const MAX_READ = 4 * 1024 * 1024;
 
 export interface CodexWatchOptions {
@@ -75,10 +75,10 @@ export function createCodexWatcher(store: LocalStore, options: CodexWatchOptions
         if (!known.has(path) && now() - st.mtimeMs <= KNOWN_WINDOW_MS) {
           known.add(path);
           const meta = readMeta(path);
-          if (meta) store.registerEndpoint({ provider: "codex", sessionId: meta.id, cwd: meta.cwd });
+          if (meta) store.registerEndpoint({ provider: "codex", sessionId: meta.id, cwd: meta.cwd, seenAt: new Date(st.mtimeMs).toISOString() });
         }
         const tracked = files.get(path);
-        if (tracked) { if (st.size > tracked.offset) tracked.touchedAt = now(); continue; }
+        if (tracked) { if (st.size > tracked.offset) { tracked.touchedAt = now(); if (tracked.id) store.registerEndpoint({ provider: "codex", sessionId: tracked.id, cwd: tracked.cwd, seenAt: new Date(st.mtimeMs).toISOString() }); } continue; }
         if (now() - st.mtimeMs > ACTIVE_WINDOW_MS) continue;
         // A session that began after we started is read from its first line; one that was already running is read from now on.
         const fresh = st.birthtimeMs >= startedAt;

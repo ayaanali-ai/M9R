@@ -65,6 +65,8 @@ const REASON_CHARS = 200;
 const RECENT_ITEMS = 10;
 const SEEN_WINDOW_MS = 10 * 60_000;
 const ANSWER_WINDOW_MS = 6 * 3_600_000;
+/** Once the answer has reached the agent that asked, the pill only keeps it a little while. */
+const SHOWN_ANSWER_WINDOW_MS = 10 * 60_000;
 const FAILED_WINDOW_MS = 24 * 3_600_000;
 const KNOWN_AGENTS = ["claude", "codex", "opencode"] as const;
 
@@ -95,7 +97,7 @@ export function lastTurnState(tailText: string): "working" | "idle" | "unknown" 
 function agentFor(handle: string, input: FeedInput): FeedAgent {
   const sessions = input.sessions.filter((s) => s.handle === handle).sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
   const endpoint = input.endpoints.find((e) => e.handle === handle);
-  const rows = sessions.map((s) => ({ id: s.sessionId, cwd: s.cwd, live: (input.probes[s.sessionId]?.live === "live" ? true : input.probes[s.sessionId]?.live === "free" ? false : null) as boolean | null }));
+  const rows = sessions.slice().sort((a, b) => Number(input.probes[b.sessionId]?.turn === "working") - Number(input.probes[a.sessionId]?.turn === "working") || Number(input.probes[b.sessionId]?.live === "live") - Number(input.probes[a.sessionId]?.live === "live")).map((s) => ({ id: s.sessionId, cwd: s.cwd, live: (input.probes[s.sessionId]?.live === "live" ? true : input.probes[s.sessionId]?.live === "free" ? false : null) as boolean | null }));
   if (!endpoint && sessions.length === 0) return { handle, state: "not_connected", doing: null, sessions: [], evidence: "No session of this agent has been seen on this machine." };
 
   const probed = sessions.filter((s) => input.probes[s.sessionId]);
@@ -137,7 +139,7 @@ function needsYouFrom(input: FeedInput): NeedsYou[] {
     } else if (t.delivery?.state === "failed" && t.approval !== "denied" && t.approval !== "expired" && nowMs - Date.parse(t.createdAt) < FAILED_WINDOW_MS && !t.deliveredAt) {
       const reason = t.delivery.error ?? "The push failed.";
       out.push({ kind: "push_failed", taskId: t.id, to: t.to, reason: safe(reason, REASON_CHARS), fix: /sessions are open/.test(reason) ? "m9r-cli sessions, then m9r-cli send @codex --session <id> \"...\"" : "m9r-cli tasks" });
-    } else if (t.resultSummary && nowMs - Date.parse(t.createdAt) < ANSWER_WINDOW_MS) {
+    } else if (t.resultSummary && nowMs - Date.parse(t.createdAt) < ANSWER_WINDOW_MS && (!t.resultShownAt || nowMs - Date.parse(t.resultShownAt) < SHOWN_ANSWER_WINDOW_MS)) {
       out.push({ kind: "answer", taskId: t.id, from: t.to, summary: safe(t.resultSummary, SUMMARY_CHARS) });
     }
   }

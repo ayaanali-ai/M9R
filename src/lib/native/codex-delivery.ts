@@ -79,6 +79,9 @@ export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, 
 // Real implementations
 
 const TAIL_BYTES = 512 * 1024;
+const LIVENESS_FRESH_MS = 20_000;
+/** Who holds which session file open, remembered briefly within this process (the resident engine). */
+const livenessMemo = new Map<string, { v: Liveness; at: number }>();
 
 export function codexHome(env: Record<string, string | undefined>): string {
   return env.CODEX_HOME?.trim() || join(homedir(), ".codex");
@@ -140,11 +143,22 @@ export function realDeps(env: Record<string, string | undefined> = process.env):
       return file ? readTail(file, TAIL_BYTES) : null;
     },
     sessionLiveness: async (threadIds) => {
-      const byFile = new Map<string, string>();
-      for (const id of threadIds) { const f = findRolloutFile(codexHome(env), id); if (f) byFile.set(f, id); }
-      const verdicts = await windowsFileHolders([...byFile.keys()]);
-      const out: Record<string, Liveness> = Object.fromEntries(threadIds.map((id) => [id, "unknown" as Liveness]));
-      for (const [file, id] of byFile) out[id] = verdicts[file] ?? "unknown";
+      // The feed already asks the machine every few seconds; a push right after should not pay for the same 2 s question again.
+      const now = Date.now();
+      const out: Record<string, Liveness> = {};
+      const missing: string[] = [];
+      for (const id of threadIds) {
+        const hit = livenessMemo.get(id);
+        if (hit && now - hit.at < LIVENESS_FRESH_MS) out[id] = hit.v; else missing.push(id);
+      }
+      if (missing.length > 0) {
+        const byFile = new Map<string, string>();
+        for (const id of missing) { const f = findRolloutFile(codexHome(env), id); if (f) byFile.set(f, id); }
+        const verdicts = await windowsFileHolders([...byFile.keys()]);
+        for (const id of missing) out[id] = "unknown";
+        for (const [file, id] of byFile) out[id] = verdicts[file] ?? "unknown";
+        for (const id of missing) if (out[id] !== "unknown") livenessMemo.set(id, { v: out[id], at: Date.now() });
+      }
       return out;
     },
   };

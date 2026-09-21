@@ -10,6 +10,7 @@ import { buildFeed, feedBody, lastTurnState, type Feed, type SessionProbe } from
 import { readRolloutTailFor, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { PENDING_TTL_MS } from "./approval-core";
 import { createLocalStore } from "./local-store";
+import { readClaudeSessions, type ClaudeSession } from "./claude-registry";
 import type { CodexWatcher } from "./codex-watch";
 
 export const FEED_FILE = "feed.json";
@@ -19,6 +20,8 @@ export interface FeedDeps {
   /** Injected for tests; production asks the machine which Codex sessions are open. */
   liveness?: DeliveryDeps["sessionLiveness"];
   readRolloutTail?: (threadId: string) => string | null;
+  /** Open Claude Code sessions; production reads Claude's own session registry. */
+  claudeSessions?: () => ClaudeSession[];
 }
 
 export interface FeedRunOptions {
@@ -52,14 +55,26 @@ function writeAtomic(path: string, text: string): void {
   }
 }
 
+const PROBE_RECENT_MS = 6 * 3_600_000;
+const PROBE_MAX = 12;
+
 async function probe(store: ReturnType<typeof createLocalStore>, deps: FeedDeps): Promise<Record<string, SessionProbe>> {
-  const codex = store.sessionsFor("codex");
-  if (codex.length === 0) return {};
+  const out: Record<string, SessionProbe> = {};
+
+  // Claude Code: its own registry says which sessions are open and whether each is busy. No hook needed.
+  for (const c of (deps.claudeSessions ?? (() => readClaudeSessions()))()) {
+    if (!store.sessionsFor("claude").some((s) => s.sessionId === c.sessionId)) store.registerEndpoint({ provider: "claude-code", sessionId: c.sessionId, cwd: c.cwd, seenAt: c.updatedAt ? new Date(c.updatedAt).toISOString() : undefined });
+    out[c.sessionId] = { live: "live", turn: c.status === "busy" ? "working" : c.status === "idle" ? "idle" : "unknown" };
+  }
+
+  // Codex: ask the machine which recently active sessions hold their file open. Dozens of old sessions are not asked about every pass.
+  const cutoff = (deps.now ?? (() => new Date()))().getTime() - PROBE_RECENT_MS;
+  const codex = store.sessionsFor("codex").filter((s) => Date.parse(s.lastSeenAt) >= cutoff).slice(0, PROBE_MAX);
+  if (codex.length === 0) return out;
   const ids = codex.map((s) => s.sessionId);
   const liveness = deps.liveness ?? realDeps().sessionLiveness;
   const live = liveness ? await liveness(ids).catch(() => undefined) : undefined;
   const tail = deps.readRolloutTail ?? ((id: string) => readRolloutTailFor(id));
-  const out: Record<string, SessionProbe> = {};
   for (const id of ids) {
     const l = live?.[id] ?? "unknown";
     const t = l === "live" ? tail(id) : null;

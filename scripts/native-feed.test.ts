@@ -169,3 +169,42 @@ test("only one feed watcher may run: a live holder blocks a second, a dead one i
   writeFileSync(join(root, "feed.lock"), "999999999");
   assert.ok(acquireFeedLock(root, process.pid), "a lock left by a dead process is taken over");
 });
+
+test("an answer already shown to the agent that asked leaves the pill after ten minutes; one never shown stays for hours", () => {
+  const answered = (id: string, over: Partial<Task> = {}) => task({ id, resultSummary: "done", createdAt: "2026-09-20T09:00:00Z", ...over });
+  const f = buildFeed(input({ tasks: [
+    answered("T1", { resultShownAt: "2026-09-20T11:55:00Z" }),
+    answered("T2", { resultShownAt: "2026-09-20T11:30:00Z" }),
+    answered("T3"),
+  ] }), null);
+  assert.deepEqual(f.needsYou.map((n) => n.taskId).sort(), ["T1", "T3"]);
+});
+
+test("Claude Code sessions come from Claude's own registry: open ones show as open, busy as working, the working folder leads", async () => {
+  const { readClaudeSessions } = await import("../src/lib/native/claude-registry");
+  const dir = mkdtempSync(join(tmpdir(), "m9r-claude-reg-"));
+  const write = (name: string, body: unknown) => writeFileSync(join(dir, name), typeof body === "string" ? body : JSON.stringify(body));
+  write("100.json", { pid: 100, sessionId: "aaaa1111-0000-4000-8000-000000000001", cwd: "C:/demo", status: "busy", updatedAt: 1790000000000, messagingSocketPath: "SHOULD-NEVER-BE-USED" });
+  write("200.json", { pid: 200, sessionId: "aaaa1111-0000-4000-8000-000000000002", cwd: "C:/other", status: "idle" });
+  write("300.json", { pid: 300, sessionId: "aaaa1111-0000-4000-8000-000000000003", cwd: "C:/dead", status: "idle" });
+  write("400.json", "{not json");
+  write("100.deadbeef.key", "SECRET-DO-NOT-READ");
+  const open = readClaudeSessions(dir, (pid) => pid !== 300);
+  assert.deepEqual(open.map((s) => [s.pid, s.status]), [[100, "busy"], [200, "idle"]]);
+  assert.equal(JSON.stringify(open).includes("SHOULD-NEVER-BE-USED"), false);
+  assert.equal(JSON.stringify(open).includes("SECRET"), false);
+
+  const root = mkdtempSync(join(tmpdir(), "m9r-claude-feed-"));
+  const store = createLocalStore(root);
+  store.registerEndpoint({ provider: "claude-code", sessionId: "old-hook-session", cwd: "C:/old" });
+  const feed = await feedPass(root, { now: () => NOW, claudeSessions: () => open, liveness: async () => ({}) }, {}).then(() => null);
+  void feed;
+  const built = buildFeed(input({
+    endpoints: [{ handle: "claude", provider: "claude-code", lastSeenAt: NOW.toISOString() }],
+    sessions: open.map((s) => ({ handle: "claude", provider: "claude-code", sessionId: s.sessionId, cwd: s.cwd, firstSeenAt: NOW.toISOString(), lastSeenAt: NOW.toISOString() })),
+    probes: Object.fromEntries(open.map((s) => [s.sessionId, probe("live", s.status === "busy" ? "working" : "idle")])),
+  }), null);
+  const claude = built.agents.find((a) => a.handle === "claude");
+  assert.equal(claude?.state, "open_working");
+  assert.equal(claude?.sessions[0].cwd, "C:/demo", "the working session's folder is shown first");
+});
