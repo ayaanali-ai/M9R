@@ -60,15 +60,52 @@ function section(title: string, rows: HTMLElement[], emptyText: string) {
   return wrap;
 }
 
+type Approval = Extract<NeedsYou, { kind: "approval" }>;
+/** Results of clicks, kept until the feed drops the task so the row says what happened instead of going quiet. */
+const decided = new Map<string, { ok: boolean; text: string; title: string }>();
+
+function outcomeText(action: string, to: string, out: string): string {
+  if (action === "deny") return `Denied. @${to} is told no.`;
+  if (/Could not push/i.test(out)) return `Approved, but @${to} isn't reachable now. It gets it at its next prompt.`;
+  if (/Pushed into/i.test(out)) return `Approved. Sent to @${to}.`;
+  return `Approved. @${to} gets it at its next prompt.`;
+}
+
+function actionsFor(n: Approval) {
+  const actions = el("div", "actions");
+  const buttons: HTMLButtonElement[] = [];
+  const run = async (action: "approve" | "deny" | "allow_day") => {
+    buttons.forEach((b) => { b.disabled = true; });
+    try {
+      const out = await invoke<string>("decide", { taskId: n.taskId, action, from: n.from, to: n.to });
+      decided.set(n.taskId, { ok: true, title: `@${n.from} asks @${n.to}: ${n.goal}`, text: action === "allow_day" ? `Approved, and @${n.from} may hand work to @${n.to} for a day.` : outcomeText(action, n.to, out) });
+      window.setTimeout(() => { decided.delete(n.taskId); render(); }, 5000);
+    } catch (e) {
+      decided.set(n.taskId, { ok: false, title: `@${n.from} asks @${n.to}: ${n.goal}`, text: `Couldn't do that: ${String(e).slice(0, 140)}` });
+      window.setTimeout(() => { decided.delete(n.taskId); render(); }, 6000);
+    }
+    render();
+  };
+  const mk = (label: string, cls: string, action: "approve" | "deny" | "allow_day") => {
+    const b = el("button", cls, label) as HTMLButtonElement;
+    b.addEventListener("click", () => { void run(action); });
+    buttons.push(b);
+    return b;
+  };
+  actions.append(mk(n.protected ? "Approve this once" : "Approve", "btn primary", "approve"), mk("Deny", "btn", "deny"));
+  if (!n.protected) { const l = mk("Allow this kind for a day", "link", "allow_day"); actions.append(l); }
+  return actions;
+}
+
 function needsRow(n: NeedsYou) {
   const row = el("div", "row");
   const main = el("div", "main");
   if (n.kind === "approval") {
     main.append(el("div", "title", `@${n.from} asks @${n.to}: ${n.goal}`));
-    if (n.protected) main.append(el("div", "tag", "PROTECTED ACTION: ALWAYS ASKS"));
-    const actions = el("div", "actions");
-    for (const label of ["Approve", "Deny"]) { const b = el("button", "btn", label) as HTMLButtonElement; b.disabled = true; b.title = `Deciding from the overlay arrives in a later step. For now: m9r-cli ${label.toLowerCase()} ${n.taskId}`; actions.append(b); }
-    main.append(actions);
+    if (n.protected) main.append(el("div", "tag", "ALWAYS ASKS"), el("div", "sub", "Approving covers this one action only."));
+    const done = decided.get(n.taskId);
+    if (done) main.append(el("div", done.ok ? "result ok" : "result bad", done.text));
+    else main.append(actionsFor(n));
   } else if (n.kind === "push_failed") {
     main.append(el("div", "title", `${n.taskId} could not be pushed`), el("div", "sub", n.reason), el("div", "sub", n.fix));
   } else {
@@ -76,6 +113,12 @@ function needsRow(n: NeedsYou) {
   }
   row.append(main);
   return row;
+}
+
+/** A decided task leaves the feed within a moment; keep its row a few seconds so the answer to your click is readable. */
+function ghostRows(live: NeedsYou[]) {
+  const ids = new Set(live.filter((n) => n.kind === "approval").map((n) => (n as Approval).taskId));
+  return [...decided].filter(([id]) => !ids.has(id)).map(([, d]) => { const row = el("div", "row"), main = el("div", "main"); main.append(el("div", "title", d.title), el("div", d.ok ? "result ok" : "result bad", d.text)); row.append(main); return row; });
 }
 
 function drawPanel() {
@@ -89,7 +132,7 @@ function drawPanel() {
   });
   const recent = feed.recent.slice(0, 6).map((r) => { const row = el("div", "row"); const main = el("div", "main"); main.append(el("div", "sub", `${hhmm(r.at)}  ${r.text}`)); row.append(main); return row; });
   panel.replaceChildren(
-    section("Needs you", feed.needsYou.map(needsRow), "Nothing needs you."),
+    section("Needs you", [...feed.needsYou.map(needsRow), ...ghostRows(feed.needsYou)], "Nothing needs you."),
     section("Agents", agents, "No agents seen yet."),
     section("Recent", recent, "No activity yet."),
     el("div", "foot", "M9R overlay · a view of ~/.m9r/feed.json"),

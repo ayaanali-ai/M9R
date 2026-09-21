@@ -170,6 +170,53 @@ fn spawn_engine_supervisor() {
     });
 }
 
+fn engine_call(engine: &PathBuf, args: &[&str]) -> Result<String, String> {
+    let mut cmd = Command::new(engine);
+    // A click on the pill is a person deciding, so the engine is told it is human (the same flag a person's own script may set).
+    cmd.args(args).env("M9R_SEND_AS_HUMAN", "1").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    if out.status.success() {
+        Ok(text)
+    } else {
+        Err(format!("{}{}", text, String::from_utf8_lossy(&out.stderr)).trim().to_string())
+    }
+}
+
+fn plain_id(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Approve or deny a task from the pill. `action` is "approve", "deny" or "allow_day" (a one-day rule for this pair of agents, then approve).
+/// Every argument is checked here, and the engine, not this shell, decides what is allowed (protected actions never get a rule).
+#[tauri::command]
+async fn decide(task_id: String, action: String, from: Option<String>, to: Option<String>) -> Result<String, String> {
+    if !plain_id(&task_id) {
+        return Err("Bad task id".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || match action.as_str() {
+        "approve" => engine_call(&engine, &["approve", &task_id, "--yes"]),
+        "deny" => engine_call(&engine, &["deny", &task_id, "--yes"]),
+        "allow_day" => {
+            let (f, t) = (from.unwrap_or_default(), to.unwrap_or_default());
+            if !plain_id(&f) || !plain_id(&t) {
+                return Err("Bad agent name".into());
+            }
+            engine_call(&engine, &["allow", &format!("@{f}"), &format!("@{t}"), "--for", "1d"])?;
+            engine_call(&engine, &["approve", &task_id, "--yes"])
+        }
+        _ => Err("Unknown action".into()),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn stop_engine() {
     if let Some(mut child) = ENGINE.lock().unwrap().take() {
         let _ = child.kill();
@@ -205,7 +252,7 @@ fn spawn_feed_watcher(app: AppHandle) {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide])
         .setup(|app| {
             let window = app.get_webview_window(PILL).expect("pill window");
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
