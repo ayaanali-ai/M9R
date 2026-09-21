@@ -139,7 +139,7 @@ fn spawn_engine_supervisor() {
         let mut wait = Duration::from_secs(5);
         if let Some(engine) = find_engine() {
             let mut cmd = Command::new(engine);
-            cmd.args(["feed", "--watch"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            cmd.args(["feed", "--watch", "--serve-hooks"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;

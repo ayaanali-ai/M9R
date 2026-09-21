@@ -10,6 +10,8 @@ import type { LocalStore } from "./local-store";
 import { consumeRollout, newWatchFile, type WatchFile } from "./codex-watch-core";
 
 const ACTIVE_WINDOW_MS = 20 * 60_000;
+/** Sessions this recent are offered to `@codex` as targets (the same window delivery uses). */
+const KNOWN_WINDOW_MS = 24 * 60 * 60_000;
 const MAX_READ = 4 * 1024 * 1024;
 
 export interface CodexWatchOptions {
@@ -17,6 +19,8 @@ export interface CodexWatchOptions {
   codexHome: string;
   dispatch?: (taskId: string) => void;
   now?: () => number;
+  /** Turn typed `@agent` prompts into tasks. Off when Codex has not been told to stand down (discovery of sessions still runs). Default on. */
+  routeMentions?: boolean;
 }
 
 export interface CodexWatcher {
@@ -24,6 +28,21 @@ export interface CodexWatcher {
   refresh(): void;
   /** Reads new lines from tracked files and routes typed mentions. Returns the number of tasks created. */
   tick(): number;
+}
+
+/** The first line of a rollout names the session: id, folder, and (for sub-agents such as the approval guardian) an object source. */
+function readMeta(path: string): { id: string; cwd?: string } | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(32 * 1024);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    const first = buf.toString("utf8", 0, n).split(String.fromCharCode(10))[0];
+    const rec = JSON.parse(first) as { type?: string; payload?: { id?: string; cwd?: string; source?: unknown } };
+    const p = rec.payload;
+    if (rec.type !== "session_meta" || !p || typeof p.id !== "string" || (p.source !== null && typeof p.source === "object")) return null;
+    return { id: p.id, cwd: typeof p.cwd === "string" ? p.cwd : undefined };
+  } catch { return null; } finally { if (fd !== null) try { closeSync(fd); } catch { /* ignore */ } }
 }
 
 function walk(dir: string, out: string[], depth = 0): void {
@@ -40,6 +59,8 @@ export function createCodexWatcher(store: LocalStore, options: CodexWatchOptions
   const startedAt = now();
   const files = new Map<string, WatchFile & { touchedAt: number }>();
   const sessionsDir = join(options.codexHome, "sessions");
+  /** Rollouts already offered to `@codex`, so a session is registered once, with no Codex hook and no trust step. */
+  const known = new Set<string>();
 
   return {
     refresh() {
@@ -49,6 +70,13 @@ export function createCodexWatcher(store: LocalStore, options: CodexWatchOptions
       for (const path of found) {
         let st;
         try { st = statSync(path); } catch { continue; }
+        // Hook-free discovery: every real Codex session of the last day becomes a target for `@codex` (delivery still asks the machine
+        // which ones are open, and never guesses between several).
+        if (!known.has(path) && now() - st.mtimeMs <= KNOWN_WINDOW_MS) {
+          known.add(path);
+          const meta = readMeta(path);
+          if (meta) store.registerEndpoint({ provider: "codex", sessionId: meta.id, cwd: meta.cwd });
+        }
         const tracked = files.get(path);
         if (tracked) { if (st.size > tracked.offset) tracked.touchedAt = now(); continue; }
         if (now() - st.mtimeMs > ACTIVE_WINDOW_MS) continue;
@@ -61,6 +89,7 @@ export function createCodexWatcher(store: LocalStore, options: CodexWatchOptions
 
     tick() {
       let created = 0;
+      if (options.routeMentions === false) return 0;
       for (const [path, f] of files) {
         let size: number;
         try { size = statSync(path).size; } catch { files.delete(path); continue; }

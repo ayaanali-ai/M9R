@@ -7,6 +7,11 @@ import { nativeStatus, nativePaths, runNativeCommand, type NativeIo } from "@/li
 import { createLocalStore } from "@/lib/native/local-store";
 import { ONBOARDING_STEPS, renderStepsMarkdown } from "@/lib/native/onboarding-steps";
 
+const autostartCalls: string[] = [];
+let autostartOn = false;
+// Every test gets a fake: nothing here may ever touch the real Windows registry.
+const fakeAutostart = { enable: (c: string) => { autostartCalls.push(`enable ${c}`); autostartOn = true; return true; }, disable: () => { autostartCalls.push("disable"); autostartOn = false; }, isOn: () => autostartOn };
+
 function sandbox(opts: { confirm?: boolean | "none" } = {}) {
   const home = mkdtempSync(join(tmpdir(), "m9r-home-"));
   const hookEntry = join(home, "m9r-hook.js");
@@ -19,6 +24,7 @@ function sandbox(opts: { confirm?: boolean | "none" } = {}) {
     out: (l) => out.push(l),
     err: (l) => err.push(l),
     confirm: opts.confirm === "none" ? undefined : async () => opts.confirm !== false,
+    autostart: fakeAutostart,
   };
   const p = nativePaths(io);
   return { home, io, out, err, p, run: (cmd: string, args: string[] = []) => runNativeCommand(cmd, args, io), done: () => rmSync(home, { recursive: true, force: true }) };
@@ -313,5 +319,27 @@ test("with the engine and the native hook side by side, the settings point at th
   assert.doesNotMatch(settings, /m9r-engine/);
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(existsSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native")), false);
+  s.done();
+});
+
+test("starting with Windows is optional: only with --autostart (or a yes to its own question), and uninstall turns it off", async () => {
+  if (process.platform !== "win32") return;
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(join(s.home, "m9r-hook.exe"), "stand-in native hook", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  autostartCalls.length = 0; autostartOn = false;
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  assert.deepEqual(autostartCalls, [], "--yes alone never turns it on");
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(await s.run("setup", ["--yes", "--autostart"]), 0);
+  assert.equal(autostartCalls.length, 1);
+  assert.match(autostartCalls[0], /^enable ".*m9r-engine\.exe" feed --watch --serve-hooks$/);
+  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).autostart, true);
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(autostartCalls.at(-1), "disable");
   s.done();
 });

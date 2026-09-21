@@ -42,7 +42,7 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   // Asking the machine costs about a second, so only when there is a choice to make and nobody pinned one.
   const liveness = !task.targetSession && known.length > 1 && deps.sessionLiveness ? await deps.sessionLiveness(known.map((s) => s.sessionId)).catch(() => undefined) : undefined;
   const choice = pickSession(known, { pinned: task.targetSession, senderCwd: task.cwd, now: new Date(), liveness });
-  if (choice.kind === "none") return fail(task.targetSession ? `No Codex session matches "${task.targetSession}". See: m9r-cli sessions` : "No Codex session is known yet. Open Codex once with the M9R hooks trusted, then send again.");
+  if (choice.kind === "none") return fail(task.targetSession ? `No Codex session matches "${task.targetSession}". See: m9r-cli sessions` : "No Codex session is known yet. Start a Codex session (with the M9R engine running) and send again.");
   if (choice.kind === "ambiguous") return fail(`${choice.sessions.length} Codex sessions are open here and M9R cannot tell which you mean, so it will show at the next prompt in whichever you use. To aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
   const endpoint = choice.session;
   if (!isThreadId(endpoint.sessionId)) return fail("The Codex session id looks wrong; open Codex again and retry.");

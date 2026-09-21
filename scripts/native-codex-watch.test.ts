@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -94,4 +94,19 @@ test("inside the engine, codex.js is run with the node on PATH, never with the e
   assert.equal(nodeForCodex(engine, [w("C:", "x")], exists), "node");
   const real = w("C:", "Program Files", "nodejs", "node.exe");
   assert.equal(nodeForCodex(real, [tools], exists), real);
+});
+
+test("every real Codex session of the last day becomes a target for @codex without any Codex hook; sub-agents and old sessions do not", () => {
+  const { day, store, start } = watchSetup();
+  const real = join(day, "rollout-2026-09-21T09-00-00-01a0aaaa-0000-7000-8000-000000000001.jsonl");
+  writeFileSync(real, line({ type: "session_meta", payload: { id: "01a0aaaa-0000-7000-8000-000000000001", cwd: "C:/proj", source: "vscode" } }) + turn());
+  const guardian = join(day, "rollout-2026-09-21T09-00-00-01a0aaaa-0000-7000-8000-000000000002.jsonl");
+  writeFileSync(guardian, line({ type: "session_meta", payload: { id: "01a0aaaa-0000-7000-8000-000000000002", cwd: "C:/proj", source: { subagent: { other: "guardian" } } } }));
+  const old = join(day, "rollout-2026-09-01T09-00-00-01a0aaaa-0000-7000-8000-000000000003.jsonl");
+  writeFileSync(old, line({ type: "session_meta", payload: { id: "01a0aaaa-0000-7000-8000-000000000003", cwd: "C:/proj", source: "vscode" } }));
+  const longAgo = new Date(Date.now() - 3 * 24 * 60 * 60_000);
+  utimesSync(old, longAgo, longAgo);
+  start().refresh();
+  const ids = store.sessionsFor("codex").map((s) => s.sessionId);
+  assert.deepEqual(ids, ["01a0aaaa-0000-7000-8000-000000000001"]);
 });

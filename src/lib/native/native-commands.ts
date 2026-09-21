@@ -47,10 +47,35 @@ export interface NativeIo {
   codexDeps?: DeliveryDeps;
   /** Where the command was run; the default is the process's own folder. Used to pick between several open sessions. */
   cwd?: string;
+  /** Start-with-Windows switch; tests inject a fake so nothing ever touches the real registry. */
+  autostart?: Autostart;
 }
 
+export interface Autostart {
+  enable(command: string): boolean;
+  disable(): void;
+  isOn(): boolean;
+}
+
+const RUN_KEY = String.raw`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
+
+/** Windows "Run at sign-in" through the per-user Run key: no admin rights, visible in Task Manager's Startup tab, removed by uninstall. */
+export const registryAutostart: Autostart = {
+  enable(command) {
+    if (process.platform !== "win32") return false;
+    return spawnSync("reg", ["add", RUN_KEY, "/v", "M9R", "/t", "REG_SZ", "/d", command, "/f"], { windowsHide: true, stdio: "ignore" }).status === 0;
+  },
+  disable() {
+    if (process.platform === "win32") spawnSync("reg", ["delete", RUN_KEY, "/v", "M9R", "/f"], { windowsHide: true, stdio: "ignore" });
+  },
+  isOn() {
+    return process.platform === "win32" && spawnSync("reg", ["query", RUN_KEY, "/v", "M9R"], { windowsHide: true, stdio: "ignore" }).status === 0;
+  },
+};
+const autostartOf = (io: NativeIo): Autostart => io.autostart ?? registryAutostart;
+
 type Kind = "hooks-json" | "markdown-block";
-interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEntry & { kind: Kind }>; /** Hook program files M9R copied into its own folder; removed on uninstall. */ runtimeFiles?: string[] }
+interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEntry & { kind: Kind }>; /** Hook program files M9R copied into its own folder; removed on uninstall. */ runtimeFiles?: string[]; /** M9R starts when you sign in to Windows (removed on uninstall). */ autostart?: boolean }
 
 export function nativePaths(io: Pick<NativeIo, "env" | "homeDir">) {
   const m9r = defaultStoreRoot(io.homeDir, io.env);
@@ -197,7 +222,7 @@ async function ask(io: NativeIo, yes: boolean, question: string): Promise<boolea
   return io.confirm(question);
 }
 
-export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: boolean }): Promise<number> {
+export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: boolean; autostart?: boolean }): Promise<number> {
   let files: PlannedFile[];
   try { files = plan(io); } catch (error) {
     if (error instanceof UnparseableConfigError) { io.err(error.message); io.err("Nothing was changed."); return 1; }
@@ -222,6 +247,9 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   io.out("Undo anytime with: m9r-cli uninstall");
   if (flags.dryRun) { io.out("Dry run: nothing was written."); return 0; }
   if (!(await ask(io, !!flags.yes, "Go ahead?"))) { io.out("Nothing was changed."); return 1; }
+  // Starting with Windows is its own, optional yes: nothing about it is implied by the rest.
+  const canAutostart = !!runtime.engine && !!runtime.shim && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
+  const wantAutostart = canAutostart && (flags.autostart === true || (flags.autostart === undefined && !flags.yes && !!io.confirm && (await io.confirm("Also start M9R when you sign in to Windows, so it is ready before your first prompt? (Uninstall turns this off.)"))));
 
   mkdirSync(p.backups, { recursive: true });
   const manifest: Manifest = readManifest(p.manifest) ?? { version: 1, installedAt: new Date().toISOString(), entries: [] };
@@ -245,6 +273,10 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
     mkdirSync(dirname(f.path), { recursive: true });
     writeFileSync(f.path, f.after, "utf8");
     manifest.entries.push(entry);
+  }
+  if (wantAutostart && runtime.engine) {
+    manifest.autostart = autostartOf(io).enable(`"${runtime.engine.to}" feed --watch --serve-hooks`);
+    io.out(manifest.autostart ? "M9R will start when you sign in to Windows." : "Could not turn on starting with Windows; M9R still starts itself when an agent first needs it.");
   }
   writeFileSync(p.manifest, JSON.stringify(manifest, null, 2) + "\n", "utf8");
   createLocalStore(p.m9r); // make sure the local store folder exists
@@ -297,6 +329,8 @@ export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?:
       io.out(`Removed M9R's entries from ${e.path}; your own edits were kept.`);
     }
   }
+  // Only what this install turned on: a scratch install's uninstall must never switch off the real one.
+  if (manifest.autostart) autostartOf(io).disable();
   if ((manifest.runtimeFiles ?? []).length > 0) await stopResidentEngine(io);
   for (const f of manifest.runtimeFiles ?? []) rmSync(f, { force: true });
   try { rmdirSync(join(p.m9r, "bin")); } catch { /* not empty or already gone: leave it */ }
@@ -364,7 +398,7 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   for (let i = 0; i < rest.length; i += 1) { if (rest[i].startsWith("-")) { if (["--from", "--key", "--for", "--session"].includes(rest[i])) i += 1; continue; } positionals.push(rest[i]); }
   if (command === "setup") {
     if (has("--status")) { printNativeStatus(io); return 0; }
-    return runSetup(io, { yes: has("--yes", "-y"), dryRun: has("--dry-run") });
+    return runSetup(io, { yes: has("--yes", "-y"), dryRun: has("--dry-run"), autostart: has("--autostart") ? true : undefined });
   }
   if (command === "uninstall") return runUninstall(io, { yes: has("--yes", "-y"), purge: has("--purge") });
   if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key"), session: value("--session") });
@@ -376,8 +410,9 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
     if (has("--watch")) { process.once("SIGINT", () => controller.abort()); process.once("SIGTERM", () => controller.abort()); io.out(`Writing ${feedPath(root)} (Ctrl+C to stop)`); }
     // The Codex watcher forwards what a person types in Codex; Codex must be told to stand down or the work is done twice, so it only
     // runs when the stand-down note is installed for Codex (or a test forces it on).
-    const codexWatchOn = has("--watch") && !io.env.M9R_NO_CODEX_WATCH && (io.env.M9R_CODEX_WATCH === "1" || standingInstructionStatus(readText(nativePaths(io).codexAgents)).current);
-    const watcher = codexWatchOn ? createCodexWatcher(createLocalStore(root), { codexHome: codexHome(io.env), dispatch: (id) => spawnDeliveryRunner(activeHookEntry(io), id, io.env) }) : undefined;
+    const routeMentions = !!(io.env.M9R_CODEX_WATCH === "1" || standingInstructionStatus(readText(nativePaths(io).codexAgents)).current);
+    // Finding Codex sessions (so `@codex` has somewhere to go) always runs while watching; forwarding what a person types in Codex only when the note is there.
+    const watcher = has("--watch") && !io.env.M9R_NO_CODEX_WATCH ? createCodexWatcher(createLocalStore(root), { codexHome: codexHome(io.env), routeMentions, dispatch: (id) => spawnDeliveryRunner(activeHookEntry(io), id, io.env) }) : undefined;
     const server = has("--watch") && has("--serve-hooks")
       ? startHookServer({
           path: hookPipePath(root),
