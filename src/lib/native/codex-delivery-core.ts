@@ -71,7 +71,7 @@ export type SessionChoice =
   | { kind: "none" };
 
 const SESSION_WINDOW_MS = 24 * 60 * 60_000;
-const normCwd = (p: string | undefined) => (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+export const normCwd = (p: string | undefined) => (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 
 /**
  * Which session to push into. Codex has no session-end hook and its hook payload has no process id, but a live session

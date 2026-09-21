@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, nodeForCodex, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
 import { windowsFileHolders, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
 
@@ -38,7 +38,10 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
     store.setDelivery(taskId, { state: "failed", attempts, error: reason });
     return { state: "failed", reason };
   };
-  const known = store.sessionsFor("codex");
+  const everySession = store.sessionsFor("codex");
+  // Sessions in the sender's own folder are the likely target; asking the machine about all of them (dozens after a day of use) costs seconds.
+  const sameFolder = task.cwd && !task.targetSession ? everySession.filter((s) => normCwd(s.cwd) === normCwd(task.cwd)) : [];
+  const known = sameFolder.length > 0 ? sameFolder : everySession;
   // Asking the machine costs about a second, so only when there is a choice to make and nobody pinned one.
   const liveness = !task.targetSession && known.length > 1 && deps.sessionLiveness ? await deps.sessionLiveness(known.map((s) => s.sessionId)).catch(() => undefined) : undefined;
   const choice = pickSession(known, { pinned: task.targetSession, senderCwd: task.cwd, now: new Date(), liveness });

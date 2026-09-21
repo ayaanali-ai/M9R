@@ -416,7 +416,7 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
     const server = has("--watch") && has("--serve-hooks")
       ? startHookServer({
           path: hookPipePath(root),
-          handle: (req) => runHookRequest({ event: req.event ?? "", provider: req.provider ?? "claude-code", input: req.input ?? null, env: req.env }, activeHookEntry(io), { ...io.env }),
+          handle: (req) => runHookRequest({ event: req.event ?? "", provider: req.provider ?? "claude-code", input: req.input ?? null, env: req.env }, activeHookEntry(io), { ...io.env }, true),
           onShutdown: () => controller.abort(),
         })
       : undefined;
