@@ -414,6 +414,12 @@ fn main() {
             let _ = window.set_always_on_top(true);
             place(&window, &load_saved(app.handle()));
             let _ = window.show();
+            // Debug aid for a live "the pill shows the wrong thing" report: M9R_DEBUG=1 opens DevTools on the
+            // pill's own webview so the actual console/network error is visible instead of guessing from a
+            // screenshot. Never on by default -- devtools is a real attack-surface increase to leave open.
+            if std::env::var("M9R_DEBUG").as_deref() == Ok("1") {
+                window.open_devtools();
+            }
 
             let show = MenuItem::with_id(app, "toggle", &format!("Show / hide ({TOGGLE_HOTKEY_LABEL})"), true, None::<&str>)?;
             let dnd = CheckMenuItem::with_id(app, "dnd", "Do not disturb", true, false, None::<&str>)?;
