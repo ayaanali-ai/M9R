@@ -153,8 +153,14 @@ export function readTail(path: string, bytes: number): string | null {
   } catch { return null; }
 }
 
-/** The tail of a session's rollout file, for callers outside the delivery flow (the overlay feed). */
-export function readRolloutTailFor(threadId: string, env: Record<string, string | undefined> = process.env, bytes = 64 * 1024): string | null {
+/**
+ * The tail of a session's rollout file, for callers outside the delivery flow (the overlay feed's working/idle probe).
+ * Default window matches TAIL_BYTES below, not a smaller one: confirmed live on 2026-09-22 that a real, busy rollout
+ * file can carry 300-400KB+ of `token_count`/`item_completed` noise between one `task_started` and the next marker,
+ * so a 64KB tail (the old default) reliably missed both markers and the pill always fell back to reporting idle --
+ * never once seeing a turn as "working" no matter how long Codex was actually mid-turn.
+ */
+export function readRolloutTailFor(threadId: string, env: Record<string, string | undefined> = process.env, bytes = TAIL_BYTES): string | null {
   const file = findRolloutFile(codexHome(env), threadId);
   return file ? readTail(file, bytes) : null;
 }
