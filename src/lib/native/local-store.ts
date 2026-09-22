@@ -69,6 +69,8 @@ export interface SessionLink {
 
 const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [] });
 
+const cursorKey = (handle: string, sessionId?: string): string => (sessionId ? `${handle}::${sessionId}` : handle);
+
 const KNOWN_PROVIDER_HANDLES: Readonly<Record<string, string>> = { "claude-code": "claude", claude: "claude", codex: "codex", opencode: "opencode" };
 
 /** `claude-code` is addressed as `@claude`; unknown providers keep a safe slug of their own name. */
@@ -412,17 +414,23 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /**
-     * Delivery is once per agent, not once per window: a task addressed to @claude goes to whichever Claude session
-     * prompts first, and no later session repeats it. (The session argument is accepted so callers can stay
-     * session-aware later, but it is deliberately not part of the key.)
+     * Per session, not per agent: a task addressed to @claude must show in every Claude session that prompts,
+     * not just whichever one happens to prompt first. Keying this by handle alone (the original design) meant
+     * one Claude session's own hook call could silently advance a SHARED cursor and starve every other open
+     * Claude session of ever seeing the notification -- confirmed live 2026-09-22 with several Claude sessions
+     * open at once: a task sent by Codex only ever showed in whichever session's hook fired first, and the
+     * person had to explicitly ask a different session to "check the M9R inbox" to see it at all. A session
+     * with no id (older callers, or an event with no session_id) falls back to the handle-only key so it still
+     * gets a cursor, just not one isolated from other id-less callers.
      */
-    cursorFor(handle: string, _sessionId?: string): number {
-      return readState().cursors[handle] ?? 0;
+    cursorFor(handle: string, sessionId?: string): number {
+      return readState().cursors[cursorKey(handle, sessionId)] ?? 0;
     },
 
-    setCursor(handle: string, _sessionId: string | undefined, seq: number): void {
+    setCursor(handle: string, sessionId: string | undefined, seq: number): void {
       update((s) => {
-        if (seq > (s.cursors[handle] ?? 0)) s.cursors[handle] = seq;
+        const key = cursorKey(handle, sessionId);
+        if (seq > (s.cursors[key] ?? 0)) s.cursors[key] = seq;
       });
     },
   };

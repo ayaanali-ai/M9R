@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "@/lib/native/local-store";
 import { handleHookEvent } from "@/lib/native/hook-handler";
+import { renderInboxInjection } from "@/lib/native/inbox-core";
 
 function tempStore(now?: () => Date) {
   const root = mkdtempSync(join(tmpdir(), "m9r-store-"));
@@ -34,7 +35,7 @@ test("tasks get sequential ids and per-inbox sequence numbers, and the same key 
   done();
 });
 
-test("state survives a new store instance on the same folder, cursors are per agent and only move forward", () => {
+test("state survives a new store instance on the same folder, cursors are per session and only move forward", () => {
   const { root, store, done } = tempStore();
   store.addTask(task());
   store.setCursor("claude", "s1", 5);
@@ -42,8 +43,21 @@ test("state survives a new store instance on the same folder, cursors are per ag
   const again = createLocalStore(root);
   assert.equal(again.getTask("T1")?.goal, "look at the reconnect bug");
   assert.equal(again.cursorFor("claude", "s1"), 5);
-  assert.equal(again.cursorFor("claude", "other"), 5, "delivery is once per agent, not per window");
+  assert.equal(again.cursorFor("claude", "other"), 0, "a different Claude session must not have its own notification silently eaten by another session's cursor");
   assert.equal(again.cursorFor("codex", "s1"), 0);
+  done();
+});
+
+test("a task addressed to @claude shows in every open Claude session, not just whichever one prompts first", () => {
+  const { store, done } = tempStore();
+  store.addTask({ from: "codex", to: "claude", goal: "check the build", origin: "human_typed", idempotencyKey: "k1" });
+  // Session A prompts first and gets shown the task.
+  const a = renderInboxInjection(store.tasksFor("claude"), store.cursorFor("claude", "session-a"));
+  assert.match(a.text, /check the build/);
+  store.setCursor("claude", "session-a", a.newCursor);
+  // Session B, a second open Claude session in a different folder, prompts afterward -- it must still see it.
+  const b = renderInboxInjection(store.tasksFor("claude"), store.cursorFor("claude", "session-b"));
+  assert.match(b.text, /check the build/, "session B's own cursor was never advanced, so it must not have been starved by session A's");
   done();
 });
 
@@ -140,15 +154,20 @@ test("a plain prompt with nothing in the inbox prints nothing, which costs zero 
   done();
 });
 
-test("a pending inbox item is injected once per agent at the next prompt, then never again in any window", () => {
+test("a pending inbox item is injected once per session at the next prompt, then never again in that same session -- but a different open session of the same agent still sees it", () => {
   const { store, done } = tempStore();
   store.addTask({ from: "codex", to: "claude", goal: "review lease.ts", origin: "human_typed", idempotencyKey: "a" });
   const first = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "hi" }, ctx(store));
   assert.match(ctxOf(first)!, /M9R inbox \(1 new\)/);
   assert.match(ctxOf(first)!, /T1 from @codex, typed by the user\] review lease\.ts/);
   assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "and again" }, ctx(store)), null);
+  // A second open Claude session must not be starved just because session s1 already saw it -- confirmed live
+  // 2026-09-22: with several Claude sessions open, whichever one prompted first silently ate the notification
+  // for every other one, and the person had to manually ask a different session to check its inbox.
   const otherSession = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s2", cwd: "/repo", prompt: "new window" }, ctx(store));
-  assert.equal(otherSession, null, "a new window of the same agent must not repeat a task that was already delivered");
+  assert.match(ctxOf(otherSession)!, /T1 from @codex, typed by the user\] review lease\.ts/, "a different open session must still see a task it has not itself been shown yet");
+  // But s2 itself must not repeat it a second time either.
+  assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s2", cwd: "/repo", prompt: "and again" }, ctx(store)), null);
   done();
 });
 
