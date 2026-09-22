@@ -21,8 +21,13 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 
 /// The one manual way to show or hide the pill that does not depend on finding the tray icon (Windows tucks a new tray
 /// icon into the hidden/overflow drawer by default, so a person can easily have no visible way to reach it otherwise).
-const TOGGLE_HOTKEY_MODS: Modifiers = Modifiers::ALT.union(Modifiers::SHIFT);
+// Plain Alt+Shift collides with Windows' own built-in input-language-switch hotkey on most systems with more than
+// one keyboard layout installed (confirmed 2026-09-22: it's a low-level system hook, not a RegisterHotKey caller,
+// so it can consume the chord before this app ever sees it -- flaky in practice even though a synthetic SendKeys
+// test bypasses that layer and looks fine). Four modifiers is not a real Windows default for anything.
+const TOGGLE_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT).union(Modifiers::SHIFT);
 const TOGGLE_HOTKEY_CODE: Code = Code::KeyM;
+const TOGGLE_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+M";
 
 /// The engine child the overlay started, so quitting the overlay stops it too.
 static ENGINE: Mutex<Option<Child>> = Mutex::new(None);
@@ -410,7 +415,7 @@ fn main() {
             place(&window, &load_saved(app.handle()));
             let _ = window.show();
 
-            let show = MenuItem::with_id(app, "toggle", "Show / hide (Alt+Shift+M)", true, None::<&str>)?;
+            let show = MenuItem::with_id(app, "toggle", &format!("Show / hide ({TOGGLE_HOTKEY_LABEL})"), true, None::<&str>)?;
             let dnd = CheckMenuItem::with_id(app, "dnd", "Do not disturb", true, false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &dnd, &quit])?;
@@ -434,8 +439,12 @@ fn main() {
             spawn_feed_watcher(app.handle().clone());
             spawn_engine_supervisor();
             spawn_fullscreen_watcher(app.handle().clone());
-            // Best effort: if another app already holds Alt+Shift+M, the tray menu's "Show / hide" still works.
-            let _ = app.global_shortcut().register(toggle_shortcut);
+            // Best effort: if something else already holds this chord, the tray menu's "Show / hide" still works.
+            // The result is no longer silently discarded -- a failure here was previously invisible even to us.
+            match app.global_shortcut().register(toggle_shortcut) {
+                Ok(()) => eprintln!("M9R: registered global hotkey {TOGGLE_HOTKEY_LABEL}"),
+                Err(e) => eprintln!("M9R: could not register global hotkey {TOGGLE_HOTKEY_LABEL} ({e}); use the tray menu's Show/hide instead"),
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
