@@ -264,6 +264,21 @@ async fn decide(task_id: String, action: String, from: Option<String>, to: Optio
     .map_err(|e| e.to_string())?
 }
 
+/// Clears one item from the pill's own lists (an old answer, a stale failed push, an approval you don't want to act
+/// on right now) without acting on it -- the task itself is untouched, this only stops the overlay from showing it.
+/// Confirmed real complaint 2026-09-22: items with no natural close action (answers shown for up to 10 minutes,
+/// failed pushes for longer) had no way to clear them, so they stacked up on screen across a long testing session.
+#[tauri::command]
+async fn dismiss_task(task_id: String) -> Result<String, String> {
+    if !plain_id(&task_id) {
+        return Err("Bad task id".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["dismiss", &task_id]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Is a fullscreen app in front (a game, a video, a presentation)? Heuristic: the foreground window is not this pill, covers
 /// its whole monitor (no border), and is not the desktop or the shell. Windows has no single official "is fullscreen" flag.
 #[cfg(windows)]
@@ -406,7 +421,7 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, list_sessions, link_sessions])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, list_sessions, link_sessions, dismiss_task])
         .setup(move |app| {
             let window = app.get_webview_window(PILL).expect("pill window");
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.

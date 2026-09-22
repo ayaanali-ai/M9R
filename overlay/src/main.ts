@@ -56,8 +56,8 @@ function drawMark() {
 }
 
 function drawBadge() {
-  const n = feed?.needsYou.length ?? 0;
-  const busy = feed?.inProgress?.length ?? 0;
+  const n = feed?.needsYou.filter((x) => !locallyDismissed.has(x.taskId)).length ?? 0;
+  const busy = feed?.inProgress?.filter((x) => !locallyDismissed.has(x.taskId)).length ?? 0;
   // Something needs you: the filled badge. Otherwise, if work is under way, a hollow badge with a pulse, so a pause reads as progress.
   badge.hidden = n === 0 && busy === 0;
   badge.textContent = String(n > 0 ? n : busy);
@@ -72,7 +72,7 @@ function progressRow(p: InProgress) {
   main.append(el("div", "title", `@${p.from} → @${p.to}: ${p.goal}`));
   const what = p.state === "queued" ? `Queued in @${p.to}, waiting for it to pick up` : p.state === "waiting_prompt" ? `Waiting for @${p.to}'s next prompt` : `@${p.to} is working on it`;
   main.append(el("div", "sub progress", `${what} · ${secs(p.since)} s`));
-  row.append(main);
+  row.append(main, dismissButton(p.taskId));
   return row;
 }
 
@@ -87,6 +87,26 @@ type Approval = Extract<NeedsYou, { kind: "approval" }>;
 /** Results of clicks, kept until the feed drops the task so the row says what happened instead of going quiet. */
 const decided = new Map<string, { ok: boolean; text: string; title: string }>();
 const linkedResults = new Map<string, { ok: boolean; text: string }>();
+/**
+ * Rows the person cleared with the row's own "x", hidden locally the instant they click it. The backend dismiss
+ * is fire-and-forget (a stale item with no natural close action was the actual complaint -- clearing it should
+ * never wait on a round trip), and this set is reconciled against the feed once it catches up, so nothing lingers
+ * forever if the engine call happens to fail.
+ */
+const locallyDismissed = new Set<string>();
+
+/** A small "x" in a row's corner: clears it from the overlay's own lists without touching the task itself. */
+function dismissButton(taskId: string) {
+  const b = el("button", "dismiss", "×") as HTMLButtonElement;
+  b.setAttribute("aria-label", "Dismiss");
+  b.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    locallyDismissed.add(taskId);
+    render();
+    void invoke("dismiss_task", { taskId }).catch(() => { locallyDismissed.delete(taskId); render(); });
+  });
+  return b;
+}
 /** Sessions fetched for one agent while a link picker is open, so re-render does not refetch it every 3 s. */
 const sessionCache = new Map<string, { at: number; rows: Array<{ sessionId: string; cwd?: string; lastSeenAt: string }> }>();
 
@@ -175,7 +195,7 @@ function needsRow(n: NeedsYou) {
   } else {
     main.append(el("div", "title", `@${n.from} answered ${n.taskId}`), el("div", "sub", n.summary));
   }
-  row.append(main);
+  row.append(main, dismissButton(n.taskId));
   return row;
 }
 
@@ -195,9 +215,13 @@ function drawPanel() {
     row.append(main); return row;
   });
   const recent = feed.recent.slice(0, 6).map((r) => { const row = el("div", "row"); const main = el("div", "main"); main.append(el("div", "sub", `${hhmm(r.at)}  ${r.text}`)); row.append(main); return row; });
+  const needsYou = feed.needsYou.filter((n) => !locallyDismissed.has(n.taskId));
+  const inProgress = (feed.inProgress ?? []).filter((p) => !locallyDismissed.has(p.taskId));
+  // Reconcile: once the feed itself no longer has a dismissed id, the round trip is done -- stop tracking it.
+  for (const id of locallyDismissed) if (!feed.needsYou.some((n) => n.taskId === id) && !(feed.inProgress ?? []).some((p) => p.taskId === id)) locallyDismissed.delete(id);
   panel.replaceChildren(
-    section("Needs you", [...feed.needsYou.map(needsRow), ...ghostRows(feed.needsYou)], "Nothing needs you."),
-    ...((feed.inProgress?.length ?? 0) > 0 ? [section("In progress", (feed.inProgress ?? []).map(progressRow), "")] : []),
+    section("Needs you", [...needsYou.map(needsRow), ...ghostRows(needsYou)], "Nothing needs you."),
+    ...(inProgress.length > 0 ? [section("In progress", inProgress.map(progressRow), "")] : []),
     section("Agents", agents, "No agents seen yet."),
     section("Recent", recent, "No activity yet."),
     el("div", "foot", "M9R overlay · a view of ~/.m9r/feed.json"),
