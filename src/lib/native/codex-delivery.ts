@@ -123,12 +123,19 @@ export function codexHome(env: Record<string, string | undefined>): string {
   return env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 }
 
+/**
+ * Codex rotates a thread onto a new rollout file as it grows (compaction/resume), keeping the same thread id but
+ * appending a second, fresh id to the filename: `rollout-<ts>-<threadId>.jsonl` becomes
+ * `rollout-<ts>-<threadId>_<newId>.jsonl`, then rotates again onto yet another `_<newId>.jsonl` from there. An exact
+ * `-${threadId}.jsonl` suffix match only ever finds the very first file, which Codex closed at the first rotation --
+ * live/free checks against it are checking a file nobody has held open in days. Match the optional `_<uuid>` tail too.
+ */
 export function findRolloutFile(home: string, threadId: string): string | null {
   const root = join(home, "sessions");
-  const suffix = `-${threadId}.jsonl`;
+  const pattern = new RegExp(`-${threadId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:_[0-9a-f-]+)?\\.jsonl$`, "i");
   const list = (dir: string): string[] => { try { return readdirSync(dir).sort().reverse(); } catch { return []; } };
   for (const y of list(root)) for (const m of list(join(root, y))) for (const d of list(join(root, y, m))) {
-    for (const f of list(join(root, y, m, d))) if (f.endsWith(suffix)) return join(root, y, m, d, f);
+    for (const f of list(join(root, y, m, d))) if (pattern.test(f)) return join(root, y, m, d, f);
   }
   return null;
 }

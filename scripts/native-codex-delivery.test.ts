@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
-import { collectCodexResults, deliverToCodex, type DeliveryDeps } from "../src/lib/native/codex-delivery";
+import { collectCodexResults, deliverToCodex, findRolloutFile, type DeliveryDeps } from "../src/lib/native/codex-delivery";
 import { renderInboxInjection, renderResultsInjection } from "../src/lib/native/inbox-core";
 import { handleHookEvent } from "../src/lib/native/hook-handler";
 import { createLocalStore } from "../src/lib/native/local-store";
@@ -394,4 +394,19 @@ test("a link whose stored session id is not a real Codex thread id is never used
   assert.deepEqual(await deliverToCodex(store, t.id, deps), { state: "queued", threadId: THREAD }, "falls back to the folder match instead of calling codex queue with a bad id");
   assert.equal(deps.calls.length, 1);
   assert.equal(deps.calls[0][2], THREAD);
+});
+
+test("findRolloutFile follows a thread across Codex's rotated/resumed rollout files, not just its original one", () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-codex-home-"));
+  const day1 = join(home, "sessions", "2026", "09", "19");
+  const day2 = join(home, "sessions", "2026", "09", "21");
+  mkdirSync(day1, { recursive: true });
+  mkdirSync(day2, { recursive: true });
+  const id = "01a0bc65-5d09-71a1-89f1-1f15cf4bc79a";
+  // The original file (no second id) plus two later rotations Codex creates for the same thread as it compacts/resumes.
+  writeFileSync(join(day1, `rollout-2026-09-19T20-19-14-${id}.jsonl`), "");
+  writeFileSync(join(day2, `rollout-2026-09-21T21-56-07-${id}_01a0c70a-c5c7-7c22-8bd4-0f5ab237cdbd.jsonl`), "");
+  writeFileSync(join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "");
+  const found = findRolloutFile(home, id);
+  assert.equal(found, join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "must resolve to the latest rotation, not the closed original file");
 });

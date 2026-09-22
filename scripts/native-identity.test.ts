@@ -56,10 +56,10 @@ test("store.revokeIdentity invalidates the live token for a session", () => {
   done();
 });
 
-type ToolServer = ReturnType<typeof createM9rMcpServer> & { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ type: string; text: string }> }> }> };
+type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ type: string; text: string }> }> }> };
 
 async function callTool(server: ReturnType<typeof createM9rMcpServer>, name: string, args: unknown = {}) {
-  const tool = (server as ToolServer)._registeredTools[name];
+  const tool = (server as unknown as ToolServer)._registeredTools[name];
   assert.ok(tool, `tool ${name} was not registered`);
   return tool.handler(args);
 }
