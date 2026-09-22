@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writ
 import { join } from "node:path";
 import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
 import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
+import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 
 export interface EndpointRecord {
   handle: string;
@@ -53,6 +54,8 @@ interface StoreState {
   /** Explicit or auto-made links between two sessions (see routing in codex-delivery.ts). */
   links: SessionLink[];
   nextLinkNo: number;
+  /** P1 identity: one token per session, issued at SessionStart. See identity-core.ts. */
+  identities: IdentityToken[];
 }
 
 export interface SessionLink {
@@ -64,7 +67,7 @@ export interface SessionLink {
   updatedAt: string;
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1 });
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [] });
 
 const KNOWN_PROVIDER_HANDLES: Readonly<Record<string, string>> = { "claude-code": "claude", claude: "claude", codex: "codex", opencode: "opencode" };
 
@@ -226,6 +229,28 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     setAnswerPushed(id: string): void {
       update((s) => { const t = s.tasks.find((x) => x.id === id); if (t) t.answerPushedAt = now().toISOString(); });
+    },
+
+    /** Issues (or, for the same session, re-issues) an identity token. Old tokens for the SAME session are revoked, so a
+     * session that starts again never has two live tokens. Capped: the 200 most recent stay, so the store cannot grow forever. */
+    issueIdentity(handle: string, provider: string, sessionId: string): IdentityToken {
+      return update((s) => {
+        const at = now().toISOString();
+        for (const t of s.identities) if (t.sessionId === sessionId && !t.revokedAt) t.revokedAt = at;
+        const issued = issueIdentity(handle, provider, sessionId, at);
+        s.identities = [...s.identities, issued].slice(-200);
+        return issued;
+      });
+    },
+
+    /** Checks a presented token; does not mutate. */
+    verifyIdentity(token: string, claimedSessionId?: string): VerifiedIdentity | null {
+      return verifyToken(readState().identities, token, claimedSessionId);
+    },
+
+    /** Ends a session's token early (the person revoked it from the pill, or the session closed). */
+    revokeIdentity(sessionId: string): void {
+      update((s) => { const at = now().toISOString(); for (const t of s.identities) if (t.sessionId === sessionId && !t.revokedAt) t.revokedAt = at; });
     },
 
     /** Every link this session takes part in, either side. */

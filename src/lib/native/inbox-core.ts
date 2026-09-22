@@ -209,6 +209,8 @@ export interface CardInput {
   awaitingApproval?: number;
   /** Only set when the folder really exists; otherwise the card says nothing about memory. */
   memoryDir?: string;
+  /** Freshly issued this SessionStart; scopes the M9R MCP server to this one verified identity. */
+  identityToken?: string;
 }
 
 /** The once-per-session card: a handful of lines, pointers only, never memory content. */
@@ -216,6 +218,7 @@ export function renderSessionCard(input: CardInput): string {
   const others = input.others.slice(0, CAPS.cardOthers).map((o) => `@${o.handle}${o.activity ? ` (${o.activity.slice(0, 60)})` : ""}`);
   const lines = [
     `M9R connected as @${input.handle}.`,
+    input.identityToken ? `M9R session token (for the M9R MCP server, "m9r_whoami" and friends; keep it out of anything you post publicly): ${input.identityToken}` : "",
     others.length ? `Active now: ${others.join(", ")}.` : "No other agents active.",
     input.pendingCount > 0 ? `${input.pendingCount} pending inbox item(s); they appear at your next prompt.` : "",
     input.awaitingApproval ? `${input.awaitingApproval} task(s) are waiting for the user's approval; if it comes up, tell the user to run: m9r-cli tasks.` : "",

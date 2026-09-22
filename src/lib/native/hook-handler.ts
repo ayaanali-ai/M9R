@@ -111,7 +111,8 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const memoryDir = ctx.memoryDir ?? (input.cwd && (ctx.pathExists ?? existsSync)(join(input.cwd, ".oathlock", "memory", "index.md")) ? ".oathlock/memory" : undefined);
       ctx.store.sweepExpired();
       const awaitingApproval = ctx.store.pendingApprovals().length;
-      return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir }));
+      const identityToken = input.session_id ? ctx.store.issueIdentity(self, ctx.provider, input.session_id).token : undefined;
+      return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir, identityToken }));
     }
 
     // A turn finished. If this session was shown tasks other agents sent, its final message is the answer: record it and send it back.
