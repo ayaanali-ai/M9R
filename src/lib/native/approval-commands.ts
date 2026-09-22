@@ -86,6 +86,35 @@ export function runSessions(io: ApprovalIo, storeRoot: string, handle: string | 
   return 0;
 }
 
+/** Lists every session M9R knows for an agent, as JSON, for the pill's link picker. Not human-formatted, unlike `sessions`. */
+export function runSessionsJson(io: ApprovalIo, storeRoot: string, handle: string | undefined): number {
+  const who = handleForProvider((handle ?? "codex").replace(/^@/, ""));
+  const store = createLocalStore(storeRoot);
+  const sessions = store.sessionsFor(who).map((s) => ({ sessionId: s.sessionId, cwd: s.cwd, lastSeenAt: s.lastSeenAt }));
+  io.out(JSON.stringify(sessions));
+  return 0;
+}
+
+/** Links one session to another so a task from it always goes to that partner, overriding any guess. Symmetric: linking A to B also lets B reach A. */
+export function runLink(io: ApprovalIo, storeRoot: string, fromHandle: string | undefined, fromSession: string | undefined, toHandle: string | undefined, toSession: string | undefined): number {
+  if (!isHuman(io)) { io.err(HUMAN_ONLY); return 1; }
+  if (!fromHandle || !fromSession || !toHandle || !toSession) { io.err('Usage: m9r-cli link --from-handle @agent --from-session <id> --to-handle @agent --to-session <id>'); return 1; }
+  const store = createLocalStore(storeRoot);
+  const a = { handle: handleForProvider(fromHandle.replace(/^@/, "")), sessionId: fromSession };
+  const b = { handle: handleForProvider(toHandle.replace(/^@/, "")), sessionId: toSession };
+  const link = store.setLink(a, b, "picked");
+  io.out(`Linked ${link.id}: @${a.handle} (${a.sessionId.slice(0, 8)}) <-> @${b.handle} (${b.sessionId.slice(0, 8)}). Undo: m9r-cli unlink ${link.id}`);
+  return 0;
+}
+
+export function runUnlink(io: ApprovalIo, storeRoot: string, id: string | undefined): number {
+  if (!isHuman(io)) { io.err(HUMAN_ONLY); return 1; }
+  if (!id) { io.err("Usage: m9r-cli unlink <link id>"); return 1; }
+  createLocalStore(storeRoot).removeLink(id.toUpperCase());
+  io.out(`Removed link ${id.toUpperCase()}.`);
+  return 0;
+}
+
 export function runRules(io: ApprovalIo, storeRoot: string): number {
   const rules = createLocalStore(storeRoot).activeRules();
   if (rules.length === 0) { io.out("No standing rules."); return 0; }

@@ -32,7 +32,7 @@ import { hookPipePath, requestShutdown, startHookServer } from "./hook-server";
 import { runHookRequest } from "./hook-run";
 import { canQueue } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
-import { runAllow, runDecision, runRevoke, runRules, runSessions, runTasks } from "./approval-commands";
+import { runAllow, runDecision, runLink, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
 import { USER_STEPS } from "./onboarding-steps";
 
@@ -277,7 +277,12 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
     manifest.entries.push(entry);
   }
   if (wantAutostart && runtime.engine) {
-    manifest.autostart = autostartOf(io).enable(`"${runtime.engine.to}" feed --watch --serve-hooks`);
+    // The overlay pill also starts and supervises the engine (spawn_engine_supervisor in main.rs); autostart it, not the
+    // headless engine alone, so the pill is on screen after a reboot, not just ready to answer hooks invisibly. Falls back
+    // to the engine alone when the overlay is not installed next to it (it is a separate, optional install today).
+    const overlayExe = join(dirname(runtime.engine.to), "m9r-overlay.exe");
+    const command = existsSync(overlayExe) ? `"${overlayExe}"` : `"${runtime.engine.to}" feed --watch --serve-hooks`;
+    manifest.autostart = autostartOf(io).enable(command);
     io.out(manifest.autostart ? "M9R will start when you sign in to Windows." : "Could not turn on starting with Windows; M9R still starts itself when an agent first needs it.");
   }
   writeFileSync(p.manifest, JSON.stringify(manifest, null, 2) + "\n", "utf8");
@@ -432,6 +437,9 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   if (command === "dismiss") { const n = createLocalStore(root).dismiss(positionals.map((p) => p.toUpperCase())); io.out(n ? `Cleared ${n} from the overlay list.` : "Nothing to clear."); return 0; }
   if (command === "tasks") return runTasks(io, root);
   if (command === "sessions") return runSessions(io, root, positionals[0]);
+  if (command === "sessions-json") return runSessionsJson(io, root, positionals[0]);
+  if (command === "link") return runLink(io, root, value("--from-handle"), value("--from-session"), value("--to-handle"), value("--to-session"));
+  if (command === "unlink") return runUnlink(io, root, positionals[0]);
   if (command === "approve" || command === "deny") return runDecision(io, root, command === "approve" ? "approved" : "denied", positionals[0], has("--yes", "-y"));
   if (command === "allow") return runAllow(io, root, positionals[0], positionals[1], value("--for"));
   if (command === "standing") return runRules(io, root);

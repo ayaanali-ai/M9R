@@ -50,9 +50,21 @@ interface StoreState {
   rules: StandingRule[];
   nextRuleNo: number;
   sessions: SessionRecord[];
+  /** Explicit or auto-made links between two sessions (see routing in codex-delivery.ts). */
+  links: SessionLink[];
+  nextLinkNo: number;
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [] });
+export interface SessionLink {
+  id: string;
+  a: { handle: string; sessionId: string };
+  b: { handle: string; sessionId: string };
+  origin: "auto" | "picked";
+  createdAt: string;
+  updatedAt: string;
+}
+
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1 });
 
 const KNOWN_PROVIDER_HANDLES: Readonly<Record<string, string>> = { "claude-code": "claude", claude: "claude", codex: "codex", opencode: "opencode" };
 
@@ -106,6 +118,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return emptyState();
     }
   }
+
+
 
   const pushEvent = (s: StoreState, event: Omit<EventRecord, "at">) => {
     s.events.push({ at: now().toISOString(), ...event });
@@ -212,6 +226,40 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     setAnswerPushed(id: string): void {
       update((s) => { const t = s.tasks.find((x) => x.id === id); if (t) t.answerPushedAt = now().toISOString(); });
+    },
+
+    /** Every link this session takes part in, either side. */
+    linksFor(handle: string, sessionId: string): SessionLink[] {
+      return readState().links.filter((l) => (l.a.handle === handle && l.a.sessionId === sessionId) || (l.b.handle === handle && l.b.sessionId === sessionId));
+    },
+
+    /** The session this one is linked to for a given partner agent, if any. */
+    linkedSession(handle: string, sessionId: string, partnerHandle: string): { sessionId: string } | undefined {
+      const l = this.linksFor(handle, sessionId).find((x) => (x.a.handle === partnerHandle) || (x.b.handle === partnerHandle));
+      if (!l) return undefined;
+      const other = l.a.handle === handle && l.a.sessionId === sessionId ? l.b : l.a;
+      return { sessionId: other.sessionId };
+    },
+
+    /** Creates or replaces the one link a session may have with a given partner agent. */
+    setLink(a: { handle: string; sessionId: string }, b: { handle: string; sessionId: string }, origin: "auto" | "picked"): SessionLink {
+      return update((s) => {
+        const at = now().toISOString();
+        const keep = s.links.filter((l) => !((l.a.handle === a.handle && l.a.sessionId === a.sessionId && l.b.handle === b.handle) || (l.b.handle === a.handle && l.b.sessionId === a.sessionId && l.a.handle === b.handle) || (l.a.handle === b.handle && l.a.sessionId === b.sessionId && l.b.handle === a.handle) || (l.b.handle === b.handle && l.b.sessionId === b.sessionId && l.a.handle === a.handle)));
+        const link: SessionLink = { id: `L${s.nextLinkNo}`, a, b, origin, createdAt: at, updatedAt: at };
+        s.nextLinkNo += 1;
+        s.links = [...keep, link];
+        pushEvent(s, { kind: "agent.connected", text: `linked @${a.handle} <-> @${b.handle} (${origin})` });
+        return link;
+      });
+    },
+
+    removeLink(id: string): void {
+      update((s) => { s.links = s.links.filter((l) => l.id !== id); });
+    },
+
+    allLinks(): SessionLink[] {
+      return readState().links;
     },
 
     addRule(input: { from: string; to: string; ttlMs: number; note?: string }): StandingRule {

@@ -8,7 +8,7 @@ type AgentState = "open_working" | "open_idle" | "offline" | "unknown" | "seen" 
 interface Agent { handle: string; state: AgentState; since?: string; evidence: string; sessions: Array<{ id: string; cwd?: string; live: boolean | null }> }
 type NeedsYou =
   | { kind: "approval"; taskId: string; from: string; to: string; goal: string; protected: boolean }
-  | { kind: "push_failed"; taskId: string; to: string; reason: string; fix: string }
+  | { kind: "push_failed"; taskId: string; from: string; fromSession?: string; to: string; reason: string; fix: string; linkable: boolean }
   | { kind: "answer"; taskId: string; from: string; summary: string };
 interface Ping { id: number; kind: string; taskId: string; text: string }
 interface InProgress { taskId: string; from: string; to: string; goal: string; state: "queued" | "waiting_prompt" | "working"; since: string }
@@ -21,9 +21,10 @@ const PANEL_MAX_H = 520;
 const inTauri = "__TAURI_INTERNALS__" in window;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const pill = $("pill"), dots = $("dots"), pingEl = $("ping"), badge = $("badge"), panel = $("panel");
+const pill = $("pill"), dots = $("dots"), pingEl = $("ping"), badge = $("badge"), panel = $("panel"), mark = $("mark");
 
 let feed: Feed | null = null;
+let engineStale = false;
 let expanded = false;
 let dnd = false;
 let pingUntil = 0;
@@ -47,6 +48,11 @@ const stateText = (a: Agent) => (a.state === "seen" ? `seen ${hhmm(a.since)}`.tr
 
 function drawDots() {
   dots.replaceChildren(...(feed?.agents ?? []).map((a) => { const d = el("span", `dot ${a.state}`); d.title = `@${a.handle}: ${stateText(a)}`; return d; }));
+}
+
+function drawMark() {
+  mark.classList.toggle("stale", engineStale);
+  mark.title = engineStale ? "M9R engine seems stopped; it will restart itself, or reopen the overlay." : "";
 }
 
 function drawBadge() {
@@ -80,6 +86,44 @@ function section(title: string, rows: HTMLElement[], emptyText: string) {
 type Approval = Extract<NeedsYou, { kind: "approval" }>;
 /** Results of clicks, kept until the feed drops the task so the row says what happened instead of going quiet. */
 const decided = new Map<string, { ok: boolean; text: string; title: string }>();
+const linkedResults = new Map<string, { ok: boolean; text: string }>();
+/** Sessions fetched for one agent while a link picker is open, so re-render does not refetch it every 3 s. */
+const sessionCache = new Map<string, { at: number; rows: Array<{ sessionId: string; cwd?: string; lastSeenAt: string }> }>();
+
+type PushFailed = Extract<NeedsYou, { kind: "push_failed" }>;
+
+/** "Link a session" for a task that could not be pushed: pick which of the target agent's sessions this one should always reach. */
+function linkPicker(n: PushFailed) {
+  const wrap = el("div", "actions");
+  const label = el("button", "link", "Link a session…");
+  const list = el("div", "picker");
+  list.hidden = true;
+  label.addEventListener("click", async () => {
+    if (!list.hidden) { list.hidden = true; return; }
+    list.replaceChildren(el("div", "sub", "Loading…"));
+    list.hidden = false;
+    const cached = sessionCache.get(n.to);
+    const rows = cached && Date.now() - cached.at < 4000 ? cached.rows : await invoke<string>("list_sessions", { handle: n.to }).then((s) => { const r = JSON.parse(s); sessionCache.set(n.to, { at: Date.now(), rows: r }); return r; }).catch(() => []);
+    if (rows.length === 0) { list.replaceChildren(el("div", "sub", `No @${n.to} sessions seen yet.`)); return; }
+    list.replaceChildren(...rows.map((r: { sessionId: string; cwd?: string; lastSeenAt: string }) => {
+      const item = el("button", "btn picker-item", `${r.cwd ?? "(no folder)"} · ${hhmm(r.lastSeenAt)}`);
+      item.addEventListener("click", async () => {
+        list.hidden = true;
+        try {
+          await invoke<string>("link_sessions", { fromHandle: n.from, fromSession: n.fromSession, toHandle: n.to, toSession: r.sessionId });
+          linkedResults.set(n.taskId, { ok: true, text: `Linked. Send it again and it will go to that @${n.to} session.` });
+        } catch (e) {
+          linkedResults.set(n.taskId, { ok: false, text: `Couldn't link: ${String(e).slice(0, 100)}` });
+        }
+        window.setTimeout(() => { linkedResults.delete(n.taskId); render(); }, 8000);
+        render();
+      });
+      return item;
+    }));
+  });
+  wrap.append(label, list);
+  return wrap;
+}
 
 function outcomeText(action: string, to: string, out: string): string {
   if (action === "deny") return `Denied. @${to} is told no.`;
@@ -125,6 +169,9 @@ function needsRow(n: NeedsYou) {
     else main.append(actionsFor(n));
   } else if (n.kind === "push_failed") {
     main.append(el("div", "title", `${n.taskId} could not be pushed`), el("div", "sub", n.reason), ...(n.fix ? [el("div", "sub", n.fix)] : []));
+    const linked = linkedResults.get(n.taskId);
+    if (linked) main.append(el("div", linked.ok ? "result ok" : "result bad", linked.text));
+    else if (n.linkable) main.append(linkPicker(n));
   } else {
     main.append(el("div", "title", `@${n.from} answered ${n.taskId}`), el("div", "sub", n.summary));
   }
@@ -168,7 +215,7 @@ function fit() {
 }
 
 function render() {
-  drawDots(); drawBadge(); drawPanel(); fit();
+  drawDots(); drawBadge(); drawMark(); drawPanel(); fit();
 }
 
 function onFeed(next: Feed) {
@@ -222,6 +269,8 @@ async function start() {
   if (inTauri) {
     await listen<string>("feed", (e) => parse(e.payload));
     await listen("feed-missing", () => { feed = null; render(); });
+    await listen("engine-stale", () => { engineStale = true; render(); });
+    await listen("engine-ok", () => { engineStale = false; render(); });
     await listen<boolean>("dnd", (e) => { dnd = e.payload; });
     const initial = await invoke<string | null>("read_feed").catch(() => null);
     if (initial) parse(initial);

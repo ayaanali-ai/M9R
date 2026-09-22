@@ -39,6 +39,18 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
     return { state: "failed", reason };
   };
   const everySession = store.sessionsFor("codex");
+
+  // Rule 1: an explicit link the person made (or M9R made from one clear match) always wins, even over folder or recency.
+  const linked = task.fromSession && !task.targetSession ? store.linkedSession(task.from, task.fromSession, "codex") : undefined;
+  if (linked && isThreadId(linked.sessionId) && everySession.some((s) => s.sessionId === linked.sessionId)) {
+    const command = deps.resolveCodex();
+    if (!command) return fail("The codex command was not found on this machine.");
+    const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(linked.sessionId, buildQueueMessage(task))));
+    if (!outcome.ok) return fail(outcome.error ?? "codex queue failed");
+    store.setDelivery(taskId, { state: "queued", attempts, threadId: linked.sessionId, queuedAt: new Date().toISOString(), error: undefined });
+    return { state: "queued", threadId: linked.sessionId };
+  }
+
   // A task is aimed by folder: only sessions in the sender's own folder. A session anywhere else (even a parent folder) is never picked for
   // the sender: it could be another project, or an old thread, and a clean new session must never lose its task to one. Only an explicit
   // `--session`, or a sender with no known folder, may reach any session.
@@ -53,6 +65,8 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   const choice = pickSession(known, { pinned: task.targetSession, senderCwd: task.cwd, now: new Date(), liveness });
   if (choice.kind === "none") return fail(task.targetSession ? `No Codex session matches "${task.targetSession}". See: m9r-cli sessions` : "No Codex session is known yet. Start a Codex session (with the M9R engine running) and send again.");
   if (choice.kind === "ambiguous") return fail(`${choice.sessions.length} Codex sessions are open here and M9R cannot tell which you mean, so it will show at the next prompt in whichever you use. To aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
+  // Rule 2: exactly one candidate was just resolved for a sender with a known session: remember it as an auto-link for next time.
+  if (task.fromSession) store.setLink({ handle: task.from, sessionId: task.fromSession }, { handle: "codex", sessionId: choice.session.sessionId }, "auto");
   const endpoint = choice.session;
   if (!isThreadId(endpoint.sessionId)) return fail("The Codex session id looks wrong; open Codex again and retry.");
   const command = deps.resolveCodex();

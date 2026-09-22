@@ -192,6 +192,42 @@ fn plain_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Sessions M9R knows for one agent (`@codex`, `@claude`, ...), for the pill's link picker.
+#[tauri::command]
+async fn list_sessions(handle: String) -> Result<String, String> {
+    if !plain_id(&handle) {
+        return Err("Bad agent name".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["sessions-json", &handle]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Links a task's own session to a chosen partner session, so future tasks from it always go there.
+#[tauri::command]
+async fn link_sessions(from_handle: String, from_session: String, to_handle: String, to_session: String) -> Result<String, String> {
+    for s in [&from_handle, &to_handle] {
+        if !plain_id(s) {
+            return Err("Bad agent name".into());
+        }
+    }
+    for s in [&from_session, &to_session] {
+        if s.is_empty() || s.len() > 128 || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err("Bad session id".into());
+        }
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        engine_call(
+            &engine,
+            &["link", "--from-handle", &from_handle, "--from-session", &from_session, "--to-handle", &to_handle, "--to-session", &to_session],
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Approve or deny a task from the pill. `action` is "approve", "deny" or "allow_day" (a one-day rule for this pair of agents, then approve).
 /// Every argument is checked here, and the engine, not this shell, decides what is allowed (protected actions never get a rule).
 #[tauri::command]
@@ -217,6 +253,78 @@ async fn decide(task_id: String, action: String, from: Option<String>, to: Optio
     .map_err(|e| e.to_string())?
 }
 
+/// Is a fullscreen app in front (a game, a video, a presentation)? Heuristic: the foreground window is not this pill, covers
+/// its whole monitor (no border), and is not the desktop or the shell. Windows has no single official "is fullscreen" flag.
+#[cfg(windows)]
+fn fullscreen_app_in_front(pill_hwnd: isize) -> bool {
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn GetWindowRect(hwnd: isize, rect: *mut [i32; 4]) -> i32;
+        fn GetClassNameW(hwnd: isize, buf: *mut u16, max: i32) -> i32;
+        fn MonitorFromWindow(hwnd: isize, flags: u32) -> isize;
+        fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
+    }
+    #[repr(C)]
+    struct MonitorInfo {
+        size: u32,
+        monitor: [i32; 4],
+        work: [i32; 4],
+        flags: u32,
+    }
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg == 0 || fg == pill_hwnd {
+            return false;
+        }
+        let mut buf = [0u16; 64];
+        let len = GetClassNameW(fg, buf.as_mut_ptr(), 64).max(0) as usize;
+        let class = String::from_utf16_lossy(&buf[..len]);
+        // The desktop and the taskbar are always window-sized to the monitor; never treat them as "fullscreen".
+        if class == "Progman" || class == "WorkerW" || class == "Shell_TrayWnd" {
+            return false;
+        }
+        let mut rect = [0i32; 4];
+        if GetWindowRect(fg, &mut rect) == 0 {
+            return false;
+        }
+        let mon = MonitorFromWindow(fg, 2 /* MONITOR_DEFAULTTONEAREST */);
+        let mut info = MonitorInfo { size: std::mem::size_of::<MonitorInfo>() as u32, monitor: [0; 4], work: [0; 4], flags: 0 };
+        if mon == 0 || GetMonitorInfoW(mon, &mut info) == 0 {
+            return false;
+        }
+        rect == info.monitor
+    }
+}
+#[cfg(not(windows))]
+fn fullscreen_app_in_front(_pill_hwnd: isize) -> bool {
+    false
+}
+
+/// Hides the pill while a fullscreen app has focus (a game, a video call, a presentation), and shows it again once that ends.
+/// Skips the check entirely when the person hid the pill themselves from the tray menu.
+fn spawn_fullscreen_watcher(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut hidden_for_fullscreen = false;
+        loop {
+            std::thread::sleep(Duration::from_millis(700));
+            let Some(window) = app.get_webview_window(PILL) else { continue };
+            let user_hidden = !window.is_visible().unwrap_or(true);
+            if user_hidden && !hidden_for_fullscreen {
+                continue; // the person hid it on purpose; leave it alone
+            }
+            let hwnd = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+            let fullscreen = fullscreen_app_in_front(hwnd);
+            if fullscreen && !hidden_for_fullscreen {
+                hidden_for_fullscreen = true;
+                let _ = window.hide();
+            } else if !fullscreen && hidden_for_fullscreen {
+                hidden_for_fullscreen = false;
+                let _ = window.show();
+            }
+        }
+    });
+}
+
 fn stop_engine() {
     if let Some(mut child) = ENGINE.lock().unwrap().take() {
         let _ = child.kill();
@@ -228,15 +336,27 @@ fn spawn_feed_watcher(app: AppHandle) {
     std::thread::spawn(move || {
         let path = feed_path();
         let mut last: Option<(SystemTime, u64)> = None;
+        let mut last_change_at = Instant::now();
+        let mut stale_reported = false;
         loop {
             match fs::metadata(&path) {
                 Ok(meta) => {
                     let key = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
                     if last != Some(key) {
                         last = Some(key);
+                        last_change_at = Instant::now();
+                        if stale_reported {
+                            stale_reported = false;
+                            let _ = app.emit("engine-ok", ());
+                        }
                         if let Ok(text) = fs::read_to_string(&path) {
                             let _ = app.emit("feed", text);
                         }
+                    } else if !stale_reported && last_change_at.elapsed() > Duration::from_secs(20) {
+                        // The feed writer normally touches this file every few seconds; if it has gone quiet, the resident
+                        // engine likely died between the supervisor's restart attempts. Say so rather than looking merely idle.
+                        stale_reported = true;
+                        let _ = app.emit("engine-stale", ());
                     }
                 }
                 Err(_) => {
@@ -252,7 +372,7 @@ fn spawn_feed_watcher(app: AppHandle) {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, list_sessions, link_sessions])
         .setup(|app| {
             let window = app.get_webview_window(PILL).expect("pill window");
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
@@ -292,6 +412,7 @@ fn main() {
 
             spawn_feed_watcher(app.handle().clone());
             spawn_engine_supervisor();
+            spawn_fullscreen_watcher(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

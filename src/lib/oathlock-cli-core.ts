@@ -3338,6 +3338,9 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "feed":
     case "dismiss":
     case "sessions":
+    case "sessions-json":
+    case "link":
+    case "unlink":
     case "approve":
     case "deny":
     case "allow":

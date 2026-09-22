@@ -353,3 +353,45 @@ test("two threads in the same folder: the one in use right now wins only when it
   assert.equal(pickSession([s(A, 900), s(B, 800)], { now, senderCwd: "C:/p" }).kind, "ambiguous", "neither used in the last 12 hours: it does not pick the least stale");
   assert.deepEqual(pickSession([s(A, 240), s(B, 60)], { now, senderCwd: "C:/p" }), { kind: "one", session: s(B, 60) }, "the thread used an hour ago beats the one used four hours ago");
 });
+
+test("an explicit link always wins over folder and recency, and a resolved one-candidate push auto-links for next time", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj" });
+  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/elsewhere" });
+  store.setLink({ handle: "claude", sessionId: "cc-1" }, { handle: "codex", sessionId: B }, "picked");
+  const deps = fakeDeps();
+  // The sender's folder matches A, but the link to B wins.
+  const linked = store.addTask({ from: "claude", to: "codex", goal: "one", origin: "human_typed", idempotencyKey: "l1", cwd: "C:/proj", fromSession: "cc-1" }).task;
+  assert.deepEqual(await deliverToCodex(store, linked.id, deps), { state: "queued", threadId: B });
+
+  // A different, unlinked Claude session resolves normally and then gets remembered.
+  const solo = newStore(); seedCodex(solo);
+  const t = solo.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "l2", fromSession: "cc-2" }).task;
+  const outcome = await deliverToCodex(solo, t.id, fakeDeps());
+  assert.equal(outcome.state, "queued");
+  assert.deepEqual(solo.linkedSession("claude", "cc-2", "codex"), { sessionId: THREAD });
+});
+
+test("a link store entry is symmetric and replacing it removes the old one", () => {
+  const store = newStore();
+  const l1 = store.setLink({ handle: "claude", sessionId: "cc-1" }, { handle: "codex", sessionId: A }, "auto");
+  assert.deepEqual(store.linkedSession("claude", "cc-1", "codex"), { sessionId: A });
+  assert.deepEqual(store.linkedSession("codex", A, "claude"), { sessionId: "cc-1" }, "the link works from either side");
+  const l2 = store.setLink({ handle: "claude", sessionId: "cc-1" }, { handle: "codex", sessionId: B }, "picked");
+  assert.notEqual(l1.id, l2.id);
+  assert.deepEqual(store.linkedSession("claude", "cc-1", "codex"), { sessionId: B }, "the new link replaces the old one for this pair");
+  assert.equal(store.allLinks().length, 1);
+  store.removeLink(l2.id);
+  assert.equal(store.linkedSession("claude", "cc-1", "codex"), undefined);
+});
+
+test("a link whose stored session id is not a real Codex thread id is never used for the queue call; it falls through to the normal folder rules", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: THREAD, cwd: "C:/p" });
+  store.setLink({ handle: "claude", sessionId: "cc-1" }, { handle: "codex", sessionId: "not-a-uuid" }, "picked");
+  const deps = fakeDeps();
+  const t = store.addTask({ from: "claude", to: "codex", goal: "x", origin: "human_typed", idempotencyKey: "bad-link", cwd: "C:/p", fromSession: "cc-1" }).task;
+  assert.deepEqual(await deliverToCodex(store, t.id, deps), { state: "queued", threadId: THREAD }, "falls back to the folder match instead of calling codex queue with a bad id");
+  assert.equal(deps.calls.length, 1);
+  assert.equal(deps.calls[0][2], THREAD);
+});
