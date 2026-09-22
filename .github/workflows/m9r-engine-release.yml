@@ -1,0 +1,33 @@
+name: M9R standalone Windows engine
+
+on:
+  push:
+    tags:
+      - 'm9r-engine-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run build:engine
+      - run: node --test ./scripts/install-m9r.test.mjs
+      - name: Package standalone installer assets
+        shell: pwsh
+        run: ./scripts/package-engine-release.ps1 -OutputDirectory "$env:RUNNER_TEMP/m9r-release"
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^m9r-engine-v\d+\.\d+\.\d+$') { throw "Refusing non-stable engine release tag: $env:GITHUB_REF_NAME" }
+          gh release create "$env:GITHUB_REF_NAME" "$env:RUNNER_TEMP/m9r-release/m9r-engine-windows-x64.zip" "$env:RUNNER_TEMP/m9r-release/m9r-engine-windows-x64.zip.sha256" --verify-tag --generate-notes --title "$env:GITHUB_REF_NAME"

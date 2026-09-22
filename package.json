@@ -53,6 +53,7 @@
     "stage1:acceptance": "node scripts/stage1-acceptance.mjs",
     "test:ui": "tsx --test scripts/ui-button.test.ts",
     "test:runtime-core": "tsx --test packages/runtime-core/test/runtime-core.test.ts",
+    "test:installer": "node --test ./scripts/install-m9r.test.mjs",
     "self-host:smoke": "node ./scripts/self-host-install-smoke.mjs",
     "open-core:history-audit": "node ./scripts/open-core-history-audit.mjs",
     "open-core:check": "node ./scripts/open-core-release-check.mjs",
