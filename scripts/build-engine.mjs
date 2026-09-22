@@ -21,13 +21,15 @@ mkdirSync(work, { recursive: true });
 
 // The dispatcher: SEA argv is [exe, exe, ...args]; shift so both programs see the argv they were written for.
 const hookJs = join(root, "cli", "dist", "m9r-hook.js").split(String.fromCharCode(92)).join("/");
+const mcpJs = join(root, "cli", "dist", "m9r-mcp.js").split(String.fromCharCode(92)).join("/");
 const cliJs = join(root, "cli", "dist", "m9r.js").split(String.fromCharCode(92)).join("/");
 const entry = join(work, "entry.mjs");
 writeFileSync(entry, `
 const args = process.argv.slice(2);
 const isHook = args[0] === "m9r-hook" || args[0] === "hook";
-process.argv = [process.argv[0], process.argv[0], ...(isHook ? args.slice(1) : args)];
-(isHook ? import(${JSON.stringify(hookJs)}) : import(${JSON.stringify(cliJs)})).catch((e) => { if (!isHook) console.error(e); process.exit(isHook ? 0 : 1); });
+const isMcp = !isHook && args[0] === "mcp";
+process.argv = [process.argv[0], process.argv[0], ...(isHook ? args.slice(1) : isMcp ? args.slice(1) : args)];
+(isHook ? import(${JSON.stringify(hookJs)}) : isMcp ? import(${JSON.stringify(mcpJs)}) : import(${JSON.stringify(cliJs)})).catch((e) => { if (!isHook) console.error(e); process.exit(isHook ? 0 : 1); });
 `);
 
 await build({

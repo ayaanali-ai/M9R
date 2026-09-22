@@ -12,11 +12,9 @@
  * time with a clear reason, same discipline as dev-mcp-server.ts.
  */
 
-import { homedir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { createLocalStore, defaultStoreRoot, type LocalStore } from "./local-store";
+import type { LocalStore } from "./local-store";
 import { renderInboxInjection } from "./inbox-core";
 import type { VerifiedIdentity } from "./identity-core";
 
@@ -120,32 +118,4 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   );
 
   return server;
-}
-
-async function main(): Promise<void> {
-  const root = defaultStoreRoot(homedir(), process.env);
-  const store = createLocalStore(root);
-  const server = createM9rMcpServer({ store });
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-}
-
-import { fileURLToPath } from "node:url";
-import { resolve as resolvePath } from "node:path";
-
-/** Portable direct-entry check for both tsx source and the compiled CLI. */
-export function isDirectMcpServerProcess(argvPath = process.argv[1], moduleUrl = import.meta.url): boolean {
-  if (!argvPath) return false;
-  try {
-    return resolvePath(argvPath) === resolvePath(fileURLToPath(moduleUrl));
-  } catch {
-    return false;
-  }
-}
-
-if (isDirectMcpServerProcess()) {
-  main().catch((error) => {
-    process.stderr.write(`M9R MCP server crashed: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(1);
-  });
 }

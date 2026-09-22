@@ -322,6 +322,49 @@ test("with the engine and the native hook side by side, the settings point at th
   s.done();
 });
 
+test("with the engine, setup registers the M9R MCP server for Claude (and Codex, when installed), keeps every other registered server, and uninstall removes only ours", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  mkdirSync(s.p.codex, { recursive: true });
+  mkdirSync(s.p.claude, { recursive: true });
+  writeFileSync(s.p.codexConfig, "[mcp_servers.github]\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-github\"]\n", "utf8");
+  writeFileSync(s.p.claudeMcp, JSON.stringify({ mcpServers: { other: { command: "npx", args: ["-y", "other-server"] } } }), "utf8");
+
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+
+  const claudeMcp = JSON.parse(readFileSync(s.p.claudeMcp, "utf8"));
+  assert.deepEqual(claudeMcp.mcpServers.other, { command: "npx", args: ["-y", "other-server"] }, "an already-registered server is left alone");
+  assert.match(claudeMcp.mcpServers.m9r.command, /m9r-engine(\.exe)?$/);
+  assert.deepEqual(claudeMcp.mcpServers.m9r.args, ["mcp"]);
+
+  const codexConfig = readFileSync(s.p.codexConfig, "utf8");
+  assert.match(codexConfig, /\[mcp_servers\.github\]/);
+  assert.match(codexConfig, /\[mcp_servers\.m9r\]/);
+  assert.match(codexConfig, /args = \["mcp"\]/);
+
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  assert.match(s.out.join("\n"), /Already set up/);
+
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  const claudeMcpAfter = JSON.parse(readFileSync(s.p.claudeMcp, "utf8"));
+  assert.ok(!("m9r" in claudeMcpAfter.mcpServers), "our entry is gone");
+  assert.deepEqual(claudeMcpAfter.mcpServers.other, { command: "npx", args: ["-y", "other-server"] }, "the other server survives uninstall");
+  const codexConfigAfter = readFileSync(s.p.codexConfig, "utf8");
+  assert.doesNotMatch(codexConfigAfter, /\[mcp_servers\.m9r\]/);
+  assert.match(codexConfigAfter, /\[mcp_servers\.github\]/);
+  s.done();
+});
+
+test("without the engine (JS-only runtime), setup does not register the MCP server -- no node_modules ship with the copied runtime yet", async () => {
+  const s = sandbox();
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  assert.equal(existsSync(s.p.claudeMcp), false);
+  s.done();
+});
+
 test("starting with Windows is optional: only with --autostart (or a yes to its own question), and uninstall turns it off", async () => {
   if (process.platform !== "win32") return;
   const s = sandbox();

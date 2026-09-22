@@ -283,6 +283,9 @@ function build() {
   const hookEntryTs = readFileSync(resolve(repoRoot, "scripts/m9r-hook.ts"), "utf8");
   writeFileSync(resolve(outDir, "m9r-hook.js"), transpile(hookEntryTs).replace(/["']@\/lib\/native\/([a-z-]+)["']/g, '"./$1.js"'));
 
+  const mcpEntryTs = readFileSync(resolve(repoRoot, "scripts/m9r-mcp.ts"), "utf8");
+  writeFileSync(resolve(outDir, "m9r-mcp.js"), transpile(mcpEntryTs).replace(/["']@\/lib\/native\/([a-z-]+)["']/g, '"./$1.js"'));
+
   const missionParticipantIdsTs = readFileSync(resolve(repoRoot, "src/lib/mission/mission-participant-ids.ts"), "utf8");
   writeFileSync(resolve(outDir, "mission-participant-ids.js"), transpile(missionParticipantIdsTs));
 

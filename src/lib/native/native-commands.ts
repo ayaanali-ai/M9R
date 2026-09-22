@@ -18,12 +18,17 @@ import {
   decideUninstall,
   hasOurHooks,
   mergeHooks,
+  mergeMcpServerJson,
+  mergeMcpServerToml,
   removeHooks,
+  removeMcpServerJson,
+  removeMcpServerToml,
   removeStandingInstruction,
   sha256,
   standingInstructionStatus,
   type HookSpec,
   type ManifestEntry,
+  type McpServerSpec,
 } from "./install-core";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
 import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type DeliveryDeps } from "./codex-delivery";
@@ -74,14 +79,14 @@ export const registryAutostart: Autostart = {
 };
 const autostartOf = (io: NativeIo): Autostart => io.autostart ?? registryAutostart;
 
-type Kind = "hooks-json" | "markdown-block";
+type Kind = "hooks-json" | "markdown-block" | "mcp-json" | "mcp-toml";
 interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEntry & { kind: Kind }>; /** Hook program files M9R copied into its own folder; removed on uninstall. */ runtimeFiles?: string[]; /** M9R starts when you sign in to Windows (removed on uninstall). */ autostart?: boolean }
 
 export function nativePaths(io: Pick<NativeIo, "env" | "homeDir">) {
   const m9r = defaultStoreRoot(io.homeDir, io.env);
   const claude = io.env.CLAUDE_CONFIG_DIR?.trim() || join(io.homeDir, ".claude");
   const codex = io.env.CODEX_HOME?.trim() || join(io.homeDir, ".codex");
-  return { m9r, claude, codex, codexHooks: join(codex, "hooks.json"), codexAgents: join(codex, "AGENTS.md"), settings: join(claude, "settings.json"), claudeMd: join(claude, "CLAUDE.md"), manifest: join(m9r, "install-manifest.json"), backups: join(m9r, "backups") };
+  return { m9r, claude, codex, codexHooks: join(codex, "hooks.json"), codexAgents: join(codex, "AGENTS.md"), codexConfig: join(codex, "config.toml"), settings: join(claude, "settings.json"), claudeMd: join(claude, "CLAUDE.md"), claudeMcp: join(claude, ".mcp.json"), manifest: join(m9r, "install-manifest.json"), backups: join(m9r, "backups") };
 }
 
 /** The tiny hook entry sits next to this module in `cli/dist`; tests and dev can override it. */
@@ -188,6 +193,19 @@ function hookSpecs(entry: string, provider = "claude-code", shim?: string): Hook
 /** The native hook the settings should point at: only when one ships with the engine and no override is set. */
 const shimFor = (io: NativeIo): string | undefined => (!io.env.M9R_HOOK_ENTRY?.trim() && shimSource(io.env) ? shimTarget(io) : undefined);
 
+export const MCP_SERVER_NAME = "m9r";
+
+/**
+ * The MCP server registration is engine-mode only for now: without the self-contained engine, running it would need
+ * `node m9r-mcp.js` from the copied runtime folder, which has no node_modules of its own (HOOK_RUNTIME_FILES ships
+ * plain .js files, not @modelcontextprotocol/sdk/zod) -- a real gap, not silently pretended away. `plan()` below only
+ * adds these entries when `activeHookEntry` resolves to the engine binary.
+ */
+function mcpServerSpec(io: NativeIo): McpServerSpec | null {
+  const entry = activeHookEntry(io);
+  return /m9r-engine(\.exe)?$/i.test(entry) ? { command: slash(entry), args: ["mcp"] } : null;
+}
+
 interface PlannedFile { path: string; kind: Kind; before: string | null; after: string; changed: boolean; summary: string }
 
 function plan(io: NativeIo): PlannedFile[] {
@@ -200,6 +218,12 @@ function plan(io: NativeIo): PlannedFile[] {
     { path: p.settings, kind: "hooks-json", before: settingsBefore, after: settings.content, changed: settings.changed, summary: `add 3 hooks (session start, prompt submit, turn end) to ${p.settings}` },
     { path: p.claudeMd, kind: "markdown-block", before: mdBefore, after: md.content, changed: md.changed, summary: `${mdBefore == null ? "create" : "add a short block to"} ${p.claudeMd}` },
   ];
+  const mcpSpec = mcpServerSpec(io);
+  if (mcpSpec) {
+    const claudeMcpBefore = readText(p.claudeMcp);
+    const claudeMcp = mergeMcpServerJson(claudeMcpBefore, MCP_SERVER_NAME, mcpSpec, p.claudeMcp);
+    files.push({ path: p.claudeMcp, kind: "mcp-json", before: claudeMcpBefore, after: claudeMcp.content, changed: claudeMcp.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.claudeMcp}` });
+  }
   // Codex is only touched when it is installed here (its folder exists); M9R never creates ~/.codex.
   if (existsSync(p.codex)) {
     const hooksBefore = readText(p.codexHooks);
@@ -210,6 +234,11 @@ function plan(io: NativeIo): PlannedFile[] {
       { path: p.codexHooks, kind: "hooks-json", before: hooksBefore, after: codexHooks.content, changed: codexHooks.changed, summary: `add 2 hooks (session start, prompt submit) to ${p.codexHooks} (Codex; you trust them once with /hooks)` },
       { path: p.codexAgents, kind: "markdown-block", before: agentsBefore, after: agents.content, changed: agents.changed, summary: `${agentsBefore == null ? "create" : "add a short block to"} ${p.codexAgents} (it tells Codex to leave @mentions of other agents to M9R, so nothing is done twice)` },
     );
+    if (mcpSpec) {
+      const codexConfigBefore = readText(p.codexConfig);
+      const codexConfig = mergeMcpServerToml(codexConfigBefore, MCP_SERVER_NAME, mcpSpec);
+      files.push({ path: p.codexConfig, kind: "mcp-toml", before: codexConfigBefore, after: codexConfig.content, changed: codexConfig.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.codexConfig}` });
+    }
   }
   return files;
 }
@@ -331,7 +360,10 @@ export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?:
       io.out(`Removed ${e.path} (M9R had created it).`);
     } else if (decision.action === "restore_backup" || decision.action === "remove_our_entries") {
       if (current == null) continue;
-      const result = e.kind === "hooks-json" ? removeHooks(current, e.path) : removeStandingInstruction(current);
+      const result = e.kind === "hooks-json" ? removeHooks(current, e.path)
+        : e.kind === "mcp-json" ? removeMcpServerJson(current, MCP_SERVER_NAME, e.path)
+        : e.kind === "mcp-toml" ? removeMcpServerToml(current, MCP_SERVER_NAME)
+        : removeStandingInstruction(current);
       if (result.changed) writeFileSync(e.path, result.content, "utf8");
       io.out(`Removed M9R's entries from ${e.path}; your own edits were kept.`);
     }
