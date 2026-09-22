@@ -64,36 +64,34 @@ async function callTool(server: ReturnType<typeof createM9rMcpServer>, name: str
   return tool.handler(args);
 }
 
-test("m9r_whoami refuses an invalid token and answers with the verified identity for a valid one", async () => {
+test("m9r_whoami refuses an invalid token and answers with the verified identity for a valid one, from one shared server", async () => {
   const { store, done } = tempStore();
   const issued = store.issueIdentity("claude", "claude-code", "s1");
-  const server = createM9rMcpServer({ store, token: issued.token });
-  const bad = createM9rMcpServer({ store, token: "garbage" });
+  const server = createM9rMcpServer({ store });
 
-  const ok = await callTool(server, "m9r_whoami");
+  const ok = await callTool(server, "m9r_whoami", { token: issued.token });
   assert.match(ok.content[0].text, /@claude/);
 
-  await assert.rejects(() => callTool(bad, "m9r_whoami"), /invalid or has been revoked/);
+  await assert.rejects(() => callTool(server, "m9r_whoami", { token: "garbage" }), /invalid or has been revoked/);
   done();
 });
 
-test("m9r_send creates a real inbox task the recipient can see, m9r_result records it and refuses a mismatched owner", async () => {
+test("m9r_send creates a real inbox task the recipient can see, m9r_result records it and refuses a mismatched owner -- two callers, one shared server", async () => {
   const { store, done } = tempStore();
   const codex = store.issueIdentity("codex", "codex", "s-codex");
   const claude = store.issueIdentity("claude", "claude-code", "s-claude");
-  const codexServer = createM9rMcpServer({ store, token: codex.token });
-  const claudeServer = createM9rMcpServer({ store, token: claude.token });
+  const server = createM9rMcpServer({ store });
 
-  const sent = await callTool(codexServer, "m9r_send", { to: "claude", goal: "check the build" });
+  const sent = await callTool(server, "m9r_send", { token: codex.token, to: "claude", goal: "check the build" });
   assert.match(sent.content[0].text, /Sent to @claude as task T1/);
   assert.equal(store.getTask("T1")?.from, "codex");
 
-  await assert.rejects(() => callTool(codexServer, "m9r_result", { taskId: "T1", summary: "done" }), /not sent to you/);
+  await assert.rejects(() => callTool(server, "m9r_result", { token: codex.token, taskId: "T1", summary: "done" }), /not sent to you/);
 
-  const inbox = await callTool(claudeServer, "m9r_inbox");
+  const inbox = await callTool(server, "m9r_inbox", { token: claude.token });
   assert.match(inbox.content[0].text, /check the build/);
 
-  const result = await callTool(claudeServer, "m9r_result", { taskId: "T1", summary: "build is green" });
+  const result = await callTool(server, "m9r_result", { token: claude.token, taskId: "T1", summary: "build is green" });
   assert.match(result.content[0].text, /Recorded result for T1/);
   assert.equal(store.getTask("T1")?.resultSummary, "build is green");
   done();
