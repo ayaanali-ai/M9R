@@ -17,6 +17,12 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent,
 };
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+/// The one manual way to show or hide the pill that does not depend on finding the tray icon (Windows tucks a new tray
+/// icon into the hidden/overflow drawer by default, so a person can easily have no visible way to reach it otherwise).
+const TOGGLE_HOTKEY_MODS: Modifiers = Modifiers::ALT.union(Modifiers::SHIFT);
+const TOGGLE_HOTKEY_CODE: Code = Code::KeyM;
 
 /// The engine child the overlay started, so quitting the overlay stops it too.
 static ENGINE: Mutex<Option<Child>> = Mutex::new(None);
@@ -325,6 +331,19 @@ fn spawn_fullscreen_watcher(app: AppHandle) {
     });
 }
 
+/// Shows the pill if hidden, hides it if shown. The one manual control the person has over it, reachable from the tray
+/// menu and from a global hotkey (Alt+Shift+M) so it works even if the tray icon is tucked into Windows' overflow drawer,
+/// which is where a new icon lands by default and easy to never notice.
+fn toggle_pill(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(PILL) {
+        if w.is_visible().unwrap_or(true) {
+            let _ = w.hide();
+        } else {
+            let _ = w.show();
+        }
+    }
+}
+
 fn stop_engine() {
     if let Some(mut child) = ENGINE.lock().unwrap().take() {
         let _ = child.kill();
@@ -371,9 +390,19 @@ fn spawn_feed_watcher(app: AppHandle) {
 }
 
 fn main() {
+    let toggle_shortcut = Shortcut::new(Some(TOGGLE_HOTKEY_MODS), TOGGLE_HOTKEY_CODE);
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |app, shortcut, event| {
+                    if shortcut == &toggle_shortcut && event.state() == ShortcutState::Pressed {
+                        toggle_pill(app);
+                    }
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, list_sessions, link_sessions])
-        .setup(|app| {
+        .setup(move |app| {
             let window = app.get_webview_window(PILL).expect("pill window");
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
             let _ = window.set_focusable(false);
@@ -381,7 +410,7 @@ fn main() {
             place(&window, &load_saved(app.handle()));
             let _ = window.show();
 
-            let show = MenuItem::with_id(app, "toggle", "Show / hide", true, None::<&str>)?;
+            let show = MenuItem::with_id(app, "toggle", "Show / hide (Alt+Shift+M)", true, None::<&str>)?;
             let dnd = CheckMenuItem::with_id(app, "dnd", "Do not disturb", true, false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &dnd, &quit])?;
@@ -390,15 +419,7 @@ fn main() {
                 tray = tray.icon(icon.clone());
             }
             tray.on_menu_event(move |app, event| match event.id.as_ref() {
-                "toggle" => {
-                    if let Some(w) = app.get_webview_window(PILL) {
-                        if w.is_visible().unwrap_or(true) {
-                            let _ = w.hide();
-                        } else {
-                            let _ = w.show();
-                        }
-                    }
-                }
+                "toggle" => toggle_pill(app),
                 "dnd" => {
                     let _ = app.emit("dnd", dnd.is_checked().unwrap_or(false));
                 }
@@ -413,6 +434,8 @@ fn main() {
             spawn_feed_watcher(app.handle().clone());
             spawn_engine_supervisor();
             spawn_fullscreen_watcher(app.handle().clone());
+            // Best effort: if another app already holds Alt+Shift+M, the tray menu's "Show / hide" still works.
+            let _ = app.global_shortcut().register(toggle_shortcut);
             Ok(())
         })
         .on_window_event(|window, event| {
