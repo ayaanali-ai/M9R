@@ -7,13 +7,16 @@
 import { homedir } from "node:os";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { createM9rMcpServer } from "@/lib/native/mcp-server";
+import { createWebBrokerClient } from "@/lib/native/web-broker-client";
+import { brokerKeyPath } from "@/lib/native/web-broker-paths";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 async function main(): Promise<void> {
   const root = defaultStoreRoot(homedir(), process.env);
   const store = createLocalStore(root);
-  const server: McpServer = createM9rMcpServer({ store });
+  const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: Number(process.env.M9R_WEB_BROKER_PORT) || undefined });
+  const server: McpServer = createM9rMcpServer({ store, web });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

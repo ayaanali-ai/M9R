@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "M9R Web Presence (dev)",
+  "version": "0.0.2",
+  "description": "Lets agents work in shared browser tabs through M9R and shows where each one is acting. Development build, localhost only.",
+  "permissions": ["tabs", "scripting", "alarms", "storage"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "action": { "default_popup": "permission.html" },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["src/presence-logic.js", "src/presence-overlay.js", "src/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

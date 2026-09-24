@@ -175,18 +175,27 @@ function approvalLabel(t: Task): string {
  * only ones it may see (denied and expired are hidden), at most CAPS.inboxItems, each at most CAPS.inboxItemTokens.
  * Returns an empty string when there is nothing new, so an idle inbox costs zero tokens.
  */
-export function renderInboxInjection(tasks: readonly Task[], cursor: number): InjectionResult {
+export interface InjectionOptions {
+  /** Most items to show; defaults to CAPS.inboxItems. An explicit inbox check may ask for more than the automatic hook. */
+  items?: number;
+  /** Longest goal shown per item; defaults to ENVELOPE_GOAL_CHARS. */
+  itemChars?: number;
+}
+
+export function renderInboxInjection(tasks: readonly Task[], cursor: number, options: InjectionOptions = {}): InjectionResult {
+  const maxItems = options.items ?? CAPS.inboxItems;
+  const goalChars = options.itemChars ?? ENVELOPE_GOAL_CHARS;
   const visible = tasks
     // A task already pushed into the session as a real prompt must not be injected a second time from the inbox.
     .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired" && t.delivery?.state !== "queued" && t.delivery?.state !== "done")
     .sort((a, b) => a.seq - b.seq);
-  const shown = visible.slice(0, CAPS.inboxItems);
+  const shown = visible.slice(0, maxItems);
   if (shown.length === 0) return { text: "", includedIds: [], newCursor: cursor, omitted: 0 };
-  const perItemChars = CAPS.inboxItemTokens * 4;
+  const perItemChars = options.itemChars ? options.itemChars + 200 : CAPS.inboxItemTokens * 4;
   const lines = shown.map((t) => {
     const head = `[${t.id} from @${t.from}, ${approvalLabel(t)}] `;
     const tail = ` Details: get_task ${t.id}.`;
-    const room = Math.max(40, Math.min(ENVELOPE_GOAL_CHARS, perItemChars - head.length - tail.length));
+    const room = Math.max(40, Math.min(goalChars, perItemChars - head.length - tail.length));
     // The pointer is only useful (and only safe to mention) when the text shown is not the whole goal.
     const shown = clip(t.goal, room);
     return head + shown.text + (shown.truncated || t.goalTruncated ? tail : "");

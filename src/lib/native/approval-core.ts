@@ -23,6 +23,15 @@ export function isHumanContext(input: { hasTerminal: boolean; env: Record<string
   return input.hasTerminal && !isAgentContext(input.env);
 }
 
+/** A page task may be labeled human-typed only when it came from the authenticated extension-owned UI channel. */
+export function canCreateHumanTypedPageTask(input: {
+  origin: "human_typed" | "agent_initiated";
+  channel: "extension_page" | "content_script" | "page" | "agent" | "terminal" | "unknown";
+  ownerAuthenticated: boolean;
+}): boolean {
+  return input.origin === "human_typed" && input.channel === "extension_page" && input.ownerAuthenticated;
+}
+
 /** Goals that always need a fresh yes, even with a standing rule (protected actions always ask). See risk-core.ts. */
 export function isProtectedAction(goal: string): boolean {
   return classifyRisk(goal).risky;

@@ -1,0 +1,11 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "m9r-web-coordinator-local",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-24",
+  "durable_objects": {
+    "bindings": [{ "name": "WEB_COORDINATOR", "class_name": "CoordinatorRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CoordinatorRoom"] }],
+  "observability": { "enabled": false }
+}

@@ -120,3 +120,24 @@ export function classifyRisk(goal: string): Risk {
   }
   return { risky: false };
 }
+
+/**
+ * Risk gate for browser controls. `targetLabel` is an untrusted visible-label hint; typed form values are deliberately
+ * ignored so a secret or ordinary message body is neither retained nor treated as an authorization signal.
+ */
+export function classifyWebActionRisk(input: {
+  action: "open" | "read" | "click" | "type";
+  selector?: string;
+  targetLabel?: string;
+  text?: string;
+}): Risk {
+  if (input.action !== "click") return { risky: false };
+  const surface = `${input.selector ?? ""} ${input.targetLabel ?? ""}`.replace(/\s+/g, " ").trim();
+  const categories: Array<[RiskCategory, RegExp]> = [
+    ["money", /\b(?:buy|purchase|pay|checkout|place\s+order|subscribe|transfer|refund|charge)\b/i],
+    ["outside", /\b(?:submit|send|publish|post|reply|email|message|share|invite)\b/i],
+    ["destroy", /\b(?:delete|remove|destroy|cancel|erase|revoke)\b/i],
+  ];
+  for (const [category, pattern] of categories) if (pattern.test(surface)) return { risky: true, category };
+  return classifyRisk(`click ${surface}`);
+}

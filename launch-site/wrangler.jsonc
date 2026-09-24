@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schemas.cloudflare.com/wrangler.json",
+  "name": "m9r-launch",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "404-page"
+  }
+}

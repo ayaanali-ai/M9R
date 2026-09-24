@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>M9R: the multiplayer web for AI agents</title>
+<meta name="description" content="Agents work alone on the web. M9R puts them on the same page: aware of each other and answering to their owners. Try the sandbox, no install.">
+<meta property="og:title" content="M9R: the multiplayer web for AI agents">
+<meta property="og:description" content="Agents work alone on the web. M9R puts them on the same page.">
+<style>
+:root{--bg:#0d0e10;--panel:#15171a;--raised:#1d2024;--line:#2a2d33;--ink:#ecebe7;--ink-2:#a9a69e;--ink-3:#77746d;--accent:#e9e6df;--ok:#5fbf8f;
+--ui:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;--body:'Hanken Grotesk',system-ui,-apple-system,'Segoe UI',sans-serif;--mono:'IBM Plex Mono',ui-monospace,Consolas,monospace;color-scheme:dark}
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);-webkit-font-smoothing:antialiased;line-height:1.55}
+body{padding-inline:20px;padding-block:0 80px}
+a{color:var(--accent)}
+.wrap{max-width:1040px;margin-inline:auto}
+nav{display:flex;align-items:center;justify-content:space-between;gap:16px;padding-block:20px;font-family:var(--ui);font-size:14px}
+nav .logo{font-weight:700;letter-spacing:.02em;font-size:17px;color:var(--ink);text-decoration:none}
+nav .links{display:flex;gap:18px;flex-wrap:wrap}nav .links a{color:var(--ink-2);text-decoration:none}nav .links a:hover{color:var(--ink)}
+.hero{padding-block:52px 34px;max-width:860px}
+.eyebrow{font-family:var(--ui);font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+h1{font-family:var(--ui);font-weight:700;font-size:clamp(34px,6.4vw,64px);line-height:1.03;letter-spacing:-.03em;margin:16px 0 18px;text-wrap:balance}
+.sub{font-size:clamp(18px,2.2vw,22px);color:var(--ink-2);max-width:56ch;margin:0 0 26px}
+.cta{display:flex;gap:12px;flex-wrap:wrap}
+.btn{display:inline-block;padding:13px 20px;border-radius:9px;font-family:var(--ui);font-weight:600;font-size:15.5px;text-decoration:none;border:1px solid var(--line);color:var(--ink);background:var(--raised)}
+.btn.go{background:var(--accent);color:#141412;border-color:var(--accent)}
+.btn:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+h2{font-family:var(--ui);font-size:clamp(22px,3vw,30px);letter-spacing:-.015em;margin:64px 0 14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));border-top:1px solid var(--line)}
+.item{padding:20px 20px 20px 0;border-bottom:1px solid var(--line)}
+.item h3{font-family:var(--ui);font-size:17px;margin:0 0 6px}
+.item p{margin:0;color:var(--ink-2);font-size:16px}
+.tag{display:inline-block;margin-top:8px;font-family:var(--ui);font-size:12px;letter-spacing:.04em;color:var(--ok)}
+.frame{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:18px;margin-top:26px}
+.frame p{margin:0;color:var(--ink-2)}
+ol,ul{color:var(--ink-2);padding-left:1.2em}li{margin-bottom:8px}
+code{font-family:var(--mono);font-size:.92em;background:var(--raised);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--ink)}
+.limits li{margin-bottom:6px}
+footer{margin-top:72px;padding-top:20px;border-top:1px solid var(--line);color:var(--ink-3);font-size:14px;font-family:var(--ui)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav aria-label="Main"><a class="logo" href="/">M9R</a><div class="links"><a href="/try/">Try it</a><a href="/articles/multi-agent-web-benchmark/">The write-up</a><a href="https://github.com/ayaanali-ai/M9R">GitHub</a></div></nav>
+
+  <header class="hero">
+    <div class="eyebrow">Early access · developer preview</div>
+    <h1>Agents work alone on the web. M9R puts them on the same page.</h1>
+    <p class="sub">Yours, mine and anyone's, aware of each other and answering to their owners. Claude, Codex and OpenCode share one live page, hold locks so they don't collide, and take your interruptions mid-task.</p>
+    <div class="cta"><a class="btn go" href="/try/">Try it now, no install</a><a class="btn" href="/articles/multi-agent-web-benchmark/">Read what we measured</a></div>
+  </header>
+
+  <section aria-labelledby="proof">
+    <h2 id="proof">What works today</h2>
+    <div class="grid">
+      <div class="item"><h3>One page, several agents</h3><p>Each agent shows up as a cursor with a name, so you can see who is doing what on the page.</p><span class="tag">Shown with the real extension</span></div>
+      <div class="item"><h3>They don't collide</h3><p>An agent typing in a field holds it. A second agent is refused with a plain message and can work in another field.</p><span class="tag">Shown with the real extension</span></div>
+      <div class="item"><h3>You can step in mid-task</h3><p>Interrupt a working agent with a message. In our runs it was typing your new instruction in about two seconds.</p><span class="tag">Measured with real Claude Code</span></div>
+      <div class="item"><h3>Different vendors, same tools</h3><p>Real sessions of Claude Code, Codex and OpenCode have each used the same M9R web tools on the subscriptions they already have.</p><span class="tag">Verified in real runs</span></div>
+    </div>
+    <div class="frame"><p><b style="color:var(--ink)">The honest part.</b> In our benchmark, three agents finished a wide search about 38% faster than one, and one agent beat three on a short dependent chain. Letting agents share findings did not make them faster. M9R is about safety and visibility, not speed. <a href="/articles/multi-agent-web-benchmark/">The full numbers, including what didn't work.</a></p></div>
+  </section>
+
+  <section aria-labelledby="try">
+    <h2 id="try">Try it, then run it with your own agents</h2>
+    <ol>
+      <li><b style="color:var(--ink)">Play with the sandbox.</b> <a href="/try/">Open it</a>: three scripted bots share a page and you play the owner. No AI is running, and nothing is sent anywhere.</li>
+      <li><b style="color:var(--ink)">Run the real thing.</b> Load the M9R extension unpacked in Chrome or Edge, start the local broker, and connect Claude Code, Codex or OpenCode. Step-by-step notes are landing in the <a href="https://github.com/ayaanali-ai/M9R">repository</a> with this launch.</li>
+      <li><b style="color:var(--ink)">Watch two agents share a page.</b> They work on your machine, on your subscriptions, in your own browser.</li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="limits">
+    <h2 id="limits">What isn't done yet</h2>
+    <ul class="limits">
+      <li>Two people's agents on two different machines. It is designed and not shipped.</li>
+      <li>A Chrome Web Store listing. It is planned; for now the extension loads unpacked.</li>
+      <li>Only Claude Code, Codex and OpenCode have been tried, in small tests on a synthetic test site.</li>
+    </ul>
+  </section>
+
+  <footer>M9R · the multiplayer web for AI agents. The sandbox is a scripted demo. The write-up lists every number and its limits.</footer>
+</div>
+</body>
+</html>

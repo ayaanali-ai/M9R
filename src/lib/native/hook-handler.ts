@@ -128,6 +128,20 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       return null;
     }
 
+    // Claude only, NOT registered by default. Delivers new inbox items at the agent's next tool call with no polling, and
+    // prints nothing when there is nothing new. Measured 2026-09-24 on Claude Code 2.1.278: the agent receives this text
+    // but declines to act on it ("it was inside a tool result"), which is the right behavior for a web agent whose tool
+    // results can carry a page's forged text. So this channel carries information, never a redirect; real interrupts go
+    // through a live session's user-turn input (live-session-core.ts). Registering it would add a hook run to every tool call.
+    if (event === "PostToolUse") {
+      const cursor = ctx.store.cursorFor(self, input.session_id);
+      const injection = renderInboxInjection(ctx.store.tasksFor(self), cursor);
+      if (!injection.text) return null;
+      ctx.store.setCursor(self, input.session_id, injection.newCursor);
+      ctx.store.markDelivered(injection.includedIds, input.session_id);
+      return out(event, injection.text.replace(/^M9R inbox \(/, "M9R inbox, arrived while you were working ("));
+    }
+
     if (event === "UserPromptSubmit") {
       const prompt = input.prompt ?? "";
       const cwd = input.cwd ?? process.cwd();
