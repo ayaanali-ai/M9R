@@ -7,6 +7,11 @@ import { nativeStatus, nativePaths, runNativeCommand, type NativeIo } from "@/li
 import { createLocalStore } from "@/lib/native/local-store";
 import { ONBOARDING_STEPS, renderStepsMarkdown } from "@/lib/native/onboarding-steps";
 
+const autostartCalls: string[] = [];
+let autostartOn = false;
+// Every test gets a fake: nothing here may ever touch the real Windows registry.
+const fakeAutostart = { enable: (c: string) => { autostartCalls.push(`enable ${c}`); autostartOn = true; return true; }, disable: () => { autostartCalls.push("disable"); autostartOn = false; }, isOn: () => autostartOn };
+
 function sandbox(opts: { confirm?: boolean | "none" } = {}) {
   const home = mkdtempSync(join(tmpdir(), "m9r-home-"));
   const hookEntry = join(home, "m9r-hook.js");
@@ -19,6 +24,7 @@ function sandbox(opts: { confirm?: boolean | "none" } = {}) {
     out: (l) => out.push(l),
     err: (l) => err.push(l),
     confirm: opts.confirm === "none" ? undefined : async () => opts.confirm !== false,
+    autostart: fakeAutostart,
   };
   const p = nativePaths(io);
   return { home, io, out, err, p, run: (cmd: string, args: string[] = []) => runNativeCommand(cmd, args, io), done: () => rmSync(home, { recursive: true, force: true }) };
@@ -31,7 +37,7 @@ test("a dry run shows the plan and writes nothing at all", async () => {
   assert.equal(existsSync(s.p.settings), false);
   assert.equal(existsSync(s.p.claudeMd), false);
   assert.equal(existsSync(s.p.manifest), false);
-  assert.match(s.out.join("\n"), /add 2 hooks/);
+  assert.match(s.out.join("\n"), /add 3 hooks/);
   assert.match(s.out.join("\n"), /Dry run: nothing was written/);
   s.done();
 });
@@ -186,7 +192,7 @@ function runtimeSandbox() {
   const home = mkdtempSync(join(tmpdir(), "m9r-rt-"));
   const source = join(home, "cli-dist");
   mkdirSync(source, { recursive: true });
-  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js"]) writeFileSync(join(source, f), `// ${f} v1\n`, "utf8");
+  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js"]) writeFileSync(join(source, f), `// ${f} v1\n`, "utf8");
   const out: string[] = [];
   const err: string[] = [];
   const io: NativeIo = { homeDir: home, env: { M9R_HOME: join(home, ".m9r"), CLAUDE_CONFIG_DIR: join(home, ".claude"), M9R_HOOK_SOURCE: source }, out: (l) => out.push(l), err: (l) => err.push(l) };
@@ -197,12 +203,12 @@ function runtimeSandbox() {
 test("setup copies the hook program into ~/.m9r/bin and points the hooks there, not at where the CLI happens to live", async () => {
   const s = runtimeSandbox();
   assert.equal(await s.run("setup", ["--yes"]), 0);
-  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "package.json"]) assert.equal(existsSync(join(s.bin, f)), true, f);
+  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js", "package.json"]) assert.equal(existsSync(join(s.bin, f)), true, f);
   assert.equal(JSON.parse(readFileSync(join(s.bin, "package.json"), "utf8")).type, "module");
   const command: string = JSON.parse(readFileSync(s.p.settings, "utf8")).hooks.UserPromptSubmit[0].hooks[0].command;
   assert.equal(command.includes(s.bin.split(String.fromCharCode(92)).join("/")), true, command);
   assert.equal(command.includes("cli-dist"), false, "the hook must not point at the CLI's own location");
-  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles.length, 11);
+  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles.length, 13);
   s.done();
 });
 
@@ -274,5 +280,109 @@ test("without Codex installed, setup never creates its folder", async () => {
   assert.equal(await s.run("setup", ["--yes"]), 0);
   assert.equal(existsSync(s.p.codex), false);
   assert.equal(nativeStatus(s.io).some((r) => r.id === "codex-hooks"), false);
+  s.done();
+});
+
+test("with the engine, setup copies it into M9R's folder and the hooks call it (no node needed), and uninstall removes it", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const installed = join(s.p.m9r, "bin", process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
+  assert.equal(readFileSync(installed, "utf8"), "stand-in engine");
+  const settings = readFileSync(s.p.settings, "utf8");
+  assert.match(settings, /m9r-engine(.exe)?.{1,2} m9r-hook UserPromptSubmit claude-code/);
+  assert.doesNotMatch(settings, /"node /);
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  assert.match(s.out.join("\n"), /Already set up/);
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(existsSync(installed), false);
+  s.done();
+});
+
+test("with the engine and the native hook side by side, the settings point at the small hook, both are copied, and uninstall removes both", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in native hook", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const bin = join(s.p.m9r, "bin");
+  assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native"), "utf8"), "stand-in native hook");
+  assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine"), "utf8"), "stand-in engine");
+  const settings = readFileSync(s.p.settings, "utf8");
+  assert.match(settings, /m9r-hook(\.exe|-native)?.{1,2} UserPromptSubmit claude-code/);
+  assert.doesNotMatch(settings, /m9r-engine/);
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(existsSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native")), false);
+  s.done();
+});
+
+test("with the engine, setup registers the M9R MCP server for Claude (and Codex, when installed), keeps every other registered server, and uninstall removes only ours", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  mkdirSync(s.p.codex, { recursive: true });
+  mkdirSync(s.p.claude, { recursive: true });
+  writeFileSync(s.p.codexConfig, "[mcp_servers.github]\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-github\"]\n", "utf8");
+  writeFileSync(s.p.claudeMcp, JSON.stringify({ mcpServers: { other: { command: "npx", args: ["-y", "other-server"] } } }), "utf8");
+
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+
+  const claudeMcp = JSON.parse(readFileSync(s.p.claudeMcp, "utf8"));
+  assert.deepEqual(claudeMcp.mcpServers.other, { command: "npx", args: ["-y", "other-server"] }, "an already-registered server is left alone");
+  assert.match(claudeMcp.mcpServers.m9r.command, /m9r-engine(\.exe)?$/);
+  assert.deepEqual(claudeMcp.mcpServers.m9r.args, ["mcp"]);
+
+  const codexConfig = readFileSync(s.p.codexConfig, "utf8");
+  assert.match(codexConfig, /\[mcp_servers\.github\]/);
+  assert.match(codexConfig, /\[mcp_servers\.m9r\]/);
+  assert.match(codexConfig, /args = \["mcp"\]/);
+
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  assert.match(s.out.join("\n"), /Already set up/);
+
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  const claudeMcpAfter = JSON.parse(readFileSync(s.p.claudeMcp, "utf8"));
+  assert.ok(!("m9r" in claudeMcpAfter.mcpServers), "our entry is gone");
+  assert.deepEqual(claudeMcpAfter.mcpServers.other, { command: "npx", args: ["-y", "other-server"] }, "the other server survives uninstall");
+  const codexConfigAfter = readFileSync(s.p.codexConfig, "utf8");
+  assert.doesNotMatch(codexConfigAfter, /\[mcp_servers\.m9r\]/);
+  assert.match(codexConfigAfter, /\[mcp_servers\.github\]/);
+  s.done();
+});
+
+test("without the engine (JS-only runtime), setup does not register the MCP server -- no node_modules ship with the copied runtime yet", async () => {
+  const s = sandbox();
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  assert.equal(existsSync(s.p.claudeMcp), false);
+  s.done();
+});
+
+test("starting with Windows is optional: only with --autostart (or a yes to its own question), and uninstall turns it off", async () => {
+  if (process.platform !== "win32") return;
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(join(s.home, "m9r-hook.exe"), "stand-in native hook", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  autostartCalls.length = 0; autostartOn = false;
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  assert.deepEqual(autostartCalls, [], "--yes alone never turns it on");
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(await s.run("setup", ["--yes", "--autostart"]), 0);
+  assert.equal(autostartCalls.length, 1);
+  assert.match(autostartCalls[0], /^enable ".*m9r-engine\.exe" feed --watch --serve-hooks$/);
+  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).autostart, true);
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(autostartCalls.at(-1), "disable");
   s.done();
 });

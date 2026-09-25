@@ -4,14 +4,59 @@
     {
       "name": "dev",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
       "port": 3000
     },
     {
       "name": "immersive-homepage-dev",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "-p", "3107"],
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--",
+        "-p",
+        "3107"
+      ],
       "port": 3107
+    },
+    {
+      "name": "homepage-3005",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--",
+        "--webpack",
+        "--port",
+        "3005"
+      ],
+      "port": 3005
+    },
+    {
+      "name": "overlay-ui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "overlay",
+        "run",
+        "ui"
+      ],
+      "port": 5173
+    },
+    {
+      "name": "presence-test",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "5180",
+        "--directory",
+        "extensions/browser"
+      ],
+      "port": 5180
     }
   ]
 }

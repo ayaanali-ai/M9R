@@ -1,0 +1,31 @@
+[package]
+name = "m9r-overlay"
+version = "0.1.0"
+description = "M9R overlay: a small always-on-top pill that shows which agents are open and what needs you."
+edition = "2021"
+license = "Apache-2.0"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+
+# `custom-protocol` makes the binary serve the bundled `frontendDist` (dist/) instead of falling back to
+# tauri.conf.json's `devUrl` (http://localhost:5173). The Tauri CLI (`tauri build`/`tauri dev`) injects this
+# feature automatically via `--features tauri/custom-protocol`; a plain `cargo build --release` -- which is how
+# this project's own build steps invoke it -- never did, so every release build made that way tried to load a dev
+# server that wasn't running and showed WebView2's own connection-failed page instead of the pill. Confirmed live
+# 2026-09-22 via the Chrome DevTools Protocol (WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port):
+# the loaded page URL was literally "http://localhost:5173/". Unconditional here (not feature-gated) so a bare
+# `cargo build --release` is always correct, regardless of who builds it or with what command.
+tauri = { version = "2", features = ["tray-icon", "devtools", "custom-protocol"] }
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

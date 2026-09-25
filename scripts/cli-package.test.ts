@@ -102,6 +102,7 @@ test("package.json has the publishable bin/metadata shape", () => {
   assert.ok(typeof pkg.version === "string" && /^\d+\.\d+\.\d+/.test(pkg.version));
   assert.ok(pkg.description && pkg.description.length > 10);
   assert.equal(pkg.bin["m9r-cli"], "dist/m9r.js");
+  assert.equal(pkg.bin.m9r, "dist/m9r.js");
   assert.equal(pkg.bin.oathlock, "dist/oathlock.js");
   assert.ok(pkg.license, "license placeholder required");
   assert.ok(pkg.repository, "repository required for publishing");
@@ -216,7 +217,12 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
 
   const child = spawn(process.execPath, [resolve(distDir, "m9r.js"), "terminal", "runtime"], {
     cwd: workspace,
-    env: { ...process.env, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", OATHLOCK_BRIDGE_PORT: String(port) },
+    // Keep the packaged-runtime test isolated from the developer's real
+    // machine credentials and native-event store. The runtime starts its
+    // metadata sync from the OS home directory, independently of cwd.
+    // Do not let startup recovery discover or launch the developer's globally
+    // installed provider CLIs while this packaging test is running.
+    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, PATH: workspace, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", OATHLOCK_BRIDGE_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -246,6 +252,16 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
     assert.doesNotMatch(`${stdout}\n${stderr}`, /Cannot find module ['"]tsx\/cli/);
     assert.doesNotMatch(`${stdout}\n${stderr}`, /ERR_MODULE_NOT_FOUND|Cannot find module/);
   } finally {
+    // The connected runtime may start helper processes. Kill this test-owned
+    // process tree before deleting its cwd; killing only the Node parent can
+    // leave a child holding the temporary workspace open on Windows.
+    if (process.platform === "win32" && child.pid !== undefined) {
+      try {
+        execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      } catch {
+        // The process may already have exited; removeTempWorkspace handles its watchdog too.
+      }
+    }
     if (child.exitCode === null) {
       child.kill();
       await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));

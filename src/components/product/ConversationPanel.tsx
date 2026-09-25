@@ -1,4 +1,5 @@
 "use client";
+import MessageDeliveryDetails from "@/components/product/MessageDeliveryDetails";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -1930,6 +1931,8 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
       if (!field) return;
       const rect = field.getBoundingClientRect();
       // The menu is portaled to body, so its position must follow layout changes.
+      // The menu is portaled to body, so its position must follow layout changes.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMentionMenuRect({ left: rect.left, bottom: window.innerHeight - rect.top + 6, width: rect.width });
     };
     measure();
@@ -2541,6 +2544,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                       )}
                       {queuedMessageIds.has(message.id) && <span className="wf-chat-queued-pill">Queued — runs after current turn</span>}
                       {message.sendStatus && <SendStatusIndicator message={message} onRetry={retrySend} />}
+                      {message.kind !== "notice" && /@[a-z][a-z0-9-]*/i.test(message.body) && <MessageDeliveryDetails messageId={message.id} />}
                       {/* A "View run →" deep-link lived here, pointing at
                           /dashboard/runs/[id]. That page was cut; the card
                           below already carries the run's task, status and

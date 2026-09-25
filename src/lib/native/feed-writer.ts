@@ -4,12 +4,14 @@
  * turn running) on a timer, off the UI path. Writes are atomic (temp file, then rename) and happen only when the content
  * changed, so the overlay never sees a half file and is not woken for nothing.
  */
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { buildFeed, feedBody, lastTurnState, type Feed, type SessionProbe } from "./feed-core";
 import { readRolloutTailFor, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { PENDING_TTL_MS } from "./approval-core";
 import { createLocalStore } from "./local-store";
+import { readClaudeSessions, type ClaudeSession } from "./claude-registry";
+import type { CodexWatcher } from "./codex-watch";
 
 export const FEED_FILE = "feed.json";
 
@@ -18,6 +20,8 @@ export interface FeedDeps {
   /** Injected for tests; production asks the machine which Codex sessions are open. */
   liveness?: DeliveryDeps["sessionLiveness"];
   readRolloutTail?: (threadId: string) => string | null;
+  /** Open Claude Code sessions; production reads Claude's own session registry. */
+  claudeSessions?: () => ClaudeSession[];
 }
 
 export interface FeedRunOptions {
@@ -28,6 +32,8 @@ export interface FeedRunOptions {
   /** Milliseconds between checks of state.json in watch mode. */
   pollEveryMs?: number;
   deps?: FeedDeps;
+  /** Hook-free Codex mentions: read new Codex prompts while watching (see codex-watch.ts). */
+  codexWatcher?: CodexWatcher;
   onWrite?: (feed: Feed) => void;
   /** Stops watch mode when aborted. */
   signal?: AbortSignal;
@@ -49,14 +55,26 @@ function writeAtomic(path: string, text: string): void {
   }
 }
 
+const PROBE_RECENT_MS = 6 * 3_600_000;
+const PROBE_MAX = 12;
+
 async function probe(store: ReturnType<typeof createLocalStore>, deps: FeedDeps): Promise<Record<string, SessionProbe>> {
-  const codex = store.sessionsFor("codex");
-  if (codex.length === 0) return {};
+  const out: Record<string, SessionProbe> = {};
+
+  // Claude Code: its own registry says which sessions are open and whether each is busy. No hook needed.
+  for (const c of (deps.claudeSessions ?? (() => readClaudeSessions()))()) {
+    if (!store.sessionsFor("claude").some((s) => s.sessionId === c.sessionId)) store.registerEndpoint({ provider: "claude-code", sessionId: c.sessionId, cwd: c.cwd, seenAt: c.updatedAt ? new Date(c.updatedAt).toISOString() : undefined });
+    out[c.sessionId] = { live: "live", turn: c.status === "busy" ? "working" : c.status === "idle" ? "idle" : "unknown" };
+  }
+
+  // Codex: ask the machine which recently active sessions hold their file open. Dozens of old sessions are not asked about every pass.
+  const cutoff = (deps.now ?? (() => new Date()))().getTime() - PROBE_RECENT_MS;
+  const codex = store.sessionsFor("codex").filter((s) => Date.parse(s.lastSeenAt) >= cutoff).slice(0, PROBE_MAX);
+  if (codex.length === 0) return out;
   const ids = codex.map((s) => s.sessionId);
   const liveness = deps.liveness ?? realDeps().sessionLiveness;
   const live = liveness ? await liveness(ids).catch(() => undefined) : undefined;
   const tail = deps.readRolloutTail ?? ((id: string) => readRolloutTailFor(id));
-  const out: Record<string, SessionProbe> = {};
   for (const id of ids) {
     const l = live?.[id] ?? "unknown";
     const t = l === "live" ? tail(id) : null;
@@ -103,7 +121,12 @@ export async function runFeed(options: FeedRunOptions): Promise<Feed | null> {
   await new Promise<void>((resolve) => {
     const poll = setInterval(() => { const m = mtime(); if (m !== seen) { seen = m; void tick(false); } }, options.pollEveryMs ?? 500);
     const slow = setInterval(() => void tick(true), options.probeEveryMs ?? 8000);
-    const stop = () => { clearInterval(poll); clearInterval(slow); resolve(); };
+    const watcher = options.codexWatcher;
+    const safely = (fn: () => void) => { try { fn(); } catch { /* the watcher must never stop the feed */ } };
+    if (watcher) safely(() => watcher.refresh());
+    const codexRead = watcher ? setInterval(() => safely(() => { watcher.tick(); }), 1500) : undefined;
+    const codexFind = watcher ? setInterval(() => safely(() => watcher.refresh()), 10_000) : undefined;
+    const stop = () => { clearInterval(poll); clearInterval(slow); if (codexRead) clearInterval(codexRead); if (codexFind) clearInterval(codexFind); resolve(); };
     if (options.signal?.aborted) stop(); else options.signal?.addEventListener("abort", stop, { once: true });
   });
   return last;
@@ -111,3 +134,18 @@ export async function runFeed(options: FeedRunOptions): Promise<Feed | null> {
 
 export const feedPath = (root: string) => join(root, FEED_FILE);
 export const feedExists = (root: string) => existsSync(feedPath(root));
+
+const lockPath = (root: string) => join(root, "feed.lock");
+const pidAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; } };
+
+/** Only one watcher may write the feed (the overlay starts one, and a person may too). Returns a release function, or null when another one is running. */
+export function acquireFeedLock(root: string, pid = process.pid): (() => void) | null {
+  mkdirSync(root, { recursive: true });
+  const path = lockPath(root);
+  try {
+    const other = Number(readFileSync(path, "utf8").trim());
+    if (Number.isInteger(other) && other > 0 && other !== pid && pidAlive(other)) return null;
+  } catch { /* no lock, or unreadable: take it */ }
+  writeFileSync(path, String(pid));
+  return () => { try { if (Number(readFileSync(path, "utf8").trim()) === pid) rmSync(path, { force: true }); } catch { /* already gone */ } };
+}

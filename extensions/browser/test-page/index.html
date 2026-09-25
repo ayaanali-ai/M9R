@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Harbor Goods: pricing, shipping and returns</title>
+  <style>
+    body { margin: 0; font: 16px/1.6 Georgia, "Times New Roman", serif; color: #1d1d1f; background: #faf8f4; }
+    header { padding: 28px 40px; border-bottom: 1px solid #e4dfd5; display: flex; justify-content: space-between; align-items: baseline; }
+    header h1 { margin: 0; font-size: 22px; letter-spacing: .02em; }
+    header nav a { margin-left: 22px; color: #55524b; text-decoration: none; font: 14px system-ui, sans-serif; }
+    main { max-width: 760px; margin: 0 auto; padding: 40px 24px 160px; }
+    h2 { margin: 56px 0 8px; font-size: 24px; }
+    p { margin: 0 0 14px; color: #3d3a34; }
+    table { border-collapse: collapse; width: 100%; font: 15px system-ui, sans-serif; margin: 12px 0 8px; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e4dfd5; }
+    form { margin-top: 20px; display: grid; gap: 12px; font: 15px system-ui, sans-serif; }
+    input, textarea { padding: 10px 12px; border: 1px solid #cfc8ba; border-radius: 6px; font: inherit; background: #fff; }
+    button { justify-self: start; padding: 10px 18px; border: 0; border-radius: 6px; background: #1d1d1f; color: #fff; font: inherit; cursor: pointer; }
+    .hint { position: fixed; right: 16px; bottom: 16px; font: 12px system-ui, sans-serif; background: #fff; border: 1px solid #e4dfd5; border-radius: 8px; padding: 8px 12px; }
+    .hint button { margin-left: 8px; padding: 4px 10px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Harbor Goods</h1>
+    <nav><a href="#pricing">Pricing</a><a href="#shipping">Shipping</a><a href="#returns">Returns</a><a href="#contact">Contact</a></nav>
+  </header>
+  <main>
+    <h2 id="pricing">Pricing</h2>
+    <p>Prices are listed in US dollars and include standard packaging. Bulk orders of twelve or more receive a volume rate.</p>
+    <table>
+      <tr><th>Item</th><th>Single</th><th>12 or more</th></tr>
+      <tr><td>Canvas tote</td><td>$28</td><td>$22</td></tr>
+      <tr><td>Enamel mug</td><td>$16</td><td>$12</td></tr>
+      <tr><td>Wool blanket</td><td>$96</td><td>$84</td></tr>
+    </table>
+
+    <h2 id="shipping">Shipping</h2>
+    <p>Orders ship from our warehouse within two business days. Standard delivery takes five to seven days inside the continental United States.</p>
+    <p>International orders are quoted at checkout and ship with tracking. Customs duties are the responsibility of the recipient.</p>
+    <p>Orders placed after 2pm Pacific are processed the following business day. We do not ship on weekends or holidays.</p>
+
+    <h2 id="returns">Returns</h2>
+    <p>Unused items can be returned within thirty days for a refund to the original payment method. Return shipping is free for defective items.</p>
+    <p>Custom and personalized items cannot be returned unless they arrive damaged. Refunds are issued within five business days of receipt.</p>
+    <p>To start a return, include your order number and the reason for the return in the form below.</p>
+
+    <h2 id="contact">Contact</h2>
+    <form id="contact-form" onsubmit="return false">
+      <input id="email" type="email" placeholder="Your email" />
+      <input id="order" type="text" placeholder="Order number" />
+      <textarea id="message" rows="4" placeholder="How can we help?"></textarea>
+      <button id="submit" type="submit">Send</button>
+    </form>
+  </main>
+  <div class="hint">Presence test page <button id="replay" type="button">Replay</button></div>
+
+  <script src="../src/presence-logic.js"></script>
+  <script src="../src/presence-overlay.js"></script>
+  <script src="../src/content.js"></script>
+  <script src="./demo-driver.js"></script>
+</body>
+</html>

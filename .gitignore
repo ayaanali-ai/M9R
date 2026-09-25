@@ -110,3 +110,18 @@ services/*/.wrangler/
 scratchpad_local/
 Screenshot*.png
 M9R_COMPLETE_HANDOFF*.docx
+
+# Private strategy, research and task notes: kept locally, never committed to the public repo
+/M9R_*.md
+/dist/
+/.agents/
+/.grok/
+/.hermes/
+
+# overlay (Tauri app)
+/overlay/node_modules
+/overlay/dist
+/overlay/src-tauri/target
+/overlay/src-tauri/gen
+engine/dist/
+/hook/target

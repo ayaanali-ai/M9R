@@ -52,6 +52,12 @@ export interface Task {
   cwd?: string;
   /** Session id (or unique prefix) the sender pinned, so a push never has to guess. */
   targetSession?: string;
+  /** The sender's own session (a Codex thread id, say), so the answer can be pushed back to exactly that session. */
+  fromSession?: string;
+  /** The session the task was shown in (its inbox delivery), so its answer is read from that session's transcript. */
+  deliveredSession?: string;
+  /** Set when the answer was pushed back into the sender's session. */
+  answerPushedAt?: string;
 }
 
 export interface TaskDelivery {
@@ -75,6 +81,7 @@ export interface NewTaskInput {
   standingRuleApplies?: boolean;
   cwd?: string;
   targetSession?: string;
+  fromSession?: string;
 }
 
 /** Approximate token count; good enough to enforce a budget without a tokenizer dependency. */
@@ -129,6 +136,7 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
     createdAt: nowIso,
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(input.targetSession ? { targetSession: input.targetSession } : {}),
+    ...(input.fromSession ? { fromSession: input.fromSession } : {}),
   };
 }
 
@@ -167,18 +175,27 @@ function approvalLabel(t: Task): string {
  * only ones it may see (denied and expired are hidden), at most CAPS.inboxItems, each at most CAPS.inboxItemTokens.
  * Returns an empty string when there is nothing new, so an idle inbox costs zero tokens.
  */
-export function renderInboxInjection(tasks: readonly Task[], cursor: number): InjectionResult {
+export interface InjectionOptions {
+  /** Most items to show; defaults to CAPS.inboxItems. An explicit inbox check may ask for more than the automatic hook. */
+  items?: number;
+  /** Longest goal shown per item; defaults to ENVELOPE_GOAL_CHARS. */
+  itemChars?: number;
+}
+
+export function renderInboxInjection(tasks: readonly Task[], cursor: number, options: InjectionOptions = {}): InjectionResult {
+  const maxItems = options.items ?? CAPS.inboxItems;
+  const goalChars = options.itemChars ?? ENVELOPE_GOAL_CHARS;
   const visible = tasks
     // A task already pushed into the session as a real prompt must not be injected a second time from the inbox.
     .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired" && t.delivery?.state !== "queued" && t.delivery?.state !== "done")
     .sort((a, b) => a.seq - b.seq);
-  const shown = visible.slice(0, CAPS.inboxItems);
+  const shown = visible.slice(0, maxItems);
   if (shown.length === 0) return { text: "", includedIds: [], newCursor: cursor, omitted: 0 };
-  const perItemChars = CAPS.inboxItemTokens * 4;
+  const perItemChars = options.itemChars ? options.itemChars + 200 : CAPS.inboxItemTokens * 4;
   const lines = shown.map((t) => {
     const head = `[${t.id} from @${t.from}, ${approvalLabel(t)}] `;
     const tail = ` Details: get_task ${t.id}.`;
-    const room = Math.max(40, Math.min(ENVELOPE_GOAL_CHARS, perItemChars - head.length - tail.length));
+    const room = Math.max(40, Math.min(goalChars, perItemChars - head.length - tail.length));
     // The pointer is only useful (and only safe to mention) when the text shown is not the whole goal.
     const shown = clip(t.goal, room);
     return head + shown.text + (shown.truncated || t.goalTruncated ? tail : "");
@@ -201,6 +218,8 @@ export interface CardInput {
   awaitingApproval?: number;
   /** Only set when the folder really exists; otherwise the card says nothing about memory. */
   memoryDir?: string;
+  /** Freshly issued this SessionStart; scopes the M9R MCP server to this one verified identity. */
+  identityToken?: string;
 }
 
 /** The once-per-session card: a handful of lines, pointers only, never memory content. */
@@ -208,6 +227,7 @@ export function renderSessionCard(input: CardInput): string {
   const others = input.others.slice(0, CAPS.cardOthers).map((o) => `@${o.handle}${o.activity ? ` (${o.activity.slice(0, 60)})` : ""}`);
   const lines = [
     `M9R connected as @${input.handle}.`,
+    input.identityToken ? `M9R session token (for the M9R MCP server, "m9r_whoami" and friends; keep it out of anything you post publicly): ${input.identityToken}` : "",
     others.length ? `Active now: ${others.join(", ")}.` : "No other agents active.",
     input.pendingCount > 0 ? `${input.pendingCount} pending inbox item(s); they appear at your next prompt.` : "",
     input.awaitingApproval ? `${input.awaitingApproval} task(s) are waiting for the user's approval; if it comes up, tell the user to run: m9r-cli tasks.` : "",

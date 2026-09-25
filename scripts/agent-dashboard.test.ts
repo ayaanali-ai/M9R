@@ -1158,10 +1158,14 @@ test("public homepage does not claim an unimplemented tamper-evident or admissib
 // The homepage markup is being redesigned, so these tests pin what must stay true regardless of layout: it is a single
 // server page that renders the current home component, never the retired card strip, and never opens a socket to a
 // visitor's own machine just to render.
-test("public homepage renders one home component and none of the retired card-strip pieces", () => {
+test("public homepage renders one approved home component and none of the retired card-strip pieces", () => {
   const page = read("src/app/page.tsx");
   assert.match(page, /export default/);
-  assert.match(page, /from "@\/components\/home\//, "the page composes a component from components/home");
+  assert.match(
+    page,
+    /from "@\/components\/(?:home|reference)\//,
+    "the page composes an approved public-home component",
+  );
   assert.doesNotMatch(page, /ProofStrip/);
   assert.doesNotMatch(page, /V2ProductReveal/);
   assert.doesNotMatch(page, /const CTA_PRIMARY = \{ href: "\/analyze", label: "Seal a session"/);

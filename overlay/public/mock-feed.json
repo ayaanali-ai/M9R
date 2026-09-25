@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "seq": 7,
+  "generatedAt": "2026-09-20T17:00:00Z",
+  "agents": [
+    { "handle": "claude", "state": "seen", "since": "2026-09-20T16:58:10Z", "doing": null, "sessions": [], "evidence": "Seen recently. M9R has no reliable open/closed signal for this agent yet." },
+    { "handle": "codex", "state": "open_working", "since": "2026-09-20T16:55:00Z", "doing": null, "sessions": [{ "id": "01a0c010-9e03-7152-a1d2-039c92c32e05", "cwd": "C:/RunLeak/runleak", "live": true }], "evidence": "1 open session(s): its session file is held open, a turn is in progress." },
+    { "handle": "opencode", "state": "not_connected", "doing": null, "sessions": [], "evidence": "No session of this agent has been seen on this machine." }
+  ],
+  "needsYou": [
+    { "kind": "approval", "taskId": "T4", "from": "claude", "to": "codex", "goal": "Review relay/lease.ts for the renewal race and report what you find.", "protected": false },
+    { "kind": "approval", "taskId": "T5", "from": "claude", "to": "codex", "goal": "Deploy the relay to production.", "protected": true },
+    { "kind": "push_failed", "taskId": "T3", "to": "codex", "reason": "2 Codex sessions are open here and M9R cannot tell which you mean.", "fix": "m9r-cli sessions, then m9r-cli send @codex --session <id> \"...\"" },
+    { "kind": "answer", "taskId": "T2", "from": "codex", "summary": "Reviewed: one race in renew(); the fencing token is compared after the extend." }
+  ],
+  "recent": [
+    { "at": "2026-09-20T16:59:20Z", "taskId": "T5", "text": "@claude to @codex: Deploy the relay to production." },
+    { "at": "2026-09-20T16:58:40Z", "taskId": "T4", "text": "@claude to @codex: Review relay/lease.ts for the renewal race" },
+    { "at": "2026-09-20T16:55:02Z", "taskId": "T2", "text": "T2 finished: Reviewed: one race in renew()" }
+  ],
+  "pings": [{ "id": 7, "kind": "approval", "taskId": "T5", "text": "@claude asks @codex: Deploy the relay to production." }],
+  "reserved": { "people": [], "channels": [] }
+}

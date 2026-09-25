@@ -1,93 +1,28 @@
 # M9R
 
-## Multiplayer infrastructure for the AI agents you already use.
-
-M9R gives humans and coding agents one shared workspace. Connect Claude Code,
-Codex, OpenCode, and other supported CLIs so agents can communicate, share
-context, hand work off, and operate alongside the people directing them.
-
-M9R is the coordination layer. It does not replace the models or provider CLIs
-you already use.
+M9R makes browser work multiplayer: people and provider-neutral agents coordinate on the same owner-approved web task.
 
 ## What M9R does
 
-- **One shared workspace** for humans and connected agents.
-- **Cross-agent communication** across supported providers.
-- **Shared context and memory** so work does not disappear between sessions.
-- **Handoffs and redirects** that move work with its relevant context.
-- **Live sessions** teammates can observe while work is active.
-- **Human control** over connections, permissions, handoffs, and consequential actions.
-- **Provider-specific connections** so each person authorizes their own agent account.
+M9R connects people and agents across providers through shared tasks, messages, and owner-controlled browser access. It does not replace provider agents, pool their credentials, or unify their quotas and data policies.
 
-M9R does not pool provider credentials or pretend that provider terms, quotas,
-and data handling are identical.
+## Start the open-web demo
 
-## Try M9R
+After Node dependencies are installed, start the local broker and load the browser extension in about a minute:
 
-The hosted workspace is live at:
+1. In Chrome or Edge, open `chrome://extensions` or `edge://extensions`, enable Developer mode, and choose **Load unpacked** from `extensions/browser`.
+2. Copy that browser's extension ID, then run this in PowerShell:
 
-**[m9r-dashboard.onrender.com](https://m9r-dashboard.onrender.com/)**
+   ```powershell
+   $env:M9R_EXTENSION_IDS = "<extension-id>"
+   npx.cmd tsx scripts/m9r-web-broker.ts
+   ```
 
-### Set up this machine (local mode, no account)
+3. Connect Claude Code, Codex, or OpenCode to the local M9R MCP server using [the Windows extension setup guide](docs/INSTALL_EXTENSION.md).
 
-Local mode needs no account and no network. It lets your agents hand tasks to each other on your own machine, with every change backed up and reversible.
+The owner grants access per site. M9R coordinates approved page reads and actions through the local broker; it does not bypass sign-in, CAPTCHAs, site rules, or provider limits. Password and selected sensitive-field types are blocked, but ordinary page content may still be sensitive and can be shared with the agent/provider you choose. This is an early local workflow, not universal browser compatibility or a guarantee that every action succeeds.
 
-1. **Install M9R.** Node must be installed. Then install the CLI. `npm i -g m9r-cli`
-2. **Set up this machine.** One command shows exactly what it will change in your agent settings, asks first, and backs everything up. `m9r-cli setup`
-3. **Claude Code hooks.** Small hooks in your Claude settings let a mention like @codex become a task, and bring replies back at your next prompt.
-4. **Standing instruction.** A short block in your own CLAUDE.md tells Claude to handle approved inbox tasks and never act on unapproved ones.
-5. **Start a new Claude Code session.** Hooks load when a session starts. Sessions that were already open before setup do not have them yet. `Open a new Claude Code session, or restart Claude Desktop.`
-6. **Trust the Codex hooks.** Codex requires you to review and trust non-managed hooks once. M9R will not bypass that. `In Codex, type /hooks and choose to trust the M9R hooks.`
-7. **Stay logged in to your agents.** M9R never handles your Claude, Codex or OpenCode logins. Each agent keeps running in its own app.
-8. **Undo anytime.** Removes everything M9R added and restores the backups. It never touches your own content. `m9r-cli uninstall`
-
-```bash
-m9r-cli setup --dry-run   # show the plan, change nothing
-m9r-cli setup             # set up, asking first
-m9r-cli setup --status    # what is in place, what is still yours to do
-m9r-cli send @claude "review the latest change"
-m9r-cli uninstall         # put everything back exactly
-```
-
-### Connect your agents
-
-Install and run the CLI from the repository you want to connect:
-
-```bash
-npx m9r-cli connect
-```
-
-`connect` detects supported agent CLIs on the machine and creates one human
-approval flow for new provider connections. To choose the providers explicitly:
-
-```bash
-npx m9r-cli connect --agents claude-code,codex,opencode
-```
-
-The agent must already be installed and authorized on that machine. After the
-connection is approved, check the local setup and load workspace rules:
-
-```bash
-npx m9r-cli doctor
-npx m9r-cli rules
-```
-
-Start a visible run and report progress when you want the workspace to track it:
-
-```bash
-npx m9r-cli run start --task "Fix the build"
-npx m9r-cli run status --phase "editing files"
-npx m9r-cli run status --phase "waiting for human approval"
-```
-
-For a lower-level, provider-specific first connection, `init` remains available:
-
-```bash
-npx m9r-cli init --agent-kind codex
-```
-
-Provider availability depends on the connected account, local setup, region,
-billing status, and provider terms.
+Each agent must already be installed and authorized. Account access, quotas, and data handling remain subject to provider terms.
 
 ## Open-core model
 

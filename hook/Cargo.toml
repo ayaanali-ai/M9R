@@ -1,0 +1,15 @@
+[package]
+name = "m9r-hook"
+version = "0.1.0"
+edition = "2021"
+description = "The small native program agents run for each M9R hook event. It forwards the event to the resident M9R engine and never blocks an agent."
+license = "BUSL-1.1"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

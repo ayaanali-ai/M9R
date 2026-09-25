@@ -14,14 +14,16 @@
  *   npm run m9r -- submit-session m9r-session.md --approved
  */
 
-import { mkdir, readFile, writeFile, access, unlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, access, unlink, chmod, rm, readdir, rename, rmdir } from "node:fs/promises";
 import { connect } from "node:net";
 import { spawn, execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
-import { platform } from "node:os";
+import { emitKeypressEvents } from "node:readline";
+import { homedir, platform, tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 
 import { run, type CliDeps } from "@/lib/oathlock-cli-core";
@@ -55,8 +57,25 @@ import {
 import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, shouldRelaunch, stillHoldsWatchdogLock } from "@/lib/oathlock-watchdog";
 import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
 import { createInterface } from "node:readline/promises";
+import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
+import { isAgentContext, isHumanContext } from "@/lib/native/approval-core";
+import { DEFAULT_BROKER_PORT, brokerKeyPath } from "@/lib/native/web-broker-paths";
+import { runWebAuthorityCli } from "@/lib/native/web-authority-cli";
+import { apiKeyLaunchBlock, buildVendorLaunchPlan, type M9rLaunchProfile, type M9rLaunchVendor } from "@/lib/native/vendor-launch-core";
+import { detectInstalledAgents, type DetectedAgent, type DetectableAgentKind } from "@/lib/agent-detection-core";
+import {
+  buildClaudeMcpAddArgs, buildClaudeMcpRemoveArgs, extensionIdFromManifestKey, mergeCodexWebMcp, mergeOpenCodeWebMcp, parseWebSetupList,
+  planWebSetup, removeCodexWebMcp, removeOpenCodeWebMcp, resolveWebMcpRuntime, selectWebSetupAgents,
+  webConfigUninstallMode, WEB_EXTENSION_ID, type WebSetupBrowser,
+} from "@/lib/native/web-setup-core";
+import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
+import { createWebAuthority } from "@/lib/native/web-authority-core";
+import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 
 const execFileAsync = promisify(execFile);
+
+const WEB_SETUP_MANIFEST = "web-setup-manifest.json";
+const WEB_TASK_NAME = "M9R Web Broker";
 
 /** Best-effort: open a URL in the default browser. Never throws to the caller. */
 function openUrl(url: string): void {
@@ -78,6 +97,10 @@ const deps: CliDeps = {
   fetch: globalThis.fetch,
   readFile: (p) => readFile(p, "utf8"),
   writeFile: (p, data) => writeFile(p, data, "utf8"),
+  writeSecretFile: async (p, data) => {
+    await writeFile(p, data, { encoding: "utf8", mode: 0o600 });
+    if (platform() !== "win32") await chmod(p, 0o600);
+  },
   removeFile: (p) => unlink(p),
   mkdir: async (p) => {
     await mkdir(p, { recursive: true });
@@ -520,6 +543,10 @@ async function runWatchdog(): Promise<number> {
 async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Promise<number> {
   const localOnly = options.localOnly === true;
   if (localOnly) process.env.M9R_LOCAL_ONLY = "1";
+  if (!localOnly) {
+    const { startNativeEventSync } = await import("../src/lib/native-event-sync");
+    startNativeEventSync();
+  }
   const configFile = join(process.cwd(), ".oathlock", "resident.local.json");
   let config: unknown = {};
   try { config = JSON.parse(await readFile(configFile, "utf8")); } catch { /* terminals still work without resident profiles */ }
@@ -963,7 +990,614 @@ async function reportTerminalState(state: string | undefined): Promise<number> {
 }
 
 const argv = process.argv.slice(2);
-const execution = argv[0] === "resident"
+async function runVendorLaunch(args: string[]): Promise<number> {
+  const vendorValue = args[0];
+  if (vendorValue !== "claude" && vendorValue !== "codex") {
+    process.stderr.write("Usage: m9r launch <claude|codex> [--profile web-only|hands] [--allow-api-key]\n");
+    return 2;
+  }
+  const vendor: M9rLaunchVendor = vendorValue;
+  let profile: M9rLaunchProfile = "web-only";
+  let allowApiKey = false;
+  for (let i = 1; i < args.length; i += 1) {
+    if (args[i] === "--allow-api-key") allowApiKey = true;
+    else if (args[i] === "--profile" && (args[i + 1] === "web-only" || args[i + 1] === "hands")) {
+      profile = args[i + 1] as M9rLaunchProfile;
+      i += 1;
+    } else {
+      process.stderr.write("Usage: m9r launch <claude|codex> [--profile web-only|hands] [--allow-api-key]\n");
+      return 2;
+    }
+  }
+  const blocked = apiKeyLaunchBlock(process.env, allowApiKey);
+  if (blocked) {
+    process.stderr.write(`${blocked}\n`);
+    return 2;
+  }
+
+  const storeRoot = defaultStoreRoot(homedir(), process.env);
+  const store = createLocalStore(storeRoot);
+  const sessionId = randomUUID();
+  const identity = store.issueIdentity(vendor, vendor === "claude" ? "claude-code" : "codex-cli", sessionId);
+  const tempDir = await mkdtemp(join(tmpdir(), "m9r-launch-"));
+  try {
+    const compiledMcp = join(dirname(fileURLToPath(import.meta.url)), "m9r-mcp.js");
+    const mcpSource = resolve(process.cwd(), "scripts", "m9r-mcp.ts");
+    const mcpRegister = resolve(process.cwd(), "scripts", "register-alias.mjs");
+    let mcpArgs: string[];
+    try {
+      await access(compiledMcp);
+      mcpArgs = [compiledMcp];
+    } catch {
+      try { await access(mcpSource); } catch { throw new Error("M9R MCP entry is missing; install the CLI build or run from the M9R repository."); }
+      mcpArgs = ["--disable-warning=ExperimentalWarning", "--import", mcpRegister, mcpSource];
+    }
+    const mcpEnv: Record<string, string> = { M9R_HOME: storeRoot };
+    if (process.env.M9R_WEB_BROKER_PORT) mcpEnv.M9R_WEB_BROKER_PORT = process.env.M9R_WEB_BROKER_PORT;
+    const plan = buildVendorLaunchPlan({
+      vendor, profile, cwd: process.cwd(), mcpConfigPath: join(tempDir, "mcp.json"), promptFile: join(tempDir, "m9r-system-prompt.txt"),
+      mcpCommand: process.execPath, mcpArgs, mcpEnv, sessionToken: identity.token,
+    });
+    if (plan.mcpConfigJson) await writeFile(join(tempDir, "mcp.json"), plan.mcpConfigJson, "utf8");
+    if (plan.promptFileContent) await writeFile(join(tempDir, "m9r-system-prompt.txt"), plan.promptFileContent, "utf8");
+    const binary = process.env[vendor === "claude" ? "M9R_CLAUDE_BIN" : "M9R_CODEX_BIN"]?.trim() || plan.command;
+    const child = spawn(binary, plan.args, {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: plan.stdinPrompt ? ["pipe", "inherit", "inherit"] : "inherit",
+      shell: platform() === "win32",
+      windowsHide: false,
+    });
+    if (plan.stdinPrompt && child.stdin) {
+      child.stdin.end(plan.stdinPrompt);
+    }
+    return await new Promise<number>((resolveCode, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => resolveCode(code ?? 1));
+    });
+  } catch (error) {
+    process.stderr.write(`m9r launch failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  } finally {
+    store.revokeIdentity(sessionId);
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+type WebSetupManifest = {
+  version: 1;
+  configs: Array<{ agent: DetectableAgentKind; path: string; layout?: "legacy" | "servers"; existedBefore: boolean; beforeHash: string | null; installedHash: string; backupPath?: string }>;
+  extensionPath: string;
+  extensionFiles: Array<{ path: string; hash: string }>;
+  extensionDirectories?: string[];
+  runtimePath?: string;
+  runtimeHash?: string;
+  brokerConfigPath: string;
+  brokerConfigHash: string;
+  brokerConfigExistedBefore?: boolean;
+  brokerConfigBackupPath?: string;
+  brokerKeyCreated?: boolean;
+  brokerKeyHash?: string;
+  identityBootstrap: "installed" | "preexisting" | "not-installed";
+  identityManifestHash?: string;
+  browsers: WebSetupBrowser[];
+};
+
+const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+const canRead = async (path: string) => access(path).then(() => true).catch(() => false);
+const readOptional = async (path: string) => (await canRead(path)) ? readFile(path) : null;
+const writeAtomic = async (path: string, value: string | Uint8Array) => {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, value);
+  await rename(temporary, path);
+};
+
+function valueAfter(args: readonly string[], flag: string): string | undefined {
+  const index = args.indexOf(flag);
+  return index < 0 ? undefined : args[index + 1];
+}
+
+function hasClaudeMcpEntry(raw: string): boolean {
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const servers = (value as Record<string, unknown>).mcpServers;
+    return typeof servers === "object" && servers !== null && !Array.isArray(servers) && Object.hasOwn(servers, "m9r");
+  } catch { return false; }
+}
+
+function webMcpRuntime(): { command: string; args: readonly string[] } {
+  const entry = fileURLToPath(import.meta.url);
+  const installedEngine = join(defaultStoreRoot(homeDirectory(), process.env), "bin", process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
+  const builtMcp = join(dirname(entry), "m9r-mcp.js");
+  const sourceMcp = join(dirname(entry), "m9r-mcp.ts");
+  const currentExecutable = /^m9r-engine(?:\.exe)?$/i.test(entry.split(/[\\/]/).pop() ?? "") || /^m9r-engine(?:\.exe)?$/i.test(process.execPath.split(/[\\/]/).pop() ?? "");
+  return resolveWebMcpRuntime({
+    nodeCommand: process.execPath,
+    ...(awaitableExists(installedEngine) ? { installedEngine } : {}),
+    ...(currentExecutable ? { currentEngine: process.execPath } : {}),
+    ...(awaitableExists(builtMcp) ? { compiledMcp: builtMcp } : {}),
+    ...(awaitableExists(sourceMcp) ? { sourceMcp, sourceNodeArgs: process.execArgv } : {}),
+  });
+}
+
+function awaitableExists(path: string): boolean {
+  return existsSync(path);
+}
+
+async function detectBrowsers(): Promise<WebSetupBrowser[]> {
+  if (platform() !== "win32") return [];
+  const roots = [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter((v): v is string => !!v);
+  const candidates: Array<[WebSetupBrowser, string[]]> = [
+    ["chrome", roots.map((root) => join(root, "Google", "Chrome", "Application", "chrome.exe"))],
+    ["edge", roots.map((root) => join(root, "Microsoft", "Edge", "Application", "msedge.exe"))],
+  ];
+  const found: WebSetupBrowser[] = [];
+  for (const [browser, paths] of candidates) if (paths.some(awaitableExists)) found.push(browser);
+  return found;
+}
+
+async function selectWebAgents(detected: readonly DetectedAgent[]): Promise<DetectableAgentKind[]> {
+  const items: DetectableAgentKind[] = ["claude-code", "codex", "opencode"];
+  const names: Record<DetectableAgentKind, string> = { "claude-code": "Claude Code", codex: "Codex", opencode: "OpenCode" };
+  const found = new Set(detected.map((agent) => agent.kind));
+  const selected = new Set(items.filter((item) => found.has(item)));
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Non-interactive setup requires both --agents <claude-code,codex,opencode> and --yes.");
+  return await new Promise((resolvePick, rejectPick) => {
+    let cursor = 0;
+    const render = () => {
+      process.stdout.write("\x1b[2J\x1b[HSelect installed agents (arrows move, Space toggles, Enter confirms):\n\n");
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i]!;
+        const missing = !found.has(item);
+        const row = `${i === cursor ? "❯" : " "} [${selected.has(item) ? "x" : " "}] ${names[item]}${missing ? " (not found)" : ""}`;
+        process.stdout.write(missing ? `\x1b[90m${row}\x1b[0m\n` : `${row}\n`);
+      }
+    };
+    const stdin = process.stdin;
+    const oldRaw = stdin.isRaw;
+    const finish = (error?: Error) => {
+      stdin.removeListener("keypress", onKey);
+      if (stdin.isTTY && typeof stdin.setRawMode === "function") stdin.setRawMode(Boolean(oldRaw));
+      process.stdout.write("\n");
+      if (error) rejectPick(error);
+      else {
+        const chosen = items.filter((item) => selected.has(item));
+        try { resolvePick(selectWebSetupAgents(detected, chosen)); } catch (selectionError) { rejectPick(selectionError); }
+      }
+    };
+    const onKey = (_text: string | undefined, key: { name?: string; sequence?: string; ctrl?: boolean }) => {
+      if (key.ctrl && key.name === "c") { finish(new Error("Setup cancelled.")); return; }
+      if (key.name === "up") cursor = (cursor + items.length - 1) % items.length;
+      else if (key.name === "down") cursor = (cursor + 1) % items.length;
+      else if (key.name === "space" && found.has(items[cursor]!)) {
+        const item = items[cursor]!;
+        if (selected.has(item)) selected.delete(item); else selected.add(item);
+      } else if (key.name === "return") { finish(); return; }
+      render();
+    };
+    // Node's readline keypress decoder is also used by existing CLI prompts.
+    emitKeypressEvents(stdin);
+    stdin.setRawMode(true);
+    stdin.on("keypress", onKey);
+    render();
+  });
+}
+
+function resolveWebConfigPaths(): Partial<Record<DetectableAgentKind, string>> {
+  const home = homeDirectory();
+  const configHome = process.env.CODEX_HOME?.trim() || join(home, ".codex");
+  const opencodeHome = process.env.XDG_CONFIG_HOME?.trim() || process.env.APPDATA?.trim() || join(home, ".config");
+  return {
+    "claude-code": join(process.env.CLAUDE_CONFIG_DIR?.trim() || home, ".claude.json"),
+    codex: join(configHome, "config.toml"),
+    opencode: ["opencode.jsonc", "opencode.json"].map((name) => join(opencodeHome, "opencode", name)).find(awaitableExists)
+      ?? join(opencodeHome, "opencode", "opencode.json"),
+  };
+}
+
+function webExtensionSource(destination: string): string {
+  const entry = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    process.env.M9R_EXTENSION_SOURCE?.trim(),
+    join(entry, "extension"),
+    resolve(entry, "..", "extensions", "browser"),
+    resolve(entry, "..", "..", "extensions", "browser"),
+    destination,
+  ].filter((value): value is string => Boolean(value));
+  return candidates.find((path) => awaitableExists(join(path, "manifest.json"))) ?? "";
+}
+
+function webBrokerRuntime(root: string, port: number): { executable: string; args: string[]; copiedBundle?: string; sourceBundle?: string } {
+  const installedEngine = join(root, "bin", process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
+  if (awaitableExists(installedEngine)) return { executable: installedEngine, args: ["web", "serve", "--home", root, "--port", String(port)] };
+  const sourceBundle = join(dirname(fileURLToPath(import.meta.url)), "m9r-web-broker.cjs");
+  if (!awaitableExists(sourceBundle)) throw new Error("The packaged broker runtime is missing; run the CLI build and reinstall the package.");
+  const copiedBundle = join(root, "web-runtime", "m9r-web-broker.cjs");
+  return { executable: process.execPath, args: [copiedBundle, "--home", root, "--port", String(port)], copiedBundle, sourceBundle };
+}
+
+function formatWebPlan(
+  plan: ReturnType<typeof planWebSetup>,
+  mcpCommand: { command: string; args: readonly string[] },
+  brokerRuntime: { executable: string; args: readonly string[] },
+  root: string,
+): string[] {
+  const taskAction = `"${brokerRuntime.executable.replaceAll('"', '""')}" ${brokerRuntime.args.map((value) => `"${value.replaceAll('"', '""')}"`).join(" ")}`;
+  const rows = ["M9R Web setup will:", `  - install/update the browser extension at ${plan.extensionPath}`, `  - allow extension ID ${plan.allowedExtensionIds[0]} on 127.0.0.1 only`, "  - register the local broker to start at Windows sign-in (current user; no admin)", "  - configure these user-level MCP entries:"];
+  rows.push("  - files:");
+  for (const item of plan.agentFiles) rows.push(`      ${item.path}`);
+  rows.push(`      ${join(root, "web-broker.json")}`, `      ${join(root, "web-broker.key")} (generated locally; value is never shown)`, `      ${join(root, WEB_SETUP_MANIFEST)}`, `      ${plan.extensionPath}\\<packaged extension files>`);
+  if (brokerRuntime.args[0]?.endsWith("m9r-web-broker.cjs")) rows.push(`      ${brokerRuntime.args[0]} (packaged local broker runtime)`);
+  for (const item of plan.agentFiles) {
+    rows.push(`      ${item.agent}: ${item.path}${item.layout ? ` (${item.layout} OpenCode layout)` : ""}`);
+    if (item.agent === "claude-code") {
+      rows.push(`        command: claude ${buildClaudeMcpRemoveArgs().join(" ")} (only if already present)`);
+      rows.push(`        command: claude ${buildClaudeMcpAddArgs({ ...mcpCommand, m9rHome: plan.m9rHome }).join(" ")}`);
+    }
+    else rows.push("        action: add/update only the m9r MCP entry; preserve the other settings");
+  }
+  rows.push(`  - command: schtasks.exe /Create /SC ONLOGON /TN "${WEB_TASK_NAME}" /TR "${taskAction}" /F /RL LIMITED`);
+  rows.push(`  - command: schtasks.exe /Run /TN "${WEB_TASK_NAME}"`);
+  rows.push(`  - browsers: ${plan.browsers.length ? plan.browsers.join(", ") : "none detected; extension can be loaded later"}`);
+  for (const browser of plan.browsers) rows.push(`      open ${browser === "chrome" ? "chrome://extensions/" : "edge://extensions/"}`);
+  rows.push("  - install the existing M9R session identity bootstrap for Claude Code/Codex where selected");
+  return rows;
+}
+
+async function runWebSetup(args: string[]): Promise<number> {
+  if (platform() !== "win32") { process.stderr.write("M9R Web setup currently supports Windows 10/11 only.\n"); return 2; }
+  const yes = args.includes("--yes") || args.includes("-y");
+  const dryRun = args.includes("--dry-run");
+  const requestedAgents = valueAfter(args, "--agents");
+  const requestedBrowsers = valueAfter(args, "--browsers");
+  if ((!process.stdin.isTTY || !process.stdout.isTTY) && (!yes || !requestedAgents)) {
+    process.stderr.write("Non-interactive setup requires --agents <claude-code,codex,opencode> and --yes.\n"); return 2;
+  }
+  try {
+    const detected = await detectInstalledAgents(probeVersion);
+    const selected = requestedAgents
+      ? selectWebSetupAgents(detected, parseWebSetupList(requestedAgents, ["claude-code", "codex", "opencode"], "agent"))
+      : await selectWebAgents(detected);
+    const installedBrowsers = await detectBrowsers();
+    const browsers = requestedBrowsers
+      ? parseWebSetupList(requestedBrowsers, ["chrome", "edge"], "browser") as WebSetupBrowser[]
+      : installedBrowsers;
+    const home = homeDirectory();
+    const root = defaultStoreRoot(home, process.env);
+    const extensionPath = join(process.env.LOCALAPPDATA || join(home, "AppData", "Local"), "M9R", "extension");
+    const extensionSource = webExtensionSource(extensionPath);
+    if (!extensionSource) throw new Error("The packaged browser extension was not found. Install from the M9R package or set M9R_EXTENSION_SOURCE to its folder.");
+    const runtime = webMcpRuntime();
+    const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
+    const runtimePlan = { command: runtime.command, args: runtime.args, m9rHome: root, brokerPort: port };
+    const configPaths = resolveWebConfigPaths();
+    const plan = planWebSetup({ detected, selectedAgents: selected, engineCommand: runtime.command, mcpArgs: runtime.args, m9rHome: root, configPaths, extensionPath, browsers, extensionId: WEB_EXTENSION_ID });
+    const brokerRuntime = webBrokerRuntime(root, port);
+    process.stdout.write(`${formatWebPlan(plan, runtime, brokerRuntime, root)}\n`);
+    const identityAgents = selected.filter((agent) => agent === "claude-code" || agent === "codex");
+    if (identityAgents.length) {
+      process.stdout.write("\nExisting M9R identity bootstrap plan (preview):\n");
+      await run(["setup", "--identity-only", "--agents", identityAgents.join(","), "--dry-run"], deps);
+    }
+    if (dryRun) { process.stdout.write("Dry run only; no files, processes, browser tabs, or login tasks were changed.\n"); return 0; }
+    if (!yes && !(await deps.confirm?.("Apply this exact M9R Web setup plan?"))) { process.stdout.write("Cancelled. Nothing was changed.\n"); return 0; }
+
+    const manifestPath = join(root, WEB_SETUP_MANIFEST);
+    const previousManifest = await readOptional(manifestPath);
+    const previous = previousManifest ? JSON.parse(previousManifest.toString("utf8")) as WebSetupManifest : null;
+    const manifest: WebSetupManifest = previous ?? { version: 1, configs: [], extensionPath, extensionFiles: [], extensionDirectories: [], brokerConfigPath: join(root, "web-broker.json"), brokerConfigHash: "", identityBootstrap: "not-installed", browsers };
+    const existingTask = await execFileAsync("schtasks.exe", ["/Query", "/TN", WEB_TASK_NAME], { windowsHide: true, timeout: 10_000 }).then(() => true).catch(() => false);
+    if (existingTask && !previousManifest) throw new Error(`A Windows task named ${WEB_TASK_NAME} already exists but is not owned by this web setup; refusing to overwrite it.`);
+    manifest.extensionPath = extensionPath;
+    manifest.browsers = browsers;
+    await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+    const existingExtensionManifest = join(extensionPath, "manifest.json");
+    if (await canRead(existingExtensionManifest)) {
+      const current = JSON.parse(await readFile(existingExtensionManifest, "utf8")) as { key?: string };
+      if (!current.key || extensionIdFromManifestKey(current.key) !== WEB_EXTENSION_ID) throw new Error(`Existing extension at ${extensionPath} does not have the fixed M9R development ID; move it aside before setup.`);
+    } else {
+      const destinationExists = await canRead(extensionPath);
+      if (destinationExists && (await readdir(extensionPath)).length > 0) throw new Error(`The extension folder ${extensionPath} already contains files but no valid M9R manifest; refusing to overwrite user data.`);
+      const files: string[] = [];
+      const walk = async (directory: string) => {
+        for (const item of await readdir(directory, { withFileTypes: true })) {
+          if (["store-assets", "test-page", ".git", "node_modules"].includes(item.name)) continue;
+          const source = join(directory, item.name);
+          if (item.isDirectory()) await walk(source); else files.push(source);
+        }
+      };
+      await walk(extensionSource);
+      for (const source of files) {
+        const relative = source.slice(extensionSource.length + 1);
+        const target = join(extensionPath, relative);
+        const content = await readFile(source);
+        let directory = dirname(target);
+        const created = new Set(manifest.extensionDirectories ?? []);
+        while (directory === extensionPath || directory.startsWith(`${extensionPath}${process.platform === "win32" ? "\\" : "/"}`)) {
+          if (!await canRead(directory)) created.add(directory);
+          if (directory === extensionPath) break;
+          directory = dirname(directory);
+        }
+        manifest.extensionDirectories = [...created].sort((left, right) => right.length - left.length);
+        await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, content);
+        manifest.extensionFiles.push({ path: target, hash: digest(content) });
+        await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+      }
+    }
+
+    manifest.brokerConfigPath = join(root, "web-broker.json");
+    const previousBrokerConfig = await readOptional(manifest.brokerConfigPath);
+    if (manifest.brokerConfigExistedBefore === undefined) {
+      manifest.brokerConfigExistedBefore = previousBrokerConfig !== null;
+      if (previousBrokerConfig) {
+        manifest.brokerConfigBackupPath = join(root, "web-backups", `broker-${randomUUID()}.bak`);
+        await mkdir(dirname(manifest.brokerConfigBackupPath), { recursive: true });
+        await writeFile(manifest.brokerConfigBackupPath, previousBrokerConfig);
+      }
+    }
+    if (previous?.brokerConfigHash && previousBrokerConfig && digest(previousBrokerConfig) !== previous.brokerConfigHash) {
+      throw new Error("The managed broker config changed outside M9R setup; review it before rerunning setup.");
+    }
+    await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+    const mcpConfig = JSON.stringify({ version: 1, extensionIds: [WEB_EXTENSION_ID], port }, null, 2) + "\n";
+    await writeAtomic(manifest.brokerConfigPath, mcpConfig);
+    manifest.brokerConfigHash = digest(mcpConfig);
+    const identityManifestPath = join(root, "install-manifest.json");
+    const hadIdentityManifest = await canRead(identityManifestPath);
+
+    for (const item of plan.agentFiles) {
+      const path = item.path;
+      const beforeBytes = await readOptional(path);
+      const beforeText = beforeBytes?.toString("utf8") ?? "";
+      const priorRecord = manifest.configs.find((config) => config.agent === item.agent);
+      const plannedConfig = item.agent === "codex"
+        ? mergeCodexWebMcp(beforeText, runtimePlan)
+        : item.agent === "opencode"
+          ? mergeOpenCodeWebMcp(beforeText, item.layout ?? "legacy", runtimePlan)
+          : null;
+      const record: WebSetupManifest["configs"][number] = priorRecord
+        ? { ...priorRecord, path, ...(item.layout ? { layout: item.layout } : {}), installedHash: plannedConfig ? digest(plannedConfig) : "" }
+        : {
+          agent: item.agent, path, ...(item.layout ? { layout: item.layout } : {}),
+          existedBefore: beforeBytes !== null, beforeHash: beforeBytes ? digest(beforeBytes) : null, installedHash: plannedConfig ? digest(plannedConfig) : "",
+        };
+      if (beforeBytes && !priorRecord) {
+        const backupPath = join(root, "web-backups", `${item.agent}-${randomUUID()}.bak`);
+        await mkdir(dirname(backupPath), { recursive: true });
+        await writeFile(backupPath, beforeBytes);
+        record.backupPath = backupPath;
+      }
+      manifest.configs = manifest.configs.filter((config) => config.agent !== item.agent);
+      manifest.configs.push(record);
+      await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+      if (item.agent === "claude-code") {
+        const claude = detected.find((agent) => agent.kind === item.agent);
+        if (!claude) throw new Error("Claude Code disappeared during setup.");
+        const currentEntry = hasClaudeMcpEntry(beforeText);
+        if (currentEntry) {
+          await execFileAsync(claude.binary, buildClaudeMcpRemoveArgs(), { shell: true, windowsHide: true, timeout: 20_000 });
+          const afterRemove = await readOptional(path);
+          if (afterRemove) {
+            record.installedHash = digest(afterRemove);
+            manifest.configs = manifest.configs.map((config) => config.agent === item.agent ? record : config);
+            await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+          }
+        }
+        const { stdout } = await execFileAsync(claude.binary, buildClaudeMcpAddArgs(runtimePlan), { shell: true, windowsHide: true, timeout: 20_000 });
+        void stdout;
+      } else if (item.agent === "codex") {
+        await writeAtomic(path, plannedConfig ?? beforeText);
+      } else {
+        await writeAtomic(path, plannedConfig ?? beforeText);
+      }
+      const afterBytes = await readFile(path);
+      record.installedHash = digest(afterBytes);
+      manifest.configs = manifest.configs.map((config) => config.agent === item.agent ? record : config);
+      await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+    }
+
+    if (identityAgents.length) {
+      const identityExit = await run(["setup", "--identity-only", "--agents", identityAgents.join(","), "--yes"], deps);
+      if (identityExit !== 0) throw new Error("The M9R session identity bootstrap failed; review the setup output before retrying.");
+      manifest.identityBootstrap = manifest.identityBootstrap === "installed" || !hadIdentityManifest ? "installed" : "preexisting";
+      if (manifest.identityBootstrap === "installed") {
+        const identityManifest = await readOptional(identityManifestPath);
+        manifest.identityManifestHash = identityManifest ? digest(identityManifest) : undefined;
+      }
+      await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+    }
+
+    const keyPath = brokerKeyPath(root);
+    const hadBrokerKey = await canRead(keyPath);
+    const key = loadOrCreateBrokerKey(keyPath);
+    manifest.brokerKeyCreated = manifest.brokerKeyCreated ?? !hadBrokerKey;
+    manifest.brokerKeyHash = digest(key);
+    await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+    const brokerExe = brokerRuntime.executable;
+    const brokerArgs = [...brokerRuntime.args];
+    if (brokerRuntime.copiedBundle && brokerRuntime.sourceBundle) {
+      const runtimePath = brokerRuntime.copiedBundle;
+      const oldRuntime = await readOptional(runtimePath);
+      if (oldRuntime && manifest.runtimeHash && digest(oldRuntime) !== manifest.runtimeHash) throw new Error("The managed broker runtime changed outside M9R setup; it was not overwritten.");
+      const runtimeBytes = await readFile(brokerRuntime.sourceBundle);
+      await mkdir(dirname(runtimePath), { recursive: true });
+      await writeFile(runtimePath, runtimeBytes);
+      manifest.runtimePath = runtimePath;
+      manifest.runtimeHash = digest(runtimeBytes);
+      await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+    }
+    const taskAction = `"${brokerExe.replaceAll('"', '""')}" ${brokerArgs.map((value) => `"${value.replaceAll('"', '""')}"`).join(" ")}`;
+    await execFileAsync("schtasks.exe", ["/Create", "/SC", "ONLOGON", "/TN", WEB_TASK_NAME, "/TR", taskAction, "/F", "/RL", "LIMITED"], { windowsHide: true, timeout: 20_000 });
+    await execFileAsync("schtasks.exe", ["/Run", "/TN", WEB_TASK_NAME], { windowsHide: true, timeout: 20_000 });
+    const healthUrl = `http://127.0.0.1:${port}/health`;
+    let brokerReady = false;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try { brokerReady = (await fetch(healthUrl, { signal: AbortSignal.timeout(500) })).ok; } catch { /* keep polling */ }
+      if (brokerReady) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    }
+    const statusResponse = brokerReady ? await fetch(`http://127.0.0.1:${port}/web/status`, { headers: { "x-m9r-key": key }, signal: AbortSignal.timeout(1_000) }).catch(() => null) : null;
+    const status = statusResponse?.ok ? await statusResponse.json() as { extensionReady?: boolean } : null;
+    await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+    process.stdout.write(`\n[${brokerReady ? "PASS" : "FAIL"}] local broker health check\n`);
+    process.stdout.write(`[${status ? "PASS" : "FAIL"}] authenticated broker status check\n`);
+    for (const item of plan.agentFiles) {
+      let configured = false;
+      if (item.agent === "claude-code") {
+        configured = hasClaudeMcpEntry((await readOptional(item.path))?.toString("utf8") ?? "");
+      } else {
+        const raw = (await readOptional(item.path))?.toString("utf8") ?? "";
+        configured = item.agent === "codex" ? removeCodexWebMcp(raw) !== raw : removeOpenCodeWebMcp(raw, item.layout ?? "legacy") !== raw;
+      }
+      process.stdout.write(`[${configured ? "PASS" : "FAIL"}] ${item.agent} MCP configuration\n`);
+    }
+    process.stdout.write(`[${status?.extensionReady ? "PASS" : "WAIT"}] extension ready handshake${status?.extensionReady ? "" : " (load unpacked once below)"}\n`);
+    if (!brokerReady || !status) return 1;
+
+    const clipboard = spawn("clip.exe", [], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+    clipboard.stdin?.end(`${extensionPath}\r\n`);
+    for (const browser of browsers) {
+      const programFiles = [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter((v): v is string => !!v);
+      const exeNames = browser === "chrome" ? ["Google\\Chrome\\Application\\chrome.exe"] : ["Microsoft\\Edge\\Application\\msedge.exe"];
+      const executable = programFiles.map((base) => join(base, exeNames[0]!)).find(awaitableExists);
+      if (executable) spawn(executable, [browser === "chrome" ? "chrome://extensions/" : "edge://extensions/"], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    }
+    process.stdout.write(`\nManual browser step: open ${extensionPath} from the clipboard in Extensions > Developer mode > Load unpacked, then allow the requested site.\n`);
+    process.stdout.write("First task: ask your agent to open https://en.wikipedia.org and read the heading.\n");
+    if (selected.includes("opencode")) process.stdout.write("Note: OpenCode MCP is configured, but this build has no OpenCode SessionStart identity hook; authenticated M9R web tools need that bootstrap.\n");
+    return 0;
+  } catch (error) {
+    process.stderr.write(`M9R web setup failed: ${error instanceof Error ? error.message : "unknown error"}. No secret values were displayed.\n`);
+    return 1;
+  }
+}
+
+async function runWebUninstall(args: string[]): Promise<number> {
+  if (platform() !== "win32") { process.stderr.write("M9R Web uninstall currently supports Windows 10/11 only.\n"); return 2; }
+  const root = defaultStoreRoot(homeDirectory(), process.env);
+  const manifestPath = join(root, WEB_SETUP_MANIFEST);
+  let manifest: WebSetupManifest;
+  try { manifest = JSON.parse(await readFile(manifestPath, "utf8")) as WebSetupManifest; }
+  catch { process.stderr.write("No M9R Web setup manifest was found.\n"); return 1; }
+  process.stdout.write("M9R Web uninstall will remove the managed login task, broker and extension files, and these MCP entries:\n");
+  for (const config of manifest.configs) process.stdout.write(`  - ${config.agent}: ${config.path}\n`);
+  if (manifest.identityBootstrap === "installed") process.stdout.write("  - the M9R identity bootstrap installed by this setup\n");
+  if (!args.includes("--yes") && !args.includes("-y") && !(await deps.confirm?.("Apply this exact M9R Web removal plan?"))) { process.stdout.write("Cancelled. Nothing was changed.\n"); return 0; }
+  const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
+  try {
+    const key = (await readFile(brokerKeyPath(root), "utf8")).trim();
+    await fetch(`http://127.0.0.1:${port}/web/shutdown`, { method: "POST", headers: { "x-m9r-key": key }, signal: AbortSignal.timeout(1_000) }).catch(() => undefined);
+  } catch { /* Broker may already be stopped. */ }
+  await execFileAsync("schtasks.exe", ["/End", "/TN", WEB_TASK_NAME], { windowsHide: true }).catch(() => undefined);
+  await execFileAsync("schtasks.exe", ["/Delete", "/TN", WEB_TASK_NAME, "/F"], { windowsHide: true }).catch(() => undefined);
+  for (const config of manifest.configs) {
+    const current = await readOptional(config.path);
+    const action = webConfigUninstallMode({ existedBefore: config.existedBefore, currentHash: current ? digest(current) : null, installedHash: config.installedHash });
+    if (action === "restore-backup" && config.backupPath && await canRead(config.backupPath)) await writeAtomic(config.path, await readFile(config.backupPath));
+    else if (action === "delete-created-file") await unlink(config.path).catch(() => undefined);
+    else if (action === "remove-managed-entry" && current) {
+      const text = current.toString("utf8");
+      const after = config.agent === "codex" ? removeCodexWebMcp(text) : config.agent === "opencode" ? removeOpenCodeWebMcp(text, config.layout ?? "legacy") : null;
+      if (after !== null) await writeAtomic(config.path, after);
+      else {
+        const claude = await detectInstalledAgents(probeVersion).then((agents) => agents.find((agent) => agent.kind === "claude-code"));
+        if (claude && hasClaudeMcpEntry(text)) {
+          const removed = await execFileAsync(claude.binary, buildClaudeMcpRemoveArgs(), { shell: true, windowsHide: true, timeout: 20_000 }).then(() => true).catch(() => false);
+          if (!removed) process.stdout.write(`  [KEEP] Could not remove Claude's managed entry; review it with: claude mcp list\n`);
+        } else if (!claude) process.stdout.write(`  [KEEP] Claude Code is unavailable; review its entry with: claude mcp list\n`);
+      }
+    }
+    if (config.backupPath) await unlink(config.backupPath).catch(() => undefined);
+  }
+  for (const file of manifest.extensionFiles) {
+    const current = await readOptional(file.path);
+    if (current && digest(current) === file.hash) await unlink(file.path).catch(() => undefined);
+  }
+  for (const directory of manifest.extensionDirectories ?? []) await rmdir(directory).catch(() => undefined);
+  if (manifest.runtimePath && manifest.runtimeHash) {
+    const current = await readOptional(manifest.runtimePath);
+    if (current && digest(current) === manifest.runtimeHash) await unlink(manifest.runtimePath).catch(() => undefined);
+  }
+  const brokerConfig = await readOptional(manifest.brokerConfigPath);
+  const brokerAction = webConfigUninstallMode({ existedBefore: manifest.brokerConfigExistedBefore === true, currentHash: brokerConfig ? digest(brokerConfig) : null, installedHash: manifest.brokerConfigHash });
+  if (brokerAction === "restore-backup" && manifest.brokerConfigBackupPath && await canRead(manifest.brokerConfigBackupPath)) await writeAtomic(manifest.brokerConfigPath, await readFile(manifest.brokerConfigBackupPath));
+  else if (brokerAction === "delete-created-file") await unlink(manifest.brokerConfigPath).catch(() => undefined);
+  if (manifest.brokerConfigBackupPath) await unlink(manifest.brokerConfigBackupPath).catch(() => undefined);
+  if (manifest.brokerKeyCreated && manifest.brokerKeyHash) {
+    const keyPath = brokerKeyPath(root);
+    const keyBytes = await readOptional(keyPath);
+    if (keyBytes && digest(keyBytes.toString("utf8").trim()) === manifest.brokerKeyHash) await unlink(keyPath).catch(() => undefined);
+  }
+  if (manifest.identityBootstrap === "installed") {
+    const identityManifestPath = join(root, "install-manifest.json");
+    const currentIdentityManifest = await readOptional(identityManifestPath);
+    if (currentIdentityManifest && digest(currentIdentityManifest) === manifest.identityManifestHash) {
+      const code = await run(["uninstall", "--yes"], deps);
+      if (code !== 0) process.stdout.write("  [KEEP] Native identity bootstrap needs manual review via m9r uninstall.\n");
+    } else {
+      process.stdout.write("  [KEEP] Native identity setup changed since web setup; preserved it instead of removing later user changes.\n");
+    }
+  } else if (manifest.identityBootstrap === "preexisting") {
+    process.stdout.write("  [KEEP] Existing native M9R identity setup was left untouched.\n");
+  }
+  await unlink(manifestPath);
+  process.stdout.write("M9R Web-managed setup was removed; files changed by you since setup were preserved.\n");
+  return 0;
+}
+
+async function runWebBrokerServer(args: string[]): Promise<number> {
+  const home = valueAfter(args, "--home") || defaultStoreRoot(homeDirectory(), process.env);
+  const configuredPort = valueAfter(args, "--port");
+  process.env.M9R_HOME = home;
+  if (configuredPort) process.env.M9R_WEB_BROKER_PORT = configuredPort;
+  const root = defaultStoreRoot(homeDirectory(), process.env);
+  const key = loadOrCreateBrokerKey(brokerKeyPath(root));
+  const authorityStore = createWebAuthorityStore(root);
+  const authority = createWebAuthority({ ownerId: process.env.M9R_OWNER_ID?.trim() || "local-machine" });
+  authority.restore(authorityStore.load());
+  const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
+  const broker = await startWebBroker({ key, port, host: "127.0.0.1", allowedExtensionIds: [WEB_EXTENSION_ID], ownerId: "local-machine", authority, authorityStore });
+  process.stdout.write(`M9R web broker listening on 127.0.0.1:${broker.port}\n`);
+  const stop = () => void broker.close().then(() => process.exit(0));
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  return await new Promise<number>((resolveServer) => {
+    process.once("exit", () => resolveServer(0));
+  });
+}
+
+async function runWebCli(args: string[]): Promise<number> {
+  if (args[0] === "setup") return runWebSetup(args.slice(1));
+  if (args[0] === "uninstall") return runWebUninstall(args.slice(1));
+  if (args[0] === "serve") return runWebBrokerServer(args.slice(1));
+  const root = defaultStoreRoot(homedir(), process.env);
+  let key: string;
+  try {
+    key = (await readFile(brokerKeyPath(root), "utf8")).trim();
+  } catch {
+    process.stderr.write("M9R web broker key is missing; start the local web broker first.\n");
+    return 1;
+  }
+  const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
+  const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  return runWebAuthorityCli(args, {
+    port,
+    key,
+    fetch: globalThis.fetch,
+    out: (line) => process.stdout.write(`${line}\n`),
+    err: (line) => process.stderr.write(`${line}\n`),
+    canApprove: terminal && !isAgentContext(process.env) && isHumanContext({ hasTerminal: terminal, env: process.env }),
+    confirm: deps.confirm,
+  });
+}
+
+const execution = argv[0] === "setup" && argv.includes("--web")
+  ? runWebSetup(argv.filter((arg) => arg !== "--web").slice(1))
+  : argv[0] === "resident"
   ? runResidentCli(argv.slice(1))
   : argv[0] === "service"
     ? runServiceCli(argv.slice(1))
@@ -973,6 +1607,10 @@ const execution = argv[0] === "resident"
     ? startTerminalRuntime({ localOnly: argv.includes("--local-only") })
   : argv[0] === "watchdog" && argv[1] === "run"
     ? runWatchdog()
+    : argv[0] === "web"
+      ? runWebCli(argv.slice(1))
+    : argv[0] === "launch"
+      ? runVendorLaunch(argv.slice(1))
     : run(argv, deps);
 
 /** `--no-autostart` declines; an interactive terminal is asked (default yes); a script keeps the disclosed default. */

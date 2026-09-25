@@ -6,8 +6,9 @@
  * whole run with nothing half-done); back up every file that existed; record what was written so uninstall can put it
  * back exactly. Local mode needs no account and no network.
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -17,19 +18,27 @@ import {
   decideUninstall,
   hasOurHooks,
   mergeHooks,
+  mergeMcpServerJson,
+  mergeMcpServerToml,
   removeHooks,
+  removeMcpServerJson,
+  removeMcpServerToml,
   removeStandingInstruction,
   sha256,
   standingInstructionStatus,
   type HookSpec,
   type ManifestEntry,
+  type McpServerSpec,
 } from "./install-core";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
-import { deliverToCodex, realDeps, type DeliveryDeps } from "./codex-delivery";
+import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type DeliveryDeps } from "./codex-delivery";
+import { codexNoteInEffect, createCodexWatcher } from "./codex-watch";
+import { hookPipePath, requestShutdown, startHookServer } from "./hook-server";
+import { runHookRequest } from "./hook-run";
 import { canQueue } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
-import { runAllow, runDecision, runRevoke, runRules, runSessions, runTasks } from "./approval-commands";
-import { feedPath, runFeed } from "./feed-writer";
+import { runAllow, runDecision, runLink, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
+import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
 import { USER_STEPS } from "./onboarding-steps";
 
 export interface NativeIo {
@@ -43,16 +52,41 @@ export interface NativeIo {
   codexDeps?: DeliveryDeps;
   /** Where the command was run; the default is the process's own folder. Used to pick between several open sessions. */
   cwd?: string;
+  /** Start-with-Windows switch; tests inject a fake so nothing ever touches the real registry. */
+  autostart?: Autostart;
 }
 
-type Kind = "hooks-json" | "markdown-block";
-interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEntry & { kind: Kind }>; /** Hook program files M9R copied into its own folder; removed on uninstall. */ runtimeFiles?: string[] }
+export interface Autostart {
+  enable(command: string): boolean;
+  disable(): void;
+  isOn(): boolean;
+}
+
+const RUN_KEY = String.raw`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
+
+/** Windows "Run at sign-in" through the per-user Run key: no admin rights, visible in Task Manager's Startup tab, removed by uninstall. */
+export const registryAutostart: Autostart = {
+  enable(command) {
+    if (process.platform !== "win32") return false;
+    return spawnSync("reg", ["add", RUN_KEY, "/v", "M9R", "/t", "REG_SZ", "/d", command, "/f"], { windowsHide: true, stdio: "ignore" }).status === 0;
+  },
+  disable() {
+    if (process.platform === "win32") spawnSync("reg", ["delete", RUN_KEY, "/v", "M9R", "/f"], { windowsHide: true, stdio: "ignore" });
+  },
+  isOn() {
+    return process.platform === "win32" && spawnSync("reg", ["query", RUN_KEY, "/v", "M9R"], { windowsHide: true, stdio: "ignore" }).status === 0;
+  },
+};
+const autostartOf = (io: NativeIo): Autostart => io.autostart ?? registryAutostart;
+
+type Kind = "hooks-json" | "markdown-block" | "mcp-json" | "mcp-toml";
+interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEntry & { kind: Kind }>; /** Hook program files M9R copied into its own folder; removed on uninstall. */ runtimeFiles?: string[]; /** M9R starts when you sign in to Windows (removed on uninstall). */ autostart?: boolean }
 
 export function nativePaths(io: Pick<NativeIo, "env" | "homeDir">) {
   const m9r = defaultStoreRoot(io.homeDir, io.env);
   const claude = io.env.CLAUDE_CONFIG_DIR?.trim() || join(io.homeDir, ".claude");
   const codex = io.env.CODEX_HOME?.trim() || join(io.homeDir, ".codex");
-  return { m9r, claude, codex, codexHooks: join(codex, "hooks.json"), codexAgents: join(codex, "AGENTS.md"), settings: join(claude, "settings.json"), claudeMd: join(claude, "CLAUDE.md"), manifest: join(m9r, "install-manifest.json"), backups: join(m9r, "backups") };
+  return { m9r, claude, codex, codexHooks: join(codex, "hooks.json"), codexAgents: join(codex, "AGENTS.md"), codexConfig: join(codex, "config.toml"), settings: join(claude, "settings.json"), claudeMd: join(claude, "CLAUDE.md"), claudeMcp: join(claude, ".mcp.json"), manifest: join(m9r, "install-manifest.json"), backups: join(m9r, "backups") };
 }
 
 /** The tiny hook entry sits next to this module in `cli/dist`; tests and dev can override it. */
@@ -65,20 +99,59 @@ export function hookEntryPath(env: Record<string, string | undefined>): string {
  * The hook must not run from where the CLI happens to live: `npx` runs it from a cache that is later cleared, which
  * would silently kill the hooks. Setup copies this small runtime into M9R's own folder and points the hooks there.
  */
-export const HOOK_RUNTIME_FILES = ["m9r-hook.js", "local-store.js", "hook-handler.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js"] as const;
+export const HOOK_RUNTIME_FILES = ["m9r-hook.js", "local-store.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js"] as const;
 
 function hookSourceDir(env: Record<string, string | undefined>): string {
   return env.M9R_HOOK_SOURCE?.trim() || dirname(hookEntryPath(env));
 }
 
-/** Where the hooks run from: an explicit override (tests, development) or M9R's own stable folder. */
+/**
+ * The self-contained engine (one executable, no Node needed on the machine): `M9R_ENGINE` names it, or it is the program
+ * already running this command. When present, hooks run from a copy of it in M9R's own folder instead of JS files.
+ */
+export function engineSource(env: Record<string, string | undefined>, execPath = process.execPath): string | null {
+  if (env.M9R_ENGINE?.trim()) return env.M9R_ENGINE.trim();
+  return /^m9r-engine(\.exe)?$/i.test(basename(execPath)) ? execPath : null;
+}
+
+const engineTarget = (io: Pick<NativeIo, "homeDir" | "env">) => join(nativePaths(io).m9r, "bin", process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
+
+/** Where the hooks run from: an explicit override (tests, development), the engine copy, or M9R's own stable folder. */
 export function activeHookEntry(io: Pick<NativeIo, "env" | "homeDir">): string {
   if (io.env.M9R_HOOK_ENTRY?.trim()) return io.env.M9R_HOOK_ENTRY.trim();
+  if (engineSource(io.env)) return engineTarget(io);
   return join(nativePaths(io).m9r, "bin", "m9r-hook.js");
 }
 
-function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; targetDir: string; missingSource: string[] } {
+const shimName = process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native";
+const shimTarget = (io: Pick<NativeIo, "homeDir" | "env">) => join(nativePaths(io).m9r, "bin", shimName);
+
+/** The small native hook program that ships next to the engine, when there is one (it answers in milliseconds; see hook-server.ts). */
+function shimSource(env: Record<string, string | undefined>): string | null {
+  const engine = engineSource(env);
+  if (!engine) return null;
+  const path = join(dirname(engine), shimName);
+  return existsSync(path) ? path : null;
+}
+
+/** Stops a running resident engine so its file can be replaced or removed; harmless when none is running. */
+async function stopResidentEngine(io: NativeIo): Promise<void> {
+  if (await requestShutdown(hookPipePath(nativePaths(io).m9r))) await new Promise((r) => setTimeout(r, 900));
+}
+
+const sameFile = (a: string, b: string): boolean => {
+  try { return statSync(a).size === statSync(b).size && createHash("sha256").update(readFileSync(a)).digest("hex") === createHash("sha256").update(readFileSync(b)).digest("hex"); } catch { return false; }
+};
+
+function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; targetDir: string; missingSource: string[]; engine?: { from: string; to: string }; shim?: { from: string; to: string } } {
   const targetDir = join(nativePaths(io).m9r, "bin");
+  const engine = engineSource(io.env);
+  if (engine && !io.env.M9R_HOOK_ENTRY?.trim()) {
+    const to = engineTarget(io);
+    const shimFrom = shimSource(io.env);
+    const shim = shimFrom ? { from: shimFrom, to: shimTarget(io) } : undefined;
+    return { needed: !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)), sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim };
+  }
   const sourceDir = hookSourceDir(io.env);
   if (io.env.M9R_HOOK_ENTRY?.trim()) return { needed: false, sourceDir, targetDir, missingSource: [] };
   const missingSource = HOOK_RUNTIME_FILES.filter((f) => !existsSync(join(sourceDir, f)));
@@ -86,8 +159,14 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
   return { needed, sourceDir, targetDir, missingSource };
 }
 
-function copyRuntime(plan: { sourceDir: string; targetDir: string }): string[] {
+function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string } }): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
+  if (plan.engine) {
+    const written = [plan.engine.to];
+    copyFileSync(plan.engine.from, plan.engine.to);
+    if (plan.shim) { copyFileSync(plan.shim.from, plan.shim.to); written.push(plan.shim.to); }
+    return written;
+  }
   const written: string[] = [];
   for (const f of HOOK_RUNTIME_FILES) { copyFileSync(join(plan.sourceDir, f), join(plan.targetDir, f)); written.push(join(plan.targetDir, f)); }
   // The runtime files are ES modules; this keeps them working wherever the folder lives.
@@ -100,12 +179,31 @@ function copyRuntime(plan: { sourceDir: string; targetDir: string }): string[] {
 const slash = (p: string) => p.replace(/\\/g, "/");
 const readText = (path: string): string | null => (existsSync(path) ? readFileSync(path, "utf8") : null);
 
-function hookSpecs(entry: string, provider = "claude-code"): HookSpec[] {
-  const command = (event: string) => `node "${slash(entry)}" ${event} ${provider}`;
+function hookSpecs(entry: string, provider = "claude-code", shim?: string): HookSpec[] {
+  // The engine's subcommand is spelled "m9r-hook" so the installed command carries the marker that uninstall looks for.
+  const command = (event: string) => (shim ? `"${slash(shim)}" ${event} ${provider}` : /m9r-engine(\.exe)?$/i.test(entry) ? `"${slash(entry)}" m9r-hook ${event} ${provider}` : `node "${slash(entry)}" ${event} ${provider}`);
   return [
     { event: "SessionStart", command: command("SessionStart"), timeoutSec: 5 },
     { event: "UserPromptSubmit", command: command("UserPromptSubmit"), timeoutSec: 5 },
+    // Claude only: when a turn ends, its final message answers any task another agent handed it.
+    ...(provider === "claude-code" ? [{ event: "Stop", command: command("Stop"), timeoutSec: 5 }] : []),
   ];
+}
+
+/** The native hook the settings should point at: only when one ships with the engine and no override is set. */
+const shimFor = (io: NativeIo): string | undefined => (!io.env.M9R_HOOK_ENTRY?.trim() && shimSource(io.env) ? shimTarget(io) : undefined);
+
+export const MCP_SERVER_NAME = "m9r";
+
+/**
+ * The MCP server registration is engine-mode only for now: without the self-contained engine, running it would need
+ * `node m9r-mcp.js` from the copied runtime folder, which has no node_modules of its own (HOOK_RUNTIME_FILES ships
+ * plain .js files, not @modelcontextprotocol/sdk/zod) -- a real gap, not silently pretended away. `plan()` below only
+ * adds these entries when `activeHookEntry` resolves to the engine binary.
+ */
+function mcpServerSpec(io: NativeIo): McpServerSpec | null {
+  const entry = activeHookEntry(io);
+  return /m9r-engine(\.exe)?$/i.test(entry) ? { command: slash(entry), args: ["mcp"] } : null;
 }
 
 interface PlannedFile { path: string; kind: Kind; before: string | null; after: string; changed: boolean; summary: string }
@@ -113,23 +211,34 @@ interface PlannedFile { path: string; kind: Kind; before: string | null; after: 
 function plan(io: NativeIo): PlannedFile[] {
   const p = nativePaths(io);
   const settingsBefore = readText(p.settings);
-  const settings = mergeHooks(settingsBefore, hookSpecs(activeHookEntry(io)), p.settings);
+  const settings = mergeHooks(settingsBefore, hookSpecs(activeHookEntry(io), "claude-code", shimFor(io)), p.settings);
   const mdBefore = readText(p.claudeMd);
   const md = applyStandingInstruction(mdBefore);
   const files: PlannedFile[] = [
-    { path: p.settings, kind: "hooks-json", before: settingsBefore, after: settings.content, changed: settings.changed, summary: `add 2 hooks (session start, prompt submit) to ${p.settings}` },
+    { path: p.settings, kind: "hooks-json", before: settingsBefore, after: settings.content, changed: settings.changed, summary: `add 3 hooks (session start, prompt submit, turn end) to ${p.settings}` },
     { path: p.claudeMd, kind: "markdown-block", before: mdBefore, after: md.content, changed: md.changed, summary: `${mdBefore == null ? "create" : "add a short block to"} ${p.claudeMd}` },
   ];
+  const mcpSpec = mcpServerSpec(io);
+  if (mcpSpec) {
+    const claudeMcpBefore = readText(p.claudeMcp);
+    const claudeMcp = mergeMcpServerJson(claudeMcpBefore, MCP_SERVER_NAME, mcpSpec, p.claudeMcp);
+    files.push({ path: p.claudeMcp, kind: "mcp-json", before: claudeMcpBefore, after: claudeMcp.content, changed: claudeMcp.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.claudeMcp}` });
+  }
   // Codex is only touched when it is installed here (its folder exists); M9R never creates ~/.codex.
   if (existsSync(p.codex)) {
     const hooksBefore = readText(p.codexHooks);
-    const codexHooks = mergeHooks(hooksBefore, hookSpecs(activeHookEntry(io), "codex"), p.codexHooks);
+    const codexHooks = mergeHooks(hooksBefore, hookSpecs(activeHookEntry(io), "codex", shimFor(io)), p.codexHooks);
     const agentsBefore = readText(p.codexAgents);
-    const agents = applyStandingInstruction(agentsBefore);
+    const agents = applyStandingInstruction(agentsBefore, "codex");
     files.push(
       { path: p.codexHooks, kind: "hooks-json", before: hooksBefore, after: codexHooks.content, changed: codexHooks.changed, summary: `add 2 hooks (session start, prompt submit) to ${p.codexHooks} (Codex; you trust them once with /hooks)` },
-      { path: p.codexAgents, kind: "markdown-block", before: agentsBefore, after: agents.content, changed: agents.changed, summary: `${agentsBefore == null ? "create" : "add a short block to"} ${p.codexAgents}` },
+      { path: p.codexAgents, kind: "markdown-block", before: agentsBefore, after: agents.content, changed: agents.changed, summary: `${agentsBefore == null ? "create" : "add a short block to"} ${p.codexAgents} (it tells Codex to leave @mentions of other agents to M9R, so nothing is done twice)` },
     );
+    if (mcpSpec) {
+      const codexConfigBefore = readText(p.codexConfig);
+      const codexConfig = mergeMcpServerToml(codexConfigBefore, MCP_SERVER_NAME, mcpSpec);
+      files.push({ path: p.codexConfig, kind: "mcp-toml", before: codexConfigBefore, after: codexConfig.content, changed: codexConfig.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.codexConfig}` });
+    }
   }
   return files;
 }
@@ -144,7 +253,7 @@ async function ask(io: NativeIo, yes: boolean, question: string): Promise<boolea
   return io.confirm(question);
 }
 
-export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: boolean }): Promise<number> {
+export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: boolean; autostart?: boolean }): Promise<number> {
   let files: PlannedFile[];
   try { files = plan(io); } catch (error) {
     if (error instanceof UnparseableConfigError) { io.err(error.message); io.err("Nothing was changed."); return 1; }
@@ -163,16 +272,23 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   if (todo.length === 0 && !runtime.needed) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
   io.out("This will:");
   if (runtime.needed) io.out(`  - copy the small hook program to ${runtime.targetDir} (so the hooks keep working even if this CLI moves or is updated)`);
+  if (runtime.engine && runtime.shim) io.out("  - start the M9R background engine, which answers your agents' hooks in milliseconds (uninstall stops it)");
   for (const f of todo) io.out(`  - ${f.summary}`);
   if (todo.some((f) => f.before != null)) io.out(`  - back up each existing file to ${p.backups} first`);
   io.out("Undo anytime with: m9r-cli uninstall");
   if (flags.dryRun) { io.out("Dry run: nothing was written."); return 0; }
   if (!(await ask(io, !!flags.yes, "Go ahead?"))) { io.out("Nothing was changed."); return 1; }
+  // Starting with Windows is its own, optional yes: nothing about it is implied by the rest.
+  const canAutostart = !!runtime.engine && !!runtime.shim && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
+  const wantAutostart = canAutostart && (flags.autostart === true || (flags.autostart === undefined && !flags.yes && !!io.confirm && (await io.confirm("Also start M9R when you sign in to Windows, so it is ready before your first prompt? (Uninstall turns this off.)"))));
 
   mkdirSync(p.backups, { recursive: true });
   const manifest: Manifest = readManifest(p.manifest) ?? { version: 1, installedAt: new Date().toISOString(), entries: [] };
   // The hook program goes first, so a hook can never point at a file that is not there yet.
-  if (runtime.needed) manifest.runtimeFiles = copyRuntime(runtime);
+  if (runtime.needed) {
+    if (runtime.engine) await stopResidentEngine(io);
+    manifest.runtimeFiles = copyRuntime(runtime);
+  }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   for (const f of todo) {
     const existing = manifest.entries.find((e) => e.path === f.path);
@@ -189,11 +305,34 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
     writeFileSync(f.path, f.after, "utf8");
     manifest.entries.push(entry);
   }
+  if (wantAutostart && runtime.engine) {
+    // The overlay pill also starts and supervises the engine (spawn_engine_supervisor in main.rs); autostart it, not the
+    // headless engine alone, so the pill is on screen after a reboot, not just ready to answer hooks invisibly. Falls back
+    // to the engine alone when the overlay is not installed next to it (it is a separate, optional install today).
+    const overlayExe = join(dirname(runtime.engine.to), "m9r-overlay.exe");
+    const command = existsSync(overlayExe) ? `"${overlayExe}"` : `"${runtime.engine.to}" feed --watch --serve-hooks`;
+    manifest.autostart = autostartOf(io).enable(command);
+    io.out(manifest.autostart ? "M9R will start when you sign in to Windows." : "Could not turn on starting with Windows; M9R still starts itself when an agent first needs it.");
+  }
   writeFileSync(p.manifest, JSON.stringify(manifest, null, 2) + "\n", "utf8");
   createLocalStore(p.m9r); // make sure the local store folder exists
+  if (runtime.engine && runtime.shim && !io.env.M9R_NO_DAEMON) warmUpAndStart(io, runtime.shim.to, runtime.engine.to);
   io.out("Done.");
   printOpenSteps(io);
   return 0;
+}
+
+/**
+ * Runs the new native hook once (so the antivirus scan of a brand-new program happens now, not on your first prompt) and starts
+ * the resident engine so the first hook already finds it. Best effort: a failure here only means the hook starts it later.
+ */
+function warmUpAndStart(io: NativeIo, shim: string, engine: string): void {
+  try { spawnSync(shim, ["--warm"], { timeout: 20_000, windowsHide: true, stdio: "ignore" }); } catch { /* the first real call warms it instead */ }
+  try {
+    const child = spawn(engine, ["feed", "--watch", "--serve-hooks"], { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...io.env } });
+    child.on("error", () => undefined);
+    child.unref();
+  } catch { /* the hook starts it on first use */ }
 }
 
 function printOpenSteps(io: NativeIo): void {
@@ -221,11 +360,17 @@ export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?:
       io.out(`Removed ${e.path} (M9R had created it).`);
     } else if (decision.action === "restore_backup" || decision.action === "remove_our_entries") {
       if (current == null) continue;
-      const result = e.kind === "hooks-json" ? removeHooks(current, e.path) : removeStandingInstruction(current);
+      const result = e.kind === "hooks-json" ? removeHooks(current, e.path)
+        : e.kind === "mcp-json" ? removeMcpServerJson(current, MCP_SERVER_NAME, e.path)
+        : e.kind === "mcp-toml" ? removeMcpServerToml(current, MCP_SERVER_NAME)
+        : removeStandingInstruction(current);
       if (result.changed) writeFileSync(e.path, result.content, "utf8");
       io.out(`Removed M9R's entries from ${e.path}; your own edits were kept.`);
     }
   }
+  // Only what this install turned on: a scratch install's uninstall must never switch off the real one.
+  if (manifest.autostart) autostartOf(io).disable();
+  if ((manifest.runtimeFiles ?? []).length > 0) await stopResidentEngine(io);
   for (const f of manifest.runtimeFiles ?? []) rmSync(f, { force: true });
   try { rmdirSync(join(p.m9r, "bin")); } catch { /* not empty or already gone: leave it */ }
   rmSync(p.manifest, { force: true });
@@ -292,21 +437,41 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   for (let i = 0; i < rest.length; i += 1) { if (rest[i].startsWith("-")) { if (["--from", "--key", "--for", "--session"].includes(rest[i])) i += 1; continue; } positionals.push(rest[i]); }
   if (command === "setup") {
     if (has("--status")) { printNativeStatus(io); return 0; }
-    return runSetup(io, { yes: has("--yes", "-y"), dryRun: has("--dry-run") });
+    return runSetup(io, { yes: has("--yes", "-y"), dryRun: has("--dry-run"), autostart: has("--autostart") ? true : undefined });
   }
   if (command === "uninstall") return runUninstall(io, { yes: has("--yes", "-y"), purge: has("--purge") });
   if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key"), session: value("--session") });
   const root = nativePaths(io).m9r;
   if (command === "feed") {
     const controller = new AbortController();
+    const release = has("--watch") ? acquireFeedLock(root) : () => {};
+    if (!release) { io.out("The feed is already being written by another M9R process."); return 0; }
     if (has("--watch")) { process.once("SIGINT", () => controller.abort()); process.once("SIGTERM", () => controller.abort()); io.out(`Writing ${feedPath(root)} (Ctrl+C to stop)`); }
-    await runFeed({ root, watch: has("--watch"), signal: controller.signal, onWrite: has("--watch") ? (f) => io.out(`feed #${f.seq}: ${f.needsYou.length} need you`) : undefined });
+    // The Codex watcher forwards what a person types in Codex; Codex must be told to stand down or the work is done twice, so it only
+    // runs when the stand-down note is installed for Codex (or a test forces it on).
+    // Finding Codex sessions (so `@codex` has somewhere to go) always runs while watching. Forwarding what a person types in Codex only
+    // happens for sessions where Codex was told to stand down (its AGENTS.md carries the note), or when a test forces it on.
+    const routeMentions = io.env.M9R_CODEX_WATCH === "1" ? true : (cwd: string | undefined) => codexNoteInEffect(cwd, codexHome(io.env));
+    const watcher = has("--watch") && !io.env.M9R_NO_CODEX_WATCH ? createCodexWatcher(createLocalStore(root), { codexHome: codexHome(io.env), routeMentions, dispatch: (id) => spawnDeliveryRunner(activeHookEntry(io), id, io.env) }) : undefined;
+    const server = has("--watch") && has("--serve-hooks")
+      ? startHookServer({
+          path: hookPipePath(root),
+          handle: (req) => runHookRequest({ event: req.event ?? "", provider: req.provider ?? "claude-code", input: req.input ?? null, env: req.env }, activeHookEntry(io), { ...io.env }, true),
+          onShutdown: () => controller.abort(),
+        })
+      : undefined;
+    await runFeed({ root, watch: has("--watch"), codexWatcher: watcher, signal: controller.signal, onWrite: has("--watch") ? (f) => io.out(`feed #${f.seq}: ${f.needsYou.length} need you`) : undefined });
+    server?.close();
+    release();
     if (!has("--watch")) io.out(`Wrote ${feedPath(root)}`);
     return 0;
   }
   if (command === "dismiss") { const n = createLocalStore(root).dismiss(positionals.map((p) => p.toUpperCase())); io.out(n ? `Cleared ${n} from the overlay list.` : "Nothing to clear."); return 0; }
   if (command === "tasks") return runTasks(io, root);
   if (command === "sessions") return runSessions(io, root, positionals[0]);
+  if (command === "sessions-json") return runSessionsJson(io, root, positionals[0]);
+  if (command === "link") return runLink(io, root, value("--from-handle"), value("--from-session"), value("--to-handle"), value("--to-session"));
+  if (command === "unlink") return runUnlink(io, root, positionals[0]);
   if (command === "approve" || command === "deny") return runDecision(io, root, command === "approve" ? "approved" : "denied", positionals[0], has("--yes", "-y"));
   if (command === "allow") return runAllow(io, root, positionals[0], positionals[1], value("--for"));
   if (command === "standing") return runRules(io, root);

@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import InviteDialog from "@/components/world/InviteDialog";
+import WaitlistDialog from "./WaitlistDialog";
 import s from "./ReferenceHome.module.css";
 
 const asset = (name: string) => `/reference-innerwebs/${name}`;
@@ -34,10 +35,20 @@ function Alert({ children, index }: { children: ReactNode; index: number }) {
   </div>;
 }
 
+function ProductWindow({ title, kicker, status, children, className = "" }: { title: string; kicker: string; status: string; children: ReactNode; className?: string }) {
+  return <div className={`${s.window} ${s.productWindow} ${className}`} data-reveal="scale">
+    <div className={s.titleBar}><span><img src={asset("b319737156808921.webp")} alt="" />{title}</span></div>
+    <div className={s.productBody}><p className={s.productKicker}>{kicker}</p><h3>{title}</h3>{children}</div>
+    <div className={s.statusBar}><span>{status}</span></div>
+  </div>;
+}
+
 export default function ReferenceHome({ configured, authNext }: { configured: boolean; authNext?: string }) {
   const root = useRef<HTMLDivElement>(null);
   const drag = useRef({ active: false, startX: 0, startScroll: 0 });
   const [reduced, setReduced] = useState(false);
+  const [waitlistOpen, setWaitlistOpen] = useState(false);
+  const closeWaitlist = () => setWaitlistOpen(false);
 
   useEffect(() => {
     const el = root.current;
@@ -84,11 +95,11 @@ export default function ReferenceHome({ configured, authNext }: { configured: bo
     <div className={s.crtTop} aria-hidden="true"><img src={asset("29b917084067f0b0.webp")} alt="" /></div>
     <div className={s.crtBottom} aria-hidden="true"><img src={asset("9a18f35b2adad8d3.webp")} alt="" /></div>
 
-    <header className={s.header}><nav className={s.nav} aria-label="Main"><a href="#top" aria-label="M9R home"><span className={s.logoText}>M9R</span></a><Link className={s.reserve} href="/auth?mode=login">Sign in</Link></nav></header>
+    <header className={s.header}><nav className={s.nav} aria-label="Main"><a href="#top" aria-label="M9R home"><span className={s.logoText}>M9R</span></a><div className={s.navActions}><button type="button" className={s.reserve} onClick={() => setWaitlistOpen(true)}>Join waitlist</button><Link className={s.reserve} href="/auth?mode=login">Sign in</Link></div></nav></header>
     <main id="top">
       <div className={s.marquee} aria-hidden="true">{Array.from({ length: 10 }, (_, i) => <div key={i}><span>{Array.from({ length: 3 }, () => "Connect your agents · Welcome to M9R · Share the context · Play multiplayer · Hand off the work · ").join("")}</span></div>)}</div>
       <section className={s.hero} aria-label="Introduction">
-        <div className={s.heroText}><h1><span>Connect</span>{" "}<span>your</span><br /><span className={s.productivity}><span>Terminals</span><img src={asset("f580c1c0a55226d0.webp")} alt="" /><strong>AGENTS</strong></span></h1><p>Claude, Codex and OpenCode, working as one</p></div>
+        <div className={s.heroText}><h1><span>The</span>{" "}<span>web</span>{" "}<span>is</span><br /><span className={s.productivity}><span>Single</span><img src={asset("f580c1c0a55226d0.webp")} alt="" /><strong className={s.multiplayerWord}>MULTIPLAYER</strong></span></h1><p>Claude, Codex and OpenCode, on the same web page</p></div>
         <div className={s.computer}><img fetchPriority="high" src={asset("m9r-computer-eye.png")} width="1200" height="1324" alt="Vintage beige computer displaying a surreal eye opening through clouds on its curved CRT screen" /></div>
       </section>
 
@@ -116,15 +127,34 @@ export default function ReferenceHome({ configured, authNext }: { configured: bo
         </div>
       </section>
 
+      <section id="products" className={s.products} aria-labelledby="products-title">
+        <h2 id="products-title" data-reveal="title">Three ways to put agents together</h2>
+        <div className={s.productGrid}>
+          <ProductWindow className={s.productMain} title="M9R Web" kicker="The multiplayer web" status="Developer preview · waitlist">
+            <p>Your agents work on the same real web page at the same time. Claude, Codex and OpenCode each show up with a name and a cursor you can see. They cannot overwrite each other, and anything risky waits for your yes. It runs in your own browser, on the agent subscriptions you already have. Teammates&apos; agents on their own machines are next.</p>
+            <div className={s.productActions}><button type="button" className={s.productButton} onClick={() => setWaitlistOpen(true)}>Join the waitlist</button><a className={s.productLink} href="/try">Try the sandbox →</a></div>
+          </ProductWindow>
+          <ProductWindow title="M9R Native" kicker="Agents stay native, still multiplayer" status="Preview · waitlist">
+            <p>Your agents stay in the tools they already live in, Claude Code, Codex and OpenCode, and still work together. @mention one from another, hand a task over with its context, approve the risky step once. No new app to open.</p>
+            <div className={s.productActions}><button type="button" className={s.productButton} onClick={() => setWaitlistOpen(true)}>Join the waitlist</button></div>
+          </ProductWindow>
+          <ProductWindow title="M9R Channels" kicker="Slack for AI" status="Live now · sign in">
+            <p>Channels where you and your agents talk, share context and hand work off. It is live today: sign in and start.</p>
+            <div className={s.productActions}><Link className={s.productButton} href="/auth?mode=login">Sign in</Link></div>
+          </ProductWindow>
+        </div>
+      </section>
+
       <section className={s.benefits} data-benefits>
         <h2 data-reveal="focus"><em>Everything</em><br />falls in...</h2>
         <div className={s.orbStage} data-reveal="orb"><div className={s.lists}><ul><li><em>Less</em> Copy-pasting</li><li><em>Less</em> Re-explaining</li><li><em>Less</em> Opening another app</li><li><em>Less</em> Waiting on teammates</li></ul><ul><li><em>More</em> Shared memory</li><li><em>More</em> Any agent</li><li><em>More</em> Approvals you control</li><li><em>More</em> Momentum</li><li><em>More</em> Time back</li><li><em>More</em> Teammates in the loop, soon</li></ul></div></div>
-        <div className={s.bottomCta}><Link href="/auth?mode=login">Sign in</Link><p>Free to start. No waitlist.</p></div>
+        <div className={s.bottomCta}><div className={s.bottomButtons}><button type="button" onClick={() => setWaitlistOpen(true)}>Join the waitlist</button><Link href="/auth?mode=login">Sign in</Link></div><p>M9R Channels is live: sign in today. The waitlist covers M9R Web and M9R Native.</p></div>
       </section>
       <div className={s.gradientBridge}>{reduced ? <div /> : <video src={asset("954b15a1be6a905b.mp4")} autoPlay muted playsInline loop aria-hidden="true" />}</div>
     </main>
     <footer className={s.footer}><div className={s.footerMarquee} aria-hidden="true">{[0, 1].map(copy => <div className={s.wordmarks} key={copy}><span className={s.wmSerif}>M9R</span><img className={s.marqueeLogo} src={asset("m9r-logo-black.png")} alt="" /><span className={s.wmItalic}>M9R</span><img className={s.marqueeLogo} src={asset("m9r-logo-black.png")} alt="" /><span className={s.wmPixel}>M9R</span><img className={s.marqueeLogo} src={asset("m9r-logo-black.png")} alt="" /><span className={s.wmBold}>M9R</span><img className={s.marqueeLogo} src={asset("m9r-logo-black.png")} alt="" /></div>)}</div><div className={s.footerInner}><nav aria-label="Footer"><a href="#top">Home</a><a href="/how-it-works">How it works</a><a href="/docs">Docs</a><a href="/faq">FAQ</a><a href="/open-core">Open core</a></nav><div className={s.socials}>{[["X (@useM9R)", "7e2a52ba473849dc"]].map(([name, id]) => <a key={id} href="https://x.com/useM9R" target="_blank" rel="noreferrer" aria-label={name}><img src={asset(`${id}.webp`)} alt="" /></a>)}</div></div><p className={s.legal}>M9R © 2026 All rights reserved　𐄁　<a href="/terms">Terms</a>　𐄁　<a href="/privacy">Privacy</a></p></footer>
 
+    <WaitlistDialog open={waitlistOpen} onClose={closeWaitlist} />
     {authNext && <InviteDialog configured={configured} next={authNext} />}
   </div>;
 }

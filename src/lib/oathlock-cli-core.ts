@@ -27,7 +27,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { join, extname, basename, dirname } from "node:path";
+import { join, extname, basename, dirname, resolve } from "node:path";
 import {
   agentKindLabel,
   applyWorkflowBlock,
@@ -83,6 +83,8 @@ export interface CliDeps {
   fetch: typeof fetch;
   readFile(path: string): Promise<string>;
   writeFile(path: string, data: string): Promise<void>;
+  /** Writes a credential with restrictive permissions; required for machine sync. */
+  writeSecretFile?(path: string, data: string): Promise<void>;
   removeFile?(path: string): Promise<void>;
   mkdir(path: string): Promise<void>;
   fileExists(path: string): Promise<boolean>;
@@ -1492,6 +1494,61 @@ async function cmdConnect(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
   if (failures.length > 0) {
     deps.err(`${failures.length} of ${results.length} agent connection(s) failed. See output above for details.`);
     return 1;
+  }
+  // Only human-approved connections reach this point. Machine sync remains
+  // disabled when secure local storage is unavailable or minting fails.
+  if (deps.writeSecretFile) {
+    const home = deps.env.USERPROFILE ?? deps.env.HOME;
+    if (!home) {
+      deps.err("Machine sync not enabled: home directory unavailable.");
+      return 1;
+    }
+    const machineRoot = join(home, ".m9r");
+    const identityPath = join(machineRoot, "device.json");
+    let deviceId: string | null = null;
+    try {
+      if (await deps.fileExists(identityPath)) {
+        const saved = parseLocalJson(await deps.readFile(identityPath)) as { deviceId?: unknown } | null;
+        if (typeof saved?.deviceId === "string" && /^[0-9a-f-]{36}$/i.test(saved.deviceId)) deviceId = saved.deviceId;
+      }
+      if (!deviceId) {
+        deviceId = randomUUID();
+        await writeJson(deps, identityPath, { deviceId });
+      }
+      for (const kind of kinds) {
+        const local = await readLocal(deps, kind);
+        if (!local?.token) throw new Error(`Missing approved ${kind} token`);
+        const response = await apiFetch(deps, `${apiBase(deps.env)}/api/agent/native/credential`, {
+          method: "POST", headers: { authorization: `Bearer ${local.token}`, "content-type": "application/json" },
+          body: JSON.stringify({ deviceId }),
+        });
+        if (!response.ok || typeof response.json?.token !== "string" || typeof response.json?.workspaceId !== "string") {
+          throw new Error(`Could not mint ${kind} machine credential`);
+        }
+        const workspaceId = response.json.workspaceId;
+        if (!/^[0-9a-f-]{36}$/i.test(workspaceId)) throw new Error("Invalid workspace in credential response");
+        const path = join(machineRoot, "workspaces", workspaceId, `${kind}.json`);
+        await deps.mkdir(dirname(path));
+        const root = resolve(deps.cwd);
+        let previousRoots: Array<{ path: string; connectedAt: string }> = [];
+        if (await deps.fileExists(path)) {
+          try {
+            const previous = parseLocalJson(await deps.readFile(path)) as { deviceId?: unknown; workspaceId?: unknown; repoRoots?: unknown } | null;
+            if (previous?.deviceId === deviceId && previous.workspaceId === workspaceId && Array.isArray(previous.repoRoots)) {
+              previousRoots = previous.repoRoots.filter((item): item is { path: string; connectedAt: string } =>
+                !!item && typeof item.path === "string" && typeof item.connectedAt === "string" && Number.isFinite(Date.parse(item.connectedAt)));
+            }
+          } catch { /* A damaged previous profile cannot grant an old directory access. */ }
+        }
+        const repoRoots = previousRoots.some((item) => item.path === root)
+          ? previousRoots : [...previousRoots, { path: root, connectedAt: new Date().toISOString() }];
+        await deps.writeSecretFile(path, JSON.stringify({ token: response.json.token, deviceId, workspaceId, agentKind: kind, apiUrl: apiBase(deps.env), repoRoots }) + "\n");
+      }
+      deps.out("Machine sync credentials saved under ~/.m9r/workspaces (not displayed).");
+    } catch (error) {
+      deps.err(`Machine sync not enabled: ${error instanceof Error ? error.message : "unknown error"}. Existing approved connections are unchanged.`);
+      return 1;
+    }
   }
   return 0;
 }
@@ -3338,6 +3395,9 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "feed":
     case "dismiss":
     case "sessions":
+    case "sessions-json":
+    case "link":
+    case "unlink":
     case "approve":
     case "deny":
     case "allow":

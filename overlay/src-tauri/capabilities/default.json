@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The pill only listens for feed events; everything else goes through the commands defined in main.rs.",
+  "windows": ["pill"],
+  "permissions": ["core:default", "core:window:allow-start-dragging", "global-shortcut:allow-register", "global-shortcut:allow-unregister"]
+}

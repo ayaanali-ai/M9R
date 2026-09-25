@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writ
 import { join } from "node:path";
 import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
 import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
+import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 
 export interface EndpointRecord {
   handle: string;
@@ -30,7 +31,7 @@ export interface SessionRecord {
 
 export interface EventRecord {
   at: string;
-  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked";
+  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked" | "mention.double";
   handle?: string;
   taskId?: string;
   text: string;
@@ -50,9 +51,25 @@ interface StoreState {
   rules: StandingRule[];
   nextRuleNo: number;
   sessions: SessionRecord[];
+  /** Explicit or auto-made links between two sessions (see routing in codex-delivery.ts). */
+  links: SessionLink[];
+  nextLinkNo: number;
+  /** P1 identity: one token per session, issued at SessionStart. See identity-core.ts. */
+  identities: IdentityToken[];
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [] });
+export interface SessionLink {
+  id: string;
+  a: { handle: string; sessionId: string };
+  b: { handle: string; sessionId: string };
+  origin: "auto" | "picked";
+  createdAt: string;
+  updatedAt: string;
+}
+
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [] });
+
+const cursorKey = (handle: string, sessionId?: string): string => (sessionId ? `${handle}::${sessionId}` : handle);
 
 const KNOWN_PROVIDER_HANDLES: Readonly<Record<string, string>> = { "claude-code": "claude", claude: "claude", codex: "codex", opencode: "opencode" };
 
@@ -107,6 +124,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     }
   }
 
+
+
   const pushEvent = (s: StoreState, event: Omit<EventRecord, "at">) => {
     s.events.push({ at: now().toISOString(), ...event });
     if (s.events.length > MAX_EVENTS) s.events = s.events.slice(-MAX_EVENTS);
@@ -130,20 +149,26 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
   return {
     root,
 
-    registerEndpoint(input: { provider: string; sessionId?: string; cwd?: string }): EndpointRecord {
+    /** Adds a line to the activity log shown as "Recent" on the pill. */
+    noteEvent(kind: EventRecord["kind"], text: string, taskId?: string): void {
+      update((s) => { pushEvent(s, { kind, text, ...(taskId ? { taskId } : {}) }); });
+    },
+
+    registerEndpoint(input: { provider: string; sessionId?: string; cwd?: string; /** When it was really last active (from a file); default is now. */ seenAt?: string }): EndpointRecord {
       const handle = handleForProvider(input.provider);
       return update((s) => {
         const previous = s.endpoints[handle];
-        const record: EndpointRecord = { handle, provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, lastSeenAt: now().toISOString() };
+        const seen = input.seenAt ?? now().toISOString();
+        const record: EndpointRecord = { handle, provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, lastSeenAt: previous && Date.parse(previous.lastSeenAt) > Date.parse(seen) ? previous.lastSeenAt : seen };
         s.endpoints[handle] = record;
         if (input.sessionId) {
-          const at = now().toISOString();
+          const at = input.seenAt ?? now().toISOString();
           const known = s.sessions.find((x) => x.handle === handle && x.sessionId === input.sessionId);
-          if (known) { known.lastSeenAt = at; if (input.cwd) known.cwd = input.cwd; }
+          if (known) { if (Date.parse(at) > Date.parse(known.lastSeenAt)) known.lastSeenAt = at; if (input.cwd) known.cwd = input.cwd; }
           else s.sessions.push({ handle, provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, firstSeenAt: at, lastSeenAt: at });
-          // Keep the list small: the 30 most recent sessions, nothing older than a week.
+          // Keep the list small: the 60 most recent sessions, nothing older than a week.
           const cutoff = now().getTime() - 7 * 86_400_000;
-          s.sessions = s.sessions.filter((x) => Date.parse(x.lastSeenAt) >= cutoff).sort((a, b) => Date.parse(a.lastSeenAt) - Date.parse(b.lastSeenAt)).slice(-30);
+          s.sessions = s.sessions.filter((x) => Date.parse(x.lastSeenAt) >= cutoff).sort((a, b) => Date.parse(a.lastSeenAt) - Date.parse(b.lastSeenAt)).slice(-60);
         }
         if (!previous) pushEvent(s, { kind: "agent.connected", handle, text: `@${handle} connected (${input.provider})` });
         else if (input.sessionId && previous.sessionId !== input.sessionId) pushEvent(s, { kind: "session.started", handle, text: `@${handle} started a new session` });
@@ -185,16 +210,83 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /** Records that these tasks were shown to their target; the first time only. */
-    markDelivered(ids: readonly string[]): void {
+    markDelivered(ids: readonly string[], sessionId?: string): void {
       if (ids.length === 0) return;
       update((s) => {
         for (const id of ids) {
           const t = s.tasks.find((x) => x.id === id);
           if (!t || t.deliveredAt) continue;
           t.deliveredAt = now().toISOString();
+          if (sessionId) t.deliveredSession = sessionId;
           pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `@${t.to} received ${id}` });
         }
       });
+    },
+
+    /** Tasks shown to this agent's session that have no answer yet: what its next finished turn is (probably) the answer to. */
+    awaitingAnswerFrom(handle: string, sessionId: string | undefined, withinMs = 60 * 60_000): Task[] {
+      const cutoff = now().getTime() - withinMs;
+      return readState().tasks.filter((t) => t.to === handle && t.deliveredAt && !t.resultSummary && (!t.deliveredSession || t.deliveredSession === sessionId) && Date.parse(t.deliveredAt) >= cutoff);
+    },
+
+    setAnswerPushed(id: string): void {
+      update((s) => { const t = s.tasks.find((x) => x.id === id); if (t) t.answerPushedAt = now().toISOString(); });
+    },
+
+    /** Issues (or, for the same session, re-issues) an identity token. Old tokens for the SAME session are revoked, so a
+     * session that starts again never has two live tokens. Capped: the 200 most recent stay, so the store cannot grow forever. */
+    issueIdentity(handle: string, provider: string, sessionId: string): IdentityToken {
+      return update((s) => {
+        const at = now().toISOString();
+        for (const t of s.identities) if (t.sessionId === sessionId && !t.revokedAt) t.revokedAt = at;
+        const issued = issueIdentity(handle, provider, sessionId, at);
+        s.identities = [...s.identities, issued].slice(-200);
+        return issued;
+      });
+    },
+
+    /** Checks a presented token; does not mutate. */
+    verifyIdentity(token: string, claimedSessionId?: string): VerifiedIdentity | null {
+      return verifyToken(readState().identities, token, claimedSessionId);
+    },
+
+    /** Ends a session's token early (the person revoked it from the pill, or the session closed). */
+    revokeIdentity(sessionId: string): void {
+      update((s) => { const at = now().toISOString(); for (const t of s.identities) if (t.sessionId === sessionId && !t.revokedAt) t.revokedAt = at; });
+    },
+
+    /** Every link this session takes part in, either side. */
+    linksFor(handle: string, sessionId: string): SessionLink[] {
+      return readState().links.filter((l) => (l.a.handle === handle && l.a.sessionId === sessionId) || (l.b.handle === handle && l.b.sessionId === sessionId));
+    },
+
+    /** The session this one is linked to for a given partner agent, if any. */
+    linkedSession(handle: string, sessionId: string, partnerHandle: string): { sessionId: string } | undefined {
+      const l = this.linksFor(handle, sessionId).find((x) => (x.a.handle === partnerHandle) || (x.b.handle === partnerHandle));
+      if (!l) return undefined;
+      const other = l.a.handle === handle && l.a.sessionId === sessionId ? l.b : l.a;
+      return { sessionId: other.sessionId };
+    },
+
+    /** Creates or replaces the one link a session may have with a given partner agent. */
+    setLink(a: { handle: string; sessionId: string }, b: { handle: string; sessionId: string }, origin: "auto" | "picked"): SessionLink {
+      return update((s) => {
+        const at = now().toISOString();
+        const keep = s.links.filter((l) => !((l.a.handle === a.handle && l.a.sessionId === a.sessionId && l.b.handle === b.handle) || (l.b.handle === a.handle && l.b.sessionId === a.sessionId && l.a.handle === b.handle) || (l.a.handle === b.handle && l.a.sessionId === b.sessionId && l.b.handle === a.handle) || (l.b.handle === b.handle && l.b.sessionId === b.sessionId && l.a.handle === a.handle)));
+        const link: SessionLink = { id: `L${s.nextLinkNo}`, a, b, origin, createdAt: at, updatedAt: at };
+        s.nextLinkNo += 1;
+        s.links = [...keep, link];
+        pushEvent(s, { kind: "agent.connected", text: `linked @${a.handle} <-> @${b.handle} (${origin})` });
+        return link;
+      });
+    },
+
+    removeLink(id: string): void {
+      update((s) => { s.links = s.links.filter((l) => l.id !== id); });
+    },
+
+    allLinks(): SessionLink[] {
+      return readState().links;
     },
 
     addRule(input: { from: string; to: string; ttlMs: number; note?: string }): StandingRule {
@@ -322,17 +414,23 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /**
-     * Delivery is once per agent, not once per window: a task addressed to @claude goes to whichever Claude session
-     * prompts first, and no later session repeats it. (The session argument is accepted so callers can stay
-     * session-aware later, but it is deliberately not part of the key.)
+     * Per session, not per agent: a task addressed to @claude must show in every Claude session that prompts,
+     * not just whichever one happens to prompt first. Keying this by handle alone (the original design) meant
+     * one Claude session's own hook call could silently advance a SHARED cursor and starve every other open
+     * Claude session of ever seeing the notification -- confirmed live 2026-09-22 with several Claude sessions
+     * open at once: a task sent by Codex only ever showed in whichever session's hook fired first, and the
+     * person had to explicitly ask a different session to "check the M9R inbox" to see it at all. A session
+     * with no id (older callers, or an event with no session_id) falls back to the handle-only key so it still
+     * gets a cursor, just not one isolated from other id-less callers.
      */
-    cursorFor(handle: string, _sessionId?: string): number {
-      return readState().cursors[handle] ?? 0;
+    cursorFor(handle: string, sessionId?: string): number {
+      return readState().cursors[cursorKey(handle, sessionId)] ?? 0;
     },
 
-    setCursor(handle: string, _sessionId: string | undefined, seq: number): void {
+    setCursor(handle: string, sessionId: string | undefined, seq: number): void {
       update((s) => {
-        if (seq > (s.cursors[handle] ?? 0)) s.cursors[handle] = seq;
+        const key = cursorKey(handle, sessionId);
+        if (seq > (s.cursors[key] ?? 0)) s.cursors[key] = seq;
       });
     },
   };

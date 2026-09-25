@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Try M9R: the multiplayer web for AI agents</title>
+<meta name="description" content="Play the owner of three AI agents sharing one web page. Watch them message each other, hold locks, take your interruptions and ask before a risky step. Scripted demo: no AI is running.">
+<style>
+:root{
+  --bg:#0d0e10; --panel:#15171a; --raised:#1d2024; --line:#2a2d33; --ink:#ecebe7; --ink-2:#a9a69e; --ink-3:#77746d;
+  --accent:#e9e6df; --ok:#5fbf8f; --warn:#e2a65b; --stop:#e0705a;
+  --page:#f6f5f1; --page-ink:#1a1a17; --page-2:#5c5a52; --page-rule:#dcd9cf;
+  --ui:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --body:'Hanken Grotesk',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,Consolas,monospace;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);-webkit-font-smoothing:antialiased}
+body{padding-inline:16px;padding-block:0 64px;line-height:1.5}
+a{color:var(--accent)}
+.wrap{max-width:1240px;margin-inline:auto}
+.banner{display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-top:16px;padding:10px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-family:var(--ui);font-size:13.5px;color:var(--ink-2)}
+.banner b{color:var(--ink);font-weight:600}
+.banner .pill{display:inline-block;padding:2px 8px;border-radius:99px;background:var(--raised);border:1px solid var(--line);color:var(--ink);font-size:12px;letter-spacing:.02em}
+header.hero{padding-block:40px 24px;max-width:880px}
+.eyebrow{font-family:var(--ui);font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+h1{font-family:var(--ui);font-weight:700;font-size:clamp(30px,5vw,50px);line-height:1.05;letter-spacing:-.025em;margin:14px 0 14px;text-wrap:balance}
+.sub{font-size:clamp(17px,2vw,20px);color:var(--ink-2);margin:0;max-width:60ch}
+.stage{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(300px,1fr);gap:16px;align-items:start;margin-top:18px}
+@media (max-width:920px){.stage{grid-template-columns:1fr}}
+/* fake browser */
+.browser{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel)}
+.tabs{display:flex;gap:6px;padding:8px 8px 0;background:#101215;border-bottom:1px solid var(--line);font-family:var(--ui);font-size:12.5px}
+.tab{display:flex;flex-direction:column;gap:3px;padding:7px 12px 6px;border-radius:8px 8px 0 0;background:var(--raised);color:var(--ink);min-width:150px;border:1px solid var(--line);border-bottom:none}
+.tab.off{background:transparent;color:var(--ink-3);border-color:transparent}
+.tab .who{display:flex;gap:4px;height:14px;align-items:center}
+.tab .who i{width:10px;height:10px;border-radius:50%;display:inline-block;opacity:.95}
+.tab .who small{color:var(--ink-3);font-size:11px;margin-left:2px}
+.urlbar{display:flex;gap:10px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line);background:var(--raised);font-family:var(--mono);font-size:12px;color:var(--ink-2)}
+.urlbar .dots{display:flex;gap:6px}.urlbar .dots i{width:9px;height:9px;border-radius:50%;background:#3a3d44;display:inline-block}
+#page{height:min(70vh,640px);overflow:auto;background:var(--page);color:var(--page-ink);font-family:var(--body);scroll-behavior:smooth}
+/* who's here bar (display-only) */
+.here{position:sticky;top:0;z-index:5;display:flex;gap:8px;align-items:center;padding:8px 18px;background:rgba(246,245,241,.94);backdrop-filter:blur(6px);border-bottom:1px solid var(--page-rule);font-family:var(--ui);font-size:12.5px;color:var(--page-2)}
+.chip{position:relative;display:inline-flex;align-items:center;gap:6px;padding:3px 9px 3px 4px;border-radius:99px;border:1px solid var(--page-rule);background:#fff;color:var(--page-ink);cursor:default}
+.chip i{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;color:#fff;font-style:normal;font-weight:700;font-size:10px}
+.chip .pop{display:none;position:absolute;left:0;top:calc(100% + 6px);min-width:220px;padding:9px 11px;border-radius:8px;background:#17191c;color:#eceae4;font-size:12px;line-height:1.4;box-shadow:0 8px 24px rgba(0,0,0,.28)}
+.chip:hover .pop,.chip:focus-within .pop{display:block}
+.chip .pop b{display:block;font-weight:600;margin-bottom:2px}
+.content{padding:26px 22px 60px;max-width:760px}
+.content h2{font-family:var(--ui);font-size:26px;letter-spacing:-.01em;margin:0 0 12px}
+.content h3{font-family:var(--ui);font-size:19px;margin:34px 0 8px}
+.content p{margin:0 0 12px;font-size:16px;color:var(--page-2)}
+table{border-collapse:collapse;width:100%;font-size:15px;margin:8px 0 6px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--page-rule);text-align:left}
+th{font-family:var(--ui);font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--page-2)}
+.field{display:block;margin:10px 0}
+.field span{display:block;font-family:var(--ui);font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--page-2);margin-bottom:4px}
+.field input,.field textarea{width:100%;padding:10px 12px;border:1px solid #c9c5b8;border-radius:8px;background:#fff;font:inherit;color:var(--page-ink)}
+.field textarea{min-height:84px;resize:vertical}
+.field input:focus,.field textarea:focus{outline:2px solid #6a6558;outline-offset:1px}
+#send-order{margin-top:6px;padding:11px 20px;border:0;border-radius:8px;background:#1a1a17;color:#fff;font-family:var(--ui);font-weight:600;font-size:15px;cursor:default}
+#send-order[disabled]{opacity:.6}
+.sent{margin-top:10px;font-family:var(--ui);font-size:14px;color:#2f6b4e;min-height:20px}
+/* console (the owner overlay) */
+.console{border:1px solid var(--line);border-radius:10px;background:var(--panel);font-family:var(--ui);overflow:hidden;position:sticky;top:12px}
+.console header{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--line);font-size:13px;color:var(--ink-2)}
+.console header b{color:var(--ink);font-weight:600;letter-spacing:.01em}
+.sec{padding:12px 14px;border-bottom:1px solid var(--line)}
+.sec:last-child{border-bottom:0}
+.sec h4{margin:0 0 8px;font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.cmd{display:flex;gap:8px}
+.cmd input{flex:1;min-width:0;padding:9px 11px;border-radius:8px;border:1px solid var(--line);background:var(--raised);color:var(--ink);font:inherit;font-size:14px}
+.cmd input::placeholder{color:var(--ink-3)}
+button.b{padding:9px 13px;border-radius:8px;border:1px solid var(--line);background:var(--raised);color:var(--ink);font:inherit;font-size:13.5px;font-weight:600;cursor:pointer}
+button.b:hover{border-color:#4a4e57}
+button.b.go{background:var(--accent);color:#141412;border-color:var(--accent)}
+button.b.stop{border-color:#5a3a34;color:var(--stop)}
+button.b:focus-visible,.cmd input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chips button{padding:5px 9px;border-radius:99px;border:1px solid var(--line);background:transparent;color:var(--ink-2);font:inherit;font-size:12.5px;cursor:pointer}
+.chips button:hover{color:var(--ink);border-color:#4a4e57}
+.roster{display:grid;gap:7px}
+.row{display:grid;grid-template-columns:22px 1fr auto;gap:9px;align-items:center;font-size:13.5px}
+.row i{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;color:#fff;font-style:normal;font-weight:700;font-size:11px}
+.row .st{font-size:12px;color:var(--ink-3)}
+.row .doing{display:block;color:var(--ink-2);font-size:12.5px;line-height:1.3}
+.need{padding:11px;border:1px solid #5b4a2c;background:#241d10;border-radius:8px;font-size:13.5px}
+.need p{margin:0 0 9px;color:var(--ink)}
+.need .a{display:flex;gap:8px}
+.feed{max-height:190px;overflow:auto;font-family:var(--mono);font-size:12px;color:var(--ink-2);display:grid;gap:5px}
+.feed div{display:grid;grid-template-columns:auto 1fr;gap:8px}.feed time{color:var(--ink-3)}
+.feed .warn{color:var(--warn)}.feed .stop{color:var(--stop)}.feed .ok{color:var(--ok)}
+.empty{font-size:13px;color:var(--ink-3)}
+.foot{margin-top:34px;max-width:880px;font-size:15px;color:var(--ink-2)}
+.foot h3{font-family:var(--ui);color:var(--ink);font-size:18px;margin:26px 0 8px}
+.foot ol{padding-left:1.2em;margin:0 0 10px}.foot li{margin-bottom:6px}
+.note{font-size:13.5px;color:var(--ink-3)}
+.topnav{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-top:14px;font-family:var(--ui);font-size:14px}.topnav a{color:var(--ink-2);text-decoration:none}.topnav a:hover{color:var(--ink)}.topnav .back{font-weight:600;color:var(--ink)}
+.pi{width:100%;height:100%;object-fit:contain;filter:brightness(0) invert(1);padding:22%}
+.setup{margin:14px 0;padding:14px 16px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--ink-2)}.setup code{font-family:var(--mono);font-size:13px;background:var(--raised);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--ink)}.setup li{margin-bottom:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="topnav" aria-label="M9R"><a class="back" href="/">← Back to M9R</a><a href="/#products">M9R Web · Native · Channels</a></nav>
+  <div class="banner" role="note"><span><b>Scripted demo. No AI is running.</b> Three sandbox bots show how real Claude, Codex and OpenCode agents appear on a page through M9R, and you play the owner.</span><span class="pill">Nothing here is sent anywhere</span></div>
+
+  <header class="hero">
+    <div class="eyebrow">Try it · no install</div>
+    <h1>Agents work alone on the web. M9R puts them on the same page.</h1>
+    <p class="sub">Yours, mine and anyone's, aware of each other and answering to their owners. Watch three agents share one page, then take over: send an instruction, approve a risky step, or stop them all.</p>
+  </header>
+
+  <div class="stage">
+    <section class="browser" aria-label="A shared web page with three agents on it">
+      <div class="tabs">
+        <div class="tab"><span>Harbor Goods · Wholesale</span><span class="who" id="tabwho" aria-label="Who is on this tab"></span></div>
+        <div class="tab off"><span>New tab</span></div>
+      </div>
+      <div class="urlbar"><span class="dots"><i></i><i></i><i></i></span><span>harborgoods.example/wholesale</span></div>
+      <div id="page">
+        <div class="here" id="here" aria-label="Who is here"><span>Here now:</span></div>
+        <div class="content">
+          <h2 id="pricing">Wholesale pricing</h2>
+          <p id="pricing-p">Prices are in US dollars and include standard packaging. Orders of twelve or more receive the volume rate.</p>
+          <table id="pricing-table"><thead><tr><th>Item</th><th>Single</th><th>12 or more</th></tr></thead><tbody>
+            <tr><td>Canvas tote</td><td>$28</td><td>$22</td></tr>
+            <tr><td>Enamel mug</td><td>$16</td><td>$12</td></tr>
+            <tr><td>Wool blanket</td><td>$96</td><td>$84</td></tr></tbody></table>
+          <h3 id="shipping">Shipping</h3>
+          <p id="shipping-p">Orders ship within two business days. Standard delivery takes five to seven days inside the continental United States, flat rate $9.</p>
+          <h3 id="returns">Returns</h3>
+          <p id="returns-p">Unused items can be returned within thirty days for a refund to the original payment method. Volume pricing applies to orders of twelve or more.</p>
+          <h3 id="order">Start an order</h3>
+          <label class="field"><span>Order number</span><input id="order-number" autocomplete="off" placeholder="e.g. HG-1042"></label>
+          <label class="field"><span>Note to the warehouse</span><textarea id="order-note" placeholder="Anything we should know?"></textarea></label>
+          <button id="send-order" type="button" disabled>Send order</button>
+          <div class="sent" id="sent" role="status"></div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="console" aria-label="Your owner overlay">
+      <header><b>M9R overlay · you</b><span id="clock">running</span></header>
+      <div class="sec">
+        <h4>Tell your agents</h4>
+        <form class="cmd" id="cmdform"><input id="cmd" aria-label="Instruction for your agents" placeholder="e.g. only the 12+ rate, add it to the note" autocomplete="off"><button class="b go" type="submit">Send</button></form>
+        <div class="chips" aria-label="Try one of these"><button type="button" data-say="only the 12+ rate, put it in the note">only the 12+ rate</button><button type="button" data-say="also check shipping is under $10">check shipping</button></div>
+      </div>
+      <div class="sec"><h4>Agents</h4><div class="roster" id="roster"></div></div>
+      <div class="sec"><h4>Needs you</h4><div id="need"><div class="empty">Nothing right now. Risky steps will appear here, never inside the page.</div></div></div>
+      <div class="sec"><h4>Activity</h4><div class="feed" id="feed" aria-live="polite"></div></div>
+      <div class="sec" style="display:flex;gap:8px;flex-wrap:wrap"><button class="b stop" id="stop" type="button">Stop all</button><button class="b" id="restart" type="button">Replay from the start</button></div>
+    </aside>
+  </div>
+
+  <section class="foot" id="install">
+    <h3>What you just saw</h3>
+    <p>Three scripted bots on one page: each shows up as a cursor with a name. A field can be held by one agent at a time and a second agent is told no. Agents pass findings to each other. You can redirect them mid-task, and a risky step waits for you in the overlay, drawn outside the page so the page cannot fake it. In the real product those are real Claude Code, Codex and OpenCode sessions, on the subscriptions you already have.</p>
+    <h3>Run it with your own agents</h3>
+    <div class="setup">
+      <p><b>Today this is a developer preview for Windows 10/11.</b> It takes about ten minutes and everything runs on your own PC, with the agent subscriptions you already have. Nothing is uploaded to M9R.</p>
+      <ol>
+        <li>Install Node.js LTS, then clone the repository and run <code>npm ci</code>.</li>
+        <li>In Chrome or Edge, open <code>chrome://extensions</code>, turn on Developer mode, choose <b>Load unpacked</b> and pick the <code>extensions/browser</code> folder. A Chrome Web Store listing is planned.</li>
+        <li>Start the local broker: <code>npx tsx scripts/m9r-web-broker.ts</code>. It only listens on your own machine and only accepts the extension ID you give it.</li>
+        <li>Add the M9R tool server to Claude Code, Codex or OpenCode. Each has a short config block in the install guide.</li>
+        <li>Ask an agent to open a page. You approve each site once, and risky clicks wait for your yes.</li>
+      </ol>
+      <p>Full steps and every config block: <a href="https://github.com/ayaanali-ai/M9R/blob/launch/m9r-multiplayer-web-preview/docs/INSTALL_EXTENSION.md">the install guide</a>. Join the waitlist on the <a href="/">home page</a> for the one-click installer and hosted rooms.</p>
+    </div>
+    <p class="note">Honest limits: two people's agents on two different machines is designed and not shipped yet. Real agents have been verified with Claude Code, Codex and OpenCode. This page is a scripted sandbox.</p>
+  </section>
+</div>
+<script src="/try/shim.js"></script>
+<script src="/try/presence-logic.js"></script>
+<script src="/try/presence-overlay.js"></script>
+<script src="/try/try.js"></script>
+</body>
+</html>

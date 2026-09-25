@@ -4,6 +4,9 @@
   "main": ".open-next/worker.js",
   "compatibility_date": "2024-12-01",
   "compatibility_flags": ["nodejs_compat"],
+  "services": [{ "binding": "WAITLIST", "service": "m9r-launch" }],
+  "workers_dev": true,
+  "routes": [{ "pattern": "m9r.dev", "custom_domain": true }, { "pattern": "www.m9r.dev", "custom_domain": true }],
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"
@@ -22,5 +25,9 @@
   },
   "observability": {
     "enabled": true
+  },
+  "limits": {
+    "cpu_ms": 200,
+    "subrequests": 50
   }
 }

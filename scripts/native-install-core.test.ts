@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   HOOK_MARKER,
+  MCP_MARKER,
   STANDING_END,
   STANDING_START,
   UnparseableConfigError,
@@ -9,7 +10,11 @@ import {
   decideUninstall,
   hasOurHooks,
   mergeHooks,
+  mergeMcpServerJson,
+  mergeMcpServerToml,
   removeHooks,
+  removeMcpServerJson,
+  removeMcpServerToml,
   removeStandingInstruction,
   sha256,
   standingInstructionBlock,
@@ -98,7 +103,7 @@ test("the standing instruction is created, appended with a separator, and never 
   assert.equal(created.content.startsWith(STANDING_START), true);
   const appended = applyStandingInstruction("# My rules\nBe terse.");
   assert.equal(appended.action, "installed");
-  assert.match(appended.content, /^# My rules\nBe terse\.\n\n<!-- M9R:STANDING-INSTRUCTION:START v2 -->/);
+  assert.match(appended.content, /^# My rules\nBe terse\.\n\n<!-- M9R:STANDING-INSTRUCTION:START v4 -->/);
   const again = applyStandingInstruction(appended.content);
   assert.equal(again.action, "unchanged");
   assert.equal((again.content.match(/STANDING-INSTRUCTION:START/g) ?? []).length, 1);
@@ -150,4 +155,96 @@ test("uninstall removes only our entries when the user edited the file after ini
   const entry = { path: "settings.json", existedBefore: true, backupPath: "b", sha256After: sha256(written) };
   assert.deepEqual(decideUninstall(entry, written.replace("{", '{\n  "added": 1,')), { action: "remove_our_entries" });
   assert.deepEqual(decideUninstall(entry, null), { action: "nothing" });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// MCP server registration
+
+const mcpSpec = { command: String.raw`C:\Users\u\.m9r\bin\m9r-engine.exe`, args: ["mcp"] };
+
+test("mergeMcpServerJson adds our entry, keeps every other server, and is idempotent", () => {
+  const existing = JSON.stringify({ mcpServers: { github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"] } } });
+  const first = mergeMcpServerJson(existing, "m9r", mcpSpec);
+  assert.equal(first.changed, true);
+  const parsed = JSON.parse(first.content) as { mcpServers: Record<string, unknown> };
+  assert.deepEqual(parsed.mcpServers.github, { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"] });
+  assert.deepEqual(parsed.mcpServers.m9r, mcpSpec);
+
+  const second = mergeMcpServerJson(first.content, "m9r", mcpSpec);
+  assert.equal(second.changed, false, "running it again with the same spec must be a no-op");
+});
+
+test("mergeMcpServerJson updates our entry in place when the spec changes, and refuses invalid JSON", () => {
+  const existing = JSON.stringify({ mcpServers: { m9r: { command: "old", args: [] } } });
+  const updated = mergeMcpServerJson(existing, "m9r", mcpSpec);
+  assert.equal(updated.changed, true);
+  assert.deepEqual(JSON.parse(updated.content).mcpServers.m9r, mcpSpec);
+  assert.throws(() => mergeMcpServerJson("not json", "m9r", mcpSpec), UnparseableConfigError);
+});
+
+test("removeMcpServerJson removes only our named entry and drops mcpServers entirely once empty", () => {
+  const withOthers = JSON.stringify({ mcpServers: { github: { command: "npx", args: [] }, m9r: mcpSpec } });
+  const r1 = removeMcpServerJson(withOthers, "m9r");
+  assert.equal(r1.changed, true);
+  const parsed1 = JSON.parse(r1.content) as { mcpServers: Record<string, unknown> };
+  assert.ok(!("m9r" in parsed1.mcpServers));
+  assert.ok("github" in parsed1.mcpServers);
+
+  const onlyOurs = JSON.stringify({ mcpServers: { m9r: mcpSpec } });
+  const r2 = removeMcpServerJson(onlyOurs, "m9r");
+  assert.ok(!("mcpServers" in JSON.parse(r2.content)));
+
+  const r3 = removeMcpServerJson(withOthers, "not-registered");
+  assert.equal(r3.changed, false);
+});
+
+test("mergeMcpServerToml appends a marked block, is idempotent, and leaves every other [mcp_servers.*] table untouched", () => {
+  const existing = [
+    "approval_policy = \"on-request\"",
+    "",
+    "[mcp_servers.github]",
+    "command = \"npx\"",
+    "args = [\"-y\", \"@modelcontextprotocol/server-github\"]",
+    "startup_timeout_sec = 30.0",
+    "",
+    "[mcp_servers.node_repl]",
+    "args = []",
+    "command = 'C:\\node.exe'",
+    "",
+    "[mcp_servers.node_repl.env]",
+    "NODE_PATH = \"x\"",
+    "",
+  ].join("\n");
+
+  const first = mergeMcpServerToml(existing, "m9r", mcpSpec);
+  assert.equal(first.changed, true);
+  assert.match(first.content, new RegExp(`# ${MCP_MARKER} `));
+  assert.match(first.content, /\[mcp_servers\.m9r\]/);
+  // Every pre-existing table (including the node_repl sub-table) must survive byte for byte.
+  assert.match(first.content, /\[mcp_servers\.github\]/);
+  assert.match(first.content, /\[mcp_servers\.node_repl\.env\]/);
+  assert.match(first.content, /NODE_PATH = "x"/);
+
+  const second = mergeMcpServerToml(first.content, "m9r", mcpSpec);
+  assert.equal(second.changed, false, "running it again with the same spec must be a no-op");
+});
+
+test("mergeMcpServerToml replaces only our own block in place when the spec changes", () => {
+  const first = mergeMcpServerToml("[mcp_servers.other]\ncommand = \"x\"\n", "m9r", { command: "old", args: [] });
+  const updated = mergeMcpServerToml(first.content, "m9r", mcpSpec);
+  assert.equal(updated.changed, true);
+  assert.match(updated.content, /command = "C:\\\\Users\\\\u\\\\\.m9r\\\\bin\\\\m9r-engine\.exe"/);
+  assert.match(updated.content, /\[mcp_servers\.other\]/);
+  assert.doesNotMatch(updated.content, /command = "old"/);
+});
+
+test("removeMcpServerToml removes only our block; a config with none of ours is unchanged", () => {
+  const withUs = mergeMcpServerToml("[mcp_servers.other]\ncommand = \"x\"\n", "m9r", mcpSpec).content;
+  const removed = removeMcpServerToml(withUs, "m9r");
+  assert.equal(removed.changed, true);
+  assert.doesNotMatch(removed.content, new RegExp(MCP_MARKER));
+  assert.match(removed.content, /\[mcp_servers\.other\]/);
+
+  const untouched = removeMcpServerToml("[mcp_servers.other]\ncommand = \"x\"\n", "m9r");
+  assert.equal(untouched.changed, false);
 });

@@ -19,6 +19,7 @@ import { handleForProvider, type LocalStore } from "./local-store";
 export interface HookInput {
   hook_event_name?: string;
   session_id?: string;
+  transcript_path?: string;
   cwd?: string;
   prompt?: string;
 }
@@ -35,6 +36,10 @@ export interface HookContext {
   dispatch?: (taskId: string) => void;
   /** N2: reads back answers for tasks already pushed into Codex sessions, before results are shown. */
   collect?: () => void;
+  /** The final message of this agent's just-finished turn (from its transcript); used to answer tasks it was shown. */
+  lastAnswer?: (input: HookInput) => string | null;
+  /** A task just got its answer: send it back to whoever asked (fire and forget). */
+  answerBack?: (taskId: string) => void;
   /** Endpoints seen more recently than this count as "active now" on the card. */
   activeWindowMs?: number;
   now?: () => Date;
@@ -49,7 +54,8 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex").slice(0,
 
 /** The task's goal is what the human wrote, minus the routing token, so the target reads a clean request. */
 function goalFor(prompt: string, handle: string): string {
-  return prompt.replace(new RegExp(`@${handle}\\b`, "gi"), "").replace(/[ \t]{2,}/g, " ").trim();
+  // Claude Code wraps pasted text in <pasted_content ...> tags; they are not part of what the person asked.
+  return prompt.replace(/<\/?pasted_content[^>]*>/gi, " ").replace(new RegExp(`@${handle}\\b`, "gi"), "").replace(/[ \t]{2,}/g, " ").trim();
 }
 
 function readMemoryIndex(cwd: string): string | null {
@@ -59,6 +65,35 @@ function readMemoryIndex(cwd: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Human-typed mentions become tasks. Never our own handle; never an existing file or folder. Shared by the hook and the
+ * hook-free Codex watcher, and does nothing else (no inbox, no results), so the watcher can call it without side effects on Codex.
+ * Returns the "sent" acknowledgements the hook shows to the agent.
+ */
+export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "provider" | "store" | "pathExists" | "dispatch">): { acks: string[]; tasks: Array<{ id: string; to: string }> } {
+  const self = handleForProvider(ctx.provider);
+  const prompt = input.prompt ?? "";
+  const cwd = input.cwd ?? process.cwd();
+  const exists = ctx.pathExists ?? existsSync;
+  const acks: string[] = [];
+  const tasks: Array<{ id: string; to: string }> = [];
+  ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: input.cwd });
+  // A prompt M9R pushed in ("[M9R T3] Task from @claude ...") names its sender; routing that would bounce it back.
+  const targets = isM9rPushedPrompt(prompt) ? [] : findEndpointMentions(prompt, {
+    aliases: ctx.store.knownAliases().filter((a) => a !== self),
+    pathExists: (token) => exists(resolve(join(cwd, token))),
+  });
+  for (const to of targets) {
+    const goal = goalFor(prompt, to);
+    if (!goal) continue;
+    const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", cwd: input.cwd, fromSession: input.session_id, idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
+    acks.push(renderSentAck(task.id, to));
+    tasks.push({ id: task.id, to });
+    if (created && to === "codex" && canQueue(task)) ctx.dispatch?.(task.id);
+  }
+  return { acks, tasks };
 }
 
 export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalContext | null {
@@ -76,29 +111,43 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const memoryDir = ctx.memoryDir ?? (input.cwd && (ctx.pathExists ?? existsSync)(join(input.cwd, ".oathlock", "memory", "index.md")) ? ".oathlock/memory" : undefined);
       ctx.store.sweepExpired();
       const awaitingApproval = ctx.store.pendingApprovals().length;
-      return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir }));
+      const identityToken = input.session_id ? ctx.store.issueIdentity(self, ctx.provider, input.session_id).token : undefined;
+      return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir, identityToken }));
+    }
+
+    // A turn finished. If this session was shown tasks other agents sent, its final message is the answer: record it and send it back.
+    if (event === "Stop") {
+      const waiting = ctx.store.awaitingAnswerFrom(self, input.session_id);
+      if (waiting.length === 0 || !ctx.lastAnswer) return null;
+      const text = ctx.lastAnswer(input);
+      if (!text) return null;
+      for (const t of waiting) {
+        ctx.store.setResult(t.id, text);
+        ctx.answerBack?.(t.id);
+      }
+      return null;
+    }
+
+    // Claude only, NOT registered by default. Delivers new inbox items at the agent's next tool call with no polling, and
+    // prints nothing when there is nothing new. Measured 2026-09-24 on Claude Code 2.1.278: the agent receives this text
+    // but declines to act on it ("it was inside a tool result"), which is the right behavior for a web agent whose tool
+    // results can carry a page's forged text. So this channel carries information, never a redirect; real interrupts go
+    // through a live session's user-turn input (live-session-core.ts). Registering it would add a hook run to every tool call.
+    if (event === "PostToolUse") {
+      const cursor = ctx.store.cursorFor(self, input.session_id);
+      const injection = renderInboxInjection(ctx.store.tasksFor(self), cursor);
+      if (!injection.text) return null;
+      ctx.store.setCursor(self, input.session_id, injection.newCursor);
+      ctx.store.markDelivered(injection.includedIds, input.session_id);
+      return out(event, injection.text.replace(/^M9R inbox \(/, "M9R inbox, arrived while you were working ("));
     }
 
     if (event === "UserPromptSubmit") {
       const prompt = input.prompt ?? "";
-      ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: input.cwd });
       const cwd = input.cwd ?? process.cwd();
-      const exists = ctx.pathExists ?? existsSync;
       const parts: string[] = [];
 
-      // 1. Human-typed mentions become tasks. Never our own handle; never an existing file or folder.
-      // A prompt M9R pushed in ("[M9R T3] Task from @claude ...") names its sender; routing that would bounce it back.
-      const targets = isM9rPushedPrompt(prompt) ? [] : findEndpointMentions(prompt, {
-        aliases: ctx.store.knownAliases().filter((a) => a !== self),
-        pathExists: (token) => exists(resolve(join(cwd, token))),
-      });
-      for (const to of targets) {
-        const goal = goalFor(prompt, to);
-        if (!goal) continue;
-        const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", cwd: input.cwd, idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
-        parts.push(renderSentAck(task.id, to));
-        if (created && to === "codex" && canQueue(task)) ctx.dispatch?.(task.id);
-      }
+      parts.push(...routeTypedMentions(input, ctx).acks);
 
       // A prompt M9R pushed in is a task by itself: nothing else (older inbox items, results) is mixed into it, or the agent
       // may answer the wrong one. Those items wait for the user's next real prompt.
@@ -115,7 +164,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       if (injection.text) {
         parts.push(injection.text);
         ctx.store.setCursor(self, input.session_id, injection.newCursor);
-        ctx.store.markDelivered(injection.includedIds);
+        ctx.store.markDelivered(injection.includedIds, input.session_id);
       }
 
       // 3. A pointer to earlier sessions, only when this prompt matches the local memory index.

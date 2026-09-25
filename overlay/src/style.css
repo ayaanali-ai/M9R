@@ -1,0 +1,70 @@
+/* One text face, layered near-blacks, one warm accent. Nothing here animates on its own; only a ping moves. */
+:root {
+  --bg: #0d0e11;
+  --bg-2: #14161b;
+  --line: rgba(255, 255, 255, 0.08);
+  --text: #e9e6df;
+  --muted: #8d919a;
+  --faint: #5d616a;
+  --accent: #d9783f;
+  --working: #d9a441;
+  --open: #62b89b;
+  --seen: #7d9bd6;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+/* An author `display` (like .badge) would otherwise beat the built-in [hidden] rule and show hidden things. */
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; user-select: none; -webkit-user-select: none; }
+body { font: 12px/1.35 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; color: var(--text); }
+#root { width: 100%; }
+.pill {
+  height: 36px; border-radius: 18px; background: var(--bg); border: 1px solid var(--line);
+  display: flex; align-items: center; gap: 10px; padding: 0 12px 0 14px; cursor: default;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset;
+}
+.mark { font-weight: 650; letter-spacing: 0.16em; font-size: 11px; color: var(--text); }
+.mark.stale { color: var(--faint); animation: pulse 1.6s ease-in-out infinite; }
+.dots { display: flex; gap: 7px; align-items: center; flex: 1; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.dot.open_working { background: var(--working); }
+.dot.open_idle { background: var(--open); }
+.dot.offline { background: var(--faint); }
+.dot.unknown { border: 1.5px solid var(--faint); }
+.dot.seen { border: 1.5px solid var(--seen); }
+.dot.not_connected { border: 1.5px dashed var(--faint); opacity: .7; }
+.badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: #17100b; font-weight: 700; font-size: 11px; display: grid; place-items: center; }
+.ping { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); animation: rise .18s ease-out; }
+@keyframes rise { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+.pill.pinging .dots { display: none; }
+.panel { margin-top: 6px; border-radius: 14px; background: var(--bg); border: 1px solid var(--line); padding: 10px 0 6px; max-height: 470px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
+.panel h3 { margin: 6px 14px 4px; font-size: 10px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.row { display: flex; gap: 9px; align-items: flex-start; padding: 6px 14px; }
+.row + .row { border-top: 1px solid var(--line); }
+.row .dot { margin-top: 4px; }
+.row .main { flex: 1; min-width: 0; }
+.row .title { color: var(--text); overflow-wrap: anywhere; }
+.row .sub { color: var(--muted); overflow-wrap: anywhere; margin-top: 1px; }
+.row .tag { color: var(--accent); font-weight: 600; font-size: 10px; letter-spacing: .06em; }
+.row .actions { display: flex; gap: 6px; margin-top: 5px; }
+.dismiss { flex: none; width: 18px; height: 18px; line-height: 16px; padding: 0; border: none; background: transparent; color: var(--muted); font-size: 14px; cursor: pointer; border-radius: 4px; }
+.dismiss:hover { background: var(--line); color: var(--text); }
+.btn { border: 1px solid var(--line); background: var(--bg-2); color: var(--muted); border-radius: 7px; padding: 2px 9px; font: inherit; font-size: 11px; }
+.btn { cursor: pointer; }
+.btn:hover { background: rgba(255,255,255,.06); color: var(--text); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #17100b; font-weight: 600; }
+.btn.primary:hover { background: #e4864d; color: #17100b; }
+.btn[disabled] { opacity: .5; cursor: default; }
+.link { margin-left: auto; align-self: center; background: none; border: 0; padding: 0; font: inherit; font-size: 11px; color: var(--muted); cursor: pointer; }
+.link:hover { color: var(--text); }
+.link[disabled] { opacity: .5; cursor: default; }
+.badge.wait { background: transparent; border: 1.5px solid var(--working); color: var(--working); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+.sub.progress { color: var(--working); }
+.picker { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.picker-item { text-align: left; width: 100%; }
+.result { margin-top: 4px; font-weight: 600; }
+.result.ok { color: var(--open); }
+.result.bad { color: var(--accent); }
+.empty { color: var(--faint); padding: 6px 14px; }
+.foot { color: var(--faint); font-size: 10px; padding: 6px 14px 2px; }

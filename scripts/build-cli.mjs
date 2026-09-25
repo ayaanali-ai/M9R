@@ -7,10 +7,11 @@
 // Run from anywhere: paths resolve from this file, not the cwd. Used by
 // `npm run build:cli` and by the cli package's `prepack` hook before `npm pack`.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, cpSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { buildSync } from "esbuild";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = resolve(repoRoot, "cli", "dist");
@@ -44,6 +45,14 @@ function build() {
   // alias or repository source tree at runtime.
   const adapterContractTs = readFileSync(resolve(repoRoot, "src/lib/adapter-contract.ts"), "utf8");
   writeFileSync(resolve(outDir, "adapter-contract.js"), transpile(adapterContractTs));
+
+  const attributionTs = readFileSync(resolve(repoRoot, "src/lib/native-event-attribution.ts"), "utf8");
+  writeFileSync(resolve(outDir, "native-event-attribution.js"), transpile(attributionTs));
+  const nativeSyncTs = readFileSync(resolve(repoRoot, "src/lib/native-event-sync.ts"), "utf8");
+  writeFileSync(resolve(outDir, "native-event-sync.js"), transpile(nativeSyncTs)
+    .replace(/["']@\/lib\/native\/local-store["']/g, '"./local-store.js"')
+    .replace(/["']@\/lib\/native-event-attribution["']/g, '"./native-event-attribution.js"'));
+
 
   // `m9r connect` agent-CLI detection -- pure logic, no `@/` imports of its own.
   const agentDetectionTs = readFileSync(resolve(repoRoot, "src/lib/agent-detection-core.ts"), "utf8");
@@ -275,13 +284,38 @@ function build() {
 
   // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["mention-core", "inbox-core", "approval-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "local-store", "hook-handler", "install-core", "onboarding-steps", "native-commands"]) {
+  for (const name of ["mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "local-store", "web-broker-paths", "web-broker-core", "web-broker-server", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "vendor-launch-core", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
-    const js = transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"').replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"');
+    const js = transpile(source)
+      .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
+      .replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"')
+      .replace(/["']\.\.\/agent-detection-core["']/g, '"./agent-detection-core.js"');
     writeFileSync(resolve(outDir, `${name}.js`), js);
   }
   const hookEntryTs = readFileSync(resolve(repoRoot, "scripts/m9r-hook.ts"), "utf8");
   writeFileSync(resolve(outDir, "m9r-hook.js"), transpile(hookEntryTs).replace(/["']@\/lib\/native\/([a-z-]+)["']/g, '"./$1.js"'));
+
+  const mcpEntryTs = readFileSync(resolve(repoRoot, "scripts/m9r-mcp.ts"), "utf8");
+  writeFileSync(resolve(outDir, "m9r-mcp.js"), transpile(mcpEntryTs).replace(/["']@\/lib\/native\/([a-z-]+)["']/g, '"./$1.js"'));
+
+  buildSync({
+    absWorkingDir: repoRoot,
+    entryPoints: [resolve(repoRoot, "scripts/m9r-web-broker.ts")],
+    outfile: resolve(outDir, "m9r-web-broker.cjs"),
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node22",
+    tsconfig: resolve(repoRoot, "tsconfig.json"),
+    logLevel: "silent",
+  });
+  cpSync(resolve(repoRoot, "extensions/browser"), resolve(outDir, "extension"), {
+    recursive: true,
+    filter(source) {
+      const relative = source.slice(resolve(repoRoot, "extensions/browser").length).replaceAll("\\", "/");
+      return !/(^|\/)(store-assets|test-page|node_modules|\.git)(\/|$)/.test(relative);
+    },
+  });
 
   const missionParticipantIdsTs = readFileSync(resolve(repoRoot, "src/lib/mission/mission-participant-ids.ts"), "utf8");
   writeFileSync(resolve(outDir, "mission-participant-ids.js"), transpile(missionParticipantIdsTs));
@@ -507,6 +541,15 @@ function build() {
     /["']@\/lib\/local-terminal-protocol["']/g,
     '"./local-terminal-protocol.js"',
   );
+  entryJs = entryJs
+    .replace(/["']@\/lib\/native\/local-store["']/g, '"./local-store.js"')
+    .replace(/["']@\/lib\/native\/approval-core["']/g, '"./approval-core.js"')
+    .replace(/["']@\/lib\/native\/web-broker-paths["']/g, '"./web-broker-paths.js"')
+    .replace(/["']@\/lib\/native\/web-authority-cli["']/g, '"./web-authority-cli.js"')
+    .replace(/["']@\/lib\/native\/vendor-launch-core["']/g, '"./vendor-launch-core.js"');
+  entryJs = entryJs
+    .replace(/["']@\/lib\/agent-detection-core["']/g, '"./agent-detection-core.js"')
+    .replace(/["']@\/lib\/native\/([a-z-]+)["']/g, '"./$1.js"');
   entryJs = entryJs.replace(
     /["']@\/lib\/provider-adapter-config["']/g,
     '"./provider-adapter-config.js"',
@@ -535,6 +578,11 @@ function build() {
     /["']\.\.\/src\/lib\/opencode-capture-backfill-core["']/g,
     '"./opencode-capture-backfill-core.js"',
   );
+  entryJs = entryJs.replace(
+    /["']\.\.\/src\/lib\/native-event-sync["']/g,
+    '"./native-event-sync.js"',
+  );
+
   if (!entryJs.startsWith(SHEBANG)) entryJs = SHEBANG + entryJs;
   const entryPath = resolve(outDir, "m9r.js");
   writeFileSync(entryPath, entryJs);

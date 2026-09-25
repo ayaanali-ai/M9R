@@ -56,6 +56,7 @@ export const RELAY_CLIENT_FRAME_TYPES = [
   // worth keeping) -- see handlePresenceCursor's own comment for the
   // mandatory server-side rate limit this needs.
   "presence.cursor",
+  "web.presence",
 ] as const;
 export type RelayClientFrameType = (typeof RELAY_CLIENT_FRAME_TYPES)[number];
 
@@ -101,8 +102,20 @@ export const RELAY_SERVER_FRAME_TYPES = [
   "fs.content.chunk",
   "fs.error",
   "presence.cursor",
+  "web.presence",
 ] as const;
 export type RelayServerFrameType = (typeof RELAY_SERVER_FRAME_TYPES)[number];
+
+export type WebPresenceAction = "open" | "read" | "click" | "type";
+export type WebPresenceTarget = { selector: string } | { x: number; y: number };
+export interface WebPresencePayload {
+  agent: string;
+  provider: string;
+  url: string;
+  target: WebPresenceTarget;
+  action: WebPresenceAction;
+  seq: number;
+}
 
 export type MissionHuddleSignalFrameType = "huddle.offer" | "huddle.answer" | "huddle.ice";
 export type MissionHuddleDescriptionType = "offer" | "answer";

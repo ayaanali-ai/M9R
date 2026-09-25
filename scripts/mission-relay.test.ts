@@ -38,6 +38,36 @@ test("relay frame validation is versioned, bounded, and rejects unknown frame ty
   assert.equal(parseRelayFrame({ ...baseFrame, version: "old" }).ok, false);
   assert.equal(parseRelayFrame({ ...baseFrame, type: "unknown.frame" }).ok, false);
   assert.equal(parseRelayFrame({ ...baseFrame, payload: { body: "x".repeat(20_000) } }).ok, false);
+  assert.equal(parseRelayFrame({ ...baseFrame, type: "web.presence", payload: { agent: "Codex", provider: "codex", url: "https://example.test", target: { selector: "#submit" }, action: "click", seq: 1 } }).ok, true);
+});
+
+test("web.presence validates its target and fans out only redacted, bounded presence", async () => {
+  const framesByConnection = new Map<string, RelayFrame[]>();
+  const service = new MissionRelayService({
+    authenticator: { async authenticate({ credential }) { return { kind: "human", id: credential, workspaceIds: ["workspace-1"] }; } },
+    loadMissionSnapshot: async () => ({ mission: "snapshot" }),
+  });
+  for (const connectionId of ["sender", "observer"]) {
+    framesByConnection.set(connectionId, []);
+    service.connect({ connectionId, send: (frame) => { framesByConnection.get(connectionId)!.push(frame); } });
+    await service.receive(connectionId, { ...baseFrame, type: "auth.browser", frameId: `auth-${connectionId}`, payload: { credential: connectionId } });
+    await service.receive(connectionId, { ...baseFrame, type: "mission.subscribe", frameId: `subscribe-${connectionId}`, payload: { cursor: null } });
+  }
+
+  const sent = { ...baseFrame, type: "web.presence", frameId: "web-presence-1", payload: {
+    agent: "Codex", provider: "codex", url: "https://shop.example/cart?session=secret#payment",
+    target: { selector: "#checkout" }, action: "click", seq: 1,
+  } } as RelayFrame;
+  await service.receive("sender", sent);
+  const published = framesByConnection.get("observer")!.find((frame) => frame.type === "web.presence");
+  assert.ok(published);
+  assert.deepEqual(published.payload, {
+    agent: "Codex", provider: "codex", url: "https://shop.example/cart", target: { selector: "#checkout" }, action: "click", seq: 1,
+  });
+
+  await service.receive("sender", { ...sent, frameId: "web-presence-invalid", payload: { ...sent.payload as Record<string, unknown>, target: { x: 1.2, y: 0.5 } } });
+  assert.equal(framesByConnection.get("sender")!.some((frame) => frame.type === "relay.error" && (frame.payload as { code?: string }).code === "web_presence_invalid"), true);
+  assert.equal(framesByConnection.get("observer")!.filter((frame) => frame.type === "web.presence").length, 1);
 });
 
 test("workspace authorization rejects cross-tenant relay access", () => {

@@ -64,3 +64,44 @@
 .reserve:hover{color:#000!important}
 .bottomCta>a{display:inline-block;color:#fff;background:#000;border:1px solid #a1a1a1;border-radius:100px;width:354px;max-width:100%;padding:22px 30px;font:italic 28px/36px StudyInstrument,serif;box-shadow:0 0 30px #aa73fd66,inset 0 0 10px #ffffff24;transition:box-shadow .3s,transform .3s}
 .bottomCta>a:hover{box-shadow:0 0 55px #aa73fd99;transform:scale(1.03)}
+
+/* Launch additions: nav actions, products section, waitlist card, bottom buttons */
+.navActions{display:flex;gap:10px;align-items:center}
+.navActions .reserve{min-width:0;padding:8px 18px 10px;cursor:pointer}
+.bottomButtons{display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
+.bottomButtons>a,.bottomButtons>button{display:inline-block;color:#fff;background:#000;border:1px solid #a1a1a1;border-radius:100px;width:300px;max-width:100%;padding:22px 30px;font:italic 28px/36px StudyInstrument,serif;box-shadow:0 0 30px #aa73fd66,inset 0 0 10px #ffffff24;transition:box-shadow .3s,transform .3s;cursor:pointer;text-decoration:none}
+.bottomButtons>a:hover,.bottomButtons>button:hover{box-shadow:0 0 55px #aa73fd99;transform:scale(1.03)}
+.products{max-width:1180px;margin:0 auto;padding:120px 40px 140px;position:relative;z-index:2}
+.products>h2{font:600 72px/76px StudyHaas,sans-serif;letter-spacing:-.02em;color:#fff;text-align:center;margin:0 0 64px;text-shadow:0 2px 24px #0008}
+.productGrid{display:grid;grid-template-columns:1fr 1fr;gap:40px;align-items:stretch}
+.productMain{grid-column:1/-1}
+.productWindow{font-size:12px;display:flex;flex-direction:column}.productWindow .productBody{flex:1}
+.productBody{background:#fff;margin:2px 4px;padding:36px 40px 40px;box-shadow:inset 1px 1px gray,inset -1px -1px #fff,inset 2px 2px #0a0a0a;color:#000;font-family:StudyGaramond,serif}
+.productKicker{font:12px/16px StudyPixel,Arial,sans-serif;text-transform:uppercase;letter-spacing:.08em;color:#555;margin:0 0 6px}
+.productBody h3{font:italic 400 64px/60px StudyInstrument,serif;margin:0 0 18px;color:#000}
+.productMain .productBody h3{font-size:92px;line-height:84px}
+.productBody p{font-size:24px;line-height:32px;margin:0;color:#111}
+.productActions{display:flex;gap:22px;align-items:center;flex-wrap:wrap;margin-top:28px}
+.productButton{display:inline-block;color:#15151a;background:#f3dd9d;border:0;padding:10px 22px 12px;font:20px/28px StudyGaramond,serif;box-shadow:1.79px 2.68px 1.79px rgba(0,0,0,.95);cursor:pointer;text-decoration:none}
+.productButton:hover{filter:brightness(1.08)}
+.productLink{font:italic 24px/32px StudyInstrument,serif;color:#000;text-decoration:underline}
+.waitlistBackdrop{position:fixed;inset:0;z-index:100;background:rgba(5,5,14,.62);backdrop-filter:blur(6px);display:grid;place-items:center;padding:20px}
+.waitlistCard{width:min(480px,100%);max-height:calc(100dvh - 40px);overflow:auto;font-size:12px}
+.waitlistBody{background:#fff;margin:2px 4px;padding:26px 28px 30px;box-shadow:inset 1px 1px gray,inset -1px -1px #fff,inset 2px 2px #0a0a0a;color:#000;font-family:StudyGaramond,serif}
+.waitlistBody label,.waitlistBody legend{font:15px/22px StudyPixel,Arial,sans-serif;display:block;margin-top:14px;color:#222}
+.waitlistBody input[type=email]{width:100%;margin-top:6px;padding:12px;font:20px/24px StudyGaramond,serif;border:0;background:#fff;box-shadow:inset 1px 1px gray,inset -1px -1px #dfdfdf,inset 2px 2px #0a0a0a;color:#000}
+.waitlistBody fieldset{border:0;padding:0;margin:10px 0 0;display:flex;flex-wrap:wrap;gap:4px 18px}
+.waitlistBody legend{width:100%;padding:0}
+.waitlistBody .waitlistCheck{display:inline-flex;align-items:center;gap:8px;margin-top:6px;font:20px/28px StudyGaramond,serif}
+.waitlistBody .waitlistCheck input{width:18px;height:18px}
+.waitlistLead{font:italic 30px/34px StudyInstrument,serif;margin:0 0 6px;color:#000}
+.waitlistSubmit{margin-top:22px;width:100%;color:#15151a;background:#f3dd9d;border:0;padding:12px 22px 14px;font:22px/28px StudyGaramond,serif;box-shadow:1.79px 2.68px 1.79px rgba(0,0,0,.95);cursor:pointer}
+.waitlistSubmit:disabled{filter:grayscale(.5);cursor:progress}
+.waitlistNote{font:18px/24px StudyGaramond,serif;color:#333;margin:14px 0 0;min-height:24px}
+.waitlistError{color:#a10000}
+@media(max-width:900px){.products{padding:80px 20px 100px}.products>h2{font-size:44px;line-height:48px;margin-bottom:40px}.productGrid{grid-template-columns:1fr;gap:28px}.productBody{padding:26px 22px 30px}.productBody h3,.productMain .productBody h3{font-size:52px;line-height:50px}.productBody p{font-size:21px;line-height:28px}}
+@media(max-width:639px){.navActions{gap:6px}.navActions .reserve{font-size:15px;line-height:22px;padding:8px 10px 10px}.bottomButtons>a,.bottomButtons>button{width:280px;padding:17px 20px;font-size:24px}}
+
+.productivity>strong.multiplayerWord{font-size:52px;right:-370px;top:4px;white-space:nowrap}
+@media(max-width:1023px){.productivity>strong.multiplayerWord{font-size:46px;right:-150px;top:50px}}
+@media(max-width:639px){.productivity>strong.multiplayerWord{font-size:30px;right:-24px;top:40px}.heroText>p{margin-top:38px}}

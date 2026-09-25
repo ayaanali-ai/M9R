@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
-import { collectCodexResults, deliverToCodex, type DeliveryDeps } from "../src/lib/native/codex-delivery";
+import { collectCodexResults, deliverToCodex, findRolloutFile, type DeliveryDeps } from "../src/lib/native/codex-delivery";
 import { renderInboxInjection, renderResultsInjection } from "../src/lib/native/inbox-core";
 import { handleHookEvent } from "../src/lib/native/hook-handler";
 import { createLocalStore } from "../src/lib/native/local-store";
@@ -207,7 +207,7 @@ test("the session chooser never guesses between several: pinned, then the only o
   assert.equal(pickSession(two, { now: NOW, pinned: "zzz" }).kind, "none");
 });
 
-test("with two open Codex sessions an unaimed task is not pushed at random; it falls back to the inbox and says how to aim it", async () => {
+test("a task from a folder with no Codex session is never pushed into another folder's session; it falls back to the inbox and says how to aim it", async () => {
   const store = newStore();
   store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj/a" });
   store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/b" });
@@ -216,7 +216,7 @@ test("with two open Codex sessions an unaimed task is not pushed at random; it f
   const t = store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "human_typed", idempotencyKey: "amb", cwd: "C:/elsewhere" }).task;
   const r = await deliverToCodex(store, t.id, deps);
   assert.equal(r.state, "failed");
-  assert.match(r.state === "failed" ? r.reason : "", /2 Codex sessions.*m9r-cli send @codex --session/);
+  assert.match(r.state === "failed" ? r.reason : "", /No Codex session is open in C:\/elsewhere.*m9r-cli send @codex --session/);
   assert.equal(deps.calls.length, 0, "nothing was queued anywhere");
   assert.match(renderInboxInjection(store.tasksFor("codex"), 0).text, /Review lease\.ts/, "it shows at the next prompt in whichever session the user uses");
 });
@@ -262,11 +262,11 @@ test("open sessions are preferred when the machine can say which are open; other
 
 test("with two sessions the push goes to the one that is open, and the machine is asked only when there is a choice", async () => {
   const store = newStore();
-  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj/a" });
-  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/b" });
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj" });
+  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj" });
   const asked: string[][] = [];
   const deps = fakeDeps({ sessionLiveness: async (ids) => { asked.push(ids); return { [A]: "live", [B]: "free" }; } });
-  const t = store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "human_typed", idempotencyKey: "live1", cwd: "C:/elsewhere" }).task;
+  const t = store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "human_typed", idempotencyKey: "live1", cwd: "C:/proj" }).task;
   assert.deepEqual(await deliverToCodex(store, t.id, deps), { state: "queued", threadId: A });
   assert.equal(asked.length, 1);
   const pinned = store.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "live2", targetSession: B.slice(0, 12) }).task;
@@ -296,4 +296,117 @@ test("an older inbox item is not mixed into a prompt M9R pushed; it waits for th
   assert.equal(pushed, null, "the pushed prompt gets nothing added");
   const real = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "what next?" }, ctx);
   assert.match(real?.hookSpecificOutput.additionalContext ?? "", /Older item that fell back to the inbox/, "it arrives at the user's own next prompt");
+});
+
+test("a task is only ever pushed into a Codex session in the sender's own folder: not a parent, not a child, not another project", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj" });
+  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/term" });
+  const deps = fakeDeps();
+  const inTerm = store.addTask({ from: "claude", to: "codex", goal: "one", origin: "human_typed", idempotencyKey: "t1", cwd: "C:/proj/term" }).task;
+  assert.deepEqual(await deliverToCodex(store, inTerm.id, deps), { state: "queued", threadId: B });
+  const fresh = store.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "t2", cwd: "C:/proj/demo" }).task;
+  const r = await deliverToCodex(store, fresh.id, deps);
+  assert.equal(r.state, "failed", "a clean folder with no Codex session yet does not fall back to the parent's old thread");
+  assert.match(r.state === "failed" ? r.reason : "", /No Codex session is open in C:\/proj\/demo.*one message/);
+  assert.equal(deps.calls.length, 1, "nothing else was queued");
+});
+
+test("Claude's finished turn answers the task it was shown, and the answer is pushed back into the Codex session that asked (once)", async () => {
+  const { handleHookEvent } = await import("../src/lib/native/hook-handler");
+  const { pushAnswerToCodex } = await import("../src/lib/native/codex-delivery");
+  const store = newStore();
+  const asked = store.addTask({ from: "codex", to: "claude", goal: "Summarise a.txt", origin: "human_typed", idempotencyKey: "rev1", cwd: "C:/p", fromSession: A }).task;
+  const answered: string[] = [];
+  const ctx = { provider: "claude-code", store, pathExists: () => false, readIndex: () => null, lastAnswer: () => "It says: PURPLE-ELEPHANT-42.", answerBack: (id: string) => answered.push(id) };
+  // Before Claude has seen the task, a finished turn answers nothing.
+  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-1" }, ctx);
+  assert.equal(answered.length, 0);
+  // Claude sees it at its next prompt...
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", cwd: "C:/p", prompt: "go" }, ctx);
+  assert.equal(store.getTask(asked.id)?.deliveredSession, "cc-1");
+  // ...and its finished turn is the answer.
+  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-1" }, ctx);
+  assert.deepEqual(answered, [asked.id]);
+  assert.equal(store.getTask(asked.id)?.resultSummary, "It says: PURPLE-ELEPHANT-42.");
+  // A different Claude session's finished turn is not its answer.
+  const other = newStore();
+  const t2 = other.addTask({ from: "codex", to: "claude", goal: "x", origin: "human_typed", idempotencyKey: "rev2", fromSession: A }).task;
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", prompt: "go" }, { ...ctx, store: other });
+  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-OTHER" }, { ...ctx, store: other, answerBack: (id: string) => answered.push("WRONG" + id) });
+  assert.equal(other.getTask(t2.id)?.resultSummary, undefined);
+
+  const deps = fakeDeps();
+  assert.deepEqual(await pushAnswerToCodex(store, asked.id, deps), { state: "queued", threadId: A });
+  assert.equal(deps.calls.length, 1);
+  assert.equal(deps.calls[0][2], A, "the answer goes back into the session that asked");
+  assert.match(deps.calls[0][4], /^\[M9R T1\] Answer from @claude[\s\S]*PURPLE-ELEPHANT-42/);
+  assert.equal((await pushAnswerToCodex(store, asked.id, deps)).state, "skipped", "never sent twice");
+});
+
+test("two threads in the same folder: the one in use right now wins only when it is clearly the one in use; otherwise M9R does not guess", () => {
+  const now = new Date("2026-09-21T23:20:00Z");
+  const at = (min: number) => new Date(now.getTime() - min * 60_000).toISOString();
+  const s = (id: string, min: number) => ({ sessionId: id, cwd: "C:/p", lastSeenAt: at(min) });
+  assert.deepEqual(pickSession([s(A, 240), s(B, 4)], { now, senderCwd: "C:/p" }), { kind: "one", session: s(B, 4) }, "one thread used 4 minutes ago, the other 4 hours ago");
+  assert.equal(pickSession([s(A, 6), s(B, 4)], { now, senderCwd: "C:/p" }).kind, "ambiguous", "both in use lately: it is not clear");
+  assert.equal(pickSession([s(A, 900), s(B, 800)], { now, senderCwd: "C:/p" }).kind, "ambiguous", "neither used in the last 12 hours: it does not pick the least stale");
+  assert.deepEqual(pickSession([s(A, 240), s(B, 60)], { now, senderCwd: "C:/p" }), { kind: "one", session: s(B, 60) }, "the thread used an hour ago beats the one used four hours ago");
+});
+
+test("an explicit link always wins over folder and recency, and a resolved one-candidate push auto-links for next time", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj" });
+  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/elsewhere" });
+  store.setLink({ handle: "claude", sessionId: "cc-1" }, { handle: "codex", sessionId: B }, "picked");
+  const deps = fakeDeps();
+  // The sender's folder matches A, but the link to B wins.
+  const linked = store.addTask({ from: "claude", to: "codex", goal: "one", origin: "human_typed", idempotencyKey: "l1", cwd: "C:/proj", fromSession: "cc-1" }).task;
+  assert.deepEqual(await deliverToCodex(store, linked.id, deps), { state: "queued", threadId: B });
+
+  // A different, unlinked Claude session resolves normally and then gets remembered.
+  const solo = newStore(); seedCodex(solo);
+  const t = solo.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "l2", fromSession: "cc-2" }).task;
+  const outcome = await deliverToCodex(solo, t.id, fakeDeps());
+  assert.equal(outcome.state, "queued");
+  assert.deepEqual(solo.linkedSession("claude", "cc-2", "codex"), { sessionId: THREAD });
+});
+
+test("a link store entry is symmetric and replacing it removes the old one", () => {
+  const store = newStore();
+  const l1 = store.setLink({ handle: "claude", sessionId: "cc-1" }, { handle: "codex", sessionId: A }, "auto");
+  assert.deepEqual(store.linkedSession("claude", "cc-1", "codex"), { sessionId: A });
+  assert.deepEqual(store.linkedSession("codex", A, "claude"), { sessionId: "cc-1" }, "the link works from either side");
+  const l2 = store.setLink({ handle: "claude", sessionId: "cc-1" }, { handle: "codex", sessionId: B }, "picked");
+  assert.notEqual(l1.id, l2.id);
+  assert.deepEqual(store.linkedSession("claude", "cc-1", "codex"), { sessionId: B }, "the new link replaces the old one for this pair");
+  assert.equal(store.allLinks().length, 1);
+  store.removeLink(l2.id);
+  assert.equal(store.linkedSession("claude", "cc-1", "codex"), undefined);
+});
+
+test("a link whose stored session id is not a real Codex thread id is never used for the queue call; it falls through to the normal folder rules", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: THREAD, cwd: "C:/p" });
+  store.setLink({ handle: "claude", sessionId: "cc-1" }, { handle: "codex", sessionId: "not-a-uuid" }, "picked");
+  const deps = fakeDeps();
+  const t = store.addTask({ from: "claude", to: "codex", goal: "x", origin: "human_typed", idempotencyKey: "bad-link", cwd: "C:/p", fromSession: "cc-1" }).task;
+  assert.deepEqual(await deliverToCodex(store, t.id, deps), { state: "queued", threadId: THREAD }, "falls back to the folder match instead of calling codex queue with a bad id");
+  assert.equal(deps.calls.length, 1);
+  assert.equal(deps.calls[0][2], THREAD);
+});
+
+test("findRolloutFile follows a thread across Codex's rotated/resumed rollout files, not just its original one", () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-codex-home-"));
+  const day1 = join(home, "sessions", "2026", "09", "19");
+  const day2 = join(home, "sessions", "2026", "09", "21");
+  mkdirSync(day1, { recursive: true });
+  mkdirSync(day2, { recursive: true });
+  const id = "01a0bc65-5d09-71a1-89f1-1f15cf4bc79a";
+  // The original file (no second id) plus two later rotations Codex creates for the same thread as it compacts/resumes.
+  writeFileSync(join(day1, `rollout-2026-09-19T20-19-14-${id}.jsonl`), "");
+  writeFileSync(join(day2, `rollout-2026-09-21T21-56-07-${id}_01a0c70a-c5c7-7c22-8bd4-0f5ab237cdbd.jsonl`), "");
+  writeFileSync(join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "");
+  const found = findRolloutFile(home, id);
+  assert.equal(found, join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "must resolve to the latest rotation, not the closed original file");
 });
