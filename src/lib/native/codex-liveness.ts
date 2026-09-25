@@ -13,6 +13,7 @@ export type Liveness = "live" | "free" | "unknown";
 
 const CSHARP = String.raw`
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public static class M9rRm {
   [StructLayout(LayoutKind.Sequential)] struct FT { public uint lo; public uint hi; }
@@ -24,13 +25,14 @@ public static class M9rRm {
     public int type; public uint status; public uint session;
     [MarshalAs(UnmanagedType.Bool)] public bool restartable;
   }
-  [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)] static extern int RmStartSession(out uint h, int f, string key);
+  [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)] static extern int RmStartSession(out uint h, int f, StringBuilder key);
   [DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint h);
   [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)] static extern int RmRegisterResources(uint h, uint nf, string[] files, uint na, UP[] apps, uint ns, string[] svcs);
   [DllImport("rstrtmgr.dll")] static extern int RmGetList(uint h, out uint needed, ref uint count, [In, Out] PI[] info, out uint reasons);
   public static string Holders(string path) {
     uint h;
-    if (RmStartSession(out h, 0, Guid.NewGuid().ToString()) != 0) return "ERR";
+    var key = new StringBuilder(33);
+    if (RmStartSession(out h, 0, key) != 0) return "ERR";
     try {
       if (RmRegisterResources(h, 1, new[] { path }, 0, null, 0, null) != 0) return "ERR";
       uint needed = 0, count = 0, reasons;
@@ -52,7 +54,7 @@ public static class M9rRm {
 const POWERSHELL = [
   "$ErrorActionPreference = 'Stop'",
   `Add-Type -TypeDefinition @'${CSHARP}'@`,
-  "foreach ($f in ($env:M9R_RM_FILES -split '\\|')) { if ($f) { $f + [char]9 + [M9rRm]::Holders($f) } }",
+  "foreach ($f in $env:M9R_RM_FILES.Split([char]'|')) { if ($f) { $f + [char]9 + [M9rRm]::Holders($f) } }",
 ].join("\n");
 
 /** Turns the program's output into a verdict per file; anything unclear is `unknown`, never `free`. */

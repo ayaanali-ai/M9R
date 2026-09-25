@@ -8,12 +8,14 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root 'engine\dist'
 $assets = @('m9r-engine.exe', 'm9r-hook.exe')
+$extension = Join-Path $root 'cli\dist\extension'
 $destination = [IO.Path]::GetFullPath($OutputDirectory)
 
 if (-not (Test-Path -LiteralPath $dist -PathType Container)) { throw 'engine/dist is missing. Run npm run build:engine on Windows first.' }
 foreach ($asset in $assets) {
     if (-not (Test-Path -LiteralPath (Join-Path $dist $asset) -PathType Leaf)) { throw "Required release binary is missing: engine/dist/$asset" }
 }
+if (-not (Test-Path -LiteralPath (Join-Path $extension 'manifest.json') -PathType Leaf)) { throw 'cli/dist/extension is missing. Run npm run build:cli first.' }
 if (-not (Test-Path -LiteralPath $destination -PathType Container)) {
     [void](New-Item -ItemType Directory -Path $destination)
 }
@@ -22,6 +24,7 @@ $stage = Join-Path ([IO.Path]::GetTempPath()) ("m9r-release-stage-" + [guid]::Ne
 [void](New-Item -ItemType Directory -Path $stage)
 try {
     foreach ($asset in $assets) { Copy-Item -LiteralPath (Join-Path $dist $asset) -Destination (Join-Path $stage $asset) }
+    Copy-Item -LiteralPath $extension -Destination (Join-Path $stage 'extension') -Recurse
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-m9r.ps1') -Destination (Join-Path $stage 'install-m9r.ps1')
     @'
 M9R standalone Windows engine package
@@ -35,6 +38,8 @@ The executables are currently unsigned; a matching SHA-256 checksum detects corr
   .\install-m9r.ps1 -PackagePath ..\m9r-engine-windows-x64.zip
 
 The installer shows the engine's exact local setup plan and asks before editing agent configuration.
+
+To also configure M9R Web, pass -Web to the installer. It previews agent MCP changes, installs the fixed-ID extension files, and asks you to load the folder once in Chrome/Edge (the browser confirmation remains manual).
 
 Uninstall the managed setup (review the plan before confirming):
   .\install-m9r.ps1 -Uninstall

@@ -12,6 +12,8 @@ const webBrokerFiles = new Set([
   "web-broker.test.ts",
   "web-broker-server.test.ts",
   "web-broker-extension.test.ts",
+  "web-powers-core.test.ts",
+  "web-powers-mcp.test.ts",
   "page-actions.test.ts",
   "web-authority.test.ts",
   "web-authority-store.test.ts",

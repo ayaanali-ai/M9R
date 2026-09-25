@@ -80,8 +80,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     async ({ token, to, goal }) => {
       const identity = requireIdentity(token);
       const result = deps.store.addTask({
-        to,
-        from: identity.handle,
+        to: roomHandle(identity, to),
+        from: roomHandle(identity, identity.handle),
         goal,
         fromSession: identity.sessionId,
         origin: "agent_initiated",
@@ -103,6 +103,14 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
 
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+  // Browser-room agents (session ids start with "web-") talk in their own inbox space, so their chatter never
+  // lands in the owner's real Claude Code or Codex sessions, which use the plain handles.
+  const inRoom = (identity: { sessionId: string }) => identity.sessionId.startsWith("web-");
+  const roomHandle = (identity: { sessionId: string }, handle: string) => {
+    const plain = handle.replace(/^@/, "").toLowerCase();
+    return inRoom(identity) && !plain.startsWith("web-") ? `web-${plain}` : plain;
+  };
+
   server.registerTool(
     "m9r_inbox",
     {
@@ -117,9 +125,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const identity = requireIdentity(token);
       const deadline = Date.now() + (waitSeconds ?? 0) * 1000;
       for (;;) {
-        const injection = renderInboxInjection(deps.store.tasksFor(identity.handle), deps.store.cursorFor(identity.handle, identity.sessionId), { items: 10, itemChars: 3000 });
+        const injection = renderInboxInjection(deps.store.tasksFor(roomHandle(identity, identity.handle)), deps.store.cursorFor(roomHandle(identity, identity.handle), identity.sessionId), { items: 10, itemChars: 3000 });
         if (injection.text) {
-          deps.store.setCursor(identity.handle, identity.sessionId, injection.newCursor);
+          deps.store.setCursor(roomHandle(identity, identity.handle), identity.sessionId, injection.newCursor);
           return { content: [{ type: "text" as const, text: injection.text }] };
         }
         if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
@@ -196,7 +204,16 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     }
     const result = await deps.web.run({ agent: identity.handle, provider: identity.provider, sessionId: identity.sessionId, ...partial });
     if (!result.ok) return { content: [{ type: "text" as const, text: result.error ?? "The browser action failed." }], isError: true };
-    const text = typeof result.data === "string" ? result.data : JSON.stringify(result.data ?? { done: true });
+    const label = result.label ? `Target: ${result.label}\n` : "";
+    if (partial.action === "screenshot" && typeof result.data === "object" && result.data !== null) {
+      const image = result.data as { data?: unknown; mimeType?: unknown };
+      if (typeof image.data === "string" && (image.mimeType === "image/png" || image.mimeType === "image/jpeg")) {
+        return { content: [{ type: "text" as const, text: `${label}Screenshot of the current tab.` }, { type: "image" as const, data: image.data, mimeType: image.mimeType }] };
+      }
+    }
+    const room = result.room?.length ? `
+[teammates meanwhile] ${result.room.join(" | ")}` : "";
+    const text = `${label}${typeof result.data === "string" ? result.data : JSON.stringify(result.data ?? { done: true })}${room}`;
     return { content: [{ type: "text" as const, text }] };
   }
 
@@ -208,23 +225,36 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       .describe("Browser tab name. Defaults to your own handle. On a shared tab, reads never claim; typing claims one field, while opening or a submit-like click claims the tab."),
     shareWith: z.array(z.string().min(1).max(80)).max(16).optional().describe("Optional M9R agent handles allowed to act under the claim you create."),
   };
+  const targetSelector = (selector: unknown, ref: unknown): string | undefined => {
+    if (typeof selector === "string" && typeof ref === "string") return "@m9r-ref:invalid";
+    if (typeof ref === "string") return `@m9r-ref:${ref}`;
+    return typeof selector === "string" ? selector : undefined;
+  };
+  const TARGET_FIELDS = {
+    selector: z.string().min(1).max(500).optional().describe("CSS selector from a recent snapshot."),
+    ref: z.string().regex(/^e\d{1,3}$/).optional().describe("Short element ref such as e12 from the latest m9r_web_snapshot. Re-snapshot after navigation or page changes."),
+  };
 
   server.registerTool(
     "m9r_web_open",
     {
       description: "Open a web page (http or https) in the shared M9R browser. Use this instead of your own browser when you are working with other agents, so they can see where you are and avoid colliding with you.",
-      inputSchema: { ...TOKEN_FIELD, ...TAB_FIELD, url: z.string().min(1).max(2_000) },
+      inputSchema: { ...TOKEN_FIELD, ...TAB_FIELD, url: z.string().min(1).max(2_000), newTab: z.boolean().optional().describe("Always create a distinct named tab; normally M9R reuses a named tab and opens a new one automatically if another agent holds the current tab.") },
     },
-    async ({ token, tab, url, shareWith }) => runWeb(token, { action: "open", tab, url, shareWith }),
+    async ({ token, tab, url, newTab, shareWith }) => {
+      const identity = requireIdentity(token);
+      const name = newTab ? `${identity.handle.slice(0, 10)}_new_${Date.now().toString(36)}`.slice(0, 40) : tab;
+      return runWeb(token, { action: "open", tab: name, url, shareWith });
+    },
   );
 
   server.registerTool(
     "m9r_web_read",
     {
       description: "Read the visible text of the page, or of one element if you pass a CSS selector. Reading is always allowed, even on a tab another agent is using.",
-      inputSchema: { ...TOKEN_FIELD, ...TAB_FIELD, selector: z.string().max(500).optional() },
+      inputSchema: { ...TOKEN_FIELD, ...TAB_FIELD, ...TARGET_FIELDS },
     },
-    async ({ token, tab, selector }) => runWeb(token, { action: "read", tab, selector }),
+    async ({ token, tab, selector, ref }) => runWeb(token, { action: "read", tab, selector: targetSelector(selector, ref) }),
   );
 
   server.registerTool(
@@ -234,13 +264,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     inputSchema: {
       ...TOKEN_FIELD,
       ...TAB_FIELD,
-      selector: z.string().min(1).max(500),
+      ...TARGET_FIELDS,
       targetLabel: z.string().max(200).optional().describe("Optional untrusted visible-control label hint. Risky clicks are held for owner review; this label is never treated as trusted page content."),
       formSelector: z.string().min(1).max(500).optional().describe("Optional stable selector for the form this field belongs to, so a form-level claim can conflict with fields in that form."),
     },
     },
-    async ({ token, tab, selector, targetLabel, formSelector, shareWith }) => runWeb(token, {
-      action: "click", tab, selector, targetLabel, shareWith,
+    async ({ token, tab, selector, ref, targetLabel, formSelector, shareWith }) => runWeb(token, {
+      action: "click", tab, selector: targetSelector(selector, ref), targetLabel, shareWith,
       ...(formSelector ? { claimScope: { kind: "form" as const, key: formSelector } } : {}),
     }),
   );
@@ -252,12 +282,164 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     inputSchema: {
       ...TOKEN_FIELD,
       ...TAB_FIELD,
-      selector: z.string().min(1).max(500),
+      ...TARGET_FIELDS,
       formSelector: z.string().min(1).max(500).optional(),
       text: z.string().max(5_000),
     },
     },
-    async ({ token, tab, selector, formSelector, shareWith, text }) => runWeb(token, { action: "type", tab, selector, formSelector, shareWith, text }),
+    async ({ token, tab, selector, ref, formSelector, shareWith, text }) => runWeb(token, { action: "type", tab, selector: targetSelector(selector, ref), formSelector, shareWith, text }),
+  );
+
+  const POWER_TAB_FIELD = {
+    tab: z.string().min(1).max(40).optional().describe("M9R-named browser tab. Defaults to your own tab when unambiguous."),
+  };
+  const powerTool = (
+    name: string,
+    action: WebRequest["action"],
+    description: string,
+    inputSchema: Record<string, z.ZodType>,
+    map: (input: Record<string, unknown>) => Partial<WebRequest> = () => ({}),
+  ) => server.registerTool(name, { description, inputSchema: { ...TOKEN_FIELD, ...POWER_TAB_FIELD, ...inputSchema } }, async (raw) => {
+    const input = raw as Record<string, unknown>;
+    return runWeb(String(input.token), { action, tab: typeof input.tab === "string" ? input.tab : undefined, ...map(input) });
+  });
+
+  powerTool("m9r_web_scroll", "scroll", "Scroll the page or the element identified by a fresh snapshot ref or CSS selector.", {
+    ...TARGET_FIELDS, to: z.enum(["top", "bottom"]).optional(), by: z.number().finite().min(-100_000).max(100_000).optional(), smooth: z.boolean().optional(),
+  }, ({ selector, ref, to, by, smooth }) => ({ selector: targetSelector(selector, ref), args: { to: to as "top" | "bottom" | undefined, by: by as number | undefined, smooth: smooth as boolean | undefined } }));
+  powerTool("m9r_web_wait", "wait", "Wait for a CSS selector, text, or a bounded number of milliseconds (maximum 15 seconds).", {
+    ...TARGET_FIELDS, text: z.string().min(1).max(200).optional(), ms: z.number().int().min(0).max(15_000).optional(),
+  }, ({ selector, ref, text, ms }) => ({ selector: targetSelector(selector, ref), args: { text: text as string | undefined, ms: ms as number | undefined } }));
+  powerTool("m9r_web_back", "back", "Navigate backward in this M9R tab's history.", {});
+  powerTool("m9r_web_forward", "forward", "Navigate forward in this M9R tab's history.", {});
+  powerTool("m9r_web_tabs", "tabs", "List M9R tabs and provider-coloured agent tab groups. Use the tab name shown inside a group with m9r_web_switch to bring that group forward; read page content before acting.", {});
+  powerTool("m9r_web_switch", "switch", "Bring a named M9R tab to the foreground without taking its claim. For another agent's tab, choose a tab name shown under that agent's group in m9r_web_tabs.", {
+    tab: z.string().min(1).max(40).describe("The tab name shown by m9r_web_tabs."),
+  });
+  powerTool("m9r_web_close", "close", "Close an M9R-managed tab opened by this agent.", { targetLabel: z.string().max(80).optional() }, ({ targetLabel }) => ({ targetLabel: targetLabel as string | undefined }));
+  powerTool("m9r_web_press", "press", "Press a supported keyboard key, optionally targeting a page element. Enter/Space can require owner approval.", {
+    ...TARGET_FIELDS, formSelector: z.string().min(1).max(500).optional(), targetLabel: z.string().max(80).optional(),
+    key: z.string().min(1).max(48).describe("Key name or shortcut, e.g. Enter, Tab, Control+A, or Shift+Tab."), shift: z.boolean().optional(),
+    shareWith: z.array(z.string().min(1).max(80)).max(16).optional(),
+  }, ({ selector, ref, formSelector, targetLabel, key, shift, shareWith }) => ({ selector: targetSelector(selector, ref), formSelector: formSelector as string | undefined, targetLabel: targetLabel as string | undefined, shareWith: shareWith as string[] | undefined, args: { key, shift } as WebRequest["args"] }));
+  powerTool("m9r_web_select", "select", "Choose a native dropdown option by value or visible label; form-affecting choices may require owner approval.", {
+    ...TARGET_FIELDS, formSelector: z.string().min(1).max(500).optional(), targetLabel: z.string().max(80).optional(), value: z.string().max(500).optional(), option: z.string().min(1).max(500).optional(),
+    shareWith: z.array(z.string().min(1).max(80)).max(16).optional(),
+  }, ({ selector, ref, formSelector, targetLabel, value, option, shareWith }) => ({ selector: targetSelector(selector, ref), formSelector: formSelector as string | undefined, targetLabel: targetLabel as string | undefined, shareWith: shareWith as string[] | undefined, args: { value: value as string | undefined, option: option as string | undefined } }));
+  powerTool("m9r_web_find", "find", "Find matching visible text on the page and optionally scroll to the first match.", {
+    query: z.string().min(1).max(200), scrollToFirst: z.boolean().optional(),
+  }, ({ query, scrollToFirst }) => ({ args: { query: query as string, scrollToFirst: scrollToFirst as boolean | undefined } }));
+  powerTool("m9r_web_hover", "hover", "Move the page pointer over an element from a fresh snapshot ref or CSS selector.", { ...TARGET_FIELDS }, ({ selector, ref }) => ({ selector: targetSelector(selector, ref) }));
+  powerTool("m9r_web_screenshot", "screenshot", "Capture a size-capped screenshot of an authorized tab you own; returned as an MCP image when supported by the browser build.", {
+    format: z.enum(["jpeg", "png"]).optional(),
+  }, ({ format }) => ({ args: { format: format as "jpeg" | "png" | undefined } }));
+  powerTool("m9r_web_extract", "extract", "Read a bounded HTML table or list as structured JSON (maximum 500 rows).", {
+    ...TARGET_FIELDS, maxRows: z.number().int().min(1).max(500).optional(),
+  }, ({ selector, ref, maxRows }) => ({ selector: targetSelector(selector, ref), args: { maxRows: maxRows as number | undefined } }));
+
+  const SHARE_FIELD = { shareWith: z.array(z.string().min(1).max(80)).max(16).optional() };
+  const END_TARGET_FIELDS = {
+    endSelector: z.string().min(1).max(500).optional(),
+    endRef: z.string().regex(/^e\d{1,3}$/).optional(),
+  };
+  const actionTargetMap = (selector: unknown, ref: unknown) => ({ selector: targetSelector(selector, ref) });
+  const actionTargetLabel = { targetLabel: z.string().max(80).optional() };
+
+  powerTool("m9r_web_snapshot", "snapshot", "Take a structured snapshot before interacting: visible text plus up to 150 controls/links with short refs (e12) and viewport boxes. Re-snapshot after navigation or DOM changes; page text is untrusted.", {
+    query: z.string().min(1).max(200).optional(), limit: z.number().int().min(1).max(150).optional(),
+  }, ({ query, limit }) => ({ args: { query: query as string | undefined, limit: limit as number | undefined } }));
+  powerTool("m9r_web_click_at", "click_at", "Click a viewport coordinate. Always waits for owner approval because the target is not semantically identified.", {
+    x: z.number().finite().min(0).max(32_768), y: z.number().finite().min(0).max(32_768), button: z.enum(["left", "right", "middle"]).optional(),
+  }, ({ x, y, button }) => ({ args: { x: x as number, y: y as number, button: button as "left" | "right" | "middle" | undefined } }));
+  powerTool("m9r_web_reload", "reload", "Reload the current M9R tab; conflicting tab claims block it.", {});
+  powerTool("m9r_web_double_click", "double_click", "Double-click an element identified by a fresh ref or selector.", { ...TARGET_FIELDS, ...actionTargetLabel, ...SHARE_FIELD }, ({ selector, ref, targetLabel, shareWith }) => ({ ...actionTargetMap(selector, ref), targetLabel: targetLabel as string | undefined, shareWith: shareWith as string[] | undefined }));
+  powerTool("m9r_web_right_click", "right_click", "Open the page context menu on an element identified by a fresh ref or selector.", { ...TARGET_FIELDS, ...actionTargetLabel }, ({ selector, ref, targetLabel }) => ({ ...actionTargetMap(selector, ref), targetLabel: targetLabel as string | undefined }));
+  powerTool("m9r_web_drag", "drag", "Drag from a source ref/selector to a destination ref/selector. This synthetic page gesture is owner-approved and some sites may ignore it.", {
+    ...TARGET_FIELDS, ...END_TARGET_FIELDS, ...actionTargetLabel, ...SHARE_FIELD,
+  }, ({ selector, ref, endSelector, endRef, targetLabel, shareWith }) => ({
+    ...actionTargetMap(selector, ref), endSelector: targetSelector(endSelector, endRef), targetLabel: targetLabel as string | undefined,
+    shareWith: shareWith as string[] | undefined, args: { destination: targetSelector(endSelector, endRef) },
+  }));
+  powerTool("m9r_web_drop", "drop", "Drop bounded text/MIME data on a page target. This is owner-approved; external file paths are not read by the extension.", {
+    ...TARGET_FIELDS, mime: z.string().min(3).max(100), data: z.string().max(5_000), ...SHARE_FIELD,
+  }, ({ selector, ref, mime, data, shareWith }) => ({ ...actionTargetMap(selector, ref), shareWith: shareWith as string[] | undefined, args: { mime: mime as string, data: data as string } }));
+  for (const [name, action, description] of [
+    ["m9r_web_check", "check", "Check a checkbox or radio control."],
+    ["m9r_web_uncheck", "uncheck", "Uncheck a checkbox."],
+    ["m9r_web_toggle", "toggle", "Toggle a switch or checkbox."],
+  ] as const) {
+    powerTool(name, action, `${description} Uses a field claim; label heuristics may hold sensitive choices for owner approval.`, {
+      ...TARGET_FIELDS, ...actionTargetLabel, formSelector: z.string().min(1).max(500).optional(), ...SHARE_FIELD,
+    }, ({ selector, ref, targetLabel, formSelector, shareWith }) => ({
+      ...actionTargetMap(selector, ref), targetLabel: targetLabel as string | undefined, formSelector: formSelector as string | undefined, shareWith: shareWith as string[] | undefined,
+    }));
+  }
+  powerTool("m9r_web_fill_form", "fill_form", "Fill 1-30 fields in one form under a form-level claim. Sensitive inputs (password, hidden, payment-card, one-time-code) are refused.", {
+    formSelector: z.string().min(1).max(500), fields: z.array(z.object({ ...TARGET_FIELDS, value: z.string().max(5_000) })).min(1).max(30), ...SHARE_FIELD,
+  }, ({ formSelector, fields, shareWith }) => ({
+    formSelector: formSelector as string,
+    shareWith: shareWith as string[] | undefined,
+    args: { fields: (fields as Array<{ selector?: string; ref?: string; value: string }>).map((field) => ({ selector: targetSelector(field.selector, field.ref) ?? "", value: field.value })) },
+  }));
+  powerTool("m9r_web_select_text", "select_text", "Select matching text inside an element; this does not write to the system clipboard.", {
+    ...TARGET_FIELDS, text: z.string().min(1).max(500),
+  }, ({ selector, ref, text }) => ({ ...actionTargetMap(selector, ref), args: { text: text as string } }));
+  powerTool("m9r_web_copy", "copy", "Read selected/page text into the MCP result. This does not write to the operating-system clipboard.", {
+    ...TARGET_FIELDS,
+  }, ({ selector, ref }) => actionTargetMap(selector, ref));
+  powerTool("m9r_web_paste", "paste", "Insert caller-provided text into a page field (not from or to the OS clipboard); sensitive input types remain blocked.", {
+    ...TARGET_FIELDS, valueText: z.string().max(5_000), formSelector: z.string().min(1).max(500).optional(), ...SHARE_FIELD,
+  }, ({ selector, ref, valueText, formSelector, shareWith }) => ({
+    ...actionTargetMap(selector, ref), formSelector: formSelector as string | undefined, shareWith: shareWith as string[] | undefined, args: { valueText: valueText as string },
+  }));
+  powerTool("m9r_web_upload", "upload", "Owner approval is required every time. Opens a page file input; the owner must choose the local file in Chrome's native picker.", {
+    ...TARGET_FIELDS, ...actionTargetLabel, formSelector: z.string().min(1).max(500).optional(), ...SHARE_FIELD,
+  }, ({ selector, ref, targetLabel, formSelector, shareWith }) => ({
+    ...actionTargetMap(selector, ref), targetLabel: targetLabel as string | undefined, formSelector: formSelector as string | undefined, shareWith: shareWith as string[] | undefined,
+  }));
+  for (const [name, action, description] of [
+    ["m9r_web_download", "download", "Owner approval is required every time before activating a download link."],
+    ["m9r_web_submit", "submit", "Owner approval is required every time before submitting a page form/action."],
+    ["m9r_web_buy", "buy", "Owner approval is required every time before activating a purchase control."],
+    ["m9r_web_post", "post", "Owner approval is required every time before posting."],
+    ["m9r_web_follow", "follow", "Owner approval is required every time before following an account."],
+    ["m9r_web_like", "like", "Owner approval is required every time before liking/reacting."],
+    ["m9r_web_dm", "dm", "Owner approval is required every time before sending a direct message."],
+  ] as const) {
+    powerTool(name, action, description, { ...TARGET_FIELDS, ...actionTargetLabel, ...SHARE_FIELD }, ({ selector, ref, targetLabel, shareWith }) => ({
+      ...actionTargetMap(selector, ref), targetLabel: targetLabel as string | undefined, shareWith: shareWith as string[] | undefined,
+    }));
+  }
+  powerTool("m9r_web_point", "point", "Point at one element so the owner and teammates can see the existing live cursor, labelled 'this one'. Display-only; re-snapshot if the page changed.", {
+    ...TARGET_FIELDS,
+  }, ({ selector, ref }) => ({ ...actionTargetMap(selector, ref), targetLabel: "this one" }));
+
+  powerTool("m9r_web_link", "link", "Read a safe HTTP(S) href from an element identified by a fresh ref or CSS selector.", {
+    ...TARGET_FIELDS,
+  }, ({ selector, ref }) => actionTargetMap(selector, ref));
+
+  server.registerTool(
+    "m9r_web_follow_link",
+    {
+      description: "Snapshot first, then pass a link ref. Reads its href and opens it in a new named/grouped tab so another agent's shared page is never navigated away from.",
+      inputSchema: { ...TOKEN_FIELD, ...POWER_TAB_FIELD, ...TARGET_FIELDS },
+    },
+    async ({ token, tab, selector, ref }) => {
+      const identity = requireIdentity(token);
+      if (!deps.web) return { content: [{ type: "text" as const, text: "Browser tools are not available in this M9R setup." }], isError: true };
+      const link = await deps.web.run({
+        agent: identity.handle, provider: identity.provider, sessionId: identity.sessionId,
+        action: "link", tab, selector: targetSelector(selector, ref),
+      });
+      if (!link.ok) return { content: [{ type: "text" as const, text: link.error ?? "The link could not be read." }], isError: true };
+      const href = typeof link.data === "object" && link.data !== null && "href" in link.data ? (link.data as { href?: unknown }).href : undefined;
+      if (typeof href !== "string") return { content: [{ type: "text" as const, text: "The selected element did not expose a safe link." }], isError: true };
+      let url: URL;
+      try { url = new URL(href); } catch { return { content: [{ type: "text" as const, text: "The selected link URL was invalid." }], isError: true }; }
+      if (url.protocol !== "http:" && url.protocol !== "https:") return { content: [{ type: "text" as const, text: "Only http and https links can be opened." }], isError: true };
+      const newTab = `${identity.handle.slice(0, 8)}_link_${Date.now().toString(36)}`.slice(0, 40);
+      return runWeb(token, { action: "open", tab: newTab, url: url.href });
+    },
   );
 
   return server;

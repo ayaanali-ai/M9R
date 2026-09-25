@@ -41,6 +41,15 @@ test("presence formatting only displays safe summaries and ignores typed or page
   assert.equal("pageText" in (formatted ?? {}), false);
 });
 
+test("presence preserves a bounded viewport target rectangle for the live cursor path", () => {
+  const formatted = logic().formatPresenceMessage({
+    agent: "codex", message: "clicking Search", target: { selector: "@m9r-ref:e12", rect: { x: 24, y: 48, width: 180, height: 36, extra: "ignored" } },
+  }, 100);
+  assert.deepEqual(JSON.parse(JSON.stringify(formatted?.target)), {
+    selector: "@m9r-ref:e12", rect: { x: 24, y: 48, width: 180, height: 36 },
+  });
+});
+
 test("presence feed deduplicates event IDs, caps recent activity, and fades after four seconds", () => {
   const feed = logic().createPresenceFeed();
   assert.ok(feed.add({ id: "evt-1", agent: "a", message: "reading" }, 100));

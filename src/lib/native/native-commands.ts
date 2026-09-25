@@ -208,24 +208,28 @@ function mcpServerSpec(io: NativeIo): McpServerSpec | null {
 
 interface PlannedFile { path: string; kind: Kind; before: string | null; after: string; changed: boolean; summary: string }
 
-function plan(io: NativeIo): PlannedFile[] {
+function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = true): PlannedFile[] {
   const p = nativePaths(io);
-  const settingsBefore = readText(p.settings);
-  const settings = mergeHooks(settingsBefore, hookSpecs(activeHookEntry(io), "claude-code", shimFor(io)), p.settings);
-  const mdBefore = readText(p.claudeMd);
-  const md = applyStandingInstruction(mdBefore);
-  const files: PlannedFile[] = [
-    { path: p.settings, kind: "hooks-json", before: settingsBefore, after: settings.content, changed: settings.changed, summary: `add 3 hooks (session start, prompt submit, turn end) to ${p.settings}` },
-    { path: p.claudeMd, kind: "markdown-block", before: mdBefore, after: md.content, changed: md.changed, summary: `${mdBefore == null ? "create" : "add a short block to"} ${p.claudeMd}` },
-  ];
-  const mcpSpec = mcpServerSpec(io);
-  if (mcpSpec) {
+  const wantsClaude = selectedAgents === undefined || selectedAgents.includes("claude-code");
+  const wantsCodex = selectedAgents === undefined ? existsSync(p.codex) : selectedAgents.includes("codex");
+  const files: PlannedFile[] = [];
+  if (wantsClaude) {
+    const settingsBefore = readText(p.settings);
+    const settings = mergeHooks(settingsBefore, hookSpecs(activeHookEntry(io), "claude-code", shimFor(io)), p.settings);
+    const mdBefore = readText(p.claudeMd);
+    const md = applyStandingInstruction(mdBefore);
+    files.push(
+      { path: p.settings, kind: "hooks-json", before: settingsBefore, after: settings.content, changed: settings.changed, summary: `add 3 hooks (session start, prompt submit, turn end) to ${p.settings}` },
+      { path: p.claudeMd, kind: "markdown-block", before: mdBefore, after: md.content, changed: md.changed, summary: `${mdBefore == null ? "create" : "add a short block to"} ${p.claudeMd}` },
+    );
+  }
+  const mcpSpec = includeMcp ? mcpServerSpec(io) : null;
+  if (mcpSpec && wantsClaude) {
     const claudeMcpBefore = readText(p.claudeMcp);
     const claudeMcp = mergeMcpServerJson(claudeMcpBefore, MCP_SERVER_NAME, mcpSpec, p.claudeMcp);
     files.push({ path: p.claudeMcp, kind: "mcp-json", before: claudeMcpBefore, after: claudeMcp.content, changed: claudeMcp.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.claudeMcp}` });
   }
-  // Codex is only touched when it is installed here (its folder exists); M9R never creates ~/.codex.
-  if (existsSync(p.codex)) {
+  if (wantsCodex) {
     const hooksBefore = readText(p.codexHooks);
     const codexHooks = mergeHooks(hooksBefore, hookSpecs(activeHookEntry(io), "codex", shimFor(io)), p.codexHooks);
     const agentsBefore = readText(p.codexAgents);
@@ -234,7 +238,7 @@ function plan(io: NativeIo): PlannedFile[] {
       { path: p.codexHooks, kind: "hooks-json", before: hooksBefore, after: codexHooks.content, changed: codexHooks.changed, summary: `add 2 hooks (session start, prompt submit) to ${p.codexHooks} (Codex; you trust them once with /hooks)` },
       { path: p.codexAgents, kind: "markdown-block", before: agentsBefore, after: agents.content, changed: agents.changed, summary: `${agentsBefore == null ? "create" : "add a short block to"} ${p.codexAgents} (it tells Codex to leave @mentions of other agents to M9R, so nothing is done twice)` },
     );
-    if (mcpSpec) {
+    if (mcpSpec && includeMcp) {
       const codexConfigBefore = readText(p.codexConfig);
       const codexConfig = mergeMcpServerToml(codexConfigBefore, MCP_SERVER_NAME, mcpSpec);
       files.push({ path: p.codexConfig, kind: "mcp-toml", before: codexConfigBefore, after: codexConfig.content, changed: codexConfig.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.codexConfig}` });
@@ -253,9 +257,9 @@ async function ask(io: NativeIo, yes: boolean, question: string): Promise<boolea
   return io.confirm(question);
 }
 
-export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: boolean; autostart?: boolean }): Promise<number> {
+export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: boolean; autostart?: boolean; agents?: readonly string[]; identityOnly?: boolean }): Promise<number> {
   let files: PlannedFile[];
-  try { files = plan(io); } catch (error) {
+  try { files = plan(io, flags.agents, !flags.identityOnly); } catch (error) {
     if (error instanceof UnparseableConfigError) { io.err(error.message); io.err("Nothing was changed."); return 1; }
     throw error;
   }
@@ -437,7 +441,13 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   for (let i = 0; i < rest.length; i += 1) { if (rest[i].startsWith("-")) { if (["--from", "--key", "--for", "--session"].includes(rest[i])) i += 1; continue; } positionals.push(rest[i]); }
   if (command === "setup") {
     if (has("--status")) { printNativeStatus(io); return 0; }
-    return runSetup(io, { yes: has("--yes", "-y"), dryRun: has("--dry-run"), autostart: has("--autostart") ? true : undefined });
+    return runSetup(io, {
+      yes: has("--yes", "-y"),
+      dryRun: has("--dry-run"),
+      autostart: has("--autostart") ? true : undefined,
+      agents: value("--agents")?.split(",").map((agent) => agent.trim()).filter(Boolean),
+      identityOnly: has("--identity-only"),
+    });
   }
   if (command === "uninstall") return runUninstall(io, { yes: has("--yes", "-y"), purge: has("--purge") });
   if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key"), session: value("--session") });

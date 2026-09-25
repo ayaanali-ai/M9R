@@ -9,11 +9,12 @@
 import { originOf, pathOf, type WebAuthority } from "./web-authority-core";
 import { redactSecrets } from "./inbox-core";
 import { classifyWebActionRisk } from "./risk-core";
+import { narrateStep, type WebActivity } from "./web-ui-bridge";
+import { classifyPowerRisk, describePower, extraTimeoutFor, grantActionFor, isPowerAction, powerScopeFor, sanitizeLabel, validatePowerRequest, type WebPowerAction, type WebPowerArgs } from "./web-powers-core";
 
-export type WebAction = "open" | "read" | "click" | "type";
+export type WebAction = "open" | "read" | "click" | "type" | WebPowerAction;
 
 const ACTIONS: readonly WebAction[] = ["open", "read", "click", "type"];
-const MUTATING: ReadonlySet<WebAction> = new Set<WebAction>(["open", "click", "type"]);
 
 export const MAX_SELECTOR_LENGTH = 500;
 export const MAX_TEXT_LENGTH = 5_000;
@@ -38,12 +39,18 @@ export interface WebRequest {
   /** Named M9R handles allowed to act within this claim until it expires. */
   shareWith?: string[];
   text?: string;
+  /** Parameters for the power actions (web-powers-core.ts); refused on open/read/click/type. */
+  args?: WebPowerArgs;
 }
 
 export interface WebResponse {
   ok: boolean;
   data?: unknown;
   error?: string;
+  /** Accessible name or nearest visible text of the target (the page title for page-level actions), max 80 chars. */
+  label?: string;
+  /** What teammates did since this agent's last action (newest last, at most 5): the shared-room awareness. */
+  room?: string[];
 }
 
 export interface WebBrokerDeps {
@@ -54,8 +61,14 @@ export interface WebBrokerDeps {
   now?: () => number;
   timeoutMs?: number;
   claimTtlMs?: number;
+  /** Stops runaway agents: a repeat limit for identical state-changing actions and an action budget per window. Off unless set. */
+  loopGuard?: { repeat: number; budget: number; windowMs: number };
   approvalTimeoutMs?: number;
   newId?: () => string;
+  /** Adds plain-words `step` and `phase` to presence frames and sends a 'done' notice after each result. */
+  narrate?: boolean;
+  /** In-process activity stream for the UI bridge (web-ui-bridge.ts). */
+  onActivity?(activity: WebActivity): void;
 }
 
 export interface WebAgentMessage {
@@ -89,6 +102,8 @@ interface Pending {
   addedOpenCandidate: boolean;
   expectedOrigin?: string;
   expectedPathPrefix?: string;
+  request?: WebRequest;
+  presence?: Record<string, unknown>;
 }
 
 function fail(error: string): WebResponse {
@@ -110,15 +125,21 @@ function describe(request: WebRequest): string {
       return `clicking ${request.selector}`;
     case "type":
       return `typing in ${request.selector}`;
+    default:
+      return describePower(request);
   }
 }
 
 export function validateRequest(request: WebRequest): string | null {
   if (!request.agent || typeof request.agent !== "string") return "missing agent";
-  if (!ACTIONS.includes(request.action)) return `unknown action ${String(request.action)}`;
+  if (!ACTIONS.includes(request.action) && !isPowerAction(request.action)) return `unknown action ${String(request.action)}`;
   if (request.tab !== undefined && !/^[a-z0-9][a-z0-9_-]{0,39}$/i.test(request.tab)) {
     return "tab must be 1-40 letters, digits, dashes or underscores";
   }
+  if (isPowerAction(request.action)) {
+    const problem = validatePowerRequest(request as unknown as Parameters<typeof validatePowerRequest>[0]);
+    if (problem) return problem;
+  } else if (request.args !== undefined) return `${request.action} does not take args`;
   if (request.action === "open") {
     let parsed: URL;
     try {
@@ -149,7 +170,20 @@ export function createWebBroker(deps: WebBrokerDeps) {
   const pending = new Map<string, Pending>();
   const tabUrls = new Map<string, string>();
   const tabsByActor = new Map<string, Set<string>>();
+  const focusedTabByActor = new Map<string, string>();
+  const openedBy = new Map<string, string>();
   const tabLastActivity = new Map<string, number>();
+  // Shared-room awareness: what each agent did, so every agent's next reply can carry what its teammates did meanwhile.
+  const roomLog: Array<{ seq: number; agent: string; text: string }> = [];
+  let roomSeq = 0;
+  const roomCursor = new Map<string, number>();
+  const tabLastBy = new Map<string, string>();
+  function roomEventsFor(actor: string): string[] | undefined {
+    const since = roomCursor.get(actor) ?? 0;
+    const events = roomLog.filter((event) => event.seq > since && event.agent !== actor).slice(-5).map((event) => event.text);
+    roomCursor.set(actor, roomSeq);
+    return events.length ? events : undefined;
+  }
   const presenceByTab = new Map<string, Map<string, Record<string, unknown>>>();
   const hiddenMessageSessions = new Set<string>();
   const typedValuesBySession = new Map<string, Array<{ value: string; expiresAt: number }>>();
@@ -171,6 +205,10 @@ export function createWebBroker(deps: WebBrokerDeps) {
     timer: ReturnType<typeof setTimeout>;
   }
   const approvals = new Map<string, ApprovalEntry>();
+  const narrate = deps.narrate === true;
+  const emit = (activity: WebActivity) => {
+    try { deps.onActivity?.(activity); } catch { /* the UI must never break the broker */ }
+  };
 
   function advanceFeed(): void {
     feedSequence += 1;
@@ -213,6 +251,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
 
   function addTypedValue(sessionId: string, value: string | undefined): void {
     if (!value) return;
+    // Ordinary lowercase search words are not secrets; redacting them would blank them out of the whole thread.
+    if (/^[\p{L}][\p{L} ]{0,30}$/u.test(value)) return;
     const values = sessionTypedValues(sessionId);
     values.push({ value, expiresAt: now() + Math.max(claimTtlMs, 60_000) });
     while (values.length > 32) values.shift();
@@ -234,6 +274,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
   }
 
   function scopeFor(request: WebRequest): WebClaimScope | null {
+    const powerScope = powerScopeFor(request as unknown as Parameters<typeof powerScopeFor>[0]);
+    if (powerScope !== undefined) return powerScope;
     if (request.action === "read") return null;
     if (request.action === "type") return { kind: "field", key: request.selector!, ...(request.formSelector ? { formKey: request.formSelector } : {}) };
     if (request.action === "open" || (request.action === "click" && /(?:submit|checkout|purchase|buy|pay|send|delete|remove|confirm|place[-_ ]?order)/i.test(request.selector ?? ""))) return { kind: "tab", key: "*" };
@@ -286,7 +328,10 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (request.tab !== undefined) return { tab: namespace(request.tab), actorKey, publicName: request.tab };
 
     const openTabs = [...(tabsByActor.get(actorKey) ?? [])];
-    if (openTabs.length > 1) return { error: "multiple tabs are open for this agent; specify tab to choose one" };
+    // m9r_web_switch picks the tab later tab-less calls use; listing tabs never needs a choice.
+    const focused = focusedTabByActor.get(actorKey);
+    if (openTabs.length > 1 && focused && openTabs.includes(focused)) return { tab: focused, actorKey, publicName: crossOwner ? focused.slice(request.owner!.length + 1) : focused };
+    if (openTabs.length > 1 && request.action !== "tabs") return { error: "multiple tabs are open for this agent; specify tab to choose one" };
     if (openTabs.length === 1) {
       const tab = openTabs[0];
       return { tab, actorKey, publicName: crossOwner ? tab.slice(request.owner!.length + 1) : tab };
@@ -294,10 +339,31 @@ export function createWebBroker(deps: WebBrokerDeps) {
     return { tab: namespace(request.agent), actorKey, publicName: request.agent };
   }
 
+  // Loop guard state: per session, the last state-changing action signature and recent action times.
+  const recentActs = new Map<string, { sig: string; count: number; times: number[] }>();
+  function loopProblem(request: WebRequest): string | null {
+    const guard = deps.loopGuard;
+    if (!guard || request.action === "read" || request.action === "find" || request.action === "wait" || request.action === "tabs") return null;
+    const key = String(request.sessionId ?? request.agent);
+    const at = now();
+    const entry = recentActs.get(key) ?? { sig: "", count: 0, times: [] };
+    entry.times = entry.times.filter((time) => at - time < guard.windowMs);
+    if (entry.times.length >= guard.budget) return `action budget reached (${guard.budget} in ${Math.round(guard.windowMs / 60000)} minutes); stop and tell the owner what you did and what is left`;
+    const sig = [request.action, request.tab, request.url, request.selector, request.text].join(" ");
+    entry.count = entry.sig === sig ? entry.count + 1 : 1;
+    entry.sig = sig;
+    entry.times.push(at);
+    recentActs.set(key, entry);
+    if (entry.count >= guard.repeat) return `you have done this exact ${request.action} ${entry.count} times in a row; it either already worked (check with a read) or it will not work. Try a different approach, ask a teammate, or finish`;
+    return null;
+  }
+
   function dispatch(request: WebRequest): Promise<WebResponse> {
     if (stopState.state === "stopped") return Promise.resolve(fail("browser actions are stopped by the owner; restart the local broker to resume"));
     const problem = validateRequest(request);
     if (problem) return Promise.resolve(fail(problem));
+    const looping = loopProblem(request);
+    if (looping) return Promise.resolve(fail(looping));
 
     const crossOwner = request.owner !== undefined && request.owner !== deps.ownerId;
     // A guest's tabs are namespaced by owner, so a guest agent can never land in one of the host's own tabs.
@@ -305,6 +371,14 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if ("error" in resolvedTab) return Promise.resolve(fail(resolvedTab.error));
     const { tab, actorKey } = resolvedTab;
     const actor = crossOwner ? `${request.agent}@${request.owner}` : request.agent;
+    const publicTab = (name: string) => crossOwner && name.startsWith(`${request.owner}/`) ? name.slice(request.owner!.length + 1) : name;
+    if (request.action === "switch" && !tabsByActor.get(actorKey)?.has(tab) && !tabUrls.has(tab) && !openedBy.has(tab)) return Promise.resolve(fail(`tab "${resolvedTab.publicName}" is not open in the room; m9r_web_tabs lists every tab`));
+    if (request.action === "close" && openedBy.get(tab) !== actorKey) return Promise.resolve(fail(`tab "${resolvedTab.publicName}" was not opened by you; you can only close tabs you opened`));
+    const powerFields = request.action === "tabs"
+      ? { tabs: [...new Set<string>([...tabUrls.keys(), ...openedBy.keys(), ...(tabsByActor.get(actorKey) ?? [])])]
+          .filter((name) => !crossOwner || name.startsWith(`${request.owner}/`))
+          .map((name) => ({ tab: name, name: publicTab(name), opened: openedBy.get(name) === actorKey, url: tabUrls.get(name), lastBy: tabLastBy.get(name), mine: tabsByActor.get(actorKey)?.has(name) ?? false })) }
+      : {};
 
     let expectOrigin: string | undefined;
     let expectPathPrefix: string | undefined;
@@ -315,7 +389,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
       if (!origin) return Promise.resolve(fail("open the page first so its site can be checked against your grant"));
       const decision = deps.authority.check({
         grantee: { owner: request.owner as string, agent: request.agent },
-        action: request.action,
+        action: grantActionFor(request.action, request as unknown as Parameters<typeof grantActionFor>[1]),
         origin,
         path: pathOf(currentUrl ?? undefined) ?? undefined,
         selector: request.selector,
@@ -330,13 +404,48 @@ export function createWebBroker(deps: WebBrokerDeps) {
       expectPathPrefix = deps.authority.grants().find((grant) => grant.id === decision.grantId)?.pathPrefix;
     }
 
+    if (request.action === "tabs") {
+      // The room list is answered here, from what every agent has done, so it never depends on the extension.
+      const room = roomEventsFor(actor);
+      return Promise.resolve({ ok: true, data: powerFields.tabs ?? [], ...(room ? { room } : {}) });
+    }
+
+    // A shared page is a shared document: opening a page a teammate already has open in this tab joins it instead of reloading it
+    // (a reload would erase what the teammate is typing).
+    if (request.action === "open" && !crossOwner && request.url && (tabsByActor.get(actorKey)?.has(tab) || openedBy.has(tab))) {
+      const flat = (value: string | undefined) => String(value ?? "").replace(/#.*$/, "").replace(/\/+$/, "");
+      const known = tabUrls.get(tab);
+      if (known && flat(known) === flat(request.url)) {
+        rememberTab(actorKey, tab);
+        let host = "";
+        try { host = new URL(known).host; } catch { /* the step text falls back to a plain phrase */ }
+        deps.send({
+          type: "notice",
+          tab,
+          presence: { id: newId(), agent: actor, provider: request.provider, action: "joined this page", message: "joined this page", claimed: false, claimMs: 0, phase: "done", step: host ? `Joined ${host}` : "Joined the page", target: undefined },
+        });
+        return Promise.resolve({ ok: true, data: { tab, url: known, note: "This page is already open in that tab; you joined it without reloading. Read it, or click and type in it: teammates may be here too." } });
+      }
+    }
+
     const requestedScope = scopeFor(request);
     let claimHolder: Claim | undefined;
     if (requestedScope) {
       const conflicting = activeClaims(tab).find((claim) => scopesOverlap(claim.scope, requestedScope) && claim.agent !== actor && !claim.sharedWith.has(actor));
+      if (conflicting && request.action === "open" && !crossOwner) {
+        // Navigating a tab another agent is using would yank the page from under them: open a fresh tab instead.
+        const base = `${request.tab}-${actor.replace(/[^A-Za-z0-9_-]/g, "")}`.slice(0, 60);
+        let fresh = base;
+        for (let n = 2; tabsByActor.get(actorKey)?.has(fresh) || activeClaims(fresh).length > 0 || openedBy.has(fresh); n += 1) fresh = `${base}-${n}`;
+        return dispatch({ ...request, tab: fresh }).then((response) => response.ok
+          ? { ...response, data: { ...((typeof response.data === "object" && response.data) || {}), tab: fresh, note: `@${conflicting.agent} is using tab "${request.tab}", so this opened in a new tab "${fresh}". Use "${fresh}" for your next actions.` } as never }
+          : response);
+      }
       if (conflicting) {
         const seconds = Math.max(1, Math.ceil((conflicting.expiresAt - now()) / 1000));
         const scopeName = conflicting.scope.kind;
+        const blockedStep = `Waiting: @${conflicting.agent} is using this ${scopeName === "field" ? "field" : scopeName === "form" ? "form" : "tab"} (${narrateStep(request, "start")})`;
+        emit({ kind: "blocked", agent: actor, provider: request.provider, sessionId: request.sessionId, tab, step: blockedStep });
         // Display-only: lets the page show that the guardrail fired. It carries no request text and no page values.
         deps.send({
           type: "notice",
@@ -352,6 +461,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
             claimMs: 0,
             target: request.selector ? { selector: request.selector } : undefined,
             claimScope: conflicting.scope,
+            ...(narrate ? { phase: "done", step: blockedStep } : {}),
           },
         });
         return Promise.resolve(
@@ -379,6 +489,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
       url: request.url,
       selector: request.selector,
       text: request.text,
+      ...(request.args ? { args: request.args } : {}),
+      ...powerFields,
       expectOrigin,
       expectPathPrefix,
       // Presence summaries are derived from the action only; never include request.text or page values.
@@ -390,11 +502,12 @@ export function createWebBroker(deps: WebBrokerDeps) {
         owner: request.owner ?? deps.ownerId ?? "you",
         action: describe(request),
         message: describe(request),
-        claimed: MUTATING.has(request.action),
-        claimMs: MUTATING.has(request.action) ? claimTtlMs : 0,
+        claimed: requestedScope !== null,
+        claimMs: requestedScope !== null ? claimTtlMs : 0,
         target: request.selector ? { selector: request.selector } : undefined,
         ...(requestedScope ? { claimScope: requestedScope } : {}),
         ...(claimHolder?.sharedWith.size ? { sharedWith: [...claimHolder.sharedWith].sort() } : {}),
+        ...(narrate ? { phase: "start", step: narrateStep(request, "start") } : {}),
       },
     };
 
@@ -404,14 +517,17 @@ export function createWebBroker(deps: WebBrokerDeps) {
       const timer = setTimeout(() => {
         pending.delete(id);
         resolve(fail("timed out waiting for the browser"));
-      }, timeoutMs);
-      pending.set(id, { resolve, timer, tab, actorTabsKey: actorKey, action: request.action, addedOpenCandidate, expectedOrigin: expectOrigin, expectedPathPrefix: expectPathPrefix });
+      }, timeoutMs + extraTimeoutFor(request as unknown as Parameters<typeof extraTimeoutFor>[0]));
+      pending.set(id, { resolve, timer, tab, actorTabsKey: actorKey, action: request.action, addedOpenCandidate, expectedOrigin: expectOrigin, expectedPathPrefix: expectPathPrefix, request: { ...request, text: undefined }, presence: message.presence });
       if (!deps.send(message)) {
         clearTimeout(timer);
         pending.delete(id);
         if (addedOpenCandidate) forgetTab(actorKey, tab);
         resolve(fail("no browser extension is connected"));
-      } else recordPresence(tab, message.presence, request.owner);
+      } else {
+        recordPresence(tab, message.presence, request.owner);
+        emit({ kind: "action", phase: "start", id, agent: actor, provider: request.provider, sessionId: request.sessionId, tab, action: request.action, step: narrateStep(request, "start"), url: request.url ?? tabUrls.get(tab), ...(request.action === "type" && request.text ? { typedText: request.text } : {}) });
+      }
     });
   }
 
@@ -419,7 +535,9 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (stopState.state === "stopped") return Promise.resolve(fail("browser actions are stopped by the owner; restart the local broker to resume"));
     const invalid = validateRequest(request);
     if (invalid) return Promise.resolve(fail(invalid));
-    const risk = classifyWebActionRisk(request);
+    const risk = isPowerAction(request.action)
+      ? classifyPowerRisk(request as unknown as Parameters<typeof classifyPowerRisk>[0])
+      : classifyWebActionRisk(request as Parameters<typeof classifyWebActionRisk>[0]);
     if (!risk.risky) return dispatch(request);
     if (!deps.authority) return Promise.resolve(fail("risky browser action requires owner approval, but the approval audit is unavailable"));
 
@@ -460,6 +578,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
     }, approvalTimeoutMs);
     approvals.set(id, { id, actor, request: approvedRequest, risk: risk.category ?? "risky", origin, createdAt, expiresAt: createdAt + approvalTimeoutMs, resolve: resolveResponse, timer });
     advanceFeed();
+    emit({ kind: "approval", id, agent: actor, provider: request.provider, step: narrateStep(request, "start") });
+    void result.then(() => emit({ kind: "approvals-changed" }));
     return result;
   }
 
@@ -479,6 +599,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
     clearTimeout(entry.timer);
     approvals.delete(id);
     advanceFeed();
+    emit({ kind: "approvals-changed" });
     try {
       deps.authority?.recordActionDecision(decision === "approve" ? "action.approved" : "action.denied", entry.actor, {
         action: entry.request.action,
@@ -505,6 +626,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (message.type === "tab-closed" && typeof (raw as { tab?: unknown }).tab === "string") {
       const closedTab = (raw as { tab: string }).tab;
       tabUrls.delete(closedTab);
+      openedBy.delete(closedTab);
+      for (const [actorKey, focused] of focusedTabByActor) if (focused === closedTab) focusedTabByActor.delete(actorKey);
       for (const [actorKey, tabs] of tabsByActor) {
         tabs.delete(closedTab);
         if (tabs.size === 0) tabsByActor.delete(actorKey);
@@ -538,11 +661,39 @@ export function createWebBroker(deps: WebBrokerDeps) {
       : outsidePath
         ? fail("the page ended up outside the granted path")
         : message.ok
-          ? { ok: true, data }
+          ? { ok: true, data, ...(sanitizeLabel((raw as { label?: unknown }).label) ? { label: sanitizeLabel((raw as { label?: unknown }).label) } : {}) }
           : fail(typeof message.error === "string" ? message.error : "the browser reported a failure");
-    if (response.ok) rememberTab(entry.actorTabsKey, entry.tab);
+    if (response.ok && entry.action === "close") {
+      forgetTab(entry.actorTabsKey, entry.tab);
+      tabUrls.delete(entry.tab);
+      openedBy.delete(entry.tab);
+      if (focusedTabByActor.get(entry.actorTabsKey) === entry.tab) focusedTabByActor.delete(entry.actorTabsKey);
+    } else if (response.ok && entry.action !== "tabs") {
+      rememberTab(entry.actorTabsKey, entry.tab);
+      if (entry.action === "open") openedBy.set(entry.tab, entry.actorTabsKey);
+      if (entry.action === "switch") focusedTabByActor.set(entry.actorTabsKey, entry.tab);
+    }
     else if (entry.addedOpenCandidate || /tab .* is not open/i.test(response.error ?? "")) forgetTab(entry.actorTabsKey, entry.tab);
     if (/tab .* is not open/i.test(response.error ?? "")) tabUrls.delete(entry.tab);
+    if (entry.request && entry.presence) {
+      const rawLabel = typeof (raw as { label?: unknown }).label === "string" ? (raw as { label: string }).label
+        : message.data && typeof message.data === "object" && typeof (message.data as { label?: unknown }).label === "string" ? (message.data as { label: string }).label : undefined;
+      // A label for an opened page is its title; for a typed field it names the field, never the value.
+      const label = rawLabel ? redactTypedValues(entry.request.sessionId, rawLabel.slice(0, 200)) : undefined;
+      const step = narrateStep(entry.request, "done", { ok: response.ok, label, error: response.error });
+      if (narrate) deps.send({ type: "notice", tab: entry.tab, presence: { ...entry.presence, phase: "done", step, ok: response.ok } });
+      emit({ kind: "action", phase: "done", id: message.id, agent: String(entry.presence.agent), provider: entry.request.provider, sessionId: entry.request.sessionId, tab: entry.tab, action: entry.action, step, ok: response.ok, url: tabUrls.get(entry.tab) });
+      if (response.ok && entry.action !== "tabs") {
+        const who = String(entry.presence.agent);
+        tabLastBy.set(entry.tab, who);
+        roomLog.push({ seq: ++roomSeq, agent: who, text: `@${who}: ${step} [tab ${entry.tab}]` });
+        if (roomLog.length > 100) roomLog.splice(0, roomLog.length - 100);
+      }
+      if (response.ok) {
+        const room = roomEventsFor(String(entry.presence.agent));
+        if (room) (response as WebResponse).room = room;
+      }
+    }
     entry.resolve(response);
   }
 
@@ -626,6 +777,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
     // The extension signal stops future dispatch and page-side presence. An action already running in a page
     // may still finish; M9R cannot roll back or cancel an external side effect after it was dispatched.
     deps.send({ type: "stop-all", owner: stopState.stoppedBy, stoppedAt: new Date(stopState.stoppedAt ?? now()).toISOString() });
+    emit({ kind: "stopped" });
     for (const [id, entry] of pending) {
       clearTimeout(entry.timer);
       pending.delete(id);

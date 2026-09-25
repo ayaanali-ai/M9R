@@ -5,10 +5,10 @@
  *
  * Local first: nothing here needs the network or an account (design section 1, principle 7).
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
-import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
+import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, normalizeHandle, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 
 export interface EndpointRecord {
@@ -69,13 +69,16 @@ export interface SessionLink {
 
 const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [] });
 
-const cursorKey = (handle: string, sessionId?: string): string => (sessionId ? `${handle}::${sessionId}` : handle);
+const cursorKey = (handle: string, sessionId?: string): string => {
+  const normalizedHandle = normalizeHandle(handle);
+  return sessionId ? normalizedHandle + "::" + sessionId : normalizedHandle;
+};
 
 const KNOWN_PROVIDER_HANDLES: Readonly<Record<string, string>> = { "claude-code": "claude", claude: "claude", codex: "codex", opencode: "opencode" };
 
 /** `claude-code` is addressed as `@claude`; unknown providers keep a safe slug of their own name. */
 export function handleForProvider(provider: string): string {
-  const key = provider.toLowerCase();
+  const key = normalizeHandle(provider);
   const known = KNOWN_PROVIDER_HANDLES[key];
   if (known) return known;
   return key.replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 39) || "agent";
@@ -131,6 +134,19 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     if (s.events.length > MAX_EVENTS) s.events = s.events.slice(-MAX_EVENTS);
   };
 
+  /** On Windows a rename over a file another process is reading can fail with EPERM/EBUSY for a moment; retry, then copy. */
+  function renameWithRetry(from: string, to: string): void {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try { renameSync(from, to); return; } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (attempt + 1));
+      }
+    }
+    copyFileSync(from, to);
+    try { rmSync(from, { force: true }); } catch { /* the temp file is harmless */ }
+  }
+
   /** Runs `fn` on the state under the lock and writes the result atomically. */
   function update<T>(fn: (state: StoreState) => T): T {
     acquire();
@@ -139,7 +155,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       const out = fn(state);
       const tmp = `${statePath}.tmp-${process.pid}`;
       writeFileSync(tmp, JSON.stringify(state), "utf8");
-      renameSync(tmp, statePath);
+      renameWithRetry(tmp, statePath);
       return out;
     } finally {
       rmSync(lockPath, { recursive: true, force: true });
@@ -193,15 +209,16 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     /** Same idempotency key for the same recipient returns the existing task, so a repeated send delivers once. */
     addTask(input: NewTaskInput): { task: Task; created: boolean } {
+      const normalizedInput = { ...input, from: normalizeHandle(input.from), to: normalizeHandle(input.to) };
       return update((s) => {
-        const existing = findByIdempotencyKey(s.tasks, input.to, input.idempotencyKey);
+        const existing = findByIdempotencyKey(s.tasks, normalizedInput.to, normalizedInput.idempotencyKey);
         if (existing) return { task: existing, created: false };
-        const seq = (s.nextSeq[input.to] ?? 0) + 1;
-        s.nextSeq[input.to] = seq;
+        const seq = (s.nextSeq[normalizedInput.to] ?? 0) + 1;
+        s.nextSeq[normalizedInput.to] = seq;
         const id = `T${s.nextTaskNo}`;
         s.nextTaskNo += 1;
-        const rule = input.origin === "agent_initiated" && input.standingRuleApplies === undefined ? ruleCovers(s.rules, { from: input.from, to: input.to, goal: input.goal }, now()) : undefined;
-        const task = newTask({ ...input, standingRuleApplies: input.standingRuleApplies ?? !!rule }, { id, seq }, now().toISOString());
+        const rule = normalizedInput.origin === "agent_initiated" && normalizedInput.standingRuleApplies === undefined ? ruleCovers(s.rules, { from: normalizedInput.from, to: normalizedInput.to, goal: normalizedInput.goal }, now()) : undefined;
+        const task = newTask({ ...normalizedInput, standingRuleApplies: normalizedInput.standingRuleApplies ?? !!rule }, { id, seq }, now().toISOString());
         s.tasks.push(task);
         if (rule) pushEvent(s, { kind: "task.approved", taskId: id, handle: task.to, text: `${id} approved by standing rule ${rule.id}` });
         pushEvent(s, { kind: "task.created", taskId: id, handle: task.to, text: `@${task.from} to @${task.to}: ${task.goal.slice(0, 120)}` });
@@ -225,8 +242,9 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     /** Tasks shown to this agent's session that have no answer yet: what its next finished turn is (probably) the answer to. */
     awaitingAnswerFrom(handle: string, sessionId: string | undefined, withinMs = 60 * 60_000): Task[] {
+      const normalizedHandle = normalizeHandle(handle);
       const cutoff = now().getTime() - withinMs;
-      return readState().tasks.filter((t) => t.to === handle && t.deliveredAt && !t.resultSummary && (!t.deliveredSession || t.deliveredSession === sessionId) && Date.parse(t.deliveredAt) >= cutoff);
+      return readState().tasks.filter((t) => normalizeHandle(t.to) === normalizedHandle && t.deliveredAt && !t.resultSummary && (!t.deliveredSession || t.deliveredSession === sessionId) && Date.parse(t.deliveredAt) >= cutoff);
     },
 
     setAnswerPushed(id: string): void {
@@ -239,7 +257,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const at = now().toISOString();
         for (const t of s.identities) if (t.sessionId === sessionId && !t.revokedAt) t.revokedAt = at;
-        const issued = issueIdentity(handle, provider, sessionId, at);
+        const issued = issueIdentity(normalizeHandle(handle), provider, sessionId, at);
         s.identities = [...s.identities, issued].slice(-200);
         return issued;
       });
@@ -345,11 +363,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     tasksFrom(handle: string): Task[] {
-      return readState().tasks.filter((t) => t.from === handle);
+      const normalizedHandle = normalizeHandle(handle);
+      return readState().tasks.filter((t) => normalizeHandle(t.from) === normalizedHandle);
     },
 
     tasksFor(handle: string): Task[] {
-      return readState().tasks.filter((t) => t.to === handle);
+      const normalizedHandle = normalizeHandle(handle);
+      return readState().tasks.filter((t) => normalizeHandle(t.to) === normalizedHandle);
     },
 
     setApproval(id: string, approval: Approval): Task | undefined {

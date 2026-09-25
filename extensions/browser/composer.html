@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="color-scheme" content="dark" />
+  <title>M9R message bar</title>
+  <link rel="stylesheet" href="frame.css" />
+  <style>
+    #wrap { display: inline-flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 14px; width: 448px; }
+    body.small #wrap { width: auto; }
+    .cbar {
+      display: flex; align-items: flex-end; gap: 8px; min-height: 44px; padding: 5px 6px 5px 6px; border-radius: 22px;
+      background: rgba(18, 20, 25, .86); -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2);
+      border: 1px solid var(--line-2); box-shadow: 0 1px 0 rgba(255,255,255,.05) inset, 0 4px 14px rgba(0,0,0,.32);
+      cursor: grab; transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+    }
+    .cbar.focused { border-color: rgba(255,255,255,.2); box-shadow: 0 1px 0 rgba(255,255,255,.05) inset, 0 4px 14px rgba(0,0,0,.36), 0 0 0 3px rgba(217,120,63,.14); }
+    body.small .cbar { padding: 6px; }
+    .lead { flex: none; height: 32px; min-width: 32px; border: 0; padding: 0; border-radius: 16px; background: var(--bg-3); box-shadow: 0 0 0 1px var(--line-2); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+    .lead .m9r-logo { width: 16px; height: 16px; }
+    .lead[data-ring] { position: relative; }
+    .lead.stack { background: transparent; box-shadow: none; padding: 0 2px; }
+    .lead.stack { padding: 0 4px 0 2px; }
+    .lead.stack .chip { width: 26px; height: 26px; box-shadow: 0 0 0 2px #14161b; }
+    .lead.stack .chip + .chip { margin-left: -8px; }
+    .lead.stack .chip::after { display: none; }
+    .lead.stack .chip[data-ring="working"] { box-shadow: 0 0 0 2px #14161b, 0 0 0 3.5px var(--working); }
+    .lead.stack .chip[data-ring="waiting"] { box-shadow: 0 0 0 2px #14161b, 0 0 0 3.5px var(--accent); }
+    .lead.stack .chip[data-ring="blocked"] { box-shadow: 0 0 0 2px #14161b, 0 0 0 3.5px var(--blocked); }
+    .field { flex: 1; min-width: 0; align-self: center; position: relative; cursor: text; }
+    .input { max-height: 84px; caret-color: var(--accent); overflow-y: auto; outline: none; padding: 5px 2px; color: var(--text); font-size: 14px; line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-width: thin; }
+    .input:empty::before { content: attr(data-placeholder); color: #b4b8c1; pointer-events: none; }
+    .status { position: absolute; inset: 0; display: flex; align-items: center; padding: 0 2px; color: var(--open); font-size: 13.5px; pointer-events: none; animation: rise .2s var(--ease); background: rgba(18,20,25,.0); }
+    .status.bad { color: var(--blocked); }
+    .mention { display: inline-flex; align-items: center; gap: 4px; margin: 0 1px; padding: 0 7px 0 4px; height: 20px; vertical-align: -4px; border-radius: 10px; background: var(--bg-3); box-shadow: inset 0 0 0 1px var(--line-2); font: 600 12px/20px var(--display); color: var(--text); user-select: all; }
+    .mention .logo { width: 11px; height: 11px; }
+    .mention .logo.p-agent { width: 7px; height: 7px; background: var(--accent); }
+    .send { flex: none; width: 32px; height: 32px; border: 0; border-radius: 50%; display: grid; place-items: center; background: var(--bg-3); color: var(--faint); cursor: default; transition: background-color .2s var(--ease), color .2s var(--ease), transform .15s var(--ease); }
+    .send svg { width: 15px; height: 15px; }
+    .send.ready { background: var(--text); color: #0b0c0f; cursor: pointer; }
+    .send.ready:hover { transform: scale(1.05); }
+    .menu { align-self: flex-start; min-width: 220px; padding: 5px; border-radius: 12px; background: rgba(16, 18, 22, .97); border: 1px solid var(--line-2); box-shadow: 0 10px 30px rgba(0,0,0,.45); animation: rise .15s var(--ease); }
+    .opt { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font-size: 13px; text-align: left; cursor: pointer; }
+    .opt .chip { width: 22px; height: 22px; }
+    .opt .hint { margin-left: auto; color: var(--faint); font-size: 11.5px; }
+    .opt.on { background: var(--bg-3); }
+    .all-mark { width: 22px; height: 22px; border-radius: 50%; background: var(--bg-3); box-shadow: 0 0 0 1px var(--line-2); display: grid; place-items: center; font: 700 10px/1 var(--display); color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="menu" class="menu" role="listbox" hidden></div>
+    <div id="bar" class="cbar">
+      <button id="lead" class="lead" type="button" aria-label="Hide or show the message bar"><span class="m9r-logo"></span></button>
+      <div id="field" class="field">
+        <div id="input" class="input" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message your agents" data-placeholder="Message your agents, @ to mention"></div>
+        <div id="status" class="status" hidden></div>
+      </div>
+      <button id="send" class="send" type="button" aria-label="Send" disabled><svg viewBox="0 0 16 16"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    </div>
+  </div>
+  <script src="src/frame-common.js"></script>
+  <script src="src/composer.js"></script>
+</body>
+</html>

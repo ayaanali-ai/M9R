@@ -4,6 +4,7 @@
   "description": "M9R CLI — connect coding agents, report live presence, coordinate bounded assignments, and record human-approved evidence.",
   "type": "module",
   "bin": {
+    "m9r": "dist/m9r.js",
     "m9r-cli": "dist/m9r.js",
     "oathlock": "dist/oathlock.js"
   },

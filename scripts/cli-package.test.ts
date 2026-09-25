@@ -140,6 +140,17 @@ test("built entry has the correct shebang and a relative core import", () => {
   assert.ok(!readFileSync(resolve(distDir, "oathlock-resident-core.js"), "utf8").includes("@/lib/"));
 });
 
+test("built MCP package includes the web broker, powers, and page-notes runtime dependencies", () => {
+  for (const name of ["web-broker-client.js", "web-broker-core.js", "web-broker-server.js", "web-ui-bridge.js", "web-powers-core.js", "page-notes-core.js", "page-notes-store.js"]) {
+    assert.ok(existsSync(resolve(distDir, name)), `missing packaged MCP dependency ${name}`);
+  }
+  const mcpEntry = readFileSync(resolve(distDir, "m9r-mcp.js"), "utf8");
+  const mcpServer = readFileSync(resolve(distDir, "mcp-server.js"), "utf8");
+  assert.match(mcpEntry, /\.\/web-broker-client\.js/);
+  assert.match(mcpServer, /m9r_web_scroll/);
+  assert.match(mcpServer, /\.\/page-notes-store\.js/);
+});
+
 test("built CLI ships the local terminal bridge and routes terminal bridge to it", () => {
   const entry = readFileSync(resolve(distDir, "m9r.js"), "utf8");
   const bridgeFiles = [

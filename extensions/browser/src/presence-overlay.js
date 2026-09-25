@@ -2,65 +2,86 @@
   "use strict";
 
   const ROOT_ID = "m9r-presence-root";
-  const TRAIL_MAX = 8;
-  const IDLE_AFTER_MS = 15000;
   const EDGE = 10;
   const MESSAGE_TTL_MS = 4000;
-  const FEED_LIMIT = 12;
-
+  const GLIDE_MS = 480;
+  const IDLE_AFTER_MS = 4000;
+  // Without a roster from the broker there is no "session ended" signal; an agent silent this long is taken as gone.
+  const ORPHAN_AFTER_MS = 90000;
+  // With a roster, an agent missing from it leaves once it has also been quiet for a moment.
+  const MISSING_AFTER_MS = 20000;
   const HIDDEN_SESSIONS_KEY = "m9rHiddenMessageSessions";
+  const POSITION_KEYS = { pill: "m9rPillPos", composer: "m9rComposerPos" };
 
   const ARROW =
     '<svg viewBox="0 0 16 16"><path d="M1 1l5 13 2.2-5.3L13.5 6.5z" fill="var(--c)" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/></svg>';
 
   const STYLE = `
     .layer{position:fixed;inset:0;pointer-events:none;font:500 11px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif}
-    .agent{position:absolute;left:0;top:0;will-change:transform;transition:transform 480ms cubic-bezier(.22,.8,.3,1),opacity 300ms}
-    .agent.instant{transition:opacity 300ms}
-    .agent.idle{opacity:.45}
+    .agent{position:absolute;left:0;top:0;will-change:transform;transition:opacity 260ms ease}
+    .agent.idle .arrow,.agent.idle .badge{animation:breathe 2.6s ease-in-out infinite}
+    .agent.idle .label{opacity:.82}
+    .agent.parked{opacity:.72}
+    .sweep{position:fixed;left:0;right:0;top:0;height:72px;pointer-events:none;background:linear-gradient(to bottom,transparent,color-mix(in srgb,var(--c) 20%,transparent),transparent);animation:sweep 1000ms ease-in-out forwards}
+    @keyframes sweep{from{transform:translateY(-72px);opacity:0}15%{opacity:1}85%{opacity:1}to{transform:translateY(100vh);opacity:0}}
+    .agent.leaving{opacity:0}
+    .agent.pressed .arrow{transform:scale(.82);transition:transform 90ms ease-out}
     .agent.offscreen .badge{outline:2px dashed rgba(255,255,255,.75);outline-offset:2px}
     .agent.flip-x .badge{left:-37px}
-    .agent.flip-x .label{left:auto;right:42px}
+    .agent.flip-x .label,.agent.flip-x .bubble{left:auto;right:42px}
     .agent.flip-y .badge{top:-37px}
-    .agent.flip-y .label{top:-32px}
-    .arrow{position:absolute;left:0;top:0;width:16px;height:16px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))}
+    .agent.flip-y .label{top:-40px}
+    .agent.flip-y .bubble{top:auto;bottom:44px}
+    .arrow{position:absolute;left:0;top:0;width:16px;height:16px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35));transform-origin:0 0;transition:transform 160ms ease-out}
     .badge{position:absolute;left:11px;top:11px;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;color:#fff;background:var(--c);font:700 12px/1 system-ui,sans-serif;border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.28)}
-    .provider-logo{width:16px;height:16px;object-fit:contain;display:block;filter:brightness(0) invert(1)}.who-agent .provider-logo{width:14px;height:14px}.who-agent{display:inline-flex;align-items:center;gap:6px}.who-agent.logo-only{width:28px;height:28px;padding:0;justify-content:center;border-radius:50%}.who-agent.logo-only .provider-logo{width:16px;height:16px}.provider-fallback{font:700 12px/1 system-ui,sans-serif}
-    .label{position:absolute;left:42px;top:16px;white-space:nowrap;padding:3px 8px;border-radius:999px;background:rgba(18,18,22,.88);color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.25);max-width:220px;overflow:hidden;text-overflow:ellipsis}
+    .provider-logo{width:16px;height:16px;object-fit:contain;display:block;filter:brightness(0) invert(1)}.label .provider-logo{width:13px;height:13px}.provider-fallback{font:700 12px/1 system-ui,sans-serif}
+    .label{position:absolute;left:42px;top:calc(16px + var(--slot,0) * 36px);white-space:normal;padding:6px 11px;border-radius:12px;background:rgba(16,18,22,.97);color:#ebe8e1;font:600 14px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;box-shadow:0 3px 12px rgba(0,0,0,.4),0 0 0 1px rgba(255,255,255,.08);width:max-content;max-width:min(320px,70vw);overflow-wrap:break-word;word-break:normal;transition:opacity 300ms ease}
     .label:empty{display:none}
+    .label .name{color:#fff;margin-right:6px}.label .step{font-weight:500;color:#e2dfd8}.label.done .step{color:#9296a0}
+    .label .caret-mini{display:inline-block;width:2px;height:13px;margin-left:3px;vertical-align:-2px;background:var(--c);animation:blink 1s steps(1) infinite}
     .lock{position:absolute;right:-17px;top:-5px;display:none;padding:2px 4px;border:1px solid #fff;border-radius:4px;background:#a32222;color:#fff;font:700 8px/1 system-ui,sans-serif;box-shadow:0 2px 6px rgba(0,0,0,.3)}
     .agent.claimed .lock{display:block}
-    .bubble{position:absolute;left:42px;top:40px;max-width:240px;padding:6px 9px;border:1px solid rgba(255,255,255,.7);border-radius:7px;background:rgba(18,18,22,.94);color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.32);opacity:1;transition:opacity 350ms ease;white-space:normal}
+    .bubble{position:absolute;left:42px;top:calc(52px + var(--slot,0) * 36px);width:max-content;max-width:min(320px,70vw);padding:8px 11px;font:500 14px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif;border:1px solid rgba(255,255,255,.14);border-radius:3px 10px 10px 10px;background:rgba(22,25,30,.96);color:#ebe8e1;box-shadow:0 2px 8px rgba(0,0,0,.32);opacity:1;transition:opacity 350ms ease;white-space:normal;overflow-wrap:break-word;word-break:normal}
     .bubble:empty{display:none}.bubble.fading{opacity:0}
-    .pulse{position:absolute;border:2px solid #fff;border-radius:8px;box-shadow:0 0 0 3px rgba(18,18,22,.6),0 0 18px var(--c);animation:pulse 900ms ease-out infinite}
-    .rail{position:fixed;right:14px;top:14px;width:min(300px,calc(100vw - 28px));max-height:42vh;overflow:hidden;padding:8px;border:1px solid rgba(255,255,255,.55);border-radius:10px;background:rgba(18,18,22,.82);color:#fff;box-shadow:0 4px 20px rgba(0,0,0,.24);font:12px/1.35 system-ui,sans-serif;backdrop-filter:blur(6px)}
-    .rail{pointer-events:auto}
-    .rail:empty{display:none}.rail-title{margin:0 0 5px;font-weight:700;letter-spacing:.03em}.entry{display:grid;grid-template-columns:22px 1fr auto;gap:6px;align-items:start;padding:5px 2px;border-top:1px solid rgba(255,255,255,.14)}
-    .entry-icon{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:var(--c);font-size:10px;font-weight:700}.entry-main{min-width:0}.entry-name{font-weight:700}.entry-message{overflow-wrap:anywhere;color:rgba(255,255,255,.88)}.entry-claim{padding:2px 4px;border-radius:4px;background:#a32222;font-size:9px;font-weight:700}.entry-blocked{background:#b45309}
-    .who{position:fixed;left:50%;top:12px;transform:translateX(-50%);display:flex;gap:5px;align-items:center;max-width:calc(100vw - 28px);padding:5px 8px;border:1px solid rgba(255,255,255,.5);border-radius:999px;background:rgba(18,18,22,.82);color:#fff;box-shadow:0 3px 14px rgba(0,0,0,.24);font:11px/1.2 system-ui,sans-serif;pointer-events:none;backdrop-filter:blur(6px)}
-    .who:empty{display:none}.who-agent{padding:3px 7px;border-radius:999px;background:var(--c);white-space:nowrap}.who-stopped{padding:4px 7px;background:#7f1d1d;border-radius:999px;font-weight:700;white-space:nowrap}
-    .message-toggle{display:block;margin:5px 0 2px 26px;padding:3px 6px;border:1px solid rgba(255,255,255,.35);border-radius:5px;background:transparent;color:#fff;font:10px/1.2 system-ui,sans-serif;cursor:pointer}
-    @keyframes pulse{50%{transform:scale(1.04);opacity:.55}}
-    .dot{position:absolute;width:7px;height:7px;margin:-3px 0 0 -3px;border-radius:50%;opacity:.55;animation:fade 800ms ease-out forwards}
-    @keyframes fade{to{opacity:0;transform:scale(.4)}}
-    @media (prefers-reduced-motion:reduce){.agent{transition:none}.dot,.pulse{display:none}}
+    .focus{position:absolute;left:0;top:0;border-radius:7px;pointer-events:none;opacity:0;transition:opacity 260ms ease;box-shadow:0 0 0 2px color-mix(in srgb,var(--c) 70%,transparent),0 0 0 6px color-mix(in srgb,var(--c) 18%,transparent),0 0 22px color-mix(in srgb,var(--c) 30%,transparent)}
+    .focus.on{opacity:1}
+    .focus.claimed{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--c),0 0 18px var(--c)}
+    .ripple{position:absolute;width:52px;height:52px;margin:-26px 0 0 -26px;border-radius:50%;border:3px solid var(--c);background:color-mix(in srgb,var(--c) 34%,transparent);animation:ripple 560ms cubic-bezier(.2,.7,.2,1) forwards;pointer-events:none}
+    .caret{position:absolute;width:2px;margin-left:1px;border-radius:1px;background:var(--c);box-shadow:0 0 6px var(--c);animation:blink 1s steps(1) infinite;pointer-events:none;display:none}
+    .caret.on{display:block}
+    .frame-host{position:fixed;left:0;bottom:0;pointer-events:auto;display:none;border:0;margin:0;padding:0;background:transparent}
+    .frame-host.ready{display:block}
+    .frame-host.hidden{display:none}
+    .frame-host iframe{display:block;border:0;margin:0;padding:0;background:transparent;color-scheme:dark;width:100%;height:100%}
+    @keyframes breathe{0%,100%{opacity:1}50%{opacity:.55}}
+    @keyframes blink{50%{opacity:0}}
+    @keyframes ripple{from{transform:scale(.25);opacity:1}to{transform:scale(1.25);opacity:0}}
+    @media (prefers-reduced-motion:reduce){.agent.idle .arrow,.agent.idle .badge,.caret,.label .caret-mini{animation:none}.ripple{animation-duration:1ms}}
   `;
 
-  function pointFor(doc, target, fallback) {
-    if (!target) return fallback;
-    if (typeof target.selector === "string") {
-      let el = null;
-      try {
-        el = doc.querySelector(target.selector);
-      } catch {
-        el = null;
-      }
-      if (!el) return fallback;
-      const r = el.getBoundingClientRect();
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-    }
-    if (Number.isFinite(target.x) && Number.isFinite(target.y)) return { x: target.x, y: target.y };
-    return fallback;
+  // Minimum-jerk profile: how a hand actually moves (slow start, fast middle, slow settle), not a symmetric ease.
+  const minJerk = (t) => t * t * t * (10 - 15 * t + 6 * t * t);
+  // Fitts-style duration: longer trips take longer, but not proportionally.
+  const glideDuration = (dist) => Math.min(1200, Math.max(300, 260 + 140 * Math.log2(1 + dist / 30)));
+  const DWELL_MS = 170;
+  let lastGlideStartAt = 0;
+  // People do not start moving the instant something happens, and two people rarely start in the same half second.
+  const reactionDelay = (fromParked) => {
+    const now = performance.now();
+    const base = fromParked ? 260 + Math.random() * 300 : 60 + Math.random() * 140;
+    const stagger = now - lastGlideStartAt < 700 ? 300 + Math.random() * 500 : 0;
+    return base + stagger;
+  };
+
+  function verbOf(msg) {
+    if (typeof msg.verb === "string") return msg.verb;
+    const said = String(msg.action || msg.message || "").toLowerCase();
+    if (/^(clicking|click)/.test(said)) return "click";
+    if (/^(typing|type)/.test(said)) return "type";
+    if (/^(reading|read)/.test(said)) return "read";
+    if (/^(opening|open)/.test(said)) return "open";
+    if (/^(scrolling|scroll)/.test(said)) return "scroll";
+    return "";
   }
 
   function createPresenceOverlay(doc, options) {
@@ -73,19 +94,11 @@
     style.textContent = STYLE;
     const layer = doc.createElement("div");
     layer.className = "layer";
-    const who = doc.createElement("aside");
-    who.className = "who";
-    who.setAttribute("aria-label", "M9R agents on this page");
-    const rail = doc.createElement("aside");
-    rail.className = "rail";
-    rail.setAttribute("aria-label", "Recent M9R agent activity");
-    rail.setAttribute("aria-live", "polite");
-    shadow.append(style, layer, who, rail);
+    shadow.append(style, layer);
     doc.documentElement.appendChild(host);
 
+    const reducedMotion = view.matchMedia ? view.matchMedia("(prefers-reduced-motion: reduce)") : { matches: false };
     const agents = new Map();
-    const pulses = new Map();
-    const feed = global.M9RPresenceLogic ? global.M9RPresenceLogic.createPresenceFeed() : null;
     const hiddenSessions = new Set();
     const storage = global.chrome && global.chrome.storage && global.chrome.storage.local;
     if (storage) {
@@ -94,35 +107,203 @@
         if (Array.isArray(saved)) for (const id of saved) if (typeof id === "string") hiddenSessions.add(id);
       }).catch(() => {});
     }
-    let currentSessionId = "";
-    let stoppedByOwner = "";
-    let frame = 0;
-    let railTimer = 0;
+    let roster = null;
+    let loop = 0;
+    let measure = null;
 
-    function dropTrail(point, color) {
-      const dot = doc.createElement("div");
-      dot.className = "dot";
-      dot.style.cssText = `left:${point.x}px;top:${point.y}px;background:${color}`;
-      dot.addEventListener("animationend", () => dot.remove());
-      layer.appendChild(dot);
-      const dots = layer.querySelectorAll(".dot");
-      for (let i = 0; i < dots.length - TRAIL_MAX * Math.max(1, agents.size); i++) dots[i].remove();
+    function providerSpec(provider) {
+      return global.M9RPresenceLogic && global.M9RPresenceLogic.providerPresentation
+        ? global.M9RPresenceLogic.providerPresentation(provider)
+        : { label: String(provider || "Agent"), glyph: String(provider || "A").slice(0, 1).toUpperCase(), color: "#6b7280" };
     }
 
-    function place(agent, animate) {
+    function providerLogo(spec) {
+      if (!spec.asset || !global.chrome || !global.chrome.runtime || typeof global.chrome.runtime.getURL !== "function") return null;
+      const image = doc.createElement("img");
+      image.className = "provider-logo";
+      image.alt = "";
+      image.src = global.chrome.runtime.getURL(spec.asset);
+      image.addEventListener("error", () => image.remove());
+      return image;
+    }
+
+    function resolveTarget(agent) {
+      if (!agent.selector) return null;
+      if (agent.targetEl && agent.targetEl.isConnected) return agent.targetEl;
+      try { agent.targetEl = agent.selector.startsWith("@m9r-ref:") ? ((window.__m9rPageActionRefMap && window.__m9rPageActionRefMap.get(agent.selector.slice(9))) || null) : doc.querySelector(agent.selector); } catch { agent.targetEl = null; }
+      return agent.targetEl;
+    }
+
+    /** Where the end of the text in a field is on screen, so the caret (and the cursor) can sit on it while typing. */
+    function caretPoint(field, rect) {
+      const cs = view.getComputedStyle(field);
+      const padLeft = parseFloat(cs.paddingLeft) + parseFloat(cs.borderLeftWidth);
+      const value = "value" in field ? String(field.value) : String(field.textContent || "");
+      if (!measure) measure = doc.createElement("canvas").getContext("2d");
+      let width = 0;
+      if (measure) {
+        measure.font = cs.font || `${cs.fontSize} ${cs.fontFamily}`;
+        const lastLine = value.split("\n").pop();
+        width = measure.measureText(cs.textTransform === "uppercase" ? lastLine.toUpperCase() : lastLine).width;
+      }
+      const x = Math.min(rect.left + padLeft + width - (field.scrollLeft || 0), rect.right - parseFloat(cs.paddingRight) - 2);
+      const lineHeight = Math.min(rect.height - 6, parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.25 || 16);
+      const isArea = field.tagName === "TEXTAREA" || field.isContentEditable;
+      const lines = isArea ? value.split("\n").length : 1;
+      const top = isArea ? Math.min(rect.top + parseFloat(cs.paddingTop) + (lines - 1) * lineHeight, rect.bottom - lineHeight - 4) : rect.top + (rect.height - lineHeight) / 2;
+      return { x: Math.max(rect.left + padLeft, x), y: top, h: lineHeight };
+    }
+
+    // Where an agent parks while it is thinking or waiting: along the bottom-right edge, one spot per agent, so idle cursors
+    // never pile up on the page or on each other.
+    function dockPoint(agent) {
+      return { x: view.innerWidth - 40 - agent.slot * 38, y: view.innerHeight - 46 };
+    }
+
+    function destination(agent, now) {
+      if (agent.docked) return dockPoint(agent);
+      const el = resolveTarget(agent);
+      if (!el) return agent.point || agent.spawn;
+      const rect = el.getBoundingClientRect();
+      if (!rect.width && !rect.height) return agent.point || agent.spawn;
+      agent.rect = rect;
+      if (agent.verb === "type" && agent.typingUntil > now) {
+        const caret = caretPoint(el, rect);
+        agent.caretAt = caret;
+        return { x: caret.x + 3, y: caret.y + caret.h * 0.75 };
+      }
+      // Agents working on the same element are fanned out a little so their cursors and labels do not sit on top of each other.
+      const fan = agents.size > 1 ? agent.slot * 14 : 0;
+      return { x: rect.left + Math.min(rect.width / 2, 40 + rect.width / 4) + fan, y: rect.top + rect.height / 2 + fan * 0.6 };
+    }
+
+    function frameTick(now) {
+      loop = 0;
       const vw = view.innerWidth;
       const vh = view.innerHeight;
-      const raw = pointFor(doc, agent.target, agent.point || { x: vw / 2, y: vh / 2 });
-      const x = Math.min(Math.max(raw.x, EDGE), vw - EDGE);
-      const y = Math.min(Math.max(raw.y, EDGE), vh - EDGE);
-      const moved = agent.point ? Math.hypot(x - agent.point.x, y - agent.point.y) : 0;
-      if (animate && moved > 24) dropTrail(agent.point, agent.color);
-      agent.el.classList.toggle("instant", !animate || !agent.point);
-      agent.point = { x, y };
-      agent.el.style.transform = `translate(${x}px, ${y}px)`;
-      agent.el.classList.toggle("offscreen", x !== raw.x || y !== raw.y);
-      agent.el.classList.toggle("flip-x", x > vw - 260);
-      agent.el.classList.toggle("flip-y", y > vh - 48);
+      for (const agent of agents.values()) {
+        const dest = destination(agent, now);
+        let x = dest.x;
+        let y = dest.y;
+        if (agent.glide) {
+          const g = agent.glide;
+          const t = Math.max(0, Math.min(1, (performance.now() - g.start) / g.duration));
+          const k = minJerk(t);
+          const dx = dest.x - g.from.x;
+          const dy = dest.y - g.from.y;
+          const dist = Math.hypot(dx, dy) || 1;
+          // A quadratic curve bowed sideways (people never move in a ruler-straight line), plus a faint hand wobble that dies out on arrival.
+          const nx = -dy / dist;
+          const ny = dx / dist;
+          const bow = Math.min(90, dist * 0.18) * g.side;
+          const cx1 = g.from.x + dx / 2 + nx * bow;
+          const cy1 = g.from.y + dy / 2 + ny * bow;
+          const u = 1 - k;
+          const wobble = Math.sin(k * Math.PI * 3) * 1.6 * (1 - k) * (dist > 40 ? 1 : 0);
+          // On a long move the hand runs slightly past the target and comes back: an overshoot that is gone by arrival.
+          const over = dist > 260 ? Math.min(14, dist * 0.03) : 0;
+          const along = over * Math.pow(Math.sin(Math.PI * k), 2) * Math.min(1, Math.max(0, (k - 0.55) / 0.3));
+          x = u * u * g.from.x + 2 * u * k * cx1 + k * k * dest.x + nx * wobble + (dx / dist) * along;
+          y = u * u * g.from.y + 2 * u * k * cy1 + k * k * dest.y + ny * wobble + (dy / dist) * along;
+          if (t >= 1) {
+            agent.glide = null;
+            const waiting = g.waiters;
+            arrive(agent);
+            if (waiting && waiting.length) view.setTimeout(() => waiting.forEach((done) => done()), DWELL_MS);
+          }
+        }
+        agent.point = { x, y };
+        const cx = Math.min(Math.max(x, EDGE), vw - EDGE);
+        const cy = Math.min(Math.max(y, EDGE), vh - EDGE);
+        agent.el.style.transform = `translate3d(${cx}px, ${cy}px, 0)`;
+        agent.el.classList.toggle("offscreen", cx !== x || cy !== y);
+        agent.el.classList.toggle("flip-x", cx > vw - 300);
+        agent.el.classList.toggle("flip-y", cy > vh - 110);
+        const showFocus = agent.rect && (agent.focusUntil > now || agent.claimedUntil > now);
+        agent.focus.classList.toggle("on", !!showFocus);
+        agent.focus.classList.toggle("claimed", agent.claimedUntil > now && !(agent.focusUntil > now));
+        if (showFocus) {
+          const r = agent.rect;
+          agent.focus.style.transform = `translate3d(${r.left - 4}px, ${r.top - 4}px, 0)`;
+          agent.focus.style.width = `${r.width + 8}px`;
+          agent.focus.style.height = `${r.height + 8}px`;
+        }
+        const typing = agent.verb === "type" && agent.typingUntil > now && agent.caretAt;
+        agent.caret.classList.toggle("on", !!typing);
+        if (typing) {
+          agent.caret.style.transform = `translate3d(${agent.caretAt.x}px, ${agent.caretAt.y}px, 0)`;
+          agent.caret.style.height = `${agent.caretAt.h}px`;
+        }
+        if (agent.typingEl && agent.typingUntil > now) {
+          const value = "value" in agent.typingEl ? agent.typingEl.value : agent.typingEl.textContent;
+          if (value !== agent.lastTyped) {
+            agent.lastTyped = value;
+            agent.typingUntil = Math.max(agent.typingUntil, now + 900);
+          }
+        }
+        if (!agent.docked && !agent.glide && !(agent.typingUntil > now) && now - agent.lastActionAt > 3200 && !reducedMotion.matches) {
+          agent.docked = true;
+          agent.wasParked = true;
+          agent.el.classList.add("parked");
+          setLabel(agent, isWorking(agent) ? "Thinking" : "Waiting", false);
+          const to = dockPoint(agent);
+          const from = agent.point || to;
+          agent.glide = { from: { ...from }, start: performance.now(), duration: glideDuration(Math.hypot(to.x - from.x, to.y - from.y)), side: Math.random() < 0.5 ? -1 : 1, waiters: [] };
+        }
+        const idle = !agent.glide && now - agent.lastSeen > IDLE_AFTER_MS && !(agent.typingUntil > now) && !isWorking(agent);
+        agent.el.classList.toggle("idle", idle);
+        agent.miniCaret.hidden = !typing;
+      }
+      if (agents.size) loop = view.requestAnimationFrame(frameTick);
+    }
+
+    function isWorking(agent) {
+      const state = roster && roster.get(agent.id);
+      return state === "working" || state === "starting";
+    }
+
+    /** Resolves once the agent's cursor has landed (plus a short dwell), so the page action happens after the cursor is there. */
+    function whenArrived(id, timeoutMs) {
+      return new Promise((resolve) => {
+        const agent = agents.get(String(id || "").slice(0, 64));
+        const timer = view.setTimeout(resolve, timeoutMs || 1800);
+        const done = () => { view.clearTimeout(timer); resolve(); };
+        if (!agent || !agent.glide) { view.setTimeout(done, DWELL_MS); return; }
+        (agent.glide.waiters || (agent.glide.waiters = [])).push(done);
+      });
+    }
+
+    function kick() {
+      if (!loop && agents.size) loop = view.requestAnimationFrame(frameTick);
+    }
+
+    function arrive(agent) {
+      if (agent.pendingClick) {
+        agent.pendingClick = false;
+        ripple(agent);
+      }
+    }
+
+    // Reading looks like reading: a soft band sweeps down the page in the agent's colour.
+    function readSweep(agent) {
+      const band = doc.createElement("div");
+      band.className = "sweep";
+      band.style.setProperty("--c", agent.color);
+      band.addEventListener("animationend", () => band.remove());
+      layer.appendChild(band);
+    }
+
+    function ripple(agent) {
+      const point = agent.point;
+      if (!point) return;
+      const ring = doc.createElement("div");
+      ring.className = "ripple";
+      ring.style.cssText = `left:${point.x}px;top:${point.y}px;--c:${agent.color}`;
+      ring.addEventListener("animationend", () => ring.remove());
+      view.setTimeout(() => ring.remove(), 1200);
+      layer.appendChild(ring);
+      agent.el.classList.add("pressed");
+      view.setTimeout(() => agent.el.classList.remove("pressed"), 140);
     }
 
     function createAgent(id, provider) {
@@ -151,273 +332,313 @@
       badge.appendChild(lock);
       const label = doc.createElement("div");
       label.className = "label";
+      const name = doc.createElement("span");
+      name.className = "name";
+      const sameAsProvider = String(id).toLowerCase() === String(spec.label).toLowerCase();
+      name.textContent = sameAsProvider ? spec.label : `${id} · ${spec.label}`;
+      const step = doc.createElement("span");
+      step.className = "step";
+      const miniCaret = doc.createElement("span");
+      miniCaret.className = "caret-mini";
+      miniCaret.hidden = true;
+      label.append(name, step, miniCaret);
       const bubble = doc.createElement("div");
       bubble.className = "bubble";
       el.append(svg, badge, label, bubble);
-      layer.appendChild(el);
-      const agent = { id, el, label, bubble, color: spec.color, provider: spec.label, sessionId: "", activity: "", lastMessage: "", target: null, point: null, lastSeen: Date.now(), bubbleTimer: 0, fadeTimer: 0, claimTimer: 0 };
+      const focus = doc.createElement("div");
+      focus.className = "focus";
+      focus.style.setProperty("--c", spec.color);
+      const caret = doc.createElement("div");
+      caret.className = "caret";
+      caret.style.setProperty("--c", spec.color);
+      layer.append(focus, caret, el);
+      // New agents come in from the bottom centre of the page, where the pill and message bar live.
+      const spawn = { x: view.innerWidth / 2, y: view.innerHeight - 90 };
+      const agent = {
+        id, el, label, step, bubble, focus, caret, miniCaret, color: spec.color, provider: spec.label, sessionId: "",
+        selector: null, targetEl: null, rect: null, point: null, spawn, glide: null, verb: "", pendingClick: false,
+        focusUntil: 0, claimedUntil: 0, typingUntil: 0, typingEl: null, lastTyped: null, caretAt: null,
+        lastSeen: Date.now(), lastMessage: "", bubbleTimer: 0, fadeTimer: 0, claimTimer: 0, leaveTimer: 0,
+        slot: agents.size, docked: false, lastActionAt: Date.now(),
+      };
+      el.style.setProperty("--slot", String(agent.slot));
       agents.set(id, agent);
       return agent;
     }
 
-    function providerSpec(provider) {
-      const spec = global.M9RPresenceLogic && global.M9RPresenceLogic.providerPresentation
-        ? global.M9RPresenceLogic.providerPresentation(provider)
-        : { label: String(provider || "Agent"), glyph: String(provider || "A").slice(0, 1).toUpperCase(), color: "#6b7280" };
-      return spec;
-    }
-
-    function providerLogo(spec) {
-      if (!spec.asset || !global.chrome || !global.chrome.runtime || typeof global.chrome.runtime.getURL !== "function") return null;
-      const image = doc.createElement("img");
-      image.className = "provider-logo";
-      image.alt = "";
-      image.src = global.chrome.runtime.getURL(spec.asset);
-      image.addEventListener("error", () => image.remove());
-      return image;
-    }
-
-    function renderWho() {
-      while (who.firstChild) who.removeChild(who.firstChild);
-      const active = [...agents.values()].filter((agent) => Date.now() - agent.lastSeen <= IDLE_AFTER_MS);
-      for (const agent of active) {
-        const badge = doc.createElement("span");
-        badge.className = "who-agent";
-        badge.style.setProperty("--c", agent.color);
-        const provider = providerSpec(agent.provider);
-        const logo = providerLogo(provider);
-        if (logo) badge.appendChild(logo);
-        // The provider mark identifies the agent; only add a name when it says something the mark does not.
-        const sameAsProvider = String(agent.id).toLowerCase() === String(provider.label).toLowerCase();
-        if (!logo || !sameAsProvider) {
-          const name = doc.createElement("span");
-          name.textContent = sameAsProvider ? provider.label : String(agent.id);
-          badge.appendChild(name);
-        } else {
-          badge.classList.add("logo-only");
-        }
-        badge.title = `${agent.id} · ${provider.label}${agent.activity ? " · " + agent.activity : ""}`;
-        who.appendChild(badge);
-      }
-      if (stoppedByOwner) {
-        const stopped = doc.createElement("span");
-        stopped.className = "who-stopped";
-        stopped.textContent = `Stopped by ${stoppedByOwner}`;
-        who.appendChild(stopped);
-      }
-    }
-
-    function toggleMessageText(sessionId) {
-      if (!sessionId) return;
-      if (hiddenSessions.has(sessionId)) hiddenSessions.delete(sessionId);
-      else hiddenSessions.add(sessionId);
-      if (storage) void storage.set({ [HIDDEN_SESSIONS_KEY]: [...hiddenSessions] }).catch(() => {});
-      if (options && typeof options.onMessageVisibility === "function") {
-        try { options.onMessageVisibility(sessionId, !hiddenSessions.has(sessionId)); } catch {}
-      }
-      for (const agent of agents.values()) {
-        if (agent.sessionId !== sessionId) continue;
-        const hidden = hiddenSessions.has(sessionId) && agent.lastMessage;
-        if (hidden) {
-          agent.bubble.textContent = "M9R message hidden";
-          agent.label.textContent = "M9R message hidden";
-        } else if (agent.lastMessage) {
-          agent.bubble.textContent = agent.lastMessage;
-          agent.label.textContent = agent.lastMessage;
-        }
-      }
-      renderRail(feed ? feed.list(Date.now()) : []);
-    }
-
-    function renderRail(items) {
-      while (rail.firstChild) rail.removeChild(rail.firstChild);
-      if (!items.length) return;
-      const title = doc.createElement("div");
-      title.className = "rail-title";
-      title.textContent = "AGENT ACTIVITY";
-      rail.appendChild(title);
-      if (currentSessionId) {
-        const toggle = doc.createElement("button");
-        toggle.type = "button";
-        toggle.className = "message-toggle";
-        toggle.textContent = hiddenSessions.has(currentSessionId) ? "Show M9R message text" : "Hide M9R message text";
-        toggle.addEventListener("click", () => toggleMessageText(currentSessionId));
-        rail.appendChild(toggle);
-      }
-      for (const item of items.slice(0, FEED_LIMIT)) {
-        const spec = providerSpec(item.provider);
-        const row = doc.createElement("div");
-        row.className = "entry";
-        row.style.setProperty("--c", spec.color);
-        const icon = doc.createElement("span");
-        icon.className = "entry-icon";
-        const logo = providerLogo(spec);
-        if (logo) icon.appendChild(logo);
-        else icon.textContent = spec.glyph;
-        const main = doc.createElement("span");
-        main.className = "entry-main";
-        const name = doc.createElement("span");
-        name.className = "entry-name";
-        const sameName = String(item.agent).toLowerCase() === String(spec.label).toLowerCase();
-        name.textContent = item.messageKind === "agent_message" && item.recipient
-          ? `${item.agent} to ${item.recipient}${sameName ? "" : " · " + spec.label}`
-          : (sameName ? spec.label : `${item.agent} · ${spec.label}`);
-        const message = doc.createElement("span");
-        message.className = "entry-message";
-        message.textContent = item.messageKind === "agent_message" && item.sessionId && hiddenSessions.has(item.sessionId)
-          ? "M9R message hidden"
-          : item.message;
-        main.append(name, doc.createElement("br"), message);
-        row.append(icon, main);
-        if (item.blocked) {
-          const blocked = doc.createElement("span");
-          blocked.className = "entry-claim entry-blocked";
-          blocked.textContent = "BLOCKED";
-          row.appendChild(blocked);
-        } else if (item.claimed) {
-          const claim = doc.createElement("span");
-          claim.className = "entry-claim";
-          claim.textContent = "CLAIMED";
-          row.appendChild(claim);
-        }
-        rail.appendChild(row);
-      }
-    }
-
-    function scheduleRailExpiry(items) {
-      if (railTimer) view.clearTimeout(railTimer);
-      if (!feed || !items.length) return;
-      const expiresAt = Math.min(...items.map((item) => item.expiresAt));
-      railTimer = view.setTimeout(() => {
-        const active = feed.list(Date.now());
-        renderRail(active);
-        scheduleRailExpiry(active);
-      }, Math.max(1, expiresAt - Date.now()));
-    }
-
-    function pulseTarget(id, target, color) {
-      const previous = pulses.get(id);
-      if (previous) previous.remove();
-      if (!target || typeof target.selector !== "string") return;
-      let element = null;
-      try { element = doc.querySelector(target.selector); } catch { return; }
-      if (!element) return;
-      const rect = element.getBoundingClientRect();
-      if (!rect.width || !rect.height) return;
-      const ring = doc.createElement("div");
-      ring.className = "pulse";
-      ring.style.cssText = `left:${rect.left - 4}px;top:${rect.top - 4}px;width:${rect.width + 4}px;height:${rect.height + 4}px;--c:${color}`;
-      layer.appendChild(ring);
-      pulses.set(id, ring);
+    function setLabel(agent, text, done) {
+      agent.step.textContent = text;
+      agent.label.classList.toggle("done", !!done);
     }
 
     function update(msg) {
       const id = String(msg.agent || "").slice(0, 64);
       if (!id) return;
-      const agent = agents.get(id) || createAgent(id, msg.provider || id);
-      agent.lastSeen = Date.now();
-      agent.target = msg.target || null;
+      let agent = agents.get(id);
+      if (agent && agent.leaveTimer) {
+        view.clearTimeout(agent.leaveTimer);
+        agent.leaveTimer = 0;
+        agent.el.classList.remove("leaving");
+      }
+      if (!agent) agent = createAgent(id, msg.provider || id);
+      const now = Date.now();
+      agent.lastSeen = now;
       agent.sessionId = typeof msg.sessionId === "string" ? msg.sessionId : agent.sessionId;
-      if (agent.sessionId) currentSessionId = agent.sessionId;
-      agent.el.classList.remove("idle");
-      const summary = global.M9RPresenceLogic
-        ? global.M9RPresenceLogic.formatPresenceMessage({ ...msg, agent: id }, Date.now())
-        : null;
+      const summary = global.M9RPresenceLogic ? global.M9RPresenceLogic.formatPresenceMessage({ ...msg, agent: id }, now) : null;
       const message = summary?.message ?? (typeof msg.action === "string" ? msg.action.slice(0, 80) : "");
+      const step = typeof msg.step === "string" && msg.step.trim() ? msg.step.replace(/\s+/g, " ").trim().slice(0, 200) : "";
+      const phase = msg.phase === "done" ? "done" : "start";
       const isAgentMessage = msg.messageKind === "agent_message";
       if (isAgentMessage) agent.lastMessage = message;
-      agent.activity = message;
       const hideText = isAgentMessage && (msg.showMessageText === false || (agent.sessionId && hiddenSessions.has(agent.sessionId)));
-      const displayMessage = hideText ? "M9R message hidden" : message;
-      agent.label.textContent = displayMessage;
+
+      if (!isAgentMessage) setLabel(agent, hideText ? "M9R message hidden" : step || message, phase === "done");
+      const selector = msg.target && typeof msg.target.selector === "string" ? msg.target.selector : null;
+      const verb = verbOf(msg);
+
+      if (phase === "start" && !isAgentMessage) {
+        const changedTarget = selector !== agent.selector;
+        agent.verb = verb;
+        if (selector) {
+          agent.selector = selector;
+          if (changedTarget) agent.targetEl = null;
+          const el = resolveTarget(agent);
+          if (verb === "read") { agent.focusUntil = now + 2400; if (!reducedMotion.matches) readSweep(agent); }
+          if (verb === "type" && el) {
+            agent.typingEl = el;
+            agent.lastTyped = null;
+            agent.typingUntil = now + 2600;
+          }
+        } else if (verb === "open") {
+          agent.selector = null;
+          agent.targetEl = null;
+        }
+        agent.pendingClick = verb === "click";
+        const from = agent.point || agent.spawn;
+        agent.docked = false;
+        agent.el.classList.remove("parked");
+        agent.lastActionAt = now;
+        if (!reducedMotion.matches) {
+          const to = destination(agent, now);
+          const dist = Math.hypot(to.x - from.x, to.y - from.y);
+          const wait = reactionDelay(!agent.point || agent.wasParked);
+          agent.wasParked = false;
+          lastGlideStartAt = performance.now() + wait;
+          agent.glide = { from: { ...from }, start: performance.now() + wait, duration: glideDuration(dist), side: Math.random() < 0.5 ? -1 : 1, waiters: [] };
+        } else {
+          agent.glide = null;
+          agent.point = null;
+          if (agent.pendingClick) view.requestAnimationFrame(() => arrive(agent));
+        }
+      } else if (phase === "done") {
+        if (agent.verb === "read") agent.focusUntil = Math.min(agent.focusUntil, now + 500);
+        if (agent.verb === "type") agent.typingUntil = Math.min(agent.typingUntil, now + 300);
+        if (verb === "click" && agent.pendingClick && !agent.glide) arrive(agent);
+      }
+
       agent.el.classList.toggle("claimed", msg.claimed === true);
       if (agent.claimTimer) view.clearTimeout(agent.claimTimer);
       if (msg.claimed === true) {
         const claimMs = Math.min(Math.max(Number(msg.claimMs) || 8000, 500), 60000);
+        agent.claimedUntil = now + claimMs;
         agent.claimTimer = view.setTimeout(() => agent.el.classList.remove("claimed"), claimMs);
-        pulseTarget(id, agent.target, agent.color);
-      } else {
-        const previous = pulses.get(id);
-        if (previous) previous.remove();
-        pulses.delete(id);
+      } else if (phase === "start") {
+        agent.claimedUntil = 0;
       }
-      if (feed && summary) {
-        feed.add({ ...msg, agent: id, provider: summary.provider, message: summary.message, claimed: msg.claimed === true, blocked: msg.blocked === true }, Date.now());
-        const items = feed.list(Date.now());
-        renderRail(items);
-        scheduleRailExpiry(items);
+
+      if (isAgentMessage || msg.blocked === true) {
+        agent.bubble.textContent = hideText ? "M9R message hidden" : summary?.bubbleMessage ?? message;
+        agent.bubble.classList.remove("fading");
+        if (agent.bubbleTimer) view.clearTimeout(agent.bubbleTimer);
+        if (agent.fadeTimer) view.clearTimeout(agent.fadeTimer);
+        agent.bubbleTimer = view.setTimeout(() => agent.bubble.classList.add("fading"), MESSAGE_TTL_MS - 350);
+        agent.fadeTimer = view.setTimeout(() => { agent.bubble.textContent = ""; }, MESSAGE_TTL_MS);
       }
-      agent.bubble.textContent = hideText ? "M9R message hidden" : summary?.bubbleMessage ?? displayMessage;
-      agent.bubble.classList.remove("fading");
-      if (agent.bubbleTimer) view.clearTimeout(agent.bubbleTimer);
-      if (agent.fadeTimer) view.clearTimeout(agent.fadeTimer);
-      agent.bubbleTimer = view.setTimeout(() => agent.bubble.classList.add("fading"), MESSAGE_TTL_MS - 350);
-      agent.fadeTimer = view.setTimeout(() => { agent.bubble.textContent = ""; }, MESSAGE_TTL_MS);
-      place(agent, true);
-      renderWho();
+      kick();
     }
 
-    function stop(owner) {
-      stoppedByOwner = typeof owner === "string" && owner.trim() ? owner.trim().slice(0, 64) : "owner";
-      renderWho();
-    }
-
-    function resume() {
-      stoppedByOwner = "";
-      renderWho();
+    /** Fade the cursor out and take it off the page. Used when the agent stops or its session ends. */
+    function leave(id) {
+      const agent = agents.get(id);
+      if (!agent || agent.leaveTimer) return;
+      agent.el.classList.add("leaving");
+      agent.focus.classList.remove("on");
+      agent.caret.classList.remove("on");
+      agent.leaveTimer = view.setTimeout(() => remove(id), reducedMotion.matches ? 0 : 280);
     }
 
     function remove(id) {
       const agent = agents.get(id);
       if (!agent) return;
       agent.el.remove();
-      if (agent.bubbleTimer) view.clearTimeout(agent.bubbleTimer);
-      if (agent.fadeTimer) view.clearTimeout(agent.fadeTimer);
-      if (agent.claimTimer) view.clearTimeout(agent.claimTimer);
-      const pulse = pulses.get(id);
-      if (pulse) pulse.remove();
-      pulses.delete(id);
+      agent.focus.remove();
+      agent.caret.remove();
+      for (const timer of [agent.bubbleTimer, agent.fadeTimer, agent.claimTimer, agent.leaveTimer]) if (timer) view.clearTimeout(timer);
       agents.delete(id);
     }
 
-    function reflow() {
-      if (frame) return;
-      frame = view.requestAnimationFrame(() => {
-        frame = 0;
-        for (const agent of agents.values()) if (agent.target && agent.target.selector) place(agent, false);
-        for (const [id, pulse] of pulses) {
-          const target = agents.get(id)?.target;
-          if (!target?.selector) continue;
-          try {
-            const element = doc.querySelector(target.selector);
-            const rect = element?.getBoundingClientRect();
-            if (rect && rect.width && rect.height) pulse.style.cssText = `left:${rect.left - 4}px;top:${rect.top - 4}px;width:${rect.width + 4}px;height:${rect.height + 4}px;--c:${agents.get(id).color}`;
-          } catch {}
-        }
-      });
+    /** The broker's roster: agents that stopped, failed or left the session take their cursor with them. */
+    function syncAgents(list) {
+      if (!Array.isArray(list)) return;
+      roster = new Map(list.filter((a) => a && typeof a.id === "string").map((a) => [a.id, a.state]));
+      const now = Date.now();
+      for (const agent of [...agents.values()]) {
+        const state = roster.get(agent.id);
+        if (state === "stopped" || state === "failed") leave(agent.id);
+        else if (state === undefined && now - agent.lastSeen > MISSING_AFTER_MS) leave(agent.id);
+      }
+      kick();
     }
 
-    const idleTimer = view.setInterval(() => {
-      const now = Date.now();
-      for (const agent of agents.values()) agent.el.classList.toggle("idle", now - agent.lastSeen > IDLE_AFTER_MS);
-    }, 2000);
+    function stop() {
+      for (const id of [...agents.keys()]) leave(id);
+    }
 
-    view.addEventListener("scroll", reflow, { capture: true, passive: true });
-    view.addEventListener("resize", reflow, { passive: true });
+    function resume() {}
+
+    const sweep = view.setInterval(() => {
+      const now = Date.now();
+      for (const agent of [...agents.values()]) {
+        if (roster ? !roster.has(agent.id) && now - agent.lastSeen > MISSING_AFTER_MS : now - agent.lastSeen > ORPHAN_AFTER_MS) leave(agent.id);
+      }
+    }, 5000);
+
+    // ---- Extension-owned frames (the thread pill and the message bar), mounted inside this closed shadow root. ----
+    const frames = new Map();
+    const extensionOrigin = global.chrome && global.chrome.runtime && typeof global.chrome.runtime.getURL === "function"
+      ? new URL(global.chrome.runtime.getURL("")).origin
+      : "";
+
+    function mountFrame(kind, src, defaults) {
+      if (frames.has(kind) || !extensionOrigin) return null;
+      const box = doc.createElement("div");
+      box.className = "frame-host";
+      const frame = doc.createElement("iframe");
+      frame.setAttribute("title", kind === "pill" ? "M9R agents" : "M9R message bar");
+      frame.setAttribute("allowtransparency", "true");
+      frame.setAttribute("scrolling", "no");
+      box.appendChild(frame);
+      shadow.appendChild(box);
+      const state = { kind, box, frame, src, size: { w: defaults.w, h: defaults.h }, pos: null, shown: true, loads: 0, defaults };
+      frames.set(kind, state);
+      frame.addEventListener("load", () => {
+        state.loads += 1;
+        // A page can navigate a child frame it can see through window.frames; if our frame is ever
+        // navigated away from the pill, rebuild it rather than show whatever it was pointed at.
+        if (state.loads > 1) {
+          state.loads = 0;
+          frame.src = src;
+          return;
+        }
+        postToFrame(state, { kind: "host", vw: view.innerWidth, vh: view.innerHeight });
+      });
+      frame.src = src;
+      if (storage) {
+        storage.get(POSITION_KEYS[kind]).then((stored) => {
+          const saved = stored && stored[POSITION_KEYS[kind]];
+          if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.bottom)) state.pos = { left: saved.left, bottom: saved.bottom };
+          layout(state);
+        }).catch(() => layout(state));
+      } else layout(state);
+      return state;
+    }
+
+    function postToFrame(state, payload) {
+      try { state.frame.contentWindow.postMessage({ m9r: "host", ...payload }, extensionOrigin); } catch {}
+    }
+
+    function layout(state) {
+      const vw = view.innerWidth;
+      const vh = view.innerHeight;
+      const w = Math.min(state.size.w, vw - 8);
+      const h = Math.min(state.size.h, vh - 8);
+      let left = state.pos ? state.pos.left : (vw - w) / 2;
+      let bottom = state.pos ? state.pos.bottom : state.defaults.bottom;
+      left = Math.min(Math.max(left, 4), Math.max(4, vw - w - 4));
+      bottom = Math.min(Math.max(bottom, 4), Math.max(4, vh - h - 4));
+      state.box.style.cssText = `left:${left}px;bottom:${bottom}px;width:${w}px;height:${h}px`;
+      state.box.classList.add("ready");
+      state.box.classList.toggle("hidden", !state.shown);
+      state.shownAt = { left, bottom, w, h };
+    }
+
+    function frameFor(source) {
+      for (const state of frames.values()) if (state.frame.contentWindow === source) return state;
+      return null;
+    }
+
+    function onFrameMessage(event) {
+      if (!extensionOrigin || event.origin !== extensionOrigin) return;
+      const state = frameFor(event.source);
+      const data = event.data;
+      if (!state || !data || data.m9r !== "frame") return;
+      if (data.kind === "size" && Number.isFinite(data.w) && Number.isFinite(data.h)) {
+        const before = state.shownAt;
+        const grew = before && data.h !== state.size.h;
+        state.size = { w: Math.max(40, Math.min(data.w, 900)), h: Math.max(40, Math.min(data.h, 2000)) };
+        // Growing keeps the bottom edge where it is (the pill opens upward); if it would run off the top, it slides down.
+        if (grew && state.pos) state.pos = { left: state.pos.left, bottom: state.pos.bottom };
+        layout(state);
+      } else if (data.kind === "drag" && Number.isFinite(data.dx) && Number.isFinite(data.dy)) {
+        const at = state.shownAt || { left: 0, bottom: 0 };
+        state.pos = { left: at.left + data.dx, bottom: at.bottom - data.dy };
+        layout(state);
+      } else if (data.kind === "drag-end") {
+        if (storage && state.shownAt) void storage.set({ [POSITION_KEYS[state.kind]]: { left: state.shownAt.left, bottom: state.shownAt.bottom } }).catch(() => {});
+      } else if (data.kind === "focus-composer") {
+        showComposer(true);
+      } else if (data.kind === "reset-position") {
+        state.pos = null;
+        if (storage) void storage.remove(POSITION_KEYS[state.kind]).catch(() => {});
+        layout(state);
+      }
+    }
+
+    function showComposer(focus) {
+      const state = frames.get("composer");
+      if (!state) return;
+      state.shown = true;
+      layout(state);
+      if (focus) {
+        try { state.frame.focus(); } catch {}
+        postToFrame(state, { kind: "focus" });
+      }
+    }
+
+    function toggleComposer() {
+      const state = frames.get("composer");
+      if (!state) return;
+      if (state.shown) {
+        state.shown = false;
+        layout(state);
+        try { view.focus(); } catch {}
+      } else showComposer(true);
+    }
+
+    function togglePill() {
+      const state = frames.get("pill");
+      if (!state) return;
+      state.shown = !state.shown;
+      layout(state);
+    }
+
+    function onResize() {
+      for (const state of frames.values()) {
+        layout(state);
+        postToFrame(state, { kind: "host", vw: view.innerWidth, vh: view.innerHeight });
+      }
+    }
+
+    view.addEventListener("message", onFrameMessage);
+    view.addEventListener("resize", onResize, { passive: true });
 
     function destroy() {
-      view.clearInterval(idleTimer);
-      if (railTimer) view.clearTimeout(railTimer);
-      for (const agent of agents.values()) {
-        if (agent.bubbleTimer) view.clearTimeout(agent.bubbleTimer);
-        if (agent.fadeTimer) view.clearTimeout(agent.fadeTimer);
-        if (agent.claimTimer) view.clearTimeout(agent.claimTimer);
-      }
-      view.removeEventListener("scroll", reflow, { capture: true });
-      view.removeEventListener("resize", reflow);
+      view.clearInterval(sweep);
+      if (loop) view.cancelAnimationFrame(loop);
+      for (const id of [...agents.keys()]) remove(id);
+      view.removeEventListener("message", onFrameMessage);
+      view.removeEventListener("resize", onResize);
       host.remove();
-      agents.clear();
-      pulses.clear();
     }
 
     function snapshot() {
@@ -426,13 +647,16 @@
         provider: a.provider,
         sessionId: a.sessionId,
         point: a.point,
-        label: a.label.textContent,
+        label: a.step.textContent,
         message: a.bubble.textContent,
         classes: [...a.el.classList].filter((c) => c !== "agent"),
       }));
     }
 
-    return { update, remove, stop, resume, destroy, snapshot };
+    return {
+      update, remove, leave, stop, resume, destroy, snapshot, syncAgents,
+      mountFrame, showComposer, toggleComposer, togglePill, whenArrived,
+    };
   }
 
   global.M9RPresence = { createPresenceOverlay, ROOT_ID };

@@ -12,16 +12,24 @@ type NeedsYou =
   | { kind: "answer"; taskId: string; from: string; summary: string };
 interface Ping { id: number; kind: string; taskId: string; text: string }
 interface InProgress { taskId: string; from: string; to: string; goal: string; state: "queued" | "waiting_prompt" | "working"; since: string }
-interface Feed { version: 1; seq: number; agents: Agent[]; needsYou: NeedsYou[]; inProgress?: InProgress[]; recent: Array<{ at: string; taskId?: string; text: string }>; pings: Ping[] }
+type WebKind = "action" | "message" | "blocked" | "worker";
+/** What agents did or said on real web pages, newest first. Optional: older engines do not write it. */
+interface WebEvent { at: string; agent: string; provider: string; kind: WebKind; text: string; tab?: string; url?: string }
+interface Feed { version: 1; seq: number; agents: Agent[]; needsYou: NeedsYou[]; inProgress?: InProgress[]; recent: Array<{ at: string; taskId?: string; text: string }>; pings: Ping[]; web?: WebEvent[] }
 
 const COLLAPSED = { w: 220, h: 36 };
-const WIDE = 340;
+const WIDE = 360;
 const PING_MS = 6000;
-const PANEL_MAX_H = 520;
+const PANEL_MAX_H = 560;
+/** How many agent marks fit on the collapsed pill beside the mark and the badge; the rest fold into "+n". */
+const MAX_MARKS = 4;
+/** A web event this recent still colours its agent's ring: working for any activity, blocked when the newest one was a block. */
+const WORKING_MS = 60_000;
+const BLOCKED_MS = 120_000;
 const inTauri = "__TAURI_INTERNALS__" in window;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const pill = $("pill"), dots = $("dots"), pingEl = $("ping"), badge = $("badge"), panel = $("panel"), mark = $("mark");
+const pill = $("pill"), dots = $("dots"), pingEl = $("ping"), badge = $("badge"), panel = $("panel"), mark = $("mark"), root = $("root");
 
 let feed: Feed | null = null;
 let engineStale = false;
@@ -46,8 +54,80 @@ const STATE_LABEL: Record<AgentState, string> = { open_working: "working", open_
 const hhmm = (iso?: string) => { const d = iso ? new Date(iso) : null; return d && !Number.isNaN(d.getTime()) ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""; };
 const stateText = (a: Agent) => (a.state === "seen" ? `seen ${hhmm(a.since)}`.trim() : STATE_LABEL[a.state]);
 
+type Provider = "claude" | "codex" | "opencode" | "agent";
+const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude", codex: "Codex", opencode: "OpenCode", agent: "Agent" };
+const providerOf = (s: string): Provider => {
+  const v = s.toLowerCase();
+  if (/claude|anthropic/.test(v)) return "claude";
+  if (/codex|openai/.test(v)) return "codex";
+  if (/opencode/.test(v)) return "opencode";
+  return "agent";
+};
+const handleOf = (s: string) => s.replace(/^@/, "").trim().toLowerCase();
+
+/** The provider's own mark, drawn as a mask so it takes the surface's ink colour. */
+function logo(provider: Provider, cls = "chip") {
+  const chip = el("span", cls);
+  chip.append(el("span", `logo p-${provider}`));
+  return chip;
+}
+
+/** Only well-formed entries: the feed is data from another process and a bad row must not break the pill. */
+function webEvents(): WebEvent[] {
+  const w = feed?.web;
+  if (!Array.isArray(w)) return [];
+  return w.filter((e): e is WebEvent => !!e && typeof e.agent === "string" && typeof e.text === "string" && typeof e.at === "string" && ["action", "message", "blocked", "worker"].includes(e.kind)).slice(0, 30);
+}
+
+type Ring = "blocked" | "waiting" | "working" | "idle" | "off";
+const RING_LABEL: Record<Ring, string> = { blocked: "blocked", waiting: "waiting for you", working: "working", idle: "open, idle", off: "not active" };
+interface Presence { key: string; provider: Provider; state: AgentState | "web"; ring: Ring; label: string }
+
+/** One entry per agent, from the agents list and from anyone acting on the web, with the ring that best says what it is doing now. */
+function presence(): Presence[] {
+  const now = Date.now();
+  const web = webEvents();
+  const out = new Map<string, Presence>();
+  for (const a of feed?.agents ?? []) {
+    const ring: Ring = a.state === "open_working" ? "working" : a.state === "open_idle" || a.state === "seen" ? "idle" : "off";
+    out.set(handleOf(a.handle), { key: handleOf(a.handle), provider: providerOf(a.handle), state: a.state, ring, label: `@${a.handle}: ${stateText(a)}` });
+  }
+  const latest = new Map<string, WebEvent>();
+  for (const e of web) { const k = handleOf(e.agent); if (!latest.has(k)) latest.set(k, e); }
+  for (const [k, e] of latest) {
+    const age = now - Date.parse(e.at);
+    const p = out.get(k) ?? { key: k, provider: providerOf(e.provider || e.agent), state: "web" as const, ring: "off" as Ring, label: "" };
+    if (e.provider) p.provider = providerOf(e.provider);
+    if (e.kind === "blocked" && age < BLOCKED_MS) p.ring = "blocked";
+    else if (age < WORKING_MS && p.ring !== "blocked") p.ring = "working";
+    out.set(k, p);
+  }
+  const waitingOn = new Set<string>();
+  for (const n of feed?.needsYou ?? []) if (n.kind === "approval" && !locallyDismissed.has(n.taskId)) waitingOn.add(handleOf(n.from));
+  for (const p of feed?.inProgress ?? []) if (p.state === "working") { const x = out.get(handleOf(p.to)); if (x && x.ring !== "blocked") x.ring = "working"; }
+  for (const k of waitingOn) { const x = out.get(k); if (x && x.ring !== "blocked") x.ring = "waiting"; }
+  for (const p of out.values()) p.label = `@${p.key} (${PROVIDER_NAME[p.provider]}): ${RING_LABEL[p.ring]}`;
+  return [...out.values()];
+}
+
+/** Reconciled by key, not rebuilt, so a ring change is a transition and not a flash. */
 function drawDots() {
-  dots.replaceChildren(...(feed?.agents ?? []).map((a) => { const d = el("span", `dot ${a.state}`); d.title = `@${a.handle}: ${stateText(a)}`; return d; }));
+  const all = presence();
+  const shown = all.slice(0, MAX_MARKS);
+  const byKey = new Map(Array.from(dots.querySelectorAll<HTMLElement>(".dot")).map((d) => [d.dataset.key ?? "", d] as const));
+  const next: HTMLElement[] = shown.map((p) => {
+    let d = byKey.get(p.key);
+    if (!d || d.dataset.provider !== p.provider) { d = logo(p.provider, "dot"); d.dataset.key = p.key; d.dataset.provider = p.provider; }
+    d.className = `dot ${p.state}`;
+    d.dataset.ring = p.ring;
+    d.title = p.label;
+    d.setAttribute("aria-label", p.label);
+    return d;
+  });
+  if (all.length > shown.length) next.push(el("span", "more", `+${all.length - shown.length}`));
+  // Move nodes only where the order changed: a detached node loses its style, and with it the transition.
+  next.forEach((n, i) => { if (dots.children[i] !== n) dots.insertBefore(n, dots.children[i] ?? null); });
+  while (dots.children.length > next.length) dots.lastElementChild?.remove();
 }
 
 function drawMark() {
@@ -205,11 +285,92 @@ function ghostRows(live: NeedsYou[]) {
   return [...decided].filter(([id]) => !ids.has(id)).map(([, d]) => { const row = el("div", "row"), main = el("div", "main"); main.append(el("div", "title", d.title), el("div", d.ok ? "result ok" : "result bad", d.text)); row.append(main); return row; });
 }
 
+type LiveFilter = "all" | "message" | "blocked";
+let liveFilter: LiveFilter = "all";
+/** Events already drawn once; only the ones after that get the entrance, so a 3 s redraw never replays it. */
+let seenLive = new Set<string>();
+let liveDrawn = false;
+const liveKey = (e: WebEvent) => `${e.at}|${e.agent}|${e.kind}|${e.text}`;
+
+const ago = (iso: string) => {
+  const s = Math.round((Date.now() - Date.parse(iso)) / 1000);
+  if (Number.isNaN(s)) return "";
+  if (s < 10) return "now";
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return hhmm(iso);
+};
+const hostOf = (url?: string) => { if (!url) return ""; try { return new URL(url).host; } catch { return ""; } };
+/** "claude to codex: text" -> addressing and body, so the message reads as one agent speaking to another. */
+const MESSAGE = /^@?([\w.-]+)\s+(?:to|→|->)\s+@?([\w.-]+)\s*:\s*([\s\S]+)$/i;
+
+function liveItem(e: WebEvent, fresh: boolean) {
+  const item = el("div", `live-item k-${e.kind}${fresh ? " fresh" : ""}`);
+  const head = el("div", "head");
+  let body = e.text;
+  head.append(el("span", "who", handleOf(e.agent)));
+  if (e.kind === "message") {
+    const m = MESSAGE.exec(e.text);
+    if (m && handleOf(m[1]) === handleOf(e.agent)) { head.append(el("span", "to", `to ${m[2]}`)); body = m[3]; }
+    else head.append(el("span", "to", "says"));
+  } else if (e.kind === "blocked") {
+    head.append(el("span", "tag blocked", "Blocked"));
+    body = body.replace(/^blocked:\s*/i, "");
+  } else if (e.kind === "worker") {
+    head.append(el("span", "tag", "Worker"));
+  }
+  const when = el("time", "when", ago(e.at));
+  const d = new Date(e.at);
+  if (!Number.isNaN(d.getTime())) { when.setAttribute("datetime", e.at); when.title = d.toLocaleString(); }
+  head.append(when);
+  const main = el("div", "body");
+  main.append(head, el("div", "text", body));
+  const where = [e.tab, hostOf(e.url)].filter(Boolean).join(" · ");
+  if (where) { const w = el("div", "where", where); if (e.url) w.title = e.url; main.append(w); }
+  item.append(logo(providerOf(e.provider || e.agent)), main);
+  return item;
+}
+
+function liveSection(events: WebEvent[]) {
+  const wrap = el("div", "live");
+  const top = el("div", "live-top");
+  top.append(el("h3", undefined, "Live"));
+  const counts: Record<LiveFilter, number> = { all: events.length, message: events.filter((e) => e.kind === "message").length, blocked: events.filter((e) => e.kind === "blocked").length };
+  const seg = el("div", "seg");
+  seg.setAttribute("role", "tablist");
+  for (const [f, label] of [["all", "All"], ["message", "Messages"], ["blocked", "Blocked"]] as Array<[LiveFilter, string]>) {
+    const b = el("button", `seg-btn${liveFilter === f ? " on" : ""}`) as HTMLButtonElement;
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(liveFilter === f));
+    b.append(el("span", undefined, label), el("span", "n", String(counts[f])));
+    b.addEventListener("click", () => { liveFilter = f; drawPanel(); fit(); });
+    seg.append(b);
+  }
+  top.append(seg);
+  wrap.append(top);
+  const shown = liveFilter === "all" ? events : events.filter((e) => e.kind === liveFilter);
+  if (shown.length === 0) {
+    wrap.append(el("div", "empty", liveFilter === "blocked" ? "Nothing is blocked." : liveFilter === "message" ? "No messages between agents yet." : "No agents on the web right now."));
+  } else {
+    const list = el("div", "live-list");
+    list.append(...shown.map((e) => liveItem(e, liveDrawn && !seenLive.has(liveKey(e)))));
+    wrap.append(list);
+  }
+  seenLive = new Set(events.map(liveKey));
+  liveDrawn = true;
+  return wrap;
+}
+
 function drawPanel() {
   if (!feed || !expanded) { panel.hidden = true; panel.replaceChildren(); return; }
+  const scroll = panel.scrollTop;
   panel.hidden = false;
+  const rings = new Map(presence().map((p) => [p.key, p.ring]));
   const agents = feed.agents.map((a) => {
-    const row = el("div", "row"); row.append(el("span", `dot ${a.state}`));
+    const row = el("div", "row agent");
+    const chip = logo(providerOf(a.handle));
+    chip.dataset.ring = rings.get(handleOf(a.handle)) ?? "off";
+    row.append(chip);
     const main = el("div", "main");
     main.append(el("div", "title", `@${a.handle} · ${stateText(a)}`), el("div", "sub", a.sessions[0]?.cwd ?? a.evidence));
     row.append(main); return row;
@@ -219,13 +380,16 @@ function drawPanel() {
   const inProgress = (feed.inProgress ?? []).filter((p) => !locallyDismissed.has(p.taskId));
   // Reconcile: once the feed itself no longer has a dismissed id, the round trip is done -- stop tracking it.
   for (const id of locallyDismissed) if (!feed.needsYou.some((n) => n.taskId === id) && !(feed.inProgress ?? []).some((p) => p.taskId === id)) locallyDismissed.delete(id);
+  const web = webEvents();
   panel.replaceChildren(
     section("Needs you", [...needsYou.map(needsRow), ...ghostRows(needsYou)], "Nothing needs you."),
+    ...(Array.isArray(feed.web) ? [liveSection(web)] : []),
     ...(inProgress.length > 0 ? [section("In progress", inProgress.map(progressRow), "")] : []),
     section("Agents", agents, "No agents seen yet."),
     section("Recent", recent, "No activity yet."),
     el("div", "foot", "M9R overlay · a view of ~/.m9r/feed.json"),
   );
+  panel.scrollTop = scroll;
 }
 
 /** Asks the window to fit the content: pill only, pill plus a ping line, or pill plus the panel. */
@@ -236,6 +400,8 @@ function fit() {
   const width = expanded || pinging ? WIDE : COLLAPSED.w;
   const height = expanded ? Math.min(PANEL_MAX_H, COLLAPSED.h + 6 + panel.offsetHeight + 2) : COLLAPSED.h;
   if (inTauri) void invoke("resize_pill", { width, height }).catch(() => undefined);
+  // Browser preview: stand in for the window by sizing the root to what the window would be.
+  else { root.style.width = `${width}px`; root.style.height = `${height}px`; }
 }
 
 function render() {
@@ -284,10 +450,29 @@ pill.addEventListener("click", () => {
   if (expanded) { pingUntil = 0; window.clearTimeout(pingTimer); }
   render();
 });
-// Keep the "· 12 s" counters moving while work is under way and the panel is open.
-window.setInterval(() => { if (expanded && (feed?.inProgress?.length ?? 0) > 0) { const y = panel.scrollTop; drawPanel(); panel.scrollTop = y; } }, 3000);
+// Keep the "· 12 s" and "40s" counters moving while the panel is open, and let rings settle as web activity ages.
+window.setInterval(() => {
+  drawDots();
+  if (expanded && ((feed?.inProgress?.length ?? 0) > 0 || webEvents().length > 0)) drawPanel();
+}, 3000);
 
 window.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && expanded) { expanded = false; render(); } });
+
+/** Preview only: shift every ISO time in the mock feed by the same amount so it reads as happening now. */
+function freshen(text: string) {
+  try {
+    const f = JSON.parse(text) as Feed;
+    const newest = Date.parse(f.web?.[0]?.at ?? f.recent?.[0]?.at ?? "");
+    if (Number.isNaN(newest)) return text;
+    const shift = Date.now() - 4000 - newest;
+    const move = (iso?: string) => (iso && !Number.isNaN(Date.parse(iso)) ? new Date(Date.parse(iso) + shift).toISOString() : iso);
+    f.web?.forEach((e) => { e.at = move(e.at) ?? e.at; });
+    f.recent.forEach((r) => { r.at = move(r.at) ?? r.at; });
+    f.inProgress?.forEach((p) => { p.since = move(p.since) ?? p.since; });
+    f.agents.forEach((a) => { a.since = move(a.since); });
+    return JSON.stringify(f);
+  } catch { return text; }
+}
 
 async function start() {
   if (inTauri) {
@@ -300,8 +485,10 @@ async function start() {
     if (initial) parse(initial);
   } else {
     // Browser preview (`npm run ui`): draw the mock feed so the design can be checked without the window.
+    document.body.classList.add("preview");
+    // Its timestamps are moved so the newest event is a few seconds old, or every ring would read as long idle.
     const res = await fetch("/mock-feed.json").catch(() => null);
-    if (res?.ok) parse(await res.text());
+    if (res?.ok) parse(freshen(await res.text()));
   }
   render();
 }

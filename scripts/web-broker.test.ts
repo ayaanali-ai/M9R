@@ -3,7 +3,7 @@ import test from "node:test";
 import { createWebAuthority, verifyAudit } from "@/lib/native/web-authority-core";
 import { createWebBroker, validateRequest, type WebRequest } from "@/lib/native/web-broker-core";
 
-function harness(options: { connected?: boolean; timeoutMs?: number; claimTtlMs?: number; approvalEnabled?: boolean; approvalTimeoutMs?: number } = {}) {
+function harness(options: { loopGuard?: { repeat: number; budget: number; windowMs: number }; connected?: boolean; timeoutMs?: number; claimTtlMs?: number; approvalEnabled?: boolean; approvalTimeoutMs?: number } = {}) {
   const sent: Array<Record<string, unknown>> = [];
   const notices: Array<Record<string, unknown>> = [];
   let clock = 1_000;
@@ -21,6 +21,7 @@ function harness(options: { connected?: boolean; timeoutMs?: number; claimTtlMs?
     timeoutMs: options.timeoutMs ?? 200,
     claimTtlMs: options.claimTtlMs ?? 8_000,
     approvalTimeoutMs: options.approvalTimeoutMs,
+    loopGuard: options.loopGuard,
     authority,
     newId: () => `c${++n}`,
   });
@@ -220,7 +221,9 @@ test("opening or clicking a submit control claims the whole tab", async () => {
   assert.equal(afterSubmit.ok, false);
   assert.equal(sent.length, 2);
   broker.onExtensionMessage({ type: "result", id: sent[1].id, ok: true, data: { clicked: true } });
-  assert.deepEqual(await submit, { ok: true, data: { clicked: true } });
+  const submitted = await submit;
+  assert.equal(submitted.ok, true);
+  assert.deepEqual(submitted.data, { clicked: true });
 });
 
 test("agents in their own tabs never conflict, and a claim ends after its ttl", async () => {
@@ -446,4 +449,92 @@ test("the host's own requests never need a grant, and the log records what the g
   const audit = authority.audit();
   assert.ok(audit.some((entry) => entry.kind === "action.refused" && entry.action === "open"));
   assert.deepEqual(verifyAudit(audit), { ok: true });
+});
+
+test("opening a page in a tab another agent is using goes to a new tab instead of failing, and says so", async () => {
+  const { broker, sent } = harness();
+  const first = broker.submit(req("claude", "open", { url: "https://example.com/", tab: "shared" }));
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.com", url: "https://example.com/" });
+  await first;
+  const second = broker.submit(req("codex", "open", { url: "https://example.org/", tab: "shared" }));
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].tab, "shared-codex");
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, origin: "https://example.org", url: "https://example.org/" });
+  const response = await second;
+  assert.equal(response.ok, true);
+  const data = (response as { data: { tab: string; note: string } }).data;
+  assert.equal(data.tab, "shared-codex");
+  assert.match(data.note, /@claude is using tab "shared"/);
+});
+
+test("the loop guard refuses the third identical state-changing action in a row and reads never count", async () => {
+  const { broker, sent } = harness({ loopGuard: { repeat: 3, budget: 100, windowMs: 60_000 } });
+  for (let i = 1; i <= 2; i += 1) {
+    const pending = broker.submit(req("claude", "click", { selector: "#next", tab: "t" }));
+    broker.onExtensionMessage({ type: "result", id: `c${i}`, ok: true, data: { clicked: true } });
+    await pending;
+  }
+  const third = await broker.submit(req("claude", "click", { selector: "#next", tab: "t" }));
+  assert.equal(third.ok, false);
+  assert.match((third as { error: string }).error, /exact click 3 times in a row/);
+  assert.equal(sent.length, 2);
+  for (let i = 0; i < 4; i += 1) {
+    const pending = broker.submit(req("claude", "read", { selector: "#next", tab: "t" }));
+    broker.onExtensionMessage({ type: "result", id: `c${3 + i}`, ok: true, data: "x" });
+    assert.equal((await pending).ok, true);
+  }
+});
+
+test("the loop guard enforces an action budget per window", async () => {
+  const { broker, advance } = harness({ loopGuard: { repeat: 99, budget: 3, windowMs: 60_000 } });
+  for (let i = 1; i <= 3; i += 1) {
+    const pending = broker.submit(req("claude", "click", { selector: `#b${i}`, tab: "t" }));
+    broker.onExtensionMessage({ type: "result", id: `c${i}`, ok: true, data: {} });
+    await pending;
+    advance(9_000);
+  }
+  const over = await broker.submit(req("claude", "click", { selector: "#b4", tab: "t" }));
+  assert.equal(over.ok, false);
+  assert.match((over as { error: string }).error, /budget reached/);
+  advance(120_000);
+  const later = broker.submit(req("claude", "click", { selector: "#b5", tab: "t" }));
+  broker.onExtensionMessage({ type: "result", id: "c4", ok: true, data: {} });
+  assert.equal((await later).ok, true);
+});
+
+test("every reply carries what teammates did since the agent's last action, and tabs lists the whole room", async () => {
+  const { broker, sent } = harness();
+  const a = broker.submit(req("claude", "open", { url: "https://example.com/", tab: "a" }));
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.com", url: "https://example.com/" });
+  assert.equal((await a).room, undefined);
+  const b = broker.submit(req("codex", "open", { url: "https://example.org/", tab: "b" }));
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, origin: "https://example.org", url: "https://example.org/" });
+  const codexReply = await b;
+  assert.equal(codexReply.ok, true);
+  assert.match((codexReply.room ?? []).join(" "), /@claude: .*\[tab a\]/);
+  const read = broker.submit(req("claude", "read", { tab: "a", selector: "h1" }));
+  broker.onExtensionMessage({ type: "result", id: "c3", ok: true, data: "Example" });
+  assert.match(((await read).room ?? []).join(" "), /@codex: .*\[tab b\]/);
+  const list = await broker.submit(req("claude", "tabs"));
+  assert.equal(list.ok, true);
+  const tabsData = list.data as Array<{ tab: string; lastBy?: string; mine: boolean }>;
+  assert.deepEqual(tabsData.map((tab) => [tab.tab, tab.mine]).sort(), [["a", true], ["b", false]]);
+  assert.equal(sent.length, 3, "listing tabs never reaches the extension");
+});
+
+test("opening the page a teammate already has open in the shared tab joins it without reloading", async () => {
+  const { broker, sent, notices } = harness();
+  const first = broker.submit(req("claude", "open", { url: "https://example.com/doc", tab: "room" }));
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.com", url: "https://example.com/doc" });
+  await first;
+  const before = sent.length;
+  const joined = await broker.submit(req("codex", "open", { url: "https://example.com/doc/", tab: "room" }));
+  assert.equal(joined.ok, true);
+  assert.equal(sent.length, before, "no command reaches the browser, so nothing reloads under the teammate");
+  assert.match(String((joined.data as { note: string }).note), /already open/);
+  assert.ok(notices.some((n) => (n.presence as { agent: string }).agent === "codex"), "the joiner still gets a cursor on the page");
+  const elsewhere = broker.submit(req("codex", "open", { url: "https://example.org/", tab: "room" }));
+  assert.equal(sent.length, before + 1, "a different page is still a real navigation (into a new tab if a teammate is on it)");
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, origin: "https://example.org", url: "https://example.org/" });
+  await elsewhere;
 });

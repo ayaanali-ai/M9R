@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="color-scheme" content="dark" />
+  <title>M9R agents</title>
+  <link rel="stylesheet" href="frame.css" />
+  <style>
+    #wrap { display: inline-flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 14px; }
+    body.open #wrap { width: 460px; }
+    body.open .bar { width: auto; }
+
+    .bar {
+      min-height: 44px; width: 344px; border-radius: 22px; background: linear-gradient(180deg, #14161b, var(--bg-0));
+      border: 1px solid var(--line-2); display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 12px;
+      box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 4px 14px rgba(0,0,0,.32); cursor: grab;
+    }
+    .agents { display: flex; flex-direction: column; align-items: stretch; gap: 6px; flex: 1; min-width: 0; }
+    .who { display: flex; align-items: center; min-height: 26px; gap: 7px; min-width: 0; flex: 0 1 auto; }
+    .who .doing { color: #d6d3cc; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; min-width: 0; font-size: 13px; line-height: 1.3; }
+    .quiet { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .more { font: 600 10.5px/1 var(--display); color: var(--muted); }
+    .chev { flex: none; width: 24px; height: 24px; border: 0; border-radius: 12px; background: transparent; color: var(--muted); cursor: pointer; display: grid; place-items: center; }
+    .chev:hover { background: var(--bg-3); color: var(--text); }
+    .chev svg { width: 12px; height: 12px; transition: transform .25s var(--ease); }
+    body.open .chev svg { transform: rotate(180deg); }
+
+    .panel { border-radius: 14px; background: var(--bg-0); border: 1px solid var(--line-2); display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 4px 14px rgba(0,0,0,.35); animation: rise .22s var(--ease); }
+    .tabs { display: flex; gap: 2px; padding: 6px; border-bottom: 1px solid var(--line); background: var(--bg-0); cursor: grab; }
+    .tab { position: relative; flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; color: var(--muted); font: 500 12px/1 var(--display); padding: 8px 6px; border-radius: 8px; cursor: pointer; transition: background-color .2s var(--ease), color .2s var(--ease); }
+    .tab:hover { color: var(--text); }
+    .tab.on { background: var(--bg-3); color: var(--text); box-shadow: 0 1px 0 rgba(255,255,255,.05) inset; }
+    .tab .n { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+    .tab .count { min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: #1a0f08; font: 700 10px/17px var(--display); text-align: center; }
+    .tab .count.pulse { animation: pop .5s var(--ease); }
+    .tab .unread { position: absolute; top: 5px; right: 8px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+    .view { flex: 1 1 auto; min-height: 150px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--bg-3) transparent; padding: 6px 0; }
+    .empty { color: var(--faint); padding: 18px 16px; text-align: center; }
+
+    /* Chat */
+    .msg { display: flex; gap: 9px; padding: 6px 14px; animation: rise .2s var(--ease); }
+    .msg .chip { width: 22px; height: 22px; margin-top: 1px; }
+    .msg .body { min-width: 0; flex: 1; }
+    .msg .head { display: flex; align-items: baseline; gap: 6px; }
+    .msg .name { font: 600 12.5px/1.3 var(--display); }
+    .msg .to { color: var(--muted); font-size: 12px; }
+    .when { margin-left: auto; color: var(--faint); font-size: 10.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .msg .text { margin-top: 4px; padding: 7px 10px; border-radius: 3px 11px 11px 11px; background: var(--bg-2); box-shadow: inset 0 0 0 1px var(--line); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); width: fit-content; max-width: 100%; }
+    .msg.mine { justify-content: flex-end; }
+    .msg.mine .body { flex: 0 1 auto; max-width: 84%; display: flex; flex-direction: column; align-items: flex-end; }
+    .msg.mine .text { border-radius: 11px 3px 11px 11px; background: rgba(217, 120, 63, .16); box-shadow: inset 0 0 0 1px rgba(217, 120, 63, .3); }
+    .msg.mine .meta { margin-top: 3px; color: var(--faint); font-size: 10.5px; }
+    .msg.mine .meta.bad { color: var(--blocked); }
+    .notice { margin: 6px 20px; text-align: center; color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+    .typing { display: flex; align-items: center; gap: 8px; padding: 6px 14px; color: var(--muted); font-size: 12px; }
+    .typing .chip { width: 20px; height: 20px; }
+    .dots3 { display: inline-flex; gap: 3px; }
+    .dots3 i { width: 5px; height: 5px; border-radius: 50%; background: var(--working); animation: breathe 1.2s ease-in-out infinite; }
+    .dots3 i:nth-child(2) { animation-delay: .2s; } .dots3 i:nth-child(3) { animation-delay: .4s; }
+    .foot { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); }
+    .foot .hint { color: var(--faint); font-size: 11px; flex: 1; }
+
+    /* Activity */
+    .chips { display: flex; gap: 6px; padding: 4px 14px 8px; }
+    .fchip { border: 1px solid var(--line-2); background: transparent; color: var(--muted); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; cursor: pointer; }
+    .fchip.on { background: var(--bg-3); color: var(--text); }
+    .act { display: flex; gap: 10px; padding: 8px 14px 8px 12px; border-left: 2px solid transparent; animation: rise .2s var(--ease); }
+    .act + .act { border-top: 1px solid var(--line); }
+    .act .chip { width: 20px; height: 20px; margin-top: 1px; }
+    .act .body { flex: 1; min-width: 0; }
+    .act .head { display: flex; align-items: center; gap: 6px; }
+    .act .name { font: 600 12px/1.3 var(--display); }
+    .tag { font: 600 9.5px/1 var(--display); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); padding: 3px 5px; border-radius: 4px; background: var(--bg-2); }
+    .tag.now { color: var(--working); background: rgba(217, 164, 65, .1); }
+    .tag.done { color: var(--open); background: rgba(98, 184, 155, .1); }
+    .tag.blocked, .tag.failed { color: var(--blocked); background: rgba(224, 103, 92, .12); }
+    .act .text { margin-top: 2px; color: #cfccc5; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .act .where { margin-top: 3px; color: var(--faint); font-size: 11px; overflow-wrap: anywhere; }
+    .act.blocked { border-left-color: var(--blocked); background: linear-gradient(90deg, rgba(224, 103, 92, .07), transparent 60%); }
+    .act.blocked .text { color: var(--text); }
+
+    /* Approvals */
+    .card { margin: 6px 12px; padding: 11px 12px; border-radius: 11px; background: var(--bg-1); box-shadow: inset 0 0 0 1px var(--line-2); animation: rise .2s var(--ease); }
+    .card .head { display: flex; align-items: center; gap: 8px; }
+    .card .name { font: 600 12.5px/1.3 var(--display); }
+    .card .text { margin-top: 6px; color: var(--text); overflow-wrap: anywhere; white-space: pre-wrap; }
+    .card .where { margin-top: 4px; color: var(--faint); font-size: 11px; overflow-wrap: anywhere; }
+    .card .actions { display: flex; gap: 6px; margin-top: 10px; }
+    .card .result { margin-top: 8px; font-weight: 600; color: var(--open); }
+    .card .result.bad { color: var(--blocked); }
+
+    /* Agents */
+    .top { display: flex; align-items: center; justify-content: space-between; padding: 4px 14px 8px; color: var(--muted); font: 600 10px/1 var(--display); letter-spacing: .14em; text-transform: uppercase; }
+    .agent { display: flex; gap: 10px; align-items: flex-start; padding: 9px 14px; }
+    .agent + .agent { border-top: 1px solid var(--line); }
+    .agent .main { flex: 1; min-width: 0; }
+    .agent .title { font: 600 12.5px/1.3 var(--display); }
+    .agent .state { color: var(--muted); font: 500 12px/1.3 var(--display); }
+    .agent .state.working { color: var(--working); } .agent .state.blocked, .agent .state.failed { color: var(--blocked); } .agent .state.waiting { color: var(--accent); }
+    .agent .doing { margin-top: 2px; color: #cfccc5; overflow-wrap: anywhere; }
+    .agent .folder { margin-top: 2px; color: var(--faint); font-size: 11px; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <section id="panel" class="panel" hidden>
+      <nav id="tabs" class="tabs" role="tablist"></nav>
+      <div id="view" class="view" role="tabpanel"></div>
+      <div id="foot"></div>
+    </section>
+    <div id="bar" class="bar" role="button" tabindex="0" aria-label="M9R agents. Click to open, drag to move.">
+      <span class="chip" style="width:30px;height:30px"><span id="mark" class="m9r-logo" aria-hidden="true"></span></span>
+      <div id="agents" class="agents"></div>
+      <span id="badge" class="badge" hidden></span>
+      <button id="chev" class="chev" type="button" aria-label="Open or close"><svg viewBox="0 0 12 12"><path d="M2 8l4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    </div>
+  </div>
+  <script src="src/frame-common.js"></script>
+  <script src="src/pill.js"></script>
+</body>
+</html>

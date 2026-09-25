@@ -18,6 +18,8 @@ test("Claude web-only launch disables built-in tools and browser, and loads only
     mcpServers: { m9r: { command: config.mcpCommand, args: config.mcpArgs, env: config.mcpEnv } },
   });
   assert.ok(plan.promptFileContent?.includes(config.sessionToken));
+  assert.match(plan.promptFileContent ?? "", /m9r_web_scroll[\s\S]*m9r_web_wait[\s\S]*m9r_web_back[\s\S]*m9r_web_forward[\s\S]*m9r_web_tabs[\s\S]*m9r_web_extract/);
+  assert.match(plan.promptFileContent ?? "", /Do not navigate to ungranted URLs.*never work around a refusal/);
 });
 
 test("Claude hands profile enables only the requested local tool set plus M9R", () => {
@@ -35,6 +37,7 @@ test("Codex launch disables web search, overrides MCP servers with M9R, and keep
   assert.ok(plan.args.some((arg) => arg.includes("mcp_servers={m9r=")));
   assert.equal(plan.args.join(" ").includes(config.sessionToken), false);
   assert.ok(plan.stdinPrompt?.includes(config.sessionToken));
+  assert.match(plan.stdinPrompt ?? "", /m9r_web_screenshot[\s\S]*m9r_web_extract/);
 });
 
 test("Codex hands profile stays workspace-write and does not re-enable web search", () => {

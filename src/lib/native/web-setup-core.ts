@@ -98,6 +98,18 @@ export function buildClaudeMcpRemoveArgs(): string[] {
   return ["mcp", "remove", "m9r", "--scope", "user"];
 }
 
+/** PowerShell single-quoted literals preserve Windows paths and shell metacharacters as ordinary argument text. */
+export function buildPowerShellInvocation(binary: string, args: readonly string[]): string {
+  const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  const invocation = `& ${[binary, ...args].map(literal).join(" ")}`;
+  return `$ErrorActionPreference = 'Stop'; ${invocation}; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }`;
+}
+
+/** Human-readable equivalent of a native CLI argv vector for the setup preview. */
+export function formatCommandPreview(binary: string, args: readonly string[]): string {
+  return [binary, ...args].map((value) => /\s|["']/u.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value).join(" ");
+}
+
 export function planWebSetup(input: WebSetupInput): WebSetupPlan {
   if (!isAbsolutePath(input.engineCommand) || !isAbsolutePath(input.m9rHome) || !isAbsolutePath(input.extensionPath)) throw new Error("The engine command, extension path, and M9R_HOME must be absolute paths.");
   const selectedAgents = selectWebSetupAgents(input.detected, input.selectedAgents);

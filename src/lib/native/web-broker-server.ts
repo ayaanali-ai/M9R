@@ -14,6 +14,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
 import { createWebBroker, type WebAction, type WebRequest } from "./web-broker-core";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
+import { isUiMessage, type UiState, type WebUiBridge } from "./web-ui-bridge";
 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_EXTENSION_MESSAGE_BYTES = 256 * 1024;
@@ -71,10 +72,15 @@ export interface WebBrokerServerOptions {
   /** Maximum wait for the extension's ready handshake when a browser command arrives during startup. */
   extensionConnectTimeoutMs?: number;
   claimTtlMs?: number;
+  loopGuard?: { repeat: number; budget: number; windowMs: number };
   approvalTimeoutMs?: number;
   ownerId?: string;
   authority?: WebAuthority;
   authorityStore?: { load(): WebAuthoritySnapshot; save(snapshot: WebAuthoritySnapshot): void };
+  /** The in-page pill bridge (web-ui-bridge.ts). Its frames are accepted only on the ready extension socket. */
+  ui?: WebUiBridge;
+  /** Plain-words `step`/`phase` on presence frames; on by default when `ui` is set. */
+  narrate?: boolean;
 }
 
 export async function startWebBroker(options: WebBrokerServerOptions): Promise<{ port: number; close: () => Promise<void> }> {
@@ -124,11 +130,15 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     },
     timeoutMs: options.timeoutMs,
     claimTtlMs: options.claimTtlMs,
+    loopGuard: options.loopGuard,
     approvalTimeoutMs: options.approvalTimeoutMs,
     ownerId: options.ownerId,
     authority,
     onAuthorityChange: persistAuthority,
+    narrate: options.narrate ?? options.ui !== undefined,
+    onActivity: options.ui ? (activity) => options.ui!.onActivity(activity) : undefined,
   });
+  options.ui?.attachBroker(broker);
 
   const server = createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/health") return reply(res, 200, { ok: true });
@@ -166,6 +176,8 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
           agent: body.agent, provider: body.provider, sessionId: body.sessionId, to: body.to,
           messageId: body.messageId, text: body.text, ...(typeof body.owner === "string" ? { owner: body.owner } : {}),
         });
+        // Agent-to-agent traffic for the pill's thread; display only, it can never become a human-typed message.
+        if (body.owner === undefined) options.ui?.onActivity({ kind: "message", agent: body.agent, provider: body.provider, sessionId: body.sessionId, to: body.to, text: body.text });
         return reply(res, 200, { ok: true, displayed: accepted });
       }
       if (!authority) return reply(res, 503, { ok: false, error: "web authority is not configured" });
@@ -251,6 +263,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   });
 
   const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_EXTENSION_MESSAGE_BYTES });
+  const uiSinks = new Map<WebSocket, (state: UiState) => boolean>();
 
   server.on("upgrade", (req, socket, head) => {
     const origin = String(req.headers.origin ?? "");
@@ -278,6 +291,12 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
             return;
           }
           if (extension !== ws || readyExtension !== ws) return;
+          // The only door for human-typed web messages: the ready, origin-checked extension socket.
+          if (isUiMessage(message)) {
+            if (!uiSinks.has(ws)) uiSinks.set(ws, (state: UiState) => { if (extension !== ws || ws.readyState !== WebSocket.OPEN) return false; ws.send(JSON.stringify(state)); return true; });
+            options.ui?.handleExtensionMessage(message, uiSinks.get(ws));
+            return;
+          }
           if (typeof message === "object" && message !== null && "type" in message && message.type === "stop-all") {
             broker.stopAll("you");
             return;
@@ -305,6 +324,8 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         }
       });
       ws.on("close", () => {
+        options.ui?.unsubscribe(uiSinks.get(ws));
+        uiSinks.delete(ws);
         if (extension === ws) {
           extension = null;
           readyExtension = null;

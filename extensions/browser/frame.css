@@ -1,0 +1,76 @@
+/*
+ * The in-page pill and message bar share the desktop pill's language: layered near-blacks, provider marks on round
+ * chips with a ring for state, one warm accent for "needs you", one rose for "blocked". System faces only.
+ */
+:root {
+  color-scheme: dark;
+  --bg-0: #0b0c0f;
+  --bg-1: #101216;
+  --bg-2: #16191e;
+  --bg-3: #1d2027;
+  --line: rgba(255, 255, 255, 0.07);
+  --line-2: rgba(255, 255, 255, 0.11);
+  --text: #ebe8e1;
+  --muted: #9296a0;
+  --faint: #7b808a;
+  --accent: #d9783f;
+  --working: #d9a441;
+  --open: #62b89b;
+  --blocked: #e0675c;
+  --display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; background: transparent; overflow: hidden; }
+body { font: 13px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif; color: var(--text); -webkit-font-smoothing: antialiased; }
+body.dragging, body.dragging * { cursor: grabbing !important; user-select: none; }
+button { font: inherit; color: inherit; }
+
+.chip, .dot {
+  position: relative; flex: none; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--bg-3); display: grid; place-items: center; box-shadow: 0 0 0 1px var(--line-2);
+  transition: box-shadow .35s var(--ease), opacity .35s var(--ease);
+}
+.logo {
+  width: 13px; height: 13px; background: var(--text);
+  -webkit-mask: var(--mark) center / contain no-repeat; mask: var(--mark) center / contain no-repeat;
+}
+.p-claude { --mark: url("assets/providers/claude.svg"); }
+.p-codex { --mark: url("assets/providers/codex.svg"); }
+.p-opencode { --mark: url("assets/providers/opencode.svg"); width: 11px; height: 11px; }
+.p-agent, .p-you { --mark: none; -webkit-mask: none; mask: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.chip::after, .dot::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 1.5px solid transparent; opacity: 0; transition: opacity .35s var(--ease), border-color .35s var(--ease); }
+[data-ring="off"] { opacity: .5; }
+[data-ring="off"] .logo { background: var(--muted); }
+[data-ring="idle"] { box-shadow: 0 0 0 1px rgba(98, 184, 155, .45); }
+[data-ring="working"]::after { opacity: 1; border-color: rgba(217, 164, 65, .2); border-top-color: var(--working); border-right-color: var(--working); animation: turn 2.4s linear infinite; }
+[data-ring="waiting"]::after { opacity: 1; border-color: var(--accent); animation: breathe 2.4s ease-in-out infinite; }
+[data-ring="blocked"] { box-shadow: 0 0 0 1px var(--blocked); background: #2a1716; }
+[data-ring="blocked"]::after { opacity: 1; border-color: rgba(224, 103, 92, .35); }
+@keyframes turn { to { transform: rotate(1turn); } }
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes pop { 0% { transform: scale(1); } 40% { transform: scale(1.35); } 100% { transform: scale(1); } }
+
+.m9r-logo { flex: none; width: 24px; height: 24px; background: var(--text); -webkit-mask: url("assets/m9r-mark.png") center / contain no-repeat; mask: url("assets/m9r-mark.png") center / contain no-repeat; }
+.m9r-logo.stale { background: var(--faint); }
+.mark { font: 700 10.5px/1 var(--display); letter-spacing: .18em; color: var(--text); flex: none; }
+.mark.stale { color: var(--faint); }
+.badge { flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--accent); color: #1a0f08; font: 700 11px/20px var(--display); text-align: center; font-variant-numeric: tabular-nums; }
+.badge.pulse { animation: pop .5s var(--ease); }
+.btn { border: 1px solid var(--line-2); background: var(--bg-2); color: var(--muted); border-radius: 8px; padding: 4px 11px; font-size: 12px; cursor: pointer; transition: background-color .15s, color .15s; }
+.btn:hover { background: var(--bg-3); color: var(--text); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #1a0f08; font-weight: 600; }
+.btn.primary:hover { background: #e4864d; }
+.btn.danger { color: #f0a49c; border-color: rgba(224, 103, 92, .35); background: rgba(224, 103, 92, .08); }
+.btn.danger:hover { background: rgba(224, 103, 92, .16); color: #ffd2cc; }
+.btn[disabled] { opacity: .5; cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+  [data-ring="working"]::after { border-color: var(--working); }
+}
+.lead[data-ring="working"] { box-shadow: 0 0 0 1.5px var(--working) !important; }
+.lead[data-ring="waiting"] { box-shadow: 0 0 0 1.5px var(--accent) !important; }
+.lead[data-ring="blocked"] { box-shadow: 0 0 0 1.5px var(--blocked) !important; }

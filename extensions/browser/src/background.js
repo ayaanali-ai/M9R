@@ -1,8 +1,9 @@
-importScripts("page-actions.js", "permission-logic.js");
+importScripts("page-actions.js", "powers.js", "permission-logic.js", "pill-bridge.js");
 
 const BROKER_URL = "ws://127.0.0.1:47821/ext";
 const LOAD_TIMEOUT_MS = 10000;
 const NAMED_TABS_STORAGE_KEY = "m9rNamedTabs";
+const M9R_GROUP_PREFIX = "M9R: ";
 const tabsByName = new Map();
 const namedTabOperations = new Map();
 let namedTabsLoad = null;
@@ -17,7 +18,10 @@ function connect() {
   socket = connection;
   connection.onopen = () => {
     void loadNamedTabs().then(() => {
-      if (socket === connection && connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({ type: "ready" }));
+      if (socket === connection && connection.readyState === WebSocket.OPEN) {
+        connection.send(JSON.stringify({ type: "ready" }));
+        if (typeof M9RPillBridge !== "undefined") M9RPillBridge.brokerOpen();
+      }
     }).catch(() => connection.close(1011, "named tab state is unavailable"));
   };
   connection.onmessage = (event) => {
@@ -29,6 +33,7 @@ function connect() {
     }
     if (message && message.type === "command") void handle(message);
     else if (message && message.type === "grant-approved") void queueGrantPermission(message.grant);
+    else if (message && message.type === "ui-state") { if (typeof M9RPillBridge !== "undefined") M9RPillBridge.state(message); }
     else if (message && message.type === "broker-state" && typeof message.stopped === "boolean") {
       actionsStopped = message.stopped;
       void chrome.tabs.query({}).then((tabs) => {
@@ -53,6 +58,7 @@ function connect() {
   connection.onclose = () => {
     if (socket === connection) {
       socket = null;
+      if (typeof M9RPillBridge !== "undefined") M9RPillBridge.brokerClosed();
       setTimeout(connect, 2000);
     }
   };
@@ -98,6 +104,69 @@ async function hasHostPermission(url, expectedOrigin, pathPrefix) {
     return granted && M9RPermissionLogic.mayActOnUrl(url, expectedOrigin || null, [pattern], pathPrefix);
   } catch {
     return false;
+  }
+}
+
+function providerGroupColor(provider) {
+  const name = String(provider || "").toLowerCase();
+  if (name.includes("claude")) return "orange";
+  if (name.includes("codex")) return "green";
+  if (name.includes("opencode")) return "purple";
+  if (name.includes("grok") || name.includes("xai")) return "blue";
+  return "grey";
+}
+
+function providerGroupLabel(provider) {
+  const name = String(provider || "agent").toLowerCase();
+  if (name.includes("claude")) return "Claude";
+  if (name.includes("codex")) return "Codex";
+  if (name.includes("opencode")) return "OpenCode";
+  if (name.includes("grok") || name.includes("xai")) return "Grok";
+  return name.slice(0, 32);
+}
+
+function agentGroupTitle(presence) {
+  const agent = String(presence && presence.agent || "Agent").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 64) || "Agent";
+  return `${M9R_GROUP_PREFIX}${agent} · ${providerGroupLabel(presence && presence.provider)}`.slice(0, 100);
+}
+
+async function groupAgentTab(tab, presence) {
+  if (!chrome.tabGroups || typeof chrome.tabs.group !== "function" || !Number.isSafeInteger(tab && tab.id)) return null;
+  const title = agentGroupTitle(presence);
+  const color = providerGroupColor(presence.provider);
+  try {
+    const groups = await chrome.tabGroups.query({ windowId: tab.windowId });
+    const existing = groups.find((group) => group.title === title);
+    const groupId = await chrome.tabs.group({ tabIds: [tab.id], ...(existing ? { groupId: existing.id } : {}) });
+    await chrome.tabGroups.update(groupId, { title, color });
+    return { id: groupId, title, color };
+  } catch {
+    // Tab grouping is a dev-only convenience; a grouping failure never prevents the browser action itself.
+    return null;
+  }
+}
+
+async function listM9rTabGroups() {
+  if (!chrome.tabGroups || typeof chrome.tabGroups.query !== "function") return [];
+  try {
+    const [groups, browserTabs] = await Promise.all([chrome.tabGroups.query({}), chrome.tabs.query({})]);
+    const namesById = new Map();
+    for (const [name, tabId] of tabsByName) {
+      const choices = namesById.get(tabId) || [];
+      choices.push(name);
+      namesById.set(tabId, choices);
+    }
+    return groups.filter((group) => typeof group.title === "string" && group.title.startsWith(M9R_GROUP_PREFIX)).map((group) => ({
+      id: group.id,
+      title: group.title,
+      color: group.color,
+      tabs: browserTabs.filter((tab) => tab.groupId === group.id).map((tab) => ({
+        name: (namesById.get(tab.id) || []).sort((a, b) => a.length - b.length)[0] || null,
+        active: tab.active === true,
+      })),
+    }));
+  } catch {
+    return [];
   }
 }
 
@@ -170,15 +239,15 @@ async function ensurePresenceOverlay(tabId) {
 
 function reply(id, result, origin, url) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify({ type: "result", id, ok: result.ok, data: result.data, error: result.error, origin: origin || undefined, url: url || undefined }));
+  socket.send(JSON.stringify({ type: "result", id, ok: result.ok, data: result.data, error: result.error, label: typeof result.label === "string" ? result.label.slice(0, 80) : undefined, origin: origin || undefined, url: url || undefined }));
 }
 
-function announce(tabId, presence, selector) {
-  void ensurePresenceOverlay(tabId).then(() => {
-  chrome.tabs
-    .sendMessage(tabId, { type: "presence", ...presence, target: selector ? { selector } : presence.target || null })
-    .catch(() => {});
-  });
+function announce(tabId, presence, selector, rect) {
+  const target = selector || rect ? { selector: selector || null, rect: rect || null } : null;
+  // Resolves when the page has finished gliding the agent's cursor to the target (or on failure), so callers can act after it lands.
+  return ensurePresenceOverlay(tabId)
+    .then(() => chrome.tabs.sendMessage(tabId, { type: "presence", ...presence, target }).catch(() => null))
+    .catch(() => null);
 }
 
 function waitForLoad(tabId) {
@@ -242,6 +311,21 @@ async function withNamedTabLock(name, operation) {
   }
 }
 
+// Background tabs do not animate, so an agent working in one looks frozen. Bring the tab the agent acts in to the front
+// (throttled so several agents do not make the window flicker), unless the owner turned "follow the agents" off.
+let lastFollowAt = 0;
+async function followAgent(tabId) {
+  try {
+    const { m9rFollow } = await chrome.storage.local.get("m9rFollow");
+    if (m9rFollow === false) return;
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.active) return;
+    if (Date.now() - lastFollowAt < 2500) return;
+    lastFollowAt = Date.now();
+    await chrome.tabs.update(tabId, { active: true });
+  } catch { /* the tab may have closed */ }
+}
+
 async function existingTab(name) {
   await loadNamedTabs();
   const id = tabsByName.get(name);
@@ -265,25 +349,49 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }).catch(() => {});
 });
 
-async function run(tabId, func, args) {
+async function run(tabId, func, args, retried) {
   try {
     const [injection] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
     return injection.result || { ok: false, error: "the page returned nothing" };
   } catch (error) {
-    return { ok: false, error: "this extension can only act on localhost pages right now (" + (error && error.message ? error.message : error) + ")" };
+    const message = String(error && error.message ? error.message : error);
+    // No site permission yet (or it was revoked): ask the owner in the pill, then try once more.
+    if (!retried && /cannot access contents|missing host permission|extension manifest must request permission/i.test(message)) {
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        const allowed = globalThis.M9RPillBridge && globalThis.M9RPillBridge.requestConsent && /^https?:/.test(tab.url || "")
+          ? await globalThis.M9RPillBridge.requestConsent(tab.url, null) : false;
+        if (allowed) return run(tabId, func, args, true);
+      } catch { /* fall through to the plain error */ }
+      return { ok: false, error: "M9R cannot run on this page: the owner has not allowed this site (or it is a browser page). Tell the owner which site you need; do not conclude M9R only works on localhost. Detail: " + message.slice(0, 160) };
+    }
+    // A page that is still loading or redirecting refuses injection for a moment: wait and try again before reporting.
+    if ((retried || 0) < 2 && /frame with id|was removed|error page|no tab with id|cannot be scripted|before the page|loading/i.test(message + " ")) {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      return run(tabId, func, args, (retried || 0) + 1);
+    }
+    return { ok: false, error: "the browser could not run that on this page: " + message.slice(0, 200) };
   }
 }
 
 async function handle(command) {
   try {
     if (actionsStopped) return reply(command.id, { ok: false, error: "browser actions are stopped by the owner" });
+    if (command.action === "tabs") {
+      const tabs = [...tabsByName].map(([name, id]) => ({ name, id }));
+      return reply(command.id, { ok: true, data: { tabs, groups: await listM9rTabGroups() } });
+    }
     if (command.action === "open") {
-      if (!await hasHostPermission(command.url, command.expectOrigin || null, command.expectPathPrefix)) return reply(command.id, { ok: false, error: "M9R has no Chrome permission for this site; approve access from the M9R site-consent screen first" });
+      if (!await hasHostPermission(command.url, command.expectOrigin || null, command.expectPathPrefix)) {
+        // Not allowed yet: ask the owner right here (a card in the M9R pill) instead of failing, and wait for the answer.
+        const allowed = globalThis.M9RPillBridge && globalThis.M9RPillBridge.requestConsent ? await globalThis.M9RPillBridge.requestConsent(command.url, command.presence) : false;
+        if (!allowed || !await hasHostPermission(command.url, command.expectOrigin || null, command.expectPathPrefix)) return reply(command.id, { ok: false, error: "The owner has not allowed M9R on this site yet, so it cannot be opened. Do not try other sites blindly: tell the owner which site you need (they can allow it from the M9R toolbar panel) and keep working with sites you can already open" });
+      }
       if (actionsStopped) return reply(command.id, { ok: false, error: "browser actions are stopped by the owner" });
       return await withNamedTabLock(command.tab, async () => {
         if (actionsStopped) return reply(command.id, { ok: false, error: "browser actions are stopped by the owner" });
         const tab = await existingTab(command.tab);
-        const opened = tab ? await chrome.tabs.update(tab.id, { url: command.url }) : await chrome.tabs.create({ url: command.url, active: false });
+        const opened = tab ? await chrome.tabs.update(tab.id, { url: command.url }) : await chrome.tabs.create({ url: command.url, active: true });
         await loadNamedTabs();
         tabsByName.set(command.tab, opened.id);
         await saveNamedTabs();
@@ -298,7 +406,12 @@ async function handle(command) {
           await chrome.tabs.update(opened.id, { url: "about:blank" });
           return reply(command.id, { ok: false, error: "the page ended up outside the granted path" }, landed, actualUrl);
         }
-        announce(opened.id, command.presence, null);
+        await groupAgentTab(opened, command.presence);
+        await followAgent(opened.id);
+        const openedTarget = typeof m9rPagePower === "function"
+          ? await run(opened.id, m9rPagePower, ["target", null, {}, command.expectOrigin || null, command.expectPathPrefix || null])
+          : null;
+        announce(opened.id, command.presence, null, openedTarget && openedTarget.ok && openedTarget.data ? openedTarget.data.rect : null);
         return reply(command.id, { ok: true, data: { tab: command.tab, url: command.url } }, landed, actualUrl);
       });
     }
@@ -314,17 +427,78 @@ async function handle(command) {
       return reply(command.id, { ok: false, error: "the tab is no longer within the granted path" }, current, tab.url);
     }
     if (actionsStopped) return reply(command.id, { ok: false, error: "browser actions are stopped by the owner" }, current, tab.url);
-    announce(tab.id, command.presence, command.selector);
+    if (command.action !== "read") await followAgent(tab.id);
+    // Like a person: scroll the target into view smoothly, let the cursor travel to it, pause a beat, then act.
+    const humanLike = !!command.selector && !["read", "scroll", "snapshot", "find", "wait", "extract"].includes(command.action);
+    if (humanLike && typeof m9rPageMine === "function") await run(tab.id, m9rPageMine, ["ensure_visible", command.selector, {}, command.expectOrigin || null, command.expectPathPrefix || null]);
+    const targetAction = command.action === "click_at" ? "target_at" : "target";
+    const targetInfo = await run(tab.id, m9rPagePower, [targetAction, command.selector || null, command.args || {}, command.expectOrigin || null, command.expectPathPrefix || null]);
+    const targetRect = targetInfo && targetInfo.ok && targetInfo.data ? targetInfo.data.rect || null : null;
+    const actionPresence = command.action === "point"
+      ? { ...command.presence, action: "Pointing at this one", message: "Pointing at this one" }
+      : command.presence;
+    const liveSelector = command.selector && !String(command.selector).startsWith("@m9r-ref:")
+      ? command.selector
+      : targetInfo && targetInfo.ok && targetInfo.data ? targetInfo.data.selector || null : null;
+    const arrival = announce(tab.id, actionPresence, liveSelector, targetRect);
+    if (humanLike) await Promise.race([arrival, new Promise((resolve) => setTimeout(resolve, 2400))]);
 
+    let preLabel = targetInfo && targetInfo.ok && targetInfo.data && typeof targetInfo.data.name === "string" ? targetInfo.data.name : null;
+    if (command.selector && typeof m9rPageLabel === "function") {
+      const named = await run(tab.id, m9rPageLabel, [command.selector]);
+      if (named && named.ok && named.data) preLabel = named.data;
+    }
     let result;
     if (command.action === "read") result = await run(tab.id, m9rPageRead, [command.selector || null, command.expectOrigin || null, command.expectPathPrefix || null]);
     else if (command.action === "click") result = await run(tab.id, m9rPageClick, [command.selector, command.expectOrigin || null, command.expectPathPrefix || null]);
-    else if (command.action === "type") result = await run(tab.id, m9rPageType, [command.selector, command.text, command.expectOrigin || null, command.expectPathPrefix || null]);
-    else result = { ok: false, error: "unknown action " + command.action };
+    else if (command.action === "type") result = await run(tab.id, m9rPageType, [command.selector, command.text, command.expectOrigin || null, command.expectPathPrefix || null, true]);
+    else if (command.action === "snapshot") {
+      result = await run(tab.id, m9rPageSnapshot, [(command.args && command.args.query) || null, (command.args && command.args.limit) || null]);
+      if (result && result.ok && typeof m9rPageMine === "function") await run(tab.id, m9rPageMine, ["heal", null, {}, null, null]);
+    }
+    else if (command.action === "back" || command.action === "forward" || command.action === "reload") {
+      if (command.action === "back") await chrome.tabs.goBack(tab.id).catch(() => {});
+      else if (command.action === "forward") await chrome.tabs.goForward(tab.id).catch(() => {});
+      else await chrome.tabs.reload(tab.id);
+      await waitForLoad(tab.id);
+      result = { ok: true, data: { url: await urlNow(tab.id), title: (await chrome.tabs.get(tab.id)).title } };
+    } else if (command.action === "switch") {
+      if (tab.groupId >= 0 && chrome.tabGroups && typeof chrome.tabGroups.update === "function") {
+        await chrome.tabGroups.update(tab.groupId, { collapsed: false });
+      }
+      await chrome.tabs.update(tab.id, { active: true });
+      try { await chrome.windows.update(tab.windowId, { focused: true }); } catch {}
+      result = { ok: true, data: { switchedTo: command.tab, url: tab.url } };
+    } else if (command.action === "close") {
+      await chrome.tabs.remove(tab.id);
+      await loadNamedTabs();
+      tabsByName.delete(command.tab);
+      await saveNamedTabs();
+      result = { ok: true, data: { closed: command.tab } };
+    } else if (command.action === "screenshot") {
+      await chrome.tabs.update(tab.id, { active: true });
+      const format = command.args && command.args.format === "png" ? "png" : "jpeg";
+      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format, quality: 55 });
+      result = { ok: true, data: { mimeType: "image/" + format, data: String(dataUrl).split(",")[1] || "" } };
+    } else if (typeof m9rPagePower === "function") {
+      result = await run(tab.id, m9rPagePower, [command.action, command.selector || null, command.args || {}, command.expectOrigin || null, command.expectPathPrefix || null]);
+    } else result = { ok: false, error: "unknown action " + command.action };
+    if (preLabel && result && result.ok && !result.label) result.label = preLabel;
     return reply(command.id, result, await originNow(tab.id), await urlNow(tab.id));
   } catch (error) {
     return reply(command.id, { ok: false, error: String(error && error.message ? error.message : error) });
   }
+}
+
+if (typeof M9RPillBridge !== "undefined") {
+  M9RPillBridge.init({
+    send(payload) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+      socket.send(JSON.stringify(payload));
+      return true;
+    },
+    connected: () => !!socket && socket.readyState === WebSocket.OPEN,
+  });
 }
 
 chrome.alarms.create("m9r-keepalive", { periodInMinutes: 0.5 });

@@ -59,6 +59,19 @@ test("setup with consent writes the hooks and the standing block, backs up exist
   s.done();
 });
 
+test("web identity-only setup installs selected provider hooks without registering the native MCP server", async () => {
+  const s = sandbox();
+  mkdirSync(s.p.codex, { recursive: true });
+  assert.equal(await s.run("setup", ["--identity-only", "--agents", "codex", "--yes"]), 0);
+  assert.equal(existsSync(s.p.codexHooks), true);
+  assert.equal(existsSync(s.p.codexAgents), true);
+  assert.equal(existsSync(s.p.codexConfig), false);
+  assert.equal(existsSync(s.p.settings), false);
+  const manifest = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { entries: Array<{ path: string; kind: string }> };
+  assert.equal(manifest.entries.every((entry) => entry.kind !== "mcp-toml" && !entry.path.endsWith("settings.json")), true);
+  s.done();
+});
+
 test("without --yes it asks, and a no changes nothing", async () => {
   const s = sandbox({ confirm: false });
   assert.equal(await s.run("setup"), 1);

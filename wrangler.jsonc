@@ -12,7 +12,7 @@
     "binding": "ASSETS"
   },
   "vars": {
-    "NEXT_PUBLIC_SITE_URL": "https://app.m9r.workers.dev",
+    "NEXT_PUBLIC_SITE_URL": "https://m9r.dev",
     "NEXT_PUBLIC_SUPABASE_URL": "https://eymtshaxpkmojsggdtkh.supabase.co",
     "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_XGgzhm1N8caXP8Aj11SjQw_gmeRZOP0",
     "MISSION_RELAY_PUBLIC_URL": "wss://m9r-relay.m9r.workers.dev",

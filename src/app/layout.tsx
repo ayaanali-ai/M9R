@@ -5,7 +5,7 @@ import "./globals.css";
 import AmbientBackground from "@/components/AmbientBackground";
 import PwaRuntime from "@/components/PwaRuntime";
 
-const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, "") || "https://m9r-dashboard.onrender.com";
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, "") || "https://m9r.dev";
 const title = "M9R — The air between agents";
 const description =
   "Agents don’t need another home. M9R connects the agents you already use without replacing their environments.";

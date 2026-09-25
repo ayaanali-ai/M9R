@@ -3,21 +3,192 @@
   "seq": 7,
   "generatedAt": "2026-09-20T17:00:00Z",
   "agents": [
-    { "handle": "claude", "state": "seen", "since": "2026-09-20T16:58:10Z", "doing": null, "sessions": [], "evidence": "Seen recently. M9R has no reliable open/closed signal for this agent yet." },
-    { "handle": "codex", "state": "open_working", "since": "2026-09-20T16:55:00Z", "doing": null, "sessions": [{ "id": "01a0c010-9e03-7152-a1d2-039c92c32e05", "cwd": "C:/RunLeak/runleak", "live": true }], "evidence": "1 open session(s): its session file is held open, a turn is in progress." },
-    { "handle": "opencode", "state": "not_connected", "doing": null, "sessions": [], "evidence": "No session of this agent has been seen on this machine." }
+    {
+      "handle": "claude",
+      "state": "seen",
+      "since": "2026-09-20T16:58:10Z",
+      "doing": null,
+      "sessions": [],
+      "evidence": "Seen recently. M9R has no reliable open/closed signal for this agent yet."
+    },
+    {
+      "handle": "codex",
+      "state": "open_working",
+      "since": "2026-09-20T16:55:00Z",
+      "doing": null,
+      "sessions": [
+        {
+          "id": "01a0c010-9e03-7152-a1d2-039c92c32e05",
+          "cwd": "C:/RunLeak/runleak",
+          "live": true
+        }
+      ],
+      "evidence": "1 open session(s): its session file is held open, a turn is in progress."
+    },
+    {
+      "handle": "opencode",
+      "state": "not_connected",
+      "doing": null,
+      "sessions": [],
+      "evidence": "No session of this agent has been seen on this machine."
+    }
   ],
   "needsYou": [
-    { "kind": "approval", "taskId": "T4", "from": "claude", "to": "codex", "goal": "Review relay/lease.ts for the renewal race and report what you find.", "protected": false },
-    { "kind": "approval", "taskId": "T5", "from": "claude", "to": "codex", "goal": "Deploy the relay to production.", "protected": true },
-    { "kind": "push_failed", "taskId": "T3", "to": "codex", "reason": "2 Codex sessions are open here and M9R cannot tell which you mean.", "fix": "m9r-cli sessions, then m9r-cli send @codex --session <id> \"...\"" },
-    { "kind": "answer", "taskId": "T2", "from": "codex", "summary": "Reviewed: one race in renew(); the fencing token is compared after the extend." }
+    {
+      "kind": "approval",
+      "taskId": "T4",
+      "from": "claude",
+      "to": "codex",
+      "goal": "Review relay/lease.ts for the renewal race and report what you find.",
+      "protected": false
+    },
+    {
+      "kind": "approval",
+      "taskId": "T5",
+      "from": "claude",
+      "to": "codex",
+      "goal": "Deploy the relay to production.",
+      "protected": true
+    },
+    {
+      "kind": "push_failed",
+      "taskId": "T3",
+      "to": "codex",
+      "reason": "2 Codex sessions are open here and M9R cannot tell which you mean.",
+      "fix": "m9r-cli sessions, then m9r-cli send @codex --session <id> \"...\""
+    },
+    {
+      "kind": "answer",
+      "taskId": "T2",
+      "from": "codex",
+      "summary": "Reviewed: one race in renew(); the fencing token is compared after the extend."
+    }
   ],
   "recent": [
-    { "at": "2026-09-20T16:59:20Z", "taskId": "T5", "text": "@claude to @codex: Deploy the relay to production." },
-    { "at": "2026-09-20T16:58:40Z", "taskId": "T4", "text": "@claude to @codex: Review relay/lease.ts for the renewal race" },
-    { "at": "2026-09-20T16:55:02Z", "taskId": "T2", "text": "T2 finished: Reviewed: one race in renew()" }
+    {
+      "at": "2026-09-20T16:59:20Z",
+      "taskId": "T5",
+      "text": "@claude to @codex: Deploy the relay to production."
+    },
+    {
+      "at": "2026-09-20T16:58:40Z",
+      "taskId": "T4",
+      "text": "@claude to @codex: Review relay/lease.ts for the renewal race"
+    },
+    {
+      "at": "2026-09-20T16:55:02Z",
+      "taskId": "T2",
+      "text": "T2 finished: Reviewed: one race in renew()"
+    }
   ],
-  "pings": [{ "id": 7, "kind": "approval", "taskId": "T5", "text": "@claude asks @codex: Deploy the relay to production." }],
-  "reserved": { "people": [], "channels": [] }
+  "pings": [
+    {
+      "id": 7,
+      "kind": "approval",
+      "taskId": "T5",
+      "text": "@claude asks @codex: Deploy the relay to production."
+    }
+  ],
+  "reserved": {
+    "people": [],
+    "channels": []
+  },
+  "inProgress": [
+    {
+      "taskId": "T6",
+      "from": "claude",
+      "to": "opencode",
+      "goal": "Fill the shipping form on the checkout page and stop before paying.",
+      "state": "working",
+      "since": "2026-09-20T16:59:12Z"
+    }
+  ],
+  "web": [
+    {
+      "at": "2026-09-20T17:00:00Z",
+      "agent": "opencode",
+      "provider": "opencode",
+      "kind": "action",
+      "text": "Typed the postcode into Shipping address and moved to City.",
+      "tab": "Checkout",
+      "url": "https://shop.example.com/checkout/shipping"
+    },
+    {
+      "at": "2026-09-20T16:59:51Z",
+      "agent": "codex",
+      "provider": "codex",
+      "kind": "blocked",
+      "text": "blocked: @claude has this field",
+      "tab": "Checkout",
+      "url": "https://shop.example.com/checkout/shipping"
+    },
+    {
+      "at": "2026-09-20T16:59:46Z",
+      "agent": "claude",
+      "provider": "claude",
+      "kind": "message",
+      "text": "claude to codex: I have the address block and the delivery options. Take the gift-note field and the promo code, and leave the payment step alone: the owner has to approve anything past the order summary, so stop there and tell me what the total came to after the promo is applied.",
+      "tab": "Checkout",
+      "url": "https://shop.example.com/checkout/shipping"
+    },
+    {
+      "at": "2026-09-20T16:59:39Z",
+      "agent": "codex",
+      "provider": "codex",
+      "kind": "message",
+      "text": "codex to claude: Taking the promo field. Which address line are you on?"
+    },
+    {
+      "at": "2026-09-20T16:59:33Z",
+      "agent": "claude",
+      "provider": "claude",
+      "kind": "action",
+      "text": "Clicked Standard delivery (3 to 5 days, free) and checked the order summary updated to 84.20.",
+      "tab": "Checkout",
+      "url": "https://shop.example.com/checkout/shipping"
+    },
+    {
+      "at": "2026-09-20T16:59:25Z",
+      "agent": "claude",
+      "provider": "claude",
+      "kind": "worker",
+      "text": "Started a worker to compare the same basket on two other shops.",
+      "tab": "Compare",
+      "url": "https://compare.example.org/basket"
+    },
+    {
+      "at": "2026-09-20T16:59:08Z",
+      "agent": "opencode",
+      "provider": "opencode",
+      "kind": "blocked",
+      "text": "blocked: @codex is editing the promo code field",
+      "tab": "Checkout",
+      "url": "https://shop.example.com/checkout/shipping"
+    },
+    {
+      "at": "2026-09-20T16:58:50Z",
+      "agent": "claude",
+      "provider": "claude",
+      "kind": "action",
+      "text": "Opened the checkout page and read the form: 9 fields, 2 required fields are empty.",
+      "tab": "Checkout",
+      "url": "https://shop.example.com/checkout"
+    },
+    {
+      "at": "2026-09-20T16:58:25Z",
+      "agent": "codex",
+      "provider": "codex",
+      "kind": "action",
+      "text": "Read the product page and added the 2 kg bag to the basket.",
+      "tab": "Coffee beans",
+      "url": "https://shop.example.com/p/house-blend"
+    },
+    {
+      "at": "2026-09-20T16:57:50Z",
+      "agent": "opencode",
+      "provider": "opencode",
+      "kind": "message",
+      "text": "opencode to claude: Joined the checkout tab. I can take shipping if you want to do billing."
+    }
+  ]
 }

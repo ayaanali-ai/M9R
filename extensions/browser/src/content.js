@@ -10,11 +10,40 @@
   });
 
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
-    chrome.runtime.onMessage.addListener((msg) => {
-      if (msg && msg.type === "presence") overlay.update(msg);
+    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+      if (msg && msg.type === "presence") {
+        overlay.update(msg);
+        // For actions aimed at an element, hold the reply until the cursor has landed so the page action happens after it arrives.
+        if (msg.phase !== "done" && msg.target && msg.target.selector && typeof overlay.whenArrived === "function") {
+          overlay.whenArrived(msg.agent, 2000).then(() => sendResponse({ arrived: true }));
+          return true;
+        }
+      }
       else if (msg && msg.type === "owner-stop") overlay.stop(msg.owner);
       else if (msg && msg.type === "owner-resume") overlay.resume();
+      else if (msg && msg.type === "m9r-agents") overlay.syncAgents(msg.agents);
+      else if (msg && msg.type === "m9r-composer-toggle") overlay.toggleComposer();
+      else if (msg && msg.type === "m9r-pill-toggle") overlay.togglePill();
+      else if (msg && msg.type === "m9r-composer-show") overlay.showComposer(msg.focus === true);
+      else if (msg && msg.type === "m9r-pill-selection") {
+        let selection = "";
+        try { selection = String(window.getSelection() || "").slice(0, 2000); } catch {}
+        sendResponse({ selection });
+      }
     });
+  }
+
+  // The thread pill and the message bar are extension pages in frames inside the overlay's closed shadow root, so the
+  // page never sees what the owner types. Each frame carries a one-time nonce registered for this tab; the background
+  // only accepts owner commands from a frame whose nonce it knows.
+  if (chrome.runtime && typeof chrome.runtime.getURL === "function") {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    const nonce = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    chrome.runtime.sendMessage({ type: "m9r-pill-register", nonce }).then((reply) => {
+      if (!reply || !reply.ok) return;
+      overlay.mountFrame("pill", chrome.runtime.getURL(`pill.html?n=${nonce}`), { w: 372, h: 76, bottom: 76 });
+      overlay.mountFrame("composer", chrome.runtime.getURL(`composer.html?n=${nonce}`), { w: 448, h: 72, bottom: 6 });
+    }).catch(() => {});
   }
 
   document.addEventListener("m9r:presence", (event) => {
@@ -27,7 +56,7 @@
       }
     }
     if (!msg || typeof msg !== "object") return;
-    if (msg.type === "leave") overlay.remove(String(msg.agent || ""));
+    if (msg.type === "leave") overlay.leave(String(msg.agent || ""));
     else overlay.update(msg);
   });
 })();

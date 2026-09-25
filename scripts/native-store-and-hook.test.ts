@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "@/lib/native/local-store";
 import { handleHookEvent } from "@/lib/native/hook-handler";
-import { renderInboxInjection } from "@/lib/native/inbox-core";
+import { normalizeHandle, renderInboxInjection } from "@/lib/native/inbox-core";
 
 function tempStore(now?: () => Date) {
   const root = mkdtempSync(join(tmpdir(), "m9r-store-"));
@@ -18,6 +18,8 @@ test("provider names map to friendly handles", () => {
   assert.equal(handleForProvider("Codex"), "codex");
   assert.equal(handleForProvider("My Tool!"), "my-tool");
   assert.equal(handleForProvider("!!!"), "agent");
+  assert.equal(normalizeHandle("@CLAUDE"), "claude");
+  assert.equal(normalizeHandle("@@CLAUDE"), "@claude", "normalization removes exactly one leading mention marker");
   assert.equal(defaultStoreRoot("/home/u", {}), join("/home/u", ".m9r"));
   assert.equal(defaultStoreRoot("/home/u", { M9R_HOME: "/tmp/x" }), "/tmp/x");
 });
@@ -32,6 +34,18 @@ test("tasks get sequential ids and per-inbox sequence numbers, and the same key 
   assert.equal(dup.created, false); assert.equal(dup.task.id, "T1");
   assert.equal(store.addTask(task({ to: "codex", idempotencyKey: "k3" })).task.seq, 1, "each inbox counts on its own");
   assert.equal(store.tasksFor("claude").length, 2);
+  done();
+});
+
+test("recipient handles are normalized before task storage, inbox lookup and idempotency checks", () => {
+  const { store, done } = tempStore();
+  const created = store.addTask(task({ to: "@CLAUDE" }));
+  assert.equal(created.task.to, "claude");
+  assert.equal(store.tasksFor("claude").length, 1);
+  assert.equal(store.tasksFor("@CLAUDE").length, 1);
+  const duplicate = store.addTask(task({ to: "claude" }));
+  assert.equal(duplicate.created, false);
+  assert.equal(duplicate.task.id, created.task.id);
   done();
 });
 

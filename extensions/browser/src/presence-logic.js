@@ -26,8 +26,16 @@
     const createdAt = Number.isFinite(input.createdAt) ? input.createdAt : now;
     const id = clean(input.messageId, 128) || clean(input.id, 128) || `${agent}:${provider}:${createdAt}:${message}`;
     const claimMs = Number.isFinite(input.claimMs) ? Math.min(Math.max(input.claimMs, 0), 60000) : 0;
-    const target = input.target && typeof input.target.selector === "string"
-      ? { selector: clean(input.target.selector, 500) }
+    const targetRect = input.target && input.target.rect && typeof input.target.rect === "object"
+      ? {
+        x: Number.isFinite(input.target.rect.x) ? Math.max(0, Math.min(32768, Math.round(input.target.rect.x))) : null,
+        y: Number.isFinite(input.target.rect.y) ? Math.max(0, Math.min(32768, Math.round(input.target.rect.y))) : null,
+        width: Number.isFinite(input.target.rect.width) ? Math.max(0, Math.min(32768, Math.round(input.target.rect.width))) : null,
+        height: Number.isFinite(input.target.rect.height) ? Math.max(0, Math.min(32768, Math.round(input.target.rect.height))) : null,
+      }
+      : null;
+    const target = input.target && (typeof input.target.selector === "string" || targetRect)
+      ? { selector: typeof input.target.selector === "string" ? clean(input.target.selector, 500) : null, rect: targetRect }
       : null;
     const recipient = clean(input.to, 80);
     const messageKind = input.messageKind === "agent_message" ? "agent_message" : "activity";

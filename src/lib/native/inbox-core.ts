@@ -25,6 +25,11 @@ export const TRUNCATION_MARKER = " [truncated: full text via get_task]";
 export type Approval = "not_needed" | "pending" | "approved" | "denied" | "expired";
 export type Origin = "human_typed" | "agent_initiated";
 
+/** Canonical inbox key: tolerate a single mention marker and provider-handle casing. */
+export function normalizeHandle(handle: string): string {
+  return (handle.startsWith("@") ? handle.slice(1) : handle).toLowerCase();
+}
+
 export interface Task {
   id: string;
   /** Monotonic per-inbox sequence; the cursor is the highest seq an agent has been shown. */
@@ -124,8 +129,8 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
   return {
     id: ids.id,
     seq: ids.seq,
-    from: input.from,
-    to: input.to,
+    from: normalizeHandle(input.from),
+    to: normalizeHandle(input.to),
     goal: goal.text,
     goalTruncated: goal.truncated,
     pointers,
@@ -145,7 +150,8 @@ const RESULT_CHARS = 400;
 
 /** Answers to tasks this agent sent, shown once at its next prompt. Empty when there are none (zero tokens). */
 export function renderResultsInjection(tasks: readonly Task[], handle: string): { text: string; ids: string[] } {
-  const ready = tasks.filter((t) => t.from === handle && t.resultSummary && !t.resultShownAt).slice(0, RESULT_ITEMS);
+  const normalizedHandle = normalizeHandle(handle);
+  const ready = tasks.filter((t) => normalizeHandle(t.from) === normalizedHandle && t.resultSummary && !t.resultShownAt).slice(0, RESULT_ITEMS);
   if (ready.length === 0) return { text: "", ids: [] };
   const lines = ready.map((t) => `[${t.id} finished by @${t.to}] ${clip(t.resultSummary ?? "", RESULT_CHARS).text}`);
   return { text: `M9R results (${ready.length})\n${lines.join("\n")}`, ids: ready.map((t) => t.id) };
@@ -153,7 +159,8 @@ export function renderResultsInjection(tasks: readonly Task[], handle: string): 
 
 /** Same key means the same task: a repeated send must not create or deliver a second one. */
 export function findByIdempotencyKey(tasks: readonly Task[], to: string, key: string): Task | undefined {
-  return tasks.find((t) => t.to === to && t.idempotencyKey === key);
+  const normalizedTo = normalizeHandle(to);
+  return tasks.find((t) => normalizeHandle(t.to) === normalizedTo && t.idempotencyKey === key);
 }
 
 export interface InjectionResult {

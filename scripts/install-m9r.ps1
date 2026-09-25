@@ -16,12 +16,16 @@ Use a previously downloaded release ZIP. Its adjacent .sha256 file is required.
 .PARAMETER Uninstall
 Run the installed engine's reversible uninstall. It runs from a temporary copy
 because Windows does not allow a process to delete its own executable.
+
+.PARAMETER Web
+After the native setup, also run the consent-driven M9R browser/MCP setup.
 #>
 [CmdletBinding()]
 param(
     [string]$Version,
     [string]$PackagePath,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$Web
 )
 
 $ErrorActionPreference = 'Stop'
@@ -152,6 +156,12 @@ function Invoke-InstalledUninstall {
             Write-Host 'Nothing was changed.'
             return
         }
+        $webManifest = Join-Path $env:USERPROFILE '.m9r\web-setup-manifest.json'
+        if (Test-Path -LiteralPath $webManifest -PathType Leaf) {
+            & $maintenanceExe web uninstall --yes
+            $webExit = $LASTEXITCODE
+            if ($webExit -ne 0) { throw "M9R Web uninstall exited with code $webExit. Native setup was not removed." }
+        }
         & $maintenanceExe uninstall --yes
         $code = $LASTEXITCODE
         if ($code -ne 0) { throw "M9R uninstall exited with code $code." }
@@ -209,6 +219,18 @@ try {
     Write-Host 'M9R setup finished. Start a new supported agent session to activate its hooks.' -ForegroundColor Green
     Write-Host "To undo the managed setup later: `"$env:USERPROFILE\.m9r\bin\m9r-engine.exe`" uninstall"
     Write-Host 'Codex hook trust remains optional and is handled by Codex itself.'
+    if ($Web) {
+        $extensionPackage = Join-Path $payload 'extension'
+        if (-not (Test-Path -LiteralPath (Join-Path $extensionPackage 'manifest.json') -PathType Leaf)) {
+            throw 'The verified engine package does not contain the browser extension. Native setup is installed; rerun with a package built by npm run build:cli.'
+        }
+        $env:M9R_EXTENSION_SOURCE = $extensionPackage
+        Write-Host ''
+        Write-Host 'Starting the separate M9R Web setup. It previews its agent/browser changes and asks before applying them.' -ForegroundColor Cyan
+        & $engine web setup
+        $webExit = $LASTEXITCODE
+        if ($webExit -ne 0) { throw "M9R Web setup exited with code $webExit. Native setup remains installed and can be removed with -Uninstall." }
+    }
     exit 0
 } catch {
     Write-Host $_ -ForegroundColor Red

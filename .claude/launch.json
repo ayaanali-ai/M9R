@@ -47,6 +47,12 @@
       "port": 5173
     },
     {
+      "name": "overlay-ui-5195",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "overlay", "run", "ui", "--", "--port", "5195"],
+      "port": 5195
+    },
+    {
       "name": "presence-test",
       "runtimeExecutable": "python",
       "runtimeArgs": [

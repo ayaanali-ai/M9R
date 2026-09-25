@@ -6,7 +6,7 @@
  */
 import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { buildFeed, feedBody, lastTurnState, type Feed, type SessionProbe } from "./feed-core";
+import { buildFeed, feedBody, lastTurnState, type Feed, type FeedWebItem, type SessionProbe } from "./feed-core";
 import { readRolloutTailFor, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { PENDING_TTL_MS } from "./approval-core";
 import { createLocalStore } from "./local-store";
@@ -55,6 +55,21 @@ function writeAtomic(path: string, text: string): void {
   }
 }
 
+/** Written by the web broker (scripts/m9r-web-broker.ts): its recent activity, newest first, already redacted. */
+export const WEB_ACTIVITY_FILE = "web-activity.json";
+
+export function writeWebActivity(root: string, items: readonly FeedWebItem[]): void {
+  mkdirSync(root, { recursive: true });
+  writeAtomic(join(root, WEB_ACTIVITY_FILE), JSON.stringify({ version: 1, web: items.slice(0, 30) }) + "\n");
+}
+
+function readWebActivity(root: string): FeedWebItem[] | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(root, WEB_ACTIVITY_FILE), "utf8")) as { web?: unknown };
+    return Array.isArray(parsed.web) ? (parsed.web as FeedWebItem[]) : null;
+  } catch { return null; }
+}
+
 const PROBE_RECENT_MS = 6 * 3_600_000;
 const PROBE_MAX = 12;
 
@@ -91,7 +106,8 @@ export async function feedPass(root: string, deps: FeedDeps, probes: Record<stri
   store.sweepExpired(PENDING_TTL_MS);
   const snap = store.snapshot();
   const previous = readPrevious(path);
-  const feed = buildFeed({ now, endpoints: snap.endpoints, sessions: snap.sessions, tasks: snap.tasks, events: snap.events, probes, pendingIds: new Set(store.pendingApprovals().map((t) => t.id)) }, previous);
+  const web = readWebActivity(root);
+  const feed = buildFeed({ now, endpoints: snap.endpoints, sessions: snap.sessions, tasks: snap.tasks, events: snap.events, probes, pendingIds: new Set(store.pendingApprovals().map((t) => t.id)), ...(web ? { web } : {}) }, previous);
   if (previous && feedBody(previous) === feedBody(feed)) return null;
   mkdirSync(root, { recursive: true });
   writeAtomic(path, JSON.stringify(feed, null, 2) + "\n");
@@ -106,7 +122,9 @@ export async function runFeed(options: FeedRunOptions): Promise<Feed | null> {
   if (!options.watch) return last;
 
   const statePath = join(options.root, "state.json");
-  const mtime = () => { try { return statSync(statePath).mtimeMs; } catch { return 0; } };
+  const webPath = join(options.root, WEB_ACTIVITY_FILE);
+  const stamp = (path: string) => { try { return statSync(path).mtimeMs; } catch { return 0; } };
+  const mtime = () => stamp(statePath) + stamp(webPath);
   let seen = mtime();
   let busy = false;
   const tick = async (reprobe: boolean) => {

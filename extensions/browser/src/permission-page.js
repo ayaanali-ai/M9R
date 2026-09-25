@@ -30,6 +30,7 @@
       document.querySelector("main > p").textContent = "You are granting your own M9R agents browser access to:";
       scope.textContent = "Owner access · site-wide Chrome permission. M9R only acts when you ask it to.";
       allow.textContent = "Allow this site";
+      if (allowAll) allowAll.hidden = false;
       deny.textContent = "Cancel";
     } else {
       scope.textContent = `Grant scope: ${grant.pathPrefix} · Actions: ${grant.actions.join(", ") || "none"}`;
@@ -37,7 +38,22 @@
     site.textContent = new URL(grant.origin).host;
     allow.disabled = false;
   }
+  const allowAll = document.getElementById("allow-all");
   void initialize();
+  // Owner-initiated only: one click to let their own agents research across many sites; risky actions still wait for approval.
+  if (allowAll) {
+    allowAll.addEventListener("click", async () => {
+      allowAll.disabled = true;
+      status.textContent = "Waiting for Chrome…";
+      try {
+        const granted = await chrome.permissions.request({ origins: ["https://*/*", "http://*/*"] });
+        status.textContent = granted ? "All websites allowed for your own M9R agents. Submit, buy, post and delete still wait for you." : "No extra access was added.";
+      } catch {
+        status.textContent = "Chrome did not grant all-site access.";
+      }
+      allowAll.disabled = false;
+    });
+  }
 
   async function finish(granted) {
     if (ownerInitiated) {

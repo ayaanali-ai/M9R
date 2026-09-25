@@ -50,7 +50,11 @@ export interface Feed {
   recent: Array<{ at: string; taskId?: string; text: string }>;
   pings: FeedPing[];
   reserved: { people: unknown[]; channels: unknown[] };
+  /** Web activity from the local web broker, newest first (only present when the broker has written some). */
+  web?: FeedWebItem[];
 }
+
+export interface FeedWebItem { at: string; agent: string; provider: string; kind: "action" | "message" | "blocked" | "worker"; text: string; tab?: string; url?: string }
 
 /** What a probe learned about one Codex session. `null` means the probe could not run. */
 export interface SessionProbe {
@@ -69,6 +73,17 @@ export interface FeedInput {
   probes: Readonly<Record<string, SessionProbe>>;
   /** Tasks whose approval has lapsed are not shown as waiting. */
   pendingIds: ReadonlySet<string>;
+  /** The web broker's recent activity (web-activity.json); omitted when there is none. */
+  web?: readonly FeedWebItem[];
+}
+
+const WEB_KINDS = new Set(["action", "message", "blocked", "worker"]);
+function webItems(items: readonly FeedWebItem[]): FeedWebItem[] {
+  return items.filter((w) => w && typeof w.text === "string" && WEB_KINDS.has(w.kind)).slice(0, 30).map((w) => ({
+    at: String(w.at), agent: safe(String(w.agent), 40), provider: safe(String(w.provider), 40), kind: w.kind, text: safe(w.text, 200),
+    ...(typeof w.tab === "string" ? { tab: safe(w.tab, 40) } : {}),
+    ...(typeof w.url === "string" ? { url: safe(w.url.split(/[?#]/)[0], 300) } : {}),
+  }));
 }
 
 const GOAL_CHARS = 300;
@@ -185,8 +200,9 @@ export function buildFeed(input: FeedInput, previous: Feed | null): Feed {
   const inProgress = inProgressFrom(input);
   const recent = input.events.slice(-RECENT_ITEMS).reverse().map((e) => ({ at: e.at, taskId: e.taskId, text: safe(e.text, 140) }));
 
-  const body = { agents, needsYou, inProgress, recent };
-  const changed = !previous || JSON.stringify({ agents: previous.agents, needsYou: previous.needsYou, inProgress: previous.inProgress ?? [], recent: previous.recent }) !== JSON.stringify(body);
+  const web = input.web ? webItems(input.web) : undefined;
+  const body = { agents, needsYou, inProgress, recent, ...(web ? { web } : {}) };
+  const changed = !previous || JSON.stringify({ agents: previous.agents, needsYou: previous.needsYou, inProgress: previous.inProgress ?? [], recent: previous.recent, ...(web ? { web: previous.web ?? [] } : {}) }) !== JSON.stringify(body);
   const seq = previous ? (changed ? previous.seq + 1 : previous.seq) : 1;
 
   const before = new Set((previous?.needsYou ?? []).map(needsKey));
@@ -196,7 +212,7 @@ export function buildFeed(input: FeedInput, previous: Feed | null): Feed {
         text: n.kind === "approval" ? `@${n.from} asks @${n.to}: ${n.goal}` : n.kind === "push_failed" ? `${n.taskId} could not be pushed: ${n.reason}` : `@${n.from} answered ${n.taskId}`,
       }))
     : (previous?.pings ?? []);
-  return { version: 1, seq, generatedAt: input.now.toISOString(), agents, needsYou, inProgress, recent, pings, reserved: { people: [], channels: [] } };
+  return { version: 1, seq, generatedAt: input.now.toISOString(), agents, needsYou, inProgress, recent, pings, reserved: { people: [], channels: [] }, ...(web ? { web } : {}) };
 }
 
 /** The part of a feed that matters for "did anything change" (everything but the timestamp). */

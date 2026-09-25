@@ -45,7 +45,7 @@ cd C:\RunLeak\runleak   # replace with the folder where you cloned M9R
 npm ci
 ```
 
-Keep the repository folder in a stable location while using the unpacked extension. Its development ID can change if the folder moves.
+The development key pins the extension ID even if the folder moves; keep the folder accessible because Chrome/Edge load the extension's files from it.
 
 ## 2. Load unpacked in Chrome or Edge
 
@@ -65,7 +65,7 @@ In a PowerShell window, start the broker. Keep this process running while agents
 npx.cmd tsx scripts/m9r-web-broker.ts
 ```
 
-The development manifest contains a fixed public key, so this build has the stable extension ID `mahhaigfogjneccbmbpbedlnkhgdcmhb`; the broker allows only that ID. Do not use `M9R_ALLOW_ANY_EXTENSION=1` outside isolated local development. The broker listens on loopback port `47821` by default; set `M9R_WEB_BROKER_PORT` before starting it only if you intentionally use another port.
+The development manifest contains a fixed public key, so this build has the stable extension ID `mahhaigfogjneccbmbpbedlnkhgdcmhb`; the broker allows only that ID. The broker listens on loopback port `47821` by default; set `M9R_WEB_BROKER_PORT` before starting it only if you intentionally use another port.
 
 ## 4. Connect Claude Code
 
