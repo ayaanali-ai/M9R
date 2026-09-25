@@ -202,7 +202,7 @@ export function mergeMcpServerToml(existingTomlText: string | null, name: string
 export function removeMcpServerToml(existingTomlText: string, name: string): { content: string; changed: boolean } {
   const bounds = codexBlockBounds(existingTomlText, name);
   if (!bounds) return { content: existingTomlText, changed: false };
-  let end = bounds.end;
+  const end = bounds.end;
   const before = existingTomlText.slice(0, bounds.start);
   const after = existingTomlText.slice(end);
   const content = before.endsWith("\n\n") && after === "" ? before.slice(0, -1) : before + after;

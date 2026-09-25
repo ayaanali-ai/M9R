@@ -19,8 +19,7 @@ function createHarness(settings: { completeOnCreate?: boolean } = {}) {
   let clearedLoadTimers = 0;
   const loadTimers = new Set<ReturnType<typeof setTimeout>>();
   const workerSetTimeout = (callback: () => void, delay: number) => {
-    let timer: ReturnType<typeof setTimeout>;
-    timer = globalThis.setTimeout(() => {
+    const timer: ReturnType<typeof setTimeout> = globalThis.setTimeout(() => {
       loadTimers.delete(timer);
       callback();
     }, delay === 10_000 ? 50 : delay);

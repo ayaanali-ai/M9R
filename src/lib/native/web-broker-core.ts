@@ -183,6 +183,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
   function recordPresence(tab: string, presence: Record<string, unknown>, owner?: string): void {
     const key = activityKey(String(presence.agent ?? ""), String(presence.provider ?? ""), String(presence.sessionId ?? ""));
     const records = presenceByTab.get(tab) ?? new Map<string, Record<string, unknown>>();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- presence records are loosely shaped by the extension
     const record: Record<string, any> = { ...presence, owner: owner ?? deps.ownerId ?? "you", tab, updatedAt: now() };
     records.set(key, record);
     presenceByTab.set(tab, records);

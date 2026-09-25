@@ -286,7 +286,7 @@ test("validation rejects non-http urls, missing selectors, bad tab names and ove
 
 function crossHarness(options: { withAuthority?: boolean } = {}) {
   const sent: Array<Record<string, unknown>> = [];
-  let clock = 1_000;
+  const clock = 1_000;
   let n = 0;
   const authority = createWebAuthority({ ownerId: "alice", now: () => clock, newId: () => `a${++n}` });
   const broker = createWebBroker({
