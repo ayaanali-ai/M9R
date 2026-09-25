@@ -20,11 +20,17 @@ function crc32(buffer) {
 }
 
 function dosTimestamp(date = ZIP_EPOCH) {
-  const year = Math.max(1980, date.getFullYear());
+  const year = Math.max(1980, date.getUTCFullYear());
   return {
-    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
-    date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+    time: (date.getUTCHours() << 11) | (date.getUTCMinutes() << 5) | Math.floor(date.getUTCSeconds() / 2),
+    date: ((year - 1980) << 9) | ((date.getUTCMonth() + 1) << 5) | date.getUTCDate(),
   };
+}
+
+function compareNames(left, right) {
+  const a = left.replace(/\\/g, "/");
+  const b = right.replace(/\\/g, "/");
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 export function buildZip(entries) {
@@ -32,7 +38,7 @@ export function buildZip(entries) {
   const centralParts = [];
   const stamp = dosTimestamp();
   let offset = 0;
-  const sortedEntries = [...entries].sort((a, b) => a.name.replace(/\\/g, "/").localeCompare(b.name.replace(/\\/g, "/"), "en"));
+  const sortedEntries = [...entries].sort((a, b) => compareNames(a.name, b.name));
   for (const entry of sortedEntries) {
     const name = Buffer.from(entry.name.replace(/\\/g, "/"), "utf8");
     const data = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data);
@@ -85,6 +91,26 @@ export function buildZip(entries) {
   return Buffer.concat([...localParts, centralDirectory, end]);
 }
 
+export function validateStoreManifest(manifest) {
+  const fail = (reason) => { throw new Error(`store manifest failed review guard: ${reason}`); };
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) fail("expected an object");
+  if (manifest.manifest_version !== 3) fail("Manifest V3 is required");
+  if (typeof manifest.name !== "string" || manifest.name.trim().length === 0 || manifest.name.length > 45) fail("name must be 1-45 characters");
+  if (typeof manifest.description !== "string" || manifest.description.trim().length === 0 || manifest.description.length > 132) fail("description must be 1-132 characters");
+  if (manifest.content_scripts !== undefined) fail("static content scripts are not allowed in the store build");
+  if (manifest.externally_connectable !== undefined) fail("externally_connectable is not part of the store build");
+  if (JSON.stringify(manifest.permissions) !== JSON.stringify(["tabs", "scripting", "alarms", "storage"])) fail("permissions must remain the reviewed minimum set");
+  if (JSON.stringify(manifest.host_permissions) !== JSON.stringify(["http://127.0.0.1/*", "http://localhost/*"])) fail("required host access must remain loopback-only");
+  if (JSON.stringify(manifest.optional_host_permissions) !== JSON.stringify(["http://*/*", "https://*/*"])) fail("site access must remain optional and limited to HTTP/HTTPS origins");
+  if (JSON.stringify(manifest.web_accessible_resources) !== JSON.stringify([{
+    resources: ["assets/providers/*.svg"],
+    matches: ["http://*/*", "https://*/*"],
+  }])) fail("only static provider badge SVGs may be web-accessible");
+  if (manifest.background?.service_worker !== "src/background.js") fail("unexpected service worker entry point");
+  if (manifest.action?.default_popup !== "permission.html") fail("unexpected action popup");
+  return true;
+}
+
 async function walkFiles(root, current = root) {
   const entries = [];
   for (const item of await readdir(current, { withFileTypes: true })) {
@@ -100,9 +126,7 @@ export async function buildStorePackage(outputPath) {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "m9r-store-package-"));
   try {
     const template = JSON.parse(await readFile(templatePath, "utf8"));
-    if (template.manifest_version !== 3 || template.content_scripts || template.host_permissions.some((host) => !host.includes("127.0.0.1") && !host.includes("localhost"))) {
-      throw new Error("store manifest failed the local-only required-host guard");
-    }
+    validateStoreManifest(template);
     const stage = path.join(tempRoot, "package");
     await mkdir(stage, { recursive: true });
     await copyFile(path.join(browserRoot, "permission.html"), path.join(stage, "permission.html"));
@@ -129,7 +153,7 @@ export async function buildStorePackage(outputPath) {
     template.icons = Object.fromEntries([16, 32, 48, 128].map((size) => [size, `icons/icon-${size}.png`]));
     template.action.default_icon = { 16: "icons/icon-16.png", 32: "icons/icon-32.png" };
     await writeFile(path.join(stage, "manifest.json"), `${JSON.stringify(template, null, 2)}\n`, { flag: "wx" });
-    const files = (await walkFiles(stage)).sort((a, b) => a.name.localeCompare(b.name, "en"));
+    const files = (await walkFiles(stage)).sort((a, b) => compareNames(a.name, b.name));
     const archive = buildZip(files);
     await mkdir(path.dirname(output), { recursive: true });
     await writeFile(output, archive, { flag: "wx" });

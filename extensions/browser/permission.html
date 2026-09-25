@@ -10,6 +10,7 @@
     main{width:min(560px,100%);padding:28px;border:1px solid #424650;border-radius:14px;background:#1a1d24;box-shadow:0 18px 60px #0008}
     h1{margin:0 0 8px;font-size:22px}p{color:#c5c9d2}code{overflow-wrap:anywhere;color:#a8f0c6}
     .scope{padding:12px;border:1px solid #393e49;border-radius:8px;background:#111318}
+    .disclosure{padding:14px;border:1px solid #8f7a3c;border-radius:8px;background:#272316;color:#f5e8b4}.disclosure strong{display:block;margin-bottom:5px}.disclosure p{margin:0;color:#f5e8b4}
     button{margin:12px 8px 0 0;padding:10px 14px;border:0;border-radius:7px;background:#b7f3cd;color:#101914;font-weight:700;cursor:pointer}
     button.secondary{background:#333844;color:#f3f4f6}#status{min-height:24px;margin-top:16px;color:#a8f0c6}
     .stop-tools{margin-top:28px;padding-top:18px;border-top:1px solid #393e49}.stop-tools p{font-size:13px}.stop-tools button{background:#702c32;color:#fff}
@@ -22,6 +23,10 @@
     <p class="scope"><code id="site">Checking site…</code></p>
     <p id="scope"></p>
     <p>Chrome’s site permission covers the entire site, not just the approved path. M9R will still enforce the grant’s listed actions, path, and expiry locally. The agent may read visible page content and use the approved page controls; passwords and other sensitive fields remain blocked.</p>
+    <section class="disclosure" aria-label="Browser data disclosure">
+      <strong>What browser access means</strong>
+      <p>When you run an M9R browser task, requested page text, URLs, and action data (including text you ask an agent to type into ordinary fields) go to the M9R broker on this computer and may be sent to the selected agent/provider and authorized M9R collaborators. Password, hidden, payment-card, and one-time-code fields are blocked by targeted checks, but visible pages can still contain sensitive information. No page data is sent merely by granting browser permission.</p>
+    </section>
     <button id="allow" type="button">Continue to Chrome permission</button>
     <button id="deny" class="secondary" type="button">No thanks</button>
     <div id="status" role="status" aria-live="polite"></div>

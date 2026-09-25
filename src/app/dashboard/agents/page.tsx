@@ -1,5 +1,6 @@
 import { PageHeader } from "@/components/product/WorkspaceUI";
 import AgentWorkspaceClient from "@/components/product/AgentWorkspaceClient";
+import WorkspaceEndpointCard from "@/components/product/WorkspaceEndpointCard";
 import { createClient } from "@/lib/supabase/server";
 import { supabase as adminDb } from "@/lib/supabase";
 import { listAgentRunsForUser, type DashboardRun } from "@/lib/agent-run-service";
@@ -313,6 +314,7 @@ export default async function AgentsDashboardPage() {
   return (
     <div className="wf-atmosphere">
       <div className="mx-auto w-full max-w-[1400px]">
+        <WorkspaceEndpointCard />
         <AgentWorkspaceClient
           agents={agents}
           viewerUserId={user?.id ?? null}

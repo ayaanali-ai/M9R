@@ -2,7 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { AgentJoinError, type AuthedAgent } from "@/lib/agent-join-service";
 import { explicitlyMentionedAgentKinds } from "@/lib/conversation-routing";
 import { deriveDelivery, type DeliveryRecipient, type DeliveryView, type TimingEvidence } from "@/lib/delivery-state";
-import { loadWorkspaceEndpoints, viewOf } from "@/lib/endpoint-service";
+import { loadWorkspaceEndpoints, loadWorkspaceEndpointsForHuman, viewOf } from "@/lib/endpoint-service";
 
 function requireService() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -24,34 +24,57 @@ export interface MessageDeliveryReport {
  * The caller must be a participant in the message's conversation; anything else is a plain 404.
  */
 export async function getMessageDelivery(agent: AuthedAgent, messageId: string): Promise<MessageDeliveryReport> {
+  return readMessageDelivery({ workspaceId: agent.workspaceId, connectionId: agent.connectionId }, messageId);
+}
+
+export async function getDashboardMessageDelivery(workspaceId: string, userId: string, messageId: string): Promise<MessageDeliveryReport> {
+  return readMessageDelivery({ workspaceId, userId }, messageId);
+}
+
+async function readMessageDelivery(viewer: { workspaceId: string; connectionId: string; userId?: never } | { workspaceId: string; userId: string; connectionId?: never }, messageId: string): Promise<MessageDeliveryReport> {
   const db = requireService();
   const notFound = () => new AgentJoinError("Message was not found.", "MESSAGE_NOT_FOUND", 404);
   if (!/^[0-9a-f-]{36}$/i.test(messageId)) throw notFound();
 
   const { data: message, error } = await db.from("conversation_messages")
     .select("id, conversation_id, recipient_connection_id, body, created_at")
-    .eq("workspace_id", agent.workspaceId)
+    .eq("workspace_id", viewer.workspaceId)
     .eq("id", messageId)
     .maybeSingle();
   if (error) throw new AgentJoinError("Could not read the message.", "MESSAGE_READ_FAILED", 500);
   if (!message) throw notFound();
 
-  const { data: participant } = await db.from("conversation_participants")
-    .select("connection_id")
-    .eq("workspace_id", agent.workspaceId)
-    .eq("conversation_id", message.conversation_id as string)
-    .eq("connection_id", agent.connectionId)
-    .maybeSingle();
-  if (!participant) throw notFound();
+  if (viewer.connectionId) {
+    const { data: participant } = await db.from("conversation_participants")
+      .select("connection_id").eq("workspace_id", viewer.workspaceId)
+      .eq("conversation_id", message.conversation_id as string).eq("connection_id", viewer.connectionId).maybeSingle();
+    if (!participant) throw notFound();
+  } else {
+    const { data: conversation } = await db.from("agent_conversations")
+      .select("human_membership_managed").eq("workspace_id", viewer.workspaceId)
+      .eq("id", message.conversation_id as string).maybeSingle();
+    if (!conversation) throw notFound();
+    const { data: member } = await db.from("workspace_members").select("user_id")
+      .eq("workspace_id", viewer.workspaceId).eq("user_id", viewer.userId).maybeSingle();
+    if (!member) throw notFound();
+    if (conversation.human_membership_managed) {
+      const { data: channelMember } = await db.from("conversation_human_members").select("user_id")
+        .eq("workspace_id", viewer.workspaceId).eq("conversation_id", message.conversation_id as string)
+        .eq("user_id", viewer.userId).maybeSingle();
+      if (!channelMember) throw notFound();
+    }
+  }
 
   const [timingResult, loaded] = await Promise.all([
     db.from("workspace_turn_timing_events")
       .select("stage, provider, occurred_at, at_ms, bridge_instance_id, metadata")
-      .eq("workspace_id", agent.workspaceId)
+      .eq("workspace_id", viewer.workspaceId)
       .eq("message_id", messageId)
       .order("at_ms", { ascending: true })
       .limit(500),
-    loadWorkspaceEndpoints(agent),
+    viewer.connectionId
+      ? loadWorkspaceEndpoints({ workspaceId: viewer.workspaceId, connectionId: viewer.connectionId } as AuthedAgent)
+      : loadWorkspaceEndpointsForHuman(viewer.workspaceId, viewer.userId ?? null),
   ]);
   if (timingResult.error) throw new AgentJoinError("Could not read delivery evidence.", "DELIVERY_READ_FAILED", 500);
   const timings = (timingResult.data ?? []) as TimingEvidence[];

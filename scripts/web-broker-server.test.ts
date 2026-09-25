@@ -291,6 +291,35 @@ test("with no extension connected the tool reports it instead of hanging", async
   await t.done();
 });
 
+test("authenticated web status reports whether the extension completed its ready handshake", async () => {
+  const t = await setup({ allowAnyExtension: true });
+  try {
+    const denied = await ownerRequest(t.broker.port, undefined, "/web/status");
+    assert.equal(denied.status, 401);
+    const before = await ownerRequest(t.broker.port, t.key, "/web/status");
+    assert.equal((before.body as { extensionReady: boolean }).extensionReady, false);
+    const { ws } = await t.connectExtension();
+    const after = await ownerRequest(t.broker.port, t.key, "/web/status");
+    assert.equal((after.body as { extensionConnected: boolean }).extensionConnected, true);
+    assert.equal((after.body as { extensionReady: boolean }).extensionReady, true);
+    ws.close();
+  } finally {
+    await t.done();
+  }
+});
+
+test("authenticated owner shutdown closes the loopback broker", async () => {
+  const t = await setup({ allowAnyExtension: true });
+  try {
+    const response = await ownerRequest(t.broker.port, t.key, "/web/shutdown", "POST", {});
+    assert.equal(response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await assert.rejects(fetch(`http://127.0.0.1:${t.broker.port}/health`));
+  } finally {
+    await t.done();
+  }
+});
+
 test("a command waits for the extension ready handshake before dispatching", async () => {
   const t = await setup({ allowAnyExtension: true, extensionConnectTimeoutMs: 500 });
   try {

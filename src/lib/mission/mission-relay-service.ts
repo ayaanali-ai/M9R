@@ -8,6 +8,8 @@ import {
   type MissionHuddleOfferPayload,
   type RelayFrame,
   type RelayServerFrameType,
+  type WebPresenceAction,
+  type WebPresencePayload,
 } from "./mission-relay-protocol";
 import { MissionRelaySubscriptionRegistry } from "./mission-relay-subscriptions";
 import {
@@ -411,6 +413,9 @@ export class MissionRelayService {
       case "presence.cursor":
         this.handlePresenceCursor(state, frame);
         return;
+      case "web.presence":
+        await this.handleWebPresence(state, frame);
+        return;
       case "workspace.step":
       case "workspace.turn":
       case "workspace.todos":
@@ -603,6 +608,63 @@ export class MissionRelayService {
     if (!this.cursorRateLimiter.allow(state.connection.connectionId)) return;
 
     this.subscriptions.publish(frame.workspaceId, targetRoom, this.serverFrame(frame, "presence.cursor", { participantId, sessionId, x, y }));
+  }
+
+  private async handleWebPresence(state: ConnectionState, frame: RelayFrame): Promise<void> {
+    const targetRoom = roomId(frame);
+    if (!targetRoom) return this.sendError(state, "room_required", "missionId or channelId is required for web presence.", frame);
+    const payload = frame.payload && typeof frame.payload === "object" && !Array.isArray(frame.payload)
+      ? frame.payload as Record<string, unknown>
+      : {};
+    const agent = typeof payload.agent === "string" ? payload.agent.trim() : "";
+    const provider = typeof payload.provider === "string" ? payload.provider.trim() : "";
+    const rawUrl = typeof payload.url === "string" ? payload.url : "";
+    const action = payload.action;
+    const seq = payload.seq;
+    const rawTarget = payload.target;
+    if (!agent || agent.length > 80 || !provider || provider.length > 80 || !Number.isSafeInteger(seq) || (seq as number) < 0 ||
+        (action !== "open" && action !== "read" && action !== "click" && action !== "type") ||
+        typeof rawTarget !== "object" || rawTarget === null || Array.isArray(rawTarget)) {
+      return this.sendError(state, "web_presence_invalid", "Web presence fields are invalid.", frame);
+    }
+
+    let url: URL;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      return this.sendError(state, "web_presence_invalid", "Web presence URL must be an absolute HTTP or HTTPS URL.", frame);
+    }
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || rawUrl.length > 2_048) {
+      return this.sendError(state, "web_presence_invalid", "Web presence URL must be a safe HTTP or HTTPS URL.", frame);
+    }
+
+    const targetRecord = rawTarget as Record<string, unknown>;
+    let target: WebPresencePayload["target"];
+    if (typeof targetRecord.selector === "string" && targetRecord.selector.trim().length > 0 && targetRecord.selector.length <= 500 &&
+        Object.keys(targetRecord).length === 1) {
+      target = { selector: targetRecord.selector };
+    } else if (typeof targetRecord.x === "number" && typeof targetRecord.y === "number" &&
+        Number.isFinite(targetRecord.x) && Number.isFinite(targetRecord.y) && targetRecord.x >= 0 && targetRecord.x <= 1 &&
+        targetRecord.y >= 0 && targetRecord.y <= 1 && Object.keys(targetRecord).length === 2) {
+      target = { x: targetRecord.x, y: targetRecord.y };
+    } else {
+      return this.sendError(state, "web_presence_invalid", "Web presence target must be a selector or normalized x/y coordinates.", frame);
+    }
+
+    if (!this.cursorRateLimiter.allow(state.connection.connectionId)) return;
+    // Query strings and fragments often contain search terms, invite tokens, or session identifiers.
+    // Presence needs the visible site/path, not those incidental secrets.
+    url.search = "";
+    url.hash = "";
+    const safePayload: WebPresencePayload = {
+      agent,
+      provider,
+      url: url.toString(),
+      target,
+      action: action as WebPresenceAction,
+      seq: seq as number,
+    };
+    this.subscriptions.publish(frame.workspaceId, targetRoom, this.serverFrame(frame, "web.presence", safePayload));
   }
 
   private async huddleIdentity(state: ConnectionState, frame: RelayFrame): Promise<{ huddleId: string; participantId: string } | null> {

@@ -30,13 +30,15 @@
       ? { selector: clean(input.target.selector, 500) }
       : null;
     const recipient = clean(input.to, 80);
+    const messageKind = input.messageKind === "agent_message" ? "agent_message" : "activity";
     return {
       id,
       agent,
       provider,
       providerLabel: providerPresentation(provider).label,
       message,
-      messageKind: input.messageKind === "agent_message" ? "agent_message" : "activity",
+      messageKind,
+      bubbleMessage: messageKind === "agent_message" && recipient ? `${agent} to ${recipient}: ${message}` : message,
       sessionId: clean(input.sessionId, 128) || null,
       recipient,
       showMessageText: input.showMessageText !== false,
@@ -56,6 +58,12 @@
     const label = provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : "Agent";
     const glyph = Array.from(label)[0].toUpperCase();
     return { label, glyph, color: "#6b7280", asset: null, known: false };
+  }
+
+  function formatAgentBadgeLabel(agent, provider) {
+    const name = clean(agent, 64) || "Agent";
+    const label = providerPresentation(provider).label;
+    return name.toLowerCase() === label.toLowerCase() ? label : `${name} · ${label}`;
   }
 
   function createPresenceFeed() {
@@ -87,5 +95,5 @@
     };
   }
 
-  global.M9RPresenceLogic = { MESSAGE_TTL_MS, MAX_MESSAGES, formatPresenceMessage, providerPresentation, createPresenceFeed };
+  global.M9RPresenceLogic = { MESSAGE_TTL_MS, MAX_MESSAGES, formatPresenceMessage, formatAgentBadgeLabel, providerPresentation, createPresenceFeed };
 })(typeof window !== "undefined" ? window : globalThis);

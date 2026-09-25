@@ -55,7 +55,9 @@ export async function stageScreenshots(sourceDir, destinationDir) {
     const sourcePath = path.join(source, name);
     const bytes = await readFile(sourcePath);
     const dimensions = pngDimensions(bytes);
-    if (!dimensions || dimensions.width < 1 || dimensions.height < 1) throw new Error(`${name} is not a valid PNG image`);
+    if (!dimensions || dimensions.width !== 1280 || dimensions.height !== 800) {
+      throw new Error(`${name} must be a valid 1280x800 PNG screenshot`);
+    }
     const destPath = path.join(destination, name);
     await copyFile(sourcePath, destPath, fsConstants.COPYFILE_EXCL);
     staged.push({ name, ...dimensions });

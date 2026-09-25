@@ -44,6 +44,13 @@
     state[key] = { status, doing };
     renderRoster();
   }
+  function logo(a) {
+    const img = document.createElement("img");
+    img.className = "pi";
+    img.alt = "";
+    img.src = "/try/assets/providers/" + a.provider + ".svg";
+    return img;
+  }
   function renderRoster() {
     const roster = $("roster");
     roster.textContent = "";
@@ -54,7 +61,7 @@
       row.className = "row";
       const dot = document.createElement("i");
       dot.style.background = a.color;
-      dot.textContent = a.glyph;
+      dot.appendChild(logo(a));
       const mid = document.createElement("div");
       mid.textContent = a.name;
       const doing = document.createElement("span");
@@ -88,7 +95,7 @@
       chip.tabIndex = 0;
       const i = document.createElement("i");
       i.style.background = a.color;
-      i.textContent = a.glyph;
+      i.appendChild(logo(a));
       chip.append(i, document.createTextNode(a.name));
       const pop = document.createElement("span");
       pop.className = "pop";

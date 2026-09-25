@@ -61,6 +61,7 @@ function createHarness(settings: { completeOnCreate?: boolean } = {}) {
         addListener(listener: (tabId: number, info: { status?: string }) => void) { listeners.add(listener); },
         removeListener(listener: (tabId: number, info: { status?: string }) => void) { listeners.delete(listener); },
       },
+      async query() { return [...tabs.values()].map((tab) => ({ ...tab })); },
       async get(id: number) {
         const tab = tabs.get(id);
         if (!tab) throw new Error("tab not found");
@@ -164,7 +165,7 @@ test("extension stop-all blocks broker commands until the server reports a fresh
   assert.equal(h.created.length, 0);
   assert.equal(h.replies.at(-1)?.error, "browser actions are stopped by the owner");
   h.sockets[0].receive({ type: "broker-state", stopped: false });
-  await worker.handle({ id: "resumed", type: "command", action: "open", tab: "demo", url: "https://example.com/" });
+  await worker.handle({ id: "resumed", type: "command", action: "open", tab: "demo", url: "https://example.com/", presence: { agent: "claude", target: null } });
   assert.equal(h.created.length, 1);
   assert.equal(h.replies.at(-1)?.ok, true);
 });

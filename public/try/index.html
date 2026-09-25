@@ -96,10 +96,14 @@ button.b:focus-visible,.cmd input:focus-visible{outline:2px solid var(--accent);
 .foot h3{font-family:var(--ui);color:var(--ink);font-size:18px;margin:26px 0 8px}
 .foot ol{padding-left:1.2em;margin:0 0 10px}.foot li{margin-bottom:6px}
 .note{font-size:13.5px;color:var(--ink-3)}
+.topnav{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-top:14px;font-family:var(--ui);font-size:14px}.topnav a{color:var(--ink-2);text-decoration:none}.topnav a:hover{color:var(--ink)}.topnav .back{font-weight:600;color:var(--ink)}
+.pi{width:100%;height:100%;object-fit:contain;filter:brightness(0) invert(1);padding:22%}
+.setup{margin:14px 0;padding:14px 16px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--ink-2)}.setup code{font-family:var(--mono);font-size:13px;background:var(--raised);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--ink)}.setup li{margin-bottom:8px}
 </style>
 </head>
 <body>
 <div class="wrap">
+  <nav class="topnav" aria-label="M9R"><a class="back" href="/">← Back to M9R</a><a href="/#products">M9R Web · Native · Channels</a></nav>
   <div class="banner" role="note"><span><b>Scripted demo. No AI is running.</b> Three sandbox bots show how real Claude, Codex and OpenCode agents appear on a page through M9R, and you play the owner.</span><span class="pill">Nothing here is sent anywhere</span></div>
 
   <header class="hero">
@@ -155,16 +159,23 @@ button.b:focus-visible,.cmd input:focus-visible{outline:2px solid var(--accent);
     <h3>What you just saw</h3>
     <p>Three scripted bots on one page: each shows up as a cursor with a name. A field can be held by one agent at a time and a second agent is told no. Agents pass findings to each other. You can redirect them mid-task, and a risky step waits for you in the overlay, drawn outside the page so the page cannot fake it. In the real product those are real Claude Code, Codex and OpenCode sessions, on the subscriptions you already have.</p>
     <h3>Run it with your own agents</h3>
-    <ol>
-      <li>Get the M9R extension from the repository. A Chrome Web Store listing is planned, so for now load it unpacked: open <b>chrome://extensions</b>, turn on Developer mode, choose Load unpacked, and pick the <b>extensions/browser</b> folder.</li>
-      <li>Start the local broker and connect Claude Code, Codex or OpenCode to it. Setup notes live in the repository: <a href="https://github.com/ayaanali-ai/M9R">github.com/ayaanali-ai/M9R</a>.</li>
-      <li>Give two agents a page and watch them work on it together.</li>
-    </ol>
+    <div class="setup">
+      <p><b>Today this is a developer preview for Windows 10/11.</b> It takes about ten minutes and everything runs on your own PC, with the agent subscriptions you already have. Nothing is uploaded to M9R.</p>
+      <ol>
+        <li>Install Node.js LTS, then clone the repository and run <code>npm ci</code>.</li>
+        <li>In Chrome or Edge, open <code>chrome://extensions</code>, turn on Developer mode, choose <b>Load unpacked</b> and pick the <code>extensions/browser</code> folder. A Chrome Web Store listing is planned.</li>
+        <li>Start the local broker: <code>npx tsx scripts/m9r-web-broker.ts</code>. It only listens on your own machine and only accepts the extension ID you give it.</li>
+        <li>Add the M9R tool server to Claude Code, Codex or OpenCode. Each has a short config block in the install guide.</li>
+        <li>Ask an agent to open a page. You approve each site once, and risky clicks wait for your yes.</li>
+      </ol>
+      <p>Full steps and every config block: <a href="https://github.com/ayaanali-ai/M9R/blob/launch/m9r-multiplayer-web-preview/docs/INSTALL_EXTENSION.md">the install guide</a>. Join the waitlist on the <a href="/">home page</a> for the one-click installer and hosted rooms.</p>
+    </div>
     <p class="note">Honest limits: two people's agents on two different machines is designed and not shipped yet. Real agents have been verified with Claude Code, Codex and OpenCode. This page is a scripted sandbox.</p>
   </section>
 </div>
-<script src="presence-logic.js"></script>
-<script src="presence-overlay.js"></script>
-<script src="try.js"></script>
+<script src="/try/shim.js"></script>
+<script src="/try/presence-logic.js"></script>
+<script src="/try/presence-overlay.js"></script>
+<script src="/try/try.js"></script>
 </body>
 </html>

@@ -10,6 +10,7 @@ function logic() {
   runInNewContext(source, { window, Date });
   return window.M9RPresenceLogic as {
     formatPresenceMessage: (value: unknown, now: number) => Record<string, unknown> | null;
+    formatAgentBadgeLabel: (agent: string, provider: string) => string;
     providerPresentation: (provider: string) => { label: string; glyph: string; color: string; asset: string | null; known: boolean };
     createPresenceFeed: () => {
       add: (value: unknown, now: number) => Record<string, unknown> | null;
@@ -56,4 +57,19 @@ test("provider badges normalize known launch slugs and keep unknown providers ne
   assert.deepEqual(presentation("codex-cli"), { label: "Codex", glyph: "X", color: "#0f9d7a", asset: "assets/providers/codex.svg", known: true });
   assert.deepEqual(presentation("opencode"), { label: "OpenCode", glyph: "O", color: "#6a5acd", asset: "assets/providers/opencode.svg", known: true });
   assert.deepEqual(presentation("mystery-engine"), { label: "Mystery-engine", glyph: "M", color: "#6b7280", asset: null, known: false });
+});
+
+test("the compact who's-here label uses friendly provider names, not launch slugs", () => {
+  const presence = logic();
+  assert.equal(presence.formatAgentBadgeLabel("claude-1", "claude-code"), "claude-1 · Claude");
+  assert.equal(presence.formatAgentBadgeLabel("codex-1", "codex-cli"), "codex-1 · Codex");
+  assert.equal(presence.formatAgentBadgeLabel("opencode-1", "opencode"), "opencode-1 · OpenCode");
+});
+
+test("agent-to-agent bubbles identify sender and recipient while normal activity stays concise", () => {
+  const presence = logic();
+  const message = presence.formatPresenceMessage({ agent: "claude", provider: "claude-code", to: "codex", message: "found the 12+ rate", messageKind: "agent_message" }, 100);
+  const activity = presence.formatPresenceMessage({ agent: "claude", provider: "claude-code", message: "reading the page" }, 100);
+  assert.equal(message?.bubbleMessage, "claude to codex: found the 12+ rate");
+  assert.equal(activity?.bubbleMessage, "reading the page");
 });

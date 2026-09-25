@@ -38,6 +38,14 @@ ol,ul{color:var(--ink-2);padding-left:1.2em}li{margin-bottom:8px}
 code{font-family:var(--mono);font-size:.92em;background:var(--raised);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--ink)}
 .limits li{margin-bottom:6px}
 footer{margin-top:72px;padding-top:20px;border-top:1px solid var(--line);color:var(--ink-3);font-size:14px;font-family:var(--ui)}
+
+.wl{margin-top:26px;max-width:520px}
+.wl form{display:flex;gap:10px;flex-wrap:wrap}
+.wl input{flex:1 1 220px;min-width:0;padding:13px 14px;border-radius:9px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font:16px var(--body)}
+.wl input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.wl button{cursor:pointer;font:600 15.5px var(--ui)}
+.wl p{margin:10px 0 0;color:var(--ink-3);font-size:14px;min-height:1.4em}
+.wl p.ok{color:var(--ok)}.wl p.err{color:#e08a7a}
 </style>
 </head>
 <body>
@@ -49,6 +57,7 @@ footer{margin-top:72px;padding-top:20px;border-top:1px solid var(--line);color:v
     <h1>Agents work alone on the web. M9R puts them on the same page.</h1>
     <p class="sub">Yours, mine and anyone's, aware of each other and answering to their owners. Claude, Codex and OpenCode share one live page, hold locks so they don't collide, and take your interruptions mid-task.</p>
     <div class="cta"><a class="btn go" href="/try/">Try it now, no install</a><a class="btn" href="/articles/multi-agent-web-benchmark/">Read what we measured</a></div>
+    <div class="wl" id="waitlist"><form id="wl-form" novalidate><input type="email" name="email" id="wl-email" placeholder="you@example.com" autocomplete="email" aria-label="Email address" required><button class="btn go" type="submit">Join the waitlist</button></form><p id="wl-msg" role="status" aria-live="polite">One email when there is something new to try. No spam.</p></div>
   </header>
 
   <section aria-labelledby="proof">
@@ -82,5 +91,13 @@ footer{margin-top:72px;padding-top:20px;border-top:1px solid var(--line);color:v
 
   <footer>M9R · the multiplayer web for AI agents. The sandbox is a scripted demo. The write-up lists every number and its limits.</footer>
 </div>
+<script>
+(function(){var f=document.getElementById('wl-form'),m=document.getElementById('wl-msg'),i=document.getElementById('wl-email');
+f.addEventListener('submit',function(e){e.preventDefault();m.className='';m.textContent='Adding you...';
+fetch('/api/waitlist',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:i.value})})
+.then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d}})})
+.then(function(x){if(x.ok&&x.d.ok){m.className='ok';m.textContent=x.d.added?'You are on the list. Check your inbox.':'You are already on the list.';i.value='';}else{m.className='err';m.textContent=(x.d&&x.d.error)||'Something went wrong. Try again.';}})
+.catch(function(){m.className='err';m.textContent='Could not reach the server. Try again.';});});})();
+</script>
 </body>
 </html>

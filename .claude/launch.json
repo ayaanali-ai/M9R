@@ -45,6 +45,18 @@
         "ui"
       ],
       "port": 5173
+    },
+    {
+      "name": "presence-test",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "5180",
+        "--directory",
+        "extensions/browser"
+      ],
+      "port": 5180
     }
   ]
 }

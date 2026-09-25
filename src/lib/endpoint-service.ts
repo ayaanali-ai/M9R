@@ -19,11 +19,16 @@ export interface WorkspaceEndpoints {
 
 /** Every endpoint in the caller's workspace, with the liveness of the connection each one is bound to. */
 export async function loadWorkspaceEndpoints(agent: AuthedAgent): Promise<WorkspaceEndpoints> {
+  const loaded = await loadWorkspaceEndpointsForHuman(agent.workspaceId, null);
   const db = requireService();
-  const [endpoints, viewer] = await Promise.all([
-    db.from("endpoints").select(ENDPOINT_COLUMNS).eq("workspace_id", agent.workspaceId).neq("status", "retired").order("created_at", { ascending: true }),
-    db.from("agent_connections").select("created_by").eq("id", agent.connectionId).maybeSingle(),
-  ]);
+  const viewer = await db.from("agent_connections").select("created_by").eq("id", agent.connectionId).maybeSingle();
+  return { ...loaded, viewerOwnerId: (viewer.data?.created_by as string | null | undefined) ?? null };
+}
+
+/** Human dashboard variant; the caller must resolve workspace membership before calling. */
+export async function loadWorkspaceEndpointsForHuman(workspaceId: string, viewerUserId: string | null): Promise<WorkspaceEndpoints> {
+  const db = requireService();
+  const endpoints = await db.from("endpoints").select(ENDPOINT_COLUMNS).eq("workspace_id", workspaceId).neq("status", "retired").order("created_at", { ascending: true });
   if (endpoints.error) throw new Error(`Could not list endpoints: ${endpoints.error.message}`);
   const rows = (endpoints.data ?? []) as EndpointRow[];
   const connectionIds = rows.map((row) => row.current_connection_id).filter((id): id is string => id !== null);
@@ -33,7 +38,7 @@ export async function loadWorkspaceEndpoints(agent: AuthedAgent): Promise<Worksp
     if (error) throw new Error(`Could not read endpoint liveness: ${error.message}`);
     for (const row of (data ?? []) as Array<{ id: string; last_seen_at: string | null }>) lastSeenByConnection.set(row.id, row.last_seen_at);
   }
-  return { rows, lastSeenByConnection, viewerOwnerId: (viewer.data?.created_by as string | null | undefined) ?? null };
+  return { rows, lastSeenByConnection, viewerOwnerId: viewerUserId };
 }
 
 export function viewOf(row: EndpointRow, loaded: WorkspaceEndpoints): EndpointView {

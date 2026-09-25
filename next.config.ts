@@ -24,6 +24,9 @@ const nextConfig: NextConfig = {
     };
     return config;
   },
+  async rewrites() {
+    return [{ source: "/try", destination: "/try/index.html" }];
+  },
   async headers() {
     return [
       {

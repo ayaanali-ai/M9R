@@ -88,6 +88,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   };
   let extension: WebSocket | null = null;
   let readyExtension: WebSocket | null = null;
+  let closeServer: () => Promise<void> = async () => undefined;
   const readyWaiters = new Set<(ready: boolean) => void>();
 
   function settleReadyWaiters(ready: boolean): void {
@@ -135,6 +136,14 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (requestUrl.pathname.startsWith("/web/")) {
       if (req.headers.origin !== undefined) return reply(res, 403, { ok: false, error: "browser-originated requests are refused" });
       if (!sameSecret(req.headers["x-m9r-key"] as string | undefined, options.key)) return reply(res, 401, { ok: false, error: "missing or wrong key" });
+      if (req.method === "GET" && requestUrl.pathname === "/web/status") {
+        return reply(res, 200, { ok: true, broker: "ready", extensionConnected: !!extension && extension.readyState === WebSocket.OPEN, extensionReady: !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN });
+      }
+      if (req.method === "POST" && requestUrl.pathname === "/web/shutdown") {
+        reply(res, 200, { ok: true, stopped: true });
+        setTimeout(() => void closeServer(), 0);
+        return;
+      }
       if (req.method === "GET" && requestUrl.pathname === "/web/feed") return reply(res, 200, broker.feedSnapshot());
       if (req.method === "POST" && requestUrl.pathname === "/web/message") {
         const bodyText = await readBody(req);
@@ -312,15 +321,18 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : options.port ?? DEFAULT_BROKER_PORT;
 
-  return {
-    port,
-    close: () =>
-      new Promise<void>((resolve) => {
-        settleReadyWaiters(false);
-        extension?.close();
-        sockets.close();
-        server.close(() => resolve());
-        server.closeAllConnections();
-      }),
+  let closePromise: Promise<void> | null = null;
+  const close = () => {
+    if (closePromise) return closePromise;
+    closePromise = new Promise<void>((resolve) => {
+      settleReadyWaiters(false);
+      extension?.close();
+      sockets.close();
+      server.close(() => resolve());
+      server.closeAllConnections();
+    });
+    return closePromise;
   };
+  closeServer = close;
+  return { port, close };
 }

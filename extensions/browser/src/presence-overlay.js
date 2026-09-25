@@ -25,7 +25,7 @@
     .agent.flip-y .label{top:-32px}
     .arrow{position:absolute;left:0;top:0;width:16px;height:16px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))}
     .badge{position:absolute;left:11px;top:11px;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;color:#fff;background:var(--c);font:700 12px/1 system-ui,sans-serif;border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.28)}
-    .provider-logo{width:16px;height:16px;object-fit:contain;display:block;filter:brightness(0) invert(1)}.who-agent .provider-logo{width:12px;height:12px}.provider-fallback{font:700 12px/1 system-ui,sans-serif}
+    .provider-logo{width:16px;height:16px;object-fit:contain;display:block;filter:brightness(0) invert(1)}.who-agent .provider-logo{width:14px;height:14px}.who-agent{display:inline-flex;align-items:center;gap:6px}.who-agent.logo-only{width:28px;height:28px;padding:0;justify-content:center;border-radius:50%}.who-agent.logo-only .provider-logo{width:16px;height:16px}.provider-fallback{font:700 12px/1 system-ui,sans-serif}
     .label{position:absolute;left:42px;top:16px;white-space:nowrap;padding:3px 8px;border-radius:999px;background:rgba(18,18,22,.88);color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.25);max-width:220px;overflow:hidden;text-overflow:ellipsis}
     .label:empty{display:none}
     .lock{position:absolute;right:-17px;top:-5px;display:none;padding:2px 4px;border:1px solid #fff;border-radius:4px;background:#a32222;color:#fff;font:700 8px/1 system-ui,sans-serif;box-shadow:0 2px 6px rgba(0,0,0,.3)}
@@ -187,10 +187,16 @@
         const provider = providerSpec(agent.provider);
         const logo = providerLogo(provider);
         if (logo) badge.appendChild(logo);
-        const name = doc.createElement("span");
-        name.textContent = `${agent.id} · ${agent.provider}`;
-        badge.appendChild(name);
-        badge.title = agent.activity || "Connected to this page";
+        // The provider mark identifies the agent; only add a name when it says something the mark does not.
+        const sameAsProvider = String(agent.id).toLowerCase() === String(provider.label).toLowerCase();
+        if (!logo || !sameAsProvider) {
+          const name = doc.createElement("span");
+          name.textContent = sameAsProvider ? provider.label : String(agent.id);
+          badge.appendChild(name);
+        } else {
+          badge.classList.add("logo-only");
+        }
+        badge.title = `${agent.id} · ${provider.label}${agent.activity ? " · " + agent.activity : ""}`;
         who.appendChild(badge);
       }
       if (stoppedByOwner) {
@@ -252,9 +258,10 @@
         main.className = "entry-main";
         const name = doc.createElement("span");
         name.className = "entry-name";
+        const sameName = String(item.agent).toLowerCase() === String(spec.label).toLowerCase();
         name.textContent = item.messageKind === "agent_message" && item.recipient
-          ? `${item.agent} to ${item.recipient} · ${spec.label}`
-          : `${item.agent} · ${spec.label}`;
+          ? `${item.agent} to ${item.recipient}${sameName ? "" : " · " + spec.label}`
+          : (sameName ? spec.label : `${item.agent} · ${spec.label}`);
         const message = doc.createElement("span");
         message.className = "entry-message";
         message.textContent = item.messageKind === "agent_message" && item.sessionId && hiddenSessions.has(item.sessionId)
@@ -340,7 +347,7 @@
         renderRail(items);
         scheduleRailExpiry(items);
       }
-      agent.bubble.textContent = displayMessage;
+      agent.bubble.textContent = hideText ? "M9R message hidden" : summary?.bubbleMessage ?? displayMessage;
       agent.bubble.classList.remove("fading");
       if (agent.bubbleTimer) view.clearTimeout(agent.bubbleTimer);
       if (agent.fadeTimer) view.clearTimeout(agent.fadeTimer);

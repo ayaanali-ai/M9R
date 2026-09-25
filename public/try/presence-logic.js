@@ -3,6 +3,13 @@
 
   const MESSAGE_TTL_MS = 4000;
   const MAX_MESSAGES = 12;
+  const PROVIDERS = {
+    claude: { label: "Claude", glyph: "C", color: "#c96442", asset: "assets/providers/claude.svg" },
+    "claude-code": { label: "Claude", glyph: "C", color: "#c96442", asset: "assets/providers/claude.svg" },
+    codex: { label: "Codex", glyph: "X", color: "#0f9d7a", asset: "assets/providers/codex.svg" },
+    "codex-cli": { label: "Codex", glyph: "X", color: "#0f9d7a", asset: "assets/providers/codex.svg" },
+    opencode: { label: "OpenCode", glyph: "O", color: "#6a5acd", asset: "assets/providers/opencode.svg" },
+  };
 
   function clean(value, limit) {
     if (typeof value !== "string") return "";
@@ -22,7 +29,41 @@
     const target = input.target && typeof input.target.selector === "string"
       ? { selector: clean(input.target.selector, 500) }
       : null;
-    return { id, agent, provider, message, claimed: input.claimed === true, blocked: input.blocked === true, claimMs, target, createdAt, expiresAt: createdAt + MESSAGE_TTL_MS };
+    const recipient = clean(input.to, 80);
+    const messageKind = input.messageKind === "agent_message" ? "agent_message" : "activity";
+    return {
+      id,
+      agent,
+      provider,
+      providerLabel: providerPresentation(provider).label,
+      message,
+      messageKind,
+      bubbleMessage: messageKind === "agent_message" && recipient ? `${agent} to ${recipient}: ${message}` : message,
+      sessionId: clean(input.sessionId, 128) || null,
+      recipient,
+      showMessageText: input.showMessageText !== false,
+      claimed: input.claimed === true,
+      blocked: input.blocked === true,
+      claimMs,
+      target,
+      createdAt,
+      expiresAt: createdAt + MESSAGE_TTL_MS,
+    };
+  }
+
+  function providerPresentation(value) {
+    const provider = clean(value, 40).toLowerCase();
+    const known = PROVIDERS[provider];
+    if (known) return { ...known, known: true };
+    const label = provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : "Agent";
+    const glyph = Array.from(label)[0].toUpperCase();
+    return { label, glyph, color: "#6b7280", asset: null, known: false };
+  }
+
+  function formatAgentBadgeLabel(agent, provider) {
+    const name = clean(agent, 64) || "Agent";
+    const label = providerPresentation(provider).label;
+    return name.toLowerCase() === label.toLowerCase() ? label : `${name} · ${label}`;
   }
 
   function createPresenceFeed() {
@@ -54,5 +95,5 @@
     };
   }
 
-  global.M9RPresenceLogic = { MESSAGE_TTL_MS, MAX_MESSAGES, formatPresenceMessage, createPresenceFeed };
+  global.M9RPresenceLogic = { MESSAGE_TTL_MS, MAX_MESSAGES, formatPresenceMessage, formatAgentBadgeLabel, providerPresentation, createPresenceFeed };
 })(typeof window !== "undefined" ? window : globalThis);

@@ -3,6 +3,7 @@
   "name": "M9R Web Presence (dev)",
   "version": "0.0.2",
   "description": "Lets agents work in shared browser tabs through M9R and shows where each one is acting. Development build, localhost only.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr5n3636v00gKFp0VwB/DvkYMUZP2wL/X/VvjnxlJE3dJeo6PCuSFuKScfRD2NA8Sg3xSrxNO6Mb63vkO5aecg6aozQMN9PKRCew34wwGhXy3WCwN4ch+V2mS+ppMRbgAxgD+gKeXO2gFLqTSMNv9n3Wcio3TrPmQzFr9okmjm1acJQyxEhxXfAwCGiQ6krwtwlx9g1mHU3BAicz+2HtgAYcNzGvDKHsL5B5afB3XVwyUUGVTRhJuezFS39V7Jv6dz8O3W5t4tGiUnmkQ8iyTpOh2WfPY2w32SDSd6OPC+jDnLxyOCMlIYN4cwkTRhi9RcldJIUqyG7JifrdHI06PLQIDAQAB",
   "permissions": ["tabs", "scripting", "alarms", "storage"],
   "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],

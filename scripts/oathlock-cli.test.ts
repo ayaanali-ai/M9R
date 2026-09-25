@@ -63,6 +63,7 @@ function makeDeps(opts: {
     env: opts.env ?? {},
     fetch: (async (url: string | URL, init?: RequestInit) => {
       requests.push({ url: String(url), init });
+
       return router(String(url), init);
     }) as unknown as typeof fetch,
     readFile: async (p) => {
@@ -1888,6 +1889,36 @@ test("connect --agents registers every listed kind in one batch and uses one app
   assert.match(text, /claim\/batch\/batch-1/);
   assert.match(text, /claude-code: registered/);
   assert.match(text, /codex: registered/);
+});
+
+test("connect saves a separate machine credential only after the approved claim", async () => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const { deps, files, requests, out } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000", USERPROFILE: "/home/tester" },
+    router: (url) => {
+      if (url.includes("/api/agent/register-batch")) return jsonResponse(201, {
+        batch_url: "http://localhost:3000/claim/batch/1",
+        claims: [{ agent_kind: "codex", claim_id: "claim-codex", setup_code: "setup-codex" }],
+      });
+      if (url.includes("/api/agent/claim-status")) return jsonResponse(200, {
+        status: "approved", token: "approved-agent-token", scopes: ["session:submit"],
+      });
+      if (url.includes("/api/agent/native/credential")) return jsonResponse(200, {
+        deviceId: "22222222-2222-4222-8222-222222222222", workspaceId, token: "machine-secret-token",
+      });
+      return jsonResponse(404, {});
+    },
+  });
+  deps.writeSecretFile = async (path, data) => { files.set(path, data); };
+  const code = await run(["connect", "--agents", "codex"], deps);
+  assert.equal(code, 0);
+  const mint = requests.find((request) => request.url.includes("/api/agent/native/credential"));
+  assert.equal(mint?.init?.headers && (mint.init.headers as Record<string, string>).authorization, "Bearer approved-agent-token");
+  const machinePath = [...files.keys()].find((path) => path.endsWith("codex.json") && path.includes(workspaceId));
+  assert.ok(machinePath);
+  assert.equal(JSON.parse(files.get(machinePath)!).token, "machine-secret-token");
+  assert.equal(JSON.parse(files.get(machinePath)!).repoRoots.length, 1);
+  assert.doesNotMatch(out.join("\n"), /machine-secret-token/);
 });
 
 test("connect with no --agents and no probe support fails honestly instead of silently connecting nothing", async () => {
