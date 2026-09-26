@@ -44,12 +44,18 @@
     .opt .chip { width: 22px; height: 22px; }
     .opt .hint { margin-left: auto; color: var(--faint); font-size: 11.5px; }
     .opt.on { background: var(--bg-3); }
+    /* Where the message will go, shown as the person types ("To Claude, Codex", "Carries on with Claude"). */
+    .route { align-self: flex-start; margin: 0 8px; padding: 3px 10px; border-radius: 10px; background: rgba(16, 18, 22, .92); border: 1px solid var(--line-2); color: var(--muted); font-size: 11.5px; line-height: 16px; animation: rise .15s var(--ease); }
+    .route.warn { color: var(--working); }
+    .cbar.listening { border-color: rgba(217, 120, 63, .7); box-shadow: 0 1px 0 rgba(255,255,255,.05) inset, 0 4px 14px rgba(0,0,0,.36), 0 0 0 3px rgba(217,120,63,.2); }
+    .status.live { color: var(--text); font-size: 14px; }
     .all-mark { width: 22px; height: 22px; border-radius: 50%; background: var(--bg-3); box-shadow: 0 0 0 1px var(--line-2); display: grid; place-items: center; font: 700 10px/1 var(--display); color: var(--accent); }
   </style>
 </head>
 <body>
   <div id="wrap">
     <div id="menu" class="menu" role="listbox" hidden></div>
+    <div id="route" class="route" role="status" hidden></div>
     <div id="bar" class="cbar">
       <button id="lead" class="lead" type="button" aria-label="Hide or show the message bar"><span class="m9r-logo"></span></button>
       <div id="field" class="field">
@@ -60,6 +66,7 @@
     </div>
   </div>
   <script src="src/frame-common.js"></script>
+  <script src="src/mention-logic.js"></script>
   <script src="src/composer.js"></script>
 </body>
 </html>

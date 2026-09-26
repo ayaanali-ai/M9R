@@ -3,10 +3,13 @@
   if (window.top !== window) return;
   if (document.getElementById(window.M9RPresence.ROOT_ID)) return;
 
+  // Set by the push-to-talk gesture below; the message bar calls it when Alt or M comes up inside its own frame.
+  let onTalkRelease = () => {};
   const overlay = window.M9RPresence.createPresenceOverlay(document, {
     onMessageVisibility(sessionId, show) {
       try { chrome.runtime.sendMessage({ type: "m9r-message-visibility", sessionId, show }); } catch {}
     },
+    onTalkRelease() { onTalkRelease(); },
   });
 
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
@@ -45,6 +48,30 @@
       overlay.mountFrame("composer", chrome.runtime.getURL(`composer.html?n=${nonce}`), { w: 448, h: 72, bottom: 6 });
     }).catch(() => {});
   }
+
+  // Push-to-talk: hold Alt+M. A tap is left to the Alt+M command (it opens or closes the bar); holding past the delay starts
+  // speech in the bar. The Alt+M command also focuses the bar, so the key can come up in the bar's frame instead of here: the
+  // frame then reports it (onTalkRelease) so a tap cancels the pending talk and a hold ends it.
+  (function pushToTalk() {
+    const HOLD_MS = 280;
+    let holdTimer = 0;
+    let talking = false;
+    const isTalkKey = (ev) => ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.code === "KeyM";
+    const stopTalk = () => {
+      clearTimeout(holdTimer);
+      if (talking) { talking = false; overlay.talk(false); }
+    };
+    onTalkRelease = stopTalk;
+    window.addEventListener("keydown", (ev) => {
+      if (!isTalkKey(ev) || ev.repeat) return;
+      clearTimeout(holdTimer);
+      talking = false;
+      holdTimer = setTimeout(() => { talking = true; overlay.talk(true); }, HOLD_MS);
+    }, true);
+    window.addEventListener("keyup", (ev) => {
+      if (ev.code === "KeyM" || ev.key === "Alt") stopTalk();
+    }, true);
+  })();
 
   document.addEventListener("m9r:presence", (event) => {
     let msg = event.detail;

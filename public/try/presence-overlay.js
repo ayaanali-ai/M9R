@@ -704,6 +704,8 @@
         if (storage && Number.isFinite(state.u)) void storage.set({ [DOCK_KEY]: state.u }).catch(() => {});
       } else if (data.kind === "drag-end") {
         if (storage && state.shownAt) void storage.set({ [POSITION_KEYS[state.kind]]: { left: state.shownAt.left, bottom: state.shownAt.bottom } }).catch(() => {});
+      } else if (data.kind === "talk-release") {
+        if (options && typeof options.onTalkRelease === "function") options.onTalkRelease();
       } else if (data.kind === "focus-composer") {
         showComposer(true);
       } else if (data.kind === "reset-position") {
@@ -733,6 +735,14 @@
         layout(state);
         try { view.focus(); } catch {}
       } else showComposer(true);
+    }
+
+    /** Start or stop push-to-talk in the message bar; starting also brings the bar up, whatever state a tap left it in. */
+    function talk(active) {
+      const state = frames.get("composer");
+      if (!state) return;
+      if (active) { state.shown = true; layout(state); }
+      postToFrame(state, { kind: "talk", active: !!active });
     }
 
     function togglePill() {
@@ -776,7 +786,7 @@
 
     return {
       update, remove, leave, stop, resume, destroy, snapshot, syncAgents,
-      mountFrame, showComposer, toggleComposer, togglePill, whenArrived,
+      mountFrame, showComposer, toggleComposer, togglePill, talk, whenArrived,
     };
   }
 
