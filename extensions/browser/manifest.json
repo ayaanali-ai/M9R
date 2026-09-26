@@ -33,6 +33,7 @@
       ],
       "js": [
         "src/presence-logic.js",
+        "src/dock-logic.js",
         "src/presence-overlay.js",
         "src/content.js"
       ],

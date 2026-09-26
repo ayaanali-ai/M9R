@@ -1,6 +1,7 @@
 importScripts("page-actions.js", "powers.js", "permission-logic.js", "pill-bridge.js");
 
 const BROKER_URL = "ws://127.0.0.1:47821/ext";
+const BROKER_AUTH_TIMEOUT_MS = 5000;
 const LOAD_TIMEOUT_MS = 10000;
 const NAMED_TABS_STORAGE_KEY = "m9rNamedTabs";
 const M9R_GROUP_PREFIX = "M9R: ";
@@ -8,6 +9,8 @@ const tabsByName = new Map();
 const namedTabOperations = new Map();
 let namedTabsLoad = null;
 let socket = null;
+let brokerAuthenticated = false;
+let brokerAuthTimeout = null;
 let actionsStopped = false;
 const permissionQueue = [];
 const promptingGrants = new Set();
@@ -16,32 +19,52 @@ function connect() {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
   const connection = new WebSocket(BROKER_URL);
   socket = connection;
+  brokerAuthenticated = false;
+  let readySent = false;
   connection.onopen = () => {
     void loadNamedTabs().then(() => {
       if (socket === connection && connection.readyState === WebSocket.OPEN) {
         connection.send(JSON.stringify({ type: "ready" }));
-        if (typeof M9RPillBridge !== "undefined") M9RPillBridge.brokerOpen();
+        readySent = true;
+        brokerAuthTimeout = setTimeout(() => {
+          if (socket === connection && !brokerAuthenticated && connection.readyState === WebSocket.OPEN) {
+            connection.close(4001, "broker readiness handshake timed out");
+          }
+        }, BROKER_AUTH_TIMEOUT_MS);
       }
     }).catch(() => connection.close(1011, "named tab state is unavailable"));
   };
   connection.onmessage = (event) => {
+    if (socket !== connection) return;
     let message;
     try {
       message = JSON.parse(event.data);
     } catch {
       return;
     }
-    if (message && message.type === "command") void handle(message);
-    else if (message && message.type === "grant-approved") void queueGrantPermission(message.grant);
-    else if (message && message.type === "ui-state") { if (typeof M9RPillBridge !== "undefined") M9RPillBridge.state(message); }
-    else if (message && message.type === "broker-state" && typeof message.stopped === "boolean") {
+    // The broker sends this only after accepting the extension-origin connection and its ready frame. A raw open
+    // socket (or a process merely listening on the configured port) is not enough to advertise broker readiness.
+    if (message && message.type === "broker-state") {
+      if (!readySent || typeof message.stopped !== "boolean" || connection.readyState !== WebSocket.OPEN) return;
+      if (!brokerAuthenticated) {
+        brokerAuthenticated = true;
+        if (brokerAuthTimeout !== null) clearTimeout(brokerAuthTimeout);
+        brokerAuthTimeout = null;
+        if (typeof M9RPillBridge !== "undefined") M9RPillBridge.brokerOpen();
+      }
       actionsStopped = message.stopped;
       void chrome.tabs.query({}).then((tabs) => {
         for (const tab of tabs) if (Number.isSafeInteger(tab.id)) {
           chrome.tabs.sendMessage(tab.id, { type: actionsStopped ? "owner-stop" : "owner-resume", owner: "you" }).catch(() => {});
         }
       });
+      return;
     }
+    if (!brokerAuthenticated) return;
+
+    if (message && message.type === "command") void handle(message);
+    else if (message && message.type === "grant-approved") void queueGrantPermission(message.grant);
+    else if (message && message.type === "ui-state") { if (typeof M9RPillBridge !== "undefined") M9RPillBridge.state(message); }
     else if (message && message.type === "stop-all") {
       actionsStopped = true;
       void chrome.tabs.query({}).then((tabs) => {
@@ -58,6 +81,9 @@ function connect() {
   connection.onclose = () => {
     if (socket === connection) {
       socket = null;
+      brokerAuthenticated = false;
+      if (brokerAuthTimeout !== null) clearTimeout(brokerAuthTimeout);
+      brokerAuthTimeout = null;
       if (typeof M9RPillBridge !== "undefined") M9RPillBridge.brokerClosed();
       setTimeout(connect, 2000);
     }
@@ -231,7 +257,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function ensurePresenceOverlay(tabId) {
   try {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ["src/presence-logic.js", "src/presence-overlay.js", "src/content.js"] });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["src/presence-logic.js", "src/dock-logic.js", "src/presence-overlay.js", "src/content.js"] });
   } catch {
     // The page may have navigated or the user may have revoked its host access.
   }
@@ -493,11 +519,11 @@ async function handle(command) {
 if (typeof M9RPillBridge !== "undefined") {
   M9RPillBridge.init({
     send(payload) {
-      if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+      if (!brokerAuthenticated || !socket || socket.readyState !== WebSocket.OPEN) return false;
       socket.send(JSON.stringify(payload));
       return true;
     },
-    connected: () => !!socket && socket.readyState === WebSocket.OPEN,
+    connected: () => brokerAuthenticated && !!socket && socket.readyState === WebSocket.OPEN,
   });
 }
 

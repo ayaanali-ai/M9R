@@ -126,7 +126,7 @@
       }
       press.x = ev.screenX;
       press.y = ev.screenY;
-      toParent({ kind: "drag", dx, dy });
+      toParent({ kind: "drag", dx, dy, cx: ev.clientX, cy: ev.clientY });
     });
     const end = (ev) => {
       if (!press || (ev && ev.pointerId !== press.id)) return;

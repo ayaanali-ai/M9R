@@ -11,7 +11,7 @@
   const FRAME_PAGES = ["pill.html", "composer.html"];
   const NONCE_KEY = "m9rPillNonces";
   const SITE_SCRIPT_ID = "m9r-granted-sites";
-  const CONTENT_JS = ["src/presence-logic.js", "src/presence-overlay.js", "src/content.js"];
+  const CONTENT_JS = ["src/presence-logic.js", "src/dock-logic.js", "src/presence-overlay.js", "src/content.js"];
   const LOCAL_ORIGINS = ["http://localhost/*", "http://127.0.0.1/*"];
   const AGENT_STATES = new Set(["idle", "starting", "working", "waiting", "blocked", "stopped", "failed"]);
   const THREAD_KINDS = new Set(["say", "do", "block", "approval", "system"]);

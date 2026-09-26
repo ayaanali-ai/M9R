@@ -26,6 +26,11 @@
   const decided = new Map();
   let stopping = new Set();
 
+  // The host tells the pill which window edge it is docked to, so the panel can open away from that edge.
+  F.onHost((data) => {
+    if (data && data.kind === "dock" && /^(top|right|bottom|left)$/.test(String(data.edge))) document.body.dataset.edge = data.edge;
+  });
+
   const isOwner = (t) => /^(you|owner)$/i.test(t.agent) || /^(you|owner)$/i.test(t.provider);
   const chatItems = () => state.thread.filter((t) => t.kind === "say" || t.kind === "system");
   const activityItems = () => state.thread.filter((t) => t.kind === "do" || t.kind === "block");

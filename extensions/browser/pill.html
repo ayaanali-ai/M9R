@@ -8,6 +8,8 @@
   <style>
     #wrap { display: inline-flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 14px; }
     body.open #wrap { width: 460px; }
+    /* Docked along the top edge the bar sits first and the panel opens below it. */
+    body[data-edge="top"] #wrap { flex-direction: column-reverse; }
     body.open .bar { width: auto; }
 
     .bar {

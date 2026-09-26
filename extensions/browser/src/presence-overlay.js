@@ -12,6 +12,10 @@
   const MISSING_AFTER_MS = 20000;
   const HIDDEN_SESSIONS_KEY = "m9rHiddenMessageSessions";
   const POSITION_KEYS = { pill: "m9rPillPos", composer: "m9rComposerPos" };
+  // Where the thread pill sits on its track around the window, as a fraction of the track's length (independent of window size).
+  const DOCK_KEY = "m9rDockU";
+  // The pill's bar is 44px tall inside a frame with 14px of padding; the track keeps the bar 16px off the window edge.
+  const DOCK = { thickness: 44, pad: 14, gap: 16, radius: 72 };
 
   const ARROW =
     '<svg viewBox="0 0 16 16"><path d="M1 1l5 13 2.2-5.3L13.5 6.5z" fill="var(--c)" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/></svg>';
@@ -188,23 +192,30 @@
         if (agent.glide) {
           const g = agent.glide;
           const t = Math.max(0, Math.min(1, (performance.now() - g.start) / g.duration));
-          const k = minJerk(t);
           const dx = dest.x - g.from.x;
           const dy = dest.y - g.from.y;
-          const dist = Math.hypot(dx, dy) || 1;
-          // A quadratic curve bowed sideways (people never move in a ruler-straight line), plus a faint hand wobble that dies out on arrival.
-          const nx = -dy / dist;
-          const ny = dx / dist;
-          const bow = Math.min(90, dist * 0.18) * g.side;
-          const cx1 = g.from.x + dx / 2 + nx * bow;
-          const cy1 = g.from.y + dy / 2 + ny * bow;
-          const u = 1 - k;
-          const wobble = Math.sin(k * Math.PI * 3) * 1.6 * (1 - k) * (dist > 40 ? 1 : 0);
-          // On a long move the hand runs slightly past the target and comes back: an overshoot that is gone by arrival.
-          const over = dist > 260 ? Math.min(14, dist * 0.03) : 0;
-          const along = over * Math.pow(Math.sin(Math.PI * k), 2) * Math.min(1, Math.max(0, (k - 0.55) / 0.3));
-          x = u * u * g.from.x + 2 * u * k * cx1 + k * k * dest.x + nx * wobble + (dx / dist) * along;
-          y = u * u * g.from.y + 2 * u * k * cy1 + k * k * dest.y + ny * wobble + (dy / dist) * along;
+          if (g.simple) {
+            // Reduced motion: a short straight glide that eases out, with no bow, wobble or overshoot.
+            const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+            x = g.from.x + dx * e;
+            y = g.from.y + dy * e;
+          } else {
+            const k = minJerk(t);
+            const dist = Math.hypot(dx, dy) || 1;
+            // A quadratic curve bowed sideways (people never move in a ruler-straight line), plus a faint hand wobble that dies out on arrival.
+            const nx = -dy / dist;
+            const ny = dx / dist;
+            const bow = Math.min(90, dist * 0.18) * g.side;
+            const cx1 = g.from.x + dx / 2 + nx * bow;
+            const cy1 = g.from.y + dy / 2 + ny * bow;
+            const u = 1 - k;
+            const wobble = Math.sin(k * Math.PI * 3) * 1.6 * (1 - k) * (dist > 40 ? 1 : 0);
+            // On a long move the hand runs slightly past the target and comes back: an overshoot that is gone by arrival.
+            const over = dist > 260 ? Math.min(14, dist * 0.03) : 0;
+            const along = over * Math.pow(Math.sin(Math.PI * k), 2) * Math.min(1, Math.max(0, (k - 0.55) / 0.3));
+            x = u * u * g.from.x + 2 * u * k * cx1 + k * k * dest.x + nx * wobble + (dx / dist) * along;
+            y = u * u * g.from.y + 2 * u * k * cy1 + k * k * dest.y + ny * wobble + (dy / dist) * along;
+          }
           if (t >= 1) {
             agent.glide = null;
             const waiting = g.waiters;
@@ -426,9 +437,12 @@
           lastGlideStartAt = performance.now() + wait;
           agent.glide = { from: { ...from }, start: performance.now() + wait, duration: glideDuration(dist), side: Math.random() < 0.5 ? -1 : 1, waiters: [] };
         } else {
-          agent.glide = null;
-          agent.point = null;
-          if (agent.pendingClick) view.requestAnimationFrame(() => arrive(agent));
+          // Reduced motion trims the decoration, not the movement: the cursor still travels to its target, so people can see where
+          // the agent is. It goes briefly and in a straight line, with no bow, overshoot or reaction delay.
+          const to = destination(agent, now);
+          const dist = Math.hypot(to.x - from.x, to.y - from.y);
+          agent.wasParked = false;
+          agent.glide = { from: { ...from }, start: performance.now(), duration: Math.min(380, 180 + dist * 0.18), side: 1, simple: true, waiters: [] };
         }
       } else if (phase === "done") {
         if (agent.verb === "read") agent.focusUntil = Math.min(agent.focusUntil, now + 500);
@@ -520,6 +534,8 @@
       box.appendChild(frame);
       shadow.appendChild(box);
       const state = { kind, box, frame, src, size: { w: defaults.w, h: defaults.h }, pos: null, shown: true, loads: 0, defaults };
+      // The thread pill rides the dock track when the dock module is loaded; otherwise it keeps its old free position.
+      state.dock = kind === "pill" && !!global.M9RDock;
       frames.set(kind, state);
       frame.addEventListener("load", () => {
         state.loads += 1;
@@ -531,9 +547,16 @@
           return;
         }
         postToFrame(state, { kind: "host", vw: view.innerWidth, vh: view.innerHeight });
+        if (state.dock && state.notifiedEdge) postToFrame(state, { kind: "dock", edge: state.notifiedEdge });
       });
       frame.src = src;
-      if (storage) {
+      if (storage && state.dock) {
+        storage.get(DOCK_KEY).then((stored) => {
+          const saved = stored && stored[DOCK_KEY];
+          if (Number.isFinite(saved) && saved >= 0 && saved <= 1) state.u = saved;
+          layout(state);
+        }).catch(() => layout(state));
+      } else if (storage) {
         storage.get(POSITION_KEYS[kind]).then((stored) => {
           const saved = stored && stored[POSITION_KEYS[kind]];
           if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.bottom)) state.pos = { left: saved.left, bottom: saved.bottom };
@@ -548,6 +571,7 @@
     }
 
     function layout(state) {
+      if (state.dock) return layoutDock(state);
       const vw = view.innerWidth;
       const vh = view.innerHeight;
       const w = Math.min(state.size.w, vw - 8);
@@ -560,6 +584,91 @@
       state.box.classList.add("ready");
       state.box.classList.toggle("hidden", !state.shown);
       state.shownAt = { left, bottom, w, h };
+    }
+
+    // ---- Dock: the thread pill rides a rounded track just inside the window edge. A drag anywhere slides it along the
+    // edges and around corners; every change of place or size is a spring, so nothing snaps. ----
+    let dockLoop = 0;
+    let dockLast = 0;
+    const clampN = (value, low, high) => Math.min(Math.max(value, low), high);
+
+    // The frame's four edges are the things that move, so switching from one window edge to another (or opening the panel)
+    // glides continuously instead of jumping between placement rules.
+    function dockSprings(state) {
+      if (!state.springs) {
+        const D = global.M9RDock;
+        const make = () => D.createSpring({ ...D.SPRING_PRESETS.snap });
+        state.springs = { l: make(), t: make(), r: make(), b: make() };
+      }
+      return state.springs;
+    }
+
+    function layoutDock(state) {
+      const D = global.M9RDock;
+      const vw = view.innerWidth;
+      const vh = view.innerHeight;
+      const path = D.pathFor(vw, vh, DOCK);
+      state.path = path;
+      // Until the owner moves it, the pill rests on the bottom edge, right of centre, clear of the message bar.
+      if (!Number.isFinite(state.u)) state.u = D.project(path, vw > 900 ? vw - 260 : vw / 2, vh).t / path.length;
+      const point = D.pointAt(path, state.u * path.length);
+      const o = D.orientationAt(point.theta);
+      const w = Math.min(state.size.w, vw - 8);
+      const h = Math.min(state.size.h, vh - 8);
+      // The bar sits at the frame's bottom (its top when docked along the top), so growth always opens away from the edge.
+      // Along the top and bottom the frame is centred on the track point; on the sides it hugs the edge and slides up and down.
+      const half = DOCK.thickness / 2 + DOCK.pad;
+      let left = o.card === 1 ? vw - DOCK.gap + DOCK.pad - w : o.card === 3 ? DOCK.gap - DOCK.pad : point.x - w / 2;
+      let top = o.card === 0 ? point.y - half : point.y + half - h;
+      left = clampN(left, 4, Math.max(4, vw - w - 4));
+      top = clampN(top, 4, Math.max(4, vh - h - 4));
+      if (o.edge !== state.notifiedEdge) {
+        state.notifiedEdge = o.edge;
+        postToFrame(state, { kind: "dock", edge: o.edge });
+      }
+      const sp = dockSprings(state);
+      // The dock always moves on springs (they settle without overshoot): where the pill goes is information, not decoration.
+      if (!state.springsReady) {
+        sp.l.jump(left); sp.t.jump(top); sp.r.jump(left + w); sp.b.jump(top + h);
+        state.springsReady = true;
+      } else {
+        sp.l.setTarget(left); sp.t.setTarget(top); sp.r.setTarget(left + w); sp.b.setTarget(top + h);
+      }
+      state.box.classList.add("ready");
+      state.box.classList.toggle("hidden", !state.shown);
+      applyDock(state);
+      if (!Object.values(sp).every((s) => s.settled()) && !dockLoop) {
+        dockLast = 0;
+        dockLoop = view.requestAnimationFrame(stepDock);
+      }
+    }
+
+    function applyDock(state) {
+      const sp = state.springs;
+      const vh = view.innerHeight;
+      const left = sp.l.value;
+      const top = sp.t.value;
+      const w = Math.max(40, sp.r.value - left);
+      const h = Math.max(40, sp.b.value - top);
+      state.box.style.cssText = `left:${left}px;top:${top}px;bottom:auto;width:${w}px;height:${h}px`;
+      state.cur = { left, top, width: w, height: h };
+      state.shownAt = { left, bottom: vh - top - h, w, h };
+    }
+
+    function stepDock(stamp) {
+      dockLoop = 0;
+      const dt = dockLast ? (stamp - dockLast) / 1000 : 1 / 60;
+      dockLast = stamp;
+      let live = false;
+      for (const state of frames.values()) {
+        if (!state.dock || !state.springs) continue;
+        const list = Object.values(state.springs);
+        for (const s of list) s.step(dt);
+        applyDock(state);
+        if (!list.every((s) => s.settled())) live = true;
+      }
+      if (live) dockLoop = view.requestAnimationFrame(stepDock);
+      else dockLast = 0;
     }
 
     function frameFor(source) {
@@ -579,17 +688,26 @@
         // Growing keeps the bottom edge where it is (the pill opens upward); if it would run off the top, it slides down.
         if (grew && state.pos) state.pos = { left: state.pos.left, bottom: state.pos.bottom };
         layout(state);
+      } else if (data.kind === "drag" && state.dock && state.path && Number.isFinite(data.cx) && Number.isFinite(data.cy)) {
+        // The pointer, in window coordinates: where the frame is drawn right now plus where the pointer is inside it.
+        const at = state.cur || { left: 0, top: 0 };
+        const hit = global.M9RDock.project(state.path, at.left + data.cx, at.top + data.cy);
+        state.u = hit.t / state.path.length;
+        layoutDock(state);
       } else if (data.kind === "drag" && Number.isFinite(data.dx) && Number.isFinite(data.dy)) {
         const at = state.shownAt || { left: 0, bottom: 0 };
         state.pos = { left: at.left + data.dx, bottom: at.bottom - data.dy };
         layout(state);
+      } else if (data.kind === "drag-end" && state.dock) {
+        if (storage && Number.isFinite(state.u)) void storage.set({ [DOCK_KEY]: state.u }).catch(() => {});
       } else if (data.kind === "drag-end") {
         if (storage && state.shownAt) void storage.set({ [POSITION_KEYS[state.kind]]: { left: state.shownAt.left, bottom: state.shownAt.bottom } }).catch(() => {});
       } else if (data.kind === "focus-composer") {
         showComposer(true);
       } else if (data.kind === "reset-position") {
         state.pos = null;
-        if (storage) void storage.remove(POSITION_KEYS[state.kind]).catch(() => {});
+        if (state.dock) state.u = NaN;
+        if (storage) void storage.remove(state.dock ? DOCK_KEY : POSITION_KEYS[state.kind]).catch(() => {});
         layout(state);
       }
     }
@@ -635,6 +753,7 @@
     function destroy() {
       view.clearInterval(sweep);
       if (loop) view.cancelAnimationFrame(loop);
+      if (dockLoop) view.cancelAnimationFrame(dockLoop);
       for (const id of [...agents.keys()]) remove(id);
       view.removeEventListener("message", onFrameMessage);
       view.removeEventListener("resize", onResize);
