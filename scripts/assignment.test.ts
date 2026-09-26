@@ -34,7 +34,7 @@ test("rejects unbounded, expired, or unsafe assignment input", () => {
 test("prohibited scope may safely name secret files without allowing active content", () => {
   assert.equal(validateAssignment({
     ...valid,
-    prohibitedScope: [".env", ".oathlock/local.json", "private keys"],
+    prohibitedScope: [".env", ".m9r/local.json", "private keys"],
   }, Date.parse("2026-07-13T00:00:00.000Z")).ok, true);
   assert.equal(validateAssignment({
     ...valid,

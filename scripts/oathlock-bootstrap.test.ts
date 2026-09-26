@@ -24,7 +24,7 @@ import {
   buildWorkflowBlock,
   inspectWorkflowBlock,
   removeWorkflowBlock,
-  OATHLOCK_WORKFLOW_BLOCK_VERSION,
+  M9R_WORKFLOW_BLOCK_VERSION,
 } from "../src/lib/oathlock-bootstrap-core.ts";
 
 const CWD = "/repo";
@@ -280,7 +280,7 @@ test("bootstrap status reports missing, installed, and outdated safely", async (
   assert.match(text, /agent kind: Codex \(codex\)/);
   assert.match(text, /integration file: AGENTS\.md/);
   assert.match(text, /workflow: installed/);
-  assert.match(text, new RegExp(`managed block version: ${OATHLOCK_WORKFLOW_BLOCK_VERSION}`));
+  assert.match(text, new RegExp(`managed block version: ${M9R_WORKFLOW_BLOCK_VERSION}`));
 
   // Outdated: rewrite the block with a stale version marker.
   const path = join(CWD, "AGENTS.md");
@@ -320,7 +320,7 @@ test("managed files contain no tokens, claim URLs, config values, or secrets", a
   assert.ok(!/oak_[A-Za-z0-9]/.test(content));
   assert.ok(!/Bearer/i.test(content));
   // The block warns against reading local config rather than referencing values from it.
-  assert.match(content, /`\.oathlock\/local\.json`/);
+  assert.match(content, /`\.m9r\/local\.json`/);
 });
 
 test("bootstrap error output never reveals local config contents", async () => {
@@ -348,11 +348,11 @@ test("a revoked connection cannot continue OathLock-controlled work", async () =
 test("bootstrap and remove never touch historical run or connection records", async () => {
   const runJson = JSON.stringify({ run_id: "run-1" });
   const { deps, files } = makeDeps({
-    files: { ...connectedFiles("codex"), [join(CWD, ".oathlock/run.json")]: runJson },
+    files: { ...connectedFiles("codex"), [join(CWD, ".m9r/run.json")]: runJson },
   });
   assert.equal(await run(["bootstrap"], deps), 0);
   assert.equal(await run(["bootstrap", "remove"], deps), 0);
-  assert.equal(files.get(join(CWD, ".oathlock/run.json")), runJson);
+  assert.equal(files.get(join(CWD, ".m9r/run.json")), runJson);
   assert.ok(files.has(localPath(CWD)), "local connection must be preserved");
 });
 
@@ -410,7 +410,7 @@ test("every integration requires the structured redacted evidence draft", () => 
     assert.match(block, /Never claim a command passed unless it was run/);
     assert.match(block, /limitations or `None identified`/);
     assert.match(block, /tokens, cookies, claim URLs, environment values, private keys/);
-    assert.match(block, /raw local configuration or `\.oathlock` config contents/);
+    assert.match(block, /raw local configuration or `\.m9r` config contents/);
   }
 });
 
@@ -455,7 +455,7 @@ test("managed instructions scope the workflow to repo tasks only", () => {
 test("managed instructions prevent duplicate and misattached runs", () => {
   const block = buildWorkflowBlock("codex");
   assert.match(block, /current runtime's scoped\s+run pointer/);
-  assert.match(block, /\.oathlock\/agents\/<authenticated-kind>\/run\.json/);
+  assert.match(block, /\.m9r\/agents\/<authenticated-kind>\/run\.json/);
   assert.match(block, /never\s+read another provider's pointer/);
   assert.match(block, /attach to it/);
   assert.match(block, /Never create a second\s+run for the same task/);
@@ -500,7 +500,7 @@ test("inspectWorkflowBlock reports presence, version, and currency", () => {
   const fresh = applyWorkflowBlock(null, "codex").content;
   const status = inspectWorkflowBlock(fresh, "codex");
   assert.equal(status.present, true);
-  assert.equal(status.version, OATHLOCK_WORKFLOW_BLOCK_VERSION);
+  assert.equal(status.version, M9R_WORKFLOW_BLOCK_VERSION);
   assert.equal(status.current, true);
   const stale = fresh.replace("## M9R", "## Tampered");
   assert.equal(inspectWorkflowBlock(stale, "codex").current, false);

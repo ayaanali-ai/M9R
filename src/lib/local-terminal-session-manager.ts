@@ -57,14 +57,21 @@ interface TerminalSession extends TerminalSessionView {
 }
 
 const PRIVATE_ENV_KEYS = new Set([
+  "M9R_AGENT_TOKEN",
+  "M9R_BRIDGE_TOKEN",
+  "M9R_TOKEN",
   "OATHLOCK_AGENT_TOKEN",
   "OATHLOCK_BRIDGE_TOKEN",
   "OATHLOCK_TOKEN",
 ]);
 
+const PRIVATE_ENV_PREFIXES = ["M9R_SECRET_", "OATHLOCK_SECRET_"];
+
 export function sanitizeTerminalEnvironment(env: NodeJS.ProcessEnv | Record<string, string | undefined>): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(env).filter(([key, value]) => typeof value === "string" && !PRIVATE_ENV_KEYS.has(key) && !key.startsWith("OATHLOCK_SECRET_")) as Array<[string, string]>,
+    Object.entries(env).filter(([key, value]) => typeof value === "string"
+      && !PRIVATE_ENV_KEYS.has(key)
+      && !PRIVATE_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))) as Array<[string, string]>,
   );
 }
 
@@ -110,7 +117,7 @@ export function createTerminalSessionManager(options: {
         cwd,
         cols: input.cols,
         rows: input.rows,
-        env: { ...env, OATHLOCK_AGENT_KIND: input.provider, OATHLOCK_TERMINAL_SESSION_ID: id, TERM: env.TERM ?? "xterm-256color" },
+        env: { ...env, M9R_AGENT_KIND: input.provider, M9R_TERMINAL_SESSION_ID: id, TERM: env.TERM ?? "xterm-256color" },
         name: "xterm-256color",
         ...(process.platform === "win32" ? { useConptyDll: true, conptyInheritCursor: true } : {}),
       });

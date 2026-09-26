@@ -23,7 +23,7 @@ import {
  * noise (`node_modules`, build output, VCS internals), not a new policy.
  */
 const SKIPPED_DIRECTORY_NAMES = new Set([
-  "node_modules", ".git", ".next", "dist", "build", ".oathlock", ".turbo", "coverage",
+  "node_modules", ".git", ".next", "dist", "build", ".m9r", ".turbo", "coverage",
 ]);
 
 export class FsTreeHost {

@@ -131,7 +131,7 @@ export function parseOpenCodeExportOutput(raw: string): Record<string, unknown> 
 }
 
 export function opencodeBackfillCursorPath(repositoryRoot: string): string {
-  return join(resolve(repositoryRoot), ".oathlock", "capture", CURSOR_FILE_NAME);
+  return join(resolve(repositoryRoot), ".m9r", "capture", CURSOR_FILE_NAME);
 }
 
 function defaultRunOpenCodeCommand(): OpenCodeCommandRunner {

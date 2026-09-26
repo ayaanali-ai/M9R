@@ -1,7 +1,7 @@
 /**
  * OathLock CLI — run lifecycle tests
  * ----------------------------------------------------------------------------
- * Covers `run start` / `run status`, the `.oathlock/run.json` active-run file,
+ * Covers `run start` / `run status`, the `.m9r/run.json` active-run file,
  * and the wiring of `rules` (rules_loaded_count) and `submit-session` (run_id)
  * into the active run. In-memory fs + fake fetch; no real network.
  */
@@ -61,7 +61,7 @@ const TOKEN_FILE = (token = "oak_tok_run") => ({ [localPath(CWD)]: JSON.stringif
 // run start
 // ---------------------------------------------------------------------------
 
-test("run start writes the active run id to .oathlock/run.json", async () => {
+test("run start writes the active run id to .m9r/run.json", async () => {
   const { deps, files, requests } = makeDeps({
     files: TOKEN_FILE(),
     router: (url) =>

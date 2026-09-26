@@ -52,7 +52,7 @@ test("resident provider prompts permit bounded Mission requests without direct p
     repositoryRoot: resolve(process.cwd()),
     task: "Inspect the bounded Mission contract.",
     allowedPaths: ["src"],
-    prohibitedPaths: [".env", ".oathlock/local.json"],
+    prohibitedPaths: [".env", ".m9r/local.json"],
     maxDurationMs: 60_000,
     executionMode: "read_only",
   }, "codex");

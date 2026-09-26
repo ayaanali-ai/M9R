@@ -4,7 +4,7 @@ import test from "node:test";
 import { WebSocket } from "ws";
 import { BRIDGE_PROTOCOL_VERSION } from "../src/lib/local-terminal-protocol.ts";
 
-test("the real runtime rejects unauthenticated HTTP state mutation and accepts state changes on an authorized provider socket", { timeout: 20_000 }, async () => {
+test("the real runtime rejects unauthenticated HTTP state mutation and accepts state changes on an authorized provider socket", { timeout: 60_000 }, async () => {
   const port = 43119;
   const child = spawn(process.execPath, ["--import", "tsx", "scripts/oathlock-terminal-bridge.ts"], {
     cwd: process.cwd(),
@@ -18,7 +18,10 @@ test("the real runtime rejects unauthenticated HTTP state mutation and accepts s
   try {
     await new Promise<void>((resolve, reject) => {
       let output = "";
-      const timer = setTimeout(() => reject(new Error(`Runtime did not start: ${stderr}`)), 10_000);
+      // First tsx startup in a cold Windows checkout can take over 20 seconds
+      // while loading the runtime's dependency graph; this is not the runtime
+      // health timeout, so allow startup without mistaking compilation for a hang.
+      const timer = setTimeout(() => reject(new Error(`Runtime did not start: ${stderr}`)), 45_000);
       child.stdout.on("data", (chunk) => {
         output += String(chunk);
         if (output.includes("M9R local runtime is running.")) { clearTimeout(timer); resolve(); }

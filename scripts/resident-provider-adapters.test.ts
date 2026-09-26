@@ -25,7 +25,7 @@ const grant = {
   repositoryRoot: process.cwd(),
   task: "Inspect the resident adapter and return a concise finding.",
   allowedPaths: ["src/lib/resident-provider-adapters.ts"],
-  prohibitedPaths: [".env*", ".oathlock/local.json"],
+  prohibitedPaths: [".env*", ".m9r/local.json"],
   maxDurationMs: 30_000,
   executionMode: "read_only" as const,
 };
@@ -176,7 +176,7 @@ test("Codex launch uses stdin, JSONL, an ephemeral session, and a bounded sandbo
   assert.equal(spec.args.at(-1), "-");
   assert.doesNotMatch(spec.args.join(" "), /Inspect the resident adapter/);
   assert.match(spec.stdin, /grant-provider-123/);
-  assert.match(spec.stdin, /\.oathlock\/local\.json/);
+  assert.match(spec.stdin, /\.m9r\/local\.json/);
   assert.equal(spec.shell, false);
 });
 

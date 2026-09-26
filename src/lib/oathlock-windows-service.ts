@@ -40,7 +40,7 @@ export interface WindowsLaunchScriptInput {
   workingDirectory: string;
   /**
    * Environment variables the launched process needs that the login
-   * environment won't otherwise carry -- e.g. OATHLOCK_TERMINAL_PANES.
+   * environment won't otherwise carry -- e.g. M9R_TERMINAL_PANES.
    * Start-Process has no -Environment parameter, so these are set as
    * $env: assignments in the wrapper script's own process, which
    * Start-Process's child then inherits. Optional and empty by default;

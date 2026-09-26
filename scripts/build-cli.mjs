@@ -7,7 +7,7 @@
 // Run from anywhere: paths resolve from this file, not the cwd. Used by
 // `npm run build:cli` and by the cli package's `prepack` hook before `npm pack`.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, cpSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, cpSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -360,7 +360,7 @@ function build() {
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/workspace-prompt-queue['"]/g, '"./workspace-prompt-queue.js"')
     // Dynamic import (inside ensureTerminalPane), not a static one -- this
     // one was missing from the rewrite list entirely. Confirmed live: the
-    // packaged CLI crashed every provider the moment OATHLOCK_TERMINAL_PANES
+    // packaged CLI crashed every provider the moment M9R_TERMINAL_PANES
     // was actually turned on (ERR_MODULE_NOT_FOUND, wrong relative path once
     // the file it's computed from moved into cli/dist/), meaning terminal
     // panes have never actually run end-to-end through the real CLI build.
@@ -599,6 +599,22 @@ function build() {
     chmodSync(entryPath, 0o755);
   } catch {
     /* non-POSIX filesystem — npm handles the bit at install time */
+  }
+
+  // Leaf modules that several compiled files import through the app's `@/` alias. Without this pass the packaged CLI
+  // crashes on start with ERR_MODULE_NOT_FOUND ("Cannot find package '@/lib'").
+  for (const [source, name] of [["src/lib/native/m9r-compatibility.ts", "m9r-compatibility"], ["src/lib/terminal-config.ts", "terminal-config"], ["packages/web-protocol-placeholder/src/index.ts", "web-protocol-placeholder"]]) {
+    writeFileSync(resolve(outDir, `${name}.js`), transpile(readFileSync(resolve(repoRoot, source), "utf8")));
+  }
+  for (const file of readdirSync(outDir)) {
+    if (!file.endsWith(".js")) continue;
+    const path = resolve(outDir, file);
+    const before = readFileSync(path, "utf8");
+    const after = before
+      .replace(/["'](?:@\/lib\/native|(?:\.\.\/)+src\/lib\/native)\/m9r-compatibility["']/g, '"./m9r-compatibility.js"')
+      .replace(/["']@\/lib\/terminal-config["']/g, '"./terminal-config.js"')
+      .replace(/["'](?:\.\.\/)+packages\/web-protocol-placeholder\/src\/index["']/g, '"./web-protocol-placeholder.js"');
+    if (after !== before) writeFileSync(path, after);
   }
 
   // A running resident/bridge process has no way to know a rebuild happened

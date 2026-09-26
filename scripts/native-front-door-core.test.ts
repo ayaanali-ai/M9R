@@ -141,11 +141,11 @@ test("a pending task is flagged so the agent does not act; denied and expired ar
 });
 
 test("the session card is a few lines of pointers within its cap, and never carries memory content", () => {
-  const card = renderSessionCard({ handle: "claude", others: [{ handle: "codex", activity: "editing relay/hub.ts" }], pendingCount: 2, memoryDir: ".oathlock/memory" });
+  const card = renderSessionCard({ handle: "claude", others: [{ handle: "codex", activity: "editing relay/hub.ts" }], pendingCount: 2, memoryDir: ".m9r/memory" });
   assert.match(card, /M9R connected as @claude\./);
   assert.match(card, /@codex \(editing relay\/hub\.ts\)/);
   assert.match(card, /2 pending inbox item/);
-  assert.match(card, /indexed in \.oathlock\/memory\/index\.md/);
+  assert.match(card, /indexed in \.m9r\/memory\/index\.md/);
   assert.doesNotMatch(renderSessionCard({ handle: "claude", others: [], pendingCount: 0 }), /memory/i, "no memory line when there is no folder");
   assert.equal(approxTokens(card) <= CAPS.cardTokens, true);
   const crowded = renderSessionCard({ handle: "a", others: Array.from({ length: 30 }, (_, i) => ({ handle: `agent${i}`, activity: "z".repeat(200) })), pendingCount: 0, memoryDir: "m" });

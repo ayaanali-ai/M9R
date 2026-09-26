@@ -32,7 +32,7 @@ test("readPendingWorktrees returns an empty list when no state file exists yet",
 
 test("writePendingWorktrees then readPendingWorktrees round-trips entries", async () => {
   const fs = fakeFs();
-  const entry: PendingWorktree = { grantId: "grant-1", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.oathlock-worktrees/grant-1", branch: "oathlock/grant-1", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
+  const entry: PendingWorktree = { grantId: "grant-1", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.m9r-worktrees/grant-1", branch: "oathlock/grant-1", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
   await writePendingWorktrees("C:/repos/app", [entry], fs.writeFileFn, fs.mkdirFn);
   const read = await readPendingWorktrees("C:/repos/app", fs.readFileFn);
   assert.deepEqual(read, [entry]);
@@ -40,7 +40,7 @@ test("writePendingWorktrees then readPendingWorktrees round-trips entries", asyn
 
 test("reconcilePendingWorktrees merges and cleans up when the human approved the exact reported diff", async () => {
   const fs = fakeFs();
-  const entry: PendingWorktree = { grantId: "grant-1", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.oathlock-worktrees/grant-1", branch: "oathlock/grant-1", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
+  const entry: PendingWorktree = { grantId: "grant-1", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.m9r-worktrees/grant-1", branch: "oathlock/grant-1", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
   await writePendingWorktrees(profile.repositoryRoot, [entry], fs.writeFileFn, fs.mkdirFn);
   const merges: Array<{ branch: string }> = [];
   const removed: string[] = [];
@@ -58,13 +58,13 @@ test("reconcilePendingWorktrees merges and cleans up when the human approved the
   });
   assert.deepEqual(result, { merged: 1, discarded: 0, stillPending: 0 });
   assert.deepEqual(merges, [{ branch: "oathlock/grant-1" }]);
-  assert.deepEqual(removed, ["C:/repos/.oathlock-worktrees/grant-1"]);
+  assert.deepEqual(removed, ["C:/repos/.m9r-worktrees/grant-1"]);
   assert.deepEqual(fs.get(), []);
 });
 
 test("reconcilePendingWorktrees discards without merging when the human rejected the review", async () => {
   const fs = fakeFs();
-  const entry: PendingWorktree = { grantId: "grant-1", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.oathlock-worktrees/grant-1", branch: "oathlock/grant-1", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
+  const entry: PendingWorktree = { grantId: "grant-1", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.m9r-worktrees/grant-1", branch: "oathlock/grant-1", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
   await writePendingWorktrees(profile.repositoryRoot, [entry], fs.writeFileFn, fs.mkdirFn);
   let mergeCalled = false;
   const removed: string[] = [];
@@ -79,13 +79,13 @@ test("reconcilePendingWorktrees discards without merging when the human rejected
   });
   assert.deepEqual(result, { merged: 0, discarded: 1, stillPending: 0 });
   assert.equal(mergeCalled, false);
-  assert.deepEqual(removed, ["C:/repos/.oathlock-worktrees/grant-1"]);
+  assert.deepEqual(removed, ["C:/repos/.m9r-worktrees/grant-1"]);
   assert.deepEqual(fs.get(), []);
 });
 
 test("reconcilePendingWorktrees leaves a still-pending review untouched, neither merged nor discarded", async () => {
   const fs = fakeFs();
-  const entry: PendingWorktree = { grantId: "grant-1", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.oathlock-worktrees/grant-1", branch: "oathlock/grant-1", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
+  const entry: PendingWorktree = { grantId: "grant-1", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.m9r-worktrees/grant-1", branch: "oathlock/grant-1", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
   await writePendingWorktrees(profile.repositoryRoot, [entry], fs.writeFileFn, fs.mkdirFn);
   let mergeCalled = false, removeCalled = false;
   const fetch: typeof globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, writeEnabled: false, review: { decision: "pending" } }), { status: 200 });
@@ -105,8 +105,8 @@ test("reconcilePendingWorktrees leaves a still-pending review untouched, neither
 
 test("reconcilePendingWorktrees keeps a failing entry pending rather than losing track of it, and still reconciles the rest", async () => {
   const fs = fakeFs();
-  const broken: PendingWorktree = { grantId: "grant-broken", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.oathlock-worktrees/grant-broken", branch: "oathlock/grant-broken", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
-  const healthy: PendingWorktree = { grantId: "grant-healthy", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.oathlock-worktrees/grant-healthy", branch: "oathlock/grant-healthy", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
+  const broken: PendingWorktree = { grantId: "grant-broken", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.m9r-worktrees/grant-broken", branch: "oathlock/grant-broken", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
+  const healthy: PendingWorktree = { grantId: "grant-healthy", instanceKey: "codex-resident-01", worktreeRoot: "C:/repos/.m9r-worktrees/grant-healthy", branch: "oathlock/grant-healthy", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) };
   await writePendingWorktrees(profile.repositoryRoot, [broken, healthy], fs.writeFileFn, fs.mkdirFn);
   const merges: string[] = [];
   const fetch: typeof globalThis.fetch = async (input) => {
@@ -153,7 +153,7 @@ test("a successful workspace_write cycle reports the diff and leaves it tracked 
       await deps.recordEvent({ event: "return_result", sequence: 5, resultText: "added the helper" });
       return {
         status: "returned", result: null,
-        worktree: { repositoryRoot: profile.repositoryRoot, worktreeRoot: "C:/repos/.oathlock-worktrees/grant-write-1", branch: "oathlock/grant-write-1", baseCommit: "a".repeat(40) },
+        worktree: { repositoryRoot: profile.repositoryRoot, worktreeRoot: "C:/repos/.m9r-worktrees/grant-write-1", branch: "oathlock/grant-write-1", baseCommit: "a".repeat(40) },
       };
     },
   });
@@ -167,5 +167,5 @@ test("a successful workspace_write cycle reports the diff and leaves it tracked 
   // reads those from the grant's own row, never from this request.
   assert.equal(posted[0].body?.allowedPaths, undefined);
   // The worktree stays tracked pending -- runResidentCycle never merges on its own.
-  assert.deepEqual(fs.get(), [{ grantId: "grant-write-1", instanceKey: profile.instanceKey, worktreeRoot: "C:/repos/.oathlock-worktrees/grant-write-1", branch: "oathlock/grant-write-1", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) }]);
+  assert.deepEqual(fs.get(), [{ grantId: "grant-write-1", instanceKey: profile.instanceKey, worktreeRoot: "C:/repos/.m9r-worktrees/grant-write-1", branch: "oathlock/grant-write-1", baseCommit: "a".repeat(40), headCommit: "b".repeat(40) }]);
 });

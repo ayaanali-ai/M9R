@@ -5,7 +5,7 @@
  * env-driven so the SAME logic can be started either by the standalone
  * Render deployment (via env vars, unchanged) or by the local runtime
  * (scripts/oathlock-terminal-bridge.ts), which derives its config from the
- * already-authenticated local `.oathlock/agents/<kind>/local.json` token
+ * already-authenticated local `.m9r/agents/<kind>/local.json` token
  * instead of requiring separate cloud credentials — this is the local,
  * Buzz-parity path: the agent CLI is already logged in on this machine, so
  * nothing here needs a billable API key.
@@ -39,6 +39,7 @@ import { isMissionFeatureEnabled } from "../../../src/lib/mission/mission-featur
 import { MissionRelayClient } from "../../../src/lib/mission/mission-relay-client";
 import { compareWorkspaceCursor, cursorIsAfter, decodeWorkspaceCursor, encodeWorkspaceCursor, workspaceCursorFromMessage } from "../../../src/lib/mission/workspace-cursor";
 import { isAgentAvailabilityNoticeBody } from "../../../src/lib/conversation-routing";
+import { migrateLegacyM9rDirectory, normalizeLegacyM9rEnvironment } from "../../../src/lib/native/m9r-compatibility";
 
 /**
  * Confirmed live tonight: three real agents, given a task with an explicit
@@ -682,7 +683,7 @@ export interface MissionBridgeConfig {
   onWorkspaceTurnTiming?: (event: WorkspaceTurnTimingEvent) => void;
   /**
    * Set only by the local path (local-mission-bridge-bootstrap.ts, from
-   * whichever .oathlock/agents/<provider>/local.json it actually
+   * whichever .m9r/agents/<provider>/local.json it actually
    * authenticated with) -- constrains ensureDynamicSessionForConversation to
    * only ever start a session for THIS provider. Every bridge process
    * registers both ACP adapters (createDefaultAcpProviderRegistry always
@@ -720,11 +721,17 @@ export interface MissionBridgeHandle {
 }
 
 export async function startMissionBridge(config: MissionBridgeConfig): Promise<MissionBridgeHandle> {
+  normalizeLegacyM9rEnvironment(process.env);
+  const startupRepositoryRoot = config.repositoryRoot?.trim() || process.cwd();
+  try { migrateLegacyM9rDirectory(startupRepositoryRoot); }
+  catch (error) {
+    throw new Error(`Could not migrate legacy .oathlock state before starting the M9R bridge: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
   const { workspaceId, appUrl: rawAppUrl, agentToken } = config;
   const appUrl = rawAppUrl.replace(/\/$/, "");
   const bridgeStartedAtMs = Date.now();
   const bridgeInstanceId = config.bridgeInstanceId?.trim() || `bridge-${randomUUID()}`;
-  const repositoryRoot = config.repositoryRoot?.trim() || process.cwd();
+  const repositoryRoot = startupRepositoryRoot;
   // A local bridge is the long-lived process that keeps the provider's
   // connection routable. Give its presence lease a process-scoped identity so
   // a restart can begin at sequence 1 without replaying the previous process'
@@ -785,8 +792,8 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
   // process's config object -- acp-stdio-adapter.ts's devMcpServerDescriptor
   // reads these two off process.env and passes them (plus the per-session
   // missionId) through the ACP McpServer descriptor's own `env` field.
-  process.env.OATHLOCK_APP_URL = appUrl;
-  process.env.OATHLOCK_AGENT_TOKEN = agentToken;
+  process.env.M9R_APP_URL = appUrl;
+  process.env.M9R_AGENT_TOKEN = agentToken;
 
   const relayClient = new MissionRelayClient({
     url: websocketUrl(config.relayPublicUrl),
@@ -976,7 +983,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
   // The local delivery ledger (spec 7.3 #7): each stage is written to disk before it is reported, so a receipt can
   // honestly be called persisted. Only a local runtime has one; a cloud Bridge reports without the flag.
   const deliveryLedger = config.localProvider
-    ? new DeliveryLedger(joinPath(repositoryRoot, ".oathlock", "runtime", `delivery-ledger-${config.localProvider.replace(/[^a-z0-9-]/gi, "-").slice(0, 40)}.jsonl`))
+    ? new DeliveryLedger(joinPath(repositoryRoot, ".m9r", "runtime", `delivery-ledger-${config.localProvider.replace(/[^a-z0-9-]/gi, "-").slice(0, 40)}.jsonl`))
     : null;
   const workspaceTelemetry = createWorkspaceTurnTelemetry({ emit: (rawEvent) => {
     let event = rawEvent;
@@ -3531,7 +3538,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     bridgeEvents.emit("connectionError", { stage: "startup", error });
   });
 
-  // Opt-in only (OATHLOCK_DEBUG_EXPOSE_STATE=true) -- lets a live diagnostic
+  // Opt-in only (M9R_DEBUG_EXPOSE_STATE=true) -- lets a live diagnostic
   // session (`node --inspect`, DevTools console) read the exact internal
   // state of this bridge's poll loop and outbox with one call, instead of
   // navigating closure scopes at a manually-placed breakpoint. Never enabled
@@ -3544,7 +3551,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
   // set had zero listening ports between them. inspector.open() from
   // *inside* the process is a runtime API call, not a CLI flag, so it
   // isn't subject to that restriction.
-  if (process.env.OATHLOCK_DEBUG_EXPOSE_STATE === "true") {
+  if (process.env.M9R_DEBUG_EXPOSE_STATE === "true") {
     void import("node:inspector").then((inspector) => {
       if (inspector.url()) return; // already open (e.g. real --inspect was used)
       inspector.open(0, "127.0.0.1", false);
@@ -3553,7 +3560,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       console.error("[debug] could not open inspector:", error instanceof Error ? error.message : error);
     });
   }
-  if (process.env.OATHLOCK_DEBUG_EXPOSE_STATE === "true") {
+  if (process.env.M9R_DEBUG_EXPOSE_STATE === "true") {
     (globalThis as Record<string, unknown>)[`__oathlockBridgeDebug_${config.localProvider ?? bridgeInstanceId}`] = () => ({
       bridgeInstanceId,
       provider: config.localProvider,

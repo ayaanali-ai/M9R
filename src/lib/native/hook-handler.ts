@@ -60,7 +60,7 @@ function goalFor(prompt: string, handle: string): string {
 
 function readMemoryIndex(cwd: string): string | null {
   try {
-    const path = join(cwd, ".oathlock", "memory", "index.md");
+    const path = join(cwd, ".m9r", "memory", "index.md");
     return statSync(path).size <= 96_000 ? readFileSync(path, "utf8") : null;
   } catch {
     return null;
@@ -108,7 +108,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const others = ctx.store.listEndpoints().filter((e) => e.handle !== self && now.getTime() - Date.parse(e.lastSeenAt) < activeWindow).map((e) => ({ handle: e.handle }));
       const pending = renderInboxInjection(ctx.store.tasksFor(self), ctx.store.cursorFor(self, input.session_id, input.cwd)).includedIds.length;
       // Only mention memory if the index file really exists here (the earlier card pointed at a file that did not).
-      const memoryDir = ctx.memoryDir ?? (input.cwd && (ctx.pathExists ?? existsSync)(join(input.cwd, ".oathlock", "memory", "index.md")) ? ".oathlock/memory" : undefined);
+      const memoryDir = ctx.memoryDir ?? (input.cwd && (ctx.pathExists ?? existsSync)(join(input.cwd, ".m9r", "memory", "index.md")) ? ".m9r/memory" : undefined);
       ctx.store.sweepExpired();
       const awaitingApproval = ctx.store.pendingApprovals().length;
       const identityToken = input.session_id ? ctx.store.issueIdentity(self, ctx.provider, input.session_id).token : undefined;

@@ -17,6 +17,7 @@ import {
   removeCronEntry,
   LINUX_CRON_MARKER,
   WINDOWS_TASK_NAME,
+  LEGACY_WINDOWS_TASK_NAME,
   type AutostartLaunchSpec,
 } from "@/lib/oathlock-autostart";
 
@@ -39,7 +40,7 @@ test("autostartPlatform maps each supported OS to its own mechanism and refuses 
 /* ------------------------------------------------------------------ Windows */
 
 test("the Scheduled Task registration is per-user, hidden twice over, and time-unlimited -- a finite ExecutionTimeLimit would let Task Scheduler reap the detached runtime with the launcher", () => {
-  const script = buildScheduledTaskRegisterScript('-WindowStyle Hidden -File "C:\\repo\\.oathlock\\service-launch.ps1"', "C:\\repo");
+  const script = buildScheduledTaskRegisterScript('-WindowStyle Hidden -File "C:\\repo\\.m9r\\service-launch.ps1"', "C:\\repo");
   assert.match(script, /New-ScheduledTaskTrigger -AtLogOn -User "\$env:USERDOMAIN\\\$env:USERNAME"/, "must trigger for the current user only, never machine-wide");
   assert.match(script, /New-ScheduledTaskSettingsSet -Hidden\b/, "task settings must mark the task hidden");
   assert.match(script, /-WindowStyle Hidden/, "the launched powershell action must itself be hidden");
@@ -47,10 +48,12 @@ test("the Scheduled Task registration is per-user, hidden twice over, and time-u
   assert.doesNotMatch(script, /-RunLevel Highest|Register-ScheduledTask[^\n]*-User 'SYSTEM'/i, "must never ask for elevation");
 });
 
-test("Scheduled Task registration is idempotent by -Force, so a second init replaces rather than duplicates", () => {
+test("Scheduled Task registration is idempotent and upgrades the legacy task only after the new task registers", () => {
   const script = buildScheduledTaskRegisterScript("-File x.ps1", "C:\\repo");
-  assert.match(script, /Register-ScheduledTask -TaskName 'OathLock Runtime AutoStart'[\s\S]*-Force/);
-  assert.equal(WINDOWS_TASK_NAME, "OathLock Runtime AutoStart");
+  assert.match(script, /Register-ScheduledTask -TaskName 'M9R Runtime AutoStart'[\s\S]*-Force/);
+  assert.ok(script.indexOf("Register-ScheduledTask") < script.indexOf("Unregister-ScheduledTask"), "old task is removed only after the replacement is registered");
+  assert.equal(WINDOWS_TASK_NAME, "M9R Runtime AutoStart");
+  assert.equal(LEGACY_WINDOWS_TASK_NAME, "OathLock Runtime AutoStart");
 });
 
 test("single quotes inside a path cannot break out of the PowerShell literal", () => {
@@ -60,9 +63,11 @@ test("single quotes inside a path cannot break out of the PowerShell literal", (
 
 test("the query and remove scripts tolerate an absent task instead of erroring", () => {
   assert.match(buildScheduledTaskQueryScript(), /-ErrorAction SilentlyContinue/);
+  assert.match(buildScheduledTaskQueryScript(), /'OathLock Runtime AutoStart'/, "the query recognizes the prior release task");
   const remove = buildScheduledTaskRemoveScript();
   assert.match(remove, /-ErrorAction SilentlyContinue/, "must check for existence first");
-  assert.match(remove, /Unregister-ScheduledTask -TaskName 'OathLock Runtime AutoStart' -Confirm:\$false/, "must not prompt");
+  assert.match(remove, /Unregister-ScheduledTask -TaskName 'M9R Runtime AutoStart' -Confirm:\$false/, "must remove the current task without prompting");
+  assert.match(remove, /Unregister-ScheduledTask -TaskName 'OathLock Runtime AutoStart' -Confirm:\$false/, "must clean up the old task on uninstall");
 });
 
 test("PowerShell is always invoked hidden and non-interactive, so registration itself never flashes a window or blocks on a prompt", () => {
@@ -77,12 +82,12 @@ test("PowerShell is always invoked hidden and non-interactive, so registration i
 
 test("the macOS plist goes in the per-user LaunchAgents directory, never LaunchDaemons (which would need root)", () => {
   const path = macosLaunchAgentPath("/Users/kai");
-  assert.equal(path, "/Users/kai/Library/LaunchAgents/com.oathlock.runtime.plist");
+  assert.equal(path, "/Users/kai/Library/LaunchAgents/com.m9r.runtime.plist");
   assert.doesNotMatch(path, /LaunchDaemons/);
 });
 
 test("the LaunchAgent plist is well-formed and carries node flags, entry path and args in launch order", () => {
-  const plist = buildLaunchAgentPlist(posixSpec, "/repo/.oathlock/launch-agent.log");
+  const plist = buildLaunchAgentPlist(posixSpec, "/repo/.m9r/launch-agent.log");
   assert.ok(plist.startsWith('<?xml version="1.0" encoding="UTF-8"?>'));
   assert.match(plist, /<!DOCTYPE plist PUBLIC "-\/\/Apple\/\/DTD PLIST 1\.0\/\/EN"/);
   assert.ok(plist.trimEnd().endsWith("</plist>"));
@@ -99,7 +104,7 @@ test("the LaunchAgent plist is well-formed and carries node flags, entry path an
 });
 
 test("the LaunchAgent runs at load, in the background, from the repo directory", () => {
-  const plist = buildLaunchAgentPlist(posixSpec, "/repo/.oathlock/launch-agent.log");
+  const plist = buildLaunchAgentPlist(posixSpec, "/repo/.m9r/launch-agent.log");
   assert.match(plist, /<key>RunAtLoad<\/key>\s*\n\s*<true\/>/);
   assert.match(plist, /<key>ProcessType<\/key>\s*\n\s*<string>Background<\/string>/, "Background keeps it off the Dock and out of the GUI");
   assert.match(plist, /<key>WorkingDirectory<\/key>\s*\n\s*<string>\/repo<\/string>/);

@@ -51,7 +51,7 @@ test("input, resize, and close are routed only to an existing session", () => {
   assert.throws(() => manager.write("missing", "x"), /not found/i);
 });
 
-test("environment secrets owned by OathLock are not inherited by provider terminals", () => {
+test("M9R and legacy OathLock secrets are not inherited by provider terminals", () => {
   const log: string[] = [];
   let capturedEnv: Record<string, string> = {};
   const factory: PtyFactory = {
@@ -63,14 +63,25 @@ test("environment secrets owned by OathLock are not inherited by provider termin
   const manager = createTerminalSessionManager({
     repositoryRoot: process.cwd(),
     ptyFactory: factory,
-    env: { PATH: "safe", OATHLOCK_AGENT_TOKEN: "secret", OATHLOCK_BRIDGE_TOKEN: "secret", HOME: "home" },
+    env: {
+      PATH: "safe",
+      M9R_AGENT_TOKEN: "new-secret",
+      M9R_SECRET_SESSION_KEY: "new-secret",
+      OATHLOCK_AGENT_TOKEN: "legacy-secret",
+      OATHLOCK_BRIDGE_TOKEN: "legacy-secret",
+      OATHLOCK_SECRET_SESSION_KEY: "legacy-secret",
+      HOME: "home",
+    },
   });
   manager.spawn({ provider: "grok-build", cwd: ".", cols: 80, rows: 24 });
   assert.equal(capturedEnv.PATH, "safe");
   assert.equal(capturedEnv.HOME, "home");
+  assert.equal(capturedEnv.M9R_AGENT_TOKEN, undefined);
+  assert.equal(capturedEnv.M9R_SECRET_SESSION_KEY, undefined);
   assert.equal(capturedEnv.OATHLOCK_AGENT_TOKEN, undefined);
   assert.equal(capturedEnv.OATHLOCK_BRIDGE_TOKEN, undefined);
-  assert.match(capturedEnv.OATHLOCK_TERMINAL_SESSION_ID, /^[0-9a-f-]{36}$/);
+  assert.equal(capturedEnv.OATHLOCK_SECRET_SESSION_KEY, undefined);
+  assert.match(capturedEnv.M9R_TERMINAL_SESSION_ID, /^[0-9a-f-]{36}$/);
 });
 
 test("local integration state updates are session-scoped and require no model call", () => {

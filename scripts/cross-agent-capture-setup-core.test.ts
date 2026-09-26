@@ -94,14 +94,14 @@ test("generated OpenCode plugin retries an empty initial idle event and captures
 
     await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_live" } } });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    await assert.rejects(access(join(dir, ".oathlock", "capture", "pending.jsonl")));
+    await assert.rejects(access(join(dir, ".m9r", "capture", "pending.jsonl")));
 
     messages = [{ info: { role: "user" }, parts: [{ type: "text", text: "live prompt" }] }];
     await plugin.event({ event: { type: "session.status", properties: { sessionID: "ses_live", status: { type: "idle" } } } });
 
     let spool = "";
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      try { spool = await readFile(join(dir, ".oathlock", "capture", "pending.jsonl"), "utf8"); break; } catch { await new Promise((resolve) => setTimeout(resolve, 5)); }
+      try { spool = await readFile(join(dir, ".m9r", "capture", "pending.jsonl"), "utf8"); break; } catch { await new Promise((resolve) => setTimeout(resolve, 5)); }
     }
     assert.match(spool, /"provider":"opencode"/);
     assert.match(spool, /live prompt/);
@@ -115,5 +115,5 @@ test("CAPTURE_HOOK_SCRIPT_SOURCE is a minimal, dependency-free stdin-to-spool sc
   assert.match(CAPTURE_HOOK_SCRIPT_SOURCE, /process\.stdin/);
   assert.match(CAPTURE_HOOK_SCRIPT_SOURCE, /pending\.jsonl/);
   assert.doesNotMatch(CAPTURE_HOOK_SCRIPT_SOURCE, /require\(["'](?!node:)/);
-  assert.equal(CAPTURE_HOOK_RELATIVE_PATH, ".oathlock/bin/m9r-capture.mjs");
+  assert.equal(CAPTURE_HOOK_RELATIVE_PATH, ".m9r/bin/m9r-capture.mjs");
 });

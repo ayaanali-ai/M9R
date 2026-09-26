@@ -35,7 +35,7 @@ const LOCAL_PROVIDER_NAMES = ["claude-code", "codex", "opencode"] as const;
 
 async function readLocalToken(repositoryRoot: string, provider: string): Promise<string | null> {
   try {
-    const raw = await readFile(resolve(repositoryRoot, ".oathlock", "agents", provider, "local.json"), "utf8");
+    const raw = await readFile(resolve(repositoryRoot, ".m9r", "agents", provider, "local.json"), "utf8");
     const parsed = JSON.parse(raw) as { token?: string };
     return typeof parsed.token === "string" && parsed.token.trim() ? parsed.token.trim() : null;
   } catch {
@@ -71,7 +71,7 @@ interface ConversationListResponse {
 
 export interface OwnerPtyRuntimeOptions {
   repositoryRoot: string;
-  /** Defaults to OATHLOCK_API_URL, same env var oathlock-terminal-bridge.ts already reads. */
+  /** Defaults to M9R_API_URL, same env var oathlock-terminal-bridge.ts already reads. */
   appUrl?: string;
   /** Defaults to MISSION_RELAY_PUBLIC_URL, same env var every bridge already reads. */
   relayPublicUrl?: string;
@@ -86,7 +86,7 @@ export interface OwnerPtyRuntimeOptions {
  * nothing to do yet. Retries on the same discovery interval, so connecting
  * an agent later picks this up on its own without a restart. */
 export async function startOwnerPtyRuntime(options: OwnerPtyRuntimeOptions): Promise<void> {
-  const appUrl = (options.appUrl ?? process.env.OATHLOCK_API_URL ?? "https://m9r.dev").replace(/\/+$/, "");
+  const appUrl = (options.appUrl ?? process.env.M9R_API_URL ?? "https://m9r.dev").replace(/\/+$/, "");
   const relayPublicUrl = options.relayPublicUrl ?? process.env.MISSION_RELAY_PUBLIC_URL?.trim() ?? "https://m9r-relay.m9r.workers.dev";
   const discoveryIntervalMs = options.discoveryIntervalMs ?? 15_000;
   const log = options.onLog ?? ((message: string) => console.log(`[owner-terminal] ${message}`));

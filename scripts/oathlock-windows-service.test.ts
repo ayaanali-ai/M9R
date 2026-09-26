@@ -65,15 +65,15 @@ test("buildWindowsLaunchScript quotes a working directory containing a single qu
 });
 
 test("buildHiddenLaunchCommand wraps the script path in a hidden, non-interactive powershell invocation", () => {
-  const command = buildHiddenLaunchCommand("C:\\repo\\.oathlock\\service-launch.ps1");
+  const command = buildHiddenLaunchCommand("C:\\repo\\.m9r\\service-launch.ps1");
   assert.match(command, /^powershell\.exe /);
   assert.match(command, /-WindowStyle Hidden/);
   assert.match(command, /-ExecutionPolicy Bypass/);
-  assert.match(command, /"C:\\repo\\\.oathlock\\service-launch\.ps1"/);
+  assert.match(command, /"C:\\repo\\\.m9r\\service-launch\.ps1"/);
 });
 
 test("buildRegAddArgs / buildRegDeleteArgs / buildRegQueryArgs all target the same HKCU Run key and value name", () => {
-  const scriptPath = "C:\\repo\\.oathlock\\service-launch.ps1";
+  const scriptPath = "C:\\repo\\.m9r\\service-launch.ps1";
   const addArgs = buildRegAddArgs(scriptPath);
   const deleteArgs = buildRegDeleteArgs();
   const queryArgs = buildRegQueryArgs();

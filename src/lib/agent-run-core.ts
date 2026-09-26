@@ -8,7 +8,7 @@
  *
  * Two invariants live here and are tested directly:
  *   1. Run events carry status/provenance ONLY. `redactRunEvent` strips tokens,
- *      setup codes, claim URLs, `.oathlock/local.json`, and anything that looks
+ *      setup codes, claim URLs, `.m9r/local.json`, and anything that looks
  *      like source code. There is no path for raw content into a run event.
  *   2. Two-run proof copy is conservative. It never says a rule "worked",
  *      "proved" anything, "saved" money, "fixed" the agent, or "passed
@@ -81,7 +81,7 @@ export const SECRET_PATTERNS: Array<[RegExp, string]> = [
   // Setup codes if ever echoed.
   [/setup_code[=:]\s*\S+/gi, "setup_code=[redacted]"],
   // The local token file path/contents reference.
-  [/\.oathlock[/\\]local\.json/gi, "[redacted-local-state]"],
+  [/\.m9r[/\\]local\.json/gi, "[redacted-local-state]"],
   // Anything that names a raw token field.
   [/"?token"?\s*[:=]\s*"?[A-Za-z0-9._-]{12,}"?/gi, "token=[redacted]"],
 ];

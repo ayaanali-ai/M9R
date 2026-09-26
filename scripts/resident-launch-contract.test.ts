@@ -23,7 +23,7 @@ const validGrant = {
   task: "Review the resident launch contract for authorization gaps.",
   requiredCapabilities: ["security-review"],
   allowedPaths: ["src/lib/resident-launch-contract.ts"],
-  prohibitedPaths: [".env", ".oathlock/local.json"],
+  prohibitedPaths: [".env", ".m9r/local.json"],
   maxDurationMs: 10 * 60_000,
   maxEstimatedTokens: 8_000,
   delegationDepth: 1,

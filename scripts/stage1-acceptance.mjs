@@ -4,7 +4,7 @@
 //   node scripts/stage1-acceptance.mjs [--target claude-code] [--sender codex] [--restart-bridges]
 //
 // Runs against the real staging app with real sessions, so it posts a few short test messages in #general and
-// uses a few tokens of the target's subscription. Env: OATHLOCK_API_URL (default staging).
+// uses a few tokens of the target's subscription. Env: M9R_API_URL (default staging).
 // Step 6 (kill mid-turn) is scripts/stage1-restart-kill-test.ps1. The Relay lease check is scripts/stage1-relay-lease-live.ts.
 // --restart-bridges (Windows) also restarts the local bridge runners to prove a message sent during the gap is delivered once.
 import { execFileSync, spawnSync } from "node:child_process";
@@ -17,14 +17,14 @@ const opt = (name, fallback) => { const i = args.indexOf(`--${name}`); return i 
 const TARGET = opt("target", "claude-code");
 const SENDER = opt("sender", "codex");
 const RESTART = args.includes("--restart-bridges");
-const API = process.env.OATHLOCK_API_URL ?? "https://m9r.dev";
+const API = process.env.M9R_API_URL ?? "https://m9r.dev";
 const root = resolve(import.meta.dirname, "..");
 const cli = resolve(root, "cli/dist/m9r.js");
-const token = JSON.parse(readFileSync(resolve(root, `.oathlock/agents/${SENDER}/local.json`), "utf8")).token;
+const token = JSON.parse(readFileSync(resolve(root, `.m9r/agents/${SENDER}/local.json`), "utf8")).token;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function m9r(...cliArgs) {
-  const r = spawnSync(process.execPath, [cli, ...cliArgs, "--agent-kind", SENDER], { env: { ...process.env, OATHLOCK_API_URL: API }, encoding: "utf8", windowsHide: true });
+  const r = spawnSync(process.execPath, [cli, ...cliArgs, "--agent-kind", SENDER], { env: { ...process.env, M9R_API_URL: API }, encoding: "utf8", windowsHide: true });
   return { code: r.status, out: r.stdout ?? "", err: r.stderr ?? "", all: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 const results = [];

@@ -6,11 +6,11 @@
 # Requires the local runtime running from a build that includes restart recovery.
 $ErrorActionPreference = 'Stop'
 $repo = 'C:\RunLeak\runleak'
-$env:OATHLOCK_API_URL = 'https://m9r.dev'
+$env:M9R_API_URL = 'https://m9r.dev'
 $out = & node "$repo\cli\dist\m9r.js" ask '@claude-code' 'Write the numbers 1 to 5000, one per line, with no other text at all.' --agent-kind codex
 $mid = ($out | Select-String -Pattern 'delivery ([0-9a-f-]{36})').Matches[0].Groups[1].Value
 "message $mid sent"
-$ledger = "$repo\.oathlock\runtime\delivery-ledger-claude-code.jsonl"
+$ledger = "$repo\.m9r\runtime\delivery-ledger-claude-code.jsonl"
 $deadline = (Get-Date).AddSeconds(120)
 $seen = $false
 while ((Get-Date) -lt $deadline) {

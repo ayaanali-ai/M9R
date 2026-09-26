@@ -78,9 +78,9 @@ test("a watchdog started while the slot is already held exits instead of lingeri
     `}`,
   ].join("\n"));
   await writeFile(join(dir, "boot.mjs"), `import { register } from "node:module";\nregister("./alias.mjs", import.meta.url);\n`);
-  await mkdir(join(dir, ".oathlock"), { recursive: true });
+  await mkdir(join(dir, ".m9r"), { recursive: true });
   // This test process is unquestionably alive, so the slot reads as held.
-  await writeFile(join(dir, ".oathlock", "watchdog.lock"), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  await writeFile(join(dir, ".m9r", "watchdog.lock"), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
 
   const child = spawn(process.execPath, [
     "--disable-warning=ExperimentalWarning",

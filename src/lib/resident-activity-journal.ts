@@ -24,7 +24,7 @@ export interface ResidentActivityEvent {
 const MAX_EVENT_DATA_BYTES = 64 * 1024;
 
 export function residentActivityJournalPath(repositoryRoot: string): string {
-  return join(resolve(repositoryRoot), ".oathlock", "runtime", "resident-activity.jsonl");
+  return join(resolve(repositoryRoot), ".m9r", "runtime", "resident-activity.jsonl");
 }
 
 function boundedText(value: string, maxBytes = MAX_EVENT_DATA_BYTES): string {

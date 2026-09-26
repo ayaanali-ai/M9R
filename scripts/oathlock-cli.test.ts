@@ -327,8 +327,8 @@ test("whoami reports the authenticated provider when the scoped profile matches"
 });
 
 test("Codex and Claude Code use isolated local identity profiles in one repository", () => {
-  assert.equal(agentLocalPath(CWD, "codex"), join(CWD, ".oathlock", "agents", "codex", "local.json"));
-  assert.equal(agentLocalPath(CWD, "claude-code"), join(CWD, ".oathlock", "agents", "claude-code", "local.json"));
+  assert.equal(agentLocalPath(CWD, "codex"), join(CWD, ".m9r", "agents", "codex", "local.json"));
+  assert.equal(agentLocalPath(CWD, "claude-code"), join(CWD, ".m9r", "agents", "claude-code", "local.json"));
   assert.notEqual(agentLocalPath(CWD, "codex"), agentLocalPath(CWD, "claude-code"));
   assert.notEqual(agentConfigPath(CWD, "codex"), agentConfigPath(CWD, "claude-code"));
 });
@@ -447,7 +447,7 @@ test("extractLoadedRules handles both saved response shapes", () => {
   assert.deepEqual(extractLoadedRules({ mode: "baseline" }), []);
 });
 
-test("submit-session reads .oathlock/rules.json and sends rules_loaded", async () => {
+test("submit-session reads .m9r/rules.json and sends rules_loaded", async () => {
   const sessionPath = join(CWD, "oathlock-session.md");
   const savedRules = {
     mode: "active",
@@ -758,7 +758,7 @@ test("submit-session omits rule health when not evaluated", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// init: writes local token + non-secret config to .oathlock
+// init: writes local token + non-secret config to .m9r
 // ---------------------------------------------------------------------------
 
 test("init writes token to local.json and non-secret metadata to config.json", async () => {
@@ -795,7 +795,7 @@ test("init writes token to local.json and non-secret metadata to config.json", a
   assert.ok(!("token" in config), "config.json must never contain the token");
 });
 
-test("init makes .oathlock ignore itself so the token cannot be committed", async () => {
+test("init makes .m9r ignore itself so the token cannot be committed", async () => {
   const { deps, files } = makeDeps({
     env: { OATHLOCK_API_URL: "http://localhost:3000" },
     router: (url) => {
@@ -805,7 +805,7 @@ test("init makes .oathlock ignore itself so the token cannot be committed", asyn
     },
   });
   assert.equal(await run(["init", "--repo", "me/demo", "--agent-kind", "codex"], deps), 0);
-  const ignore = files.get(join(CWD, ".oathlock", ".gitignore"));
+  const ignore = files.get(join(CWD, ".m9r", ".gitignore"));
   assert.ok(ignore && /^\*$/m.test(ignore));
 });
 
@@ -924,7 +924,7 @@ test("rules sends the Bearer token and writes rules.json", async () => {
   assert.equal(requests.length, 1);
   const headers = requests[0].init!.headers as Record<string, string>;
   assert.equal(headers.authorization, `Bearer ${TOKEN}`);
-  assert.ok(files.has(join(CWD, ".oathlock", "rules.json")));
+  assert.ok(files.has(join(CWD, ".m9r", "rules.json")));
 });
 
 test("inbox pulls Agent inbox instructions without writing local files", async () => {
@@ -1043,7 +1043,7 @@ test("finding publish requires an active run and --title/--observed, and makes n
   const noFields = makeDeps({
     files: {
       [localPath(CWD)]: JSON.stringify({ token: TOKEN }),
-      [join(CWD, ".oathlock", "run.json")]: JSON.stringify({ run_id: "run-1" }),
+      [join(CWD, ".m9r", "run.json")]: JSON.stringify({ run_id: "run-1" }),
     },
   });
   assert.equal(await run(["finding", "publish"], noFields.deps), 1);
@@ -1055,7 +1055,7 @@ test("finding publish sends the active run id and required fields to /api/agent/
   const { deps, requests } = makeDeps({
     files: {
       [localPath(CWD)]: JSON.stringify({ token: TOKEN }),
-      [join(CWD, ".oathlock", "run.json")]: JSON.stringify({ run_id: "run-1" }),
+      [join(CWD, ".m9r", "run.json")]: JSON.stringify({ run_id: "run-1" }),
     },
     router: () => jsonResponse(200, { finding_id: "finding-123", review_state: "observed" }),
   });
@@ -1085,7 +1085,7 @@ test("finding publish rejects an invalid --evidence-level before contacting the 
   const { deps, requests } = makeDeps({
     files: {
       [localPath(CWD)]: JSON.stringify({ token: TOKEN }),
-      [join(CWD, ".oathlock", "run.json")]: JSON.stringify({ run_id: "run-1" }),
+      [join(CWD, ".m9r", "run.json")]: JSON.stringify({ run_id: "run-1" }),
     },
   });
   const code = await run(["finding", "publish", "--title", "t", "--observed", "o", "--evidence-level", "definitely"], deps);
@@ -1098,7 +1098,7 @@ test("heartbeat reports linked presence with a monotonic adapter sequence", asyn
   const { deps, requests, files, out } = makeDeps({
     files: {
       [localPath(CWD)]: JSON.stringify({ token: TOKEN }),
-      [join(CWD, ".oathlock", "config.json")]: JSON.stringify({ agent_kind: "codex" }),
+      [join(CWD, ".m9r", "config.json")]: JSON.stringify({ agent_kind: "codex" }),
     },
     router: () => jsonResponse(200, { lease_expires_at: "2030-01-01T00:01:30Z" }),
   });
@@ -1110,7 +1110,7 @@ test("heartbeat reports linked presence with a monotonic adapter sequence", asyn
   assert.equal(body.sequence, 1);
   assert.ok(body.adapterInstanceId.length >= 8);
   assert.match(out.join("\n"), /lease accepted/i);
-  assert.ok(files.has(join(CWD, ".oathlock", "adapter.json")));
+  assert.ok(files.has(join(CWD, ".m9r", "adapter.json")));
 });
 
 // ---------------------------------------------------------------------------
@@ -1149,7 +1149,7 @@ test("disconnect revokes the current server connection and removes local volatil
     files: {
       [localPath(CWD)]: JSON.stringify({ token: TOKEN, scopes: ["rules:read"] }),
       [rulesPath(CWD)]: JSON.stringify({ rules: [{ id: "r1" }] }),
-      [join(CWD, ".oathlock", "run.json")]: JSON.stringify({ run_id: "run-1" }),
+      [join(CWD, ".m9r", "run.json")]: JSON.stringify({ run_id: "run-1" }),
       [configPath(CWD)]: JSON.stringify({ api_url: "https://example.test" }),
     },
     router: (url) =>
@@ -1165,7 +1165,7 @@ test("disconnect revokes the current server connection and removes local volatil
   assert.match(requests[0].url, /\/api\/agent\/disconnect$/);
   assert.equal((requests[0].init!.headers as Record<string, string>).authorization, `Bearer ${TOKEN}`);
   assert.equal(files.has(localPath(CWD)), false, "local token file must be removed");
-  assert.equal(files.has(join(CWD, ".oathlock", "run.json")), false, "run cache must be removed");
+  assert.equal(files.has(join(CWD, ".m9r", "run.json")), false, "run cache must be removed");
   assert.equal(files.has(rulesPath(CWD)), false, "rules cache must be removed");
   assert.equal(files.has(configPath(CWD)), true, "non-secret config metadata is not volatile cleanup");
 
@@ -1225,7 +1225,7 @@ test("disconnect reports server failure honestly while still removing local file
     files: {
       [localPath(CWD)]: JSON.stringify({ token: TOKEN }),
       [rulesPath(CWD)]: JSON.stringify({ rules: [] }),
-      [join(CWD, ".oathlock", "run.json")]: JSON.stringify({ run_id: "run-fail" }),
+      [join(CWD, ".m9r", "run.json")]: JSON.stringify({ run_id: "run-fail" }),
     },
     router: () => jsonResponse(500, { error: `server could not revoke ${TOKEN}` }),
   });
@@ -1234,7 +1234,7 @@ test("disconnect reports server failure honestly while still removing local file
 
   assert.equal(code, 1);
   assert.equal(files.has(localPath(CWD)), false, "local token file should still be removed");
-  assert.equal(files.has(join(CWD, ".oathlock", "run.json")), false, "run cache should still be removed");
+  assert.equal(files.has(join(CWD, ".m9r", "run.json")), false, "run cache should still be removed");
   assert.equal(files.has(rulesPath(CWD)), false, "rules cache should still be removed");
 
   const output = out.join("\n");
@@ -1253,7 +1253,7 @@ test("CLI bearer commands fail safely when a revoked token is rejected by the se
   const sessionPath = join(CWD, "session.md");
   const files = {
     [localPath(CWD)]: JSON.stringify({ token: TOKEN }),
-    [join(CWD, ".oathlock", "run.json")]: JSON.stringify({ run_id: "run-revoked" }),
+    [join(CWD, ".m9r", "run.json")]: JSON.stringify({ run_id: "run-revoked" }),
     [sessionPath]: "# redacted session",
   };
 
@@ -1593,7 +1593,7 @@ test("signal emit sends a versioned envelope with a generated adapter id and cli
   assert.ok(typeof body.adapterInstanceId === "string" && (body.adapterInstanceId as string).length >= 8);
   assert.ok(typeof body.idempotencyKey === "string" && (body.idempotencyKey as string).length >= 16);
 
-  const saved = JSON.parse(files.get(join(CWD, ".oathlock", "adapter.json"))!) as Record<string, unknown>;
+  const saved = JSON.parse(files.get(join(CWD, ".m9r", "adapter.json"))!) as Record<string, unknown>;
   assert.equal(saved.last_client_sequence, 1);
   assert.equal(saved.adapter_instance_id, body.adapterInstanceId);
   assert.match(out.join("\n"), /server_sequence 7/);
@@ -1604,7 +1604,7 @@ test("signal emit reuses the persisted adapter id and increments client sequence
   const { deps, requests } = makeDeps({
     files: {
       [localPath(CWD)]: JSON.stringify({ token: TOKEN }),
-      [join(CWD, ".oathlock", "adapter.json")]: JSON.stringify({ adapter_instance_id: "adapter-fixed-0001", last_client_sequence: 4 }),
+      [join(CWD, ".m9r", "adapter.json")]: JSON.stringify({ adapter_instance_id: "adapter-fixed-0001", last_client_sequence: 4 }),
     },
     router: () => jsonResponse(200, { ok: true, signal: { id: "s2", server_sequence: 12 } }),
   });
@@ -1714,7 +1714,7 @@ test("doctor reports a fully wired Claude Code capture hook as installed and act
     env: { OATHLOCK_AGENT_KIND: "claude-code" },
     files: {
       [agentLocalPath(CWD, "claude-code")]: JSON.stringify({ token: TOKEN }),
-      [join(CWD, ".oathlock", "bin", "m9r-capture.mjs")]: "pending.jsonl",
+      [join(CWD, ".m9r", "bin", "m9r-capture.mjs")]: "pending.jsonl",
       [join(CWD, ".claude", "settings.local.json")]: JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ command: "node m9r-capture.mjs claude-code" }] }] } }),
     },
     router: (url) => {
@@ -1738,8 +1738,8 @@ test("doctor distinguishes an installed Codex hook from activation trust", async
     env: { OATHLOCK_AGENT_KIND: "codex" },
     files: {
       [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: TOKEN }),
-      [join(CWD, ".oathlock", "bin", "m9r-capture.mjs")]: "pending.jsonl",
-      [join(CWD, ".codex", "hooks.json")]: JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ command: "node .oathlock/bin/m9r-capture.mjs codex" }] }] } }),
+      [join(CWD, ".m9r", "bin", "m9r-capture.mjs")]: "pending.jsonl",
+      [join(CWD, ".codex", "hooks.json")]: JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ command: "node .m9r/bin/m9r-capture.mjs codex" }] }] } }),
     },
     router: (url) => {
       if (url.includes("/api/agent/whoami")) return jsonResponse(200, { agentKind: "codex" });
@@ -1975,7 +1975,7 @@ test("capture install repairs a Claude Code hook from an existing M9R connection
 
   assert.equal(code, 0);
   assert.equal(requests.length, 0, "repairing local capture must not create or poll a server-side claim");
-  assert.ok(files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.ok(files.has(join(CWD, ".m9r", "bin", "m9r-capture.mjs")));
   const settings = JSON.parse(files.get(join(CWD, ".claude", "settings.local.json"))!);
   assert.match(settings.hooks.SessionEnd[0].hooks[0].command, /claude-code/);
   assert.match(out.join("\n"), /Installed local capture for Claude Code/);
@@ -1989,7 +1989,7 @@ test("capture install fails closed without an existing M9R connection", async ()
 
   assert.equal(code, 1);
   assert.equal(requests.length, 0);
-  assert.ok(!files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.ok(!files.has(join(CWD, ".m9r", "bin", "m9r-capture.mjs")));
   assert.ok(!files.has(join(CWD, ".claude", "settings.local.json")));
   assert.match(err.join("\n"), /requires an existing M9R connection/);
 });
@@ -2003,7 +2003,7 @@ test("capture install rejects unknown provider kinds without writing a partial c
   const code = await run(["capture", "install", "--agent-kind", "aider"], deps);
 
   assert.equal(code, 1);
-  assert.ok(!files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.ok(!files.has(join(CWD, ".m9r", "bin", "m9r-capture.mjs")));
   assert.match(err.join("\n"), /no local capture integration is available for aider/);
 });
 
@@ -2060,7 +2060,7 @@ test("init for claude-code installs the SessionEnd hook script and merges .claud
   const code = await run(["init", "--agent-kind", "claude-code", "--memory-capture"], deps);
 
   assert.equal(code, 0);
-  const hookScript = files.get(join(CWD, ".oathlock", "bin", "m9r-capture.mjs"));
+  const hookScript = files.get(join(CWD, ".m9r", "bin", "m9r-capture.mjs"));
   assert.ok(hookScript, "the shared capture hook script must be written");
   assert.match(hookScript!, /pending\.jsonl/);
   const settings = JSON.parse(files.get(join(CWD, ".claude", "settings.local.json"))!);
@@ -2074,7 +2074,7 @@ test("init for codex installs the SessionEnd hook script and writes .codex/hooks
   const code = await run(["init", "--agent-kind", "codex", "--memory-capture"], deps);
 
   assert.equal(code, 0);
-  assert.ok(files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.ok(files.has(join(CWD, ".m9r", "bin", "m9r-capture.mjs")));
   const hooks = JSON.parse(files.get(join(CWD, ".codex", "hooks.json"))!);
   assert.match(hooks.hooks.SessionEnd[0].hooks[0].command, /codex/);
   assert.match(out.join("\n"), /run \/hooks inside Codex/);
@@ -2088,7 +2088,7 @@ test("init for opencode writes the memory plugin, and does not write a Claude/Co
   assert.equal(code, 0);
   const plugin = files.get(join(CWD, ".opencode", "plugins", "m9r-memory.js"));
   assert.ok(plugin && plugin.includes("client.session.messages"));
-  assert.ok(!files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")), "opencode has no SessionEnd hook, only the plugin");
+  assert.ok(!files.has(join(CWD, ".m9r", "bin", "m9r-capture.mjs")), "opencode has no SessionEnd hook, only the plugin");
   assert.match(out.join("\n"), /OpenCode sessions in this repo will now be captured/);
 });
 
@@ -2098,7 +2098,7 @@ test("init --skip-memory-capture connects the agent without installing any captu
   const code = await run(["init", "--agent-kind", "claude-code", "--skip-memory-capture"], deps);
 
   assert.equal(code, 0);
-  assert.ok(!files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.ok(!files.has(join(CWD, ".m9r", "bin", "m9r-capture.mjs")));
   assert.ok(!files.has(join(CWD, ".claude", "settings.local.json")));
   assert.match(out.join("\n"), /Skipped shared-memory capture setup/);
 });
@@ -2130,7 +2130,7 @@ test("capture uninstall removes only M9R's hook entry and script, keeping other 
   const settings = JSON.parse(files.get(join(CWD, ".claude", "settings.local.json"))!);
   assert.equal(settings.model, "x");
   assert.deepEqual(settings.hooks.SessionEnd, [{ hooks: [other] }]);
-  assert.ok(!files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.ok(!files.has(join(CWD, ".m9r", "bin", "m9r-capture.mjs")));
 });
 
 test("init for an agent kind with no capture mechanism (e.g. grok-build) connects cleanly with no capture files", async () => {
@@ -2139,7 +2139,7 @@ test("init for an agent kind with no capture mechanism (e.g. grok-build) connect
   const code = await run(["init", "--agent-kind", "grok-build"], deps);
 
   assert.equal(code, 0);
-  assert.ok(!files.has(join(CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.ok(!files.has(join(CWD, ".m9r", "bin", "m9r-capture.mjs")));
 });
 
 test("connect reports a failure summary and a non-zero exit when one of several agents fails to connect", async () => {

@@ -1269,7 +1269,7 @@ export class MissionRelayService {
   }
 
   private async sendError(state: ConnectionState, code: string, message: string, source?: RelayFrame): Promise<void> {
-    if (process.env.OATHLOCK_RELAY_DEBUG === "1") console.warn(`[relay.error] ${code} for ${source?.type ?? "unknown"}: ${message}`);
+    if (process.env.M9R_RELAY_DEBUG === "1") console.warn(`[relay.error] ${code} for ${source?.type ?? "unknown"}: ${message}`);
     await state.connection.send({
       version: MISSION_RELAY_FRAME_VERSION,
       frameId: `error-${source?.frameId ?? Date.now()}`,

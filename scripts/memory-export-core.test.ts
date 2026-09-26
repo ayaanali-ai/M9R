@@ -21,11 +21,11 @@ test("dashboard memory export advances its cursor but does not write a duplicate
       capturedAtIso: "2026-09-12T00:00:00.000Z",
       export: {},
     };
-    const localPath = join(dir, ".oathlock", "memory", "local", "opencode", "ses_local_canonical.md");
-    await mkdir(join(dir, ".oathlock", "memory", "local", "opencode"), { recursive: true });
+    const localPath = join(dir, ".m9r", "memory", "local", "opencode", "ses_local_canonical.md");
+    await mkdir(join(dir, ".m9r", "memory", "local", "opencode"), { recursive: true });
     await writeFile(localPath, renderCaptureMarkdown(localJob, transcript), "utf8");
-    await mkdir(join(dir, ".oathlock", "agents", "claude-code"), { recursive: true });
-    await writeFile(join(dir, ".oathlock", "agents", "claude-code", "local.json"), JSON.stringify({ token: "test-token" }), "utf8");
+    await mkdir(join(dir, ".m9r", "agents", "claude-code"), { recursive: true });
+    await writeFile(join(dir, ".m9r", "agents", "claude-code", "local.json"), JSON.stringify({ token: "test-token" }), "utf8");
 
     const result = await runMemoryExportOnce({
       repositoryRoot: dir,
@@ -44,8 +44,8 @@ test("dashboard memory export advances its cursor but does not write a duplicate
     });
 
     assert.deepEqual(result, { exported: 0 });
-    await assert.rejects(readFile(join(dir, ".oathlock", "memory", "Ayaan", "general", "dashboard-session.md")));
-    assert.match(await readFile(join(dir, ".oathlock", "memory", ".cursor.json"), "utf8"), /2026-09-12T00:01:00\.000Z/);
+    await assert.rejects(readFile(join(dir, ".m9r", "memory", "Ayaan", "general", "dashboard-session.md")));
+    assert.match(await readFile(join(dir, ".m9r", "memory", ".cursor.json"), "utf8"), /2026-09-12T00:01:00\.000Z/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

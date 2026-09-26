@@ -20,7 +20,7 @@ test("transient or ambiguous failures never retire a token", () => {
 
 test("a retired token stops the provider from being treated as connected, and is kept for reversal", async () => {
   const root = await mkdtemp(join(tmpdir(), "m9r-revoked-"));
-  const dir = join(root, ".oathlock", "agents", "opencode");
+  const dir = join(root, ".m9r", "agents", "opencode");
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, "local.json"), JSON.stringify({ token: "m9r_dead_token" }));
   assert.deepEqual(await listLocalConnectedProviders(root), ["opencode"]);

@@ -40,7 +40,7 @@ async function removeTempWorkspace(workspace: string): Promise<void> {
   // child has exited.
   if (process.platform === "win32") {
     try {
-      const lockPath = resolve(workspace, ".oathlock", "watchdog.lock");
+      const lockPath = resolve(workspace, ".m9r", "watchdog.lock");
       const lock = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown };
       if (typeof lock.pid === "number" && Number.isInteger(lock.pid) && lock.pid > 0) {
         execFileSync("taskkill", ["/PID", String(lock.pid), "/T", "/F"], { stdio: "ignore" });
@@ -112,7 +112,7 @@ test("package.json has the publishable bin/metadata shape", () => {
 });
 
 test("npm files allowlist cannot leak secrets or test artifacts", () => {
-  const banned = [".env", ".oathlock", "local.json", "rules.json", "scripts", "src", "test"];
+  const banned = [".env", ".m9r", "local.json", "rules.json", "scripts", "src", "test"];
   for (const entry of pkg.files as string[]) {
     for (const b of banned) {
       assert.ok(!entry.includes(b), `files entry "${entry}" must not include ${b}`);
@@ -220,7 +220,7 @@ test("packed CLI entry boots the terminal runtime without printing a pairing sec
 test("packed CLI runtime uses the compiled mission runner for connected providers", { timeout: 20_000 }, async () => {
   const port = 43_121;
   const workspace = mkdtempSync(resolve(tmpdir(), "oathlock-cli-runtime-"));
-  const localTokenPath = resolve(workspace, ".oathlock", "agents", "codex", "local.json");
+  const localTokenPath = resolve(workspace, ".m9r", "agents", "codex", "local.json");
   mkdirSync(dirname(localTokenPath), { recursive: true });
   // The token only exercises provider discovery. ACP is disabled for this
   // fixture, so the child exits before making any network or provider call.
@@ -442,7 +442,7 @@ test("compiled CLI: connect installs cross-agent memory capture through the real
 
   const code = await core.run(["connect", "--agents", "claude-code,codex,opencode", "--memory-capture"], deps);
   assert.equal(code, 0, "the packaged cross-agent-capture-setup-core.js import must actually resolve");
-  assert.ok(files.has(join(EXTERNAL_CWD, ".oathlock", "bin", "m9r-capture.mjs")));
+  assert.ok(files.has(join(EXTERNAL_CWD, ".m9r", "bin", "m9r-capture.mjs")));
   assert.ok(files.has(join(EXTERNAL_CWD, ".claude", "settings.local.json")));
   assert.ok(files.has(join(EXTERNAL_CWD, ".codex", "hooks.json")));
   assert.ok(files.has(join(EXTERNAL_CWD, ".opencode", "plugins", "m9r-memory.js")));

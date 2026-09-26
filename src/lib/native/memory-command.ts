@@ -13,9 +13,9 @@ export interface MemoryIo {
   err(line: string): void;
 }
 
-export const MEMORY_REL = join(".oathlock", "memory");
+export const MEMORY_REL = join(".m9r", "memory");
 
-/** The nearest `.oathlock/memory` at or above `start`. */
+/** The nearest `.m9r/memory` at or above `start`. */
 export function findMemoryDir(start: string): string | null {
   let dir = resolve(start);
   for (;;) {

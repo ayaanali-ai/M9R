@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { ArrowUp, AtSign, Paperclip, Inbox, PanelLeft, Users, Radio, SquareTerminal, ClipboardCheck, Moon, Sun, Hash, MessageSquare, BookOpen } from "lucide-react";
+import { ArrowUp, AtSign, Paperclip, Inbox, PanelLeft, Users, Radio, ClipboardCheck, Moon, Sun, Hash, MessageSquare, BookOpen } from "lucide-react";
 import M9RMark from "@/components/M9RMark";
 import { ChannelWelcome } from "@/components/product/ChannelWelcome";
 import EtheralShadow from "@/components/product/EtheralShadow";
@@ -28,7 +28,6 @@ const panelRows: Record<string, Array<{ label: string; value: string }>> = {
   Review: [{ label: "Changes awaiting review", value: "2" }, { label: "Last verified", value: "8 min ago" }],
   People: participants.map(({ name, state }) => ({ label: name, value: state })),
   Live: [{ label: "Workspace session", value: "idle" }, { label: "Connected agents", value: "2 ready" }],
-  Terminal: [{ label: "Local terminal", value: "available" }, { label: "Shared room", value: "not joined" }],
   Attachments: [{ label: "Files in this message", value: "none" }],
   Inbox: [{ label: "Unread activity", value: "0" }, { label: "Review requests", value: "2" }],
   Memory: [{ label: "Shared sessions", value: "12" }, { label: "Last archived", value: "today" }],
@@ -46,7 +45,7 @@ export default function DashboardPreview() {
   const populated = messages.length > 0;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useComposerAutosize(textareaRef, draft, channel);
-  const actions = [{ label: "Review", Icon: ClipboardCheck }, { label: "People", Icon: Users }, { label: "Live", Icon: Radio }, { label: "Terminal", Icon: SquareTerminal }];
+  const actions = [{ label: "Review", Icon: ClipboardCheck }, { label: "People", Icon: Users }, { label: "Live", Icon: Radio }];
 
   return (
     <div className="wf-root m9r-design-bench" data-bs-mode={mode}>

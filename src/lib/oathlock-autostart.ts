@@ -50,7 +50,8 @@ export interface AutostartLaunchSpec {
 
 /* ------------------------------------------------------------------ Windows */
 
-export const WINDOWS_TASK_NAME = "OathLock Runtime AutoStart";
+export const WINDOWS_TASK_NAME = "M9R Runtime AutoStart";
+export const LEGACY_WINDOWS_TASK_NAME = "OathLock Runtime AutoStart";
 
 function psQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
@@ -77,17 +78,21 @@ export function buildScheduledTaskRegisterScript(launcherCommandArguments: strin
     "$trigger = New-ScheduledTaskTrigger -AtLogOn -User \"$env:USERDOMAIN\\$env:USERNAME\"",
     "$settings = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable",
     `Register-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,
+    `if (Get-ScheduledTask -TaskName ${psQuote(LEGACY_WINDOWS_TASK_NAME)} -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName ${psQuote(LEGACY_WINDOWS_TASK_NAME)} -Confirm:$false }`,
   ].join("\n");
 }
 
 export function buildScheduledTaskQueryScript(): string {
-  return `if (Get-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -ErrorAction SilentlyContinue) { 'installed' } else { 'absent' }`;
+  return `if (Get-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -ErrorAction SilentlyContinue) { 'installed' } elseif (Get-ScheduledTask -TaskName ${psQuote(LEGACY_WINDOWS_TASK_NAME)} -ErrorAction SilentlyContinue) { 'installed' } else { 'absent' }`;
 }
 
 export function buildScheduledTaskRemoveScript(): string {
   return [
     `if (Get-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -ErrorAction SilentlyContinue) {`,
     `  Unregister-ScheduledTask -TaskName ${psQuote(WINDOWS_TASK_NAME)} -Confirm:$false`,
+    "}",
+    `if (Get-ScheduledTask -TaskName ${psQuote(LEGACY_WINDOWS_TASK_NAME)} -ErrorAction SilentlyContinue) {`,
+    `  Unregister-ScheduledTask -TaskName ${psQuote(LEGACY_WINDOWS_TASK_NAME)} -Confirm:$false`,
     "}",
   ].join("\n");
 }
@@ -99,7 +104,7 @@ export function buildPowerShellArgs(script: string): string[] {
 
 /* -------------------------------------------------------------------- macOS */
 
-export const MACOS_LAUNCH_AGENT_LABEL = "com.oathlock.runtime";
+export const MACOS_LAUNCH_AGENT_LABEL = "com.m9r.runtime";
 
 export function macosLaunchAgentPath(homeDirectory: string): string {
   return `${homeDirectory}/Library/LaunchAgents/${MACOS_LAUNCH_AGENT_LABEL}.plist`;

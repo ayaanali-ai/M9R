@@ -204,7 +204,7 @@ test("extractTranscript dispatches by provider and never throws on bad input", (
 test("captureMemoryPath files a captured session under memory/local/<provider>, separate from dashboard sessions", () => {
   const job: CaptureJob = { provider: "opencode", sessionId: "ses_1", cwd: "/workspace", capturedAtIso: "t", export: {} };
   const path = captureMemoryPath("/repo", job);
-  assert.equal(path, join("/repo", ".oathlock", "memory", "local", "opencode", "ses_1.md"));
+  assert.equal(path, join("/repo", ".m9r", "memory", "local", "opencode", "ses_1.md"));
 });
 
 // ---------------------------------------------------------------------------
@@ -215,7 +215,7 @@ test("drainCaptureSpool reads pending jobs, writes redacted markdown, and clears
   const dir = await mkdtemp(join(tmpdir(), "m9r-capture-"));
   try {
     const spool = spoolPath(dir);
-    await mkdir(join(dir, ".oathlock", "capture"), { recursive: true });
+    await mkdir(join(dir, ".m9r", "capture"), { recursive: true });
     const job = { provider: "codex", sessionId: "thr_drain", transcriptPath: "/fake/rollout.jsonl", cwd: dir, reason: "other", capturedAtIso: "2026-09-12T00:00:00.000Z" };
     await writeFile(spool, JSON.stringify(job) + "\n", "utf8");
 
@@ -231,7 +231,7 @@ test("drainCaptureSpool reads pending jobs, writes redacted markdown, and clears
     assert.equal(result.drained, 1);
     assert.equal(result.failed, 0);
 
-    const written = await readFile(join(dir, ".oathlock", "memory", "local", "codex", "thr_drain.md"), "utf8");
+    const written = await readFile(join(dir, ".m9r", "memory", "local", "codex", "thr_drain.md"), "utf8");
     assert.match(written, /# Codex session/);
     assert.ok(!written.includes("AKIAABCDEFGHIJKLMNOP"));
     assert.match(written, /\[REDACTED:AWS_ACCESS_KEY\]/);
@@ -257,7 +257,7 @@ test("drainCaptureSpool records a failure and clears its line when a transcript 
   const dir = await mkdtemp(join(tmpdir(), "m9r-capture-fail-"));
   try {
     const spool = spoolPath(dir);
-    await mkdir(join(dir, ".oathlock", "capture"), { recursive: true });
+    await mkdir(join(dir, ".m9r", "capture"), { recursive: true });
     const okJob = { provider: "codex", sessionId: "thr_ok", transcriptPath: "/ok.jsonl", cwd: dir, reason: "other", capturedAtIso: "t" };
     const badJob = { provider: "codex", sessionId: "thr_bad", transcriptPath: "/missing.jsonl", cwd: dir, reason: "other", capturedAtIso: "t" };
     await writeFile(spool, `${JSON.stringify(badJob)}\n${JSON.stringify(okJob)}\n`, "utf8");
@@ -272,7 +272,7 @@ test("drainCaptureSpool records a failure and clears its line when a transcript 
 
     assert.equal(result.drained, 1, "the second, readable job must still succeed");
     assert.equal(result.failed, 1);
-    const errorLog = await readFile(join(dir, ".oathlock", "capture", "errors.log"), "utf8");
+    const errorLog = await readFile(join(dir, ".m9r", "capture", "errors.log"), "utf8");
     assert.match(errorLog, /thr_bad/);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -288,12 +288,12 @@ test("drainCaptureSpool collapses repeated lifecycle jobs for one provider sessi
       { info: { role: "user" }, parts: [{ type: "text", text: "short prompt" }] },
       { info: { role: "assistant" }, parts: [{ type: "text", text: "the complete assistant response survived the duplicate lifecycle events" }] },
     ] } };
-    await mkdir(join(dir, ".oathlock", "capture"), { recursive: true });
+    await mkdir(join(dir, ".m9r", "capture"), { recursive: true });
     await writeFile(spoolPath(dir), `${JSON.stringify(shortJob)}\n${JSON.stringify(richJob)}\n`, "utf8");
 
     const result = await drainCaptureSpool({ repositoryRoot: dir, readTranscript: async () => "" });
     assert.deepEqual(result, { drained: 1, failed: 0 });
-    const written = await readFile(join(dir, ".oathlock", "memory", "local", "opencode", `${sessionId}.md`), "utf8");
+    const written = await readFile(join(dir, ".m9r", "memory", "local", "opencode", `${sessionId}.md`), "utf8");
     assert.match(written, /complete assistant response survived/);
     assert.equal((written.match(/\*\*User:\*\*/g) ?? []).length, 1);
   } finally {
@@ -310,8 +310,8 @@ test("drainCaptureSpool skips a local export when an older dashboard-memory file
     ];
     const fingerprint = transcriptFingerprint(transcript);
     assert.ok(fingerprint);
-    const dashboardPath = join(dir, ".oathlock", "memory", "Ayaan", "general", "dashboard-session.md");
-    await mkdir(join(dir, ".oathlock", "memory", "Ayaan", "general"), { recursive: true });
+    const dashboardPath = join(dir, ".m9r", "memory", "Ayaan", "general", "dashboard-session.md");
+    await mkdir(join(dir, ".m9r", "memory", "Ayaan", "general"), { recursive: true });
     await writeFile(dashboardPath, `# Existing dashboard session\n\n**Ayaan:**\n\n${transcript[0].body}\n\n**Claude:**\n\n${transcript[1].body}\n`, "utf8");
 
     const job = {
@@ -321,11 +321,11 @@ test("drainCaptureSpool skips a local export when an older dashboard-memory file
       capturedAtIso: "2026-09-12T00:00:00.000Z",
       export: { messages: transcript.map((message) => ({ info: { role: message.sender === "User" ? "user" : "assistant" }, parts: [{ type: "text", text: message.body }] })) },
     };
-    await mkdir(join(dir, ".oathlock", "capture"), { recursive: true });
+    await mkdir(join(dir, ".m9r", "capture"), { recursive: true });
     await writeFile(spoolPath(dir), JSON.stringify(job) + "\n", "utf8");
 
     assert.deepEqual(await drainCaptureSpool({ repositoryRoot: dir, readTranscript: async () => "" }), { drained: 1, failed: 0 });
-    assert.equal(await (async () => { try { await readFile(join(dir, ".oathlock", "memory", "local", "opencode", "ses_same_transcript.md")); return true; } catch { return false; } })(), false);
+    assert.equal(await (async () => { try { await readFile(join(dir, ".m9r", "memory", "local", "opencode", "ses_same_transcript.md")); return true; } catch { return false; } })(), false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

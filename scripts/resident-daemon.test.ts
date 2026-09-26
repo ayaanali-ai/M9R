@@ -139,7 +139,7 @@ test("resident persists a monotonic heartbeat without dropping sibling profiles 
 });
 
 test("resident service plan is explicit, restartable, and never carries a token", () => {
-  const plan = buildResidentServicePlan({ profile: "claude-review", workingDirectory: process.cwd(), configFile: ".oathlock/resident.local.json", pollMs: 15_000 });
+  const plan = buildResidentServicePlan({ profile: "claude-review", workingDirectory: process.cwd(), configFile: ".m9r/resident.local.json", pollMs: 15_000 });
   assert.deepEqual(plan.command.slice(0, 5), ["oathlock", "resident", "run", "--profile", "claude-review"]);
   assert.equal(plan.restart.policy, "on-failure");
   assert.equal(plan.health.staleAfterSeconds, 90);

@@ -66,15 +66,27 @@ import { detectInstalledAgents, type DetectedAgent, type DetectableAgentKind } f
 import {
   buildClaudeMcpAddArgs, buildClaudeMcpRemoveArgs, buildPowerShellInvocation, extensionIdFromManifestKey, formatCommandPreview, mergeCodexWebMcp, mergeOpenCodeWebMcp, parseWebSetupList,
   planWebSetup, removeCodexWebMcp, removeOpenCodeWebMcp, resolveWebMcpRuntime, selectWebSetupAgents,
-  webConfigUninstallMode, webExtensionFileAction, WEB_EXTENSION_ID, type WebSetupBrowser,
+  webConfigUninstallMode, webExtensionFileAction, webExtensionAllowlist, WEB_EXTENSION_ID, type WebSetupBrowser,
 } from "@/lib/native/web-setup-core";
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { buildLocalBrokerAutostartSpec } from "@/lib/native/install-core";
 import { runOpenCodeCli } from "@/lib/native/opencode-cli-core";
+import { migrateLegacyM9rDirectory, normalizeLegacyM9rEnvironment } from "@/lib/native/m9r-compatibility";
 
 const execFileAsync = promisify(execFile);
+
+// One compatibility release reads OATHLOCK_* and copies old project/home
+// state into .m9r. All subsequent writes use M9R_* and .m9r; the old data is
+// deliberately retained so migration is recoverable and non-destructive.
+normalizeLegacyM9rEnvironment(process.env);
+for (const stateRoot of new Set([process.cwd(), homedir()])) {
+  try { migrateLegacyM9rDirectory(stateRoot); }
+  catch (error) {
+    process.stderr.write(`M9R could not copy legacy .oathlock state from ${stateRoot}: ${error instanceof Error ? error.message : "unknown error"}\n`);
+  }
+}
 
 const WEB_SETUP_MANIFEST = "web-setup-manifest.json";
 const WEB_TASK_NAME = "M9R Web Broker";
@@ -190,7 +202,7 @@ async function readResidentCredential(provider: ResidentAgentKind): Promise<unkn
 }
 
 async function readResidentAdapter(provider: ResidentAgentKind): Promise<ProviderAdapterConfig | null> {
-  const path = join(process.cwd(), ".oathlock", "agents", provider, "adapter.json");
+  const path = join(process.cwd(), ".m9r", "agents", provider, "adapter.json");
   try {
     const raw = JSON.parse(await readFile(path, "utf8")) as unknown;
     const parsed = parseProviderAdapterConfig(raw, provider);
@@ -257,7 +269,7 @@ async function checkBuildFreshness(label: string, options: { exitOnStale?: boole
 
 async function runResidentCli(argv: string[]): Promise<number> {
   if (argv[0] !== "run" && argv[0] !== "configure" && argv[0] !== "refresh" && argv[0] !== "service-plan") {
-    process.stderr.write("Usage: oathlock resident configure --provider <slug> --binding-id <id> --profile <name>\n       oathlock resident refresh --profile <name>\n       oathlock resident run [--config .oathlock/resident.local.json] [--profile name] [--once]\n       oathlock resident service-plan --profile <name>\n");
+    process.stderr.write("Usage: oathlock resident configure --provider <slug> --binding-id <id> --profile <name>\n       oathlock resident refresh --profile <name>\n       oathlock resident run [--config .m9r/resident.local.json] [--profile name] [--once]\n       oathlock resident service-plan --profile <name>\n");
     return 1;
   }
   const valueFor = (name: string) => {
@@ -266,7 +278,7 @@ async function runResidentCli(argv: string[]): Promise<number> {
     const index = argv.indexOf(name);
     return index >= 0 ? argv[index + 1] : undefined;
   };
-  const configFile = valueFor("--config") ?? join(process.cwd(), ".oathlock", "resident.local.json");
+  const configFile = valueFor("--config") ?? join(process.cwd(), ".m9r", "resident.local.json");
   const profileName = valueFor("--profile");
   if (argv[0] === "service-plan") {
     if (!profileName) { process.stderr.write("resident service-plan: --profile is required.\n"); return 1; }
@@ -318,12 +330,12 @@ async function runResidentCli(argv: string[]): Promise<number> {
     const profiles = (existing.profiles ?? []).filter((profile) => profile.name !== profileName);
     const adapter = provider === "codex" || provider === "claude-code" ? null : await readResidentAdapter(provider);
     if (provider !== "codex" && provider !== "claude-code" && (!adapter || adapter.protocol !== "oathlock-json-stdio")) {
-      process.stderr.write(`resident configure: ${provider} needs .oathlock/agents/${provider}/adapter.json with protocol oathlock-json-stdio.\n`);
+      process.stderr.write(`resident configure: ${provider} needs .m9r/agents/${provider}/adapter.json with protocol oathlock-json-stdio.\n`);
       return 1;
     }
     const persistedCandidate = {
       name: profileName,
-      apiUrl: (process.env.OATHLOCK_API_URL ?? "https://m9r.dev").replace(/\/+$/, ""),
+      apiUrl: (process.env.M9R_API_URL ?? "https://m9r.dev").replace(/\/+$/, ""),
       provider,
       ...(adapter ? { adapter } : {}),
       instanceKey: `${provider}-${randomUUID()}`,
@@ -339,7 +351,7 @@ async function runResidentCli(argv: string[]): Promise<number> {
     const checkedProfile = validateResidentProfile(candidate);
     if (!checkedProfile.ok) { process.stderr.write(`resident configure: invalid profile (${checkedProfile.reason}).\n`); return 1; }
     profiles.push(persistedCandidate);
-    await mkdir(join(process.cwd(), ".oathlock"), { recursive: true });
+    await mkdir(join(process.cwd(), ".m9r"), { recursive: true });
     await writeFile(configFile, JSON.stringify({ profiles }, null, 2) + "\n", "utf8");
     process.stdout.write(`Resident profile ${profileName} saved locally for ${provider}; no token was printed.\n`);
     return 0;
@@ -442,12 +454,12 @@ function spawnDetachedOathlockCommand(subArgs: string[]): void {
   child.unref();
 }
 
-const watchdogLockPath = () => join(process.cwd(), ".oathlock", "watchdog.lock");
-const watchdogLogPath = () => join(process.cwd(), ".oathlock", "watchdog.log");
+const watchdogLockPath = () => join(process.cwd(), ".m9r", "watchdog.lock");
+const watchdogLogPath = () => join(process.cwd(), ".m9r", "watchdog.log");
 
 async function watchdogLog(line: string): Promise<void> {
   try {
-    await mkdir(join(process.cwd(), ".oathlock"), { recursive: true });
+    await mkdir(join(process.cwd(), ".m9r"), { recursive: true });
     await writeFile(watchdogLogPath(), `${new Date().toISOString()} ${line}\n`, { flag: "a" });
   } catch { /* best-effort logging only -- never let a log write crash the watchdog */ }
 }
@@ -514,7 +526,7 @@ async function runWatchdog(): Promise<number> {
     process.exit(0);
   }
 
-  await mkdir(join(process.cwd(), ".oathlock"), { recursive: true });
+  await mkdir(join(process.cwd(), ".m9r"), { recursive: true });
   await writeFile(watchdogLockPath(), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
   // The slot check and the write above are not atomic, so a watchdog that
   // started at the same moment may have written its own pid in between. The
@@ -575,7 +587,7 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
     const { startNativeEventSync } = await import("../src/lib/native-event-sync");
     startNativeEventSync();
   }
-  const configFile = join(process.cwd(), ".oathlock", "resident.local.json");
+  const configFile = join(process.cwd(), ".m9r", "resident.local.json");
   let config: unknown = {};
   try { config = JSON.parse(await readFile(configFile, "utf8")); } catch { /* terminals still work without resident profiles */ }
   const profiles = localOnly ? [] : residentProfileNames(config);
@@ -672,16 +684,16 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
     });
   }
   // Item #11/#29: the local half of the shared-context memory catalog --
-  // exports newly-archived Sessions to .oathlock/memory/*.md as they happen,
+  // exports newly-archived Sessions to .m9r/memory/*.md as they happen,
   // so a connected agent's own real read/grep tools have something to search
   // (see search_memory in dev-mcp-server.ts for the live, no-export-needed path).
   if (!localOnly) {
     const { startMemoryExportLoop } = await import("../src/lib/memory-export-core");
     startMemoryExportLoop({ repositoryRoot: process.cwd() });
   }
-  // Item #35: drains .oathlock/capture/pending.jsonl (written by the
+  // Item #35: drains .m9r/capture/pending.jsonl (written by the
   // SessionEnd hook/OpenCode plugin `m9r connect` installs) into the same
-  // .oathlock/memory/ tree above, so a Claude Code/Codex/OpenCode session a
+  // .m9r/memory/ tree above, so a Claude Code/Codex/OpenCode session a
   // human launched directly in their own terminal -- never touching M9R's
   // dashboard -- still becomes real, searchable shared memory.
   {
@@ -699,7 +711,7 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
   return 0;
 }
 
-const windowsServiceScriptPath = () => join(process.cwd(), ".oathlock", "service-launch.ps1");
+const windowsServiceScriptPath = () => join(process.cwd(), ".m9r", "service-launch.ps1");
 
 /**
  * How the login launcher should relaunch this CLI. A raw .ts entry (monorepo
@@ -728,7 +740,7 @@ async function repoLocalCliEntryPath(): Promise<string> {
   // this function picking it over m9r.js is exactly what caused a real,
   // live bug: `service install` wrote a login launcher pointing at the old
   // bundle, so the persistent resident silently kept running pre-rename code
-  // (including the .m9r/.oathlock directory mismatch) after every reboot,
+  // (including the .m9r/.m9r directory mismatch) after every reboot,
   // with no visible failure -- it just quietly never picked up any fix.
   const repoLocalDist = resolve(join(process.cwd(), "cli", "dist", "m9r.js"));
   try {
@@ -755,13 +767,13 @@ async function autostartLaunchSpec(): Promise<AutostartLaunchSpec> {
 
 async function writeWindowsLaunchScript(): Promise<string> {
   const scriptPath = resolve(windowsServiceScriptPath());
-  await mkdir(join(process.cwd(), ".oathlock"), { recursive: true });
+  await mkdir(join(process.cwd(), ".m9r"), { recursive: true });
   // Terminal panes stay an explicit opt-in (see bridge-runtime.ts's own
-  // comment on OATHLOCK_TERMINAL_PANES) -- but the login-launched resident
+  // comment on M9R_TERMINAL_PANES) -- but the login-launched resident
   // is a separate process from the shell that ran `service install`, so it
   // never inherits a shell-set env var. Baking it into the generated launch
   // script is what makes the opt-in actually survive a reboot.
-  await writeFile(scriptPath, buildWindowsLaunchScript({ ...(await autostartLaunchSpec()), envVars: { OATHLOCK_TERMINAL_PANES: "1" } }), "utf8");
+  await writeFile(scriptPath, buildWindowsLaunchScript({ ...(await autostartLaunchSpec()), envVars: { M9R_TERMINAL_PANES: "1" } }), "utf8");
   return scriptPath;
 }
 
@@ -810,8 +822,8 @@ async function installMacosAutostart(): Promise<string> {
   const home = homeDirectory();
   const plistPath = macosLaunchAgentPath(home);
   await mkdir(dirname(plistPath), { recursive: true });
-  await mkdir(join(process.cwd(), ".oathlock"), { recursive: true });
-  await writeFile(plistPath, buildLaunchAgentPlist(await autostartLaunchSpec(), join(process.cwd(), ".oathlock", "launch-agent.log")), "utf8");
+  await mkdir(join(process.cwd(), ".m9r"), { recursive: true });
+  await writeFile(plistPath, buildLaunchAgentPlist(await autostartLaunchSpec(), join(process.cwd(), ".m9r", "launch-agent.log")), "utf8");
   const domain = `gui/${typeof process.getuid === "function" ? process.getuid() : ""}`;
   // bootout-then-bootstrap is the idempotent form: re-running init reloads the
   // (possibly rewritten) plist instead of erroring with "service already
@@ -965,8 +977,8 @@ async function runServiceCli(argv: string[]): Promise<number> {
 }
 
 async function reportTerminalState(state: string | undefined): Promise<number> {
-  const sessionId = process.env.OATHLOCK_TERMINAL_SESSION_ID;
-  const provider = process.env.OATHLOCK_AGENT_KIND;
+  const sessionId = process.env.M9R_TERMINAL_SESSION_ID;
+  const provider = process.env.M9R_AGENT_KIND;
   if (!sessionId) {
     process.stderr.write("terminal state: this command must run inside an M9R Runtime terminal.\n");
     return 1;
@@ -1264,7 +1276,7 @@ function formatWebPlan(
   root: string,
 ): string[] {
   const taskAction = `"${brokerRuntime.executable.replaceAll('"', '""')}" ${brokerRuntime.args.map((value) => `"${value.replaceAll('"', '""')}"`).join(" ")}`;
-  const rows = ["M9R Web setup will:", `  - install/update the browser extension at ${plan.extensionPath}`, `  - allow extension ID ${plan.allowedExtensionIds[0]} on 127.0.0.1 only`, "  - register the local broker to start at Windows sign-in (current user; no admin)", "  - configure these user-level MCP entries:"];
+  const rows = ["M9R Web setup will:", `  - install/update the browser extension at ${plan.extensionPath}`, `  - allow extension IDs ${plan.allowedExtensionIds.join(", ")} on 127.0.0.1 only`, "  - register the local broker to start at Windows sign-in (current user; no admin)", "  - configure these user-level MCP entries:"];
   rows.push("  - files:");
   for (const item of plan.agentFiles) rows.push(`      ${item.path}`);
   rows.push(`      ${join(root, "web-broker.json")}`, `      ${join(root, "web-broker.key")} (generated locally; value is never shown)`, `      ${join(root, WEB_SETUP_MANIFEST)}`, `      ${plan.extensionPath}\\<packaged extension files>`);
@@ -1316,6 +1328,11 @@ async function copyWebExtensionPath(path: string): Promise<boolean> {
 
 async function runWebSetup(args: string[]): Promise<number> {
   if (platform() !== "win32") { process.stderr.write("M9R Web setup currently supports Windows 10/11 only.\n"); return 2; }
+  if (args.includes("--broker-only")) {
+    const result = await ensureLocalBrokerAutostart();
+    process.stdout.write(`${result.ok ? "[PASS]" : "[FAIL]"} ${result.message}\n`);
+    return result.ok ? 0 : 1;
+  }
   const yes = args.includes("--yes") || args.includes("-y");
   const dryRun = args.includes("--dry-run");
   const requestedAgents = valueAfter(args, "--agents");
@@ -1449,7 +1466,7 @@ async function runWebSetup(args: string[]): Promise<number> {
       throw new Error("The managed broker config changed outside M9R setup; review it before rerunning setup.");
     }
     await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
-    const mcpConfig = JSON.stringify({ version: 1, extensionIds: [WEB_EXTENSION_ID], port }, null, 2) + "\n";
+    const mcpConfig = JSON.stringify({ version: 1, extensionIds: plan.allowedExtensionIds, port }, null, 2) + "\n";
     await writeAtomic(manifest.brokerConfigPath, mcpConfig);
     manifest.brokerConfigHash = digest(mcpConfig);
     const identityManifestPath = join(root, "install-manifest.json");
@@ -1667,7 +1684,7 @@ async function runWebBrokerServer(args: string[]): Promise<number> {
   const authority = createWebAuthority({ ownerId: process.env.M9R_OWNER_ID?.trim() || "local-machine" });
   authority.restore(authorityStore.load());
   const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
-  const broker = await startWebBroker({ key, port, host: "127.0.0.1", allowedExtensionIds: [WEB_EXTENSION_ID], ownerId: "local-machine", authority, authorityStore });
+  const broker = await startWebBroker({ key, port, host: "127.0.0.1", allowedExtensionIds: webExtensionAllowlist(), ownerId: "local-machine", authority, authorityStore });
   process.stdout.write(`M9R web broker listening on 127.0.0.1:${broker.port}\n`);
   const stop = () => void broker.close().then(() => process.exit(0));
   process.once("SIGINT", stop);

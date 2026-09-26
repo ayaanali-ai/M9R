@@ -55,13 +55,13 @@ test("draining a spool writes the transcript, the summary beside it, and index.m
   try {
     const transcriptPath = join(root, "t.jsonl");
     await writeFile(transcriptPath, claudeJsonl);
-    await mkdir(join(root, ".oathlock", "capture"), { recursive: true });
+    await mkdir(join(root, ".m9r", "capture"), { recursive: true });
     await writeFile(spoolPath(root), JSON.stringify({ provider: "claude-code", sessionId: "sess-1", cwd: root, transcriptPath, reason: "other", capturedAtIso: "2026-09-20T10:00:00Z" }) + "\n");
     const res = await drainCaptureSpool({ repositoryRoot: root, readTranscript: (p) => readFile(p, "utf8"), onLog: () => {} });
     assert.equal(res.drained, 1);
-    const dir = join(root, ".oathlock", "memory", "local", "claude-code");
+    const dir = join(root, ".m9r", "memory", "local", "claude-code");
     assert.match(await readFile(join(dir, "sess-1.summary.md"), "utf8"), /## Files changed/);
-    const index = await readFile(join(root, ".oathlock", "memory", "index.md"), "utf8");
+    const index = await readFile(join(root, ".m9r", "memory", "index.md"), "utf8");
     assert.match(index, /local\/claude-code\/sess-1\.summary\.md/);
     assert.equal(await rebuildMemoryIndex(root), 1);
   } finally { await rm(root, { recursive: true, force: true }); }

@@ -104,7 +104,7 @@ export function SessionCatalog({ initialSessionId = null }: { initialSessionId?:
           />
         </div>
         <p className="px-4 pb-3 text-[11px] leading-relaxed text-[color:var(--ol-text-muted)]">
-          Your agents read these from plain files on your machine: <code className="ol-mono">.oathlock/memory/</code> in each project, with a short summary per session and an <code className="ol-mono">index.md</code>. Run <code className="ol-mono">m9r-cli memory</code> to see the exact folder.
+          Your agents read these from plain files on your machine: <code className="ol-mono">.m9r/memory/</code> in each project, with a short summary per session and an <code className="ol-mono">index.md</code>. Run <code className="ol-mono">m9r-cli memory</code> to see the exact folder.
         </p>
         {filtered.length === 0 ? (
           <p className="p-4 text-[12px] text-[color:var(--ol-text-muted)]">

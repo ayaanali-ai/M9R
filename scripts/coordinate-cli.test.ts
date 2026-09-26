@@ -133,7 +133,7 @@ test("coordinate request explains when a live resident still needs owner authori
   const code = await run([
     "coordinate", "request", "--type", "check", "--need", "Review the demo",
     "--intent", "independent_assurance", "--criteria", "one blocker identified",
-    "--binding", "binding-gate11e-readonly", "--allow", "docs/", "--deny", ".oathlock/",
+    "--binding", "binding-gate11e-readonly", "--allow", "docs/", "--deny", ".m9r/",
     "--capability", "review", "--max-tokens", "1200",
     "--max-duration-ms", "120000", "--max-latency-ms", "150000",
   ], h.deps);

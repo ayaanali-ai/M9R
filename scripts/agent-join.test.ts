@@ -90,7 +90,7 @@ test("agent.md is CLI-first and keeps curl as a fallback", () => {
 
 test("agent.md documents the local token file and human approval claim", () => {
   const md = buildAgentMarkdown(BASE);
-  assert.match(md, /\.oathlock\/local\.json/);
+  assert.match(md, /\.m9r\/local\.json/);
   assert.match(md, /do not commit/i);
   assert.match(md, /human approval claim/i);
 });
@@ -111,7 +111,7 @@ test("agent.md treats init as one-time and says not to reconnect if already conn
   const md = buildAgentMarkdown(BASE);
   assert.match(md, /one-time/i);
   // Check the local token file first; reuse the existing connection.
-  assert.match(md, /\.oathlock\/local\.json/);
+  assert.match(md, /\.m9r\/local\.json/);
   assert.match(md, /do not run init/i);
   assert.match(md, /do not reconnect/i);
 });

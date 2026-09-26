@@ -59,7 +59,7 @@ export function mintMissionRelayToken(input: {
     iat: issuedAt,
     exp: issuedAt + ttlSeconds,
   };
-  const header = encode({ alg: "HS256", typ: "OATHLOCK_RELAY" });
+  const header = encode({ alg: "HS256", typ: "M9R_RELAY" });
   const body = encode(payload);
   const unsigned = `${header}.${body}`;
   return `${unsigned}.${sign(unsigned, signingSecret)}`;
@@ -77,7 +77,7 @@ export function verifyMissionRelayToken(token: string, secret = process.env.MISS
     if (actualBytes.length !== expectedBytes.length || !timingSafeEqual(actualBytes, expectedBytes)) return null;
     const parsedHeader = JSON.parse(Buffer.from(header, "base64url").toString("utf8")) as { alg?: unknown; typ?: unknown };
     const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as Partial<TokenPayload>;
-    if (parsedHeader.alg !== "HS256" || parsedHeader.typ !== "OATHLOCK_RELAY") return null;
+    if (parsedHeader.alg !== "HS256" || parsedHeader.typ !== "M9R_RELAY") return null;
     if (payload.aud !== RELAY_TOKEN_AUDIENCE || (payload.kind !== "human" && payload.kind !== "bridge")) return null;
     if (typeof payload.sub !== "string" || !payload.sub || typeof payload.workspaceId !== "string" || !payload.workspaceId) return null;
     if (typeof payload.iat !== "number" || typeof payload.exp !== "number" || payload.exp <= nowSeconds || payload.iat > nowSeconds + 60) return null;

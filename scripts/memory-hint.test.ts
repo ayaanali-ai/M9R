@@ -18,7 +18,7 @@ test("a prompt naming a file an earlier session changed gets a pointer to that s
   const hints = findMemoryHints("can you look at relay/lease.ts, it seems flaky", INDEX);
   assert.equal(hints.length, 1);
   assert.match(hints[0], /lease renewal race/);
-  assert.match(hints[0], /\.oathlock\/memory\/local\/claude-code\/s1\.summary\.md/);
+  assert.match(hints[0], /\.m9r\/memory\/local\/claude-code\/s1\.summary\.md/);
 });
 
 test("a bare file name matches, and unrelated prompts inject nothing", () => {

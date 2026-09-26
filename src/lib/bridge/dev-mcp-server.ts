@@ -479,7 +479,7 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
 /**
  * Standalone entry point — see module comment for why this is a separate
  * process rather than an in-process import. Reads the working directory
- * from argv[2]; OATHLOCK_APP_URL/OATHLOCK_AGENT_TOKEN/OATHLOCK_MISSION_ID
+ * from argv[2]; M9R_APP_URL/M9R_AGENT_TOKEN/M9R_MISSION_ID
  * come from this process's own env, set explicitly on the ACP `McpServer`
  * descriptor's `env` field by acp-stdio-adapter.ts's devMcpServerDescriptor
  * -- not inherited implicitly, since this process is spawned by the agent
@@ -493,9 +493,9 @@ async function main(): Promise<void> {
     process.stderr.write("Usage: dev-mcp-server.ts <workingDirectory>\n");
     process.exit(1);
   }
-  const appUrl = process.env.OATHLOCK_APP_URL?.trim();
-  const agentToken = process.env.OATHLOCK_AGENT_TOKEN?.trim();
-  const missionId = process.env.OATHLOCK_MISSION_ID?.trim();
+  const appUrl = process.env.M9R_APP_URL?.trim();
+  const agentToken = process.env.M9R_AGENT_TOKEN?.trim();
+  const missionId = process.env.M9R_MISSION_ID?.trim();
   const channel = appUrl && agentToken && missionId ? { appUrl, agentToken, missionId } : undefined;
   const server = createDevMcpServer(workingDirectory, channel);
   const transport = new StdioServerTransport();

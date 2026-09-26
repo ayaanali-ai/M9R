@@ -53,7 +53,7 @@ export function agentKeyForKind(kind: string | null | undefined): AgentKindKey {
 /** The exact setup command to connect a given agent kind (PowerShell form). */
 export function setupCommandFor(kind: string): string {
   const safeKind = kind.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 40) || "other";
-  const command = `$env:OATHLOCK_AGENT_KIND="${kind}"; npx m9r-cli init`;
+  const command = `$env:M9R_AGENT_KIND="${kind}"; npx m9r-cli init`;
   return command.replace(kind, safeKind);
 }
 

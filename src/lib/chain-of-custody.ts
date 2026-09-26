@@ -238,7 +238,7 @@ export function getBlackboxFindings(
 // (advisory, motivated by live detectors) from chain controls that are planned.
 export type CustodyControl = { text: string; kind: "advisory" | "planned" };
 
-export const OATHLOCK_CONTROLS: CustodyControl[] = [
+export const M9R_CONTROLS: CustodyControl[] = [
   { text: "Summarize repeated context before the next model call.", kind: "advisory" },
   { text: "Cap tool output size before feeding it back to the model.", kind: "advisory" },
   { text: "Route cheaper models where the task allows it.", kind: "advisory" },

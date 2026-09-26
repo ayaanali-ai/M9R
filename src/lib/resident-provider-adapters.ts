@@ -193,12 +193,12 @@ function providerPrompt(grant: ProviderLaunchGrant, provider: string): string {
   return [
     "You are executing a bounded M9R launch grant.",
     `Delegated provider identity: ${label}.`,
-    "Resident child launch marker: OATHLOCK_RESIDENT_CHILD=1. The parent controlled run owns M9R governance for this assignment.",
+    "Resident child launch marker: M9R_RESIDENT_CHILD=1. The parent controlled run owns M9R governance for this assignment.",
     "The parent controlled run already owns M9R governance for this assignment.",
     "Do not run the repository's normal M9R automatic workflow, start another run, or produce an M9R Evidence Draft.",
     "Work packet (authoritative JSON):",
     JSON.stringify(packet),
-    "Do not read or reveal credentials, .env files, or .oathlock/local.json.",
+    "Do not read or reveal credentials, .env files, or .m9r/local.json.",
     "Stay inside the repository and allowed path scope. You may request bounded work from authorized Mission participants through M9R's collaboration protocol; do not launch another provider directly.",
     packet.scope.executionMode === "read_only" ? "Do not modify files." : "Modify only allowed paths.",
     "Use the supplied context references first. Retrieve additional context only when necessary and within the context fetch budget.",
@@ -218,7 +218,7 @@ function selectedEnvironment(provider: string): NodeJS.ProcessEnv {
     : provider === "claude-code"
       ? ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_GIT_BASH_PATH"]
       : [];
-  const env: NodeJS.ProcessEnv = { NODE_ENV: process.env.NODE_ENV ?? "production", OATHLOCK_RESIDENT_CHILD: "1" };
+  const env: NodeJS.ProcessEnv = { NODE_ENV: process.env.NODE_ENV ?? "production", M9R_RESIDENT_CHILD: "1" };
   for (const key of [...common, ...providerKeys]) if (process.env[key] !== undefined) env[key] = process.env[key];
   return env;
 }
@@ -538,7 +538,7 @@ export async function executeProviderLaunch(
     // The server's event validator requires modelTier and requestedModel
     // together or not at all (resident-service-contract.ts). Codex has no
     // default model mapping (resolveProviderModel returns null for it unless
-    // an operator sets OATHLOCK_CODEX_MODEL_<TIER>), so effectiveGrant often
+    // an operator sets M9R_CODEX_MODEL_<TIER>), so effectiveGrant often
     // has a modelTier with no requestedModel -- sending modelTier alone in
     // that case got every successful Codex result rejected with a 400 that
     // then looked identical to a real launch crash.

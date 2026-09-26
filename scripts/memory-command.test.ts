@@ -7,7 +7,7 @@ import { findMemoryDir, rebuildMemory, runMemory } from "../src/lib/native/memor
 
 function sandbox() {
   const root = mkdtempSync(join(tmpdir(), "m9r-memcmd-"));
-  const mem = join(root, ".oathlock", "memory");
+  const mem = join(root, ".m9r", "memory");
   mkdirSync(join(mem, "local", "codex"), { recursive: true });
   mkdirSync(join(mem, "Alice", "general"), { recursive: true });
   writeFileSync(join(mem, "local", "codex", "aaaa-1111.md"), ["# Codex session (aaaa)", "", "- Provider: Codex", "- Captured: 2026-09-18T10:00:00Z", `- Working directory: ${root}`, "- Session id: aaaa-1111", "", "---", "", "**User:**", "", "Add retry to the upload worker", "", "**Assistant:**", "", "Added exponential backoff, capped at 5 tries.", ""].join("\n"));

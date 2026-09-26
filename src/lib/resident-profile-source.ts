@@ -11,8 +11,8 @@ export function isResidentAgentKind(provider: unknown): provider is string {
 export function residentCredentialPaths(repositoryRoot: string, provider: ResidentAgentKind): string[] {
   if (!isResidentAgentKind(provider)) throw new Error("Provider identity is invalid.");
   return [
-    join(repositoryRoot, ".oathlock", "agents", provider, "local.json"),
-    join(repositoryRoot, ".oathlock", "local.json"),
+    join(repositoryRoot, ".m9r", "agents", provider, "local.json"),
+    join(repositoryRoot, ".m9r", "local.json"),
   ];
 }
 

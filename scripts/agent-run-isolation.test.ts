@@ -1,8 +1,8 @@
 /**
  * OathLock CLI — per-agent run/adapter isolation tests
  * ----------------------------------------------------------------------------
- * Two agents in one repo must never fight over `.oathlock/run.json` or
- * `.oathlock/adapter.json` (the collision that broke coordinated dogfooding
+ * Two agents in one repo must never fight over `.m9r/run.json` or
+ * `.m9r/adapter.json` (the collision that broke coordinated dogfooding
  * on 2026-07-16: Codex's `run start` overwrote Claude Code's active run, and
  * signal emit then failed with "Run was not found for this connection").
  * In-memory fs + fake fetch; no real network.

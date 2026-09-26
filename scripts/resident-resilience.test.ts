@@ -11,7 +11,7 @@ const grant = {
   repositoryRoot: process.cwd(),
   task: "Return a bounded acknowledgement.",
   allowedPaths: ["docs/proof/"],
-  prohibitedPaths: ["src/", ".oathlock/"],
+  prohibitedPaths: ["src/", ".m9r/"],
   maxDurationMs: 5_000,
   executionMode: "read_only" as const,
 };

@@ -89,7 +89,7 @@ const RESIDENT_HEARTBEAT_INTERVAL_MS = 30_000;
  * never block waiting for that decision (it could take arbitrarily long and
  * would freeze this resident's heartbeat/claim loop for every other grant in
  * the meantime). Persisted per-repository, same convention as
- * .oathlock/resident.local.json, so a resident restart doesn't orphan a
+ * .m9r/resident.local.json, so a resident restart doesn't orphan a
  * worktree whose review is still outstanding.
  */
 export interface PendingWorktree {
@@ -109,7 +109,7 @@ type WriteFileFn = (path: string, data: string, encoding: "utf8") => Promise<voi
 type MkdirFn = (path: string, options: { recursive: true }) => Promise<unknown>;
 
 function pendingWorktreesPath(repositoryRoot: string): string {
-  return join(repositoryRoot, ".oathlock", "resident-worktrees.local.json");
+  return join(repositoryRoot, ".m9r", "resident-worktrees.local.json");
 }
 
 export async function readPendingWorktrees(repositoryRoot: string, readFileFn: ReadFileFn = readFile): Promise<PendingWorktree[]> {
@@ -124,7 +124,7 @@ export async function readPendingWorktrees(repositoryRoot: string, readFileFn: R
 }
 
 export async function writePendingWorktrees(repositoryRoot: string, entries: PendingWorktree[], writeFileFn: WriteFileFn = writeFile, mkdirFn: MkdirFn = mkdir): Promise<void> {
-  await mkdirFn(join(repositoryRoot, ".oathlock"), { recursive: true });
+  await mkdirFn(join(repositoryRoot, ".m9r"), { recursive: true });
   await writeFileFn(pendingWorktreesPath(repositoryRoot), `${JSON.stringify(entries, null, 2)}\n`, "utf8");
 }
 

@@ -64,13 +64,13 @@ export async function listLocalConnectedProviders(repositoryRoot: string): Promi
  * caller that still wants the old single-bridge behavior.
  */
 async function readLocalToken(repositoryRoot: string): Promise<{ provider: string; token: string } | null> {
-  const pinned = process.env.OATHLOCK_LOCAL_MISSION_BRIDGE_PROVIDER?.trim();
+  const pinned = process.env.M9R_LOCAL_MISSION_BRIDGE_PROVIDER?.trim();
   if (pinned && !PROVIDER_SLUG_PATTERN.test(pinned)) return null;
   const order = pinned ? [pinned] : await listLocalConnectedProviders(repositoryRoot);
   for (const provider of order) {
     if (!PROVIDER_SLUG_PATTERN.test(provider)) continue;
     try {
-      const raw = await readFile(join(repositoryRoot, ".oathlock", "agents", provider, "local.json"), "utf8");
+      const raw = await readFile(join(repositoryRoot, ".m9r", "agents", provider, "local.json"), "utf8");
       const parsed = JSON.parse(raw) as LocalAgentToken;
       if (typeof parsed.token === "string" && parsed.token.trim()) return { provider, token: parsed.token.trim() };
     } catch {
@@ -85,7 +85,7 @@ export async function readLocalProviderAdapter(repositoryRoot: string, provider:
   if (!PROVIDER_SLUG_PATTERN.test(provider)) return null;
   if (["codex", "claude-code", "opencode"].includes(provider)) return null;
   try {
-    const raw = JSON.parse(await readFile(join(repositoryRoot, ".oathlock", "agents", provider, "adapter.json"), "utf8")) as unknown;
+    const raw = JSON.parse(await readFile(join(repositoryRoot, ".m9r", "agents", provider, "adapter.json"), "utf8")) as unknown;
     const parsed = parseProviderAdapterConfig(raw, provider);
     return parsed.ok ? parsed.value : null;
   } catch {
@@ -180,7 +180,7 @@ async function acquireBridgeLock(repositoryRoot: string, provider: string): Prom
   let raw: string | null = null;
   try { raw = await readFile(path, "utf8"); } catch { /* no lock yet */ }
   if (!shouldStartWatchdog(parseWatchdogLockPid(raw), isPidAlive, parseWatchdogLockStartedAt(raw))) return false;
-  await mkdir(join(repositoryRoot, ".oathlock", "agents", provider), { recursive: true });
+  await mkdir(join(repositoryRoot, ".m9r", "agents", provider), { recursive: true });
   await writeFile(path, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
   // Two processes can both observe a free slot and both write within the
   // same few milliseconds -- the same race the watchdog itself has and
@@ -231,10 +231,10 @@ export async function startLocalMissionBridge(repositoryRoot: string): Promise<L
   }
   const localAdapter = await readLocalProviderAdapter(repositoryRoot, local.provider);
 
-  // OATHLOCK_API_URL is what the rest of the CLI (init, whoami, the terminal bridge) reads, so a
+  // M9R_API_URL is what the rest of the CLI (init, whoami, the terminal bridge) reads, so a
   // user who set it must not have the bridge silently talk to a different host.
-  const appUrl = (process.env.OATHLOCK_APP_URL?.trim() || process.env.OATHLOCK_API_URL?.trim() || DEFAULT_APP_URL).replace(/\/+$/, "");
-  // Real bug fixed here: this read a var name (OATHLOCK_MISSION_RELAY_URL)
+  const appUrl = (process.env.M9R_APP_URL?.trim() || process.env.M9R_API_URL?.trim() || DEFAULT_APP_URL).replace(/\/+$/, "");
+  // Real bug fixed here: this read a var name (M9R_MISSION_RELAY_URL)
   // nothing else in the codebase sets -- MISSION_RELAY_PUBLIC_URL is the
   // actual documented name (.env.example, services/mission-bridge/src/index.ts's
   // production entrypoint, the Next app's own relay-token route). Confirmed

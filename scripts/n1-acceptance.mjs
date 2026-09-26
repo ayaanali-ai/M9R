@@ -64,13 +64,13 @@ try {
 
   // 5. Shared memory: an earlier session's summary is found and used, without re-deriving the work (C1).
   const { buildSummary, buildIndex, parseSummary } = await load("memory-distill-core.js");
-  const memDir = join(project, ".oathlock", "memory", "local", "codex");
+  const memDir = join(project, ".m9r", "memory", "local", "codex");
   mkdirSync(memDir, { recursive: true });
   const summary = buildSummary({ provider: "Codex", sessionId: "earlier-1", cwd: project, capturedAtIso: "2026-09-19T10:00:00Z",
     transcript: [{ sender: "User", body: "Fix the lease renewal race in relay/lease.ts" }, { sender: "Assistant", body: "Fixed: renewal now compares the fencing token zebra-quartz-77 before extending. All tests pass." }],
     facts: { files: [join(project, "relay", "lease.ts")], commands: ["npm run test:relay"] } });
   writeFileSync(join(memDir, "earlier-1.summary.md"), summary);
-  writeFileSync(join(project, ".oathlock", "memory", "index.md"), buildIndex([parseSummary(summary, "local/codex/earlier-1.summary.md")]));
+  writeFileSync(join(project, ".m9r", "memory", "index.md"), buildIndex([parseSummary(summary, "local/codex/earlier-1.summary.md")]));
   const hookOut = runHook("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "mem", cwd: project, prompt: "What did we change in relay/lease.ts?" });
   check("5a the hook points at the earlier session's summary on a matching prompt", /M9R memory:/.test(hookOut.stdout) && /earlier-1\.summary\.md/.test(hookOut.stdout), hookOut.stdout.slice(0, 120));
   const quiet = runHook("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "mem2", cwd: project, prompt: "What is 5+5?" });

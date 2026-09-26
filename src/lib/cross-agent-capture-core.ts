@@ -3,7 +3,7 @@
  * ----------------------------------------------------------------------------
  * Captures work from a coding-agent CLI a human launched THEMSELVES (Claude
  * Code, Codex, OpenCode run directly in their own terminal, never touching
- * M9R's dashboard) into the same `.oathlock/memory/` pipeline
+ * M9R's dashboard) into the same `.m9r/memory/` pipeline
  * memory-export-core.ts already built for M9R's own dashboard sessions.
  * Verified research (2026-09) found real, officially documented, per-repo
  * hook/plugin mechanisms for all three providers -- no raw private-file
@@ -18,7 +18,7 @@
  * providers give a hook well under two seconds to react, non-blocking, with
  * Codex hard-capping at 3s. Whatever runs INSIDE the hook (see
  * scripts/m9r-capture-hook.mjs) must do the absolute minimum -- append one
- * JSON line to `.oathlock/capture/pending.jsonl` and exit. Everything in
+ * JSON line to `.m9r/capture/pending.jsonl` and exit. Everything in
  * this file is the slow half: read later, by the already-running resident,
  * with no time pressure.
  *
@@ -43,7 +43,7 @@ export const ERROR_LOG_FILE_NAME = "errors.log";
 export type CaptureProvider = "claude-code" | "codex" | "opencode";
 
 /**
- * One line of `.oathlock/capture/pending.jsonl`. Claude Code and Codex spool
+ * One line of `.m9r/capture/pending.jsonl`. Claude Code and Codex spool
  * a pointer to their own on-disk transcript (their SessionEnd hook payloads
  * are field-identical enough to share this shape); OpenCode's plugin is not
  * time-boxed the way a SessionEnd hook is, so it spools the already-fetched
@@ -140,7 +140,7 @@ export async function findMemoryFingerprintMatch(options: {
   fingerprint: string;
   excludePath?: string;
 }): Promise<string | null> {
-  const root = join(resolve(options.repositoryRoot), ".oathlock", "memory");
+  const root = join(resolve(options.repositoryRoot), ".m9r", "memory");
   const excluded = options.excludePath ? resolve(options.excludePath) : null;
   for (const path of await listMarkdownFiles(root)) {
     if (excluded && resolve(path).toLowerCase() === excluded.toLowerCase()) continue;
@@ -390,11 +390,11 @@ export function renderCaptureMarkdown(job: CaptureJob, transcript: CaptureTransc
 
 /** Where a captured session's markdown lands. Deliberately its own "local" bucket, separate from `<owner>/<channel>` (dashboard sessions) -- this work never touched an M9R channel, so it has no owner/channel identity to file under. */
 export function captureMemoryPath(repositoryRoot: string, job: CaptureJob): string {
-  return join(repositoryRoot, ".oathlock", "memory", "local", job.provider, `${job.sessionId}.md`);
+  return join(repositoryRoot, ".m9r", "memory", "local", job.provider, `${job.sessionId}.md`);
 }
 
 function captureDir(repositoryRoot: string): string {
-  return resolve(repositoryRoot, ".oathlock", CAPTURE_DIR_NAME);
+  return resolve(repositoryRoot, ".m9r", CAPTURE_DIR_NAME);
 }
 export function spoolPath(repositoryRoot: string): string {
   return join(captureDir(repositoryRoot), SPOOL_FILE_NAME);
@@ -506,9 +506,9 @@ function extractFacts(job: CaptureJob, rawTranscript: string | null): SessionFac
   }
 }
 
-/** Rebuilds `.oathlock/memory/index.md` from every `*.summary.md` on disk, so it needs no state and self-heals. */
+/** Rebuilds `.m9r/memory/index.md` from every `*.summary.md` on disk, so it needs no state and self-heals. */
 export async function rebuildMemoryIndex(repositoryRoot: string): Promise<number> {
-  const root = join(repositoryRoot, ".oathlock", "memory");
+  const root = join(repositoryRoot, ".m9r", "memory");
   const entries: IndexEntry[] = [];
   const walk = async (dir: string): Promise<void> => {
     let items;

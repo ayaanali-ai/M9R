@@ -496,8 +496,8 @@ export function responseForPermission(params: acp.RequestPermissionRequest, appr
  * a broken session.
  */
 /**
- * `missionId` becomes the dev-mcp subprocess's OATHLOCK_MISSION_ID (plus
- * OATHLOCK_APP_URL/OATHLOCK_AGENT_TOKEN, set once on THIS process's own env
+ * `missionId` becomes the dev-mcp subprocess's M9R_MISSION_ID (plus
+ * M9R_APP_URL/M9R_AGENT_TOKEN, set once on THIS process's own env
  * by startMissionBridge -- see bridge-runtime.ts) via the ACP `env` field,
  * not left to implicit inheritance: this subprocess is spawned by the agent
  * CLI itself (Claude Code/Codex), not directly by the Bridge, so the ACP
@@ -517,12 +517,12 @@ export function devMcpServerDescriptor(workingDirectory: string, missionId: stri
   // without needing a separate build-time flag threaded through.
   const isCompiled = import.meta.url.endsWith(".js");
   const entryPoint = resolve(dirname(fileURLToPath(import.meta.url)), isCompiled ? "dev-mcp-server.js" : "dev-mcp-server.ts");
-  const appUrl = process.env.OATHLOCK_APP_URL?.trim();
-  const agentToken = process.env.OATHLOCK_AGENT_TOKEN?.trim();
+  const appUrl = process.env.M9R_APP_URL?.trim();
+  const agentToken = process.env.M9R_AGENT_TOKEN?.trim();
   const env: acp.EnvVariable[] = [];
-  if (appUrl) env.push({ name: "OATHLOCK_APP_URL", value: appUrl });
-  if (agentToken) env.push({ name: "OATHLOCK_AGENT_TOKEN", value: agentToken });
-  if (missionId) env.push({ name: "OATHLOCK_MISSION_ID", value: missionId });
+  if (appUrl) env.push({ name: "M9R_APP_URL", value: appUrl });
+  if (agentToken) env.push({ name: "M9R_AGENT_TOKEN", value: agentToken });
+  if (missionId) env.push({ name: "M9R_MISSION_ID", value: missionId });
   return [{
     name: "oathlock-dev-tools",
     command: process.execPath,
@@ -587,9 +587,9 @@ export function openCodeConfigContent(workingDirectory: string, missionId: strin
           command: [descriptor.command, ...descriptor.args],
           enabled: true,
           environment: {
-            OATHLOCK_APP_URL: "{env:OATHLOCK_APP_URL}",
-            OATHLOCK_AGENT_TOKEN: "{env:OATHLOCK_AGENT_TOKEN}",
-            OATHLOCK_MISSION_ID: missionId,
+            M9R_APP_URL: "{env:M9R_APP_URL}",
+            M9R_AGENT_TOKEN: "{env:M9R_AGENT_TOKEN}",
+            M9R_MISSION_ID: missionId,
           },
         },
       };
@@ -603,7 +603,7 @@ export function openCodeConfigContent(workingDirectory: string, missionId: strin
  * /api/bridge/permissions, bridge-permission-service.ts) so a human can
  * actually see and decide it -- runs in the same process as
  * startMissionBridge (bridge-runtime.ts), unlike devMcpServerDescriptor's
- * subprocess, so OATHLOCK_APP_URL/OATHLOCK_AGENT_TOKEN are read straight
+ * subprocess, so M9R_APP_URL/M9R_AGENT_TOKEN are read straight
  * from process.env, no ACP env-passing needed. Best-effort: a failed report
  * still leaves the real requestPermission promise waiting (and visible as
  * provider.activity either way), it just means a human won't see it in the
@@ -624,8 +624,8 @@ export function conversationIdForChannelMission(missionId: string): string | nul
 }
 
 export async function reportPendingPermissionToApp(input: { missionId: string; executionId: string; requestId: string; summary: string; command: string | null; filePath: string | null }): Promise<void> {
-  const appUrl = process.env.OATHLOCK_APP_URL?.trim();
-  const agentToken = process.env.OATHLOCK_AGENT_TOKEN?.trim();
+  const appUrl = process.env.M9R_APP_URL?.trim();
+  const agentToken = process.env.M9R_AGENT_TOKEN?.trim();
   if (!appUrl || !agentToken) return;
   try {
     await fetch(`${appUrl.replace(/\/$/, "")}/api/bridge/permissions`, {
@@ -650,8 +650,8 @@ export async function reportPendingPermissionToApp(input: { missionId: string; e
  * one being prevented. A dropped check is logged, never hidden.
  */
 export async function requestFileLockFromApp(input: { path: string; conversationId: string | null }): Promise<{ holderConnectionId: string; heldSince: string } | null> {
-  const appUrl = process.env.OATHLOCK_APP_URL?.trim();
-  const agentToken = process.env.OATHLOCK_AGENT_TOKEN?.trim();
+  const appUrl = process.env.M9R_APP_URL?.trim();
+  const agentToken = process.env.M9R_AGENT_TOKEN?.trim();
   if (!appUrl || !agentToken) return null;
   try {
     const res = await fetch(`${appUrl.replace(/\/$/, "")}/api/bridge/file-locks`, {

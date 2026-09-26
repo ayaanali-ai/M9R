@@ -20,12 +20,12 @@
 
 import type { SupportedAgentKind } from "@/lib/oathlock-cli-core";
 
-export const OATHLOCK_WORKFLOW_BLOCK_VERSION = 6;
+export const M9R_WORKFLOW_BLOCK_VERSION = 6;
 
 export const WORKFLOW_START_MARKER = "<!-- OATHLOCK:AUTOMATIC-WORKFLOW:START";
 export const WORKFLOW_END_MARKER = "<!-- OATHLOCK:AUTOMATIC-WORKFLOW:END -->";
 
-const START_LINE = `${WORKFLOW_START_MARKER} v${OATHLOCK_WORKFLOW_BLOCK_VERSION} -->`;
+const START_LINE = `${WORKFLOW_START_MARKER} v${M9R_WORKFLOW_BLOCK_VERSION} -->`;
 
 export const AGENT_KIND_LABEL: Record<SupportedAgentKind, string> = {
   codex: "Codex",
@@ -107,7 +107,7 @@ export function buildWorkflowBlock(kind: string): string {
     "Runs and evidence are attributed to that approved connection automatically —",
     "never claim a different agent identity.",
     "",
-    "Resident provider launches: when `OATHLOCK_RESIDENT_CHILD=1` is present, the parent controlled run owns M9R governance for this task.",
+    "Resident provider launches: when `M9R_RESIDENT_CHILD=1` is present, the parent controlled run owns M9R governance for this task.",
     "In that case, do not run M9R doctor, rules, whoami, run, inbox, or status commands and do not prepare an M9R Evidence Draft; follow the supplied bounded assignment and return its requested result.",
     ...manualNote,
     "",
@@ -126,8 +126,8 @@ export function buildWorkflowBlock(kind: string): string {
     "2. Load active repo rules: `npx m9r-cli rules`. If rules cannot be loaded,",
     "   stop and report instead of proceeding uncontrolled.",
     "3. Run `npx m9r-cli whoami`, then check only the current runtime's scoped",
-    "   run pointer at `.oathlock/agents/<authenticated-kind>/run.json` (never",
-    "   read another provider's pointer or `.oathlock/local.json`). If it",
+    "   run pointer at `.m9r/agents/<authenticated-kind>/run.json` (never",
+    "   read another provider's pointer or `.m9r/local.json`). If it",
     "   references a run for THIS task, attach to it and keep reporting under that",
     "   run id. Otherwise start exactly one controlled run:",
     "   `npx m9r-cli run start --task \"<short task title>\"`.",
@@ -187,7 +187,7 @@ export function buildWorkflowBlock(kind: string): string {
     "   `Status: Awaiting human approval`. Use actual verification commands and actual pass/fail results.",
     "   Never claim a command passed unless it was run. State limitations or `None identified`.",
     "   Redact tokens, cookies, claim URLs, environment values, private keys,",
-    "   raw local configuration or `.oathlock` config contents.",
+    "   raw local configuration or `.m9r` config contents.",
     "4. After preparing the draft, set the run to waiting for human review:",
     "   `npx m9r-cli run status --phase \"waiting for human review\"`.",
     "5. Do not submit, approve, or record the draft until a human explicitly approves that exact draft.",

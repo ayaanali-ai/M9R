@@ -17,17 +17,21 @@ import { renderLocalProviderWorkspace } from "../src/lib/local-provider-workspac
 import { parseProviderAdapterConfig } from "../src/lib/provider-adapter-config";
 import { createResidentSupervisor } from "../src/lib/resident-supervisor";
 import { spawn } from "node:child_process";
+import { migrateLegacyM9rDirectory, normalizeLegacyM9rEnvironment } from "../src/lib/native/m9r-compatibility";
 
 const repositoryRoot = process.cwd();
+normalizeLegacyM9rEnvironment(process.env);
+try { migrateLegacyM9rDirectory(repositoryRoot); }
+catch (error) { process.stderr.write(`M9R could not copy legacy .oathlock state: ${error instanceof Error ? error.message : "unknown error"}\n`); }
 const localOnlyRuntime = process.env.M9R_LOCAL_ONLY === "1";
 const host = DEFAULT_BRIDGE_HOST;
-const requestedPort = Number.parseInt(process.env.OATHLOCK_BRIDGE_PORT ?? "", 10);
+const requestedPort = Number.parseInt(process.env.M9R_BRIDGE_PORT ?? "", 10);
 const port = Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort <= 65_535 ? requestedPort : DEFAULT_BRIDGE_PORT;
 // The hosted app never receives a terminal WebSocket. It embeds the local
 // workspace document below, and the browser's same-origin policy keeps the
 // hosted page from reading or injecting terminal traffic. Only local origins
 // may upgrade to a shell-bearing socket.
-const allowedOrigins = (process.env.OATHLOCK_BRIDGE_ORIGINS ?? "http://localhost:3000,http://127.0.0.1:3000,http://127.0.0.1:43117")
+const allowedOrigins = (process.env.M9R_BRIDGE_ORIGINS ?? "http://localhost:3000,http://127.0.0.1:3000,http://127.0.0.1:43117")
   .split(",").map((origin) => origin.trim()).filter(Boolean);
 const require = createRequire(import.meta.url);
 const xtermScriptPath = require.resolve("@xterm/xterm");
@@ -46,7 +50,7 @@ function powershellArg(value: string): string {
 async function localAdapterCommand(provider: string): Promise<string | undefined> {
   if (["codex", "claude-code", "opencode"].includes(provider)) return undefined;
   try {
-    const raw = JSON.parse(await readFile(resolve(repositoryRoot, ".oathlock", "agents", provider, "adapter.json"), "utf8")) as unknown;
+    const raw = JSON.parse(await readFile(resolve(repositoryRoot, ".m9r", "agents", provider, "adapter.json"), "utf8")) as unknown;
     const parsed = parseProviderAdapterConfig(raw, provider);
     if (!parsed.ok) return undefined;
     return [parsed.value.command, ...parsed.value.args].map(powershellArg).join(" ");
@@ -293,10 +297,10 @@ server.listen(port, host, () => {
 // more than one agent listening at once. That is not a real product
 // experience; a user connecting three agents must get three real, live,
 // automatically-started bridges the moment this command runs, same as
-// connecting one. Each child gets OATHLOCK_LOCAL_MISSION_BRIDGE_PROVIDER
+// connecting one. Each child gets M9R_LOCAL_MISSION_BRIDGE_PROVIDER
 // pinned in its own real env (a real OS process, not shared in-process
 // state) so it only ever binds to that one provider's token --
-// startMissionBridge sets process.env.OATHLOCK_AGENT_TOKEN globally, so
+// startMissionBridge sets process.env.M9R_AGENT_TOKEN globally, so
 // running more than one provider inside a single process would make later
 // sessions silently post using an earlier provider's identity.
 //
@@ -309,7 +313,7 @@ async function connectedLocalProviders(): Promise<string[]> {
   const found: string[] = [];
   for (const provider of LOCAL_PROVIDER_NAMES) {
     try {
-      const raw = await readFile(resolve(repositoryRoot, ".oathlock", "agents", provider, "local.json"), "utf8");
+      const raw = await readFile(resolve(repositoryRoot, ".m9r", "agents", provider, "local.json"), "utf8");
       const parsed = JSON.parse(raw) as { token?: string };
       if (typeof parsed.token === "string" && parsed.token.trim()) found.push(provider);
     } catch {
@@ -323,7 +327,7 @@ async function connectedLocalProviders(): Promise<string[]> {
 async function anyConnectedProviderToken(): Promise<string | null> {
   for (const provider of LOCAL_PROVIDER_NAMES) {
     try {
-      const raw = await readFile(resolve(repositoryRoot, ".oathlock", "agents", provider, "local.json"), "utf8");
+      const raw = await readFile(resolve(repositoryRoot, ".m9r", "agents", provider, "local.json"), "utf8");
       const parsed = JSON.parse(raw) as { token?: string };
       if (typeof parsed.token === "string" && parsed.token.trim()) return parsed.token.trim();
     } catch {
@@ -333,8 +337,8 @@ async function anyConnectedProviderToken(): Promise<string | null> {
   return null;
 }
 
-const reconnectMarkerPath = resolve(repositoryRoot, ".oathlock", "reconnect-handled.json");
-const appUrl = (process.env.OATHLOCK_API_URL ?? "https://m9r.dev").replace(/\/+$/, "");
+const reconnectMarkerPath = resolve(repositoryRoot, ".m9r", "reconnect-handled.json");
+const appUrl = (process.env.M9R_API_URL ?? "https://m9r.dev").replace(/\/+$/, "");
 
 /**
  * Poll target for a dashboard "reconnect my agents" click. This is the piece
@@ -403,7 +407,7 @@ async function checkReconnectRequest(): Promise<void> {
  * and covers the case that actually matters (build output and dependency
  * trees, not a project's own bespoke ignore rules).
  */
-const FILE_WATCH_IGNORE_SEGMENTS = new Set([".git", "node_modules", ".next", ".oathlock", "dist", "cli"]);
+const FILE_WATCH_IGNORE_SEGMENTS = new Set([".git", "node_modules", ".next", ".m9r", "dist", "cli"]);
 function isIgnoredWatchPath(absolutePath: string): boolean {
   const rel = relative(repositoryRoot, absolutePath);
   return rel.split(sep).some((segment) => FILE_WATCH_IGNORE_SEGMENTS.has(segment));
@@ -506,7 +510,7 @@ const missionBridgeRunnerArgs = isCompiledTerminalBridge
 // ever learn why one provider stopped responding while another kept
 // working. Route each child's own stdout/stderr into its own append-only
 // log file instead -- still headless, but now actually diagnosable.
-const missionBridgeLogDir = resolve(repositoryRoot, ".oathlock", "runtime", "mission-bridge-logs");
+const missionBridgeLogDir = resolve(repositoryRoot, ".m9r", "runtime", "mission-bridge-logs");
 async function startMissionBridgeChildren(): Promise<void> {
   const connectedProviders = await connectedLocalProviders();
   await mkdir(missionBridgeLogDir, { recursive: true }).catch(() => {});
@@ -520,7 +524,7 @@ async function startMissionBridgeChildren(): Promise<void> {
         cwd: repositoryRoot,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
-        env: { ...process.env, OATHLOCK_LOCAL_MISSION_BRIDGE_PROVIDER: provider },
+        env: { ...process.env, M9R_LOCAL_MISSION_BRIDGE_PROVIDER: provider },
       });
       const timestampPrefix = () => `[${new Date().toISOString()}] `;
       child.stdout?.on("data", (chunk: Buffer) => logStream.write(`${timestampPrefix()}${chunk}`));

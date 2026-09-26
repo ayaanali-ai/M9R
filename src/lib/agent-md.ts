@@ -43,18 +43,18 @@ workspace is already connected, reuse the existing connection.
 
 **First, check whether the workspace is already connected:**
 
-1. Check whether \`.oathlock/local.json\` exists in the repo.
+1. Check whether \`.m9r/local.json\` exists in the repo.
 2. **If it exists**, run \`npx m9r-cli doctor\`.
    - If doctor passes, the workspace is already connected — **do not run init**.
      Pull dashboard instructions with \`npx --yes m9r-cli@latest inbox\`, then
      run \`npx m9r-cli rules\`.
    - If doctor fails (no token / unauthorized), run \`npx m9r-cli init\` to
      reconnect.
-3. **If \`.oathlock/local.json\` does not exist**, this is first-time setup — run
+3. **If \`.m9r/local.json\` does not exist**, this is first-time setup — run
    \`npx m9r-cli init\`.
 
 \`\`\`bash
-# First-time setup (no .oathlock/local.json yet):
+# First-time setup (no .m9r/local.json yet):
 npx m9r-cli init                                  # connect this workspace (one-time)
 
 # Connect multiple installed provider CLIs from one shell:
@@ -98,9 +98,9 @@ What the commands do:
 - \`npx m9r-cli connect --agents <kind,kind,...>\` groups new provider claims
   into one approval page. The page is one human decision, while each provider
   still receives a separate scoped token and polls its own setup code.
-- On approval the token is written **once** to \`.oathlock/local.json\` in the
+- On approval the token is written **once** to \`.m9r/local.json\` in the
   workspace. This file holds your local token — **do not commit it**. Add
-  \`.oathlock/\` to \`.gitignore\` (the CLI never prints the full token, only a
+  \`.m9r/\` to \`.gitignore\` (the CLI never prints the full token, only a
   masked preview).
 - \`npx m9r-cli doctor\` confirms the token is present and the API is reachable.
 - \`npx m9r-cli rules\` fetches the active rules. On the **first run there are
@@ -125,14 +125,14 @@ while they are loaded. The baseline run itself has no rules to score yet.
    - \`CLAUDE.md\`
    - \`AGENTS.md\`
    - \`.cursor/rules\`
-4. Check whether \`.oathlock/local.json\` already exists.
+4. Check whether \`.m9r/local.json\` already exists.
    - If it exists, run \`npx m9r-cli doctor\`. If it passes, the workspace is
      already connected — **skip init** and continue at step 8.
    - If it does not exist (or doctor fails), continue to step 5 to connect.
 5. Run \`npx m9r-cli init\` to request a claim and connect (one-time setup).
 6. Give the claim URL to the human and ask them to open and approve it.
 7. Wait for human approval — \`init\` polls until the human approves. The scoped
-   token is saved once to \`.oathlock/local.json\` (do not commit it).
+   token is saved once to \`.m9r/local.json\` (do not commit it).
 8. Run \`npx m9r-cli run start --task "<short task title>"\` so the human can see
    this run in their dashboard. (Telemetry only — never source or secrets.)
 9. Run \`npx m9r-cli rules\` to fetch active rules.
@@ -192,7 +192,7 @@ curl -sS '${base}/api/agent/claim-status?claim_id=CLAIM_ID&setup_code=<SETUP_COD
 - \`{"status":"pending"}\` — keep waiting.
 - \`{"status":"approved", ...}\` — the response carries the scoped token and
   scopes. The raw token is returned **once**; subsequent polls will not return it
-  again. Store it like the CLI does — in \`.oathlock/local.json\`, never committed.
+  again. Store it like the CLI does — in \`.m9r/local.json\`, never committed.
 - \`{"status":"rejected"}\` or \`{"status":"expired"}\` — request a new claim.
 
 ### 3. Fetch active rules

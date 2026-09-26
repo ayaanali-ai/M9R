@@ -67,7 +67,7 @@ test("redactRunEvent strips claim URLs and setup codes", () => {
 });
 
 test("redactRunEvent strips references to the local token file", () => {
-  const out = redactRunEvent("read token from .oathlock/local.json");
+  const out = redactRunEvent("read token from .m9r/local.json");
   assert.ok(!/local\.json/.test(out));
 });
 

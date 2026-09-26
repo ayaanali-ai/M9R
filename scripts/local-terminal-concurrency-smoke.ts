@@ -1,7 +1,7 @@
 import process from "node:process";
 import * as pty from "node-pty";
 
-const markers = ["OATHLOCK_CLAUDE_PTY", "OATHLOCK_CODEX_PTY"] as const;
+const markers = ["M9R_CLAUDE_PTY", "M9R_CODEX_PTY"] as const;
 
 function spawnMarker(marker: string) {
   const command = process.platform === "win32" ? "powershell.exe" : "/bin/sh";

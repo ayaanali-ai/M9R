@@ -35,7 +35,7 @@ function matchesScope(path: string, scope: string): boolean {
 export function worktreeSpecForGrant(repositoryRoot: string, value: unknown): { worktreeRoot: string; branch: string } {
   grantId(value);
   const safe = value.replace(/[^a-zA-Z0-9._-]/g, "-");
-  return { worktreeRoot: resolve(repositoryRoot, "..", ".oathlock-worktrees", value), branch: `oathlock/${safe}` };
+  return { worktreeRoot: resolve(repositoryRoot, "..", ".m9r-worktrees", value), branch: `oathlock/${safe}` };
 }
 
 type GitExecutor = (file: string, args: string[], cwd: string) => Promise<{ stdout: string; stderr: string }>;
@@ -122,7 +122,7 @@ export function validateWriteIsolation(input: {
   if (input.diffReviewState !== "pending") return { ok: false, reason: "diff_review_not_pending" };
   const repositoryRoot = resolve(input.repositoryRoot);
   const worktreeRoot = resolve(input.worktreeRoot);
-  const worktreeParent = resolve(repositoryRoot, "..", ".oathlock-worktrees");
+  const worktreeParent = resolve(repositoryRoot, "..", ".m9r-worktrees");
   if (!inside(worktreeParent, worktreeRoot)) return { ok: false, reason: "worktree_outside_isolation_root" };
   if (!worktreeRoot.endsWith(input.grantId)) return { ok: false, reason: "worktree_not_bound_to_grant" };
   return { ok: true, reason: null };

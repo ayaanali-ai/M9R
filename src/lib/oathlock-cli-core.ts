@@ -51,21 +51,15 @@ import {
 import { HEARTBEAT_PROTOCOL_VERSION } from "@/lib/agent-heartbeat";
 import { printNativeStatus, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
 import { runMemory } from "@/lib/native/memory-command";
+import { m9rEnvironmentValue, normalizeLegacyM9rEnvironment } from "@/lib/native/m9r-compatibility";
 
 /** Actions this CLI currently implements. */
 const CLI_IMPLEMENTED_ACTIONS = ["heartbeat", "rules_read", "inbox_read", "assignment_lifecycle", "run_lifecycle", "work_signal_emit", "work_signal_replay", "work_signal_ack", "evidence_submit", "token_rotation"];
 
 export const DEFAULT_API_URL = "https://m9r.dev";
-// NOT renamed to ".m9r" -- confirmed live against a real connected repo that
-// the actual persisted directory on disk is still ".oathlock" (real token,
-// config.json, run.json all present there). The master plan explicitly
-// scopes the directory/CLI-binary rename as a separate, riskier project not
-// yet started -- this constant briefly said ".m9r" anyway (unclear origin,
-// possibly an earlier pass in this same repo), which silently broke every
-// already-connected repo's CLI: `m9r doctor` reported "no token" against a
-// repo that has a real one, because it was looking in a directory that was
-// never actually created. Reverted to match reality, not the aspiration.
-export const M9R_DIR = ".oathlock";
+// New state is written to .m9r. The CLI entrypoint copies a pre-existing
+// .oathlock tree here without deleting or overwriting either tree.
+export const M9R_DIR = ".m9r";
 
 /** Non-secret defaults used when registering a workspace connection. */
 const DEFAULT_RULE_TARGETS = ["CLAUDE.md", "AGENTS.md", ".cursor/rules"];
@@ -116,9 +110,9 @@ export interface CliDeps {
 // Small helpers (pure)
 // ---------------------------------------------------------------------------
 
-/** Resolve the API base URL: OATHLOCK_API_URL overrides the public default. */
+/** Resolve the API base URL: M9R_API_URL overrides the public default. */
 export function apiBase(env: Record<string, string | undefined>): string {
-  const raw = (env.OATHLOCK_API_URL || "").trim();
+  const raw = (m9rEnvironmentValue(env, "M9R_API_URL") || "").trim();
   return (raw || DEFAULT_API_URL).replace(/\/+$/, "");
 }
 
@@ -198,7 +192,7 @@ export function resolveAgentKind(
   env: Record<string, string | undefined>,
 ): { kind?: string; error?: string } {
   const detected = env.CODEX_HOME || env.CODEX_THREAD_ID ? "codex" : env.CLAUDE_CODE || env.CLAUDECODE ? "claude-code" : env.GROK_BUILD || env.GROK_CLI ? "grok-build" : undefined;
-  const requested = (explicit ?? env.OATHLOCK_AGENT_KIND)?.trim().toLowerCase();
+  const requested = (explicit ?? m9rEnvironmentValue(env, "M9R_AGENT_KIND"))?.trim().toLowerCase();
   if (detected && requested && detected !== requested) {
     return { error: `Agent identity mismatch: this runtime identifies as ${detected}, not ${requested}. Connect Codex from Codex and Claude Code from Claude Code.` };
   }
@@ -452,7 +446,7 @@ export function extractLoadedRules(saved: unknown): Array<Record<string, unknown
 }
 
 /**
- * Read `.oathlock/rules.json` (written by `m9r-cli rules`) and return the saved
+ * Read `.m9r/rules.json` (written by `m9r-cli rules`) and return the saved
  * rules. Missing/invalid/empty file → []. Never throws.
  */
 async function readSavedRules(deps: CliDeps): Promise<Array<Record<string, unknown>>> {
@@ -866,7 +860,7 @@ async function resolveBootstrapKind(
 /**
  * Installs whichever provider-specific capture artifact makes a locally-
  * launched (not M9R-bridge-spawned) session of this agent kind flow into
- * `.oathlock/memory/local/<kind>/` -- see cross-agent-capture-core.ts for
+ * `.m9r/memory/local/<kind>/` -- see cross-agent-capture-core.ts for
  * the drain side and cross-agent-capture-setup-core.ts for what's written.
  * A no-op, honestly, for any kind other than the three with a real,
  * verified per-repo hook/plugin mechanism (item #35's research). Never
@@ -951,7 +945,7 @@ async function uninstallCrossAgentCapture(deps: CliDeps): Promise<number> {
   else {
     deps.out("Removed M9R session capture:");
     for (const item of removed) deps.out(`  ${item}`);
-    deps.out("Already-captured memory under .oathlock/memory is left in place; delete it yourself if you want it gone.");
+    deps.out("Already-captured memory under .m9r/memory is left in place; delete it yourself if you want it gone.");
   }
   return 0;
 }
@@ -1206,7 +1200,7 @@ async function connectOneAgent(
   }
 
   const base = apiBase(deps.env);
-  const repoHint = parsed.repo || deps.env.OATHLOCK_REPO_HINT || basename(deps.cwd) || "workspace";
+  const repoHint = parsed.repo || deps.env.M9R_REPO_HINT || basename(deps.cwd) || "workspace";
 
   deps.out(`M9R init — API ${base}`);
 
@@ -1283,13 +1277,13 @@ async function connectOneAgent(
       const token = typeof poll.json.token === "string" ? poll.json.token : "";
       if (!token) {
         deps.err(
-          "init failed: approved, but the token was already retrieved. Delete .oathlock and run init again.",
+          "init failed: approved, but the token was already retrieved. Delete .m9r and run init again.",
         );
         return 1;
       }
       const scopes = Array.isArray(poll.json.scopes) ? (poll.json.scopes as string[]) : [];
 
-      // Self-ignoring directory: `.oathlock/.gitignore` ignores everything inside, so the plaintext
+      // Self-ignoring directory: `.m9r/.gitignore` ignores everything inside, so the plaintext
       // token can never be committed even if the repo's own .gitignore says nothing about it.
       await ensureSelfIgnoredDir(deps);
 
@@ -1433,7 +1427,7 @@ async function cmdConnect(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
 
   if (pendingKinds.length > 0) {
     const base = apiBase(deps.env);
-    const repoHint = parsed.repo || deps.env.OATHLOCK_REPO_HINT || basename(deps.cwd) || "workspace";
+    const repoHint = parsed.repo || deps.env.M9R_REPO_HINT || basename(deps.cwd) || "workspace";
     const registerBodies = pendingKinds.map((agentKind) => ({
       agent_kind: agentKind,
       repo_hint: repoHint,
@@ -1796,7 +1790,7 @@ async function cmdRunStart(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
     }
   }
 
-  const repoHint = parsed.repo || deps.env.OATHLOCK_REPO_HINT || basename(deps.cwd) || "workspace";
+  const repoHint = parsed.repo || deps.env.M9R_REPO_HINT || basename(deps.cwd) || "workspace";
   const runMode = parsed.mode ?? "solo";
   if (runMode !== "solo" && runMode !== "coordinated" && runMode !== "assurance" && runMode !== "collaborative") {
     deps.err("run start failed: --mode must be solo, coordinated, assurance, or collaborative.");
@@ -2582,7 +2576,7 @@ async function cmdSignalEmit(deps: CliDeps, parsed: ParsedArgs): Promise<number>
   }
   const run = await readRun(deps);
   const { adapterInstanceId, clientSequence } = await nextAdapterSequence(deps);
-  const repo = parsed.repo || deps.env.OATHLOCK_REPO_HINT || basename(deps.cwd) || "workspace";
+  const repo = parsed.repo || deps.env.M9R_REPO_HINT || basename(deps.cwd) || "workspace";
   const scope = parsed.scope ? parsed.scope.split(",").map((s) => s.trim()).filter(Boolean) : [];
 
   const res = await apiFetch(deps, `${base}/api/agent/signals`, {
@@ -2894,7 +2888,7 @@ async function cmdSubmitSession(deps: CliDeps, parsed: ParsedArgs): Promise<numb
   // violated — observed evidence is the source of truth, not the agent's claim.
   const rulesLoaded = await readSavedRules(deps);
 
-  // Debug-safe signal: shows whether .oathlock/rules.json was picked up. Prints
+  // Debug-safe signal: shows whether .m9r/rules.json was picked up. Prints
   // only a count — never tokens, never file/session contents.
   deps.out(`loaded rules: ${rulesLoaded.length}`);
 
@@ -3370,7 +3364,7 @@ workflow (AGENTS.md for Codex/Grok Build, CLAUDE.md for Claude Code) so
 supported agents use M9R during normal tasks without
 "use M9R" in every prompt. M9R does not intercept arbitrary external
 agent sessions — automatic behavior depends on the agent reading those repo
-instructions. A returning workspace (where .oathlock/local.json already has a
+instructions. A returning workspace (where .m9r/local.json already has a
 token) should use doctor then rules.
 
 In every governed task, agents prepare a redacted M9R Evidence Draft automatically;
@@ -3379,15 +3373,15 @@ Every agent run: doctor → run start → inbox → rules → (work) → evidenc
 run telemetry is status-only; it never uploads source code or secrets.
 
 Environment:
-  OATHLOCK_API_URL   API base (default ${DEFAULT_API_URL}; use http://localhost:3000 for local dev)
+  M9R_API_URL   API base (default ${DEFAULT_API_URL}; use http://localhost:3000 for local dev)
   --agent-kind <kind>  Claim identity: any lowercase provider slug (for example codex, gemini-cli, aider)
   --agents <list>      connect: comma-separated kinds to connect instead of auto-detecting
   --adapter-command <cmd>  Local command for a non-bundled provider adapter
   --adapter-args <json>    JSON argv array for that provider command
   --adapter-protocol       acp-stdio (default) or oathlock-json-stdio for resident one-shot grants
   --adapter-shell           Resolve the adapter command through the local shell
-  OATHLOCK_AGENT_KIND  Agent-kind fallback when --agent-kind is omitted
-  OATHLOCK_REPO_HINT   Override repo hint for init`;
+  M9R_AGENT_KIND  Agent-kind fallback when --agent-kind is omitted
+  M9R_REPO_HINT   Override repo hint for init`;
 
 /** Adapts the CLI's dependencies for the native front-door commands; undefined without a home directory (tests). */
 function nativeIo(deps: CliDeps): NativeIo {
@@ -3397,6 +3391,9 @@ function nativeIo(deps: CliDeps): NativeIo {
 
 /** Run the CLI. Returns a process exit code. */
 export async function run(argv: string[], deps: CliDeps): Promise<number> {
+  const compatibleEnv = { ...deps.env };
+  normalizeLegacyM9rEnvironment(compatibleEnv);
+  deps = { ...deps, env: compatibleEnv };
   const [command, ...rest] = argv;
   const parsed = parseArgs(rest);
 

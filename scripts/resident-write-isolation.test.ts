@@ -6,7 +6,7 @@ import { buildBoundedDiffManifest, canEnableWriteMode, createGrantWorktree, merg
 test("write launch requires a distinct isolated worktree and pending diff review", () => {
   const result = validateWriteIsolation({
     repositoryRoot: "C:/repos/app",
-    worktreeRoot: "C:/repos/.oathlock-worktrees/grant-12345678",
+    worktreeRoot: "C:/repos/.m9r-worktrees/grant-12345678",
     grantId: "grant-12345678",
     diffReviewState: "pending",
   });
@@ -15,7 +15,7 @@ test("write launch requires a distinct isolated worktree and pending diff review
 
 test("a grant gets a deterministic isolated worktree and branch", () => {
   const spec = worktreeSpecForGrant("C:/repos/app", "grant-12345678");
-  assert.equal(spec.worktreeRoot.replaceAll("\\", "/"), "C:/repos/.oathlock-worktrees/grant-12345678");
+  assert.equal(spec.worktreeRoot.replaceAll("\\", "/"), "C:/repos/.m9r-worktrees/grant-12345678");
   assert.equal(spec.branch, "oathlock/grant-12345678");
 });
 
@@ -61,7 +61,7 @@ test("write mode requires an approved matching manifest with no scope violations
 test("write launch rejects shared roots, unscoped worktrees, and non-reviewable states", () => {
   assert.equal(validateWriteIsolation({ repositoryRoot: "C:/repos/app", worktreeRoot: "C:/repos/app", grantId: "grant-12345678", diffReviewState: "pending" }).ok, false);
   assert.equal(validateWriteIsolation({ repositoryRoot: "C:/repos/app", worktreeRoot: "C:/tmp/worktree", grantId: "grant-12345678", diffReviewState: "pending" }).ok, false);
-  assert.equal(validateWriteIsolation({ repositoryRoot: "C:/repos/app", worktreeRoot: "C:/repos/.oathlock-worktrees/grant-12345678", grantId: "grant-12345678", diffReviewState: "approved" }).ok, false);
+  assert.equal(validateWriteIsolation({ repositoryRoot: "C:/repos/app", worktreeRoot: "C:/repos/.m9r-worktrees/grant-12345678", grantId: "grant-12345678", diffReviewState: "approved" }).ok, false);
 });
 
 test("worktreeHeadCommit reads HEAD from inside the worktree, not the real repository", async () => {
@@ -98,12 +98,12 @@ test("removeGrantWorktree, quarantineGrantWorktree, and mergeGrantWorktree invok
   const calls: Array<{ args: string[]; cwd: string }> = [];
   const executor = async (file: string, args: string[], cwd: string) => { calls.push({ args, cwd }); return { stdout: "", stderr: "" }; };
 
-  await removeGrantWorktree("C:/repos/app", "C:/repos/.oathlock-worktrees/grant-12345678", executor);
-  assert.deepEqual(calls[0]?.args, ["worktree", "remove", "--force", "C:/repos/.oathlock-worktrees/grant-12345678"]);
+  await removeGrantWorktree("C:/repos/app", "C:/repos/.m9r-worktrees/grant-12345678", executor);
+  assert.deepEqual(calls[0]?.args, ["worktree", "remove", "--force", "C:/repos/.m9r-worktrees/grant-12345678"]);
 
-  const quarantinedPath = await quarantineGrantWorktree("C:/repos/app", "C:/repos/.oathlock-worktrees/grant-12345678", executor);
-  assert.deepEqual(calls[1]?.args, ["worktree", "move", "C:/repos/.oathlock-worktrees/grant-12345678", quarantinedPath]);
-  assert.ok(quarantinedPath.startsWith("C:/repos/.oathlock-worktrees/grant-12345678.quarantined-"));
+  const quarantinedPath = await quarantineGrantWorktree("C:/repos/app", "C:/repos/.m9r-worktrees/grant-12345678", executor);
+  assert.deepEqual(calls[1]?.args, ["worktree", "move", "C:/repos/.m9r-worktrees/grant-12345678", quarantinedPath]);
+  assert.ok(quarantinedPath.startsWith("C:/repos/.m9r-worktrees/grant-12345678.quarantined-"));
 
   await mergeGrantWorktree("C:/repos/app", "oathlock/grant-12345678", executor);
   assert.deepEqual(calls[2]?.args, ["merge", "--ff-only", "oathlock/grant-12345678"]);

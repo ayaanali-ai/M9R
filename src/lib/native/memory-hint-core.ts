@@ -1,9 +1,9 @@
 /**
  * C1 item 4: a relevant-memory hint for the UserPromptSubmit hook. Matches the prompt against the local memory index
- * (`.oathlock/memory/index.md`, one line per session) and returns at most two one-line pointers, only on a real match.
+ * (`.m9r/memory/index.md`, one line per session) and returns at most two one-line pointers, only on a real match.
  * No match means no output, so an ordinary prompt costs no tokens. Pure: the hook reads the file and passes the text in.
  */
-export const MEMORY_DIR = ".oathlock/memory";
+export const MEMORY_DIR = ".m9r/memory";
 export const MAX_HINTS = 2;
 const MAX_HINT_CHARS = 260;
 const MIN_SCORE = 3;

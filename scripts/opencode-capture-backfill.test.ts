@@ -51,7 +51,7 @@ test("backfill queues a persisted OpenCode session after the process is gone, th
 
     const drained = await drainCaptureSpool({ repositoryRoot: dir, readTranscript: async () => "" });
     assert.deepEqual(drained, { drained: 1, failed: 0 });
-    const memory = await readFile(join(dir, ".oathlock", "memory", "local", "opencode", `${sessionId}.md`), "utf8");
+    const memory = await readFile(join(dir, ".m9r", "memory", "local", "opencode", `${sessionId}.md`), "utf8");
     assert.match(memory, /recover this after the process died/);
   } finally {
     await rm(dir, { recursive: true, force: true });

@@ -1,4 +1,4 @@
-// Live check of the Relay presence lease (manual; takes ~2 minutes; uses the token in .oathlock/agents/codex/local.json).
+// Live check of the Relay presence lease (manual; takes ~2 minutes; uses the token in .m9r/agents/codex/local.json).
 //   node --disable-warning=ExperimentalWarning scripts/stage1-relay-lease-live.ts
 // PASS: a Bridge that stops heartbeating is closed with 4009 after 90-120 s; one that keeps heartbeating, and a socket that never
 // heartbeated (like a browser tab), stay connected. It opens 3 short-lived sockets; nothing is written except a heartbeat.
@@ -7,7 +7,7 @@ import { WebSocket } from "ws";
 
 const RELAY = "m9r-relay.m9r.workers.dev";
 const WEB = "https://m9r.dev";
-const token = JSON.parse(readFileSync(".oathlock/agents/codex/local.json", "utf8")).token as string;
+const token = JSON.parse(readFileSync(".m9r/agents/codex/local.json", "utf8")).token as string;
 const who = await fetch(`${WEB}/api/agent/whoami`, { headers: { authorization: `Bearer ${token}` } }).then((r) => r.json()) as { workspaceId: string };
 const WS_ID = who.workspaceId;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
