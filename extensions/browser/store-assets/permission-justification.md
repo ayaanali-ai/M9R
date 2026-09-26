@@ -1,12 +1,14 @@
-# Store permission justifications — draft
+# Store permission justifications
 
-| Permission | User-facing need in the current code | Scope and caveat |
+| Permission or access | What it is used for in the code | Scope and caveat |
 |---|---|---|
-| `tabs` | Find the active tab for the owner's permission flow, retain M9R-managed tab IDs, create/update managed tabs, and verify current URLs/origins. | Tab metadata is sensitive. The owner popup also identifies the active tab; recheck whether this permission can be narrowed. |
-| `storage` | Keep M9R-managed tab-name-to-tab-ID mappings across service-worker restarts and persist the owner's message-preview visibility choices. | Tab mappings use `chrome.storage.session`; preview-hidden session IDs use `chrome.storage.local`. Neither stores page text or field values. |
-| `scripting` | Inject packaged presence and page-action functions into a tab after site access is granted. | The extension ships the code; no remote executable code is fetched. |
-| `alarms` | Wake the service worker periodically to reconnect/ping the local M9R broker. | Used for connection maintenance, not user tracking. |
-| Required `http://127.0.0.1/*`, `http://localhost/*` host access | Connect the extension to the local broker at `ws://127.0.0.1:47821/ext`. | Verify Chrome's exact permission warning and WebSocket matching on the release build. It is not permission to read arbitrary localhost page content by itself. |
-| Optional `http://*/*`, `https://*/*` host access | Allow M9R to request one chosen site origin after the owner initiates/approves a site grant. | Broad patterns are declared as optional only; runtime requests must stay origin-specific. Chrome permission is origin-wide; M9R applies its own path/action/expiry checks. |
+| `tabs` | Read the current site of a tab to enforce which sites the owner allowed; find the active tab; create and update M9R-managed tabs; open the one-time microphone setup page. | Tab URLs are sensitive; they are used only for site checks and never stored. |
+| `scripting` | Inject the extension's own packaged overlay and page-action code into sites the owner has allowed. | No remote code is fetched or evaluated; all injected files ship in the package. |
+| `alarms` | Wake the service worker periodically to keep the connection to the local M9R app alive. | Connection maintenance only. |
+| `storage` | Keep named-tab mappings across service-worker restarts, the pill's position and open state, the motion preference, hidden message previews, whether the all-sites question was asked, and a short local log of Alt+M / Alt+N presses for troubleshooting. | No page text, form values or browsing history; the key log holds no typed text and can be cleared. |
+| Required `http://127.0.0.1/*`, `http://localhost/*` | Connect to the local M9R app at `ws://127.0.0.1:47821` and show the overlay on the owner's own local pages. | Loopback only; not access to other sites. |
+| Optional `http://*/*`, `https://*/*` | Requested at runtime, for a site the owner chose (or all sites if the owner explicitly clicks Allow all websites for agent research). | Never granted at install. Chrome's grant is per site; M9R also limits each approved grant by action, path and time. |
+| `web_accessible_resources`: `pill.html`, `composer.html`, `assets/providers/*.svg` (http/https pages) | The thread pill and the message bar are extension pages shown in a frame on the page, so a website's own scripts cannot read what the owner types. The provider badges are the small agent icons on cursors. | Only these three resources are exposed; no scripts, no other pages. The frames accept commands only with a per-tab secret that the extension's own content script registers. |
+| Microphone (web API, not a manifest permission) | Push-to-talk while Alt+M is held, in the message bar's frame; turned on once from an extension page. | Speech is recognised by Chrome's speech service; the extension never receives or stores audio. |
 
-Not requested: cookies, history, debugger, downloads, or all-sites access as a required install permission. Recheck this table against the packed manifest and every API call immediately before submission.
+Not requested: cookies, history, debugger, downloads, native messaging, `activeTab`, or access to all sites at install. No remote code is loaded. Recheck this table against the packed manifest and the code immediately before every submission.

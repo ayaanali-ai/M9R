@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import test from "node:test";
 import os from "node:os";
 import path from "node:path";
-import { buildStorePackage, validateStoreManifest } from "./build-browser-store-package.mjs";
+import { buildStorePackage, validateStoreManifest, verifyPackageComplete } from "./build-browser-store-package.mjs";
 import { stageScreenshots } from "./stage-browser-store-screenshots.mjs";
 
 function zipFiles(bytes) {
@@ -114,7 +114,7 @@ test("store manifest requests no ordinary-site permission at install and injects
   assert.deepEqual(manifest.optional_host_permissions, ["http://*/*", "https://*/*"]);
   assert.equal("content_scripts" in manifest, false);
   assert.deepEqual(manifest.permissions, ["tabs", "scripting", "alarms", "storage"]);
-  assert.deepEqual(manifest.web_accessible_resources, [{ resources: ["assets/providers/*.svg"], matches: ["http://*/*", "https://*/*"] }]);
+  assert.deepEqual(manifest.web_accessible_resources, [{ resources: ["assets/providers/*.svg", "composer.html", "pill.html"], matches: ["http://*/*", "https://*/*"] }]);
   assert.ok(manifest.description.length <= 132);
 });
 
@@ -127,6 +127,10 @@ test("store manifest guard rejects broad install permissions, extra APIs, and pa
     (manifest) => { manifest.host_permissions.push("https://*/*"); },
     (manifest) => { manifest.content_scripts = [{ matches: ["<all_urls>"], js: ["src/content.js"] }]; },
     (manifest) => { manifest.web_accessible_resources[0].resources.push("src/*.js"); },
+    (manifest) => { manifest.web_accessible_resources[0].resources.push("permission.html"); },
+    (manifest) => { manifest.web_accessible_resources[0].matches = ["<all_urls>"]; },
+    (manifest) => { manifest.web_accessible_resources[0].use_dynamic_url = true; },
+    (manifest) => { manifest.web_accessible_resources[0].resources = manifest.web_accessible_resources[0].resources.filter((r) => r !== "pill.html"); },
     (manifest) => { manifest.externally_connectable = { matches: ["<all_urls>"] }; },
   ]) {
     const changed = structuredClone(baseline);
@@ -140,4 +144,34 @@ test("the owner grant UI prominently discloses what may be sent before site cons
   assert.match(page, /page text, URLs, and action data/i);
   assert.match(page, /may be sent to the selected agent\/provider and authorized M9R collaborators/i);
   assert.match(page, /No page data is sent merely by granting browser permission/i);
+});
+
+test("the store package ships the pill, the message bar, their styles and the M9R mark, and everything it refers to is inside it", async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), "m9r-store-complete-"));
+  try {
+    await buildStorePackage(path.join(temp, "candidate.zip"));
+    const files = zipFiles(await readFile(path.join(temp, "candidate.zip")));
+    for (const name of ["pill.html", "composer.html", "frame.css", "permission.html", "assets/m9r-mark.png", "src/composer.js", "src/pill.js", "src/frame-common.js", "src/mention-logic.js", "src/dock-logic.js"]) {
+      assert.ok(files.has(name), `${name} is in the package`);
+    }
+    assert.equal(verifyPackageComplete(files), true);
+    const broken = new Map(files);
+    broken.delete("frame.css");
+    assert.throws(() => verifyPackageComplete(broken), /missing files it refers to[\s\S]*frame\.css/);
+    const noMark = new Map(files);
+    noMark.delete("assets/m9r-mark.png");
+    assert.throws(() => verifyPackageComplete(noMark), /assets\/m9r-mark\.png/);
+    const noScript = new Map(files);
+    noScript.delete("src/composer.js");
+    assert.throws(() => verifyPackageComplete(noScript), /src\/composer\.js/);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("the store icon comes from M9R's own mark, is square, and is large enough for the 128px icon", async () => {
+  const sharp = (await import("sharp")).default;
+  const meta = await sharp(new URL("../extensions/browser/store-assets/icon-source.jpg", import.meta.url).pathname.replace(/^\/(\w:)/, "$1")).metadata();
+  assert.equal(meta.width, meta.height);
+  assert.ok(meta.width >= 128);
 });

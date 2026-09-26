@@ -247,8 +247,17 @@
 
   // ---- Content scripts on every site the owner has allowed (and nowhere else). ----
   let syncing = Promise.resolve();
+  // The development manifest injects on loopback pages with static content scripts, so those are left out here; the store build has
+  // no static scripts (they are not allowed there), so loopback pages are registered like any other allowed site.
+  function hasStaticInjection() {
+    try {
+      const manifest = chrome.runtime.getManifest && chrome.runtime.getManifest();
+      return manifest ? Array.isArray(manifest.content_scripts) && manifest.content_scripts.length > 0 : true;
+    } catch { return true; }
+  }
   function siteOrigins(origins) {
-    return (origins || []).filter((o) => /^https?:\/\//.test(o) && !LOCAL_ORIGINS.includes(o)).sort();
+    const skipLocal = hasStaticInjection();
+    return (origins || []).filter((o) => /^https?:\/\//.test(o) && !(skipLocal && LOCAL_ORIGINS.includes(o))).sort();
   }
 
   function syncSiteScripts() {
@@ -261,7 +270,7 @@
         if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [SITE_SCRIPT_ID] });
         return;
       }
-      const script = { id: SITE_SCRIPT_ID, matches, excludeMatches: LOCAL_ORIGINS, js: CONTENT_JS, runAt: "document_idle", allFrames: false, persistAcrossSessions: true };
+      const script = { id: SITE_SCRIPT_ID, matches, ...(hasStaticInjection() ? { excludeMatches: LOCAL_ORIGINS } : {}), js: CONTENT_JS, runAt: "document_idle", allFrames: false, persistAcrossSessions: true };
       if (existing.length) await chrome.scripting.updateContentScripts([script]);
       else await chrome.scripting.registerContentScripts([script]);
     });

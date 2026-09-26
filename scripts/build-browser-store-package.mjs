@@ -7,7 +7,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const browserRoot = path.join(repoRoot, "extensions", "browser");
 const templatePath = path.join(browserRoot, "store-assets", "manifest.template.json");
-const iconSource = path.join(repoRoot, "public", "star-logo.png");
+const iconSource = path.join(browserRoot, "store-assets", "icon-source.jpg");
 const ZIP_EPOCH = new Date(Date.UTC(1980, 0, 1, 0, 0, 0));
 
 function crc32(buffer) {
@@ -102,12 +102,64 @@ export function validateStoreManifest(manifest) {
   if (JSON.stringify(manifest.permissions) !== JSON.stringify(["tabs", "scripting", "alarms", "storage"])) fail("permissions must remain the reviewed minimum set");
   if (JSON.stringify(manifest.host_permissions) !== JSON.stringify(["http://127.0.0.1/*", "http://localhost/*"])) fail("required host access must remain loopback-only");
   if (JSON.stringify(manifest.optional_host_permissions) !== JSON.stringify(["http://*/*", "https://*/*"])) fail("site access must remain optional and limited to HTTP/HTTPS origins");
-  if (JSON.stringify(manifest.web_accessible_resources) !== JSON.stringify([{
-    resources: ["assets/providers/*.svg"],
-    matches: ["http://*/*", "https://*/*"],
-  }])) fail("only static provider badge SVGs may be web-accessible");
+  // The overlay embeds the thread pill and the message bar as extension frames inside pages (so a page's scripts cannot read what the
+  // owner types), which requires exactly those two pages, plus the static provider badges, to be web-accessible. Nothing else may be.
+  const war = manifest.web_accessible_resources;
+  const expectedResources = ["assets/providers/*.svg", "composer.html", "pill.html"];
+  if (!Array.isArray(war) || war.length !== 1
+    || JSON.stringify([...(war[0].resources ?? [])].sort()) !== JSON.stringify(expectedResources)
+    || JSON.stringify(war[0].matches) !== JSON.stringify(["http://*/*", "https://*/*"])
+    || Object.keys(war[0]).some((key) => !["resources", "matches"].includes(key))) {
+    // use_dynamic_url is deliberately not allowed: it changes the frames' origin, and the service worker's own-frame check would then refuse every owner command.
+    fail("only the pill and message-bar frames and the static provider badge SVGs may be web-accessible");
+  }
   if (manifest.background?.service_worker !== "src/background.js") fail("unexpected service worker entry point");
   if (manifest.action?.default_popup !== "permission.html") fail("unexpected action popup");
+  return true;
+}
+
+/**
+ * Every file the package refers to must be in the package: frame pages and their scripts and styles, the service worker's
+ * imports, the scripts it injects, the images the styles and overlay load, and the manifest's icons. A store build that
+ * silently lacks the pill or message bar is worse than no build, so this throws instead.
+ */
+export function verifyPackageComplete(files) {
+  const names = new Set(files.keys());
+  const text = (name) => files.get(name)?.toString("utf8") ?? "";
+  const missing = [];
+  const need = (from, ref) => {
+    const clean = String(ref).split(/[?#]/)[0];
+    if (!clean || /^(https?:|data:|chrome-extension:|\/\/)/.test(clean)) return;
+    const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(from), clean));
+    if (!names.has(resolved)) missing.push(`${from} -> ${resolved}`);
+  };
+  const matches = (source, pattern) => [...source.matchAll(pattern)].map((m) => m[1]);
+  for (const page of [...names].filter((name) => name.endsWith(".html"))) {
+    for (const ref of matches(text(page), /(?:src|href)=["']([^"']+)["']/g)) need(page, ref);
+  }
+  for (const sheet of [...names].filter((name) => name.endsWith(".css"))) {
+    for (const ref of matches(text(sheet), /url\(["']?([^"')]+)["']?\)/g)) need(sheet, ref);
+  }
+  for (const list of matches(text("src/background.js"), /importScripts\(([^)]*)\)/g)) {
+    for (const ref of matches(list, /"([^"]+)"/g)) need("src/background.js", ref);
+  }
+  for (const script of [...names].filter((name) => name.startsWith("src/") && name.endsWith(".js"))) {
+    for (const ref of matches(text(script), /"((?:src|assets)\/[\w.\-/]+\.(?:js|svg|png))"/g)) need("manifest.json", ref);
+  }
+  const manifest = JSON.parse(text("manifest.json"));
+  for (const ref of Object.values(manifest.icons ?? {})) need("manifest.json", ref);
+  for (const ref of Object.values(manifest.action?.default_icon ?? {})) need("manifest.json", ref);
+  need("manifest.json", manifest.background?.service_worker);
+  need("manifest.json", manifest.action?.default_popup);
+  for (const entry of manifest.web_accessible_resources ?? []) {
+    for (const resource of entry.resources) {
+      if (resource.includes("*")) {
+        const prefix = resource.slice(0, resource.indexOf("*"));
+        if (![...names].some((name) => name.startsWith(prefix))) missing.push(`manifest.json -> ${resource} (matches nothing)`);
+      } else need("manifest.json", resource);
+    }
+  }
+  if (missing.length) throw new Error(`store package is missing files it refers to:\n  ${[...new Set(missing)].join("\n  ")}`);
   return true;
 }
 
@@ -129,7 +181,12 @@ export async function buildStorePackage(outputPath) {
     validateStoreManifest(template);
     const stage = path.join(tempRoot, "package");
     await mkdir(stage, { recursive: true });
-    await copyFile(path.join(browserRoot, "permission.html"), path.join(stage, "permission.html"));
+    // The pages and styles the overlay embeds as frames, and the M9R mark their styles mask onto.
+    for (const name of ["permission.html", "pill.html", "composer.html", "frame.css"]) {
+      await copyFile(path.join(browserRoot, name), path.join(stage, name));
+    }
+    await mkdir(path.join(stage, "assets"), { recursive: true });
+    await copyFile(path.join(browserRoot, "assets", "m9r-mark.png"), path.join(stage, "assets", "m9r-mark.png"));
     await mkdir(path.join(stage, "src"), { recursive: true });
     for (const entry of await walkFiles(path.join(browserRoot, "src"))) {
       const destination = path.join(stage, "src", entry.name);
@@ -147,13 +204,14 @@ export async function buildStorePackage(outputPath) {
     try { sharp = (await import("sharp")).default; }
     catch { throw new Error("The store package needs the repository's existing sharp image tooling; no dependency was installed."); }
     for (const size of [16, 32, 48, 128]) {
-      const icon = await sharp(iconSource).resize(size, size, { fit: "contain" }).png().toBuffer();
+      const icon = await sharp(iconSource).resize(size, size, { fit: "cover" }).png().toBuffer();
       await writeFile(path.join(iconsDir, `icon-${size}.png`), icon, { flag: "wx" });
     }
     template.icons = Object.fromEntries([16, 32, 48, 128].map((size) => [size, `icons/icon-${size}.png`]));
     template.action.default_icon = { 16: "icons/icon-16.png", 32: "icons/icon-32.png" };
     await writeFile(path.join(stage, "manifest.json"), `${JSON.stringify(template, null, 2)}\n`, { flag: "wx" });
     const files = (await walkFiles(stage)).sort((a, b) => compareNames(a.name, b.name));
+    verifyPackageComplete(new Map(files.map((file) => [file.name, file.data])));
     const archive = buildZip(files);
     await mkdir(path.dirname(output), { recursive: true });
     await writeFile(output, archive, { flag: "wx" });

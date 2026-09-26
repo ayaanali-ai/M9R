@@ -3,13 +3,31 @@
   "name": "M9R Web Presence",
   "version": "0.1.0",
   "description": "Connect your approved M9R agents to browser pages you choose.",
-  "permissions": ["tabs", "scripting", "alarms", "storage"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "permissions": [
+    "tabs",
+    "scripting",
+    "alarms",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
   "web_accessible_resources": [
     {
-      "resources": ["assets/providers/*.svg"],
-      "matches": ["http://*/*", "https://*/*"]
+      "resources": [
+        "assets/providers/*.svg",
+        "composer.html",
+        "pill.html"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
     }
   ],
   "background": {
