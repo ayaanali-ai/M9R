@@ -61,6 +61,11 @@ test("talking about an agent is not addressing it", () => {
   assert.deepEqual(handles("   "), []);
 });
 
+test("the word all is only an address when a command follows", () => {
+  for (const text of ["All right, the page is loaded", "all in all it went fine", "All of the tabs are open"]) assert.equal(mentions().detect(text).everyone, false, text);
+  for (const text of ["all check the page", "All, stop", "all: read the doc"]) assert.equal(mentions().detect(text).everyone, true, text);
+});
+
 test("Claude can you is still a request to Claude", () => {
   assert.deepEqual(handles("Claude can you open the page"), ["claude"]);
 });
@@ -75,6 +80,12 @@ test("a plain name with a comma or a command is confident, an unclear one is med
   assert.equal(mentions().detect("Codex, the page is open").confidence, "high");
   assert.equal(mentions().detect("Claude open it").confidence, "high");
   assert.equal(mentions().detect("Claude the page looks off").confidence, "medium");
+});
+
+test("only a message that names an agent without a clear command needs a second opinion", () => {
+  const m = mentions() as unknown as { needsJudgment(text: string): boolean };
+  for (const text of ["Can Claude and Codex both look at the table?", "codex vs claude: which found more?", "Codex still hasn't answered", "Do you all agree?", "Claude thinks it's done"]) assert.equal(m.needsJudgment(text), true, text);
+  for (const text of ["Claude do X", "codex, read the file", "open the pricing page", "now type it in", "", "Claudette is here"]) assert.equal(m.needsJudgment(text), false, text);
 });
 
 test("a message with no names carries on with the agents from the last message", () => {
