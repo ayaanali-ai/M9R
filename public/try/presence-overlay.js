@@ -182,6 +182,9 @@
     function destination(agent, now) {
       if (agent.docked) return dockPoint(agent);
       const el = resolveTarget(agent);
+      // When the page cannot resolve the selector (a control in a shadow root or a replaced node), the extension still measured
+      // the element; travel to that spot so the cursor never stays put while the click happens somewhere else.
+      if (!el && agent.hintRect && now - agent.hintRect.at < 4000) return { x: agent.hintRect.x + Math.min(agent.hintRect.width / 2, 40 + agent.hintRect.width / 4), y: agent.hintRect.y + agent.hintRect.height / 2 };
       if (!el) return agent.point || agent.spawn;
       const rect = el.getBoundingClientRect();
       if (!rect.width && !rect.height) return agent.point || agent.spawn;
@@ -420,9 +423,11 @@
 
       if (!isAgentMessage) setLabel(agent, hideText ? "M9R message hidden" : step || message, phase === "done");
       const selector = msg.target && typeof msg.target.selector === "string" ? msg.target.selector : null;
+      const hint = msg.target && msg.target.rect && Number.isFinite(msg.target.rect.x) && Number.isFinite(msg.target.rect.y) ? msg.target.rect : null;
       const verb = verbOf(msg);
 
       if (phase === "start" && !isAgentMessage) {
+        agent.hintRect = hint ? { x: hint.x, y: hint.y, width: Number(hint.width) || 0, height: Number(hint.height) || 0, at: now } : null;
         const changedTarget = selector !== agent.selector;
         agent.verb = verb;
         if (selector) {

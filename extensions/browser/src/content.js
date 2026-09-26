@@ -49,7 +49,7 @@
       if (msg && msg.type === "presence") {
         overlay.update(msg);
         // For actions aimed at an element, hold the reply until the cursor has landed so the page action happens after it arrives.
-        if (msg.phase !== "done" && msg.target && msg.target.selector && typeof overlay.whenArrived === "function") {
+        if (msg.phase !== "done" && msg.target && (msg.target.selector || msg.target.rect) && typeof overlay.whenArrived === "function") {
           overlay.whenArrived(msg.agent, 2000).then(() => sendResponse({ arrived: true }));
           return true;
         }

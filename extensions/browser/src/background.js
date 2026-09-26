@@ -459,6 +459,9 @@ async function handle(command) {
     if (humanLike && typeof m9rPageMine === "function") await run(tab.id, m9rPageMine, ["ensure_visible", command.selector, {}, command.expectOrigin || null, command.expectPathPrefix || null]);
     const targetAction = command.action === "click_at" ? "target_at" : "target";
     const targetInfo = await run(tab.id, m9rPagePower, [targetAction, command.selector || null, command.args || {}, command.expectOrigin || null, command.expectPathPrefix || null]);
+    // Sites such as X swap the search box for a new element once it is used. A key press aimed at a ref that has gone stale goes
+    // to whatever is focused (the field the agent just typed in) instead of failing.
+    if (command.action === "press" && command.selector && targetInfo && !targetInfo.ok && /stale|no element matches/.test(String(targetInfo.error || ""))) command = { ...command, selector: null };
     const targetRect = targetInfo && targetInfo.ok && targetInfo.data ? targetInfo.data.rect || null : null;
     const actionPresence = command.action === "point"
       ? { ...command.presence, action: "Pointing at this one", message: "Pointing at this one" }
