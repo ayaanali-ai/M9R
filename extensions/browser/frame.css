@@ -67,9 +67,10 @@ button { font: inherit; color: inherit; }
 .btn.danger:hover { background: rgba(224, 103, 92, .16); color: #ffd2cc; }
 .btn[disabled] { opacity: .5; cursor: default; }
 
+/* Motion is M9R's own setting (m9rMotion, set on <html data-motion>): full by default even when the OS has animations off. */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
-  [data-ring="working"]::after { border-color: var(--working); }
+  :root[data-motion="system"] *, :root[data-motion="system"] *::before, :root[data-motion="system"] *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+  :root[data-motion="system"] [data-ring="working"]::after { border-color: var(--working); }
 }
 .lead[data-ring="working"] { box-shadow: 0 0 0 1.5px var(--working) !important; }
 .lead[data-ring="waiting"] { box-shadow: 0 0 0 1.5px var(--accent) !important; }

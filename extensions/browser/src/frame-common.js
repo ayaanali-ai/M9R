@@ -174,6 +174,13 @@
     if (ev.key === "Alt" || hotkeyOf(ev)) toParent({ kind: "hotkey", key: ev.code === "KeyN" ? "n" : "m", down: false });
   }, true);
 
+  // M9R's motion setting: "full" unless the person chose to follow the system.
+  document.documentElement.dataset.motion = "full";
+  try {
+    chrome.storage.local.get("m9rMotion").then((stored) => { document.documentElement.dataset.motion = stored && stored.m9rMotion === "system" ? "system" : "full"; }).catch(() => {});
+    chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes.m9rMotion) document.documentElement.dataset.motion = changes.m9rMotion.newValue === "system" ? "system" : "full"; });
+  } catch { /* outside the extension (tests): stay on full */ }
+
   global.M9RFrame = {
     PROVIDERS, providerOf, el, chip, ringOf, displayName, ago, toParent, command, draggable, host,
     onState(fn) { listeners.add(fn); if (store.state || store.connected) fn(store); },

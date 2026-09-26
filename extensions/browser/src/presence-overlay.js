@@ -14,6 +14,7 @@
   const POSITION_KEYS = { pill: "m9rPillPos", composer: "m9rComposerPos" };
   // Where the thread pill sits on its track around the window, as a fraction of the track's length (independent of window size).
   const DOCK_KEY = "m9rDockU";
+  const MOTION_KEY = "m9rMotion";
   // The pill's bar is 44px tall inside a frame with 14px of padding; the track keeps the bar 16px off the window edge.
   const DOCK = { thickness: 44, pad: 14, gap: 16, radius: 72 };
 
@@ -60,7 +61,7 @@
     @keyframes breathe{0%,100%{opacity:1}50%{opacity:.55}}
     @keyframes blink{50%{opacity:0}}
     @keyframes ripple{from{transform:scale(.25);opacity:1}to{transform:scale(1.25);opacity:0}}
-    @media (prefers-reduced-motion:reduce){.agent.idle .arrow,.agent.idle .badge,.caret,.label .caret-mini{animation:none}.ripple{animation-duration:1ms}}
+    @media (prefers-reduced-motion:reduce){:host([data-motion="system"]) :is(.agent.idle .arrow,.agent.idle .badge,.caret,.label .caret-mini){animation:none}:host([data-motion="system"]) .ripple{animation-duration:1ms}}
   `;
 
   // Minimum-jerk profile: how a hand actually moves (slow start, fast middle, slow settle), not a symmetric ease.
@@ -101,10 +102,24 @@
     shadow.append(style, layer);
     doc.documentElement.appendChild(host);
 
-    const reducedMotion = view.matchMedia ? view.matchMedia("(prefers-reduced-motion: reduce)") : { matches: false };
+    // Motion is M9R's own setting (m9rMotion): "full" (the default) keeps cursors, the dock and the pill moving even when the operating
+    // system has animations turned off, because where an agent is and where the pill went is information, not decoration; "system"
+    // follows the OS "reduce motion" flag, which then gets brief straight glides instead of the full hand-like motion.
+    const osReduced = view.matchMedia ? view.matchMedia("(prefers-reduced-motion: reduce)") : { matches: false };
+    let motionMode = "full";
+    const reducedMotion = { get matches() { return motionMode === "system" && osReduced.matches; } };
+    host.setAttribute("data-motion", motionMode);
     const agents = new Map();
     const hiddenSessions = new Set();
     const storage = global.chrome && global.chrome.storage && global.chrome.storage.local;
+    const setMotionMode = (value) => {
+      motionMode = value === "system" ? "system" : "full";
+      host.setAttribute("data-motion", motionMode);
+    };
+    if (storage) {
+      storage.get(MOTION_KEY).then((stored) => setMotionMode(stored && stored[MOTION_KEY])).catch(() => {});
+      if (global.chrome.storage.onChanged) global.chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes[MOTION_KEY]) setMotionMode(changes[MOTION_KEY].newValue); });
+    }
     if (storage) {
       storage.get(HIDDEN_SESSIONS_KEY).then((stored) => {
         const saved = stored && stored[HIDDEN_SESSIONS_KEY];

@@ -13,8 +13,18 @@
   });
   // The Alt+M and Alt+N commands may also fire (when Chrome has them assigned). If this script already handled the same key press,
   // the command is a duplicate and is ignored.
+  // Holding a key makes Chrome repeat the command every few milliseconds, so a command is also ignored while a press is in progress
+  // and for a moment after it, and commands are never accepted more than once per 700 ms.
   let lastHotkeyAt = 0;
-  const handledRecently = () => Date.now() - lastHotkeyAt < 1000;
+  let pressStartedAt = 0;
+  let lastCommandAt = 0;
+  const commandAllowed = () => {
+    const now = Date.now();
+    if (pressStartedAt && now - pressStartedAt < 8000) return false;
+    if (now - lastHotkeyAt < 1200 || now - lastCommandAt < 700) return false;
+    lastCommandAt = now;
+    return true;
+  };
 
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -29,8 +39,8 @@
       else if (msg && msg.type === "owner-stop") overlay.stop(msg.owner);
       else if (msg && msg.type === "owner-resume") overlay.resume();
       else if (msg && msg.type === "m9r-agents") overlay.syncAgents(msg.agents);
-      else if (msg && msg.type === "m9r-composer-toggle") { if (!handledRecently()) overlay.toggleComposer(); }
-      else if (msg && msg.type === "m9r-pill-toggle") { if (!handledRecently()) overlay.togglePill(); }
+      else if (msg && msg.type === "m9r-composer-toggle") { if (commandAllowed()) overlay.toggleComposer(); }
+      else if (msg && msg.type === "m9r-pill-toggle") { if (commandAllowed()) overlay.togglePill(); }
       else if (msg && msg.type === "m9r-composer-show") overlay.showComposer(msg.focus === true);
       else if (msg && msg.type === "m9r-pill-selection") {
         let selection = "";
@@ -61,20 +71,23 @@
     let talking = false;
     let tapPending = false;
     const finish = () => {
+      pressStartedAt = 0;
+      lastHotkeyAt = Date.now();
       clearTimeout(holdTimer);
       if (talking) { talking = false; overlay.talk(false); }
       else if (tapPending) overlay.toggleComposer();
       tapPending = false;
     };
     const press = (key) => {
-      lastHotkeyAt = Date.now();
+      lastHotkeyAt = pressStartedAt = Date.now();
       if (key === "n") { overlay.togglePill(); return; }
       clearTimeout(holdTimer);
       talking = false;
       tapPending = true;
       holdTimer = setTimeout(() => { tapPending = false; talking = true; overlay.talk(true); }, HOLD_MS);
     };
-    onHotkey = (key, down) => { if (down) press(key); else if (key === "m") finish(); };
+    const release = (key) => { if (key === "m") finish(); else { pressStartedAt = 0; lastHotkeyAt = Date.now(); } };
+    onHotkey = (key, down) => { if (down) press(key); else release(key); };
     const isKey = (ev, code) => ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.code === code;
     window.addEventListener("keydown", (ev) => {
       if (ev.repeat) return;
@@ -83,6 +96,7 @@
     }, true);
     window.addEventListener("keyup", (ev) => {
       if (ev.code === "KeyM" || ev.key === "Alt") finish();
+      else if (ev.code === "KeyN") release("n");
     }, true);
   })();
 
