@@ -11,6 +11,16 @@
     /* Docked along the top edge the bar sits first and the panel opens below it. */
     body[data-edge="top"] #wrap { flex-direction: column-reverse; }
     body.open .bar { width: auto; }
+    /* Side notch: docked on the left or right edge the thread is a tab that grows out of the screen edge. The edge side is flush
+       and square, the inward side keeps the rounded corners, and nothing floats off the edge. */
+    body[data-edge="right"] #wrap { padding-right: 0; align-items: flex-end; }
+    body[data-edge="left"] #wrap { padding-left: 0; align-items: flex-start; }
+    body[data-edge="right"] .bar { border-radius: 22px 0 0 22px; border-right-width: 0; padding-right: 12px; }
+    body[data-edge="left"] .bar { border-radius: 0 22px 22px 0; border-left-width: 0; padding-left: 14px; }
+    body[data-edge="right"] .panel { border-radius: 16px 0 0 16px; border-right-width: 0; }
+    body[data-edge="left"] .panel { border-radius: 0 16px 16px 0; border-left-width: 0; }
+    body[data-edge="right"] .bar, body[data-edge="right"] .panel { box-shadow: -6px 4px 18px rgba(0,0,0,.35); }
+    body[data-edge="left"] .bar, body[data-edge="left"] .panel { box-shadow: 6px 4px 18px rgba(0,0,0,.35); }
 
     .bar {
       min-height: 44px; width: 344px; border-radius: 22px; background: linear-gradient(180deg, #14161b, var(--bg-0));

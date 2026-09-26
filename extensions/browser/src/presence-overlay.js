@@ -635,9 +635,10 @@
       // The bar sits at the frame's bottom (its top when docked along the top), so growth always opens away from the edge.
       // Along the top and bottom the frame is centred on the track point; on the sides it hugs the edge and slides up and down.
       const half = DOCK.thickness / 2 + DOCK.pad;
-      let left = o.card === 1 ? vw - DOCK.gap + DOCK.pad - w : o.card === 3 ? DOCK.gap - DOCK.pad : point.x - w / 2;
+      // On the left and right edges the pill is a notch: its frame sits exactly on the screen edge and the frame has no padding there.
+      let left = o.card === 1 ? vw - w : o.card === 3 ? 0 : point.x - w / 2;
       let top = o.card === 0 ? point.y - half : point.y + half - h;
-      left = clampN(left, 4, Math.max(4, vw - w - 4));
+      if (o.card !== 1 && o.card !== 3) left = clampN(left, 4, Math.max(4, vw - w - 4));
       top = clampN(top, 4, Math.max(4, vh - h - 4));
       if (o.edge !== state.notifiedEdge) {
         state.notifiedEdge = o.edge;
