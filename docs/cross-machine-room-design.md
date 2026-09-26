@@ -1,6 +1,6 @@
 # M9R cross-machine room — design for approval
 
-Status: design only. No cross-machine room implementation is included in this task's code changes. This design uses the existing relay and workspace conversation model; it does not claim that today's local broker already supports cross-owner collaboration.
+Status: step 1 is implemented in the local branch: room, member, and invite tables, plus authenticated room-create and room-invite endpoints. The migration has not been applied to any database. Invitation acceptance, room joining, relay coordination, browser authority, and UI are not implemented. The recommended same-origin, same-page v0 collaboration profile remains a design boundary to approve before those follow-on steps.
 
 ## Goal and boundary
 
@@ -84,4 +84,4 @@ Claim: `free -> held -> shared -> releasing -> free`; expiry, tab close, member 
 
 ## Approval boundary
 
-No cross-machine room code is implemented by this design. Required decision before implementation: approve the “both owners open the same URL in their own browser” v0 boundary, or specify another sharing model. The current same-token two-socket relay smoke check is transport evidence only, not proof of two-owner or two-machine membership.
+Step 1 only is implemented locally; no migration has been applied. Before implementing invite acceptance or cross-machine coordination, approve the “both owners open the same URL in their own browser” v0 boundary, or specify another sharing model. The current same-token two-socket relay smoke check is transport evidence only, not proof of two-owner or two-machine membership.
