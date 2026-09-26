@@ -642,16 +642,21 @@
       const half = DOCK.thickness / 2 + DOCK.pad;
       // On the left and right edges the pill is a notch: its frame sits exactly on the screen edge and the frame has no padding there.
       let left = o.card === 1 ? vw - w : o.card === 3 ? 0 : point.x - w / 2;
-      let top = o.card === 0 ? point.y - half : point.y + half - h;
+      // Every edge is a notch: the frame sits exactly on the screen edge it is docked to.
+      let top = o.card === 0 ? 0 : o.card === 2 ? vh - h : point.y + half - h;
       if (o.card !== 1 && o.card !== 3) left = clampN(left, 4, Math.max(4, vw - w - 4));
-      top = clampN(top, 4, Math.max(4, vh - h - 4));
+      if (o.card !== 0 && o.card !== 2) top = clampN(top, 4, Math.max(4, vh - h - 4));
       if (o.edge !== state.notifiedEdge) {
         state.notifiedEdge = o.edge;
         postToFrame(state, { kind: "dock", edge: o.edge });
       }
       const sp = dockSprings(state);
       // The dock always moves on springs (they settle without overshoot): where the pill goes is information, not decoration.
-      if (!state.springsReady) {
+      // Resizing a cross-process frame on every animation frame is what made opening the thread lag, so a change of size is
+      // instant (the panel animates inside the frame) and only sliding along the edge is sprung.
+      const resized = state.lastW !== w || state.lastH !== h;
+      state.lastW = w; state.lastH = h;
+      if (!state.springsReady || resized) {
         sp.l.jump(left); sp.t.jump(top); sp.r.jump(left + w); sp.b.jump(top + h);
         state.springsReady = true;
       } else {
@@ -673,7 +678,12 @@
       const top = sp.t.value;
       const w = Math.max(40, sp.r.value - left);
       const h = Math.max(40, sp.b.value - top);
-      state.box.style.cssText = `left:${left}px;top:${top}px;bottom:auto;width:${w}px;height:${h}px`;
+      const st = state.box.style;
+      if (state.appliedW !== w || state.appliedH !== h || !state.appliedBase) {
+        st.cssText = `left:0;top:0;bottom:auto;width:${w}px;height:${h}px;will-change:transform`;
+        state.appliedW = w; state.appliedH = h; state.appliedBase = true;
+      }
+      st.transform = `translate3d(${left}px,${top}px,0)`;
       state.cur = { left, top, width: w, height: h };
       state.shownAt = { left, bottom: vh - top - h, w, h };
     }
