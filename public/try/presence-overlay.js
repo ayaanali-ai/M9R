@@ -704,8 +704,8 @@
         if (storage && Number.isFinite(state.u)) void storage.set({ [DOCK_KEY]: state.u }).catch(() => {});
       } else if (data.kind === "drag-end") {
         if (storage && state.shownAt) void storage.set({ [POSITION_KEYS[state.kind]]: { left: state.shownAt.left, bottom: state.shownAt.bottom } }).catch(() => {});
-      } else if (data.kind === "talk-release") {
-        if (options && typeof options.onTalkRelease === "function") options.onTalkRelease();
+      } else if (data.kind === "hotkey") {
+        if (options && typeof options.onHotkey === "function" && (data.key === "m" || data.key === "n")) options.onHotkey(data.key, data.down === true);
       } else if (data.kind === "focus-composer") {
         showComposer(true);
       } else if (data.kind === "reset-position") {

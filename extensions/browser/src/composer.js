@@ -325,29 +325,6 @@
     try { recognizer.stop(); } catch { /* already stopped */ }
   }
 
-  // The same gesture works while the bar itself has focus (the page's copy of this handler covers the rest of the page).
-  const HOLD_MS = 280;
-  let holdTimer = 0;
-  let pressed = false;
-  let held = false;
-  const isTalkKey = (ev) => ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.code === "KeyM";
-  window.addEventListener("keydown", (ev) => {
-    if (!isTalkKey(ev) || ev.repeat || pressed) return;
-    pressed = true;
-    holdTimer = setTimeout(() => { held = true; F.toParent({ kind: "focus-composer" }); talkStart(); }, HOLD_MS);
-  }, true);
-  const releaseTalk = (ev) => {
-    const isRelease = ev.code === "KeyM" || ev.key === "Alt";
-    if (!isRelease) return;
-    if (ev.type === "keyup" && (ev.key === "Alt" || (ev.code === "KeyM" && ev.altKey))) F.toParent({ kind: "talk-release" });
-    // Talking was started by the page's copy of the gesture (focus then moved here), so the key comes up in this frame.
-    if (!pressed) { if (listening) talkStop(); return; }
-    pressed = false;
-    clearTimeout(holdTimer);
-    if (held) { held = false; talkStop(); }
-  };
-  window.addEventListener("keyup", releaseTalk, true);
-
   input.addEventListener("input", () => { syncSend(); drawMenu(); });
   input.addEventListener("keyup", (ev) => { if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") drawMenu(); });
   input.addEventListener("focus", () => bar.classList.add("focused"));

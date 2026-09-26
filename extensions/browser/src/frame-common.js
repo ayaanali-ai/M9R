@@ -163,6 +163,17 @@
     for (const fn of hostListeners) fn(data);
   });
 
+  // Alt+M and Alt+N are handled by the page's content script, not by Chrome's shortcut registration (which can leave a suggested
+  // shortcut unassigned). When focus is inside one of our frames the page never sees the keys, so the frame forwards them.
+  const hotkeyOf = (ev) => (ev.altKey && !ev.ctrlKey && !ev.metaKey ? (ev.code === "KeyM" ? "m" : ev.code === "KeyN" ? "n" : "") : "");
+  global.addEventListener("keydown", (ev) => {
+    const key = hotkeyOf(ev);
+    if (key && !ev.repeat) toParent({ kind: "hotkey", key, down: true });
+  }, true);
+  global.addEventListener("keyup", (ev) => {
+    if (ev.key === "Alt" || hotkeyOf(ev)) toParent({ kind: "hotkey", key: ev.code === "KeyN" ? "n" : "m", down: false });
+  }, true);
+
   global.M9RFrame = {
     PROVIDERS, providerOf, el, chip, ringOf, displayName, ago, toParent, command, draggable, host,
     onState(fn) { listeners.add(fn); if (store.state || store.connected) fn(store); },

@@ -3,14 +3,18 @@
   if (window.top !== window) return;
   if (document.getElementById(window.M9RPresence.ROOT_ID)) return;
 
-  // Set by the push-to-talk gesture below; the message bar calls it when Alt or M comes up inside its own frame.
-  let onTalkRelease = () => {};
+  // The Alt+M / Alt+N gestures live below; frames forward their key events here through this hook.
+  let onHotkey = () => {};
   const overlay = window.M9RPresence.createPresenceOverlay(document, {
     onMessageVisibility(sessionId, show) {
       try { chrome.runtime.sendMessage({ type: "m9r-message-visibility", sessionId, show }); } catch {}
     },
-    onTalkRelease() { onTalkRelease(); },
+    onHotkey(key, down) { onHotkey(key, down); },
   });
+  // The Alt+M and Alt+N commands may also fire (when Chrome has them assigned). If this script already handled the same key press,
+  // the command is a duplicate and is ignored.
+  let lastHotkeyAt = 0;
+  const handledRecently = () => Date.now() - lastHotkeyAt < 1000;
 
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -25,8 +29,8 @@
       else if (msg && msg.type === "owner-stop") overlay.stop(msg.owner);
       else if (msg && msg.type === "owner-resume") overlay.resume();
       else if (msg && msg.type === "m9r-agents") overlay.syncAgents(msg.agents);
-      else if (msg && msg.type === "m9r-composer-toggle") overlay.toggleComposer();
-      else if (msg && msg.type === "m9r-pill-toggle") overlay.togglePill();
+      else if (msg && msg.type === "m9r-composer-toggle") { if (!handledRecently()) overlay.toggleComposer(); }
+      else if (msg && msg.type === "m9r-pill-toggle") { if (!handledRecently()) overlay.togglePill(); }
       else if (msg && msg.type === "m9r-composer-show") overlay.showComposer(msg.focus === true);
       else if (msg && msg.type === "m9r-pill-selection") {
         let selection = "";
@@ -49,27 +53,36 @@
     }).catch(() => {});
   }
 
-  // Push-to-talk: hold Alt+M. A tap is left to the Alt+M command (it opens or closes the bar); holding past the delay starts
-  // speech in the bar. The Alt+M command also focuses the bar, so the key can come up in the bar's frame instead of here: the
-  // frame then reports it (onTalkRelease) so a tap cancels the pending talk and a hold ends it.
-  (function pushToTalk() {
+  // Alt+M: tap opens or closes the message bar; hold (past the delay) talks until the key comes up. Alt+N shows or hides the thread
+  // pill. Handled here instead of relying on Chrome's shortcut assignment, so it works wherever this script sees the key.
+  (function hotkeys() {
     const HOLD_MS = 280;
     let holdTimer = 0;
     let talking = false;
-    const isTalkKey = (ev) => ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.code === "KeyM";
-    const stopTalk = () => {
+    let tapPending = false;
+    const finish = () => {
       clearTimeout(holdTimer);
       if (talking) { talking = false; overlay.talk(false); }
+      else if (tapPending) overlay.toggleComposer();
+      tapPending = false;
     };
-    onTalkRelease = stopTalk;
-    window.addEventListener("keydown", (ev) => {
-      if (!isTalkKey(ev) || ev.repeat) return;
+    const press = (key) => {
+      lastHotkeyAt = Date.now();
+      if (key === "n") { overlay.togglePill(); return; }
       clearTimeout(holdTimer);
       talking = false;
-      holdTimer = setTimeout(() => { talking = true; overlay.talk(true); }, HOLD_MS);
+      tapPending = true;
+      holdTimer = setTimeout(() => { tapPending = false; talking = true; overlay.talk(true); }, HOLD_MS);
+    };
+    onHotkey = (key, down) => { if (down) press(key); else if (key === "m") finish(); };
+    const isKey = (ev, code) => ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.code === code;
+    window.addEventListener("keydown", (ev) => {
+      if (ev.repeat) return;
+      if (isKey(ev, "KeyM")) press("m");
+      else if (isKey(ev, "KeyN")) press("n");
     }, true);
     window.addEventListener("keyup", (ev) => {
-      if (ev.code === "KeyM" || ev.key === "Alt") stopTalk();
+      if (ev.code === "KeyM" || ev.key === "Alt") finish();
     }, true);
   })();
 
