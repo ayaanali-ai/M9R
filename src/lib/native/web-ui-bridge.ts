@@ -12,7 +12,7 @@
  * into fields, and the live sessions' own secrets (session tokens, interrupt markers).
  */
 import { randomUUID } from "node:crypto";
-import type { FeedWebItem } from "./feed-core";
+import type { FeedWebActivityInput, FeedWebItem } from "./feed-core";
 import { redactSecrets } from "./inbox-core";
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -298,7 +298,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   let timer: ReturnType<typeof setTimeout> | null = null;
   let lastAddressed: string[] = [];
   const thread: UiThreadEntry[] = [];
-  const web: FeedWebItem[] = [];
+  const web: FeedWebActivityInput[] = [];
   const doing = new Map<string, string>();
   const blocked = new Set<string>();
   const providers = new Map<string, string>();
@@ -339,7 +339,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     return full;
   }
 
-  function pushWeb(item: Omit<FeedWebItem, "at">): void {
+  function pushWeb(item: Omit<FeedWebActivityInput, "at">): void {
     web.unshift({ at: new Date(now()).toISOString(), ...item, text: redact(item.text).slice(0, 200) });
     if (web.length > 30) web.length = 30;
   }
@@ -552,8 +552,8 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     /** The socket that subscribed went away. */
     unsubscribe(reply?: (message: UiState) => boolean) { if (!reply || sink === reply) sink = null; },
     snapshot,
-    /** Newest first, up to 30, already redacted: for feed.json's optional web[]. */
-    recentWeb: (): FeedWebItem[] => web.map((w) => ({ ...w })),
+    /** Newest first, up to 30, already redacted; persisted separately as surface=web. */
+    recentWeb: (): FeedWebItem[] => web.map((w) => ({ ...w, surface: "web" })),
     close() { if (timer) clearTimeout(timer); timer = null; sink = null; },
   };
 }

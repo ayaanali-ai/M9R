@@ -50,6 +50,7 @@ function makeDeps(opts: {
   files?: Record<string, string>;
   probeVersion?: (binary: string) => Promise<string | null>;
   drainCapture?: () => Promise<{ drained: number; failed: number }>;
+  installLocalBrokerAutostart?: () => Promise<{ ok: boolean; message: string }>;
 }) {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
   const out: string[] = [];
@@ -86,6 +87,7 @@ function makeDeps(opts: {
     sleep: async () => {},
     probeVersion: opts.probeVersion,
     drainCapture: opts.drainCapture,
+    installLocalBrokerAutostart: opts.installLocalBrokerAutostart,
   };
 
   return { deps, files, out, err, requests };
@@ -1846,11 +1848,16 @@ test("signal command output never leaks the token", async () => {
 // ---------------------------------------------------------------------------
 
 test("connect --agents registers every listed kind in one batch and uses one approval URL", async () => {
+  let brokerInstallCalls = 0;
   // Claim status is looked up by claim_id/setup_code alone (no agent_kind in
   // that call), so the claim_id itself must encode which kind it belongs to
   // for this fake router to answer each poll with the right token.
   const { deps, files, requests, out } = makeDeps({
     env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    installLocalBrokerAutostart: async () => {
+      brokerInstallCalls += 1;
+      return { ok: true, message: "M9R local web broker is running and will start at login." };
+    },
     router: (url, init) => {
       if (url.includes("/api/agent/register-batch")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as { agents?: Array<{ agent_kind?: string }> };
@@ -1883,12 +1890,14 @@ test("connect --agents registers every listed kind in one batch and uses one app
   const registerCalls = requests.filter((r) => r.url.includes("/api/agent/register-batch"));
   assert.equal(registerCalls.length, 1, "all new kinds use one grouped registration request");
   assert.equal(requests.filter((r) => r.url.includes("/api/agent/claim-status")).length, 2);
+  assert.equal(brokerInstallCalls, 1, "the broker is installed only after the grouped provider approval flow succeeds");
   const text = out.join("\n");
   assert.match(text, /Connecting 2 agents: claude-code, codex/);
   assert.match(text, /approve all new connections once/);
   assert.match(text, /claim\/batch\/batch-1/);
   assert.match(text, /claude-code: registered/);
   assert.match(text, /codex: registered/);
+  assert.match(text, /local web broker is running and will start at login/);
 });
 
 test("connect saves a separate machine credential only after the approved claim", async () => {

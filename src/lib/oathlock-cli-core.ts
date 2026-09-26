@@ -108,6 +108,8 @@ export interface CliDeps {
   confirm?(question: string): Promise<boolean>;
   /** Local-only capture spool drain, wired by the real entrypoint and injected in tests. */
   drainCapture?(): Promise<{ drained: number; failed: number }>;
+  /** Installs and starts the user-scoped local web broker after provider connections succeed. */
+  installLocalBrokerAutostart?(): Promise<{ ok: boolean; message: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1494,6 +1496,16 @@ async function cmdConnect(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
   if (failures.length > 0) {
     deps.err(`${failures.length} of ${results.length} agent connection(s) failed. See output above for details.`);
     return 1;
+  }
+  if (deps.installLocalBrokerAutostart) {
+    try {
+      const broker = await deps.installLocalBrokerAutostart();
+      (broker.ok ? deps.out : deps.err)(broker.message);
+      if (!broker.ok) return 1;
+    } catch (error) {
+      deps.err(`Local web broker could not be installed: ${error instanceof Error ? error.message : "unknown error"}. The approved agent connections remain saved.`);
+      return 1;
+    }
   }
   // Only human-approved connections reach this point. Machine sync remains
   // disabled when secure local storage is unavailable or minting fails.
@@ -3287,11 +3299,16 @@ Usage:
   m9r-cli bootstrap remove                  Remove only the M9R-managed block (user content preserved)
   m9r-cli connect [--agents claude-code,codex,opencode]
                                          Detect installed agents and start one human-approved connection
+  m9r-cli opencode sessions               List local OpenCode sessions with their project folders
+  m9r-cli opencode send --folder <path> --session <id> --text <message>
+                                         Send only to that explicitly selected local session
+  m9r launch claude --resume <session-id> Resume an explicit Claude Code session
   m9r-cli setup [--dry-run] [--yes] [--status]
                                          Set up this machine locally (no account): hooks and a standing instruction, with backups
   m9r-cli uninstall [--yes] [--purge]       Remove everything setup added and restore your files exactly
   m9r-cli tasks                             List tasks and what is waiting for your approval
-  m9r-cli feed [--watch]                    Write the overlay feed (~/.m9r/feed.json); --watch keeps it current
+  m9r-cli approvals purge [--apply]         Dry-run stale approvals; apply expires them but keeps history
+  m9r-cli feed [--watch]                    Write the native overlay feed (~/.m9r/feed.json); web activity stays separate
   m9r-cli dismiss <task id>...              Clear items from the overlay list (changes nothing else)
   m9r-cli sessions [@agent]                 List the sessions of an agent seen on this machine (aim a task with send --session)
   m9r-cli approve|deny <task id>            Approve or deny a task an agent started (needs you at a terminal)
@@ -3396,6 +3413,7 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "dismiss":
     case "sessions":
     case "sessions-json":
+    case "approvals":
     case "link":
     case "unlink":
     case "approve":

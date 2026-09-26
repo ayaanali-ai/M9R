@@ -316,6 +316,7 @@ test("Claude's finished turn answers the task it was shown, and the answer is pu
   const { handleHookEvent } = await import("../src/lib/native/hook-handler");
   const { pushAnswerToCodex } = await import("../src/lib/native/codex-delivery");
   const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/p" });
   const asked = store.addTask({ from: "codex", to: "claude", goal: "Summarise a.txt", origin: "human_typed", idempotencyKey: "rev1", cwd: "C:/p", fromSession: A }).task;
   const answered: string[] = [];
   const ctx = { provider: "claude-code", store, pathExists: () => false, readIndex: () => null, lastAnswer: () => "It says: PURPLE-ELEPHANT-42.", answerBack: (id: string) => answered.push(id) };
@@ -344,6 +345,18 @@ test("Claude's finished turn answers the task it was shown, and the answer is pu
   assert.equal((await pushAnswerToCodex(store, asked.id, deps)).state, "skipped", "never sent twice");
 });
 
+test("answer push refuses a same-id Codex session that is ambiguous across folders", async () => {
+  const { pushAnswerToCodex } = await import("../src/lib/native/codex-delivery");
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/one" });
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/two" });
+  const task = store.addTask({ from: "codex", to: "claude", goal: "review", origin: "human_typed", idempotencyKey: "same-id-answer", fromSession: A }).task;
+  store.setResult(task.id, "done");
+  const deps = fakeDeps();
+  assert.deepEqual(await pushAnswerToCodex(store, task.id, deps), { state: "failed", reason: "the originating Codex session is ambiguous; no answer was pushed" });
+  assert.equal(deps.calls.length, 0);
+});
+
 test("two threads in the same folder: the one in use right now wins only when it is clearly the one in use; otherwise M9R does not guess", () => {
   const now = new Date("2026-09-21T23:20:00Z");
   const at = (min: number) => new Date(now.getTime() - min * 60_000).toISOString();
@@ -369,7 +382,7 @@ test("an explicit link always wins over folder and recency, and a resolved one-c
   const t = solo.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "l2", fromSession: "cc-2" }).task;
   const outcome = await deliverToCodex(solo, t.id, fakeDeps());
   assert.equal(outcome.state, "queued");
-  assert.deepEqual(solo.linkedSession("claude", "cc-2", "codex"), { sessionId: THREAD });
+  assert.deepEqual(solo.linkedSession("claude", "cc-2", "codex"), { sessionId: THREAD, cwd: "c:/p" });
 });
 
 test("a link store entry is symmetric and replacing it removes the old one", () => {
@@ -383,6 +396,18 @@ test("a link store entry is symmetric and replacing it removes the old one", () 
   assert.equal(store.allLinks().length, 1);
   store.removeLink(l2.id);
   assert.equal(store.linkedSession("claude", "cc-1", "codex"), undefined);
+});
+
+test("links distinguish same provider session ids by folder and return no result when an unscoped lookup is ambiguous", () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/proj/one" });
+  store.registerEndpoint({ provider: "codex", sessionId: B, cwd: "C:/proj/two" });
+  store.setLink({ handle: "claude", sessionId: "same", cwd: "C:/sender/one" }, { handle: "codex", sessionId: A, cwd: "C:/proj/one" }, "picked");
+  store.setLink({ handle: "claude", sessionId: "same", cwd: "C:/sender/two" }, { handle: "codex", sessionId: B, cwd: "C:/proj/two" }, "picked");
+
+  assert.equal(store.allLinks().length, 2);
+  assert.deepEqual(store.linkedSession("claude", "same", "codex", "C:/sender/one"), { sessionId: A, cwd: "c:/proj/one" });
+  assert.equal(store.linkedSession("claude", "same", "codex"), undefined, "without a folder there are two possible source sessions; do not guess");
 });
 
 test("a link whose stored session id is not a real Codex thread id is never used for the queue call; it falls through to the normal folder rules", async () => {

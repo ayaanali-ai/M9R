@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   HOOK_MARKER,
+  LOCAL_BROKER_AUTOSTART_TASK_NAME,
   MCP_MARKER,
   STANDING_END,
   STANDING_START,
   UnparseableConfigError,
   applyStandingInstruction,
+  buildLocalBrokerAutostartSpec,
   decideUninstall,
   hasOurHooks,
   mergeHooks,
@@ -72,6 +74,44 @@ test("invalid JSON is refused, never overwritten", () => {
   assert.throws(() => mergeHooks("{ not json", specs), UnparseableConfigError);
   assert.throws(() => mergeHooks("[1,2]", specs), UnparseableConfigError);
   assert.throws(() => removeHooks("{ nope"), UnparseableConfigError);
+});
+
+test("local broker autostart contract is user-scoped, loopback-service-only, and removable by disconnect", () => {
+  const spec = buildLocalBrokerAutostartSpec({
+    nodeExecutable: "C:\\Program Files\\nodejs\\node.exe",
+    nodeArgs: ["--no-warnings"],
+    cliEntryPath: "C:\\Tools\\m9r-cli.cjs",
+    m9rHome: "C:\\Users\\Kai\\.m9r",
+    port: 47821,
+  });
+
+  assert.deepEqual(spec, {
+    nodeExecutable: "C:\\Program Files\\nodejs\\node.exe",
+    nodeArgs: ["--no-warnings"],
+    cliEntryPath: "C:\\Tools\\m9r-cli.cjs",
+    args: ["web", "serve", "--home", "C:\\Users\\Kai\\.m9r", "--port", "47821"],
+    workingDirectory: "C:\\Users\\Kai\\.m9r",
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    bindAddress: "127.0.0.1",
+    startImmediately: true,
+    scope: "current-user",
+    trigger: "user-login",
+    removeOnDisconnect: true,
+  });
+  assert.ok(!JSON.stringify(spec).includes("https://"), "the broker launch must not depend on a hosted service");
+});
+
+test("local broker autostart contract rejects invalid ports and incomplete executable paths", () => {
+  const input = {
+    nodeExecutable: "node",
+    nodeArgs: [],
+    cliEntryPath: "m9r-cli.cjs",
+    m9rHome: ".m9r",
+    port: 47821,
+  };
+  assert.throws(() => buildLocalBrokerAutostartSpec({ ...input, port: 0 }), /port/i);
+  assert.throws(() => buildLocalBrokerAutostartSpec({ ...input, port: 65536 }), /port/i);
+  assert.throws(() => buildLocalBrokerAutostartSpec({ ...input, nodeExecutable: "  " }), /executable/i);
 });
 
 test("remove takes out only our entries and leaves the user's hooks and settings", () => {

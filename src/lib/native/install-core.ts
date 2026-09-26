@@ -202,7 +202,7 @@ export function mergeMcpServerToml(existingTomlText: string | null, name: string
 export function removeMcpServerToml(existingTomlText: string, name: string): { content: string; changed: boolean } {
   const bounds = codexBlockBounds(existingTomlText, name);
   if (!bounds) return { content: existingTomlText, changed: false };
-  let end = bounds.end;
+  const end = bounds.end;
   const before = existingTomlText.slice(0, bounds.start);
   const after = existingTomlText.slice(end);
   const content = before.endsWith("\n\n") && after === "" ? before.slice(0, -1) : before + after;
@@ -291,6 +291,61 @@ export function standingInstructionStatus(existing: string | null): { present: b
   const bounds = blockBounds(existing);
   if (!bounds) return { present: false, current: false };
   return { present: true, current: existing.slice(bounds.start, bounds.end) === standingInstructionBlock() };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Local web broker login-start contract. The CLI adapter turns this pure spec into a current-user login task and
+// removes that exact managed task on disconnect; this module deliberately performs no OS or network side effects.
+
+export const LOCAL_BROKER_AUTOSTART_TASK_NAME = "M9R Web Broker";
+
+export interface LocalBrokerAutostartInput {
+  nodeExecutable: string;
+  nodeArgs: readonly string[];
+  cliEntryPath: string;
+  m9rHome: string;
+  port: number;
+}
+
+export interface LocalBrokerAutostartSpec {
+  nodeExecutable: string;
+  nodeArgs: string[];
+  cliEntryPath: string;
+  /** Arguments start only the loopback web broker; credentials are read from the local M9R home, never embedded. */
+  args: string[];
+  workingDirectory: string;
+  taskName: typeof LOCAL_BROKER_AUTOSTART_TASK_NAME;
+  bindAddress: "127.0.0.1";
+  startImmediately: true;
+  scope: "current-user";
+  trigger: "user-login";
+  removeOnDisconnect: true;
+}
+
+/** Build the explicit local broker launch plan consumed by the CLI's login-task adapter. */
+export function buildLocalBrokerAutostartSpec(input: LocalBrokerAutostartInput): LocalBrokerAutostartSpec {
+  for (const [label, value] of [["node executable", input.nodeExecutable], ["CLI entry path", input.cliEntryPath], ["M9R home", input.m9rHome]] as const) {
+    if (typeof value !== "string" || value.trim() === "") throw new Error(`${label} is required for broker autostart`);
+  }
+  if (!Array.isArray(input.nodeArgs) || input.nodeArgs.some((arg) => typeof arg !== "string")) {
+    throw new Error("node arguments must be strings");
+  }
+  if (!Number.isSafeInteger(input.port) || input.port < 1 || input.port > 65535) {
+    throw new Error("broker port must be an integer from 1 to 65535");
+  }
+  return {
+    nodeExecutable: input.nodeExecutable,
+    nodeArgs: [...input.nodeArgs],
+    cliEntryPath: input.cliEntryPath,
+    args: ["web", "serve", "--home", input.m9rHome, "--port", String(input.port)],
+    workingDirectory: input.m9rHome,
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    bindAddress: "127.0.0.1",
+    startImmediately: true,
+    scope: "current-user",
+    trigger: "user-login",
+    removeOnDisconnect: true,
+  };
 }
 
 // ---------------------------------------------------------------------------------------------------------------

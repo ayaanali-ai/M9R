@@ -10,6 +10,9 @@
  */
 import { randomBytes } from "node:crypto";
 import { apiKeyLaunchBlock } from "./vendor-launch-core";
+import { validateClaudeResumeSessionId } from "./claude-session-id-core";
+
+export { validateClaudeResumeSessionId } from "./claude-session-id-core";
 
 export type LiveEvent =
   | { kind: "init"; sessionId: string }
@@ -149,6 +152,7 @@ export function liveLaunchBlock(env: Record<string, string | undefined>, allowAp
 }
 
 export function buildClaudeLiveArgs(config: LiveLaunchConfig): string[] {
+  if (config.resumeSessionId !== undefined) validateClaudeResumeSessionId(config.resumeSessionId);
   const builtIns = config.profile === "web-only" ? "" : "Bash,Read,Edit,Glob,Grep";
   const allowed = ["mcp__m9r", ...(config.allowedTools ?? [])];
   return [

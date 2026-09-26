@@ -41,8 +41,9 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   const everySession = store.sessionsFor("codex");
 
   // Rule 1: an explicit link the person made (or M9R made from one clear match) always wins, even over folder or recency.
-  const linked = task.fromSession && !task.targetSession ? store.linkedSession(task.from, task.fromSession, "codex") : undefined;
-  if (linked && isThreadId(linked.sessionId) && everySession.some((s) => s.sessionId === linked.sessionId)) {
+  const linked = task.fromSession && !task.targetSession ? store.linkedSession(task.from, task.fromSession, "codex", task.cwd) : undefined;
+  const linkedTargets = linked ? everySession.filter((session) => session.sessionId === linked.sessionId && (!linked.cwd || normCwd(session.cwd) === normCwd(linked.cwd))) : [];
+  if (linked && linkedTargets.length === 1 && isThreadId(linked.sessionId)) {
     const command = deps.resolveCodex();
     if (!command) return fail("The codex command was not found on this machine.");
     const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(linked.sessionId, buildQueueMessage(task))));
@@ -66,7 +67,11 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   if (choice.kind === "none") return fail(task.targetSession ? `No Codex session matches "${task.targetSession}". See: m9r-cli sessions` : "No Codex session is known yet. Start a Codex session (with the M9R engine running) and send again.");
   if (choice.kind === "ambiguous") return fail(`${choice.sessions.length} Codex sessions are open here and M9R cannot tell which you mean, so it will show at the next prompt in whichever you use. To aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
   // Rule 2: exactly one candidate was just resolved for a sender with a known session: remember it as an auto-link for next time.
-  if (task.fromSession) store.setLink({ handle: task.from, sessionId: task.fromSession }, { handle: "codex", sessionId: choice.session.sessionId }, "auto");
+  if (task.fromSession) store.setLink(
+    { handle: task.from, sessionId: task.fromSession, cwd: task.cwd },
+    { handle: "codex", sessionId: choice.session.sessionId, cwd: choice.session.cwd },
+    "auto",
+  );
   const endpoint = choice.session;
   if (!isThreadId(endpoint.sessionId)) return fail("The Codex session id looks wrong; open Codex again and retry.");
   const command = deps.resolveCodex();
@@ -84,6 +89,8 @@ export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps:
   if (!task || !task.resultSummary) return { state: "skipped", reason: "no answer yet" };
   if (task.from !== "codex" || !isThreadId(task.fromSession)) return { state: "skipped", reason: "the asker is not a Codex session we can push into" };
   if (task.answerPushedAt) return { state: "skipped", reason: "already sent back" };
+  const askerSessions = store.sessionsFor("codex").filter((session) => session.sessionId === task.fromSession && (!task.cwd || normCwd(session.cwd) === normCwd(task.cwd)));
+  if (askerSessions.length !== 1) return { state: "failed", reason: askerSessions.length === 0 ? "the originating Codex session is no longer registered in its folder" : "the originating Codex session is ambiguous; no answer was pushed" };
   const command = deps.resolveCodex();
   if (!command) return { state: "failed", reason: "The codex command was not found on this machine." };
   const goal = task.goal.length > 90 ? `${task.goal.slice(0, 89)}…` : task.goal;

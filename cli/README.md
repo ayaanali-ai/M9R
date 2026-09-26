@@ -52,6 +52,10 @@ state:
 npx --yes m9r-cli@latest disconnect
 ```
 
+On Windows, a successful `m9r-cli connect` also starts the loopback web broker
+and installs a current-user login task. The browser extension reports ready
+only after the broker handshake. The broker listens only on `127.0.0.1`.
+
 Requires Node.js >= 18.
 
 ## Commands
@@ -399,3 +403,18 @@ It specifies an `on-failure` restart policy and treats a resident as stale
 after 90 seconds without a heartbeat. M9R only shows a resident as live
 after its retained heartbeat; it never infers that a configured process is
 awake.
+
+## Local OpenCode sessions and Claude resume
+
+The OpenCode adapter connects only to a loopback `opencode serve` instance.
+List sessions with their folders, then target one explicitly:
+
+```bash
+m9r-cli opencode sessions
+m9r-cli opencode send --folder "C:\\work\\project" --session <session-id> --text "Continue the review"
+```
+
+Set `M9R_OPENCODE_URL` (default `http://127.0.0.1:4096`) and, if the local
+server requires authentication, `M9R_OPENCODE_USERNAME` and
+`M9R_OPENCODE_PASSWORD`. `m9r launch claude --resume <session-id>` resumes a
+validated Claude Code session ID; the ID is passed as a separate argument.

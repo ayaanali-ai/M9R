@@ -10,8 +10,9 @@ export async function GET() {
     const loaded = await loadWorkspaceEndpointsForHuman(context.workspaceId, context.userId);
     const machineByConnection = new Map<string, string>();
     if (supabase) {
-      const { data } = await supabase.from("native_devices").select("connection_id, device_id")
+      const { data, error } = await supabase.from("native_devices").select("connection_id, device_id")
         .eq("workspace_id", context.workspaceId).is("revoked_at", null);
+      if (error) throw new Error("Could not load endpoint machine metadata.");
       for (const machine of data ?? []) machineByConnection.set(String(machine.connection_id), String(machine.device_id));
     }
     return NextResponse.json({ endpoints: loaded.rows.map((row) => ({ ...viewOf(row, loaded),

@@ -12,17 +12,23 @@ test("project folders normalize by platform without merging case-sensitive POSIX
   assert.equal(normalizeProjectFolder("relative/project", "linux"), null);
 });
 
-test("ensure starts one logical agent session and subsequent ensure reuses it instead of spawning a duplicate", () => {
+test("ensure reuses the same keyed session but permits another provider session in the same folder", () => {
   const started = ensure();
   assert.equal(started.ok, true);
   assert.equal(started.action, "started");
   assert.equal(started.state.sessions.length, 1);
   assert.equal(started.state.sessions[0].projectFolder, "c:/work/m9r");
-  const repeated = ensure(started.state, "different-new-id");
+  const repeated = ensure(started.state, "s1");
   assert.equal(repeated.ok, true);
   assert.equal(repeated.action, "reused");
   assert.equal(repeated.state.sessions.length, 1);
   assert.equal(repeated.session?.id, "s1");
+
+  const second = ensure(repeated.state, "s2");
+  assert.equal(second.ok, true);
+  assert.equal(second.action, "started");
+  assert.equal(second.state.sessions.length, 2);
+  assert.deepEqual(second.state.sessions.map((session) => session.id), ["s1", "s2"]);
 });
 
 test("separate projects, rooms, or logical agents may each have their own live session", () => {
@@ -36,12 +42,20 @@ test("separate projects, rooms, or logical agents may each have their own live s
 test("an ambiguous duplicate live registry fails closed rather than choosing one", () => {
   const first = ensure();
   const original = first.state.sessions[0];
-  const duplicate = { ...original, id: "duplicate" };
+  const duplicate = { ...original };
   const corrupted = { sessions: [original, duplicate] };
   const result = ensure(corrupted, "new");
   assert.equal(result.ok, false);
-  assert.match(result.error ?? "", /multiple live sessions/);
+  assert.match(result.error ?? "", /multiple registry entries/);
   assert.equal(result.state, corrupted);
+});
+
+test("an existing session id cannot be rebound to another agent or folder", () => {
+  const started = ensure();
+  const result = ensure(started.state, "s1", { projectFolder: "C:\\Work\\Other" });
+  assert.equal(result.ok, false);
+  assert.equal(result.action, "conflict");
+  assert.match(result.error ?? "", /session id.*already belongs/i);
 });
 
 test("ready, idle sweep, and wake preserve the same vendor session while incrementing resume count", () => {

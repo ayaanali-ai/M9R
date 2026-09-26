@@ -42,7 +42,7 @@ async function main(): Promise<void> {
   for (const problem of config.problems) process.stdout.write(`  note: ${problem}\n`);
   const blocked = apiKeyLaunchBlock(process.env, false);
   if (blocked) process.stdout.write(`  warning: agents will not start. ${blocked}\n`);
-  // feed.json's web[] for the desktop pill: written next to feed.json, merged in by the feed writer.
+  // A separately persisted, redacted web-surface feed beside the native feed; never mutates feed.json.
   let lastWeb = "";
   const webTimer = setInterval(() => {
     const body = JSON.stringify(ui.recentWeb());

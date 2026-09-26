@@ -1,4 +1,4 @@
-// The overlay UI. It draws ~/.m9r/feed.json and nothing else: no logic about tasks, approvals or agents lives here.
+// The overlay UI draws a view-only merge of ~/.m9r/feed.json and ~/.m9r/web-activity.json; no business logic lives here.
 // Every string from the feed is placed with textContent, never as HTML.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -14,7 +14,7 @@ interface Ping { id: number; kind: string; taskId: string; text: string }
 interface InProgress { taskId: string; from: string; to: string; goal: string; state: "queued" | "waiting_prompt" | "working"; since: string }
 type WebKind = "action" | "message" | "blocked" | "worker";
 /** What agents did or said on real web pages, newest first. Optional: older engines do not write it. */
-interface WebEvent { at: string; agent: string; provider: string; kind: WebKind; text: string; tab?: string; url?: string }
+interface WebEvent { surface?: "web"; at: string; agent: string; provider: string; kind: WebKind; text: string; tab?: string; url?: string }
 interface Feed { version: 1; seq: number; agents: Agent[]; needsYou: NeedsYou[]; inProgress?: InProgress[]; recent: Array<{ at: string; taskId?: string; text: string }>; pings: Ping[]; web?: WebEvent[] }
 
 const COLLAPSED = { w: 220, h: 36 };
@@ -387,7 +387,7 @@ function drawPanel() {
     ...(inProgress.length > 0 ? [section("In progress", inProgress.map(progressRow), "")] : []),
     section("Agents", agents, "No agents seen yet."),
     section("Recent", recent, "No activity yet."),
-    el("div", "foot", "M9R overlay · a view of ~/.m9r/feed.json"),
+    el("div", "foot", "M9R overlay · a view of native feed.json + web-activity.json"),
   );
   panel.scrollTop = scroll;
 }
@@ -481,6 +481,12 @@ async function start() {
     await listen("engine-stale", () => { engineStale = true; render(); });
     await listen("engine-ok", () => { engineStale = false; render(); });
     await listen<boolean>("dnd", (e) => { dnd = e.payload; });
+    await listen<"pressed" | "released">("hold-to-talk", (e) => {
+      // Public UI hook only: no microphone is opened and no audio is captured or transcribed.
+      if (e.payload === "pressed" || e.payload === "released") {
+        window.dispatchEvent(new CustomEvent("m9r:hold-to-talk", { detail: e.payload }));
+      }
+    });
     const initial = await invoke<string | null>("read_feed").catch(() => null);
     if (initial) parse(initial);
   } else {

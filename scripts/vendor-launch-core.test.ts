@@ -28,6 +28,13 @@ test("Claude hands profile enables only the requested local tool set plus M9R", 
   assert.ok(plan.args.includes("mcp__m9r"));
 });
 
+test("Claude resume passes a validated session id as an explicit CLI argument", () => {
+  const plan = buildVendorLaunchPlan({ ...config, resumeSessionId: "session-123" });
+  assert.deepEqual(plan.args.slice(plan.args.indexOf("--resume"), plan.args.indexOf("--resume") + 2), ["--resume", "session-123"]);
+  assert.throws(() => buildVendorLaunchPlan({ ...config, resumeSessionId: "--danger" }), /resume session id is invalid/i);
+  assert.throws(() => buildVendorLaunchPlan({ ...config, vendor: "codex", resumeSessionId: "session-123" }), /Claude Code only/i);
+});
+
 test("Codex launch disables web search, overrides MCP servers with M9R, and keeps the token off argv", () => {
   const plan = buildVendorLaunchPlan({ ...config, vendor: "codex" });
   assert.equal(plan.command, "codex");

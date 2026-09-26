@@ -4,7 +4,7 @@
  */
 import { createLocalStore, handleForProvider } from "./local-store";
 import { deliverToCodex, realDeps, type DeliveryDeps } from "./codex-delivery";
-import { isHumanContext, parseDuration } from "./approval-core";
+import { isHumanContext, lapsedPending, parseDuration, PENDING_TTL_MS } from "./approval-core";
 import type { Task } from "./inbox-core";
 
 export interface ApprovalIo {
@@ -32,6 +32,27 @@ export function stateLabel(t: Task): string {
 }
 
 export const HUMAN_ONLY = "That needs a person at a terminal. An agent cannot approve tasks or set rules, so it cannot approve its own or another agent's work. Open a terminal yourself and run the same command.";
+
+/** Dry-run by default. Applying only expires stale requests; their task and audit history are deliberately retained. */
+export async function runPurgeStaleApprovals(io: ApprovalIo, storeRoot: string, apply: boolean, now: () => Date = () => new Date()): Promise<number> {
+  const store = createLocalStore(storeRoot, { now });
+  const tasks = store.snapshot().tasks;
+  const pendingCount = tasks.filter((task) => task.approval === "pending").length;
+  const stale = lapsedPending(tasks, now(), PENDING_TTL_MS);
+  if (stale.length === 0) { io.out(`No stale pending approvals found (${pendingCount} still within the 24-hour window); nothing changed.`); return 0; }
+  if (!apply) {
+    io.out(`Dry run: ${stale.length} stale approval${stale.length === 1 ? "" : "s"} (of ${pendingCount} pending) would be marked expired. No state changed. To apply: m9r-cli approvals purge --apply`);
+    return 0;
+  }
+  if (!isHuman(io) || !io.confirm) { io.err(`${HUMAN_ONLY} The purge apply step also requires an interactive confirmation.`); return 1; }
+  if (!(await io.confirm(`Mark ${stale.length} stale approval(s) expired? Their task and audit history will be retained.`))) {
+    io.out("Cancelled. Nothing was changed.");
+    return 1;
+  }
+  const expired = store.sweepExpired(PENDING_TTL_MS);
+  io.out(`Expired ${expired.length} stale approval(s). Task and audit history were retained.`);
+  return 0;
+}
 
 export function runTasks(io: ApprovalIo, storeRoot: string): number {
   const store = createLocalStore(storeRoot);

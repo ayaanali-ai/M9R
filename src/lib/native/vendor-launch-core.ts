@@ -1,3 +1,5 @@
+import { validateClaudeResumeSessionId } from "./claude-session-id-core";
+
 export type M9rLaunchVendor = "claude" | "codex";
 export type M9rLaunchProfile = "web-only" | "hands";
 
@@ -11,6 +13,7 @@ export interface VendorLaunchConfig {
   mcpArgs: string[];
   mcpEnv: Record<string, string>;
   sessionToken: string;
+  resumeSessionId?: string;
 }
 
 export interface VendorLaunchPlan {
@@ -60,6 +63,10 @@ export function buildVendorLaunchPlan(config: VendorLaunchConfig): VendorLaunchP
       "--allowedTools", "mcp__m9r",
       "--append-system-prompt-file", config.promptFile,
     ];
+    if (config.resumeSessionId !== undefined) {
+      validateClaudeResumeSessionId(config.resumeSessionId);
+      args.push("--resume", config.resumeSessionId);
+    }
     return {
       command: "claude",
       args,
@@ -67,6 +74,8 @@ export function buildVendorLaunchPlan(config: VendorLaunchConfig): VendorLaunchP
       promptFileContent: prompt,
     };
   }
+
+  if (config.resumeSessionId !== undefined) throw new Error("resume session IDs are supported for Claude Code only");
 
   const args = [
     "exec", "--cd", config.cwd,

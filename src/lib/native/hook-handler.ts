@@ -106,7 +106,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
     if (event === "SessionStart") {
       ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: input.cwd });
       const others = ctx.store.listEndpoints().filter((e) => e.handle !== self && now.getTime() - Date.parse(e.lastSeenAt) < activeWindow).map((e) => ({ handle: e.handle }));
-      const pending = renderInboxInjection(ctx.store.tasksFor(self), ctx.store.cursorFor(self, input.session_id)).includedIds.length;
+      const pending = renderInboxInjection(ctx.store.tasksFor(self), ctx.store.cursorFor(self, input.session_id, input.cwd)).includedIds.length;
       // Only mention memory if the index file really exists here (the earlier card pointed at a file that did not).
       const memoryDir = ctx.memoryDir ?? (input.cwd && (ctx.pathExists ?? existsSync)(join(input.cwd, ".oathlock", "memory", "index.md")) ? ".oathlock/memory" : undefined);
       ctx.store.sweepExpired();
@@ -134,10 +134,10 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
     // results can carry a page's forged text. So this channel carries information, never a redirect; real interrupts go
     // through a live session's user-turn input (live-session-core.ts). Registering it would add a hook run to every tool call.
     if (event === "PostToolUse") {
-      const cursor = ctx.store.cursorFor(self, input.session_id);
+      const cursor = ctx.store.cursorFor(self, input.session_id, input.cwd);
       const injection = renderInboxInjection(ctx.store.tasksFor(self), cursor);
       if (!injection.text) return null;
-      ctx.store.setCursor(self, input.session_id, injection.newCursor);
+      ctx.store.setCursor(self, input.session_id, injection.newCursor, input.cwd);
       ctx.store.markDelivered(injection.includedIds, input.session_id);
       return out(event, injection.text.replace(/^M9R inbox \(/, "M9R inbox, arrived while you were working ("));
     }
@@ -159,11 +159,11 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       if (results.text) { parts.push(results.text); ctx.store.markResultShown(results.ids); }
 
       // 2b. Anything new in our own inbox, delta-only.
-      const cursor = ctx.store.cursorFor(self, input.session_id);
+      const cursor = ctx.store.cursorFor(self, input.session_id, cwd);
       const injection = renderInboxInjection(ctx.store.tasksFor(self), cursor);
       if (injection.text) {
         parts.push(injection.text);
-        ctx.store.setCursor(self, input.session_id, injection.newCursor);
+        ctx.store.setCursor(self, input.session_id, injection.newCursor, cwd);
         ctx.store.markDelivered(injection.includedIds, input.session_id);
       }
 

@@ -24,6 +24,38 @@ test("provider names map to friendly handles", () => {
   assert.equal(defaultStoreRoot("/home/u", { M9R_HOME: "/tmp/x" }), "/tmp/x");
 });
 
+test("agent sessions are keyed by agent, normalized folder, and provider session id", () => {
+  const { store, done } = tempStore();
+  store.registerEndpoint({ provider: "claude-code", sessionId: "same-session", cwd: "C:\\Work\\One\\" });
+  store.registerEndpoint({ provider: "claude-code", sessionId: "same-session", cwd: "c:/work/one" });
+  store.registerEndpoint({ provider: "claude-code", sessionId: "same-session", cwd: "C:\\Work\\Two" });
+
+  assert.equal(store.sessionsFor("claude").length, 2, "same id in two folders must remain two sessions; path spelling aliases within a folder should dedupe");
+  assert.equal(store.sessionsFor("claude", "c:/work/one").length, 1);
+  assert.equal(store.sessionsFor("claude", "C:\\Work\\Two")[0].cwd, "c:/work/two");
+  done();
+});
+
+test("inbox cursors are folder scoped when the same agent session id is observed in distinct folders", () => {
+  const { store, done } = tempStore();
+  store.setCursor("claude", "shared-id", 4, "C:\\Work\\One");
+  store.setCursor("claude", "shared-id", 2, "C:\\Work\\Two");
+  assert.equal(store.cursorFor("claude", "shared-id", "c:/work/one"), 4);
+  assert.equal(store.cursorFor("claude", "shared-id", "C:\\Work\\Two"), 2);
+  assert.equal(store.cursorFor("claude", "shared-id"), 0, "scoped cursors must not leak into the legacy agent/session key");
+  done();
+});
+
+test("hook inbox delivery does not let a same-id session in another folder inherit the first folder's cursor", () => {
+  const { store, done } = tempStore();
+  store.addTask(task({ idempotencyKey: "folder-scope-hook" }));
+  const one = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "same", cwd: "C:\\Work\\One", prompt: "hello" }, ctx(store));
+  const two = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "same", cwd: "C:\\Work\\Two", prompt: "hello" }, ctx(store));
+  assert.match(ctxOf(one) ?? "", /look at the reconnect bug/);
+  assert.match(ctxOf(two) ?? "", /look at the reconnect bug/);
+  done();
+});
+
 test("tasks get sequential ids and per-inbox sequence numbers, and the same key never creates a second task", () => {
   const { store, done } = tempStore();
   const a = store.addTask(task());

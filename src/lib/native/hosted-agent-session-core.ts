@@ -1,7 +1,7 @@
 /** Pure planning and lifecycle primitives for owner-hosted agent sessions. */
 import { posix, win32 } from "node:path";
 import { buildVendorLaunchPlan, type M9rLaunchProfile } from "./vendor-launch-core";
-import { encodeUserMessage, signUserMessage } from "./live-session-core";
+import { encodeUserMessage, signUserMessage, validateClaudeResumeSessionId } from "./live-session-core";
 import { isThreadId, queueArgs } from "./codex-delivery-core";
 
 export type HostedVendor = "claude" | "codex";
@@ -85,22 +85,29 @@ function replaceSession(state: HostedSessionState, id: string, update: (current:
   return { ok: true, action: "unchanged", state: { ...state, sessions }, session: sessions[index] };
 }
 
-/** Idempotent owner-local session registry transition. Duplicate live keys fail closed. */
+/** Idempotent per-session transition. Session identity is room + folder + provider/agent + session id. */
 export function transitionHostedSessions(state: HostedSessionState, event: HostedEvent): HostedTransition {
   if (event.type === "ensure") {
     const key = stableKey(event.key);
     if (!key) return { ok: false, action: "conflict", state, error: "room, absolute project folder, vendor, and agent are required" };
-    const matches = state.sessions.filter((session) => LIVE_STATUSES.has(session.status) && sessionKey(session) === key);
-    if (matches.length > 1) return { ok: false, action: "conflict", state, error: "multiple live sessions share this logical agent key" };
+    if (!event.sessionId.trim()) return { ok: false, action: "conflict", state, error: "session id must be non-empty and unique" };
+    const idMatches = state.sessions.filter((session) => session.id === event.sessionId);
+    if (idMatches.some((session) => sessionKey(session) !== key)) {
+      return { ok: false, action: "conflict", state, error: "session id already belongs to another agent or folder" };
+    }
+    if (idMatches.length > 1) return { ok: false, action: "conflict", state, error: "multiple registry entries share this session id" };
+    const sameAgentSessions = state.sessions.filter((session) => LIVE_STATUSES.has(session.status) && sessionKey(session) === key);
+    if (new Set(sameAgentSessions.map((session) => session.id)).size !== sameAgentSessions.length) {
+      return { ok: false, action: "conflict", state, error: "multiple registry entries share the same agent, folder, and session id" };
+    }
+    const matches = idMatches.filter((session) => LIVE_STATUSES.has(session.status));
     const existing = matches[0];
     if (existing?.status === "sleeping") {
       const woken = { ...existing, status: "starting" as const, updatedAt: event.now, lastActivityAt: event.now, resumeCount: existing.resumeCount + 1 };
       return { ok: true, action: "waking", state: { ...state, sessions: state.sessions.map((item) => item.id === existing.id ? woken : item) }, session: woken };
     }
     if (existing) return { ok: true, action: "reused", state, session: existing };
-    if (!event.sessionId.trim() || state.sessions.some((session) => session.id === event.sessionId)) {
-      return { ok: false, action: "conflict", state, error: "session id must be non-empty and unique" };
-    }
+    if (idMatches.length) return { ok: false, action: "conflict", state, error: "session id belongs to a stopped or failed session" };
     const session: HostedAgentSession = {
       ...event.key,
       projectFolder: normalizeProjectFolder(event.key.projectFolder)!,
@@ -191,7 +198,7 @@ export interface HostedLaunchConfig {
 export function buildHostedAgentLaunchPlan(config: HostedLaunchConfig): { command: string; args: string[]; mcpConfigJson?: string; promptFileContent?: string; stdinPrompt?: string } {
   const cwd = normalizeProjectFolder(config.projectFolder);
   if (!cwd) throw new Error("project folder must be absolute");
-  if (config.resumeSessionId !== undefined && (!config.resumeSessionId.trim() || config.resumeSessionId.length > 256)) throw new Error("resume session id is invalid");
+  if (config.vendor === "claude" && config.resumeSessionId !== undefined) validateClaudeResumeSessionId(config.resumeSessionId);
   const plan = buildVendorLaunchPlan({ ...config, cwd });
   if (config.vendor === "claude" && config.resumeSessionId) plan.args.push("--resume", config.resumeSessionId);
   return plan;

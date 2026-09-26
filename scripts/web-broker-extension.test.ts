@@ -19,8 +19,7 @@ function createHarness(settings: { completeOnCreate?: boolean } = {}) {
   let clearedLoadTimers = 0;
   const loadTimers = new Set<ReturnType<typeof setTimeout>>();
   const workerSetTimeout = (callback: () => void, delay: number) => {
-    let timer: ReturnType<typeof setTimeout>;
-    timer = globalThis.setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       loadTimers.delete(timer);
       callback();
     }, delay === 10_000 ? 50 : delay);
@@ -38,7 +37,7 @@ function createHarness(settings: { completeOnCreate?: boolean } = {}) {
     readyState = 1;
     onopen?: () => void;
     onmessage?: (event: { data: string }) => void;
-    constructor(_url: string) { sockets.push(this); }
+    constructor() { sockets.push(this); }
     send(payload: string) { replies.push(JSON.parse(payload) as Record<string, unknown>); }
     receive(payload: Record<string, unknown>) { this.onmessage?.({ data: JSON.stringify(payload) }); }
     close() { this.readyState = 3; }
@@ -158,7 +157,13 @@ test("a named open tab is reused across an extension worker restart on retry", a
 test("extension stop-all blocks broker commands until the server reports a fresh running state", async () => {
   const h = createHarness({ completeOnCreate: true });
   const worker = h.startWorker();
+  h.sockets[0].onopen?.();
   await new Promise((resolve) => setTimeout(resolve, 1));
+  for (let attempt = 0; attempt < 100 && !h.replies.some((reply) => reply.type === "ready"); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.ok(h.replies.some((reply) => reply.type === "ready"), "extension must send ready after restoring local tab state");
+  h.sockets[0].receive({ type: "broker-state", stopped: false });
   h.sockets[0].receive({ type: "stop-all", owner: "you" });
   assert.equal(h.pageMessages.length, 0, "no page is open to notify yet");
   await worker.handle({ id: "blocked", type: "command", action: "open", tab: "demo", url: "https://example.com/" });

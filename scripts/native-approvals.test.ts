@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { isAgentContext, isHumanContext, isProtectedAction, lapsedPending, parseDuration, ruleCovers } from "../src/lib/native/approval-core";
 import { nativePaths, runNativeCommand, type NativeIo } from "../src/lib/native/native-commands";
 import { createLocalStore } from "../src/lib/native/local-store";
+import { runPurgeStaleApprovals, type ApprovalIo } from "../src/lib/native/approval-commands";
 import { renderSessionCard } from "../src/lib/native/inbox-core";
 import type { DeliveryDeps } from "../src/lib/native/codex-delivery";
 
@@ -135,6 +136,51 @@ test("pending approvals lapse after a day instead of waiting forever, and the se
   assert.equal(store.pendingApprovals().length, 0);
   assert.deepEqual(store.sweepExpired(), ["T1"]);
   assert.equal(store.getTask("T1")?.approval, "expired");
+});
+
+test("stale-approval purge previews 77, requires a live human confirmation, and preserves task history", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-approval-purge-"));
+  let clock = new Date("2026-09-20T00:00:00.000Z");
+  const store = createLocalStore(root, { now: () => clock });
+  for (let i = 0; i < 77; i += 1) store.addTask({ from: "claude", to: "codex", goal: `Old request ${i}`, origin: "agent_initiated", idempotencyKey: `old-${i}` });
+  clock = new Date("2026-09-21T01:00:00.000Z");
+  store.addTask({ from: "claude", to: "codex", goal: "Fresh request", origin: "agent_initiated", idempotencyKey: "fresh" });
+  clock = new Date("2026-09-21T02:00:00.000Z");
+
+  const out: string[] = [];
+  const err: string[] = [];
+  const answers = [false, true];
+  const io: ApprovalIo = { env: {}, out: (line) => out.push(line), err: (line) => err.push(line), confirm: async () => answers.shift() ?? false };
+
+  assert.equal(await runPurgeStaleApprovals(io, root, false, () => clock), 0);
+  assert.match(out.at(-1) ?? "", /Dry run: 77 stale approval/);
+  assert.equal(store.snapshot().tasks.filter((task) => task.approval === "pending").length, 78, "dry-run changes nothing");
+
+  assert.equal(await runPurgeStaleApprovals(io, root, true, () => clock), 1, "a declined confirmation aborts");
+  assert.equal(store.snapshot().tasks.filter((task) => task.approval === "pending").length, 78);
+
+  assert.equal(await runPurgeStaleApprovals(io, root, true, () => clock), 0);
+  const tasks = store.snapshot().tasks;
+  assert.equal(tasks.filter((task) => task.approval === "expired").length, 77);
+  assert.equal(tasks.find((task) => task.goal === "Fresh request")?.approval, "pending");
+  assert.equal(tasks.length, 78, "purging from the waiting queue preserves task and audit history");
+  assert.equal(store.snapshot().events.filter((event) => event.kind === "task.expired").length, 77);
+  assert.equal(err.length, 0);
+});
+
+test("the CLI exposes approvals purge as dry-run by default and --apply requires the human terminal", async () => {
+  const s = sandbox({ terminal: true });
+  s.store.addTask({ from: "claude", to: "codex", goal: "Old request", origin: "agent_initiated", idempotencyKey: "cli-purge" });
+  const statePath = join(s.io.env.M9R_HOME!, "state.json");
+  const state = JSON.parse(readFileSync(statePath, "utf8")) as { tasks: Array<{ createdAt: string }> };
+  state.tasks[0].createdAt = "2020-01-01T00:00:00.000Z";
+  writeFileSync(statePath, JSON.stringify(state), "utf8");
+
+  assert.equal(await s.run("approvals", ["purge"]), 0);
+  assert.match(s.out.join("\n"), /Dry run: 1 stale approval/);
+  assert.equal(s.store.getTask("T1")?.approval, "pending");
+  assert.equal(await s.run("approvals", ["purge", "--apply"]), 0);
+  assert.equal(s.store.getTask("T1")?.approval, "expired");
 });
 
 test("`tasks` lists what is waiting and how far each task got", async () => {

@@ -21,7 +21,7 @@ import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { emitKeypressEvents } from "node:readline";
 import { homedir, platform, tmpdir } from "node:os";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, extname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
@@ -71,6 +71,8 @@ import {
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
+import { buildLocalBrokerAutostartSpec } from "@/lib/native/install-core";
+import { runOpenCodeCli } from "@/lib/native/opencode-cli-core";
 
 const execFileAsync = promisify(execFile);
 
@@ -132,6 +134,7 @@ const deps: CliDeps = {
     repositoryRoot: process.cwd(),
     readTranscript: (path) => readFile(path, "utf8"),
   }),
+  installLocalBrokerAutostart: ensureLocalBrokerAutostart,
 };
 
 /**
@@ -1018,19 +1021,24 @@ const argv = process.argv.slice(2);
 async function runVendorLaunch(args: string[]): Promise<number> {
   const vendorValue = args[0];
   if (vendorValue !== "claude" && vendorValue !== "codex") {
-    process.stderr.write("Usage: m9r launch <claude|codex> [--profile web-only|hands] [--allow-api-key]\n");
+    process.stderr.write("Usage: m9r launch <claude|codex> [--profile web-only|hands] [--resume <claude-session-id>] [--allow-api-key]\n");
     return 2;
   }
   const vendor: M9rLaunchVendor = vendorValue;
   let profile: M9rLaunchProfile = "web-only";
   let allowApiKey = false;
+  let resumeSessionId: string | undefined;
   for (let i = 1; i < args.length; i += 1) {
     if (args[i] === "--allow-api-key") allowApiKey = true;
+    else if (args[i] === "--resume" && vendor === "claude" && args[i + 1]) {
+      resumeSessionId = args[i + 1];
+      i += 1;
+    }
     else if (args[i] === "--profile" && (args[i + 1] === "web-only" || args[i + 1] === "hands")) {
       profile = args[i + 1] as M9rLaunchProfile;
       i += 1;
     } else {
-      process.stderr.write("Usage: m9r launch <claude|codex> [--profile web-only|hands] [--allow-api-key]\n");
+      process.stderr.write("Usage: m9r launch <claude|codex> [--profile web-only|hands] [--resume <claude-session-id>] [--allow-api-key]\n");
       return 2;
     }
   }
@@ -1062,6 +1070,7 @@ async function runVendorLaunch(args: string[]): Promise<number> {
     const plan = buildVendorLaunchPlan({
       vendor, profile, cwd: process.cwd(), mcpConfigPath: join(tempDir, "mcp.json"), promptFile: join(tempDir, "m9r-system-prompt.txt"),
       mcpCommand: process.execPath, mcpArgs, mcpEnv, sessionToken: identity.token,
+      resumeSessionId,
     });
     if (plan.mcpConfigJson) await writeFile(join(tempDir, "mcp.json"), plan.mcpConfigJson, "utf8");
     if (plan.promptFileContent) await writeFile(join(tempDir, "m9r-system-prompt.txt"), plan.promptFileContent, "utf8");
@@ -1668,6 +1677,80 @@ async function runWebBrokerServer(args: string[]): Promise<number> {
   });
 }
 
+/** Install the loopback browser broker as a current-user login task after `connect` succeeds. */
+async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: string }> {
+  if (platform() !== "win32") {
+    return { ok: false, message: "Automatic local web broker startup is currently supported on Windows 10/11 only; provider connections remain saved." };
+  }
+  const home = homeDirectory();
+  const root = defaultStoreRoot(home, process.env);
+  const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
+  const entry = process.argv[1] ? resolve(process.argv[1]) : "";
+  if (!entry || !awaitableExists(entry) || ![".js", ".cjs", ".mjs"].includes(extname(entry).toLowerCase())) {
+    return { ok: false, message: "Could not identify the installed JavaScript CLI entry for broker autostart. Run connect from the packaged m9r-cli command; provider connections remain saved." };
+  }
+
+  const keyPath = brokerKeyPath(root);
+  const healthUrl = `http://127.0.0.1:${port}/health`;
+  const statusUrl = `http://127.0.0.1:${port}/web/status`;
+  let brokerAlreadyRunning = false;
+  let key: string | null = null;
+  const initialHealth = await fetch(healthUrl, { signal: AbortSignal.timeout(700) }).catch(() => null);
+  if (initialHealth?.ok) {
+    if (!await canRead(keyPath)) return { ok: false, message: `A service is already answering on the local broker port ${port}, but this M9R home has no broker key. Refusing to create or claim a new key.` };
+    key = (await readFile(keyPath, "utf8")).trim();
+    const status = await fetch(statusUrl, { headers: { "x-m9r-key": key }, signal: AbortSignal.timeout(700) });
+    if (!status.ok) return { ok: false, message: `A service is already answering on the local broker port ${port}, but it did not authenticate with M9R's local broker key. Refusing to replace or claim that service.` };
+    brokerAlreadyRunning = true;
+  }
+  if (!key) key = loadOrCreateBrokerKey(keyPath);
+
+  const markerPath = join(root, "broker-autostart.json");
+  const setupManifestPath = join(root, WEB_SETUP_MANIFEST);
+  const [markerBytes, setupBytes, taskExists] = await Promise.all([
+    readOptional(markerPath), readOptional(setupManifestPath),
+    execFileAsync("schtasks.exe", ["/Query", "/TN", WEB_TASK_NAME], { windowsHide: true, timeout: 10_000 }).then(() => true).catch(() => false),
+  ]);
+  const readJson = (bytes: Buffer | null): Record<string, unknown> | null => {
+    try {
+      const parsed: unknown = bytes ? JSON.parse(bytes.toString("utf8")) : null;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+    } catch { return null; }
+  };
+  const marker = readJson(markerBytes);
+  const setupManifest = readJson(setupBytes);
+  const hasMarker = marker?.version === 1 && marker.taskName === WEB_TASK_NAME;
+  const hasSetupManifest = setupManifest?.version === 1 && typeof setupManifest.brokerConfigPath === "string" && Array.isArray(setupManifest.configs);
+  if (taskExists && !hasMarker && !hasSetupManifest) {
+    return { ok: false, message: `A login task named ${WEB_TASK_NAME} already exists but is not recorded as M9R-managed; refusing to overwrite it.` };
+  }
+
+  const spec = buildLocalBrokerAutostartSpec({
+    nodeExecutable: process.execPath,
+    nodeArgs: [],
+    cliEntryPath: entry,
+    m9rHome: root,
+    port,
+  });
+  const action = [spec.nodeExecutable, ...spec.nodeArgs, spec.cliEntryPath, ...spec.args]
+    .map((value) => `"${value.replaceAll('"', '""')}"`).join(" ");
+  await execFileAsync("schtasks.exe", ["/Create", "/SC", "ONLOGON", "/TN", spec.taskName, "/TR", action, "/F", "/RL", "LIMITED"], { windowsHide: true, timeout: 20_000 });
+  if (!hasMarker) await writeAtomic(markerPath, JSON.stringify({ version: 1, taskName: spec.taskName, entry, port }) + "\n");
+  if (!brokerAlreadyRunning) await execFileAsync("schtasks.exe", ["/Run", "/TN", spec.taskName], { windowsHide: true, timeout: 20_000 });
+
+  let authenticated = false;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const health = await fetch(healthUrl, { signal: AbortSignal.timeout(500) });
+      const status = health.ok ? await fetch(statusUrl, { headers: { "x-m9r-key": key }, signal: AbortSignal.timeout(700) }) : null;
+      if (status?.ok) { authenticated = true; break; }
+    } catch { /* broker child may still be starting */ }
+    await new Promise((wait) => setTimeout(wait, 250));
+  }
+  if (!authenticated) return { ok: false, message: `The login task was installed, but authenticated broker health did not pass on 127.0.0.1:${port}. The approved provider connections remain saved.` };
+  return { ok: true, message: `M9R local web broker is running on 127.0.0.1:${port} and will start at login for this Windows user. The browser extension becomes ready after its authenticated handshake.` };
+}
+
 async function runWebCli(args: string[]): Promise<number> {
   if (args[0] === "setup") return runWebSetup(args.slice(1));
   if (args[0] === "uninstall") return runWebUninstall(args.slice(1));
@@ -1709,6 +1792,15 @@ const execution = argv[0] === "setup" && argv.includes("--web")
       ? runWebCli(argv.slice(1))
     : argv[0] === "launch"
       ? runVendorLaunch(argv.slice(1))
+  : argv[0] === "opencode"
+      ? runOpenCodeCli(argv.slice(1), {
+          baseUrl: process.env.M9R_OPENCODE_URL?.trim() || "http://127.0.0.1:4096",
+          username: process.env.M9R_OPENCODE_USERNAME,
+          password: process.env.M9R_OPENCODE_PASSWORD,
+          fetch: globalThis.fetch,
+          out: (line) => process.stdout.write(`${line}\n`),
+          err: (line) => process.stderr.write(`${line}\n`),
+        })
     : run(argv, deps);
 
 /** `--no-autostart` declines; an interactive terminal is asked (default yes); a script keeps the disclosed default. */

@@ -284,7 +284,7 @@ function build() {
 
   // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "local-store", "web-broker-paths", "web-broker-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "web-powers-core", "page-notes-core", "page-notes-store", "vendor-launch-core", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server"]) {
+  for (const name of ["mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "local-store", "web-broker-paths", "web-broker-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "web-powers-core", "page-notes-core", "page-notes-store", "vendor-launch-core", "claude-session-id-core", "live-session-core", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source)
       .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
@@ -512,6 +512,10 @@ function build() {
   entryJs = entryJs.replace(
     /["']@\/lib\/local-terminal-runtime-launcher["']/g,
     '"./local-terminal-runtime-launcher.js"',
+  );
+  entryJs = entryJs.replace(
+    /["']@\/lib\/native\/install-core["']/g,
+    '"./install-core.js"',
   );
   entryJs = entryJs.replace(
     /["']@\/lib\/resident-supervisor["']/g,

@@ -45,6 +45,16 @@ test("the launch arguments give web-only sessions no built-in tools, only M9R's,
   assert.ok(named.includes("Bash(git status:*)") && named.includes("--resume") && named.includes("s-9") && named.includes("--max-budget-usd"));
 });
 
+test("Claude resume uses the explicit provider session id in print/stream mode and rejects unsafe ids", () => {
+  const args = buildClaudeLiveArgs({ cwd: "C:/p", profile: "web-only", mcpConfigPath: "C:/m.json", resumeSessionId: "claude-session-123" });
+  assert.ok(args.includes("-p"));
+  assert.ok(args.includes("--input-format") && args.includes("stream-json"));
+  assert.deepEqual(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 2), ["--resume", "claude-session-123"]);
+  assert.throws(() => buildClaudeLiveArgs({ cwd: "C:/p", profile: "web-only", mcpConfigPath: "C:/m.json", resumeSessionId: "  " }), /resume session id/i);
+  assert.throws(() => buildClaudeLiveArgs({ cwd: "C:/p", profile: "web-only", mcpConfigPath: "C:/m.json", resumeSessionId: "--dangerous" }), /resume session id/i);
+  assert.throws(() => buildClaudeLiveArgs({ cwd: "C:/p", profile: "web-only", mcpConfigPath: "C:/m.json", resumeSessionId: "bad\nid" }), /resume session id/i);
+});
+
 function fakeProcess() {
   const emitter = new EventEmitter();
   const stdout = new EventEmitter();
@@ -58,6 +68,25 @@ function fakeProcess() {
   };
   return { proc, emitOut: (text: string) => stdout.emit("data", Buffer.from(text)), exit: (code: number) => emitter.emit("exit", code), written, wasKilled: () => killed };
 }
+
+test("startLiveSession resumes the exact Claude session in the requested folder without shell interpolation", () => {
+  const fake = fakeProcess();
+  let launch: { command: string; args: string[]; cwd: string } | undefined;
+  const session = startLiveSession({
+    config: { cwd: "C:/Work/Project", profile: "web-only", mcpConfigPath: "C:/mcp.json", resumeSessionId: "claude-session-123" },
+    spawn: (command, args, cwd) => { launch = { command, args, cwd }; return fake.proc; },
+    env: {},
+  });
+  assert.equal(launch?.command, "claude");
+  assert.equal(launch?.cwd, "C:/Work/Project");
+  assert.ok(launch?.args.includes("-p") && launch.args.includes("--input-format") && launch.args.includes("stream-json"));
+  assert.deepEqual(launch?.args.slice(launch.args.indexOf("--resume"), launch.args.indexOf("--resume") + 2), ["--resume", "claude-session-123"]);
+  fake.emitOut(`${line({ type: "system", subtype: "init", session_id: "claude-session-123" })}\n`);
+  assert.equal(session.state().sessionId, "claude-session-123");
+  session.send("Continue from the checkpoint");
+  assert.match(JSON.parse(fake.written[0]).message.content[0].text, /^\[M9R-USER-/);
+  session.stop();
+});
 
 test("a live session takes messages while working, follows the agent's events, handles split chunks, and stops cleanly", () => {
   const fake = fakeProcess();

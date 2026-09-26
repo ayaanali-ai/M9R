@@ -6,7 +6,7 @@
  * Local first: nothing here needs the network or an account (design section 1, principle 7).
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
 import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, normalizeHandle, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
@@ -60,8 +60,8 @@ interface StoreState {
 
 export interface SessionLink {
   id: string;
-  a: { handle: string; sessionId: string };
-  b: { handle: string; sessionId: string };
+  a: { handle: string; sessionId: string; cwd?: string };
+  b: { handle: string; sessionId: string; cwd?: string };
   origin: "auto" | "picked";
   createdAt: string;
   updatedAt: string;
@@ -69,10 +69,39 @@ export interface SessionLink {
 
 const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [] });
 
-const cursorKey = (handle: string, sessionId?: string): string => {
-  const normalizedHandle = normalizeHandle(handle);
-  return sessionId ? normalizedHandle + "::" + sessionId : normalizedHandle;
+const normalizeSessionFolder = (cwd?: string): string => {
+  const value = cwd?.trim();
+  if (!value) return "";
+  if (win32.isAbsolute(value)) {
+    const normalized = win32.normalize(value).replace(/\\/g, "/").toLowerCase();
+    return /^[a-z]:\/$/.test(normalized) ? normalized : normalized.replace(/\/$/, "");
+  }
+  if (posix.isAbsolute(value)) return posix.normalize(value).replace(/\/$/, "") || "/";
+  return "";
 };
+
+const cursorKey = (handle: string, sessionId?: string, cwd?: string): string => {
+  const normalizedHandle = normalizeHandle(handle);
+  if (!sessionId) return normalizedHandle;
+  const folder = normalizeSessionFolder(cwd);
+  return folder ? JSON.stringify([normalizedHandle, folder, sessionId]) : normalizedHandle + "::" + sessionId;
+};
+
+const sameSession = (left: Pick<SessionRecord, "handle" | "sessionId" | "cwd">, right: Pick<SessionRecord, "handle" | "sessionId" | "cwd">): boolean =>
+  normalizeHandle(left.handle) === normalizeHandle(right.handle)
+  && left.sessionId === right.sessionId
+  && normalizeSessionFolder(left.cwd) === normalizeSessionFolder(right.cwd);
+
+type SessionRef = { handle: string; sessionId: string; cwd?: string };
+const normalizeSessionRef = (session: SessionRef): SessionRef => ({
+  handle: normalizeHandle(session.handle),
+  sessionId: session.sessionId,
+  ...(normalizeSessionFolder(session.cwd) ? { cwd: normalizeSessionFolder(session.cwd) } : {}),
+});
+const sameSessionRef = (a: SessionRef, b: SessionRef): boolean =>
+  normalizeHandle(a.handle) === normalizeHandle(b.handle)
+  && a.sessionId === b.sessionId
+  && normalizeSessionFolder(a.cwd) === normalizeSessionFolder(b.cwd);
 
 const KNOWN_PROVIDER_HANDLES: Readonly<Record<string, string>> = { "claude-code": "claude", claude: "claude", codex: "codex", opencode: "opencode" };
 
@@ -175,26 +204,33 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const previous = s.endpoints[handle];
         const seen = input.seenAt ?? now().toISOString();
-        const record: EndpointRecord = { handle, provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, lastSeenAt: previous && Date.parse(previous.lastSeenAt) > Date.parse(seen) ? previous.lastSeenAt : seen };
+        const folder = normalizeSessionFolder(input.cwd);
+        const record: EndpointRecord = { handle, provider: input.provider, sessionId: input.sessionId, cwd: folder || undefined, lastSeenAt: previous && Date.parse(previous.lastSeenAt) > Date.parse(seen) ? previous.lastSeenAt : seen };
         s.endpoints[handle] = record;
+        let newSession = false;
         if (input.sessionId) {
           const at = input.seenAt ?? now().toISOString();
-          const known = s.sessions.find((x) => x.handle === handle && x.sessionId === input.sessionId);
-          if (known) { if (Date.parse(at) > Date.parse(known.lastSeenAt)) known.lastSeenAt = at; if (input.cwd) known.cwd = input.cwd; }
-          else s.sessions.push({ handle, provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, firstSeenAt: at, lastSeenAt: at });
+          const candidate = { handle, sessionId: input.sessionId, cwd: folder || undefined };
+          const known = s.sessions.find((x) => sameSession(x, candidate));
+          if (known) { if (Date.parse(at) > Date.parse(known.lastSeenAt)) known.lastSeenAt = at; if (folder) known.cwd = folder; }
+          else {
+            newSession = true;
+            s.sessions.push({ handle, provider: input.provider, sessionId: input.sessionId, cwd: folder || undefined, firstSeenAt: at, lastSeenAt: at });
+          }
           // Keep the list small: the 60 most recent sessions, nothing older than a week.
           const cutoff = now().getTime() - 7 * 86_400_000;
           s.sessions = s.sessions.filter((x) => Date.parse(x.lastSeenAt) >= cutoff).sort((a, b) => Date.parse(a.lastSeenAt) - Date.parse(b.lastSeenAt)).slice(-60);
         }
         if (!previous) pushEvent(s, { kind: "agent.connected", handle, text: `@${handle} connected (${input.provider})` });
-        else if (input.sessionId && previous.sessionId !== input.sessionId) pushEvent(s, { kind: "session.started", handle, text: `@${handle} started a new session` });
+        else if (input.sessionId && newSession) pushEvent(s, { kind: "session.started", handle, text: `@${handle} started a new session` });
         return record;
       });
     },
 
     /** Sessions of one agent, most recently seen first. */
-    sessionsFor(handle: string): SessionRecord[] {
-      return readState().sessions.filter((x) => x.handle === handle).sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
+    sessionsFor(handle: string, cwd?: string): SessionRecord[] {
+      const folder = cwd === undefined ? undefined : normalizeSessionFolder(cwd);
+      return readState().sessions.filter((x) => normalizeHandle(x.handle) === normalizeHandle(handle) && (folder === undefined || normalizeSessionFolder(x.cwd) === folder)).sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
     },
 
     listEndpoints(): EndpointRecord[] {
@@ -274,23 +310,52 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /** Every link this session takes part in, either side. */
-    linksFor(handle: string, sessionId: string): SessionLink[] {
-      return readState().links.filter((l) => (l.a.handle === handle && l.a.sessionId === sessionId) || (l.b.handle === handle && l.b.sessionId === sessionId));
+    linksFor(handle: string, sessionId: string, cwd?: string): SessionLink[] {
+      const wanted = normalizeSessionRef({ handle, sessionId, cwd });
+      const matches = (ref: SessionRef) => normalizeHandle(ref.handle) === wanted.handle
+        && ref.sessionId === wanted.sessionId
+        && (cwd === undefined || normalizeSessionFolder(ref.cwd) === normalizeSessionFolder(cwd));
+      return readState().links.filter((l) => matches(l.a) || matches(l.b));
     },
 
     /** The session this one is linked to for a given partner agent, if any. */
-    linkedSession(handle: string, sessionId: string, partnerHandle: string): { sessionId: string } | undefined {
-      const l = this.linksFor(handle, sessionId).find((x) => (x.a.handle === partnerHandle) || (x.b.handle === partnerHandle));
-      if (!l) return undefined;
-      const other = l.a.handle === handle && l.a.sessionId === sessionId ? l.b : l.a;
-      return { sessionId: other.sessionId };
+    linkedSession(handle: string, sessionId: string, partnerHandle: string, cwd?: string): { sessionId: string; cwd?: string } | undefined {
+      let links = this.linksFor(handle, sessionId, cwd).filter((x) => normalizeHandle(x.a.handle) === normalizeHandle(partnerHandle) || normalizeHandle(x.b.handle) === normalizeHandle(partnerHandle));
+      let allowLegacyFolderless = false;
+      if (links.length === 0 && cwd !== undefined) {
+        const state = readState();
+        const knownSourceFolders = state.sessions.filter((x) => normalizeHandle(x.handle) === normalizeHandle(handle) && x.sessionId === sessionId);
+        const requestedFolder = normalizeSessionFolder(cwd);
+        allowLegacyFolderless = knownSourceFolders.length === 0 || (knownSourceFolders.length === 1 && normalizeSessionFolder(knownSourceFolders[0].cwd) === requestedFolder);
+        if (allowLegacyFolderless) {
+          links = state.links.filter((link) => {
+            const legacySource = (ref: SessionRef) => normalizeHandle(ref.handle) === normalizeHandle(handle) && ref.sessionId === sessionId && !normalizeSessionFolder(ref.cwd);
+            return (legacySource(link.a) && normalizeHandle(link.b.handle) === normalizeHandle(partnerHandle)) || (legacySource(link.b) && normalizeHandle(link.a.handle) === normalizeHandle(partnerHandle));
+          });
+        }
+      }
+      if (links.length !== 1) return undefined;
+      const wanted = normalizeSessionRef({ handle, sessionId, cwd });
+      const sourceMatches = (ref: SessionRef) => normalizeHandle(ref.handle) === wanted.handle
+        && ref.sessionId === wanted.sessionId
+        && (cwd === undefined || normalizeSessionFolder(ref.cwd) === normalizeSessionFolder(cwd) || (allowLegacyFolderless && !normalizeSessionFolder(ref.cwd)));
+      const sourceIsA = sourceMatches(links[0].a);
+      const other = sourceIsA ? links[0].b : links[0].a;
+      return { sessionId: other.sessionId, ...(other.cwd ? { cwd: other.cwd } : {}) };
     },
 
     /** Creates or replaces the one link a session may have with a given partner agent. */
-    setLink(a: { handle: string; sessionId: string }, b: { handle: string; sessionId: string }, origin: "auto" | "picked"): SessionLink {
+    setLink(aInput: SessionRef, bInput: SessionRef, origin: "auto" | "picked"): SessionLink {
       return update((s) => {
         const at = now().toISOString();
-        const keep = s.links.filter((l) => !((l.a.handle === a.handle && l.a.sessionId === a.sessionId && l.b.handle === b.handle) || (l.b.handle === a.handle && l.b.sessionId === a.sessionId && l.a.handle === b.handle) || (l.a.handle === b.handle && l.a.sessionId === b.sessionId && l.b.handle === a.handle) || (l.b.handle === b.handle && l.b.sessionId === b.sessionId && l.a.handle === a.handle)));
+        const a = normalizeSessionRef(aInput);
+        const b = normalizeSessionRef(bInput);
+        const keep = s.links.filter((l) => !(
+          (sameSessionRef(l.a, a) && l.b.handle === b.handle)
+          || (sameSessionRef(l.b, a) && l.a.handle === b.handle)
+          || (sameSessionRef(l.a, b) && l.b.handle === a.handle)
+          || (sameSessionRef(l.b, b) && l.a.handle === a.handle)
+        ));
         const link: SessionLink = { id: `L${s.nextLinkNo}`, a, b, origin, createdAt: at, updatedAt: at };
         s.nextLinkNo += 1;
         s.links = [...keep, link];
@@ -443,13 +508,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
      * with no id (older callers, or an event with no session_id) falls back to the handle-only key so it still
      * gets a cursor, just not one isolated from other id-less callers.
      */
-    cursorFor(handle: string, sessionId?: string): number {
-      return readState().cursors[cursorKey(handle, sessionId)] ?? 0;
+    cursorFor(handle: string, sessionId?: string, cwd?: string): number {
+      return readState().cursors[cursorKey(handle, sessionId, cwd)] ?? 0;
     },
 
-    setCursor(handle: string, sessionId: string | undefined, seq: number): void {
+    setCursor(handle: string, sessionId: string | undefined, seq: number, cwd?: string): void {
       update((s) => {
-        const key = cursorKey(handle, sessionId);
+        const key = cursorKey(handle, sessionId, cwd);
         if (seq > (s.cursors[key] ?? 0)) s.cursors[key] = seq;
       });
     },

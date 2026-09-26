@@ -37,7 +37,7 @@ import { hookPipePath, requestShutdown, startHookServer } from "./hook-server";
 import { runHookRequest } from "./hook-run";
 import { canQueue } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
-import { runAllow, runDecision, runLink, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
+import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
 import { USER_STEPS } from "./onboarding-steps";
 
@@ -480,6 +480,7 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   if (command === "tasks") return runTasks(io, root);
   if (command === "sessions") return runSessions(io, root, positionals[0]);
   if (command === "sessions-json") return runSessionsJson(io, root, positionals[0]);
+  if (command === "approvals" && positionals[0] === "purge") return runPurgeStaleApprovals(io, root, has("--apply"));
   if (command === "link") return runLink(io, root, value("--from-handle"), value("--from-session"), value("--to-handle"), value("--to-session"));
   if (command === "unlink") return runUnlink(io, root, positionals[0]);
   if (command === "approve" || command === "deny") return runDecision(io, root, command === "approve" ? "approved" : "denied", positionals[0], has("--yes", "-y"));

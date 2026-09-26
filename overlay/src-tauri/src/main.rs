@@ -1,11 +1,11 @@
 // M9R overlay shell. It shows a feed and nothing else: all logic (routing, approvals, liveness) stays in m9r-cli, which
-// writes ~/.m9r/feed.json. This file owns only the window: placement, size, staying on top without taking focus, the
-// tray, and telling the UI when the feed file changed.
+// writes ~/.m9r/feed.json and the web broker writes ~/.m9r/web-activity.json. This file owns the view-only merge plus
+// the window, tray, and local UI events; it never changes either source file.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
     time::{Duration, Instant, SystemTime},
@@ -28,6 +28,41 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 const TOGGLE_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT).union(Modifiers::SHIFT);
 const TOGGLE_HOTKEY_CODE: Code = Code::KeyM;
 const TOGGLE_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+M";
+/// A scaffold only: press/release is surfaced to the UI, but no audio device or transcription provider is opened.
+const HOLD_TO_TALK_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT).union(Modifiers::SHIFT);
+const HOLD_TO_TALK_HOTKEY_CODE: Code = Code::Space;
+const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+Space";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HoldToTalkEvent {
+    Pressed,
+    Released,
+}
+
+impl HoldToTalkEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pressed => "pressed",
+            Self::Released => "released",
+        }
+    }
+}
+
+/// Suppresses OS key-repeat notifications so the frontend sees one start and one end per hold.
+#[derive(Default)]
+struct HoldToTalkState {
+    pressed: bool,
+}
+
+impl HoldToTalkState {
+    fn transition(&mut self, pressed: bool) -> Option<HoldToTalkEvent> {
+        if self.pressed == pressed {
+            return None;
+        }
+        self.pressed = pressed;
+        Some(if pressed { HoldToTalkEvent::Pressed } else { HoldToTalkEvent::Released })
+    }
+}
 
 /// The engine child the overlay started, so quitting the overlay stops it too.
 static ENGINE: Mutex<Option<Child>> = Mutex::new(None);
@@ -45,6 +80,15 @@ fn feed_path() -> PathBuf {
         PathBuf::from(std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default()).join(".m9r")
     });
     home.join("feed.json")
+}
+
+/// The web broker writes this separately from the native feed. If M9R_FEED is overridden for a local preview/test,
+/// keep the companion activity file beside that override; the production default is ~/.m9r/web-activity.json.
+fn web_activity_path() -> PathBuf {
+    feed_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("web-activity.json")
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -111,10 +155,74 @@ fn resize_pill(window: WebviewWindow, width: f64, height: f64) -> Result<(), Str
     window.set_position(PhysicalPosition::new(cx - new_w / 2, pos.y)).map_err(|e| e.to_string())
 }
 
-/// The current feed text, or nothing when the file does not exist yet.
+/// A view-only merge of the native feed and separately persisted web activity.
 #[tauri::command]
 fn read_feed() -> Option<String> {
-    fs::read_to_string(feed_path()).ok()
+    read_view_feed(&feed_path(), &web_activity_path())
+}
+
+fn read_view_feed(native_path: &Path, web_path: &Path) -> Option<String> {
+    let native = fs::read_to_string(native_path).ok();
+    let web = fs::read_to_string(web_path).ok();
+    merge_view_feed(native.as_deref(), web.as_deref())
+}
+
+/// Compose sources only in memory for the renderer. This never writes back to feed.json, which remains native-only.
+fn merge_view_feed(native_text: Option<&str>, web_text: Option<&str>) -> Option<String> {
+    if native_text.is_none() && web_text.is_none() {
+        return None;
+    }
+
+    let mut native: serde_json::Value = match native_text {
+        Some(text) => serde_json::from_str(text).ok()?,
+        None => serde_json::json!({
+            "surface": "native",
+            "version": 1,
+            "seq": 0,
+            "agents": [],
+            "needsYou": [],
+            "inProgress": [],
+            "recent": [],
+            "pings": [],
+            "reserved": { "people": [], "channels": [] }
+        }),
+    };
+    let object = native.as_object_mut()?;
+    object.insert("surface".into(), serde_json::Value::String("native".into()));
+    for key in ["agents", "needsYou", "inProgress", "recent", "pings"] {
+        if let Some(items) = object.get_mut(key).and_then(serde_json::Value::as_array_mut) {
+            for item in items {
+                if let Some(item) = item.as_object_mut() {
+                    item.insert("surface".into(), serde_json::Value::String("native".into()));
+                    if key == "agents" {
+                        if let Some(sessions) = item.get_mut("sessions").and_then(serde_json::Value::as_array_mut) {
+                            for session in sessions {
+                                if let Some(session) = session.as_object_mut() {
+                                    session.insert("surface".into(), serde_json::Value::String("native".into()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // A malformed or wrong-surface companion file cannot contaminate native data; it simply contributes no web rows.
+    let web_items = web_text
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .filter(|value| value.get("surface").and_then(serde_json::Value::as_str) == Some("web"))
+        .and_then(|value| value.get("items").and_then(serde_json::Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|mut item| {
+            let object = item.as_object_mut()?;
+            object.insert("surface".into(), serde_json::Value::String("web".into()));
+            Some(item)
+        })
+        .collect();
+    object.insert("web".into(), serde_json::Value::Array(web_items));
+    serde_json::to_string(&native).ok()
 }
 
 fn m9r_home() -> PathBuf {
@@ -370,53 +478,69 @@ fn stop_engine() {
     }
 }
 
-/// Watches the feed file's modified time and size (a quarter-second poll: no extra dependency, well under 1% CPU) and tells the UI.
+/// Watches both source files (a quarter-second poll: no extra dependency) and emits a merged view when either changes.
 fn spawn_feed_watcher(app: AppHandle) {
     std::thread::spawn(move || {
-        let path = feed_path();
-        let mut last: Option<(SystemTime, u64)> = None;
+        let native_path = feed_path();
+        let web_path = web_activity_path();
+        let mut last_native: Option<(SystemTime, u64)> = None;
+        let mut last_web: Option<(SystemTime, u64)> = None;
         let mut last_change_at = Instant::now();
         let mut stale_reported = false;
         loop {
-            match fs::metadata(&path) {
-                Ok(meta) => {
-                    let key = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
-                    if last != Some(key) {
-                        last = Some(key);
-                        last_change_at = Instant::now();
-                        if stale_reported {
-                            stale_reported = false;
-                            let _ = app.emit("engine-ok", ());
-                        }
-                        if let Ok(text) = fs::read_to_string(&path) {
-                            let _ = app.emit("feed", text);
-                        }
-                    } else if !stale_reported && last_change_at.elapsed() > Duration::from_secs(20) {
-                        // The feed writer normally touches this file every few seconds; if it has gone quiet, the resident
-                        // engine likely died between the supervisor's restart attempts. Say so rather than looking merely idle.
-                        stale_reported = true;
-                        let _ = app.emit("engine-stale", ());
-                    }
+            let native = file_stamp(&native_path);
+            let web = file_stamp(&web_path);
+            let native_changed = native != last_native;
+            let any_changed = native_changed || web != last_web;
+            last_native = native;
+            last_web = web;
+
+            if native_changed && native.is_some() {
+                last_change_at = Instant::now();
+                if stale_reported {
+                    stale_reported = false;
+                    let _ = app.emit("engine-ok", ());
                 }
-                Err(_) => {
-                    if last.take().is_some() {
-                        let _ = app.emit("feed-missing", ());
-                    }
+            }
+            if any_changed {
+                if let Some(view) = read_view_feed(&native_path, &web_path) {
+                    let _ = app.emit("feed", view);
+                } else {
+                    let _ = app.emit("feed-missing", ());
                 }
+            } else if native.is_some() && !stale_reported && last_change_at.elapsed() > Duration::from_secs(20) {
+                // Web activity does not keep the native engine healthy: only native feed writes reset this timer.
+                stale_reported = true;
+                let _ = app.emit("engine-stale", ());
             }
             std::thread::sleep(Duration::from_millis(250));
         }
     });
 }
 
+fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    fs::metadata(path).ok().map(|meta| (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len()))
+}
+
 fn main() {
     let toggle_shortcut = Shortcut::new(Some(TOGGLE_HOTKEY_MODS), TOGGLE_HOTKEY_CODE);
+    let hold_to_talk_shortcut = Shortcut::new(Some(HOLD_TO_TALK_HOTKEY_MODS), HOLD_TO_TALK_HOTKEY_CODE);
+    let hold_to_talk_state = std::sync::Arc::new(Mutex::new(HoldToTalkState::default()));
+    let handler_hold_to_talk_state = hold_to_talk_state.clone();
     tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
                     if shortcut == &toggle_shortcut && event.state() == ShortcutState::Pressed {
                         toggle_pill(app);
+                    } else if shortcut == &hold_to_talk_shortcut {
+                        let pressed = event.state() == ShortcutState::Pressed;
+                        let transition = handler_hold_to_talk_state.lock().unwrap().transition(pressed);
+                        if let Some(transition) = transition {
+                            // This is only an input-state hook for a future provider/privacy contract. It deliberately
+                            // does not open a microphone, record audio, or start transcription.
+                            let _ = app.emit("hold-to-talk", transition.as_str());
+                        }
                     }
                 })
                 .build(),
@@ -466,6 +590,10 @@ fn main() {
                 Ok(()) => eprintln!("M9R: registered global hotkey {TOGGLE_HOTKEY_LABEL}"),
                 Err(e) => eprintln!("M9R: could not register global hotkey {TOGGLE_HOTKEY_LABEL} ({e}); use the tray menu's Show/hide instead"),
             }
+            match app.global_shortcut().register(hold_to_talk_shortcut) {
+                Ok(()) => eprintln!("M9R: registered hold-to-talk scaffold {HOLD_TO_TALK_HOTKEY_LABEL} (no audio capture)"),
+                Err(e) => eprintln!("M9R: could not register hold-to-talk scaffold {HOLD_TO_TALK_HOTKEY_LABEL} ({e})"),
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -477,4 +605,100 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running the M9R overlay");
+}
+
+#[cfg(test)]
+mod hold_to_talk_tests {
+    use super::{HoldToTalkEvent, HoldToTalkState};
+
+    #[test]
+    fn emits_one_press_and_release_for_a_hold() {
+        let mut state = HoldToTalkState::default();
+        assert_eq!(state.transition(true), Some(HoldToTalkEvent::Pressed));
+        assert_eq!(state.transition(false), Some(HoldToTalkEvent::Released));
+    }
+
+    #[test]
+    fn ignores_repeated_keydown_and_unmatched_keyup() {
+        let mut state = HoldToTalkState::default();
+        assert_eq!(state.transition(false), None);
+        assert_eq!(state.transition(true), Some(HoldToTalkEvent::Pressed));
+        assert_eq!(state.transition(true), None);
+        assert_eq!(state.transition(true), None);
+        assert_eq!(state.transition(false), Some(HoldToTalkEvent::Released));
+        assert_eq!(state.transition(false), None);
+    }
+
+    #[test]
+    fn event_payloads_are_stable_for_the_frontend() {
+        assert_eq!(HoldToTalkEvent::Pressed.as_str(), "pressed");
+        assert_eq!(HoldToTalkEvent::Released.as_str(), "released");
+    }
+}
+
+#[cfg(test)]
+mod feed_view_tests {
+    use super::{merge_view_feed, read_view_feed};
+    use serde_json::Value;
+    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+
+    #[test]
+    fn merges_split_files_for_the_view_without_losing_surface_identity() {
+        let native_source = r#"{"surface":"native","version":1,"seq":4,"agents":[{"handle":"codex","sessions":[{"id":"s1"}]}],"needsYou":[{"kind":"approval","taskId":"t1"}],"inProgress":[],"recent":[{"text":"native item"}],"pings":[{"id":4}],"reserved":{"people":[],"channels":[]}}"#;
+        let web_source = r#"{"version":1,"surface":"web","items":[{"surface":"native","agent":"codex","provider":"codex-cli","kind":"action","text":"Read issue"}]}"#;
+
+        let view: Value = serde_json::from_str(&merge_view_feed(Some(native_source), Some(web_source)).unwrap()).unwrap();
+
+        assert_eq!(view["surface"], "native");
+        assert_eq!(view["agents"][0]["surface"], "native");
+        assert_eq!(view["agents"][0]["sessions"][0]["surface"], "native");
+        assert_eq!(view["needsYou"][0]["surface"], "native");
+        assert_eq!(view["recent"][0]["surface"], "native");
+        assert_eq!(view["pings"][0]["surface"], "native");
+        assert_eq!(view["web"][0]["surface"], "web");
+        assert_eq!(view["web"][0]["text"], "Read issue");
+        assert!(!native_source.contains("\"web\""), "the source feed remains native-only");
+    }
+
+    #[test]
+    fn web_activity_remains_visible_when_the_native_file_is_absent() {
+        let web_source = r#"{"version":1,"surface":"web","items":[{"agent":"claude","provider":"claude-code","kind":"message","text":"Found the issue"}]}"#;
+
+        let view: Value = serde_json::from_str(&merge_view_feed(None, Some(web_source)).unwrap()).unwrap();
+
+        assert_eq!(view["surface"], "native");
+        assert!(view["agents"].as_array().unwrap().is_empty());
+        assert_eq!(view["web"][0]["surface"], "web");
+        assert_eq!(view["web"][0]["agent"], "claude");
+    }
+
+    #[test]
+    fn wrong_surface_web_documents_are_not_mixed_into_the_view() {
+        let native_source = r#"{"version":1,"seq":0,"agents":[],"needsYou":[],"inProgress":[],"recent":[],"pings":[]}"#;
+        let wrong_web_source = r#"{"version":1,"surface":"native","items":[{"text":"wrong source"}]}"#;
+
+        let view: Value = serde_json::from_str(&merge_view_feed(Some(native_source), Some(wrong_web_source)).unwrap()).unwrap();
+
+        assert!(view["web"].as_array().unwrap().is_empty());
+        assert_eq!(view["surface"], "native");
+    }
+
+    #[test]
+    fn reader_loads_native_and_web_files_from_distinct_paths() {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("m9r-feed-view-{}-{nonce}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let native_path = dir.join("feed.json");
+        let web_path = dir.join("web-activity.json");
+        fs::write(&native_path, r#"{"surface":"native","version":1,"seq":1,"agents":[],"needsYou":[],"inProgress":[],"recent":[],"pings":[]}"#).unwrap();
+        fs::write(&web_path, r#"{"version":1,"surface":"web","items":[{"agent":"codex","provider":"codex-cli","kind":"action","text":"On web"}]}"#).unwrap();
+
+        let view: Value = serde_json::from_str(&read_view_feed(&native_path, &web_path).unwrap()).unwrap();
+
+        assert_eq!(view["web"][0]["surface"], "web");
+        assert_eq!(view["web"][0]["text"], "On web");
+        let disk_native: Value = serde_json::from_str(&fs::read_to_string(&native_path).unwrap()).unwrap();
+        assert!(disk_native.get("web").is_none(), "merging must not mutate native feed.json");
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

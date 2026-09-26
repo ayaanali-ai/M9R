@@ -14,6 +14,7 @@ import { AttachIcon, MentionIcon, SendIcon } from "@/components/product/wf-icons
 import { AgentMark, AGENT_BRAND_COLOR } from "@/components/product/WorkspaceUI";
 import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import { type AgentView } from "@/lib/agent-workspace-data";
+import { explicitlyMentionedAgentKinds } from "@/lib/conversation-routing";
 import { getAgentDisplayName } from "@/lib/agent-identity";
 import { WorkspaceRelayBrowserClient, type BrowserMissionRelayStatus } from "@/lib/mission/mission-relay-browser-client";
 import type { RelayFrame } from "@/lib/mission/mission-relay-protocol";
@@ -191,6 +192,13 @@ interface ConversationMessage {
   /** Carried on the local echo so a server ack (or a retry) can find and
    * replace this exact row instead of appending a duplicate. */
   clientRequestId?: string;
+}
+
+function isAgentDirectedMessage(message: ConversationMessage, agents: readonly AgentView[]): boolean {
+  return message.recipient_connection_id !== null || explicitlyMentionedAgentKinds(
+    message.body,
+    agents.map((agent) => ({ agent_kind: agent.key })),
+  ).length > 0;
 }
 
 interface Conversation {
@@ -2544,7 +2552,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                       )}
                       {queuedMessageIds.has(message.id) && <span className="wf-chat-queued-pill">Queued — runs after current turn</span>}
                       {message.sendStatus && <SendStatusIndicator message={message} onRetry={retrySend} />}
-                      {message.kind !== "notice" && /@[a-z][a-z0-9-]*/i.test(message.body) && <MessageDeliveryDetails messageId={message.id} />}
+                      {message.kind !== "notice" && isAgentDirectedMessage(message, agents) && <MessageDeliveryDetails messageId={message.id} />}
                       {/* A "View run →" deep-link lived here, pointing at
                           /dashboard/runs/[id]. That page was cut; the card
                           below already carries the run's task, status and

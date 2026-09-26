@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildFeed, feedBody, lastTurnState, type Feed, type FeedInput, type SessionProbe } from "../src/lib/native/feed-core";
-import { feedPass, runFeed } from "../src/lib/native/feed-writer";
+import { feedPass, runFeed, writeWebActivity, WEB_ACTIVITY_FILE } from "../src/lib/native/feed-writer";
 import { createLocalStore } from "../src/lib/native/local-store";
 import type { Task } from "../src/lib/native/inbox-core";
 
@@ -118,6 +118,29 @@ test("the writer writes an atomic feed for a real task, writes nothing when noth
   const after = await feedPass(root, deps, {});
   assert.ok(after === null || after.version === 1, "a corrupt store is set aside and the feed carries on");
   assert.ok(JSON.parse(readFileSync(join(root, "feed.json"), "utf8")).version === 1);
+});
+
+test("web activity is persisted as a web surface and never mixed into the native feed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-feed-surfaces-"));
+  const store = createLocalStore(root);
+  store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "agent_initiated", idempotencyKey: "surface" });
+  writeWebActivity(root, [{ at: NOW.toISOString(), agent: "codex", provider: "codex-cli", kind: "action", text: "Read the issue" }]);
+
+  const native = await feedPass(root, { now: () => NOW }, {});
+  assert.ok(native);
+  assert.equal(native.surface, "native");
+  assert.equal("web" in native, false);
+  assert.ok(native.agents.every((item) => item.surface === "native"));
+  assert.ok(native.needsYou.every((item) => item.surface === "native"));
+  assert.ok(native.pings.every((item) => item.surface === "native"));
+  assert.ok(native.recent.every((item) => item.surface === "native"));
+
+  const nativeOnDisk = JSON.parse(readFileSync(join(root, "feed.json"), "utf8")) as Feed;
+  assert.equal(nativeOnDisk.surface, "native");
+  assert.equal("web" in nativeOnDisk, false);
+  const webOnDisk = JSON.parse(readFileSync(join(root, WEB_ACTIVITY_FILE), "utf8")) as { surface: string; items: Array<{ surface: string }> };
+  assert.equal(webOnDisk.surface, "web");
+  assert.ok(webOnDisk.items.every((item) => item.surface === "web"));
 });
 
 test("watch mode picks up a task created by a hook within about a second, then stops when told to", async () => {
