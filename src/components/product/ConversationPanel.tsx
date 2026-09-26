@@ -2579,7 +2579,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                               <button type="button" className="wf-chat-approval-reject" disabled={busy} onClick={() => void decideEvidenceRequest(request.id, false)}>
                                 Reject
                               </button>
-                              <span className="wf-chat-approval-card-meta ol-mono">#{selected.topic.toLowerCase().replace(/\s+/g, "-")}</span>
+                              <span className="wf-chat-approval-card-meta ol-mono">#{channelDisplayName(selected)}</span>
                             </div>
                           </div>
                         );
@@ -2610,7 +2610,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                               <button type="button" className="wf-chat-approval-reject" disabled={busy} onClick={() => void decideRunStartApproval(approval.id, false)}>
                                 Reject
                               </button>
-                              <span className="wf-chat-approval-card-meta ol-mono">{approval.riskClassification} risk · #{selected.topic.toLowerCase().replace(/\s+/g, "-")}</span>
+                              <span className="wf-chat-approval-card-meta ol-mono">{approval.riskClassification} risk · #{channelDisplayName(selected)}</span>
                             </div>
                           </div>
                         );
@@ -2642,7 +2642,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                               <button type="button" className="wf-chat-approval-reject" disabled={busy} onClick={() => void decideFinding(finding.id, "retired")}>
                                 Retire
                               </button>
-                              <span className="wf-chat-approval-card-meta ol-mono">{finding.evidenceLevel} · #{selected.topic.toLowerCase().replace(/\s+/g, "-")}</span>
+                              <span className="wf-chat-approval-card-meta ol-mono">{finding.evidenceLevel} · #{channelDisplayName(selected)}</span>
                             </div>
                           </div>
                         );
@@ -2667,7 +2667,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                               <button type="button" className="wf-chat-approval-reject" disabled={busy} onClick={() => void decideRuleDraft(draft.id, false)}>
                                 Discard draft
                               </button>
-                              <span className="wf-chat-approval-card-meta ol-mono">#{selected.topic.toLowerCase().replace(/\s+/g, "-")}</span>
+                              <span className="wf-chat-approval-card-meta ol-mono">#{channelDisplayName(selected)}</span>
                             </div>
                           </div>
                         );
@@ -2697,7 +2697,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                               <button type="button" className="wf-chat-approval-reject" disabled={busy} onClick={() => void decidePermission(permission.id, false)}>
                                 Deny
                               </button>
-                              <span className="wf-chat-approval-card-meta ol-mono">#{selected.topic.toLowerCase().replace(/\s+/g, "-")}</span>
+                              <span className="wf-chat-approval-card-meta ol-mono">#{channelDisplayName(selected)}</span>
                             </div>
                           </div>
                         );
@@ -2732,7 +2732,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                               <button type="button" className="wf-chat-approval-reject" disabled={busy} onClick={() => void decideEvidenceSubmission(submission.id, false)}>
                                 Reject
                               </button>
-                              <span className="wf-chat-approval-card-meta ol-mono">#{selected.topic.toLowerCase().replace(/\s+/g, "-")}</span>
+                              <span className="wf-chat-approval-card-meta ol-mono">#{channelDisplayName(selected)}</span>
                             </div>
                           </div>
                         );
@@ -2911,12 +2911,12 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 <textarea
                   ref={textareaRef}
                   className="scrollbar-thin"
-                  aria-label={`Message #${selected.topic}`}
+                  aria-label={`Message #${channelDisplayName(selected)}`}
                   value={draft}
                   onKeyDown={handleComposerKeyDown}
                   onScroll={(event) => { if (mentionHighlightRef.current) mentionHighlightRef.current.scrollTop = event.currentTarget.scrollTop; }}
                   onChange={(event) => { const value = event.target.value; setDraft(value); if (value.trim()) { void relayRef.current?.setTyping(true); if (typingTimerRef.current) clearTimeout(typingTimerRef.current); typingTimerRef.current = setTimeout(() => { void relayRef.current?.setTyping(false); }, 3_000); } else void relayRef.current?.setTyping(false); }}
-                  placeholder={`${replyTargetId ? "Reply" : "Message"} #${selected.topic.toLowerCase().replace(/\s+/g, "-")}`}
+                  placeholder={`${replyTargetId ? "Reply" : "Message"} #${channelDisplayName(selected)}`}
                   maxLength={2000}
                 />
               </div>

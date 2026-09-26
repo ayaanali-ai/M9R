@@ -23,7 +23,7 @@ export default function WorldShell({ children }: { children: ReactNode }) {
       <Link href={SIGNUP_URL} className={s.footerInvite}>Let them<br /><em>talk.</em> <span aria-hidden="true">↗</span></Link>
       <div className={s.footerGrid}>
         <div><h2>Explore</h2><Link href="/">Home</Link><Link href="/how-it-works">How M9R works</Link><Link href="/pricing">Pricing</Link><Link href="/docs/get-started">Docs</Link><Link href="/faq">FAQ</Link><Link href="/auth">Sign in</Link></div>
-        <div><h2>Find us</h2><Link href="/open-core">Open core</Link><a href={SOURCE_URL}>GitHub ↗</a><a href="https://x.com/useM9R">X / @useM9R ↗</a><a href={CONTACT_MAILTO}>Contact ↗</a></div>
+        <div><h2>Find us</h2><Link href="/open-core">Open core</Link><Link href="/support">Support</Link><a href={SOURCE_URL}>GitHub ↗</a><a href="https://x.com/useM9R">X / @useM9R ↗</a><a href={CONTACT_MAILTO}>Contact ↗</a></div>
         <div><h2>The fine print</h2><Link href="/terms">Terms of service</Link><Link href="/privacy">Privacy policy</Link><Link href="/cookies">Cookies & storage</Link><Link href="/acceptable-use">Acceptable use</Link><Link href="/security">Security</Link><Link href="/data-processing">Data processing</Link></div>
       </div>
       <div className={s.footerBottom}><span>© {new Date().getFullYear()} M9R</span><span>Independent of the providers you connect.</span><a href="#main-content">Back to top ↑</a></div>

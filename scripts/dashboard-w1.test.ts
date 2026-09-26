@@ -16,16 +16,16 @@ test("W1a endpoint API is session-workspace scoped and does not silently hide ma
   assert.doesNotMatch(route, /request\.(?:json|url)/);
 });
 
-test("W1a endpoint panel presents presence, fidelity explanation, generation, machine, last-seen and setup state", () => {
+test("W1a endpoint panel uses human-readable connection copy and keeps the existing setup state", () => {
   const panel = read("src/components/product/WorkspaceEndpointCard.tsx");
   const agentsPage = read("src/app/dashboard/agents/page.tsx");
   const nativeResume = read("src/components/product/agent-workspace/strip-board.tsx");
   assert.match(agentsPage, /<WorkspaceEndpointCard\s*\/>/);
   assert.match(panel, /fetch\("\/api\/dashboard\/endpoints"/);
   assert.match(panel, /aria-label=\{row\.reachability\}/);
-  assert.match(panel, /title=\{row\.fidelity\.note\}/);
-  assert.match(panel, /row\.generation/);
-  assert.match(panel, /row\.machineId/);
+  assert.match(panel, /Connected/);
+  assert.match(panel, /Ask only/);
+  assert.doesNotMatch(panel, /\{row\.fidelity\.level\}|gen \{row\.generation\}|Machine \$\{row\.machineId/);
   assert.match(panel, /row\.presence\.lastSeenAt/);
   assert.match(panel, /ONBOARDING_STEPS/);
   assert.match(panel, /Claude connected:/);

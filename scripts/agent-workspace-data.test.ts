@@ -109,7 +109,7 @@ test("arbitrary connected providers keep a useful label and setup command", () =
   });
   assert.deepEqual(views.map((view) => view.label), ["Gemini CLI"]);
   assert.deepEqual(views.map((view) => view.key), ["gemini-cli"]);
-  assert.match(views[0]?.setupCommand ?? "", /OATHLOCK_AGENT_KIND="gemini-cli"/);
+  assert.match(views[0]?.setupCommand ?? "", /M9R_AGENT_KIND="gemini-cli"/);
 });
 
 test("two arbitrary providers stay separate instead of collapsing into Other", () => {
@@ -157,7 +157,7 @@ test("a registered offline agent remains visible without being eligible for live
 });
 
 test("setupCommandFor uses the agent kind in the PowerShell env form", () => {
-  assert.equal(setupCommandFor("grok-build"), '$env:OATHLOCK_AGENT_KIND="grok-build"; npx m9r-cli init');
+  assert.equal(setupCommandFor("grok-build"), '$env:M9R_AGENT_KIND="grok-build"; npx m9r-cli init');
 });
 
 test("only the latest fresh eligible run is Current", () => {

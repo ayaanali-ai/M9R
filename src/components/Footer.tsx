@@ -21,6 +21,7 @@ const sections = [
       { href: "/terms", label: "Terms" },
       { href: "/acceptable-use", label: "Acceptable Use" },
       { href: "/data-processing", label: "Data Processing" },
+      { href: "/support", label: "Support" },
     ],
   },
   {

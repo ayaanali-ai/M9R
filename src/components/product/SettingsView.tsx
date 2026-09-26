@@ -17,6 +17,7 @@ import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import { AgentMark, Button } from "@/components/product/WorkspaceUI";
 import { relAt } from "@/components/product/agent-workspace/shared";
 import { providerLabel } from "@/lib/provider-adapter-config";
+import { formatChannelName } from "@/lib/workspace-channel-groups";
 
 // Connected agents sits right after Account -- this is the product's whole
 // subject, and revoke/disconnect (the single most consequential control in
@@ -717,7 +718,7 @@ function GitEventsSection() {
               <option value="">Choose a channel…</option>
               {channels.map((channel) => (
                 <option key={channel.id} value={channel.id}>
-                  #{channel.topic}
+                  #{formatChannelName(channel.topic)}
                 </option>
               ))}
             </select>

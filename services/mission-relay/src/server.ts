@@ -49,7 +49,8 @@ function respondJson(response: ServerResponse, status: number, body: unknown): v
 export function createMissionRelayServer(options: MissionRelayServerOptions): { server: HttpServer; webSocketServer: WebSocketServer; service: MissionRelayService } {
   const service = new MissionRelayService(options);
   const server = createServer((request, response) => {
-    if (request.method === "GET" && request.url === "/healthz") {
+    const pathname = request.url?.split("?", 1)[0];
+    if (request.method === "GET" && (pathname === "/healthz" || pathname === "/health")) {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
       response.end(JSON.stringify({ status: "ok" }));
       return;

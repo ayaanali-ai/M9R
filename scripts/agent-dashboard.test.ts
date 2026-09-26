@@ -355,7 +355,7 @@ test("registered offline connections remain on the Watchfloor but never enter re
 
 test("disconnected agent shows the setup command for the correct agent kind", () => {
   const data = read(DATA);
-  assert.match(data, /\$env:OATHLOCK_AGENT_KIND="\$\{kind\}"; npx m9r-cli init/);
+  assert.match(data, /\$env:M9R_AGENT_KIND="\$\{kind\}"; npx m9r-cli init/);
   const workspace = read(WORKSPACE);
   assert.match(workspace, /agent\.setupCommand/);
   assert.match(workspace, /Copy \$\{agent\.key\} setup command/);

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   BUILT_IN_CHANNEL_ORDER,
+  channelDisplayName,
   channelGroupForConversation,
   isDiagnosticConversation,
 } from "@/lib/workspace-channel-groups";
@@ -25,4 +27,14 @@ test("un-slugged test and routing conversations are diagnostics, not core rooms"
 
 test("direct messages remain separate from channel groups", () => {
   assert.equal(channelGroupForConversation({ channel_kind: "dm", channel_slug: "dm-connection", topic: "Codex" }), "direct");
+});
+
+test("channel display names use readable title case without changing their stored identifiers", () => {
+  assert.equal(channelDisplayName({ channel_slug: "product-news", channel_kind: "channel", topic: "product news" }), "Product News");
+  assert.equal(channelDisplayName({ channel_slug: "general", channel_kind: "channel", topic: "general" }), "General");
+});
+
+test("the chat input accessible name uses the formatted channel name", () => {
+  const panel = readFileSync(new URL("../src/components/product/ConversationPanel.tsx", import.meta.url), "utf8");
+  assert.match(panel, /aria-label=\{`Message #\$\{channelDisplayName\(selected\)\}`\}/);
 });

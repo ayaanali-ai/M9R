@@ -48,8 +48,8 @@ export default function WorkspaceEndpointCard() {
     {error && <p role="status">Endpoint status is temporarily unavailable.</p>}
     {rows?.length ? <ul className="flex flex-wrap gap-2">{rows.map((row) => <li key={row.id} className="rounded-lg border border-white/15 px-3 py-2">
       <span aria-label={row.reachability} className={`mr-2 inline-block size-2 rounded-full ${row.reachability === "live" ? "bg-green-400" : "bg-amber-400"}`} />
-      <strong>{row.address}</strong> · {row.provider} · <span title={row.fidelity.note}>{row.fidelity.level}</span> · gen {row.generation}
-      <span className="block text-xs text-white/55">{row.machineId ? `Machine ${row.machineId.slice(0, 8)} · ` : ""}{row.presence.lastSeenAt ? `Last seen ${new Date(row.presence.lastSeenAt).toLocaleString()}` : "Never seen"}</span>
+      <strong>{row.address}</strong> · {row.provider} · <span title={row.fidelity.note}>{row.reachability === "live" && row.fidelity.level === "LIVE_NATIVE" ? "Connected" : "Ask only"}</span>
+      <span className="block text-xs text-white/55">{row.presence.lastSeenAt ? `Last seen ${new Date(row.presence.lastSeenAt).toLocaleString()}` : "Never seen"}</span>
     </li>)}</ul> : rows && <p>No endpoints are connected to this workspace yet.</p>}
     {!onboardingDismissed && rows && <div className="mt-3 border-t border-white/10 pt-3">
       <div className="flex items-center justify-between"><h3 className="font-medium">Finish setting up M9R</h3><button type="button" className="underline" onClick={() => { window.localStorage.setItem(ONBOARDING_KEY, "1"); window.dispatchEvent(new Event("m9r:onboarding")); }}>Dismiss</button></div>

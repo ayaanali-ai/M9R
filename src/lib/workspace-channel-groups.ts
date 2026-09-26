@@ -47,11 +47,20 @@ export function channelGroupForConversation(input: ChannelClassificationInput): 
   return channelSlug ? "workspace" : "agent";
 }
 
-/** The `#channel-name` form shown wherever a conversation is named. Shared so
- * the primary nav and the message feed can never disagree about a channel's
- * displayed name. */
+/** Human-readable channel label shared by every surface that names a channel. */
+export function formatChannelName(topic: string | null | undefined): string {
+  return (topic ?? "")
+    .trim()
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/(^|[\s/])([a-z])/g, (_match, prefix: string, letter: string) => `${prefix}${letter.toUpperCase()}`);
+}
+
+/** The `#Channel Name` form shown wherever a conversation is named. */
 export function channelDisplayName(input: ChannelClassificationInput): string {
-  return (input.topic ?? "").toLowerCase().trim().replace(/\s+/g, "-");
+  const topic = input.topic ?? input.channelSlug ?? input.channel_slug;
+  if ((input.channelKind ?? input.channel_kind) === "dm") return (topic ?? "").trim();
+  return formatChannelName(topic);
 }
 
 export function builtInChannelRank(input: ChannelClassificationInput): number {

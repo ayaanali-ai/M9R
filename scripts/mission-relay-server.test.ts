@@ -49,6 +49,9 @@ test("Mission Relay WebSocket transport authenticates and fans out normalized ru
   const health = await fetch(`http://127.0.0.1:${address.port}/healthz`);
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { status: "ok" });
+  const healthAlias = await fetch(`http://127.0.0.1:${address.port}/health`);
+  assert.equal(healthAlias.status, 200);
+  assert.deepEqual(await healthAlias.json(), { status: "ok" });
   const bridge = new WebSocket(`ws://127.0.0.1:${address.port}`);
   const browser = new WebSocket(`ws://127.0.0.1:${address.port}`);
   try {

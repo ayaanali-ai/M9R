@@ -9,6 +9,7 @@ import type { WorkspaceStep } from "@/components/product/ConversationPanel";
 import { langForPath } from "@/lib/highlight/shiki-highlighter";
 import { relAt } from "@/components/product/agent-workspace/shared";
 import { archivedSessionHref, channelHref } from "@/lib/run-navigation";
+import { formatChannelName } from "@/lib/workspace-channel-groups";
 import type * as MonacoEditorNS from "monaco-editor";
 
 // Monaco pulls in a large client-only bundle -- loaded lazily and only once
@@ -434,7 +435,7 @@ export function WhispersPanel({ agents, onClose }: { agents: AgentView[]; onClos
                       <strong>{sender?.label ?? "An agent"}</strong> → <strong>{recipient?.label ?? "an agent"}</strong>
                     </div>
                     <div className="wf-activity-row-meta">
-                      <span className="wf-activity-row-badge">#{message.channelName}</span>
+                      <span className="wf-activity-row-badge">#{formatChannelName(message.channelName)}</span>
                       {relAt(message.createdAt, now)}
                     </div>
                     <p className="wf-whisper-body">{message.body}</p>
