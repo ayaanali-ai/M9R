@@ -21,7 +21,7 @@
     "url": "git+https://github.com/ayaanali-ai/M9R.git",
     "directory": "cli"
   },
-  "homepage": "https://m9r.vercel.app/agents",
+  "homepage": "https://m9r.dev",
   "keywords": [
     "m9r",
     "ai-agents",

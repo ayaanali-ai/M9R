@@ -1,6 +1,6 @@
 import type { MetadataRoute } from "next";
 
-const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, "") || "https://m9r.vercel.app";
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, "") || "https://m9r.dev";
 
 // The design-bench pages (src/app/design/*) are explicitly documented as
 // static, no-auth reference/mockup surfaces not meant to represent the real

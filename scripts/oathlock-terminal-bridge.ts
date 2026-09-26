@@ -117,7 +117,7 @@ const server = createServer(async (request, response) => {
     response.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
-      "content-security-policy": `default-src 'none'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}'; connect-src ws://${host}:${port}; frame-ancestors https://m9r.dev https://oathlock.vercel.app http://localhost:3000 http://127.0.0.1:3000; base-uri 'none'; form-action 'none'`,
+      "content-security-policy": `default-src 'none'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}'; connect-src ws://${host}:${port}; frame-ancestors https://m9r.dev http://localhost:3000 http://127.0.0.1:3000; base-uri 'none'; form-action 'none'`,
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",
     });

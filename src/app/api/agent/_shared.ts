@@ -10,7 +10,7 @@ import { GoalApiError } from "@/lib/goal/goal-service";
  * without leaking request content.
  */
 
-const FALLBACK_BASE_URL = "https://m9r.vercel.app";
+const FALLBACK_BASE_URL = "https://m9r.dev";
 
 /**
  * Resolve the public base URL for building claim links. Only trusts the

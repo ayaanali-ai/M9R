@@ -3,7 +3,7 @@ import type { MetadataRoute } from "next";
 // Hosting has moved before (Vercel -> Render) without this ever being
 // touched, silently pointing crawlers at a dead host -- reading the env
 // var first means the next move doesn't require another manual edit here.
-const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, "") || "https://m9r.vercel.app";
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, "") || "https://m9r.dev";
 
 // Only real, public, non-redirecting marketing/legal pages. Excludes:
 // /leaks (a redirect, not a page), /design/* (no-auth reference mockups,

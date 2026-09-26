@@ -111,14 +111,14 @@ PORT                                → "8080"
 
 ---
 
-## Website (m9r-web-staging)
+## Website (m9r-web, served at https://m9r.dev)
 
 | Variable | Classification | Notes |
 |----------|---------------|-------|
-| `NEXT_PUBLIC_SITE_URL` | PUBLIC CONFIG | `https://m9r-web-staging.m9r.workers.dev` |
+| `NEXT_PUBLIC_SITE_URL` | PUBLIC CONFIG | `https://m9r.dev` |
 | `NEXT_PUBLIC_SUPABASE_URL` | PUBLIC CONFIG | |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | PUBLIC CONFIG | |
-| `MISSION_RELAY_PUBLIC_URL` | PUBLIC CONFIG | `wss://m9r-mission-relay.onrender.com` (current) → will switch to staging Relay |
+| `MISSION_RELAY_PUBLIC_URL` | PUBLIC CONFIG | `wss://m9r-relay.m9r.workers.dev` |
 | `NEXT_PUBLIC_M9R_BILLING_ENABLED` | PRIVATE CONFIG | `"false"` |
 | `NEXT_PUBLIC_M9R_TERMINAL_ENABLED` | PRIVATE CONFIG | `"true"` |
 | `SUPABASE_SERVICE_ROLE_KEY` | **SECRET** | |

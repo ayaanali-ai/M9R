@@ -17,7 +17,7 @@ function baseUrl(req: NextRequest): string {
     const proto = req.headers.get("x-forwarded-proto") || (host.startsWith("localhost") ? "http" : "https");
     return `${proto}://${host}`;
   }
-  return "https://m9r.vercel.app";
+  return "https://m9r.dev";
 }
 
 export async function GET(req: NextRequest) {

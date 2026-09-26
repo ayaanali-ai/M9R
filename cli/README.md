@@ -291,7 +291,7 @@ contents) so the server can score them.
 
 | Env var               | Default                       | Notes                                       |
 | --------------------- | ----------------------------- | ------------------------------------------- |
-| `OATHLOCK_API_URL`    | `https://m9r-dashboard.onrender.com` | Use `http://localhost:3000` for local dev   |
+| `OATHLOCK_API_URL`    | `https://m9r.dev` | Use `http://localhost:3000` for local dev   |
 | `M9R_LOCAL_ONLY`      | unset | Internal runtime flag; prefer `m9r-cli terminal runtime --local-only` |
 | `OATHLOCK_AGENT_KIND` | _none_                        | Fallback when `--agent-kind` is omitted     |
 

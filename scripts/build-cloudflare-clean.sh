@@ -5,10 +5,10 @@
 # (`wrangler secret put`), never baked. This hides .env.local for the duration of the build, passes only the public,
 # non-secret build-time values, restores .env.local on every exit path, and fails if a secret name slipped into the bundle.
 #
-# Usage: bash scripts/build-cloudflare-clean.sh [site-url]     (default site url: https://app.m9r.workers.dev)
+# Usage: bash scripts/build-cloudflare-clean.sh [site-url]     (default site url: https://m9r.dev)
 set -u
 cd "$(dirname "$0")/.."
-SITE_URL="${1:-https://app.m9r.workers.dev}"
+SITE_URL="${1:-https://m9r.dev}"
 HOLD=".env.build-hold.local"   # matches the .env*.local ignore rule
 
 if [ -f .env.local ]; then
