@@ -67,7 +67,16 @@ function m9rPageClick(selector, expectOrigin, expectPathPrefix, live) {
     if (!rect || rect.width <= 0 || rect.height <= 0) return { ok: false, error: "element has no visible area" };
     const pageDoc = el.ownerDocument || document;
     const hit = pageDoc.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-    if (!hit || (hit !== el && !el.contains(hit))) return { ok: false, error: "element is obscured" };
+    // A control inside a shadow root is reported by elementFromPoint as its host, so any host on the way up counts as the element itself.
+    const reachesHit = () => {
+      if (!hit) return false;
+      if (hit === el || el.contains(hit)) return true;
+      for (let root = el.getRootNode && el.getRootNode(); root && root.host; root = root.host.getRootNode && root.host.getRootNode()) {
+        if (root.host === hit || root.host.contains(hit)) return true;
+      }
+      return false;
+    };
+    if (!reachesHit()) return { ok: false, error: "element is obscured" };
     if (expectOrigin && location.origin !== expectOrigin) return { ok: false, error: "page origin does not match the granted site" };
     if (expectPathPrefix && !(expectPathPrefix === "/" || location.pathname === expectPathPrefix || location.pathname.startsWith(expectPathPrefix.endsWith("/") ? expectPathPrefix : expectPathPrefix + "/"))) {
       return { ok: false, error: "page path does not match the granted path" };

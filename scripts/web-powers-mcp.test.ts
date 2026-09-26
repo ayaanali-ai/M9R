@@ -65,3 +65,23 @@ test("snapshot refs map into the protected broker selector slot without changing
   assert.equal(requests[1]?.selector, "@m9r-ref:e12");
   assert.equal(requests[1]?.action, "click");
 });
+
+test("m9r_web_press exposes the page-change result and the no-change hint to the agent", async (t) => {
+  const store = {
+    root: "C:/tmp/m9r-web-press-test",
+    verifyIdentity: () => ({ handle: "codex", provider: "codex", sessionId: "session-press" }),
+  } as unknown as LocalStore;
+  const server = createM9rMcpServer({
+    store,
+    web: { run: async () => ({ ok: true, data: { pressed: "Enter", pageChanged: false, hint: "Nothing visibly changed after Enter; check the page before retrying." } }) },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "web-press-result-test", version: "1.0.0" });
+  t.after(async () => { await client.close(); await server.close(); });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const response = await client.callTool({ name: "m9r_web_press", arguments: { token: "valid", tab: "research", key: "Enter" } });
+  const content = response.content as Array<{ type: string; text?: string }>;
+  assert.match(content[0]?.text ?? "", /"pageChanged":false/);
+  assert.match(content[0]?.text ?? "", /Nothing visibly changed after Enter/);
+});

@@ -83,6 +83,10 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
       return { el };
     };
 
+    if (action === "page_state") {
+      return { ok: true, data: { url: location.href, visibleText: String(document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40_000) } };
+    }
+
     if (action === "snapshot") {
       const limit = Math.max(1, Math.min(Number(args.limit) || 80, 150));
       const query = typeof args.query === "string" ? args.query.toLowerCase() : "";
@@ -163,6 +167,7 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
       if (selector && !el) return { ok: false, error: "no element matches " + selector };
       if (el && selector && el !== active) el.focus();
       const target = el || document.body;
+      const beforePage = { url: location.href, visibleText: String(document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40_000) };
       const parts = key.split("+");
       const main = parts[parts.length - 1];
       const mods = parts.slice(0, -1).map((p) => p.toLowerCase());
@@ -203,7 +208,17 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
         }
       }
       target.dispatchEvent(new KeyboardEvent("keyup", init));
-      return { ok: true, data: { pressed: key, effect: effect || "sent the key" } };
+      const afterPage = { url: location.href, visibleText: String(document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40_000) };
+      const pageChanged = beforePage.url !== afterPage.url || beforePage.visibleText !== afterPage.visibleText;
+      return {
+        ok: true,
+        data: {
+          pressed: key,
+          effect: effect || "sent the key",
+          pageChanged,
+          ...(pageChanged ? {} : { hint: `Nothing visibly changed after ${key}; check the page before retrying.` }),
+        },
+      };
     }
 
     if (action === "scroll") {

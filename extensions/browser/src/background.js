@@ -375,7 +375,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }).catch(() => {});
 });
 
-async function run(tabId, func, args, retried) {
+async function run(tabId, func, args, retried, retryNavigation = true) {
   try {
     const [injection] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
     return injection.result || { ok: false, error: "the page returned nothing" };
@@ -392,9 +392,9 @@ async function run(tabId, func, args, retried) {
       return { ok: false, error: "M9R cannot run on this page: the owner has not allowed this site (or it is a browser page). Tell the owner which site you need; do not conclude M9R only works on localhost. Detail: " + message.slice(0, 160) };
     }
     // A page that is still loading or redirecting refuses injection for a moment: wait and try again before reporting.
-    if ((retried || 0) < 2 && /frame with id|was removed|error page|no tab with id|cannot be scripted|before the page|loading/i.test(message + " ")) {
+    if (retryNavigation && (retried || 0) < 2 && /frame with id|was removed|error page|no tab with id|cannot be scripted|before the page|loading/i.test(message + " ")) {
       await new Promise((resolve) => setTimeout(resolve, 700));
-      return run(tabId, func, args, (retried || 0) + 1);
+      return run(tabId, func, args, (retried || 0) + 1, retryNavigation);
     }
     return { ok: false, error: "the browser could not run that on this page: " + message.slice(0, 200) };
   }
@@ -474,6 +474,9 @@ async function handle(command) {
       const named = await run(tab.id, m9rPageLabel, [command.selector]);
       if (named && named.ok && named.data) preLabel = named.data;
     }
+    const pressBefore = command.action === "press" && typeof m9rPageMine === "function"
+      ? await run(tab.id, m9rPageMine, ["page_state", null, {}, null, null])
+      : null;
     let result;
     if (command.action === "read") result = await run(tab.id, m9rPageRead, [command.selector || null, command.expectOrigin || null, command.expectPathPrefix || null]);
     else if (command.action === "click") result = await run(tab.id, m9rPageClick, [command.selector, command.expectOrigin || null, command.expectPathPrefix || null, true]);
@@ -481,6 +484,29 @@ async function handle(command) {
     else if (command.action === "snapshot") {
       result = await run(tab.id, m9rPageSnapshot, [(command.args && command.args.query) || null, (command.args && command.args.limit) || null]);
       if (result && result.ok && typeof m9rPageMine === "function") await run(tab.id, m9rPageMine, ["heal", null, {}, null, null]);
+    }
+    else if (command.action === "press" && typeof m9rPageMine === "function") {
+      // A key can navigate the page, destroying its execution context. Never
+      // replay Enter in that case; inspect the landed page instead.
+      result = await run(tab.id, m9rPageMine, ["press", command.selector || null, command.args || {}, command.expectOrigin || null, command.expectPathPrefix || null], 0, false);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await waitForLoad(tab.id);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const pressAfter = await run(tab.id, m9rPageMine, ["page_state", null, {}, null, null]);
+      const before = pressBefore && pressBefore.ok && pressBefore.data ? pressBefore.data : {};
+      const after = pressAfter && pressAfter.ok && pressAfter.data ? pressAfter.data : {};
+      const pageChanged = (typeof before.url === "string" && typeof after.url === "string" && before.url !== after.url)
+        || (typeof before.visibleText === "string" && typeof after.visibleText === "string" && before.visibleText !== after.visibleText);
+      if (result && result.ok) {
+        const data = result.data && typeof result.data === "object" ? result.data : {};
+        result.data = {
+          ...data,
+          pageChanged,
+          ...(pageChanged ? {} : { hint: `Nothing visibly changed after ${String(command.args && command.args.key || "the key")}; check the page before retrying.` }),
+        };
+      } else if (pageChanged) {
+        result = { ok: true, data: { pressed: String(command.args && command.args.key || "the key"), effect: "page changed while the key was being processed", pageChanged: true } };
+      }
     }
     else if (command.action === "back" || command.action === "forward" || command.action === "reload") {
       if (command.action === "back") await chrome.tabs.goBack(tab.id).catch(() => {});
