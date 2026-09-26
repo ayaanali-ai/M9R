@@ -57,50 +57,50 @@ test("devMcpServerDescriptor is empty when the feature flag is off (default)", (
   });
 });
 
-test("devMcpServerDescriptor threads OATHLOCK_APP_URL/OATHLOCK_AGENT_TOKEN (bridge-wide) and the per-call missionId into the dev-mcp subprocess's own env -- this is what makes send_message work at all", () => {
-  withEnv({ MISSION_DEV_MCP_TOOLS_ENABLED: "true", OATHLOCK_APP_URL: "https://oathlock.example", OATHLOCK_AGENT_TOKEN: "agent-tok-123" }, () => {
+test("devMcpServerDescriptor threads M9R_APP_URL/M9R_AGENT_TOKEN (bridge-wide) and the per-call missionId into the dev-mcp subprocess's own env -- this is what makes send_message work at all", () => {
+  withEnv({ MISSION_DEV_MCP_TOOLS_ENABLED: "true", M9R_APP_URL: "https://m9r.example", M9R_AGENT_TOKEN: "agent-tok-123" }, () => {
     const servers = devMcpServerDescriptor("/repo", "channel-abc-123");
     assert.equal(servers.length, 1);
     const server = servers[0] as { name: string; env?: Array<{ name: string; value: string }> };
     assert.equal(server.name, "oathlock-dev-tools");
     const env = Object.fromEntries((server.env ?? []).map((entry) => [entry.name, entry.value]));
-    assert.equal(env.OATHLOCK_APP_URL, "https://oathlock.example");
-    assert.equal(env.OATHLOCK_AGENT_TOKEN, "agent-tok-123");
-    assert.equal(env.OATHLOCK_MISSION_ID, "channel-abc-123");
+    assert.equal(env.M9R_APP_URL, "https://m9r.example");
+    assert.equal(env.M9R_AGENT_TOKEN, "agent-tok-123");
+    assert.equal(env.M9R_MISSION_ID, "channel-abc-123");
   });
 });
 
 test("devMcpServerDescriptor a second call with a different missionId (a different session) carries its own missionId, not a stale one", () => {
-  withEnv({ MISSION_DEV_MCP_TOOLS_ENABLED: "true", OATHLOCK_APP_URL: "https://oathlock.example", OATHLOCK_AGENT_TOKEN: "tok" }, () => {
+  withEnv({ MISSION_DEV_MCP_TOOLS_ENABLED: "true", M9R_APP_URL: "https://m9r.example", M9R_AGENT_TOKEN: "tok" }, () => {
     const first = devMcpServerDescriptor("/repo", "channel-aaa")[0] as { env?: Array<{ name: string; value: string }> };
     const second = devMcpServerDescriptor("/repo", "channel-bbb")[0] as { env?: Array<{ name: string; value: string }> };
-    const missionIdOf = (server: { env?: Array<{ name: string; value: string }> }) => server.env?.find((entry) => entry.name === "OATHLOCK_MISSION_ID")?.value;
+    const missionIdOf = (server: { env?: Array<{ name: string; value: string }> }) => server.env?.find((entry) => entry.name === "M9R_MISSION_ID")?.value;
     assert.equal(missionIdOf(first), "channel-aaa");
     assert.equal(missionIdOf(second), "channel-bbb");
   });
 });
 
 test("devMcpServerDescriptor omits an env entry rather than sending an empty value when app URL/token aren't set on this process", () => {
-  withEnv({ MISSION_DEV_MCP_TOOLS_ENABLED: "true", OATHLOCK_APP_URL: undefined, OATHLOCK_AGENT_TOKEN: undefined }, () => {
+  withEnv({ MISSION_DEV_MCP_TOOLS_ENABLED: "true", M9R_APP_URL: undefined, M9R_AGENT_TOKEN: undefined }, () => {
     const server = devMcpServerDescriptor("/repo", "channel-abc")[0] as { env?: Array<{ name: string; value: string }> };
     const names = (server.env ?? []).map((entry) => entry.name);
-    assert.equal(names.includes("OATHLOCK_APP_URL"), false);
-    assert.equal(names.includes("OATHLOCK_AGENT_TOKEN"), false);
-    assert.equal(names.includes("OATHLOCK_MISSION_ID"), true);
+    assert.equal(names.includes("M9R_APP_URL"), false);
+    assert.equal(names.includes("M9R_AGENT_TOKEN"), false);
+    assert.equal(names.includes("M9R_MISSION_ID"), true);
   });
 });
 
 test("OpenCode receives the governed MCP server through inline config without embedding the bearer token", () => {
-  withEnv({ MISSION_DEV_MCP_TOOLS_ENABLED: "true", OATHLOCK_APP_URL: "https://oathlock.example", OATHLOCK_AGENT_TOKEN: "secret-token" }, () => {
+  withEnv({ MISSION_DEV_MCP_TOOLS_ENABLED: "true", M9R_APP_URL: "https://m9r.example", M9R_AGENT_TOKEN: "secret-token" }, () => {
     const raw = openCodeConfigContent("C:/repo", "channel-opencode");
     assert.ok(raw);
     assert.doesNotMatch(raw, /secret-token/);
     const config = JSON.parse(raw) as { mcp?: Record<string, { type?: string; command?: string[]; environment?: Record<string, string> }> };
     const server = config.mcp?.["oathlock-dev-tools"];
     assert.equal(server?.type, "local");
-    assert.equal(server?.environment?.OATHLOCK_APP_URL, "{env:OATHLOCK_APP_URL}");
-    assert.equal(server?.environment?.OATHLOCK_AGENT_TOKEN, "{env:OATHLOCK_AGENT_TOKEN}");
-    assert.equal(server?.environment?.OATHLOCK_MISSION_ID, "channel-opencode");
+    assert.equal(server?.environment?.M9R_APP_URL, "{env:M9R_APP_URL}");
+    assert.equal(server?.environment?.M9R_AGENT_TOKEN, "{env:M9R_AGENT_TOKEN}");
+    assert.equal(server?.environment?.M9R_MISSION_ID, "channel-opencode");
     assert.ok(server?.command?.some((part) => part.includes("dev-mcp-server")));
   });
 });
@@ -115,7 +115,7 @@ test("OpenCode permission config is emitted even when the dev-tools MCP feature 
 });
 
 test("OpenCode MCP injection preserves a valid operator inline config", () => {
-  withEnv({ MISSION_DEV_MCP_TOOLS_ENABLED: "true", OATHLOCK_APP_URL: "https://oathlock.example", OATHLOCK_AGENT_TOKEN: "tok" }, () => {
+  withEnv({ MISSION_DEV_MCP_TOOLS_ENABLED: "true", M9R_APP_URL: "https://m9r.example", M9R_AGENT_TOKEN: "tok" }, () => {
     const raw = openCodeConfigContent("C:/repo", "channel-opencode", JSON.stringify({ model: "provider/model", mcp: { existing: { type: "local", enabled: false } } }));
     const config = JSON.parse(raw ?? "{}") as { model?: string; mcp?: Record<string, unknown> };
     assert.equal(config.model, "provider/model");

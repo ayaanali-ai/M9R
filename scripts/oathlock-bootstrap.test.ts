@@ -149,7 +149,7 @@ test("bootstrap --agent-kind codex writes the managed block into AGENTS.md", asy
   const content = files.get(join(CWD, "AGENTS.md"))!;
   assert.match(content, /OATHLOCK:AUTOMATIC-WORKFLOW:START v\d+/);
   assert.match(content, /OATHLOCK:AUTOMATIC-WORKFLOW:END/);
-  assert.match(content, /OATHLOCK_RESIDENT_CHILD=1/);
+  assert.match(content, /M9R_RESIDENT_CHILD=1/);
   assert.match(content, /parent controlled run owns M9R governance/i);
   assert.match(out.join("\n"), /installed in AGENTS\.md/);
 });
