@@ -238,7 +238,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_web_open",
     {
-      description: "Open a web page (http or https) in the shared M9R browser. Use this instead of your own browser when you are working with other agents, so they can see where you are and avoid colliding with you.",
+      description: "Open a web page (http or https) in the shared M9R browser. Use this instead of your own browser when you are working with other agents, so they can see where you are and avoid colliding with you. Work on the page like a person: open the site's own page, then use its controls. To search, take a snapshot, click the search box, m9r_web_type the query and m9r_web_press Enter. URLs that carry a search query (?q=...) are refused.",
       inputSchema: { ...TOKEN_FIELD, ...TAB_FIELD, url: z.string().min(1).max(2_000), newTab: z.boolean().optional().describe("Always create a distinct named tab; normally M9R reuses a named tab and opens a new one automatically if another agent holds the current tab.") },
     },
     async ({ token, tab, url, newTab, shareWith }) => {
@@ -278,7 +278,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_web_type",
     {
-      description: "Type text into the input matching a CSS selector. Refused if another agent is currently using this tab.",
+      description: "Type text into the input matching a CSS selector or snapshot ref, one key at a time, so the owner and teammates watch it happen. Refused if another agent is currently using this tab. Use this (then m9r_web_press Enter) for searches and forms instead of opening a URL that already contains the answer.",
     inputSchema: {
       ...TOKEN_FIELD,
       ...TAB_FIELD,

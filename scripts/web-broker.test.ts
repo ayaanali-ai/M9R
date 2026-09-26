@@ -538,3 +538,26 @@ test("opening the page a teammate already has open in the shared tab joins it wi
   broker.onExtensionMessage({ type: "result", id: "c2", ok: true, origin: "https://example.org", url: "https://example.org/" });
   await elsewhere;
 });
+
+test("opening a search URL is refused, and the refusal tells the agent to use the page's own search box", async () => {
+  const { broker, sent } = harness();
+  const refused = await broker.submit(req("codex", "open", { url: "https://x.com/search?q=openai&src=typed_query", tab: "shared" }));
+  assert.equal(refused.ok, false);
+  assert.match(String((refused as { error?: string }).error), /search box/);
+  assert.equal(sent.length, 0, "nothing reaches the browser");
+  for (const url of ["https://www.google.com/search?q=cats", "https://example.com/?s=hello", "https://site.test/find?query=abc", "https://site.test/x?Search=y"]) {
+    assert.equal((await broker.submit(req("codex", "open", { url, tab: "shared" }))).ok, false, url);
+  }
+});
+
+test("ordinary pages, including paths that contain the word search, still open", async () => {
+  const { broker, sent } = harness();
+  const opened = broker.submit(req("codex", "open", { url: "https://x.com/", tab: "shared" }));
+  assert.equal(sent.length, 1);
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://x.com", url: "https://x.com/" });
+  assert.equal((await opened).ok, true);
+  const pathOnly = broker.submit(req("codex", "open", { url: "http://127.0.0.1:1/search/spec", tab: "other" }));
+  assert.equal(sent.length, 2);
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, origin: "http://127.0.0.1:1", url: "http://127.0.0.1:1/search/spec" });
+  assert.equal((await pathOnly).ok, true);
+});

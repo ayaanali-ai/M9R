@@ -130,6 +130,21 @@ function describe(request: WebRequest): string {
   }
 }
 
+const SEARCH_QUERY_PARAMS = new Set(["q", "query", "search", "search_query", "searchterm", "keyword", "keywords", "term"]);
+
+/**
+ * A search opened as a URL (`/search?q=...`) skips what teammates are meant to watch: the search box being used. Agents open a
+ * site's own page and search through its control, like a person. Returns the refusal text, or null when the URL is fine.
+ */
+export function searchDeepLinkProblem(url: string | undefined): string | null {
+  let parsed: URL;
+  try { parsed = new URL(url ?? ""); } catch { return null; }
+  const params = [...parsed.searchParams.keys()].map((key) => key.toLowerCase());
+  const hasQuery = params.some((key) => SEARCH_QUERY_PARAMS.has(key)) || (params.includes("s") && /^\/(search)?\/?$/.test(parsed.pathname));
+  if (!hasQuery) return null;
+  return "Do this the way a person would: open the site's own page (for example its home page), take a snapshot, click the page's search box, type the query with m9r_web_type and press Enter with m9r_web_press. A search URL skips the steps your teammates and the owner are meant to see.";
+}
+
 export function validateRequest(request: WebRequest): string | null {
   if (!request.agent || typeof request.agent !== "string") return "missing agent";
   if (!ACTIONS.includes(request.action) && !isPowerAction(request.action)) return `unknown action ${String(request.action)}`;
@@ -427,6 +442,9 @@ export function createWebBroker(deps: WebBrokerDeps) {
         return Promise.resolve({ ok: true, data: { tab, url: known, note: "This page is already open in that tab; you joined it without reloading. Read it, or click and type in it: teammates may be here too." } });
       }
     }
+
+    const deepLink = request.action === "open" ? searchDeepLinkProblem(request.url) : null;
+    if (deepLink) return Promise.resolve(fail(deepLink));
 
     const requestedScope = scopeFor(request);
     let claimHolder: Claim | undefined;

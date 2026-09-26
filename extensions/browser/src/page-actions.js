@@ -35,7 +35,9 @@ function m9rPageRead(selector, expectOrigin, expectPathPrefix) {
   }
 }
 
-function m9rPageClick(selector, expectOrigin, expectPathPrefix) {
+// With `live`, the click is a person's: the pointer enters, drifts onto a point inside the element (not its exact center), presses,
+// holds a beat and releases. A promise is returned; without `live` the events are dispatched at once.
+function m9rPageClick(selector, expectOrigin, expectPathPrefix, live) {
   try {
     let el;
     if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
@@ -69,6 +71,41 @@ function m9rPageClick(selector, expectOrigin, expectPathPrefix) {
     if (expectOrigin && location.origin !== expectOrigin) return { ok: false, error: "page origin does not match the granted site" };
     if (expectPathPrefix && !(expectPathPrefix === "/" || location.pathname === expectPathPrefix || location.pathname.startsWith(expectPathPrefix.endsWith("/") ? expectPathPrefix : expectPathPrefix + "/"))) {
       return { ok: false, error: "page path does not match the granted path" };
+    }
+    if (live && typeof MouseEvent === "function") {
+      const view = pageDoc.defaultView || window;
+      const Mouse = view.MouseEvent || MouseEvent;
+      const Pointer = typeof (view.PointerEvent || (typeof PointerEvent !== "undefined" ? PointerEvent : undefined)) === "function" ? (view.PointerEvent || PointerEvent) : null;
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const spread = (size) => size * (0.3 + Math.random() * 0.4);
+      const endX = rect.left + spread(rect.width);
+      const endY = rect.top + spread(rect.height);
+      const fire = (Type, type, x, y, buttons) => el.dispatchEvent(new Type(type, { bubbles: true, cancelable: true, view, button: 0, buttons, clientX: x, clientY: y, ...(Type === Pointer ? { pointerId: 1, pointerType: "mouse", isPrimary: true } : {}) }));
+      return (async () => {
+        const startX = endX - (30 + Math.random() * 50);
+        const startY = endY - (12 + Math.random() * 30);
+        if (Pointer) { fire(Pointer, "pointerover", startX, startY, 0); fire(Pointer, "pointerenter", startX, startY, 0); }
+        fire(Mouse, "mouseover", startX, startY, 0);
+        const steps = 4 + Math.floor(Math.random() * 3);
+        for (let i = 1; i <= steps; i += 1) {
+          const t = i / steps;
+          const ease = t * t * (3 - 2 * t);
+          const x = startX + (endX - startX) * ease;
+          const y = startY + (endY - startY) * ease;
+          if (Pointer) fire(Pointer, "pointermove", x, y, 0);
+          fire(Mouse, "mousemove", x, y, 0);
+          await wait(14 + Math.random() * 16);
+        }
+        await wait(50 + Math.random() * 90);
+        if (Pointer) fire(Pointer, "pointerdown", endX, endY, 1);
+        fire(Mouse, "mousedown", endX, endY, 1);
+        if (typeof el.focus === "function") el.focus({ preventScroll: true });
+        await wait(55 + Math.random() * 75);
+        if (Pointer) fire(Pointer, "pointerup", endX, endY, 0);
+        fire(Mouse, "mouseup", endX, endY, 0);
+        el.click();
+        return { ok: true, data: { clicked: true } };
+      })().catch((error) => ({ ok: false, error: String(error && error.message ? error.message : error) }));
     }
     if (typeof MouseEvent === "function") {
       const view = pageDoc.defaultView || window;
@@ -160,9 +197,22 @@ function m9rPageType(selector, text, expectOrigin, expectPathPrefix, live) {
         let typed = "";
         put("");
         sendInput("", "deleteContentBackward");
+        // A person's rhythm: a beat before the first key, log-normal gaps between keys, longer after a space or punctuation,
+        // the odd hesitation. Long text is sped up to fit the time budget, and whatever is left is then set at once.
+        const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
+        const budgetMs = 6000;
+        const pace = Math.min(1, budgetMs / Math.max(1, chars.length * 95));
+        const gap = (ch) => {
+          let ms = Math.exp(Math.log(75) + 0.35 * gauss());
+          if (ch === " ") ms += 40 + Math.random() * 100;
+          else if (/[.,;:!?]/.test(ch)) ms += 60 + Math.random() * 120;
+          if (Math.random() < 0.04) ms += 250 + Math.random() * 250;
+          return Math.max(25, ms * pace);
+        };
+        await new Promise((resolve) => setTimeout(resolve, 120 + Math.random() * 200));
         for (const ch of chars) {
-          if (Date.now() - started > 2000 || !el.isConnected) break;
-          el.dispatchEvent(new KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true }));
+          if (Date.now() - started > budgetMs || !el.isConnected) break;
+          el.dispatchEvent(new KeyboardEvent("keydown", { key: ch, code: /^[a-z]$/i.test(ch) ? "Key" + ch.toUpperCase() : /^[0-9]$/.test(ch) ? "Digit" + ch : ch === " " ? "Space" : "", bubbles: true, cancelable: true }));
           let inserted = false;
           if ((isInput || isTextArea) && typeof el.setSelectionRange === "function") el.setSelectionRange(typed.length, typed.length);
           if (typeof doc.execCommand === "function") {
@@ -171,7 +221,7 @@ function m9rPageType(selector, text, expectOrigin, expectPathPrefix, live) {
           if (inserted) typed = readValue();
           else { typed += ch; put(typed); sendInput(ch, "insertText"); }
           el.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
-          await new Promise((resolve) => setTimeout(resolve, 15 + Math.random() * 10));
+          await new Promise((resolve) => setTimeout(resolve, gap(ch)));
         }
         if (typed !== text) {
           if (!insertWithCommand(String(text))) {
