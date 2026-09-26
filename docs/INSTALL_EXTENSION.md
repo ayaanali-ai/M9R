@@ -20,6 +20,8 @@ npm run build:cli
 node .\cli\dist\m9r.js web setup
 ```
 
+To install or start only the local broker login task without configuring provider MCP entries or opening an agent session, run `m9r web setup --broker-only`. It registers **M9R Web Broker** for the current Windows user (no administrator rights) and runs that broker task once to verify it. It does not launch Claude Code or another agent.
+
 The only browser action that cannot be automated is loading the unpacked extension: setup copies its folder path to the clipboard and opens the detected browser's extensions page. In each browser you use, turn on **Developer mode**, select **Load unpacked**, and choose the copied `%LOCALAPPDATA%\M9R\extension` folder. Then approve the requested site in the extension when you first use it.
 
 To remove the web-managed broker, extension files, and MCP entries:
@@ -34,7 +36,7 @@ M9R Web currently has working SessionStart identity bootstraps for Claude Code a
 
 ## Manual appendix: Load unpacked and broker details
 
-This is the development / Load unpacked path for Chrome and Edge. It connects the extension to the M9R broker running on the same PC. The development manifest pins a fixed ID, and the broker allow-lists that ID only. The Chrome Web Store build intentionally uses a different manifest (no development key), so it will need its own release broker allow-list before publication.
+This is the development / Load unpacked path for Chrome and Edge. It connects the extension to the M9R broker running on the same PC. The development manifest pins a fixed ID; the broker accepts it and, when configured, the Chrome Web Store ID from `M9R_WEB_STORE_EXTENSION_ID`. Set the production ID in that one place after the store assigns it; do not substitute a guessed ID.
 
 ## 1. Prepare M9R
 

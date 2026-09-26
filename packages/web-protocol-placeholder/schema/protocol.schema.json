@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://m9r.invalid/schema/web-protocol-v0.json",
+  "title": "M9R web coordination protocol v0 (placeholder; unpublished)",
+  "description": "Schema for the local v0 message envelope. Signature verification requires a separately selected trust profile.",
+  "allOf": [
+    { "$ref": "#/$defs/base" },
+    { "if": { "properties": { "message_type": { "const": "post" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/post" } } } },
+    { "if": { "properties": { "message_type": { "const": "get" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/get" } } } },
+    { "if": { "properties": { "message_type": { "const": "reply" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/reply" } } } },
+    { "if": { "properties": { "message_type": { "const": "subscribe" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/subscribe" } } } },
+    { "if": { "properties": { "message_type": { "const": "request-context" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/request-context" } } } },
+    { "if": { "properties": { "message_type": { "const": "share-artifact" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/share-artifact" } } } },
+    { "if": { "properties": { "message_type": { "const": "ask" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/ask" } } } },
+    { "if": { "properties": { "message_type": { "const": "presence" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/presence" } } } },
+    { "if": { "properties": { "message_type": { "const": "cursor" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/cursor" } } } },
+    { "if": { "properties": { "message_type": { "const": "claim" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/claim" } } } },
+    { "if": { "properties": { "message_type": { "const": "release" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/release" } } } },
+    { "if": { "properties": { "message_type": { "const": "approval-request" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/approval-request" } } } },
+    { "if": { "properties": { "message_type": { "const": "approval-decision" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/approval-decision" } } } },
+    { "if": { "properties": { "message_type": { "const": "stop-all" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/stop-all" } } } },
+    { "if": { "properties": { "message_type": { "const": "audit-entry" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/audit-entry" } } } },
+    { "if": { "properties": { "message_type": { "const": "grant" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payloads/grant" } } } }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["protocol", "message_id", "session_id", "sender", "sequence", "created_at", "causal", "message_type", "payload", "signature"],
+      "properties": {
+        "protocol": { "const": "m9r-web/0" },
+        "message_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sender": { "type": "object", "required": ["principal_id", "key_id"], "properties": { "principal_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "key_id": { "type": "string", "minLength": 1, "maxLength": 128 } }, "additionalProperties": false },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "created_at": { "type": "string", "format": "date-time", "maxLength": 40 },
+        "causal": { "type": "object", "required": ["lamport", "observed"], "properties": { "lamport": { "type": "integer", "minimum": 0 }, "observed": { "type": "array", "maxItems": 128, "items": { "type": "string", "minLength": 1, "maxLength": 128 } } }, "additionalProperties": false },
+        "message_type": { "enum": ["post", "get", "reply", "subscribe", "request-context", "share-artifact", "ask", "presence", "cursor", "claim", "release", "approval-request", "approval-decision", "stop-all", "audit-entry", "grant"] },
+        "payload": { "type": "object" },
+        "signature": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      },
+      "additionalProperties": false
+    },
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "path": { "type": "string", "pattern": "^/", "maxLength": 2048 },
+    "target": { "type": "object", "properties": { "tab_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "path": { "$ref": "#/$defs/path" }, "scope": { "enum": ["field", "form", "tab"] }, "key": { "type": "string", "minLength": 1, "maxLength": 512 }, "selector": { "type": "string", "minLength": 1, "maxLength": 512 }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 } }, "additionalProperties": false },
+    "payloads": {
+      "post": { "type": "object", "required": ["text"], "properties": { "text": { "$ref": "#/$defs/text" }, "to": { "type": "string", "maxLength": 128 }, "depends_on": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 128 } } }, "additionalProperties": false },
+      "get": { "type": "object", "required": ["resource"], "properties": { "resource": { "type": "string", "minLength": 1, "maxLength": 128 }, "query": { "type": "object", "maxProperties": 32 } }, "additionalProperties": false },
+      "reply": { "type": "object", "required": ["in_reply_to", "text"], "properties": { "in_reply_to": { "type": "string", "minLength": 1, "maxLength": 128 }, "text": { "$ref": "#/$defs/text" } }, "additionalProperties": false },
+      "subscribe": { "type": "object", "required": ["room_id"], "properties": { "room_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "cursor": { "type": ["string", "null"], "maxLength": 128 } }, "additionalProperties": false },
+      "request-context": { "type": "object", "required": ["site", "path"], "properties": { "site": { "type": "string", "format": "uri", "maxLength": 2048 }, "path": { "$ref": "#/$defs/path" }, "context_kind": { "enum": ["page", "selection", "accessibility"] } }, "additionalProperties": false },
+      "share-artifact": { "type": "object", "required": ["artifact_id", "media_type", "digest"], "properties": { "artifact_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "media_type": { "type": "string", "minLength": 1, "maxLength": 128 }, "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "label": { "type": "string", "maxLength": 200 } }, "additionalProperties": false },
+      "ask": { "type": "object", "required": ["question_id", "to", "question"], "properties": { "question_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "to": { "type": "string", "minLength": 1, "maxLength": 128 }, "question": { "$ref": "#/$defs/text" } }, "additionalProperties": false },
+      "presence": { "type": "object", "required": ["agent", "provider", "url", "action", "seq"], "properties": { "agent": { "type": "string", "minLength": 1, "maxLength": 80 }, "provider": { "type": "string", "minLength": 1, "maxLength": 80 }, "url": { "type": "string", "format": "uri", "maxLength": 2048 }, "action": { "enum": ["open", "read", "click", "type", "submit"] }, "seq": { "type": "integer", "minimum": 0 }, "target": { "$ref": "#/$defs/target" } }, "additionalProperties": false },
+      "cursor": { "type": "object", "required": ["tab_id", "target"], "properties": { "tab_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "target": { "type": "object", "properties": { "selector": { "type": "string", "minLength": 1, "maxLength": 512 }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 } }, "additionalProperties": false } }, "additionalProperties": false },
+      "claim": { "type": "object", "required": ["claim_id", "tab_id", "scope", "expires_at"], "properties": { "claim_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "tab_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "scope": { "type": "object", "required": ["kind"], "properties": { "kind": { "enum": ["field", "form", "tab"] }, "key": { "type": "string", "maxLength": 512 }, "shared_with": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 128 } } }, "additionalProperties": false }, "expires_at": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
+      "release": { "type": "object", "required": ["claim_id"], "properties": { "claim_id": { "type": "string", "minLength": 1, "maxLength": 128 } }, "additionalProperties": false },
+      "approval-request": { "type": "object", "required": ["operation_id", "action", "target", "expires_at"], "properties": { "operation_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "action": { "type": "string", "minLength": 1, "maxLength": 80 }, "target": { "$ref": "#/$defs/target" }, "expires_at": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
+      "approval-decision": { "type": "object", "required": ["operation_id", "decision", "approver"], "properties": { "operation_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "decision": { "enum": ["approve", "deny"] }, "approver": { "type": "string", "minLength": 1, "maxLength": 128 }, "expires_at": { "type": "string", "format": "date-time" } }, "additionalProperties": false },
+      "stop-all": { "type": "object", "required": ["reason"], "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 500 } }, "additionalProperties": false },
+      "audit-entry": { "type": "object", "required": ["event_id", "event_type", "previous_hash", "hash"], "properties": { "event_id": { "type": "string", "minLength": 1, "maxLength": 128 }, "event_type": { "type": "string", "minLength": 1, "maxLength": 128 }, "previous_hash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" }, "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "target": { "$ref": "#/$defs/target" }, "depends_on": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 128 } } }, "additionalProperties": false },
+      "grant": { "type": "object", "required": ["site", "path", "actions", "expires_at", "max_uses", "use_count"], "properties": { "site": { "type": "string", "format": "uri", "maxLength": 2048 }, "path": { "$ref": "#/$defs/path" }, "actions": { "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": { "enum": ["read", "click", "type", "open", "submit"] } }, "expires_at": { "type": "string", "format": "date-time" }, "max_uses": { "type": "integer", "minimum": 1 }, "use_count": { "type": "integer", "minimum": 0 } }, "additionalProperties": false }
+    }
+  }
+}

@@ -15,6 +15,7 @@ import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web
 import { createWebBroker, type WebAction, type WebRequest } from "./web-broker-core";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import { isUiMessage, type UiState, type WebUiBridge } from "./web-ui-bridge";
+import { createProtocolLedger } from "../../../packages/web-protocol-placeholder/src/index";
 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_EXTENSION_MESSAGE_BYTES = 256 * 1024;
@@ -47,17 +48,19 @@ function reply(res: ServerResponse, status: number, body: unknown): void {
 function readBody(req: IncomingMessage): Promise<string | null> {
   return new Promise((resolve) => {
     let size = 0;
+    let oversized = false;
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => {
+      if (oversized) return;
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
-        resolve(null);
-        req.destroy();
+        oversized = true;
+        chunks.length = 0;
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => resolve(oversized ? null : Buffer.concat(chunks).toString("utf8")));
     req.on("error", () => resolve(null));
   });
 }
@@ -96,6 +99,8 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   let readyExtension: WebSocket | null = null;
   let closeServer: () => Promise<void> = async () => undefined;
   const readyWaiters = new Set<(ready: boolean) => void>();
+  const protocolLedger = createProtocolLedger();
+  const ownerId = options.ownerId ?? "local-machine";
 
   function settleReadyWaiters(ready: boolean): void {
     for (const settle of [...readyWaiters]) settle(ready);
@@ -155,6 +160,20 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         return;
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/feed") return reply(res, 200, broker.feedSnapshot());
+      if (req.method === "GET" && requestUrl.pathname === "/web/protocol") {
+        return reply(res, 200, { protocol: "m9r-web/0", messages: protocolLedger.snapshot() });
+      }
+      if (req.method === "POST" && requestUrl.pathname === "/web/protocol") {
+        const bodyText = await readBody(req);
+        if (bodyText === null) return reply(res, 413, { ok: false, error: "protocol message exceeds broker limit" });
+        let frame: unknown;
+        try { frame = JSON.parse(bodyText) as unknown; }
+        catch { return reply(res, 400, { ok: false, error: "protocol message is not valid JSON" }); }
+        const accepted = protocolLedger.accept(frame, { principalId: `owner:${ownerId}` });
+        if (!accepted.ok) return reply(res, 400, { ok: false, error: accepted.error });
+        // The accepted frame is returned and retained in the local protocol feed for subscribers.
+        return reply(res, 200, { ok: true, message: accepted.message });
+      }
       if (req.method === "POST" && requestUrl.pathname === "/web/message") {
         const bodyText = await readBody(req);
         if (bodyText === null) return reply(res, 413, { ok: false, error: "request too large" });

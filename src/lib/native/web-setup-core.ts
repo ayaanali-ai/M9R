@@ -8,6 +8,20 @@ export type WebExtensionFileAction = "write" | "preserve" | "unchanged" | "delet
 
 /** Stable unpacked-development identity. The Web Store assigns its own production ID. */
 export const WEB_EXTENSION_ID = "mahhaigfogjneccbmbpbedlnkhgdcmhb";
+/** Set after the Chrome Web Store assigns the production extension ID. */
+export const WEB_STORE_EXTENSION_ID_ENV = "M9R_WEB_STORE_EXTENSION_ID";
+
+/** One canonical allow-list source for setup, bundled broker, and the CLI broker. */
+export function webExtensionAllowlist(input: {
+  developmentId?: string;
+  storeId?: string;
+} = {}): string[] {
+  const developmentId = input.developmentId ?? WEB_EXTENSION_ID;
+  const storeId = input.storeId ?? process.env[WEB_STORE_EXTENSION_ID_ENV]?.trim();
+  if (!/^[a-p]{32}$/.test(developmentId)) throw new Error("The M9R development extension ID is invalid.");
+  if (storeId && !/^[a-p]{32}$/.test(storeId)) throw new Error(`${WEB_STORE_EXTENSION_ID_ENV} must be a valid 32-character Chromium extension ID.`);
+  return [...new Set([developmentId, ...(storeId ? [storeId] : [])])];
+}
 
 export function extensionIdFromManifestKey(key: string): string {
   const digest = createHash("sha256").update(Buffer.from(key, "base64")).digest("hex").slice(0, 32);
@@ -129,7 +143,7 @@ export function planWebSetup(input: WebSetupInput): WebSetupPlan {
     agentFiles,
     extensionPath: input.extensionPath,
     browsers: [...new Set(input.browsers)],
-    allowedExtensionIds: [input.extensionId],
+    allowedExtensionIds: webExtensionAllowlist({ developmentId: input.extensionId }),
     m9rHome: input.m9rHome,
   };
 }

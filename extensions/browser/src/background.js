@@ -476,7 +476,7 @@ async function handle(command) {
     }
     let result;
     if (command.action === "read") result = await run(tab.id, m9rPageRead, [command.selector || null, command.expectOrigin || null, command.expectPathPrefix || null]);
-    else if (command.action === "click") result = await run(tab.id, m9rPageClick, [command.selector, command.expectOrigin || null, command.expectPathPrefix || null]);
+    else if (command.action === "click") result = await run(tab.id, m9rPageClick, [command.selector, command.expectOrigin || null, command.expectPathPrefix || null, true]);
     else if (command.action === "type") result = await run(tab.id, m9rPageType, [command.selector, command.text, command.expectOrigin || null, command.expectPathPrefix || null, true]);
     else if (command.action === "snapshot") {
       result = await run(tab.id, m9rPageSnapshot, [(command.args && command.args.query) || null, (command.args && command.args.limit) || null]);

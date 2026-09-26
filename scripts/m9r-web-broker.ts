@@ -13,7 +13,7 @@ import { DEFAULT_BROKER_PORT, brokerKeyPath } from "@/lib/native/web-broker-path
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
-import { WEB_EXTENSION_ID } from "@/lib/native/web-setup-core";
+import { webExtensionAllowlist } from "@/lib/native/web-setup-core";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
   // The in-page pill: agents the owner types to, one live session per agent and folder (web-live-sessions.ts).
   const ui = createWebUiBridge();
-  const broker = await startWebBroker({ key, port, allowedExtensionIds: [WEB_EXTENSION_ID], ownerId, authority, authorityStore, ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 } });
+  const broker = await startWebBroker({ key, port, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 } });
   const config = loadAgentsConfig(root, { cwd: process.cwd() });
   const sessions = createWebLiveSessions({
     agents: config.agents, storeRoot: root, repoRoot: process.cwd(), brokerPort: broker.port,

@@ -1,0 +1,11 @@
+{
+  "name": "@m9r/protocol-placeholder",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Unpublished M9R web-coordination protocol v0 draft package",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./schema/protocol.schema.json"
+  }
+}

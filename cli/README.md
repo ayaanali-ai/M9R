@@ -13,7 +13,7 @@ session without an explicit `--approved` flag.
 No install required — run it straight from npm with `npx`. `init` is a **one-time
 setup step**, so there are two paths:
 
-**First-time setup** (no `.oathlock/local.json` yet):
+**First-time setup** (no `.m9r/local.json` yet):
 
 ```bash
 npx m9r-cli init                                  # connect this workspace (human approves in browser)
@@ -37,7 +37,7 @@ npx m9r-cli help
 `run start` / `run status` make the agent visible in the user's M9R
 dashboard. They send **status telemetry only** (phase, rules-loaded count) — never
 source code, tokens, or secrets. The active run id is stored in
-`.oathlock/run.json`; `inbox` reads the Agent inbox, `rules` reports
+`.m9r/run.json`; `inbox` reads the Agent inbox, `rules` reports
 `rules_loaded_count`, and `submit-session` links the session to the run and marks
 it completed.
 
@@ -73,10 +73,10 @@ Requires Node.js >= 18.
 One-time setup. Registers this workspace and prints a claim URL. **A human repo
 owner must approve the connection in the browser** — the CLI opens the URL for you
 (best-effort) and then waits, polling until approval. On approval it writes a
-scoped token to `.oathlock/local.json` and non-secret metadata to
-`.oathlock/config.json`.
+scoped token to `.m9r/local.json` and non-secret metadata to
+`.m9r/config.json`.
 
-If `.oathlock/local.json` already has a token, `init` treats the workspace as
+If `.m9r/local.json` already has a token, `init` treats the workspace as
 **already connected**: it does not create a new claim, never prints the token, and
 points you to `doctor`/`rules` instead. A returning workspace should run `doctor`,
 then `inbox` if the dashboard sent an instruction, then `rules` — not `init`.
@@ -144,7 +144,7 @@ wrapper/runtime.
 
 ### `doctor`
 
-Checks local setup and API reachability: confirms `.oathlock/local.json` and a
+Checks local setup and API reachability: confirms `.m9r/local.json` and a
 token are present, prints the API base, and verifies `/api/agent/rules` is
 reachable and authorized. Exits non-zero if any check fails.
 
@@ -178,7 +178,7 @@ initial public open-core announcement.
 
 Revokes the current Bearer-token connection when the server can authenticate the
 saved local token, then removes local volatile files:
-`.oathlock/local.json`, `.oathlock/run.json`, and `.oathlock/rules.json`.
+`.m9r/local.json`, `.m9r/run.json`, and `.m9r/rules.json`.
 
 If there is no local token, it exits non-zero with:
 
@@ -207,7 +207,7 @@ npx --yes m9r-cli@latest disconnect
 ### `run start` / `run status`
 
 Make the agent visible in the user's M9R dashboard. `run start` begins a run
-(optionally `--task "title"`) and stores the active run id in `.oathlock/run.json`.
+(optionally `--task "title"`) and stores the active run id in `.m9r/run.json`.
 `run status --phase "..."` reports the current phase. Both require a local token;
 `run status` requires an active run. Telemetry only — never source or secrets.
 
@@ -233,7 +233,7 @@ npx --yes m9r-cli@latest inbox
 
 Fetches the active workspace rules using the saved token, prints the mode,
 operating instructions, and rule titles, and saves the full response to
-`.oathlock/rules.json`. Run this **before** `submit-session` so the loaded rules
+`.m9r/rules.json`. Run this **before** `submit-session` so the loaded rules
 can be sent for evaluation. When a run is active, `rules` also reports
 `rules_loaded_count` to the dashboard.
 
@@ -284,44 +284,49 @@ stores it, the CLI prints the evidence contract id required by
 `submit-session` **refuses to send anything unless you pass `--approved`** — the
 gate trips before the file is even read. The session is submitted as
 `human_reviewed` / `human_approved_submission: true`. It also sends the rules
-currently loaded in `.oathlock/rules.json` (printed only as a count, never their
+currently loaded in `.m9r/rules.json` (printed only as a count, never their
 contents) so the server can score them.
 
 ## Configuration
 
 | Env var               | Default                       | Notes                                       |
 | --------------------- | ----------------------------- | ------------------------------------------- |
-| `OATHLOCK_API_URL`    | `https://m9r.dev` | Use `http://localhost:3000` for local dev   |
+| `M9R_API_URL`    | `https://m9r.dev` | Use `http://localhost:3000` for local dev   |
 | `M9R_LOCAL_ONLY`      | unset | Internal runtime flag; prefer `m9r-cli terminal runtime --local-only` |
-| `OATHLOCK_AGENT_KIND` | _none_                        | Fallback when `--agent-kind` is omitted     |
+| `M9R_AGENT_KIND` | _none_                        | Fallback when `--agent-kind` is omitted     |
 
 Agent kind is recorded on the approved connection and is used consistently in the Run Passport, Run Ledger, Approval Center, evidence attribution, and disconnect/revoke identity. Use `--agent-kind` for a new or forced claim; existing connections keep their historical identity.
-| `OATHLOCK_REPO_HINT`  | current directory name        | Override the repo hint sent on `init`       |
+| `M9R_REPO_HINT`  | current directory name        | Override the repo hint sent on `init`       |
 
-`OATHLOCK_API_URL` controls which M9R instance every command talks to — set it
+`M9R_API_URL` controls which M9R instance every command talks to — set it
 once in your shell to point the whole CLI at local dev or a staging deployment.
 
 ## Local files (created in your current workspace)
 
-The CLI writes to a `.oathlock/` directory in the workspace you run it from:
+The CLI writes to a `.m9r/` directory in the workspace you run it from.
+
+For one compatibility release, startup reads legacy `OATHLOCK_*` environment
+variables when the matching `M9R_*` variable is unset, and copies files from an
+existing `.oathlock/` directory into `.m9r/` without overwriting or deleting the
+old files. New state and documented configuration use only the M9R names:
 
 | File                    | Contents                                | Commit?               |
 | ----------------------- | --------------------------------------- | --------------------- |
-| `.oathlock/local.json`  | **Secret** scoped token + scopes        | **No — gitignore it** |
-| `.oathlock/rules.json`  | Last fetched rules response (transient)  | **No — gitignore it** |
-| `.oathlock/run.json`    | Active run id (transient telemetry)      | **No — gitignore it** |
-| `.oathlock/config.json` | Non-secret workspace metadata           | Optional              |
+| `.m9r/local.json`  | **Secret** scoped token + scopes        | **No — gitignore it** |
+| `.m9r/rules.json`  | Last fetched rules response (transient)  | **No — gitignore it** |
+| `.m9r/run.json`    | Active run id (transient telemetry)      | **No — gitignore it** |
+| `.m9r/config.json` | Non-secret workspace metadata           | Optional              |
 
 The simplest safe choice is to ignore the whole directory. Add to your
 `.gitignore`:
 
 ```gitignore
-.oathlock/
+.m9r/
 ```
 
 ## Token safety
 
-- The scoped token is written **once** to `.oathlock/local.json` (gitignore it).
+- The scoped token is written **once** to `.m9r/local.json` (gitignore it).
 - After saving, the full token is **never printed** — only a masked preview like
   `m9r_…a1b2`.
 - Any token value is **redacted** from error output before it is shown.
@@ -365,7 +370,7 @@ cd cli
 npm publish --dry-run
 ```
 
-Confirm the file list contains only `dist/` and `README.md` (no `.oathlock/`,
+Confirm the file list contains only `dist/` and `README.md` (no `.m9r/`,
 `src/`, `scripts/`, or secrets).
 
 ### Before publishing a new version
@@ -382,7 +387,7 @@ Run a connected provider as a foreground M9R resident:
 
 ```bash
 m9r resident configure --provider codex --binding-id <binding-id> --profile codex-reviewer
-m9r resident run --config .oathlock/resident.local.json
+m9r resident run --config .m9r/resident.local.json
 ```
 
 Use `--once` for one registration, heartbeat, and queue poll. The ignored

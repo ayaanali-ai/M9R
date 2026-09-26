@@ -18,6 +18,7 @@ import {
   parseWebSetupList,
   webConfigUninstallMode,
   webExtensionFileAction,
+  webExtensionAllowlist,
   WEB_EXTENSION_ID,
   webOpenCodeLayout,
 } from "../src/lib/native/web-setup-core.ts";
@@ -45,6 +46,21 @@ test("fixed unpacked extension ID is a valid Chromium extension identifier", () 
   assert.match(WEB_EXTENSION_ID, /^[a-p]{32}$/);
   const manifest = JSON.parse(readFileSync(new URL("../extensions/browser/manifest.json", import.meta.url), "utf8")) as { key?: string };
   assert.equal(extensionIdFromManifestKey(manifest.key ?? ""), WEB_EXTENSION_ID);
+});
+
+test("the broker allow-list includes the development ID and the configured Web Store ID from one canonical helper", () => {
+  const storeId = "abcdefghijklmnopabcdefghijklmnop";
+  assert.deepEqual(webExtensionAllowlist({ storeId }), [WEB_EXTENSION_ID, storeId]);
+  assert.deepEqual(webExtensionAllowlist({ developmentId: storeId, storeId }), [storeId], "duplicate IDs are collapsed");
+  assert.throws(() => webExtensionAllowlist({ storeId: "not-an-extension-id" }), /M9R_WEB_STORE_EXTENSION_ID/);
+  const previous = process.env.M9R_WEB_STORE_EXTENSION_ID;
+  try {
+    process.env.M9R_WEB_STORE_EXTENSION_ID = storeId;
+    assert.deepEqual(webExtensionAllowlist(), [WEB_EXTENSION_ID, storeId]);
+  } finally {
+    if (previous === undefined) delete process.env.M9R_WEB_STORE_EXTENSION_ID;
+    else process.env.M9R_WEB_STORE_EXTENSION_ID = previous;
+  }
 });
 
 test("Claude user-scope registration uses the native CLI, stdio, M9R_HOME, and an explicit command boundary", () => {

@@ -12,6 +12,7 @@ import { brokerKeyPath } from "@/lib/native/web-broker-paths";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
+import { webExtensionAllowlist, WEB_EXTENSION_ID } from "@/lib/native/web-setup-core";
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<ToolResult> }> };
@@ -92,6 +93,46 @@ async function ownerRequest(port: number, key: string | undefined, path: string,
     else req.end();
   });
 }
+
+test("the local broker accepts, validates, and emits v0 protocol frames through its authenticated protocol feed", async () => {
+  const t = await setup();
+  try {
+    const frame = {
+      protocol: "m9r-web/0", message_id: "protocol-post-1", session_id: "room-local",
+      sender: { principal_id: "owner:local-machine", key_id: "owner-key" }, sequence: 1,
+      created_at: new Date().toISOString(), causal: { lamport: 1, observed: [] },
+      message_type: "post", payload: { text: "room event" }, signature: "dGVzdA",
+    };
+    assert.equal((await ownerRequest(t.broker.port, undefined, "/web/protocol")).status, 401);
+    assert.equal((await ownerRequest(t.broker.port, t.key, "/web/protocol", "POST", frame, "https://attacker.test")).status, 403);
+    const accepted = await ownerRequest(t.broker.port, t.key, "/web/protocol", "POST", frame);
+    assert.equal(accepted.status, 200);
+    assert.deepEqual((accepted.body as { message: unknown }).message, frame);
+
+    const feed = await ownerRequest(t.broker.port, t.key, "/web/protocol");
+    assert.deepEqual((feed.body as { messages: unknown[] }).messages, [frame]);
+    assert.equal((await ownerRequest(t.broker.port, t.key, "/web/protocol", "POST", frame)).status, 400, "replayed frames must not be emitted again");
+    assert.equal((await ownerRequest(t.broker.port, t.key, "/web/protocol", "POST", { ...frame, message_id: "spoof", sender: { principal_id: "agent:forged", key_id: "k" }, sequence: 2 })).status, 400);
+    assert.equal((await ownerRequest(t.broker.port, t.key, "/web/protocol", "POST", { ...frame, message_id: "oversized", sequence: 2, payload: { text: "x".repeat(17_000) } })).status, 413);
+  } finally {
+    await t.done();
+  }
+});
+
+test("the broker accepts both configured development and Chrome Web Store extension origins", async () => {
+  const storeId = "abcdefghijklmnopabcdefghijklmnop";
+  const t = await setup({ allowedExtensionIds: webExtensionAllowlist({ storeId }) });
+  try {
+    const store = await t.connectExtension(`chrome-extension://${storeId}`);
+    await until(() => store.brokerStates.length > 0);
+    assert.deepEqual(store.brokerStates, [false]);
+    const development = await t.connectExtension(`chrome-extension://${WEB_EXTENSION_ID}`);
+    await until(() => development.brokerStates.length > 0);
+    assert.deepEqual(development.brokerStates, [false]);
+  } finally {
+    await t.done();
+  }
+});
 
 function post(port: number, headers: Record<string, string>, body: unknown): Promise<number> {
   return new Promise((resolve, reject) => {
