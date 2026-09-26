@@ -531,6 +531,8 @@
       frame.setAttribute("title", kind === "pill" ? "M9R agents" : "M9R message bar");
       frame.setAttribute("allowtransparency", "true");
       frame.setAttribute("scrolling", "no");
+      // Lets the message bar use the microphone for push-to-talk. A site that forbids the microphone in its own Permissions-Policy still wins.
+      frame.setAttribute("allow", "microphone");
       box.appendChild(frame);
       shadow.appendChild(box);
       const state = { kind, box, frame, src, size: { w: defaults.w, h: defaults.h }, pos: null, shown: true, loads: 0, defaults };
