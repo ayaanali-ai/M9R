@@ -275,6 +275,8 @@ export type SessionEvent =
 export interface BrokerPort {
   pendingApprovals(): Array<{ id: string; actor: string; action: string; tab?: string; selector?: string; targetLabel?: string; origin?: string }>;
   decideApproval(id: string, decision: "approve" | "deny"): boolean;
+  /** URLs the owner typed to an agent become pages an agent may open directly. */
+  noteOwnerUrls?(text: string): void;
 }
 
 
@@ -478,6 +480,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
 
   function command(message: Extract<UiInbound, { type: "ui-command" }>): void {
     const known = sessions?.handles() ?? [];
+    broker?.noteOwnerUrls?.(message.text);
     const mentioned = parseMentions(message.text);
     const everyone = mentioned.includes("all") && !known.includes("all");
     const unknown = mentioned.filter((h) => !known.includes(h) && !(everyone && h === "all"));

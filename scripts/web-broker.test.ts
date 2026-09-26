@@ -571,3 +571,29 @@ test("repeated snapshots are observation, not a loop", async () => {
     assert.notEqual((result as { error?: string }).error?.includes("exact"), true, `snapshot ${i} must not be refused as a loop`);
   }
 });
+
+test("a page of a site that is already open cannot be opened by URL unless the owner typed that URL", async () => {
+  const { broker } = harness();
+  const first = broker.submit(req("codex", "open", { url: "https://x.com/", tab: "shared" }));
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://x.com", url: "https://x.com/" });
+  assert.equal((await first).ok, true, "the first visit to a site may open any page");
+
+  const jump = await broker.submit(req("codex", "open", { url: "https://x.com/illscience", tab: "shared" }));
+  assert.equal(jump.ok, false);
+  assert.match(String((jump as { error?: string }).error), /already open/);
+  const sideTab = await broker.submit(req("codex", "open", { url: "https://x.com/illscience", tab: "other" }));
+  assert.equal(sideTab.ok, false, "a different tab name does not bypass the rule");
+
+  broker.noteOwnerUrls?.("please open https://x.com/illscience/status/1 for me");
+  const typed = broker.submit(req("codex", "open", { url: "https://x.com/illscience/status/1", tab: "shared" }));
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, origin: "https://x.com", url: "https://x.com/illscience/status/1" });
+  assert.equal((await typed).ok, true, "a URL the owner typed opens directly");
+
+  const other = broker.submit(req("codex", "open", { url: "https://example.org/", tab: "third" }));
+  broker.onExtensionMessage({ type: "result", id: "c3", ok: true, origin: "https://example.org", url: "https://example.org/" });
+  assert.equal((await other).ok, true, "a different site is a first visit");
+
+  const back = broker.submit(req("codex", "open", { url: "https://x.com/", tab: "shared" }));
+  broker.onExtensionMessage({ type: "result", id: "c4", ok: true, origin: "https://x.com", url: "https://x.com/" });
+  assert.equal((await back).ok, true, "a page the room already visited can be reopened");
+});

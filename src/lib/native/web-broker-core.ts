@@ -184,6 +184,27 @@ export function createWebBroker(deps: WebBrokerDeps) {
   const claims = new Map<string, Claim>();
   const pending = new Map<string, Pending>();
   const tabUrls = new Map<string, string>();
+  // URLs an agent may open directly: exact URLs the owner typed to it, and pages this room has already been on.
+  const ownerUrls = new Set<string>();
+  const visitedUrls = new Set<string>();
+  const flatUrl = (value: string): string => { try { const u = new URL(value); u.hash = ""; return `${u.origin}${u.pathname.replace(/\/+$/, "")}${u.search}`; } catch { return ""; } };
+  const rememberVisit = (value: string | undefined): void => { const flat = value ? flatUrl(value) : ""; if (flat) visitedUrls.add(flat); };
+  function noteOwnerUrls(text: string): void {
+    for (const match of String(text).matchAll(/https?:\/\/[^\s"'<>)\]]+/g)) { const flat = flatUrl(match[0]); if (flat) ownerUrls.add(flat); }
+  }
+  /**
+   * A person who wants a page on a site they are already using clicks or searches; they do not jump by URL. Once a site is open in
+   * the room, an agent may open a page of it by URL only when the owner typed that URL or the room has already been there.
+   */
+  function sameSiteJumpProblem(target: string | undefined): string | null {
+    const wanted = target ? flatUrl(target) : "";
+    if (!wanted || ownerUrls.has(wanted) || visitedUrls.has(wanted)) return null;
+    let origin: string;
+    try { origin = new URL(wanted).origin; } catch { return null; }
+    const open = [...tabUrls.values()].some((known) => { try { return new URL(known).origin === origin; } catch { return false; } });
+    if (!open) return null;
+    return "This site is already open in the room. Move around it the way a person does: take a snapshot, then click its links or use its search box (m9r_web_type, then m9r_web_press Enter). A page of an open site can be opened by URL only when the owner typed that exact URL to you.";
+  }
   const tabsByActor = new Map<string, Set<string>>();
   const focusedTabByActor = new Map<string, string>();
   const openedBy = new Map<string, string>();
@@ -447,6 +468,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
 
     const deepLink = request.action === "open" ? searchDeepLinkProblem(request.url) : null;
     if (deepLink) return Promise.resolve(fail(deepLink));
+    const siteJump = request.action === "open" && !crossOwner ? sameSiteJumpProblem(request.url) : null;
+    if (siteJump) return Promise.resolve(fail(siteJump));
 
     const requestedScope = scopeFor(request);
     let claimHolder: Claim | undefined;
@@ -669,8 +692,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
         // Invalid extension location metadata is never trusted for later grant checks.
       }
     }
-    if (reportedUrl) tabUrls.set(entry.tab, reportedUrl);
-    else if (reported) tabUrls.set(entry.tab, `${reported}/`);
+    if (reportedUrl) { tabUrls.set(entry.tab, reportedUrl); rememberVisit(reportedUrl); }
+    else if (reported) { tabUrls.set(entry.tab, `${reported}/`); rememberVisit(`${reported}/`); }
     let data = message.data;
     if (typeof data === "string" && data.length > MAX_READ_LENGTH) data = data.slice(0, MAX_READ_LENGTH);
     const reportedPath = reportedUrl ? pathOf(reportedUrl) : null;
@@ -887,5 +910,5 @@ export function createWebBroker(deps: WebBrokerDeps) {
     };
   }
 
-  return { submit, pendingApprovals, decideApproval, onExtensionMessage, onExtensionClosed, currentClaims, notifyAgentMessage, setMessageTextVisibility, stopAll, feedSnapshot };
+  return { submit, pendingApprovals, decideApproval, onExtensionMessage, onExtensionClosed, currentClaims, notifyAgentMessage, noteOwnerUrls, setMessageTextVisibility, stopAll, feedSnapshot };
 }
