@@ -1,0 +1,63 @@
+{
+  "report_type": "RunLeak Analysis Report",
+  "generated_at": "2026-06-19T20:58:34.038Z",
+  "label": "Synthetic benchmark trace. Not customer data.",
+  "trace": {
+    "case_id": "ls-trace-004",
+    "task": "Document Q&A Chain (imported via langsmith-like)",
+    "run_type": "bad"
+  },
+  "detected": {
+    "model_calls": 5,
+    "tool_calls": 1,
+    "retries": 0,
+    "total_input_tokens": 74900,
+    "total_output_tokens": 5800,
+    "estimated_total_cost_usd": 0.247
+  },
+  "findings": [
+    {
+      "leak_type": "repeated_context",
+      "severity": "high",
+      "detection_method": "block_id_and_similarity",
+      "confidence": "high",
+      "affected_steps": [
+        "child-llm-001",
+        "child-llm-002",
+        "child-llm-003",
+        "child-llm-004"
+      ],
+      "wasted_occurrence_steps": [
+        "child-llm-002",
+        "child-llm-003",
+        "child-llm-004"
+      ],
+      "block_id": "ls_document",
+      "block_estimated_tokens": 18600,
+      "occurrences": 4,
+      "repeated_occurrences": 3,
+      "similarity_percent": 100,
+      "estimated_waste_usd": 0.1395,
+      "cost_assumptions": {
+        "model": "gpt-4o",
+        "input_price_per_million": 2.5,
+        "output_price_per_million": 10,
+        "block_token_count": 18600,
+        "repetitions_after_first": 3,
+        "waste_tokens": 55800,
+        "estimated_waste_usd": 0.1395,
+        "note": "Waste calculated as 18600 tokens × 3 repetitions after first occurrence at 2.5/M input tokens. First occurrence (child-llm-001) excluded. Output tokens not counted because waste is on the input side."
+      },
+      "evidence": "Detection method: block_id_and_similarity. The \"LangSmith input: document\" block (18,600 tokens) appears across 4 model calls. Block ID matched (ls_document) and text similarity confirmed (100%). Block was reused 3 times after first occurrence (child-llm-001).",
+      "explanation": "The \"LangSmith input: document\" block (18,600 tokens) was included in the model context 4 times but only needed once. After the first use in child-llm-001, the remaining 3 occurrences (child-llm-002, child-llm-003, child-llm-004) passed the same content again, generating an estimated $0.14 in waste. This represents approximately 56% of the total run cost.",
+      "recommended_fix": "Cache the content of \"LangSmith input: document\" after child-llm-001. Pass a reference ID or cached summary into later steps (child-llm-002, child-llm-003, child-llm-004) instead of the full block."
+    }
+  ],
+  "cost_caveat": "The detected repeated-context waste represents a specific measured inefficiency. It does not represent total potential savings. A full cost comparison requires a before-and-after trace pair.",
+  "limitations": [
+    "Synthetic benchmark trace, not customer data.",
+    "Cost estimates use published pricing; actual costs may differ.",
+    "RunLeak does not guarantee specific savings."
+  ],
+  "version": "0.1.0"
+}

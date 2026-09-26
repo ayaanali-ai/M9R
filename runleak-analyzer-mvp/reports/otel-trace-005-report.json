@@ -1,0 +1,63 @@
+{
+  "report_type": "RunLeak Analysis Report",
+  "generated_at": "2026-06-19T20:58:37.033Z",
+  "label": "Synthetic benchmark trace. Not customer data.",
+  "trace": {
+    "case_id": "otel-trace-005",
+    "task": "imported from OTel GenAI spans (imported via otel-genai-like)",
+    "run_type": "bad"
+  },
+  "detected": {
+    "model_calls": 4,
+    "tool_calls": 1,
+    "retries": 0,
+    "total_input_tokens": 74500,
+    "total_output_tokens": 5600,
+    "estimated_total_cost_usd": 0.241
+  },
+  "findings": [
+    {
+      "leak_type": "repeated_context",
+      "severity": "high",
+      "detection_method": "block_id_and_similarity",
+      "confidence": "high",
+      "affected_steps": [
+        "span-001",
+        "span-002",
+        "span-003",
+        "span-005"
+      ],
+      "wasted_occurrence_steps": [
+        "span-002",
+        "span-003",
+        "span-005"
+      ],
+      "block_id": "otel_prompt_6f8f3539",
+      "block_estimated_tokens": 17300,
+      "occurrences": 4,
+      "repeated_occurrences": 3,
+      "similarity_percent": 99,
+      "estimated_waste_usd": 0.12975,
+      "cost_assumptions": {
+        "model": "gpt-4o",
+        "input_price_per_million": 2.5,
+        "output_price_per_million": 10,
+        "block_token_count": 17300,
+        "repetitions_after_first": 3,
+        "waste_tokens": 51900,
+        "estimated_waste_usd": 0.12975,
+        "note": "Waste calculated as 17300 tokens × 3 repetitions after first occurrence at 2.5/M input tokens. First occurrence (span-001) excluded. Output tokens not counted because waste is on the input side."
+      },
+      "evidence": "Detection method: block_id_and_similarity. The \"OTel prompt: gpt-4o\" block (17,300 tokens) appears across 4 model calls. Block ID matched (otel_prompt_6f8f3539) and text similarity confirmed (99%). Block was reused 3 times after first occurrence (span-001).",
+      "explanation": "The \"OTel prompt: gpt-4o\" block (17,300 tokens) was included in the model context 4 times but only needed once. After the first use in span-001, the remaining 3 occurrences (span-002, span-003, span-005) passed the same content again, generating an estimated $0.13 in waste. This represents approximately 54% of the total run cost.",
+      "recommended_fix": "Cache the content of \"OTel prompt: gpt-4o\" after span-001. Pass a reference ID or cached summary into later steps (span-002, span-003, span-005) instead of the full block."
+    }
+  ],
+  "cost_caveat": "The detected repeated-context waste represents a specific measured inefficiency. It does not represent total potential savings. A full cost comparison requires a before-and-after trace pair.",
+  "limitations": [
+    "Synthetic benchmark trace, not customer data.",
+    "Cost estimates use published pricing; actual costs may differ.",
+    "RunLeak does not guarantee specific savings."
+  ],
+  "version": "0.1.0"
+}

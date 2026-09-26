@@ -1,0 +1,65 @@
+{
+  "report_type": "RunLeak Analysis Report",
+  "generated_at": "2026-06-19T20:58:51.218Z",
+  "label": "Synthetic benchmark trace. Not customer data.",
+  "trace": {
+    "case_id": "001-repeated-context",
+    "task": "Document Q&A agent — answer 4 questions from a 50-page product spec document",
+    "run_type": "bad"
+  },
+  "detected": {
+    "model_calls": 8,
+    "tool_calls": 1,
+    "retries": 1,
+    "total_input_tokens": 92300,
+    "total_output_tokens": 8100,
+    "estimated_total_cost_usd": 0.317
+  },
+  "findings": [
+    {
+      "leak_type": "repeated_context",
+      "severity": "high",
+      "detection_method": "block_id_and_similarity",
+      "confidence": "high",
+      "affected_steps": [
+        "step-3",
+        "step-4",
+        "step-5",
+        "step-6",
+        "step-7"
+      ],
+      "wasted_occurrence_steps": [
+        "step-4",
+        "step-5",
+        "step-6",
+        "step-7"
+      ],
+      "block_id": "full_doc_18420",
+      "block_estimated_tokens": 18420,
+      "occurrences": 5,
+      "repeated_occurrences": 4,
+      "similarity_percent": 100,
+      "estimated_waste_usd": 0.18419999999999997,
+      "cost_assumptions": {
+        "model": "gpt-4o",
+        "input_price_per_million": 2.5,
+        "output_price_per_million": 10,
+        "block_token_count": 18420,
+        "repetitions_after_first": 4,
+        "waste_tokens": 73680,
+        "estimated_waste_usd": 0.18419999999999997,
+        "note": "Waste calculated as 18420 tokens × 4 repetitions after first occurrence at 2.5/M input tokens. First occurrence (step-3) excluded. Output tokens not counted because waste is on the input side."
+      },
+      "evidence": "Detection method: block_id_and_similarity. The \"Full product spec document (50 pages)\" block (18,420 tokens) appears across 5 model calls. Block ID matched (full_doc_18420) and text similarity confirmed (100%). Block was reused 4 times after first occurrence (step-3).",
+      "explanation": "The \"Full product spec document (50 pages)\" block (18,420 tokens) was included in the model context 5 times but only needed once. After the first use in step-3, the remaining 4 occurrences (step-4, step-5, step-6, step-7) passed the same content again, generating an estimated $0.18 in waste. This represents approximately 13% of the total run cost.",
+      "recommended_fix": "Cache the content of \"Full product spec document (50 pages)\" after step-3. Pass a reference ID or cached summary into later steps (step-4, step-5, step-6, step-7) instead of the full block."
+    }
+  ],
+  "cost_caveat": "The detected repeated-context waste represents a specific measured inefficiency. It does not represent total potential savings. A full cost comparison requires a before-and-after trace pair.",
+  "limitations": [
+    "Synthetic benchmark trace, not customer data.",
+    "Cost estimates use published pricing; actual costs may differ.",
+    "RunLeak does not guarantee specific savings."
+  ],
+  "version": "0.1.0"
+}

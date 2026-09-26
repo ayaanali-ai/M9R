@@ -1,0 +1,25 @@
+{
+  "report_type": "RunLeak Analysis Report",
+  "generated_at": "2026-06-19T06:14:44.233Z",
+  "label": "Synthetic benchmark trace. Not customer data.",
+  "trace": {
+    "case_id": "003-false-positive-boilerplate",
+    "task": "Customer support agent answering tickets for 3 different customers — each has its own account context",
+    "run_type": "bad"
+  },
+  "detected": {
+    "model_calls": 6,
+    "tool_calls": 3,
+    "retries": 0,
+    "total_input_tokens": 21500,
+    "total_output_tokens": 7800,
+    "estimated_total_cost_usd": 0.096
+  },
+  "findings": [],
+  "limitations": [
+    "Synthetic benchmark trace, not customer data.",
+    "Cost estimates use published pricing; actual costs may differ.",
+    "RunLeak does not guarantee specific savings."
+  ],
+  "version": "0.1.0"
+}

@@ -1,0 +1,60 @@
+{
+  "report_type": "RunLeak Analysis Report",
+  "generated_at": "2026-06-19T06:14:43.746Z",
+  "label": "Synthetic benchmark trace. Not customer data.",
+  "trace": {
+    "case_id": "002-repeated-context-no-block-id",
+    "task": "Document Q&A agent — answer 3 policy questions — prompt blocks have no block_id",
+    "run_type": "bad"
+  },
+  "detected": {
+    "model_calls": 4,
+    "tool_calls": 1,
+    "retries": 0,
+    "total_input_tokens": 58200,
+    "total_output_tokens": 5200,
+    "estimated_total_cost_usd": 0.182
+  },
+  "findings": [
+    {
+      "leak_type": "repeated_context",
+      "severity": "medium",
+      "detection_method": "text_similarity",
+      "confidence": "high",
+      "affected_steps": [
+        "step-1",
+        "step-2",
+        "step-3"
+      ],
+      "wasted_occurrence_steps": [
+        "step-2",
+        "step-3"
+      ],
+      "block_id": "text_match_group",
+      "block_estimated_tokens": 18520,
+      "occurrences": 3,
+      "repeated_occurrences": 2,
+      "similarity_percent": 100,
+      "estimated_waste_usd": 0.09259999999999999,
+      "cost_assumptions": {
+        "model": "gpt-4o",
+        "input_price_per_million": 2.5,
+        "output_price_per_million": 10,
+        "block_token_count": 18520,
+        "repetitions_after_first": 2,
+        "waste_tokens": 37040,
+        "estimated_waste_usd": 0.09259999999999999,
+        "note": "Waste calculated as 18520 tokens × 2 repetitions after first occurrence at 2.5/M input tokens. First occurrence (step-1) excluded. Output tokens not counted because waste is on the input side."
+      },
+      "evidence": "Detection method: text_similarity. The \"Full employee handbook content\" block (18,520 tokens) appears across 3 model calls. Block ID was not available or unreliable. Detection relied on normalized text similarity (score: 100%). Block was reused 2 times after first occurrence (step-1).",
+      "explanation": "The \"Full employee handbook content\" block (18,520 tokens) was included in the model context 3 times but only needed once. After the first use in step-1, the remaining 2 occurrences (step-2, step-3) passed the same content again, generating an estimated $0.09 in waste. This represents approximately 11% of the total run cost.",
+      "recommended_fix": "Cache the content of \"Full employee handbook content\" after step-1. Pass a reference ID or cached summary into later steps (step-2, step-3) instead of the full block."
+    }
+  ],
+  "limitations": [
+    "Synthetic benchmark trace, not customer data.",
+    "Cost estimates use published pricing; actual costs may differ.",
+    "RunLeak does not guarantee specific savings."
+  ],
+  "version": "0.1.0"
+}
