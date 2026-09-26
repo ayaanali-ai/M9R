@@ -36,9 +36,10 @@ test("marketing signup and invitations retain the existing account flow", () => 
   const home = readFileSync("src/app/page.tsx", "utf8");
   assert.match(home, /encodeURIComponent\(token\)/);
   const invitation = readFileSync("src/components/world/InviteDialog.tsx", "utf8");
-  assert.match(invitation, /<AuthForm/);
+  assert.match(invitation, /<M9RAuthTerminal/);
+  assert.match(invitation, /initialMode="signup"/);
   assert.match(invitation, /next=\{next\}/);
-  assert.match(invitation, /showModal\(\)/);
+  assert.match(invitation, /autoOpen/);
 });
 
 test("new public destinations resolve to actual pages", () => {

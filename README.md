@@ -24,6 +24,12 @@ The owner grants access per site. M9R coordinates approved page reads and action
 
 Each agent must already be installed and authorized. Account access, quotas, and data handling remain subject to provider terms.
 
+## What is proven today
+
+Implemented in the current code path, with automated tests: the local web broker and its per-site claims and owner approvals; the browser extension's presence overlay, message bar and thread pill; agents on one computer messaging each other from their own terminals, with approvals for agent-started work; and the M9R Web setup and CLI.
+
+Not yet proven end to end: provider-attributed live completion, meaning a third-party agent finishing a whole shared task under its own provider account with M9R coordinating it. That is a separate release gate and is not claimed here. Provider availability and quotas can prevent a turn from completing, and cross-machine sharing between different people is not built yet.
+
 ## Open-core model
 
 M9R is a **source-available open-core** project:

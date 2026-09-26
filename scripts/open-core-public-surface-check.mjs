@@ -174,6 +174,10 @@ const secretMatches = candidateFiles.filter((path) => {
   return secretRegex.test(bytes.toString("utf8"));
 });
 const synthetic = new Set([
+  // Redaction tests whose "secrets" are obviously synthetic (alphabetical AWS-style and sk- strings), reviewed 2026-09-26.
+  "scripts/cross-agent-capture-core.test.ts",
+  "scripts/native-front-door-core.test.ts",
+  "scripts/native-store-and-hook.test.ts",
   "docs/REAL_PROVIDER_TRACE_PRIVACY.md",
   "runleak-analyzer-mvp/examples/sample-redaction-before-after.md",
   "runleak-analyzer-mvp/src/__tests__/loadTrace.test.ts",
