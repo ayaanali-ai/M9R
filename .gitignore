@@ -76,12 +76,9 @@ dev-server.log
 # .release-excluded/artifacts for marketing/archive use.
 /.release-excluded/
 
-# M9R CLI local state (token is secret; rules.json is transient).
-# NOT ".m9r/" -- the real, persisted directory on disk is still ".oathlock/"
-# (see src/lib/oathlock-cli-core.ts's M9R_DIR constant and its comment). This
-# was ".m9r/" here, which never matched anything real, and .oathlock/local.json
-# -- a real secret token -- ended up committed and pushed as a result. Fixed
-# to match the actual directory the CLI reads and writes.
+# M9R CLI local state (tokens are secret; rules and run files are transient).
+# Keep both paths ignored during the one-release legacy migration.
+.m9r/
 .oathlock/local.json
 .oathlock/agents/*/local.json
 .oathlock/rules.json

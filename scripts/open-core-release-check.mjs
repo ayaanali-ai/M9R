@@ -101,7 +101,7 @@ else fail("retired Codex app-server path", productionMatches.join(", "));
 
 const trackedFiles = gitFiles(["ls-files"]);
 const sensitiveTracked = trackedFiles.filter((path) =>
-  /(?:^|[\\/])(?:\.env(?:\..*)?|.*\.pem|.*\.key|\.oathlock[\\/]local\.json)$/i.test(path) && !path.endsWith(".env.example"),
+  /(?:^|[\\/])(?:\.env(?:\..*)?|.*\.pem|.*\.key|(?:\.m9r|\.oathlock)[\\/]local\.json)$/i.test(path) && !path.endsWith(".env.example"),
 );
 if (sensitiveTracked.length === 0) pass("no obvious environment or private-key files are tracked");
 else fail("tracked sensitive files", sensitiveTracked.join(", "));

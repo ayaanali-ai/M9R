@@ -26,9 +26,9 @@ const required = [
 const initialSnapshotExcluded = new Set([
   "M9R_MASTER_BUILD_PLAN.md",
   "OathLock_Realtime_Multi_Agent_Execution_Plan_v1_0.md",
-  "OATHLOCK_V2_MASTER_PLAN.md",
-  "OATHLOCK_V2_SCHEMA_AUDIT.md",
-  "OATHLOCK_V2_SCORE_PLAN.md",
+  "M9R_V2_MASTER_PLAN.md",
+  "M9R_V2_SCHEMA_AUDIT.md",
+  "M9R_V2_SCORE_PLAN.md",
   "PLAN_OF_ACTION_DASHBOARD_AND_METRICS.md",
   "docs/DASHBOARD_UX_PLAN.md",
   "docs/deep-strategy-round3.md",
@@ -87,7 +87,7 @@ const reviewedPublicTestFixtures = new Set([
   "docs/proof/v5.1-production-smoke-test.md",
   "docs/proof/v5.1-before-after-proof-template.md",
 ]);
-const secretFilePattern = /(?:^|[\\/])(?:\.env(?:\..*)?|.*\.pem|.*\.key|\.oathlock[\\/]local\.json)$/i;
+const secretFilePattern = /(?:^|[\\/])(?:\.env(?:\..*)?|.*\.pem|.*\.key|(?:\.m9r|\.oathlock)[\\/]local\.json)$/i;
 const artifactPattern = /^(?:artifacts|\.release-excluded)(?:[\\/]|$)/i;
 
 function normalize(path) {

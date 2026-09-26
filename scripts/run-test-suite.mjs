@@ -9,6 +9,10 @@ const allTestFiles = readdirSync(scriptsDir).filter((name) => /\.test\.(?:ts|mjs
 const suite = process.argv[2];
 
 const webBrokerFiles = new Set([
+  "web-protocol-conformance.test.ts",
+  "m9r-compatibility.test.ts",
+  "room-litmus-core.test.ts",
+  "web-setup-core.test.ts",
   "web-broker.test.ts",
   "web-broker-server.test.ts",
   "web-broker-extension.test.ts",

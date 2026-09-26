@@ -59,9 +59,9 @@ const candidateFiles = [...new Set([...tracked, ...untracked])]
 const initialSnapshotExcluded = new Set([
   "M9R_MASTER_BUILD_PLAN.md",
   "OathLock_Realtime_Multi_Agent_Execution_Plan_v1_0.md",
-  "OATHLOCK_V2_MASTER_PLAN.md",
-  "OATHLOCK_V2_SCHEMA_AUDIT.md",
-  "OATHLOCK_V2_SCORE_PLAN.md",
+  "M9R_V2_MASTER_PLAN.md",
+  "M9R_V2_SCHEMA_AUDIT.md",
+  "M9R_V2_SCORE_PLAN.md",
   "PLAN_OF_ACTION_DASHBOARD_AND_METRICS.md",
   "docs/DASHBOARD_UX_PLAN.md",
   "docs/deep-strategy-round3.md",
@@ -138,7 +138,7 @@ if (process.argv.includes("--staged")) {
   const forbiddenStaged = staged.filter((path) =>
     isInitialSnapshotExcluded(path)
     || path.startsWith("artifacts/")
-    || /(?:^|[\\/])(?:\.env(?:\..*)?|.*\.pem|.*\.key|\.oathlock[\\/]local\.json)$/i.test(path),
+    || /(?:^|[\\/])(?:\.env(?:\..*)?|.*\.pem|.*\.key|(?:\.m9r|\.oathlock)[\\/]local\.json)$/i.test(path),
   );
   if (staged.length === 0) {
     fail("staged release candidate", "no staged files found");
@@ -152,7 +152,7 @@ if (process.argv.includes("--staged")) {
 }
 
 const candidateSensitive = candidateFiles.filter((path) =>
-  /(?:^|[\\/])(?:\.env(?:\..*)?|.*\.pem|.*\.key|\.oathlock[\\/]local\.json)$/i.test(path)
+  /(?:^|[\\/])(?:\.env(?:\..*)?|.*\.pem|.*\.key|(?:\.m9r|\.oathlock)[\\/]local\.json)$/i.test(path)
   && !path.endsWith(".env.example"),
 );
 if (candidateSensitive.length === 0) pass("no obvious secret-bearing files are in the release candidate");

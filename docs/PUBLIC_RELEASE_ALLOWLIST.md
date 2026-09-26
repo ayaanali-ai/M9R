@@ -45,7 +45,7 @@ credentials, hosted account data, or third-party provider accounts.
 ## Never include in a public release snapshot
 
 - `.env`, `.env.*` except reviewed examples;
-- `.oathlock/local.json`, live tokens, runtime state, or local logs;
+- `.m9r/local.json`, live tokens, runtime state, or local logs;
 - `.claude/settings.local.json` and other machine-local configuration;
 - `.release-excluded/`, `artifacts/`, raw demo recordings, screenshots, and
   generated decks;
