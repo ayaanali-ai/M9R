@@ -49,6 +49,11 @@
     .route.warn { color: var(--working); }
     .cbar.listening { border-color: rgba(217, 120, 63, .7); box-shadow: 0 1px 0 rgba(255,255,255,.05) inset, 0 4px 14px rgba(0,0,0,.36), 0 0 0 3px rgba(217,120,63,.2); }
     .status.live { color: var(--text); font-size: 14px; }
+    /* Listening: level bars driven by the real microphone level; they light up when you are speaking. */
+    .wave { flex: none; display: inline-flex; align-items: center; gap: 3px; height: 22px; margin-right: 10px; }
+    .wave i { display: block; width: 3px; height: 22px; border-radius: 2px; background: var(--faint); transform: scaleY(.16); transform-origin: center; transition: background-color .12s var(--ease); }
+    .wave.hearing i { background: var(--accent); }
+    .status .said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .all-mark { width: 22px; height: 22px; border-radius: 50%; background: var(--bg-3); box-shadow: 0 0 0 1px var(--line-2); display: grid; place-items: center; font: 700 10px/1 var(--display); color: var(--accent); }
   </style>
 </head>

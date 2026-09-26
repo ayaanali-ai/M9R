@@ -237,8 +237,21 @@
   let heard = "";
   let talkCap = 0;
 
+  // While listening the status line is a row of level bars plus what has been heard so far.
+  let waveEl = null;
+  let saidEl = null;
+  function ensureLive() {
+    if (!waveEl) {
+      waveEl = el("span", "wave");
+      for (let i = 0; i < 7; i += 1) waveEl.appendChild(document.createElement("i"));
+      saidEl = el("span", "said");
+    }
+    if (status.firstChild !== waveEl) status.replaceChildren(waveEl, saidEl);
+  }
+
   function setLive(text) {
-    status.textContent = text;
+    ensureLive();
+    saidEl.textContent = text;
     status.classList.remove("bad");
     status.classList.add("live");
     status.hidden = false;
@@ -246,7 +259,48 @@
     clearTimeout(statusTimer);
   }
 
+  // A real audio level from the microphone (not a canned animation): the bars follow how loud you are, and turn warm while you speak.
+  let meter = null;
+  async function startMeter() {
+    stopMeter();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!listening) { stream.getTracks().forEach((t) => t.stop()); return; }
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      const samples = new Uint8Array(analyser.fftSize);
+      const bars = waveEl ? [...waveEl.children] : [];
+      let level = 0;
+      let hearingUntil = 0;
+      let frame = 0;
+      const tick = () => {
+        analyser.getByteTimeDomainData(samples);
+        let sum = 0;
+        for (let i = 0; i < samples.length; i += 1) { const v = (samples[i] - 128) / 128; sum += v * v; }
+        level = level * 0.7 + Math.sqrt(sum / samples.length) * 0.3;
+        const now = performance.now();
+        if (level > 0.045) hearingUntil = now + 250;
+        if (waveEl) waveEl.classList.toggle("hearing", now < hearingUntil);
+        bars.forEach((bar, i) => {
+          const shape = 0.55 + 0.45 * Math.sin(now / 140 + i * 0.9);
+          bar.style.transform = `scaleY(${Math.min(1, 0.16 + level * 7 * shape).toFixed(3)})`;
+        });
+        frame = requestAnimationFrame(tick);
+      };
+      tick();
+      meter = { stop() { cancelAnimationFrame(frame); stream.getTracks().forEach((t) => t.stop()); ctx.close().catch(() => {}); } };
+    } catch { /* the meter is a nicety; speech works without it */ }
+  }
+  function stopMeter() {
+    if (meter) { meter.stop(); meter = null; }
+  }
+
   function clearLive() {
+    stopMeter();
     status.hidden = true;
     status.classList.remove("live");
     input.style.visibility = "";
@@ -310,6 +364,7 @@
       const wasListening = listening;
       wantTalk = false;
       listening = false;
+      stopMeter();
       stopping = false;
       clearTimeout(talkCap);
       bar.classList.remove("listening");
@@ -332,7 +387,7 @@
     bar.classList.add("listening");
     route.hidden = true;
     setLive("Listening…");
-    try { recognizer.start(); } catch { listening = false; bar.classList.remove("listening"); clearLive(); }
+    try { recognizer.start(); void startMeter(); } catch { listening = false; bar.classList.remove("listening"); clearLive(); }
   }
 
   let stopping = false;
