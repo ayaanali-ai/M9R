@@ -358,7 +358,9 @@ export function createWebBroker(deps: WebBrokerDeps) {
   const recentActs = new Map<string, { sig: string; count: number; times: number[] }>();
   function loopProblem(request: WebRequest): string | null {
     const guard = deps.loopGuard;
-    if (!guard || request.action === "read" || request.action === "find" || request.action === "wait" || request.action === "tabs") return null;
+    // Observing the page never changes it, so it cannot loop: a snapshot with a different query looks identical to the guard, and
+    // an agent re-snapshotting after a page change was being told it was stuck.
+    if (!guard || ["read", "find", "wait", "tabs", "snapshot", "screenshot", "extract", "link", "copy"].includes(request.action)) return null;
     const key = String(request.sessionId ?? request.agent);
     const at = now();
     const entry = recentActs.get(key) ?? { sig: "", count: 0, times: [] };

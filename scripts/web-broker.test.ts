@@ -561,3 +561,13 @@ test("ordinary pages, including paths that contain the word search, still open",
   broker.onExtensionMessage({ type: "result", id: "c2", ok: true, origin: "http://127.0.0.1:1", url: "http://127.0.0.1:1/search/spec" });
   assert.equal((await pathOnly).ok, true);
 });
+
+test("repeated snapshots are observation, not a loop", async () => {
+  const { broker } = harness({ loopGuard: { repeat: 3, budget: 50, windowMs: 60_000 } });
+  for (let i = 1; i <= 5; i += 1) {
+    const pending = broker.submit(req("codex", "snapshot", { tab: "shared" }));
+    broker.onExtensionMessage({ type: "result", id: `c${i}`, ok: true, data: { elements: [] } });
+    const result = await pending;
+    assert.notEqual((result as { error?: string }).error?.includes("exact"), true, `snapshot ${i} must not be refused as a loop`);
+  }
+});
