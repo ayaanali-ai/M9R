@@ -260,10 +260,26 @@
     "no-speech": "Didn't catch anything",
   };
 
-  function talkStart() {
-    if (listening) return;
+  let wantTalk = false;
+
+  async function micIsOn() {
+    try { return (await navigator.permissions.query({ name: "microphone" })).state === "granted"; } catch { return false; }
+  }
+
+  // Asking for the microphone from inside a page's frame makes Chrome's prompt steal focus mid-press, so the first time it is turned
+  // on from a normal extension tab instead (permission.html?mic=1). After that it is remembered for the whole extension.
+  function openMicSetup() {
+    showStatus("Turn on the microphone for M9R first (opening setup)", true);
+    try { chrome.runtime.sendMessage({ type: "m9r-pill-open-mic-setup" }); } catch { /* the extension was reloaded */ }
+  }
+
+  async function talkStart() {
+    if (listening || wantTalk) return;
+    wantTalk = true;
     const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Speech) { showStatus("Speech isn't available in this browser", true); return; }
+    if (!Speech) { wantTalk = false; showStatus("Speech isn't available in this browser", true); return; }
+    if (!(await micIsOn())) { wantTalk = false; openMicSetup(); return; }
+    if (!wantTalk) return;
     if (small) setSmall(false);
     heard = "";
     stopping = false;
@@ -283,6 +299,7 @@
       setLive(`${done}${interim}`.trim() || "Listening…");
     };
     recognizer.onerror = (event) => {
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") { listening = false; wantTalk = false; bar.classList.remove("listening"); clearLive(); openMicSetup(); return; }
       const message = SPEECH_ERRORS[event.error] || `Speech stopped: ${event.error}`;
       listening = false;
       bar.classList.remove("listening");
@@ -291,6 +308,7 @@
     };
     recognizer.onend = () => {
       const wasListening = listening;
+      wantTalk = false;
       listening = false;
       stopping = false;
       clearTimeout(talkCap);
@@ -319,6 +337,7 @@
 
   let stopping = false;
   function talkStop() {
+    wantTalk = false;
     // Both keys coming up each call this; the recognizer should only be told once.
     if (!recognizer || !listening || stopping) return;
     stopping = true;

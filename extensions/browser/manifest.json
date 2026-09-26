@@ -59,19 +59,5 @@
         "https://*/*"
       ]
     }
-  ],
-  "commands": {
-    "toggle-message-bar": {
-      "suggested_key": {
-        "default": "Alt+M"
-      },
-      "description": "Show or hide the M9R message bar"
-    },
-    "toggle-thread-pill": {
-      "suggested_key": {
-        "default": "Alt+N"
-      },
-      "description": "Show or hide the M9R agent thread pill"
-    }
-  }
+  ]
 }

@@ -188,6 +188,11 @@
       }
       return { ok: true };
     }
+    if (message.type === "m9r-pill-open-mic-setup") {
+      if (!await isOwnFrame(sender)) return { ok: false };
+      await chrome.tabs.create({ url: chrome.runtime.getURL("permission.html?mic=1") });
+      return { ok: true };
+    }
     if (message.type === "m9r-pill-focus-composer") {
       if (!await isOwnFrame(sender)) return { ok: false };
       chrome.tabs.sendMessage(sender.tab.id, { type: "m9r-composer-show", focus: true }, { frameId: 0 }).catch(() => {});

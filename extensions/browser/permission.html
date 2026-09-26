@@ -17,7 +17,7 @@
   </style>
 </head>
 <body>
-  <main>
+  <main id="site-panel">
     <h1>Allow M9R on this site?</h1>
     <p>An M9R agent grant was approved for:</p>
     <p class="scope"><code id="site">Checking site…</code></p>
@@ -36,6 +36,18 @@
       <p>Stop new M9R browser actions on every tab. An action already sent to a page may still finish.</p>
       <button id="stop-all" type="button">Stop all browser actions</button>
     </section>
+  </main>
+  <main id="mic-panel" hidden>
+    <h1>Turn on the microphone for M9R</h1>
+    <p>Hold Alt+M on any page to talk to your agents. Chrome asks once. M9R listens only while you hold the keys, and what you say is never sent until you press Enter.</p>
+    <button id="mic-allow" type="button">Turn on microphone</button>
+    <div id="mic-status" role="status" aria-live="polite"></div>
+  </main>
+  <main id="debug-panel" hidden>
+    <h1>M9R key log</h1>
+    <p>The last Alt+M and Alt+N events M9R saw (no typed text is recorded). Press the keys, then look here.</p>
+    <button id="debug-clear" class="secondary" type="button">Clear</button>
+    <pre id="debug-log" style="margin:12px 0 0;padding:12px;border:1px solid #393e49;border-radius:8px;background:#111318;color:#a8f0c6;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;max-height:60vh;overflow:auto"></pre>
   </main>
   <script src="src/permission-logic.js"></script>
   <script src="src/permission-page.js"></script>

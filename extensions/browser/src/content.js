@@ -15,6 +15,24 @@
   // the command is a duplicate and is ignored.
   // Holding a key makes Chrome repeat the command every few milliseconds, so a command is also ignored while a press is in progress
   // and for a moment after it, and commands are never accepted more than once per 700 ms.
+  // A small ring buffer of hotkey events for troubleshooting (permission.html?debug=1). It records only Alt+M / Alt+N presses and what
+  // the overlay did about them, never typed text.
+  const keyLog = [];
+  let keyLogTimer = 0;
+  const logKey = (src, what) => {
+    keyLog.push({ t: Date.now(), src, what });
+    if (keyLog.length > 80) keyLog.shift();
+    if (keyLogTimer) return;
+    keyLogTimer = setTimeout(() => {
+      keyLogTimer = 0;
+      try {
+        chrome.storage.local.get("m9rKeyLog").then((stored) => {
+          const previous = Array.isArray(stored.m9rKeyLog) ? stored.m9rKeyLog : [];
+          return chrome.storage.local.set({ m9rKeyLog: previous.concat(keyLog.splice(0)).slice(-120) });
+        }).catch(() => {});
+      } catch {}
+    }, 250);
+  };
   let lastHotkeyAt = 0;
   let pressStartedAt = 0;
   let lastCommandAt = 0;
@@ -39,8 +57,8 @@
       else if (msg && msg.type === "owner-stop") overlay.stop(msg.owner);
       else if (msg && msg.type === "owner-resume") overlay.resume();
       else if (msg && msg.type === "m9r-agents") overlay.syncAgents(msg.agents);
-      else if (msg && msg.type === "m9r-composer-toggle") { if (commandAllowed()) overlay.toggleComposer(); }
-      else if (msg && msg.type === "m9r-pill-toggle") { if (commandAllowed()) overlay.togglePill(); }
+      else if (msg && msg.type === "m9r-composer-toggle") { const ok = commandAllowed(); logKey("command", ok ? "bar toggle accepted" : "bar toggle ignored"); if (ok) overlay.toggleComposer(); }
+      else if (msg && msg.type === "m9r-pill-toggle") { const ok = commandAllowed(); logKey("command", ok ? "pill toggle accepted" : "pill toggle ignored"); if (ok) overlay.togglePill(); }
       else if (msg && msg.type === "m9r-composer-show") overlay.showComposer(msg.focus === true);
       else if (msg && msg.type === "m9r-pill-selection") {
         let selection = "";
@@ -71,6 +89,7 @@
     let talking = false;
     let tapPending = false;
     const finish = () => {
+      logKey("page", talking ? "release after hold: stop talking" : tapPending ? "release after tap: toggle bar" : "release (nothing pending)");
       pressStartedAt = 0;
       lastHotkeyAt = Date.now();
       clearTimeout(holdTimer);
@@ -79,15 +98,16 @@
       tapPending = false;
     };
     const press = (key) => {
+      logKey("page", `press Alt+${key.toUpperCase()}`);
       lastHotkeyAt = pressStartedAt = Date.now();
       if (key === "n") { overlay.togglePill(); return; }
       clearTimeout(holdTimer);
       talking = false;
       tapPending = true;
-      holdTimer = setTimeout(() => { tapPending = false; talking = true; overlay.talk(true); }, HOLD_MS);
+      holdTimer = setTimeout(() => { logKey("page", "held: start talking"); tapPending = false; talking = true; overlay.talk(true); }, HOLD_MS);
     };
     const release = (key) => { if (key === "m") finish(); else { pressStartedAt = 0; lastHotkeyAt = Date.now(); } };
-    onHotkey = (key, down) => { if (down) press(key); else release(key); };
+    onHotkey = (key, down) => { logKey("frame", `${down ? "down" : "up"} ${key}`); if (down) press(key); else release(key); };
     const isKey = (ev, code) => ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.code === code;
     window.addEventListener("keydown", (ev) => {
       if (ev.repeat) return;
