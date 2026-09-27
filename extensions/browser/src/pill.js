@@ -25,6 +25,7 @@
   let pulseApprovals = false;
   const decided = new Map();
   let stopping = new Set();
+  let lastBar = { top: 14, h: 44 };
 
   // The host tells the pill which window edge it is docked to, so the panel can open away from that edge.
   F.onHost((data) => {
@@ -94,6 +95,13 @@
       b.addEventListener("click", () => select(key));
       return b;
     }));
+    const close = el("button", "close");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close");
+    close.title = "Close";
+    close.textContent = "×";
+    close.addEventListener("click", () => toggle(false));
+    tabsEl.append(close);
   }
 
   function select(key) {
@@ -306,7 +314,9 @@
   function report() {
     const r = wrap.getBoundingClientRect();
     const b = document.getElementById("bar").getBoundingClientRect();
-    F.toParent({ kind: "size", w: Math.ceil(r.width), h: Math.ceil(r.height), barTop: Math.round(b.top - r.top), barH: Math.round(b.height) });
+    // While the panel is open the tab is hidden (the panel takes the edge), so keep reporting where the tab was: it is the anchor.
+    if (b.height > 0) lastBar = { top: Math.round(b.top - r.top), h: Math.round(b.height) };
+    F.toParent({ kind: "size", w: Math.ceil(r.width), h: Math.ceil(r.height), barTop: lastBar.top, barH: lastBar.h });
   }
 
   function toggle(next) {

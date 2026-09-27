@@ -14,6 +14,10 @@
     /* Notch. The collapsed thread is a slim tab that sits on the screen edge and shows only who is here; opening it pulls the
        thread panel out of the edge. The edge side is flush and square, the inward side is rounded, on every edge. */
     .panel { max-height: var(--panel-max, none); }
+    /* Open: the panel itself takes the screen edge (flat and flush there, rounded on the inner side); the tab steps aside. */
+    body.open[data-edge] .bar { display: none; }
+    .tab-close, .close { flex: none; width: 30px; border: 0; background: transparent; color: var(--muted); border-radius: 8px; font: 400 18px/1 var(--display); cursor: pointer; }
+    .close:hover { background: var(--bg-3); color: var(--text); }
     .panel .view { min-height: 0; }
     .bar { cursor: grab; }
     .bar:focus { outline: none; }
