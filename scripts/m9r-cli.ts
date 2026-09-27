@@ -14,6 +14,7 @@
  *   npm run m9r -- submit-session m9r-session.md --approved
  */
 
+import { createRequire } from "node:module";
 import { mkdir, mkdtemp, readFile, writeFile, access, unlink, chmod, rm, readdir, rename, rmdir } from "node:fs/promises";
 import { connect } from "node:net";
 import { spawn, execFile } from "node:child_process";
@@ -1678,17 +1679,11 @@ async function runWebBrokerServer(args: string[]): Promise<number> {
   const configuredPort = valueAfter(args, "--port");
   process.env.M9R_HOME = home;
   if (configuredPort) process.env.M9R_WEB_BROKER_PORT = configuredPort;
-  const root = defaultStoreRoot(homeDirectory(), process.env);
-  const key = loadOrCreateBrokerKey(brokerKeyPath(root));
-  const authorityStore = createWebAuthorityStore(root);
-  const authority = createWebAuthority({ ownerId: process.env.M9R_OWNER_ID?.trim() || "local-machine" });
-  authority.restore(authorityStore.load());
-  const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
-  const broker = await startWebBroker({ key, port, host: "127.0.0.1", allowedExtensionIds: webExtensionAllowlist(), ownerId: "local-machine", authority, authorityStore });
-  process.stdout.write(`M9R web broker listening on 127.0.0.1:${broker.port}\n`);
-  const stop = () => void broker.close().then(() => process.exit(0));
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
+  // Login startup must run the SAME broker as scripts/m9r-web-broker.ts: the in-page pill (agents, messages, approvals), the live agent
+  // sessions, the loop guard and the activity feed. A bare broker starts fine but leaves the pill showing "No agents yet".
+  const bundled = join(dirname(fileURLToPath(import.meta.url)), "m9r-web-broker.cjs");
+  if (awaitableExists(bundled)) createRequire(import.meta.url)(bundled);
+  else await import("./m9r-web-broker");
   return await new Promise<number>((resolveServer) => {
     process.once("exit", () => resolveServer(0));
   });
