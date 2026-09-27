@@ -646,8 +646,22 @@
       // Every edge is a notch: the frame sits exactly on the screen edge it is docked to.
       let top = o.card === 0 ? 0 : o.card === 2 ? vh - h : point.y + half - h;
       if (o.card !== 1 && o.card !== 3) left = clampN(left, 4, Math.max(4, vw - w - 4));
+      // The message bar owns the bottom centre. A notch docked on the bottom edge steps to the side of it instead of sitting behind it.
+      if (o.card === 2) {
+        const barLeft = vw / 2 - 240, barRight = vw / 2 + 240;
+        if (left < barRight + 10 && left + w > barLeft - 10) {
+          const right = barRight + 10, leftSide = barLeft - 10 - w;
+          left = leftSide < 4 || (right + w <= vw - 4 && Math.abs(right - left) <= Math.abs(leftSide - left)) ? Math.min(right, Math.max(4, vw - w - 4)) : leftSide;
+        }
+      }
       // On the left and right edges the tab stays exactly where it is and the panel grows around it; the frame only slides when the panel would not fit.
-      if ((o.card === 1 || o.card === 3) && state.bar) top = point.y - (state.bar.top + state.bar.h / 2);
+      if ((o.card === 1 || o.card === 3) && state.bar) {
+        top = point.y - (state.bar.top + state.bar.h / 2);
+        // Give the panel only the room that is left below the tab, so opening it never has to move the tab; it scrolls inside instead.
+        const cap = Math.floor(vh - 4 - Math.max(4, top) - 28);
+        const capped = cap >= 240 ? cap : 0;
+        if (capped !== state.lastCap) { state.lastCap = capped; postToFrame(state, { kind: "panel-max", px: capped }); }
+      }
       if (o.card !== 0 && o.card !== 2) top = clampN(top, 4, Math.max(4, vh - h - 4));
       if (o.edge !== state.notifiedEdge) {
         state.notifiedEdge = o.edge;

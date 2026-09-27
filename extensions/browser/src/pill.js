@@ -7,7 +7,8 @@
   const $ = (id) => document.getElementById(id);
   const bar = $("bar"), agentsEl = $("agents"), badge = $("badge"), panel = $("panel"), tabsEl = $("tabs"), view = $("view"), foot = $("foot"), mark = $("mark"), wrap = $("wrap");
 
-  const TABS = [["chat", "Chat"], ["activity", "Activity"], ["approvals", "Approvals"], ["agents", "Agents"]];
+  // One thread carries everything that happens (messages, what agents do, approvals waiting for you); the other tab is who is here.
+  const TABS = [["chat", "Chat"], ["agents", "Agents"]];
   const MAX_MARKS = 3;
   const memory = {
     get(key) { try { return localStorage.getItem(key); } catch { return null; } },
@@ -18,9 +19,8 @@
   let connected = false;
   let open = memory.get("m9r.pill.open") === "1";
   let tab = TABS.some(([t]) => t === memory.get("m9r.pill.tab")) ? memory.get("m9r.pill.tab") : "chat";
-  let activityFilter = "all";
-  const seen = { chat: new Set(), activity: new Set(), approvals: new Set() };
-  const unread = { chat: false, activity: false, approvals: false, agents: false };
+  const seen = { chat: new Set() };
+  const unread = { chat: false, agents: false };
   let primed = false;
   let pulseApprovals = false;
   const decided = new Map();
@@ -29,21 +29,22 @@
   // The host tells the pill which window edge it is docked to, so the panel can open away from that edge.
   F.onHost((data) => {
     if (data && data.kind === "dock" && /^(top|right|bottom|left)$/.test(String(data.edge))) document.body.dataset.edge = data.edge;
+    if (data && data.kind === "panel-max" && Number.isFinite(data.px)) {
+      document.documentElement.style.setProperty("--panel-max", data.px > 0 ? `${data.px}px` : "none");
+      requestAnimationFrame(() => { if (!panel.hidden) panel.style.maxHeight = `${panelHeight()}px`; report(); });
+    }
   });
 
   const isOwner = (t) => /^(you|owner)$/i.test(t.agent) || /^(you|owner)$/i.test(t.provider);
   const chatItems = () => state.thread.filter((t) => t.kind === "say" || t.kind === "system");
-  const activityItems = () => state.thread.filter((t) => t.kind === "do" || t.kind === "block");
   const running = () => state.agents.filter((a) => a.state !== "stopped" && a.state !== "failed");
 
   function trackUnread() {
-    const groups = { chat: chatItems(), activity: activityItems(), approvals: state.approvals };
-    for (const [key, items] of Object.entries(groups)) {
-      const fresh = items.filter((i) => !seen[key].has(i.id));
-      if (primed && fresh.length && !(open && tab === key)) unread[key] = true;
-      if (key === "approvals" && primed && fresh.length) pulseApprovals = true;
-      for (const i of items) seen[key].add(i.id);
-    }
+    const items = [...state.thread, ...state.approvals];
+    const fresh = items.filter((i) => !seen.chat.has(i.id));
+    if (primed && fresh.length && !(open && tab === "chat")) unread.chat = true;
+    if (primed && state.approvals.some((a) => !seen.chat.has(a.id))) pulseApprovals = true;
+    for (const i of items) seen.chat.add(i.id);
     primed = true;
   }
 
@@ -77,18 +78,17 @@
   }
 
   function drawTabs() {
-    const counts = { chat: 0, activity: activityItems().length, approvals: state.approvals.filter((a) => !decided.has(a.id)).length, agents: running().length };
+    const counts = { chat: state.approvals.filter((a) => !decided.has(a.id)).length, agents: running().length };
     tabsEl.replaceChildren(...TABS.map(([key, label]) => {
       const b = el("button", `tab${tab === key ? " on" : ""}`);
       b.type = "button";
       b.setAttribute("role", "tab");
       b.setAttribute("aria-selected", String(tab === key));
       b.append(el("span", undefined, label));
-      if (key === "approvals" && counts.approvals) {
-        const c = el("span", `count${pulseApprovals ? " pulse" : ""}`, String(counts.approvals));
-        b.append(c);
-      } else if (key === "agents" || key === "activity") {
-        if (counts[key]) b.append(el("span", "n", String(counts[key])));
+      if (key === "chat" && counts.chat) {
+        b.append(el("span", `count${pulseApprovals ? " pulse" : ""}`, String(counts.chat)));
+      } else if (key === "agents" && counts.agents) {
+        b.append(el("span", "n", String(counts.agents)));
       }
       if (unread[key] && tab !== key) b.append(el("span", "unread"));
       b.addEventListener("click", () => select(key));
@@ -130,8 +130,41 @@
     return row;
   }
 
+  // Runs of what one agent did on the web collapse into one line (the latest action, and how many came before it).
+  function actionNodes(items) {
+    const nodes = [];
+    for (let k = 0; k < items.length;) {
+      const first = items[k];
+      if (first.kind === "block") {
+        const row = el("div", "note-row blocked");
+        row.append(chip(first.provider || first.agent, "chip"), el("span", "txt", `${displayName(first.agent, first.provider)} was stopped: ${first.text.replace(/^blocked:\s*/i, "")}`), el("time", "when", ago(first.at)));
+        nodes.push(row); k += 1; continue;
+      }
+      let end = k;
+      while (end + 1 < items.length && items[end + 1].kind === "do" && items[end + 1].agent === first.agent) end += 1;
+      const last = items[end];
+      const row = el("div", `note-row${last.ok === false ? " failed" : ""}`);
+      const where = hostOf(last);
+      row.append(chip(last.provider || last.agent, "chip"), el("span", "txt", `${displayName(last.agent, last.provider)} · ${last.text}${where ? " · " + where : ""}`));
+      if (end > k) row.append(el("span", "more-n", `+${end - k}`));
+      row.append(el("time", "when", ago(last.at)));
+      nodes.push(row);
+      k = end + 1;
+    }
+    return nodes;
+  }
+
   function drawChat() {
-    const nodes = chatItems().map(msgNode);
+    const nodes = [];
+    const thread = [...state.thread].sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    for (let k = 0; k < thread.length;) {
+      const t = thread[k];
+      if (t.kind === "say" || t.kind === "system") { nodes.push(msgNode(t)); k += 1; continue; }
+      const run = [];
+      while (k < thread.length && (thread[k].kind === "do" || thread[k].kind === "block")) { run.push(thread[k]); k += 1; }
+      if (!run.length) k += 1;
+      else nodes.push(...actionNodes(run));
+    }
     for (const a of state.agents.filter((x) => x.state === "working" || x.state === "starting")) {
       const row = el("div", "typing");
       const dots = el("span", "dots3");
@@ -139,6 +172,8 @@
       row.append(chip(a.provider || a.id, "chip", "working"), el("span", undefined, `${displayName(a.id, a.provider)} is working`), dots);
       nodes.push(row);
     }
+    // What needs the owner sits at the end of the thread, where the eye already is.
+    for (const p of state.approvals) nodes.push(approvalCard(p));
     if (!nodes.length) nodes.push(el("div", "empty", "Nothing said yet. Message your agents from the bar below; type @ to pick one."));
     view.replaceChildren(...nodes);
     const f = el("div", "foot");
@@ -155,44 +190,8 @@
     return t.tab || "";
   }
 
-  function drawActivity() {
-    const items = activityItems();
-    const blocked = items.filter((t) => t.kind === "block");
-    const chips = el("div", "chips");
-    for (const [key, label, n] of [["all", "All", items.length], ["blocked", "Blocked", blocked.length]]) {
-      const b = el("button", `fchip${activityFilter === key ? " on" : ""}`, `${label} ${n}`);
-      b.type = "button";
-      b.addEventListener("click", () => { activityFilter = key; render(true); });
-      chips.append(b);
-    }
-    const shown = activityFilter === "blocked" ? blocked : items;
-    const latestStart = new Map();
-    for (const t of items) if (t.kind === "do") latestStart.set(t.agent, t.id);
-    const working = new Set(state.agents.filter((a) => a.state === "working" || a.state === "starting").map((a) => a.id));
-    const nodes = shown.map((t) => {
-      const row = el("div", `act${t.kind === "block" ? " blocked" : ""}`);
-      const body = el("div", "body");
-      const head = el("div", "head");
-      head.append(el("span", "name", displayName(t.agent, t.provider)));
-      let tag;
-      if (t.kind === "block") tag = el("span", "tag blocked", "Blocked");
-      else if (t.ok === false) tag = el("span", "tag failed", "Failed");
-      else if (t.phase !== "done" && latestStart.get(t.agent) === t.id && working.has(t.agent)) tag = el("span", "tag now", "Doing now");
-      else tag = el("span", "tag done", "Done");
-      head.append(tag, el("time", "when", ago(t.at)));
-      body.append(head, el("div", "text", t.text.replace(/^blocked:\s*/i, "")));
-      const where = [t.target, hostOf(t)].filter(Boolean).join(" · ");
-      if (where) body.append(el("div", "where", where));
-      row.append(chip(t.provider || t.agent, "chip"), body);
-      return row;
-    });
-    if (!nodes.length) nodes.push(el("div", "empty", activityFilter === "blocked" ? "Nothing is blocked." : "No agent has done anything on the web yet."));
-    view.replaceChildren(chips, ...nodes);
-    foot.replaceChildren();
-  }
-
-  function drawApprovals() {
-    const nodes = state.approvals.map((p) => {
+  function approvalCard(p) {
+    {
       const card = el("div", "card");
       const head = el("div", "head");
       head.append(chip(p.provider || p.agent, "chip", "waiting"), el("span", "name", `${displayName(p.agent, p.provider)} wants to go ahead`));
@@ -238,10 +237,7 @@
         card.append(actions);
       }
       return card;
-    });
-    if (!nodes.length) nodes.push(el("div", "empty", "Nothing needs you."));
-    view.replaceChildren(...nodes);
-    foot.replaceChildren();
+    }
   }
 
   function drawAgents() {
@@ -283,7 +279,10 @@
   }
 
   function panelHeight() {
-    return Math.max(260, Math.min(560, F.host.vh - 150));
+    const base = Math.max(260, Math.min(560, F.host.vh - 150));
+    // On a side edge the host reports how much room is left below the tab; the panel never asks for more, so the tab does not move.
+    const cap = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--panel-max"));
+    return Number.isFinite(cap) && cap > 0 ? Math.min(base, cap) : base;
   }
 
   function render(scrollToEnd) {
@@ -296,10 +295,8 @@
       panel.style.maxHeight = `${panelHeight()}px`;
       drawTabs();
       if (tab === "chat") drawChat();
-      else if (tab === "activity") drawActivity();
-      else if (tab === "approvals") drawApprovals();
       else drawAgents();
-      if (stick && (tab === "chat" || tab === "activity")) view.scrollTop = view.scrollHeight;
+      if (stick && tab === "chat") view.scrollTop = view.scrollHeight;
       else if (scrollToEnd) view.scrollTop = 0;
     }
     pulseApprovals = false;
@@ -336,7 +333,7 @@
   });
   F.onHost((data) => { if (data.kind === "host") render(false); });
   new ResizeObserver(report).observe(wrap);
-  setInterval(() => { if (open && (tab === "chat" || tab === "activity")) render(false); }, 15000);
+  setInterval(() => { if (open && tab === "chat") render(false); }, 15000);
   render(false);
   F.start();
 })();
