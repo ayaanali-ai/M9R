@@ -84,7 +84,8 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
     };
 
     if (action === "page_state") {
-      return { ok: true, data: { url: location.href, visibleText: String(document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40_000) } };
+      const topControls = [...document.querySelectorAll("a[href],button,input:not([type=hidden]),textarea,select,[role=button],[role=link],[role=textbox],[role=searchbox]")].filter((el) => isVisible(el)).slice(0, 12).map((el, position) => ({ position: position + 1, role: roleOf(el), name: nameOf(el) }));
+      return { ok: true, data: { url: location.href, title: document.title, topControls, visibleText: String(document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40_000) } };
     }
 
     if (action === "snapshot") {

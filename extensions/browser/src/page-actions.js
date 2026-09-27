@@ -218,10 +218,10 @@ function m9rPageType(selector, text, expectOrigin, expectPathPrefix, live) {
         // A person's rhythm: a beat before the first key, log-normal gaps between keys, longer after a space or punctuation,
         // the odd hesitation. Long text is sped up to fit the time budget, and whatever is left is then set at once.
         const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
-        const budgetMs = 6000;
-        const pace = Math.min(1, budgetMs / Math.max(1, chars.length * 95));
+        const budgetMs = 3000;
+        const pace = Math.min(1, budgetMs / Math.max(1, chars.length * 55));
         const gap = (ch) => {
-          let ms = Math.exp(Math.log(75) + 0.35 * gauss());
+          let ms = Math.exp(Math.log(42) + 0.35 * gauss());
           if (ch === " ") ms += 40 + Math.random() * 100;
           else if (/[.,;:!?]/.test(ch)) ms += 60 + Math.random() * 120;
           if (Math.random() < 0.04) ms += 250 + Math.random() * 250;

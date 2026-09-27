@@ -501,7 +501,7 @@ async function handle(command) {
       ? command.selector
       : targetInfo && targetInfo.ok && targetInfo.data ? targetInfo.data.selector || null : null;
     const arrival = announce(tab.id, actionPresence, liveSelector, targetRect);
-    if (humanLike) await Promise.race([arrival, new Promise((resolve) => setTimeout(resolve, 2400))]);
+    if (humanLike) await Promise.race([arrival, new Promise((resolve) => setTimeout(resolve, 1000))]);
 
     let preLabel = targetInfo && targetInfo.ok && targetInfo.data && typeof targetInfo.data.name === "string" ? targetInfo.data.name : null;
     if (command.selector && typeof m9rPageLabel === "function") {
