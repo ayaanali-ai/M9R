@@ -14,8 +14,7 @@
     /* Notch. The collapsed thread is a slim tab that sits on the screen edge and shows only who is here; opening it pulls the
        thread panel out of the edge. The edge side is flush and square, the inward side is rounded, on every edge. */
     .panel { max-height: var(--panel-max, none); }
-    /* Open: the panel itself takes the screen edge (flat and flush there, rounded on the inner side); the tab steps aside. */
-    body.open[data-edge] .bar { display: none; }
+    /* Open: the tab stays on the screen edge and the panel opens beside it, rounded on every corner so nothing looks cut off. */
     .tab-close, .close { flex: none; width: 30px; border: 0; background: transparent; color: var(--muted); border-radius: 8px; font: 400 18px/1 var(--display); cursor: pointer; }
     .close:hover { background: var(--bg-3); color: var(--text); }
     .panel .view { min-height: 0; }
@@ -39,16 +38,12 @@
     body[data-edge="top"] #wrap { padding-top: 0; }
     body[data-edge="bottom"] #wrap { padding-bottom: 0; }
     body[data-edge="top"] .bar, body[data-edge="bottom"] .bar { align-self: center; padding: 7px 14px; }
-    body.open[data-edge="left"] #wrap, body.open[data-edge="right"] #wrap { width: auto; gap: 0; }
+    body.open[data-edge="left"] #wrap, body.open[data-edge="right"] #wrap { width: auto; gap: 8px; }
     body.open[data-edge="left"] .panel, body.open[data-edge="right"] .panel { width: 372px; }
     body[data-edge="right"] .bar { border-radius: 18px 0 0 18px; border-right-width: 0; box-shadow: -6px 4px 18px rgba(0,0,0,.35); }
     body[data-edge="left"] .bar { border-radius: 0 18px 18px 0; border-left-width: 0; box-shadow: 6px 4px 18px rgba(0,0,0,.35); }
     body[data-edge="top"] .bar { border-radius: 0 0 18px 18px; border-top-width: 0; box-shadow: 0 6px 18px rgba(0,0,0,.35); }
     body[data-edge="bottom"] .bar { border-radius: 18px 18px 0 0; border-bottom-width: 0; box-shadow: 0 -6px 18px rgba(0,0,0,.35); }
-    body[data-edge="right"] .panel { border-radius: 16px 0 0 16px; border-right-width: 0; }
-    body[data-edge="left"] .panel { border-radius: 0 16px 16px 0; border-left-width: 0; }
-    body[data-edge="top"] .panel { border-radius: 0 0 16px 16px; border-top-width: 0; }
-    body[data-edge="bottom"] .panel { border-radius: 16px 16px 0 0; border-bottom-width: 0; }
     body[data-edge="left"] .bar, body[data-edge="left"] .panel { box-shadow: 6px 4px 18px rgba(0,0,0,.35); }
 
     .bar {
