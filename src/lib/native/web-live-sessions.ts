@@ -15,7 +15,8 @@ import { spawn as nodeSpawn, spawnSync, type ChildProcess } from "node:child_pro
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { apiKeyLaunchBlock } from "./vendor-launch-core";
 import { startLiveSession, type LiveEvent, type LiveProcess, type LiveSession } from "./live-session-core";
 import type { SessionEvent, SessionStatus, SessionsPort } from "./web-ui-bridge";
@@ -107,12 +108,27 @@ export function webAgentPrompt(handle: string, token: string, teammates: string[
   ].filter(Boolean).join("\n");
 }
 
-/** A launcher that runs M9R's MCP server from the repo root (it needs the path alias loader), and the config pointing at it. */
+/** The compiled MCP server that ships with the installed CLI (next to this file), or null in a development checkout. */
+function packagedMcpEntry(): string | null {
+  try {
+    const here = typeof __dirname === "string" ? __dirname : dirname(fileURLToPath(import.meta.url));
+    const candidate = join(here, "m9r-mcp.js");
+    return existsSync(candidate) ? candidate : null;
+  } catch { return null; }
+}
+
+/**
+ * A launcher for M9R's MCP server, and the config pointing at it. An installed CLI runs its compiled server; a development checkout
+ * runs the source from the repo root (it needs the path alias loader). The broker's own working folder must never decide this:
+ * started at login it runs from the M9R folder, and an agent whose MCP server cannot start silently loses every M9R tool.
+ */
 export function writeWebMcpConfig(dir: string, options: { repoRoot: string; storeRoot: string; brokerPort: number }): { configPath: string; launcher: string } {
   mkdirSync(dir, { recursive: true });
   const launcher = join(dir, "launch-m9r-mcp.cjs");
+  const packaged = packagedMcpEntry();
+  const spawnArgs = packaged ? [packaged] : ["--disable-warning=ExperimentalWarning", "--import", "./scripts/register-alias.mjs", "scripts/m9r-mcp.ts"];
   writeFileSync(launcher, `const { spawn } = require("node:child_process");
-const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--import", "./scripts/register-alias.mjs", "scripts/m9r-mcp.ts"], { cwd: ${JSON.stringify(options.repoRoot)}, stdio: "inherit" });
+const child = spawn(process.execPath, ${JSON.stringify(spawnArgs)}, { cwd: ${JSON.stringify(packaged ? dir : options.repoRoot)}, stdio: "inherit" });
 child.on("exit", (code) => process.exit(code ?? 0));
 `);
   const configPath = join(dir, "mcp.json");
