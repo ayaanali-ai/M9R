@@ -627,8 +627,9 @@
 
     function layoutDock(state) {
       const D = global.M9RDock;
-      const vw = view.innerWidth;
-      const vh = view.innerHeight;
+      // The layer is fixed to the viewport WITHOUT its scrollbars, so that is the size the notch has to hug (innerWidth includes the scrollbar and tucked the notch under it).
+      const vw = doc.documentElement.clientWidth || view.innerWidth;
+      const vh = doc.documentElement.clientHeight || view.innerHeight;
       const path = D.pathFor(vw, vh, DOCK);
       state.path = path;
       // Until the owner moves it, the pill rests on the bottom edge, right of centre, clear of the message bar.
@@ -645,6 +646,8 @@
       // Every edge is a notch: the frame sits exactly on the screen edge it is docked to.
       let top = o.card === 0 ? 0 : o.card === 2 ? vh - h : point.y + half - h;
       if (o.card !== 1 && o.card !== 3) left = clampN(left, 4, Math.max(4, vw - w - 4));
+      // On the left and right edges the tab stays exactly where it is and the panel grows around it; the frame only slides when the panel would not fit.
+      if ((o.card === 1 || o.card === 3) && state.bar) top = point.y - (state.bar.top + state.bar.h / 2);
       if (o.card !== 0 && o.card !== 2) top = clampN(top, 4, Math.max(4, vh - h - 4));
       if (o.edge !== state.notifiedEdge) {
         state.notifiedEdge = o.edge;
@@ -718,6 +721,7 @@
         const before = state.shownAt;
         const grew = before && data.h !== state.size.h;
         state.size = { w: Math.max(40, Math.min(data.w, 900)), h: Math.max(40, Math.min(data.h, 2000)) };
+        if (Number.isFinite(data.barTop) && Number.isFinite(data.barH)) state.bar = { top: data.barTop, h: data.barH };
         // Growing keeps the bottom edge where it is (the pill opens upward); if it would run off the top, it slides down.
         if (grew && state.pos) state.pos = { left: state.pos.left, bottom: state.pos.bottom };
         layout(state);

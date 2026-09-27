@@ -308,7 +308,8 @@
 
   function report() {
     const r = wrap.getBoundingClientRect();
-    F.toParent({ kind: "size", w: Math.ceil(r.width), h: Math.ceil(r.height) });
+    const b = document.getElementById("bar").getBoundingClientRect();
+    F.toParent({ kind: "size", w: Math.ceil(r.width), h: Math.ceil(r.height), barTop: Math.round(b.top - r.top), barH: Math.round(b.height) });
   }
 
   function toggle(next) {
