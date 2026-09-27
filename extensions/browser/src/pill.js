@@ -59,7 +59,11 @@
       return who;
     });
     if (list.length > shown.length) nodes.push(el("span", "more", `+${list.length - shown.length}`));
-    if (!nodes.length) nodes.push(el("span", "quiet", connected ? "No agents working" : "M9R is not running on this computer"));
+    const idleText = connected ? "No agents working" : "M9R is not running on this computer";
+    if (!nodes.length) nodes.push(el("span", "quiet", idleText));
+    // The notch shows only tiles, so the empty state's words move into the tooltip.
+    const barEl = document.getElementById("bar");
+    if (barEl) barEl.title = nodes.length === 1 && nodes[0].className === "quiet" ? idleText : "";
     agentsEl.replaceChildren(...nodes);
     const pending = state.approvals.filter((a) => !decided.has(a.id)).length;
     badge.hidden = pending === 0;
