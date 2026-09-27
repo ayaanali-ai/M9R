@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeHandle, type Approval, type Task } from "./inbox-core";
 import { apiKeyLaunchBlock } from "./vendor-launch-core";
 import { startLiveSession, type LiveEvent, type LiveProcess, type LiveSession } from "./live-session-core";
 import type { SessionEvent, SessionStatus, SessionsPort } from "./web-ui-bridge";
@@ -177,7 +178,17 @@ export interface WebLiveSessionsDeps {
   storeRoot: string;
   repoRoot: string;
   brokerPort: number;
-  store: { issueIdentity(handle: string, provider: string, sessionId: string): { token: string }; revokeIdentity(sessionId: string): void };
+  store: {
+    issueIdentity(handle: string, provider: string, sessionId: string): { token: string };
+    revokeIdentity(sessionId: string): void;
+    /** The task methods let teammates in the room message each other directly; a store without them simply has no bridge. */
+    tasksFor?(handle: string): Task[];
+    tasksFrom?(handle: string): Task[];
+    setApproval?(id: string, approval: Approval): unknown;
+    markDelivered?(ids: readonly string[], sessionId?: string): void;
+    setAnswerPushed?(id: string): void;
+    markResultShown?(ids: readonly string[]): void;
+  };
   env?: Record<string, string | undefined>;
   allowApiKey?: boolean;
   onEvent?: (event: SessionEvent) => void;
@@ -402,6 +413,57 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
     return true;
   }
 
+  // Agents in this room talk to each other directly. A message one of them sends with m9r_send is handed to the other's live session as
+  // soon as it is free (no waiting for it to poll an inbox), and the answer it gives with m9r_result goes straight back to the sender.
+  // Both agents are the owner's own and were started by the owner, so this needs no approval; a loop cap keeps a runaway exchange short.
+  const BRIDGE_MS = 700;
+  const MAX_EXCHANGES = 14;
+  const WINDOW_MS = 10 * 60_000;
+  const exchanges: number[] = [];
+  const roomSlot = (name: string): { handle: string; slot: Slot } | null => {
+    const wanted = normalizeHandle(name);
+    for (const [handle, slot] of slots) if (normalizeHandle(handle) === wanted) return { handle, slot };
+    return null;
+  };
+  const idle = (slot: Slot) => slot.status !== "working" && slot.status !== "starting" && !slot.stopping;
+  function bridgeOnce(): void {
+    const store = deps.store;
+    if (!store.tasksFor || !store.tasksFrom || !store.setApproval || !store.markDelivered || !store.setAnswerPushed || !store.markResultShown) return;
+    const at = Date.now();
+    while (exchanges.length && at - exchanges[0] > WINDOW_MS) exchanges.shift();
+    for (const [handle, slot] of slots) {
+      if (!idle(slot)) continue;
+      const tasks = store.tasksFor(handle);
+      // 1. Something a teammate asked, not yet shown to this agent.
+      const ask = tasks.find((t: Task) => !t.deliveredAt && !t.dismissedAt && t.origin === "agent_initiated" && (t.approval === "not_needed" || t.approval === "pending" || t.approval === "approved") && roomSlot(t.from));
+      if (ask) {
+        if (exchanges.length >= MAX_EXCHANGES) { if (!capNoted) { capNoted = true; say(slot, "system", "The agents paused after many back-and-forths in a row. Tell them to carry on when you are ready."); } continue; }
+        const from = roomSlot(ask.from)!;
+        if (ask.approval === "pending") store.setApproval(ask.id, "approved");
+        const text = `@${from.handle} messaged you (${ask.id}): ${ask.goal}
+
+Answer with m9r_result for ${ask.id}, in a sentence or two, so @${from.handle} sees it right away. If you need something from them, ask with m9r_send.`;
+        const sent = deliver(handle, text);
+        if (sent.ok) { store.markDelivered([ask.id], slot.sessionId); exchanges.push(at); capNoted = false; }
+        continue;
+      }
+      // 2. The answer to something this agent asked a teammate.
+      const asked = store.tasksFrom(handle).find((t: Task) => t.resultSummary && !t.answerPushedAt && !t.dismissedAt && roomSlot(t.to));
+      if (asked) {
+        if (exchanges.length >= MAX_EXCHANGES) continue;
+        const to = roomSlot(asked.to)!;
+        const text = `@${to.handle} answered ${asked.id}: ${asked.resultSummary}
+
+Continue your work with this. If you need more from them, ask again with m9r_send; when you both agree, say so plainly.`;
+        const sent = deliver(handle, text);
+        if (sent.ok) { store.setAnswerPushed(asked.id); store.markResultShown([asked.id]); exchanges.push(at); }
+      }
+    }
+  }
+  let capNoted = false;
+  const bridgeTimer = setInterval(() => { try { bridgeOnce(); } catch { /* the room keeps running; the next tick tries again */ } }, BRIDGE_MS);
+  if (typeof bridgeTimer === "object" && bridgeTimer && "unref" in bridgeTimer) (bridgeTimer as { unref(): void }).unref();
+
   const port: SessionsPort & { stop: typeof stop; close(): void; agents(): WebAgentConfig[]; sessionIdOf(handle: string): string | undefined } = {
     handles: () => [...slots.keys()],
     snapshot: () => [...slots.values()].map((s) => ({ handle: s.config.handle, provider: s.config.provider, folder: s.config.folder, status: s.status, doing: s.doing })),
@@ -409,7 +471,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
     stop,
     stopAll() { for (const handle of slots.keys()) if (slots.get(handle)!.live || slots.get(handle)!.worker) stop(handle); },
     secrets: () => [...slots.values()].flatMap((s) => [s.token, s.live?.marker].filter((v): v is string => Boolean(v))),
-    close() { for (const handle of slots.keys()) if (slots.get(handle)!.live || slots.get(handle)!.worker) stop(handle); },
+    close() { clearInterval(bridgeTimer); for (const handle of slots.keys()) if (slots.get(handle)!.live || slots.get(handle)!.worker) stop(handle); },
     agents: () => [...slots.values()].map((s) => s.config),
     sessionIdOf: (handle: string) => slots.get(handle)?.sessionId,
   };

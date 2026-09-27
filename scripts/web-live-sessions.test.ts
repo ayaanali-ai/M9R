@@ -173,3 +173,40 @@ test("helpers: codex JSONL parsing, resume args, and the agent prompt", () => {
   assert.ok(fresh.includes('sandbox_mode="read-only"'));
   assert.match(webAgentPrompt("claude", "T", ["codex"]), /@codex/);
 });
+
+test("agents in the room message each other directly: the ask reaches the teammate's session, the answer goes back, and a loop is capped", async () => {
+  const tasks: any[] = [];
+  const approvals: string[] = [];
+  const store = {
+    issueIdentity: (handle: string, _p: string, sessionId: string) => ({ token: `tok-${handle}-${sessionId.slice(-4)}` }),
+    revokeIdentity: () => undefined,
+    tasksFor: (handle: string) => tasks.filter((t) => t.to === handle),
+    tasksFrom: (handle: string) => tasks.filter((t) => t.from === handle),
+    setApproval: (id: string, approval: string) => { approvals.push(`${id}:${approval}`); const t = tasks.find((x) => x.id === id); if (t) t.approval = approval; },
+    markDelivered: (ids: string[]) => { for (const id of ids) tasks.find((t) => t.id === id).deliveredAt = "now"; },
+    setAnswerPushed: (id: string) => { tasks.find((t) => t.id === id).answerPushedAt = "now"; },
+    markResultShown: (ids: string[]) => { for (const id of ids) tasks.find((t) => t.id === id).resultShownAt = "now"; },
+  };
+  const root = mkdtempSync(join(tmpdir(), "m9r-bridge-"));
+  const claude = fakeClaude();
+  const sessions = createWebLiveSessions({
+    agents: [{ handle: "claude", provider: "claude-code", folder: root }, { handle: "opencode", provider: "claude-code", folder: root }],
+    storeRoot: root, repoRoot: process.cwd(), brokerPort: 47999, store, env: {}, spawnClaude: claude.spawn,
+  } as never);
+  try {
+    tasks.push({ id: "T1", from: "claude", to: "opencode", goal: "Which plan has the API tier?", origin: "agent_initiated", approval: "pending" });
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.equal(claude.spawned.length, 1, "the teammate's session was started for the ask");
+    assert.match(claude.spawned[0].written.join(""), /@claude messaged you \(T1\)/);
+    assert.deepEqual(approvals, ["T1:approved"], "an ask between two of the owner's own agents in the room needs no approval");
+    assert.ok(tasks[0].deliveredAt);
+    tasks[0].resultSummary = "Pro and Team.";
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.equal(claude.spawned.length, 2, "the answer started the asker's session");
+    assert.match(claude.spawned[1].written.join(""), /@opencode answered T1: Pro and Team\./);
+    assert.ok(tasks[0].answerPushedAt);
+  } finally {
+    sessions.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
