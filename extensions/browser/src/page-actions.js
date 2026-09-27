@@ -28,7 +28,16 @@ function m9rPageRead(selector, expectOrigin, expectPathPrefix) {
     if (expectPathPrefix && !(expectPathPrefix === "/" || location.pathname === expectPathPrefix || location.pathname.startsWith(expectPathPrefix.endsWith("/") ? expectPathPrefix : expectPathPrefix + "/"))) {
       return { ok: false, error: "page path does not match the granted path" };
     }
-    const text = isInput || isTextArea ? el.value : el.innerText || el.textContent || "";
+    let text = isInput || isTextArea ? el.value : el.innerText || el.textContent || "";
+    // A whole-page read also includes the text of same-origin frames (embedded widgets, editors), labelled so they are not confused with the page.
+    if (!selector && !isInput && !isTextArea) {
+      for (const frame of Array.from(document.querySelectorAll("iframe")).slice(0, 6)) {
+        try {
+          const inner = frame.contentDocument && frame.contentDocument.body ? String(frame.contentDocument.body.innerText || "").trim() : "";
+          if (inner) text += " | [frame] " + inner.slice(0, 800);
+        } catch { /* a cross-origin frame cannot be read */ }
+      }
+    }
     return { ok: true, data: String(text).trim().slice(0, 4000) };
   } catch (error) {
     return { ok: false, error: String(error && error.message ? error.message : error) };
@@ -521,7 +530,13 @@ function m9rPagePower(action, selector, args, expectOrigin, expectPathPrefix, en
       if (action === "double_click") target.dispatchEvent(new (view.MouseEvent || MouseEvent)("dblclick", { bubbles: true, cancelable: true, detail: 2 }));
       return { ok: true, data: { action, target: info(target) } };
     }
-    if (action === "hover") { if (!allowedPage()) return { ok: false, error: "page origin or path changed before hover" }; dispatchMouse(target, "mouseover"); dispatchMouse(target, "mousemove"); return { ok: true, data: { hovered: true, target: info(target) } }; }
+    if (action === "hover") { if (!allowedPage()) return { ok: false, error: "page origin or path changed before hover" }; const Pointer = (target.ownerDocument.defaultView || window).PointerEvent;
+      const r = target.getBoundingClientRect();
+      // A person moving onto a control enters it (pointer, then mouse events) and then moves inside it; menus listen for either.
+      for (const type of ["pointerover", "pointerenter"]) if (typeof Pointer === "function") target.dispatchEvent(new Pointer(type, { bubbles: type === "pointerover", cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+      dispatchMouse(target, "mouseover"); dispatchMouse(target, "mouseenter");
+      if (typeof Pointer === "function") target.dispatchEvent(new Pointer("pointermove", { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+      dispatchMouse(target, "mousemove"); return { ok: true, data: { hovered: true, target: info(target) } }; }
     if (action === "drag" || action === "drop") {
       const destination = action === "drag" ? resolve(endSelector || args.destination) : target;
       const source = action === "drag" ? target : target;
@@ -623,4 +638,19 @@ function m9rPagePower(action, selector, args, expectOrigin, expectPathPrefix, en
   } catch (error) {
     return { ok: false, error: String(error && error.message ? error.message : error) };
   }
+}
+
+// Runs in the page itself. A native alert, confirm or prompt freezes the page and every script call after it, so while an agent works
+// they are answered safely (alert closes, confirm says no, prompt is cancelled) and recorded so the agent can be told about them.
+function m9rPageDialogGuard(drain) {
+  const w = window;
+  if (!w.__m9rDialogGuard) {
+    w.__m9rDialogGuard = true;
+    w.__m9rDialogs = [];
+    const note = (kind, text, result) => { w.__m9rDialogs.push({ kind, text: String(text == null ? "" : text).slice(0, 200), answered: result === undefined ? "closed" : result === false ? "no" : "cancelled" }); return result; };
+    w.alert = (text) => { note("alert", text, undefined); };
+    w.confirm = (text) => note("confirm", text, false);
+    w.prompt = (text) => note("prompt", text, null);
+  }
+  return drain ? w.__m9rDialogs.splice(0) : [];
 }

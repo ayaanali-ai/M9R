@@ -677,6 +677,15 @@ export function createWebBroker(deps: WebBrokerDeps) {
       }
       return;
     }
+    if (message.type === "tab-opened" && typeof (raw as { tab?: unknown }).tab === "string" && typeof (raw as { parent?: unknown }).parent === "string") {
+      const { tab: openedTab, parent, url: openedUrl } = raw as { tab: string; parent: string; url?: unknown };
+      const owner = openedBy.get(parent);
+      if (!owner || openedTab.length > 60) return;
+      openedBy.set(openedTab, owner);
+      rememberTab(owner, openedTab);
+      if (typeof openedUrl === "string" && /^https?:\/\//.test(openedUrl)) { tabUrls.set(openedTab, openedUrl); rememberVisit(openedUrl); }
+      return;
+    }
     if (message.type !== "result" || typeof message.id !== "string") return;
     const entry = pending.get(message.id);
     if (!entry) return;

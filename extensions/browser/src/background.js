@@ -364,6 +364,21 @@ async function existingTab(name) {
   }
 }
 
+// A link that opens a new tab (target=_blank, window.open) from an M9R tab becomes an M9R tab too, owned by the same agent,
+// so the agent can see it in m9r_web_tabs and keep working in it instead of losing the page it just opened.
+if (chrome.tabs.onCreated && typeof chrome.tabs.onCreated.addListener === "function") chrome.tabs.onCreated.addListener((created) => {
+  if (!created || typeof created.openerTabId !== "number") return;
+  void loadNamedTabs().then(async () => {
+    const parent = [...tabsByName].find(([, id]) => id === created.openerTabId);
+    if (!parent) return;
+    let name = `${parent[0]}-new`.slice(0, 36);
+    for (let n = 2; tabsByName.has(name); n += 1) name = `${parent[0].slice(0, 32)}-new${n}`;
+    tabsByName.set(name, created.id);
+    await saveNamedTabs();
+    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "tab-opened", tab: name, parent: parent[0], url: String(created.pendingUrl || created.url || "") }));
+  }).catch(() => {});
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   void loadNamedTabs().then(async () => {
     const removed = [...tabsByName].filter(([, id]) => id === tabId).map(([name]) => name);
@@ -406,6 +421,22 @@ async function handle(command) {
     if (command.action === "tabs") {
       const tabs = [...tabsByName].map(([name, id]) => ({ name, id }));
       return reply(command.id, { ok: true, data: { tabs, groups: await listM9rTabGroups() } });
+    }
+    if (command.action === "adopt") {
+      // The owner said yes through the approval queue. The agent joins the page the owner is on, in place: nothing is opened or reloaded.
+      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const known = active ? [...tabsByName].find(([, id]) => id === active.id) : null;
+      if (!active || !/^https?:\/\//.test(String(active.url || ""))) return reply(command.id, { ok: false, error: "The owner is not on a web page right now, so there is nothing to join. Ask them to open the page, or use m9r_web_open." });
+      if (!await hasHostPermission(active.url, command.expectOrigin || null, command.expectPathPrefix)) {
+        const allowed = globalThis.M9RPillBridge && globalThis.M9RPillBridge.requestConsent ? await globalThis.M9RPillBridge.requestConsent(active.url, command.presence) : false;
+        if (!allowed || !await hasHostPermission(active.url, command.expectOrigin || null, command.expectPathPrefix)) return reply(command.id, { ok: false, error: "The owner has not allowed M9R on this site yet." });
+      }
+      await loadNamedTabs();
+      tabsByName.set(command.tab, active.id);
+      await saveNamedTabs();
+      await followAgent(active.id);
+      announce(active.id, command.presence, null, null);
+      return reply(command.id, { ok: true, data: { tab: command.tab, url: active.url, note: known ? "That page was already an M9R tab; you now share it." : "You are now working in the page the owner is on. Take a snapshot first." } }, originOf(active.url), active.url);
     }
     if (command.action === "open") {
       if (!await hasHostPermission(command.url, command.expectOrigin || null, command.expectPathPrefix)) {
@@ -480,6 +511,7 @@ async function handle(command) {
     const pressBefore = command.action === "press" && typeof m9rPageMine === "function"
       ? await run(tab.id, m9rPageMine, ["page_state", null, {}, null, null])
       : null;
+    if (humanLike) await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: m9rPageDialogGuard, args: [false] }).catch(() => null);
     let result;
     if (command.action === "read") result = await run(tab.id, m9rPageRead, [command.selector || null, command.expectOrigin || null, command.expectPathPrefix || null]);
     else if (command.action === "click") result = await run(tab.id, m9rPageClick, [command.selector, command.expectOrigin || null, command.expectPathPrefix || null, true]);
@@ -512,11 +544,20 @@ async function handle(command) {
       }
     }
     else if (command.action === "back" || command.action === "forward" || command.action === "reload") {
-      if (command.action === "back") await chrome.tabs.goBack(tab.id).catch(() => {});
-      else if (command.action === "forward") await chrome.tabs.goForward(tab.id).catch(() => {});
-      else await chrome.tabs.reload(tab.id);
+      const urlBefore = await urlNow(tab.id);
+      if (command.action === "back" || command.action === "forward") {
+        const step = command.action === "back" ? chrome.tabs.goBack : chrome.tabs.goForward;
+        let moved = true;
+        await step.call(chrome.tabs, tab.id).catch(() => { moved = false; });
+        // goBack/goForward can refuse silently on some tabs; the page's own history does the same thing.
+        if (!moved) await run(tab.id, (direction) => { direction === "back" ? history.back() : history.forward(); return { ok: true }; }, [command.action]);
+      } else await chrome.tabs.reload(tab.id);
+      await new Promise((resolve) => setTimeout(resolve, 250));
       await waitForLoad(tab.id);
-      result = { ok: true, data: { url: await urlNow(tab.id), title: (await chrome.tabs.get(tab.id)).title } };
+      const urlAfter = await urlNow(tab.id);
+      result = (command.action === "back" || command.action === "forward") && urlAfter === urlBefore
+        ? { ok: false, error: `There is no ${command.action === "back" ? "earlier" : "later"} page in this tab's history.` }
+        : { ok: true, data: { url: urlAfter, title: (await chrome.tabs.get(tab.id)).title } };
     } else if (command.action === "switch") {
       if (tab.groupId >= 0 && chrome.tabGroups && typeof chrome.tabGroups.update === "function") {
         await chrome.tabGroups.update(tab.groupId, { collapsed: false });
@@ -531,13 +572,22 @@ async function handle(command) {
       await saveNamedTabs();
       result = { ok: true, data: { closed: command.tab } };
     } else if (command.action === "screenshot") {
-      await chrome.tabs.update(tab.id, { active: true });
-      const format = command.args && command.args.format === "png" ? "png" : "jpeg";
-      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format, quality: 55 });
-      result = { ok: true, data: { mimeType: "image/" + format, data: String(dataUrl).split(",")[1] || "" } };
+      try {
+        await chrome.tabs.update(tab.id, { active: true });
+        const format = command.args && command.args.format === "png" ? "png" : "jpeg";
+        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format, quality: 55 });
+        result = { ok: true, data: { mimeType: "image/" + format, data: String(dataUrl).split(",")[1] || "" } };
+      } catch (error) {
+        const text = String(error && error.message ? error.message : error);
+        result = { ok: false, error: /all_urls|activeTab/.test(text) ? "Screenshots need the owner's permission for all websites (M9R panel: Allow all websites). Meanwhile use m9r_web_snapshot or m9r_web_read to see the page." : text };
+      }
     } else if (typeof m9rPagePower === "function") {
       result = await run(tab.id, m9rPagePower, [command.action, command.selector || null, command.args || {}, command.expectOrigin || null, command.expectPathPrefix || null]);
     } else result = { ok: false, error: "unknown action " + command.action };
+    if (humanLike && result && result.ok) {
+      const dialogs = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: m9rPageDialogGuard, args: [true] }).then((r) => (r && r[0] && Array.isArray(r[0].result) ? r[0].result : [])).catch(() => []);
+      if (dialogs.length && result.data && typeof result.data === "object" && !Array.isArray(result.data)) result.data = { ...result.data, dialogs, note: "The page opened a native dialog. M9R answered it safely (alert closed, confirm no, prompt cancelled); ask the owner if it needed a different answer." };
+    }
     if (preLabel && result && result.ok && !result.label) result.label = preLabel;
     return reply(command.id, result, await originNow(tab.id), await urlNow(tab.id));
   } catch (error) {

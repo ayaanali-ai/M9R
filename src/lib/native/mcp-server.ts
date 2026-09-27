@@ -310,6 +310,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   powerTool("m9r_web_wait", "wait", "Wait for a CSS selector, text, or a bounded number of milliseconds (maximum 15 seconds).", {
     ...TARGET_FIELDS, text: z.string().min(1).max(200).optional(), ms: z.number().int().min(0).max(15_000).optional(),
   }, ({ selector, ref, text, ms }) => ({ selector: targetSelector(selector, ref), args: { text: text as string | undefined, ms: ms as number | undefined } }));
+  powerTool("m9r_web_adopt", "adopt", "Ask the owner to let you work in the tab they are on right now, instead of opening a new tab. Use this when the owner is already on the site you need; on their yes you and your teammates act in that same page, so nobody works in parallel. Give the tab a name (default: shared).", {});
   powerTool("m9r_web_back", "back", "Navigate backward in this M9R tab's history.", {});
   powerTool("m9r_web_forward", "forward", "Navigate forward in this M9R tab's history.", {});
   powerTool("m9r_web_tabs", "tabs", "List M9R tabs and provider-coloured agent tab groups. Use the tab name shown inside a group with m9r_web_switch to bring that group forward; read page content before acting.", {});

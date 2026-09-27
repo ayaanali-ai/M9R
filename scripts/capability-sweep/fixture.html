@@ -1,0 +1,42 @@
+<!doctype html><meta charset=utf-8><title>Capability fixture</title>
+<style>body{font:15px system-ui;margin:24px;max-width:900px}section{border-bottom:1px solid #ddd;padding:14px 0}#menu{background:#eee;padding:6px}#cover{position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.02);z-index:9;display:none}#drag{width:90px;padding:8px;background:#fc8;cursor:grab}#drop{width:160px;height:60px;border:2px dashed #888;margin-top:8px}#tall{height:1400px;background:linear-gradient(#fff,#cde)}canvas{border:1px solid #999}</style>
+<h1>Capability fixture</h1>
+<section id=s-search><div role=search id=searchwrap><input id=q placeholder="Search fixture" autocomplete=off></div><div id=results></div><div role=search id=wrap2><input id=q2 placeholder="Second search"></div></section>
+<section id=s-form><form id=f1 action="#"><input id=nm name=nm placeholder="Name"><input id=em name=em type=email placeholder="Email"><label><input type=checkbox id=cb> Subscribe</label><label><input type=radio name=r id=r1 value=a> A</label><label><input type=radio name=r id=r2 value=b> B</label>
+<select id=sel><option value=x>Ex</option><option value=y>Why</option><option value=z>Zed</option></select><textarea id=ta placeholder="Message"></textarea>
+<input id=pw type=password placeholder="Password"><input type=hidden id=hid value=secret><input id=cc autocomplete=cc-number placeholder="Card number"><button id=submit type=submit>Send form</button></form></section>
+<section id=s-links><a id=lnk href="/page2.html">Page two</a> · <a id=lnk2 target=_blank href="/page2.html">Page two in a new tab</a> · <a id=dl href="/x.txt" download>Download file</a></section>
+<section id=s-hover><div id=hov>Hover me</div><div id=menu hidden>Secret item</div></section>
+<section id=s-ce><div id=ce contenteditable=true style="border:1px solid #999;min-height:30px;padding:6px">rich editor</div></section>
+<section id=s-async><button id=later>Load later</button><div id=late></div></section>
+<section id=s-dnd><div id=drag draggable=true>Drag me</div><div id=drop>Drop here</div></section>
+<section id=s-table><table id=tbl><tr><th>Plan</th><th>Price</th></tr><tr><td>Free</td><td>$0</td></tr><tr><td>Pro</td><td>$2</td></tr><tr><td>Team</td><td>$2.50</td></tr></table></section>
+<section id=s-frame><iframe id=fr src="/frame.html" width=400 height=70></iframe></section>
+<section id=s-shadow><x-card id=xc></x-card></section>
+<section id=s-risky><button id=buy>Buy now</button> <button id=post>Post</button> <input type=file id=file> <button id=confirmbtn>Confirm dialog</button> <button id=coveredbtn>Covered button</button> <canvas id=cv width=180 height=60></canvas> <button id=dbl>Double</button> <button id=ctx>Context</button></section>
+<div id=cover></div><div id=tall>tall area</div><div id=bottom>Bottom marker</div><div id=lazy></div>
+<script>
+window.__log=[];const log=(m)=>window.__log.push([m,Math.round(performance.now())]);
+const q=document.getElementById('q');
+q.addEventListener('keydown',e=>{log('kd:'+e.key);if(e.key==='Enter'){log('enter-search:'+q.value);document.getElementById('results').textContent='Results for '+q.value}});
+q.addEventListener('input',()=>log('input'));
+document.getElementById('f1').addEventListener('submit',e=>{e.preventDefault();log('form-submit')});
+for(const t of['mousemove','mousedown','mouseup','click','dblclick','contextmenu','pointerdown','pointermove'])document.addEventListener(t,e=>{if(t==='mousemove'||t==='pointermove')return log(t);log(t+':'+(e.target.id||e.target.tagName))},true);
+document.getElementById('hov').addEventListener('mouseenter',()=>{document.getElementById('menu').hidden=false;log('hover-open')});
+document.getElementById('later').addEventListener('click',()=>setTimeout(()=>{document.getElementById('late').textContent='Loaded content';log('late-loaded')},900));
+for(const id of['buy','post'])document.getElementById(id).addEventListener('click',()=>log(id+'-clicked'));
+document.getElementById('confirmbtn').addEventListener('click',()=>{log('confirm-open');const r=confirm('sure?');log('confirm-result:'+r)});
+document.getElementById('cover').style.display='none';
+const cb=document.getElementById('coveredbtn');cb.addEventListener('click',()=>log('covered-clicked'));
+window.showCover=()=>{document.getElementById('cover').style.display='block';document.getElementById('cover').style.background='#000';document.getElementById('cover').style.opacity='.4'};
+const dr=document.getElementById('drag'),dp=document.getElementById('drop');
+dr.addEventListener('dragstart',e=>{log('dragstart');e.dataTransfer.setData('text/plain','x')});dp.addEventListener('dragover',e=>e.preventDefault());dp.addEventListener('drop',e=>{e.preventDefault();log('drop');dp.textContent='Dropped'});
+document.getElementById('cv').addEventListener('click',e=>log('canvas-click:'+Math.round(e.offsetX)+','+Math.round(e.offsetY)));
+document.getElementById('lnk').addEventListener('click',()=>log('link-click'));
+class XC extends HTMLElement{constructor(){super();const s=this.attachShadow({mode:'open'});s.innerHTML='<button id=sb>Shadow button</button>';s.getElementById('sb').addEventListener('click',()=>log('shadow-click'))}}customElements.define('x-card',XC);
+const io=new IntersectionObserver(es=>{if(es[0].isIntersecting){document.getElementById('lazy').textContent='Lazy content loaded';log('lazy-loaded')}});io.observe(document.getElementById('bottom'));
+window.addEventListener('scroll',()=>{},{passive:true});
+
+// simulates sites (X) that replace the search box after the first keystroke: refs to the old element go stale
+(()=>{const w=document.getElementById('wrap2');let swapped=false;w.addEventListener('input',e=>{if(swapped)return;swapped=true;const old=e.target;const n=document.createElement('input');n.id='q2';n.placeholder='Second search';n.value=old.value;n.addEventListener('keydown',ev=>{if(ev.key==='Enter'){log('enter-search2:'+n.value)}});w.replaceChild(n,old);n.focus();n.setSelectionRange(n.value.length,n.value.length);log('swapped')})})();
+</script>

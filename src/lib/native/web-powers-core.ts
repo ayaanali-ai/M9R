@@ -12,12 +12,12 @@ export type WebPowerAction =
   | "press" | "select" | "find" | "hover" | "screenshot" | "extract"
   | "snapshot" | "click_at" | "reload" | "double_click" | "right_click" | "drag" | "drop"
   | "check" | "uncheck" | "toggle" | "fill_form" | "select_text" | "copy" | "paste"
-  | "upload" | "download" | "submit" | "buy" | "post" | "follow" | "like" | "dm" | "point" | "link";
+  | "upload" | "download" | "submit" | "buy" | "post" | "follow" | "like" | "dm" | "point" | "link" | "adopt";
 
 export const POWER_ACTIONS: readonly WebPowerAction[] = [
   "scroll", "wait", "back", "forward", "tabs", "switch", "close", "press", "select", "find", "hover", "screenshot", "extract",
   "snapshot", "click_at", "reload", "double_click", "right_click", "drag", "drop", "check", "uncheck", "toggle", "fill_form",
-  "select_text", "copy", "paste", "upload", "download", "submit", "buy", "post", "follow", "like", "dm", "point", "link",
+  "select_text", "copy", "paste", "upload", "download", "submit", "buy", "post", "follow", "like", "dm", "point", "link", "adopt",
 ];
 
 export type PressKey = string;
@@ -112,6 +112,7 @@ const TOP_FIELDS: Record<WebPowerAction, readonly string[]> = {
   dm: ["selector", "targetLabel", "shareWith"],
   point: ["selector", "targetLabel"],
   link: ["selector"],
+  adopt: [],
 };
 const ARG_FIELDS: Record<WebPowerAction, readonly (keyof WebPowerArgs)[]> = {
   scroll: ["to", "by", "smooth"],
@@ -151,6 +152,7 @@ const ARG_FIELDS: Record<WebPowerAction, readonly (keyof WebPowerArgs)[]> = {
   dm: [],
   point: [],
   link: [],
+  adopt: [],
 };
 
 export function isPowerAction(action: unknown): action is WebPowerAction {
@@ -296,6 +298,7 @@ function activates(request: PowerRequestShape): boolean {
 export function classifyPowerRisk(request: PowerRequestShape): Risk {
   switch (request.action) {
     // These are always put in the existing owner-approval queue, even if a caller gives them an innocent-looking label.
+    case "adopt":
     case "click_at":
     case "drag":
     case "drop":
@@ -376,6 +379,7 @@ export function powerScopeFor(request: PowerRequestShape): PowerClaimScope | nul
 /** Cross-owner grants still name the four base actions; each power needs the base action it is closest to. */
 export function grantActionFor(action: string, request?: PowerRequestShape): "open" | "read" | "click" | "type" {
   switch (action) {
+    case "adopt":
     case "back":
     case "forward":
     case "reload":
@@ -455,6 +459,8 @@ export function describePower(request: PowerRequestShape): string {
       return `reading the table ${target}`;
     case "snapshot":
       return "checking the page for interactive elements";
+    case "adopt":
+      return "asking to work in the page you are on";
     case "click_at":
       return "clicking a point on the page";
     case "reload":
