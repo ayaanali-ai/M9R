@@ -182,7 +182,15 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
       if (!down.defaultPrevented) {
         if (norm === "Enter" && target instanceof HTMLElement) {
           const form = target.form || target.closest("form");
-          if (target instanceof HTMLTextAreaElement || target.isContentEditable) {
+          const searchBox = target instanceof HTMLTextAreaElement && (target.rows <= 1 || target.name === "q" || /search/i.test(target.getAttribute("aria-label") || target.getAttribute("role") || "") || target.closest("[role=search]") !== null);
+          if (searchBox && form) {
+            if (typeof form.requestSubmit === "function") form.requestSubmit(); else form.submit();
+            effect = "submitted the search";
+          } else if (searchBox) {
+            const near = target.closest("[role=search]") || target.parentElement;
+            const button = near && near.querySelector("button[type=submit],button[aria-label*='earch' i],input[type=submit]");
+            if (button && isVisible(button)) { clickEl(button); effect = "clicked the search button"; } else { document.execCommand("insertText", false, String.fromCharCode(10)); effect = "newline"; }
+          } else if (target instanceof HTMLTextAreaElement || target.isContentEditable) {
             document.execCommand("insertText", false, "\n");
             effect = "newline";
           } else if (target instanceof HTMLInputElement && form) {

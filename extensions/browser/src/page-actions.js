@@ -520,7 +520,7 @@ function m9rPagePower(action, selector, args, expectOrigin, expectPathPrefix, en
       }
       if (action === "submit") {
         const form = String(target.tagName).toUpperCase() === "FORM" ? target : target.form;
-        if (form && typeof form.requestSubmit === "function") { if (!allowedPage()) return { ok: false, error: "page origin or path changed before submit" }; form.requestSubmit(target); return { ok: true, data: { submitted: true, target: info(target) } }; }
+        if (form && typeof form.requestSubmit === "function") { if (!allowedPage()) return { ok: false, error: "page origin or path changed before submit" }; form.requestSubmit(target instanceof (view.HTMLButtonElement || HTMLButtonElement) || (target.type === "submit" || target.type === "image") ? target : undefined); return { ok: true, data: { submitted: true, target: info(target) } }; }
       }
       clickSafely(target);
       return { ok: true, data: { clicked: true, target: info(target) } };

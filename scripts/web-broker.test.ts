@@ -56,6 +56,17 @@ test("an agent can omit tab after opening its only named tab", async () => {
   assert.deepEqual(await read, { ok: true, data: "Example Domain" });
 });
 
+test("an agent with no tab of its own works on the one page the room already has open", async () => {
+  const { broker, sent } = harness();
+  const opened = broker.submit(req("claude", "open", { url: "https://example.com/", tab: "research" }));
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.com", url: "https://example.com/" });
+  assert.equal((await opened).ok, true);
+  const read = broker.submit(req("codex", "read", { selector: "h1" }));
+  assert.equal(sent[1].tab, "research");
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, data: "Example Domain", origin: "https://example.com", url: "https://example.com/" });
+  assert.equal((await read).ok, true);
+});
+
 test("an omitted tab is refused when the agent has more than one open named tab", async () => {
   const { broker, sent } = harness();
   const first = broker.submit(req("claude", "open", { url: "https://example.com/", tab: "research" }));
@@ -94,7 +105,7 @@ test("typed text never appears in the presence label", async () => {
 });
 
 test("M9R messages appear at the sender's last page target with a bounded preview", async () => {
-  const { broker, sent, notices } = harness();
+  const { broker, notices } = harness();
   const opened = broker.submit(req("claude", "open", { url: "https://example.com/", tab: "research" }));
   broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.com", url: "https://example.com/" });
   await opened;
@@ -289,7 +300,7 @@ test("validation rejects non-http urls, missing selectors, bad tab names and ove
 
 function crossHarness(options: { withAuthority?: boolean } = {}) {
   const sent: Array<Record<string, unknown>> = [];
-  let clock = 1_000;
+  const clock = 1_000;
   let n = 0;
   const authority = createWebAuthority({ ownerId: "alice", now: () => clock, newId: () => `a${++n}` });
   const broker = createWebBroker({
@@ -596,4 +607,38 @@ test("a page of a site that is already open cannot be opened by URL unless the o
   const back = broker.submit(req("codex", "open", { url: "https://x.com/", tab: "shared" }));
   broker.onExtensionMessage({ type: "result", id: "c4", ok: true, origin: "https://x.com", url: "https://x.com/" });
   assert.equal((await back).ok, true, "a page the room already visited can be reopened");
+});
+
+test("m9r_web_do runs ordered steps under one tab claim, returns state after each action, and stops at the first failure", async () => {
+  const { broker, sent } = harness();
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const batch = broker.submitBatch({
+    agent: "codex", provider: "codex", sessionId: "codex-s", tab: "research", includePageState: true,
+    steps: [
+      { action: "open", url: "https://example.test/" },
+      { action: "click", selector: "@m9r-ref:e1" },
+      { action: "type", selector: "@m9r-ref:e2", text: "query" },
+    ],
+  });
+  assert.equal(sent[0]?.action, "open");
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.test", url: "https://example.test/" });
+  await flush();
+  assert.equal(sent[1]?.action, "snapshot");
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, data: "URL: https://example.test/\nTitle: Example\nText:\nBefore\nControls (act by ref):\ne1 [button] \"Save\"" });
+  await flush();
+  assert.equal(sent[2]?.action, "click");
+  broker.onExtensionMessage({ type: "result", id: "c3", ok: true, data: { clicked: true }, origin: "https://example.test", url: "https://example.test/" });
+  await flush();
+  assert.equal(sent[3]?.action, "snapshot");
+  broker.onExtensionMessage({ type: "result", id: "c4", ok: true, data: "URL: https://example.test/\nTitle: Example\nText:\nAfter\nControls (act by ref):\ne1 [button] \"Save\"" });
+  await flush();
+  assert.equal(sent[4]?.action, "type");
+  broker.onExtensionMessage({ type: "result", id: "c5", ok: false, error: "the snapshot ref or selector is stale" });
+  await flush();
+  const result = await batch;
+  assert.equal(result.ok, false);
+  assert.equal(result.failedAt, 2);
+  assert.equal(result.steps.length, 3);
+  assert.deepEqual(result.steps[0]?.response.pageState, { url: "https://example.test/", title: "Example", topControls: [{ ref: "e1", role: "button", name: "Save", position: 1 }] });
+  assert.equal(sent.length, 5, "the failed step must not dispatch a later step");
 });

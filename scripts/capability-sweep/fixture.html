@@ -2,6 +2,7 @@
 <style>body{font:15px system-ui;margin:24px;max-width:900px}section{border-bottom:1px solid #ddd;padding:14px 0}#menu{background:#eee;padding:6px}#cover{position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.02);z-index:9;display:none}#drag{width:90px;padding:8px;background:#fc8;cursor:grab}#drop{width:160px;height:60px;border:2px dashed #888;margin-top:8px}#tall{height:1400px;background:linear-gradient(#fff,#cde)}canvas{border:1px solid #999}</style>
 <h1>Capability fixture</h1>
 <section id=s-search><div role=search id=searchwrap><input id=q placeholder="Search fixture" autocomplete=off></div><div id=results></div><div role=search id=wrap2><input id=q2 placeholder="Second search"></div></section>
+<section id=s-gsearch><form id=gf role=search action="#"><textarea id=gq name=q rows=1 aria-label="Search"></textarea><input type=button id=gbtn value="Search button"></form></section>
 <section id=s-form><form id=f1 action="#"><input id=nm name=nm placeholder="Name"><input id=em name=em type=email placeholder="Email"><label><input type=checkbox id=cb> Subscribe</label><label><input type=radio name=r id=r1 value=a> A</label><label><input type=radio name=r id=r2 value=b> B</label>
 <select id=sel><option value=x>Ex</option><option value=y>Why</option><option value=z>Zed</option></select><textarea id=ta placeholder="Message"></textarea>
 <input id=pw type=password placeholder="Password"><input type=hidden id=hid value=secret><input id=cc autocomplete=cc-number placeholder="Card number"><button id=submit type=submit>Send form</button></form></section>
@@ -20,6 +21,7 @@ window.__log=[];const log=(m)=>window.__log.push([m,Math.round(performance.now()
 const q=document.getElementById('q');
 q.addEventListener('keydown',e=>{log('kd:'+e.key);if(e.key==='Enter'){log('enter-search:'+q.value);document.getElementById('results').textContent='Results for '+q.value}});
 q.addEventListener('input',()=>log('input'));
+document.getElementById('gf').addEventListener('submit',e=>{e.preventDefault();log('gsearch-submit:'+document.getElementById('gq').value)});
 document.getElementById('f1').addEventListener('submit',e=>{e.preventDefault();log('form-submit')});
 for(const t of['mousemove','mousedown','mouseup','click','dblclick','contextmenu','pointerdown','pointermove'])document.addEventListener(t,e=>{if(t==='mousemove'||t==='pointermove')return log(t);log(t+':'+(e.target.id||e.target.tagName))},true);
 document.getElementById('hov').addEventListener('mouseenter',()=>{document.getElementById('menu').hidden=false;log('hover-open')});
