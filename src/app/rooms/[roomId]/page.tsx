@@ -165,6 +165,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const [handoffResponses, setHandoffResponses] = useState<Record<string, string>>({});
   const clientRef = useRef<ReturnType<typeof createClient>>(null);
   const userIdRef = useRef<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const tasks = useMemo(() => projectRoomTasks(events), [events]);
   const handoffs = useMemo(() => projectRoomHandoffs(events), [events]);
   const artifacts = useMemo(() => projectRoomArtifacts(events), [events]);
@@ -225,6 +226,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       if (!userData.user) { setError("Your room session could not be verified."); return; }
       clientRef.current = supabase;
       userIdRef.current = userData.user.id;
+      setCurrentUserId(userData.user.id);
       // First contact requests a join (idempotent -- a returning active member stays active).
       await fetch(`/api/rooms/${roomId}/join`, { method: "POST" });
       if (cancelled) return;
@@ -643,7 +645,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             <ol aria-live="polite" aria-relevant="additions" style={{ maxHeight: 360, overflow: "auto", paddingLeft: 24 }}>
               {events.filter((event) => ["post", "ask", "reply", "task", "handoff", "artifact"].includes(event.kind)).map((event) => {
                 const actor = event.actor_seat_id ? `Agent ${event.actor_seat_id.slice(0, 6)}`
-                  : event.actor_user_id === userIdRef.current ? "You" : `Member ${String(event.actor_user_id ?? "unknown").slice(0, 6)}`;
+                  : event.actor_user_id === currentUserId ? "You" : `Member ${String(event.actor_user_id ?? "unknown").slice(0, 6)}`;
                 const payload = event.payload ?? {};
                 const eventText = typeof payload.text === "string" ? payload.text : null;
                 const taskLabel = event.kind === "task" ? `${String(payload.type ?? "updated")} goal: ${String(payload.title ?? payload.taskId ?? "room task")}` : null;
