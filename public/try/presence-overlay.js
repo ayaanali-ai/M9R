@@ -4,7 +4,6 @@
   const ROOT_ID = "m9r-presence-root";
   const EDGE = 10;
   const MESSAGE_TTL_MS = 4000;
-  const GLIDE_MS = 480;
   const IDLE_AFTER_MS = 4000;
   // Without a roster from the broker there is no "session ended" signal; an agent silent this long is taken as gone.
   const ORPHAN_AFTER_MS = 90000;
@@ -67,14 +66,16 @@
   // Minimum-jerk profile: how a hand actually moves (slow start, fast middle, slow settle), not a symmetric ease.
   const minJerk = (t) => t * t * t * (10 - 15 * t + 6 * t * t);
   // Fitts-style duration: longer trips take longer, but not proportionally.
-  const glideDuration = (dist) => Math.min(1200, Math.max(300, 260 + 140 * Math.log2(1 + dist / 30)));
-  const DWELL_MS = 170;
+  // The cursor is a progress signal, not a second animation to wait through.
+  const glideDuration = (dist) => Math.min(650, Math.max(120, 110 + 75 * Math.log2(1 + dist / 30)));
+  const DWELL_MS = 60;
   let lastGlideStartAt = 0;
-  // People do not start moving the instant something happens, and two people rarely start in the same half second.
-  const reactionDelay = (fromParked) => {
+  // Repeated, nearby, and background actions do not need another theatrical delay.
+  const reactionDelay = (fromParked, fast) => {
+    if (fast) return 0;
     const now = performance.now();
-    const base = fromParked ? 260 + Math.random() * 300 : 60 + Math.random() * 140;
-    const stagger = now - lastGlideStartAt < 700 ? 300 + Math.random() * 500 : 0;
+    const base = fromParked ? 80 + Math.random() * 100 : 20 + Math.random() * 50;
+    const stagger = now - lastGlideStartAt < 300 ? 30 + Math.random() * 70 : 0;
     return base + stagger;
   };
 
@@ -203,11 +204,13 @@
       loop = 0;
       const vw = view.innerWidth;
       const vh = view.innerHeight;
+      let keepFrame = false;
       for (const agent of agents.values()) {
         const dest = destination(agent, now);
         let x = dest.x;
         let y = dest.y;
         if (agent.glide) {
+          keepFrame = true;
           const g = agent.glide;
           const t = Math.max(0, Math.min(1, (performance.now() - g.start) / g.duration));
           const dx = dest.x - g.from.x;
@@ -264,6 +267,7 @@
           agent.caret.style.height = `${agent.caretAt.h}px`;
         }
         if (agent.typingEl && agent.typingUntil > now) {
+          keepFrame = true;
           const value = "value" in agent.typingEl ? agent.typingEl.value : agent.typingEl.textContent;
           if (value !== agent.lastTyped) {
             agent.lastTyped = value;
@@ -278,12 +282,14 @@
           const to = dockPoint(agent);
           const from = agent.point || to;
           agent.glide = { from: { ...from }, start: performance.now(), duration: glideDuration(Math.hypot(to.x - from.x, to.y - from.y)), side: Math.random() < 0.5 ? -1 : 1, waiters: [] };
+          keepFrame = true;
         }
         const idle = !agent.glide && now - agent.lastSeen > IDLE_AFTER_MS && !(agent.typingUntil > now) && !isWorking(agent);
         agent.el.classList.toggle("idle", idle);
         agent.miniCaret.hidden = !typing;
+        if (agent.typingUntil > now || agent.focusUntil > now || agent.claimedUntil > now || now - agent.lastActionAt <= 3200) keepFrame = true;
       }
-      if (agents.size) loop = view.requestAnimationFrame(frameTick);
+      if (keepFrame) loop = view.requestAnimationFrame(frameTick);
     }
 
     function isWorking(agent) {
@@ -295,7 +301,8 @@
     function whenArrived(id, timeoutMs) {
       return new Promise((resolve) => {
         const agent = agents.get(String(id || "").slice(0, 64));
-        const timer = view.setTimeout(resolve, timeoutMs || 1800);
+        const timeout = Math.min(1000, Math.max(100, Number(timeoutMs) || 1000));
+        const timer = view.setTimeout(resolve, timeout);
         const done = () => { view.clearTimeout(timer); resolve(); };
         if (!agent || !agent.glide) { view.setTimeout(done, DWELL_MS); return; }
         (agent.glide.waiters || (agent.glide.waiters = [])).push(done);
@@ -333,6 +340,15 @@
       layer.appendChild(ring);
       agent.el.classList.add("pressed");
       view.setTimeout(() => agent.el.classList.remove("pressed"), 140);
+    }
+
+    function reslot() {
+      let slot = 0;
+      for (const agent of agents.values()) {
+        agent.slot = slot;
+        agent.el.style.setProperty("--slot", String(slot));
+        slot += 1;
+      }
     }
 
     function createAgent(id, provider) {
@@ -388,10 +404,12 @@
         selector: null, targetEl: null, rect: null, point: null, spawn, glide: null, verb: "", pendingClick: false,
         focusUntil: 0, claimedUntil: 0, typingUntil: 0, typingEl: null, lastTyped: null, caretAt: null,
         lastSeen: Date.now(), lastMessage: "", bubbleTimer: 0, fadeTimer: 0, claimTimer: 0, leaveTimer: 0,
+        lastTargetAt: 0,
         slot: agents.size, docked: false, lastActionAt: Date.now(),
       };
       el.style.setProperty("--slot", String(agent.slot));
       agents.set(id, agent);
+      reslot();
       return agent;
     }
 
@@ -429,9 +447,11 @@
       if (phase === "start" && !isAgentMessage) {
         agent.hintRect = hint ? { x: hint.x, y: hint.y, width: Number(hint.width) || 0, height: Number(hint.height) || 0, at: now } : null;
         const changedTarget = selector !== agent.selector;
+        const sameTargetRecently = Boolean(selector && !changedTarget && now - agent.lastTargetAt < 1500);
         agent.verb = verb;
         if (selector) {
           agent.selector = selector;
+          agent.lastTargetAt = now;
           if (changedTarget) agent.targetEl = null;
           const el = resolveTarget(agent);
           if (verb === "read") { agent.focusUntil = now + 2400; if (!reducedMotion.matches) readSweep(agent); }
@@ -452,10 +472,17 @@
         if (!reducedMotion.matches) {
           const to = destination(agent, now);
           const dist = Math.hypot(to.x - from.x, to.y - from.y);
-          const wait = reactionDelay(!agent.point || agent.wasParked);
+          const fast = Boolean(view.document && view.document.hidden) || sameTargetRecently || dist < 48;
+          const wait = reactionDelay(!agent.point || agent.wasParked, fast);
           agent.wasParked = false;
           lastGlideStartAt = performance.now() + wait;
-          agent.glide = { from: { ...from }, start: performance.now() + wait, duration: glideDuration(dist), side: Math.random() < 0.5 ? -1 : 1, waiters: [] };
+          agent.glide = fast
+            ? null
+            : { from: { ...from }, start: performance.now() + wait, duration: glideDuration(dist), side: Math.random() < 0.5 ? -1 : 1, waiters: [] };
+          if (fast) {
+            agent.point = { ...to };
+            arrive(agent);
+          }
         } else {
           // Reduced motion trims the decoration, not the movement: the cursor still travels to its target, so people can see where
           // the agent is. It goes briefly and in a straight line, with no bow, overshoot or reaction delay.
@@ -509,6 +536,7 @@
       agent.caret.remove();
       for (const timer of [agent.bubbleTimer, agent.fadeTimer, agent.claimTimer, agent.leaveTimer]) if (timer) view.clearTimeout(timer);
       agents.delete(id);
+      reslot();
     }
 
     /** The broker's roster: agents that stopped, failed or left the session take their cursor with them. */
@@ -592,17 +620,27 @@
       try { state.frame.contentWindow.postMessage({ m9r: "host", ...payload }, extensionOrigin); } catch {}
     }
 
+    // Chrome's per-site zoom scales every CSS pixel, the pill included, so the same pill looked bigger on a site zoomed to 125% and
+    // smaller at 80%. The background reports the tab's zoom and the frames are scaled back by 1/zoom (layout sees screen-sized boxes).
+    let zoomK = 1;
+    function setZoom(zoom) {
+      const next = Number.isFinite(zoom) && zoom > 0.2 && zoom < 6 ? Math.min(2.5, Math.max(0.4, 1 / zoom)) : 1;
+      if (Math.abs(next - zoomK) < 0.001) return;
+      zoomK = next;
+      for (const state of frames.values()) { state.appliedBase = false; layout(state); }
+    }
+
     function layout(state) {
       if (state.dock) return layoutDock(state);
       const vw = view.innerWidth;
       const vh = view.innerHeight;
-      const w = Math.min(state.size.w, vw - 8);
-      const h = Math.min(state.size.h, vh - 8);
+      const w = Math.min(state.size.w * zoomK, vw - 8);
+      const h = Math.min(state.size.h * zoomK, vh - 8);
       let left = state.pos ? state.pos.left : (vw - w) / 2;
       let bottom = state.pos ? state.pos.bottom : state.defaults.bottom;
       left = Math.min(Math.max(left, 4), Math.max(4, vw - w - 4));
       bottom = Math.min(Math.max(bottom, 4), Math.max(4, vh - h - 4));
-      state.box.style.cssText = `left:${left}px;bottom:${bottom}px;width:${w}px;height:${h}px`;
+      state.box.style.cssText = `left:${left}px;bottom:${bottom}px;width:${w / zoomK}px;height:${h / zoomK}px;transform:scale(${zoomK});transform-origin:0 100%`;
       state.box.classList.add("ready");
       state.box.classList.toggle("hidden", !state.shown);
       state.shownAt = { left, bottom, w, h };
@@ -636,8 +674,8 @@
       if (!Number.isFinite(state.u)) state.u = D.project(path, vw > 900 ? vw - 260 : vw / 2, vh).t / path.length;
       const point = D.pointAt(path, state.u * path.length);
       const o = D.orientationAt(point.theta);
-      const w = Math.min(state.size.w, vw - 8);
-      const h = Math.min(state.size.h, vh - 8);
+      const w = Math.min(state.size.w * zoomK, vw - 8);
+      const h = Math.min(state.size.h * zoomK, vh - 8);
       // The bar sits at the frame's bottom (its top when docked along the top), so growth always opens away from the edge.
       // Along the top and bottom the frame is centred on the track point; on the sides it hugs the edge and slides up and down.
       const half = DOCK.thickness / 2 + DOCK.pad;
@@ -656,11 +694,11 @@
       }
       // On the left and right edges the tab stays exactly where it is and the panel grows around it; the frame only slides when the panel would not fit.
       if ((o.card === 1 || o.card === 3) && state.bar) {
-        top = point.y - (state.bar.top + state.bar.h / 2);
+        top = point.y - (state.bar.top + state.bar.h / 2) * zoomK;
         // Give the panel only the room that is left below the tab, so opening it never has to move the tab; it scrolls inside instead.
         const cap = Math.floor(vh - 4 - Math.max(4, top) - 28);
         const capped = cap >= 240 ? cap : 0;
-        if (capped !== state.lastCap) { state.lastCap = capped; postToFrame(state, { kind: "panel-max", px: capped }); }
+        if (capped !== state.lastCap) { state.lastCap = capped; postToFrame(state, { kind: "panel-max", px: Math.floor(capped / zoomK) }); }
       }
       if (o.card !== 0 && o.card !== 2) top = clampN(top, 4, Math.max(4, vh - h - 4));
       if (o.edge !== state.notifiedEdge) {
@@ -693,14 +731,18 @@
       const vh = view.innerHeight;
       const left = sp.l.value;
       const top = sp.t.value;
-      const w = Math.max(40, sp.r.value - left);
-      const h = Math.max(40, sp.b.value - top);
+      // The 40px floor is a real on-screen minimum, so it has to be scaled the same way everything else here is: without
+      // this, at a high page zoom the un-scaled 40 CSS px this box gets clamped up to is then multiplied by the browser's
+      // own zoom again on top, landing far bigger on screen than 40px (the notch clipped off the bottom of the viewport
+      // at 2x zoom because of exactly this).
+      const w = Math.max(40 * zoomK, sp.r.value - left);
+      const h = Math.max(40 * zoomK, sp.b.value - top);
       const st = state.box.style;
       if (state.appliedW !== w || state.appliedH !== h || !state.appliedBase) {
-        st.cssText = `left:0;top:0;bottom:auto;width:${w}px;height:${h}px;will-change:transform`;
+        st.cssText = `left:0;top:0;bottom:auto;width:${w / zoomK}px;height:${h / zoomK}px;will-change:transform;transform-origin:0 0`;
         state.appliedW = w; state.appliedH = h; state.appliedBase = true;
       }
-      st.transform = `translate3d(${left}px,${top}px,0)`;
+      st.transform = `translate3d(${left}px,${top}px,0) scale(${zoomK})`;
       state.cur = { left, top, width: w, height: h };
       state.shownAt = { left, bottom: vh - top - h, w, h };
     }
@@ -742,12 +784,12 @@
       } else if (data.kind === "drag" && state.dock && state.path && Number.isFinite(data.cx) && Number.isFinite(data.cy)) {
         // The pointer, in window coordinates: where the frame is drawn right now plus where the pointer is inside it.
         const at = state.cur || { left: 0, top: 0 };
-        const hit = global.M9RDock.project(state.path, at.left + data.cx, at.top + data.cy);
+        const hit = global.M9RDock.project(state.path, at.left + data.cx * zoomK, at.top + data.cy * zoomK);
         state.u = hit.t / state.path.length;
         layoutDock(state);
       } else if (data.kind === "drag" && Number.isFinite(data.dx) && Number.isFinite(data.dy)) {
         const at = state.shownAt || { left: 0, bottom: 0 };
-        state.pos = { left: at.left + data.dx, bottom: at.bottom - data.dy };
+        state.pos = { left: at.left + data.dx * zoomK, bottom: at.bottom - data.dy * zoomK };
         layout(state);
       } else if (data.kind === "drag-end" && state.dock) {
         if (storage && Number.isFinite(state.u)) void storage.set({ [DOCK_KEY]: state.u }).catch(() => {});
@@ -835,7 +877,7 @@
 
     return {
       update, remove, leave, stop, resume, destroy, snapshot, syncAgents,
-      mountFrame, showComposer, toggleComposer, togglePill, talk, whenArrived,
+      mountFrame, showComposer, toggleComposer, togglePill, talk, whenArrived, setZoom,
     };
   }
 

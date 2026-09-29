@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { redactSession } from "@/lib/session-redaction";
 import { humanizeEnumLabel } from "@/lib/format-enum-label";
@@ -22,6 +22,8 @@ export interface ResidentActivityEvent {
 }
 
 const MAX_EVENT_DATA_BYTES = 64 * 1024;
+/** Best-effort resident activity stops appending at a fixed log size; it never rewrites history. */
+export const MAX_RESIDENT_ACTIVITY_JOURNAL_BYTES = 16 * 1024 * 1024;
 
 export function residentActivityJournalPath(repositoryRoot: string): string {
   return join(resolve(repositoryRoot), ".m9r", "runtime", "resident-activity.jsonl");
@@ -90,17 +92,32 @@ export function summarizeResidentProviderLine(provider: ResidentActivityProvider
   }
 }
 
-export function createResidentActivityWriter(repositoryRoot: string): {
+export function createResidentActivityWriter(repositoryRoot: string, options: { maxBytes?: number } = {}): {
   publish(event: ResidentActivityEvent): void;
   flush(): Promise<void>;
 } {
   const path = residentActivityJournalPath(repositoryRoot);
+  const maxBytes = Math.min(MAX_RESIDENT_ACTIVITY_JOURNAL_BYTES, Math.max(1, Math.floor(options.maxBytes ?? MAX_RESIDENT_ACTIVITY_JOURNAL_BYTES)));
   let pending = Promise.resolve();
+  let capacityReached = false;
 
   const publish = (event: ResidentActivityEvent) => {
     const line = `${JSON.stringify(normalizeEvent(event))}\n`;
+    if (Buffer.byteLength(line, "utf8") > maxBytes) {
+      capacityReached = true;
+      return;
+    }
     pending = pending.then(async () => {
+      if (capacityReached) return;
       await mkdir(dirname(path), { recursive: true });
+      const currentBytes = await stat(path).then((value) => value.size).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+        throw error;
+      });
+      if (currentBytes + Buffer.byteLength(line, "utf8") > maxBytes) {
+        capacityReached = true;
+        return;
+      }
       await appendFile(path, line, "utf8");
     });
   };

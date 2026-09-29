@@ -41,6 +41,8 @@ export interface WebRequest {
   text?: string;
   /** Parameters for the power actions (web-powers-core.ts); refused on open/read/click/type. */
   args?: WebPowerArgs;
+  /** Internal batch marker: the ordered operation owns one tab claim for its entire sequence. */
+  batchClaim?: boolean;
 }
 
 export interface WebResponse {
@@ -51,10 +53,86 @@ export interface WebResponse {
   label?: string;
   /** What teammates did since this agent's last action (newest last, at most 5): the shared-room awareness. */
   room?: string[];
+  /** Compact state returned after a batched action; controls are ordered and carry stable snapshot refs. */
+  pageState?: WebPageState;
+  /** Bounded text that changed since the previous state in the same batched call. */
+  changedPart?: string;
+}
+
+export interface WebPageControl {
+  ref: string;
+  role: string;
+  name: string;
+  position: number;
+}
+
+export interface WebPageState {
+  url: string;
+  title: string;
+  topControls: WebPageControl[];
+}
+
+export interface WebBatchStep {
+  action: "open" | "click" | "type" | "press" | "scroll";
+  tab?: string;
+  url?: string;
+  selector?: string;
+  targetLabel?: string;
+  formSelector?: string;
+  text?: string;
+  args?: WebPowerArgs;
+}
+
+export interface WebBatchRequest {
+  agent: string;
+  provider: string;
+  sessionId: string;
+  owner?: string;
+  tab?: string;
+  shareWith?: string[];
+  steps: WebBatchStep[];
+  includePageState?: boolean;
+}
+
+export interface WebBatchStepResult {
+  index: number;
+  action: WebBatchStep["action"];
+  response: WebResponse;
+}
+
+export interface WebBatchResponse {
+  ok: boolean;
+  steps: WebBatchStepResult[];
+  failedAt?: number;
+  changedPart?: string;
+}
+
+/** How much the owner is asked. Money and secrets are held in every mode. */
+export type RoomMode = "watch" | "ask" | "hands-off";
+export const ROOM_MODES: readonly RoomMode[] = ["watch", "ask", "hands-off"];
+
+/**
+ * watch: agents act freely on the shared page; only things that leave it (post, message, buy, upload, download, and send/delete-like
+ * controls) ask. ask: every risky action asks. hands-off: nothing asks except money and secrets.
+ */
+export function autoAllowedInMode(mode: RoomMode, request: { action: string; selector?: string; targetLabel?: string }, risk: { risky: boolean; category?: string }): boolean {
+  if (!risk.risky) return true;
+  if (mode === "ask") return false;
+  if (risk.category === "money" || risk.category === "secrets") return false;
+  if (request.action === "adopt") return false; // which tab an agent may work in stays the owner's call, in every mode
+  if (mode === "hands-off") return true;
+  if (["post", "dm", "follow", "like", "download", "upload", "buy"].includes(request.action)) return false;
+  if (["click_at", "drag", "drop"].includes(request.action)) return true;
+  // Everything else was flagged by what the control says (Send, Delete, Pay...), and a page-level submit such as a search box
+  // is fine unless its own label reads like one of those.
+  if (request.action === "submit") return !classifyWebActionRisk({ action: "click", selector: request.selector, targetLabel: request.targetLabel }).risky;
+  return false;
 }
 
 export interface WebBrokerDeps {
   send(message: unknown): boolean;
+  /** Current room mode; absent means every risky action asks (the original behavior). */
+  roomMode?(): RoomMode;
   ownerId?: string;
   authority?: WebAuthority;
   onAuthorityChange?(): void;
@@ -69,6 +147,52 @@ export interface WebBrokerDeps {
   narrate?: boolean;
   /** In-process activity stream for the UI bridge (web-ui-bridge.ts). */
   onActivity?(activity: WebActivity): void;
+}
+
+function parseSnapshotState(data: unknown, urlHint?: string): { state: WebPageState; visibleText: string } | null {
+  if (data && typeof data === "object") {
+    const snapshot = data as { url?: unknown; title?: unknown; text?: unknown; elements?: unknown };
+    const url = typeof snapshot.url === "string" ? snapshot.url : urlHint || "";
+    const title = typeof snapshot.title === "string" ? snapshot.title : "";
+    const visibleText = typeof snapshot.text === "string" ? snapshot.text.trim().slice(0, 4_000) : "";
+    const controls: WebPageControl[] = [];
+    if (Array.isArray(snapshot.elements)) {
+      for (const element of snapshot.elements.slice(0, 12)) {
+        if (!element || typeof element !== "object") continue;
+        const candidate = element as { ref?: unknown; role?: unknown; name?: unknown };
+        if (typeof candidate.ref !== "string" || !/^e\d{1,3}$/.test(candidate.ref)
+          || typeof candidate.role !== "string" || typeof candidate.name !== "string") continue;
+        controls.push({ ref: candidate.ref, role: candidate.role.slice(0, 40), name: candidate.name.slice(0, 160), position: controls.length + 1 });
+      }
+    }
+    if (!url && !title && !visibleText && controls.length === 0) return null;
+    return { state: { url, title, topControls: controls }, visibleText };
+  }
+  if (typeof data !== "string") return null;
+  const url = data.match(/^URL:\s*(.*)$/m)?.[1]?.trim() || urlHint || "";
+  const title = data.match(/^Title:\s*(.*)$/m)?.[1]?.trim() || "";
+  if (!url && !title && !data.includes("Controls (act by ref")) return null;
+  const controls: WebPageControl[] = [];
+  const controlPattern = /^(e\d{1,3})\s+\[([^\]]+)\]\s+"([^"]*)"[^\n]*$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = controlPattern.exec(data)) && controls.length < 12) {
+    controls.push({ ref: match[1], role: match[2], name: match[3], position: controls.length + 1 });
+  }
+  const textStart = data.indexOf("Text:");
+  const controlsStart = data.indexOf("Controls (act by ref");
+  const visibleText = textStart >= 0 ? data.slice(textStart + 5, controlsStart >= textStart ? controlsStart : undefined).trim().slice(0, 4_000) : "";
+  return { state: { url, title, topControls: controls }, visibleText };
+}
+
+function changedText(previous: string, next: string): string | undefined {
+  if (!next || next === previous) return undefined;
+  if (!previous) return next.slice(0, 4_000);
+  let start = 0;
+  while (start < previous.length && start < next.length && previous[start] === next[start]) start += 1;
+  let endPrevious = previous.length - 1;
+  let endNext = next.length - 1;
+  while (endPrevious >= start && endNext >= start && previous[endPrevious] === next[endNext]) { endPrevious -= 1; endNext -= 1; }
+  return next.slice(start, endNext + 1).trim().slice(0, 4_000) || undefined;
 }
 
 export interface WebAgentMessage {
@@ -178,6 +302,7 @@ export function validateRequest(request: WebRequest): string | null {
 export function createWebBroker(deps: WebBrokerDeps) {
   const now = deps.now ?? Date.now;
   const timeoutMs = deps.timeoutMs ?? 15_000;
+  const doneNoticeAckTimeoutMs = 1_000;
   const claimTtlMs = deps.claimTtlMs ?? 8_000;
   const approvalTimeoutMs = Math.min(10 * 60_000, Math.max(1, deps.approvalTimeoutMs ?? 120_000));
   const newId = deps.newId ?? (() => crypto.randomUUID());
@@ -240,7 +365,17 @@ export function createWebBroker(deps: WebBrokerDeps) {
     resolve: (response: WebResponse) => void;
     timer: ReturnType<typeof setTimeout>;
   }
+  interface DoneNoticeAckEntry {
+    tab: string;
+    agent: string;
+    provider: string;
+    sessionId: string;
+    resolve: (rendered: boolean) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }
   const approvals = new Map<string, ApprovalEntry>();
+  const doneNoticeAcks = new Map<string, DoneNoticeAckEntry>();
+  let doneNoticeSequence = 0;
   const narrate = deps.narrate === true;
   const emit = (activity: WebActivity) => {
     try { deps.onActivity?.(activity); } catch { /* the UI must never break the broker */ }
@@ -257,7 +392,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
   function recordPresence(tab: string, presence: Record<string, unknown>, owner?: string): void {
     const key = activityKey(String(presence.agent ?? ""), String(presence.provider ?? ""), String(presence.sessionId ?? ""));
     const records = presenceByTab.get(tab) ?? new Map<string, Record<string, unknown>>();
-    const record: Record<string, any> = { ...presence, owner: owner ?? deps.ownerId ?? "you", tab, updatedAt: now() };
+    const record: Record<string, unknown> = { ...presence, owner: owner ?? deps.ownerId ?? "you", tab, updatedAt: now() };
     records.set(key, record);
     presenceByTab.set(tab, records);
     tabLastActivity.set(tab, now());
@@ -310,6 +445,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
   }
 
   function scopeFor(request: WebRequest): WebClaimScope | null {
+    if (request.batchClaim && request.action !== "read") return { kind: "tab", key: "*" };
     const powerScope = powerScopeFor(request as unknown as Parameters<typeof powerScopeFor>[0]);
     if (powerScope !== undefined) return powerScope;
     if (request.action === "read") return null;
@@ -371,6 +507,12 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (openTabs.length === 1) {
       const tab = openTabs[0];
       return { tab, actorKey, publicName: crossOwner ? tab.slice(request.owner!.length + 1) : tab };
+    }
+    // Nothing of its own yet: work on the page the room is already on (one shared tab) instead of starting a private one.
+    // Opening still starts the agent's own tab, and several shared tabs still need a choice.
+    if (request.action !== "open" && request.action !== "tabs" && !crossOwner && tabUrls.size === 1) {
+      const [shared] = [...tabUrls.keys()];
+      return { tab: shared, actorKey, publicName: shared };
     }
     return { tab: namespace(request.agent), actorKey, publicName: request.agent };
   }
@@ -582,6 +724,14 @@ export function createWebBroker(deps: WebBrokerDeps) {
       ? classifyPowerRisk(request as unknown as Parameters<typeof classifyPowerRisk>[0])
       : classifyWebActionRisk(request as Parameters<typeof classifyWebActionRisk>[0]);
     if (!risk.risky) return dispatch(request);
+    const mode = deps.roomMode?.() ?? "ask";
+    if (autoAllowedInMode(mode, request, risk)) {
+      try {
+        deps.authority?.recordActionDecision("action.approved", request.owner !== undefined && request.owner !== deps.ownerId ? `${request.agent}@${request.owner}` : request.agent, { action: request.action, origin: originOf(request.url) ?? undefined, selector: request.selector, detail: `auto-allowed in ${mode} mode: ${risk.category ?? "risky"}` });
+        deps.onAuthorityChange?.();
+      } catch { /* the audit line is best effort here; the action still shows in the feed */ }
+      return dispatch(request);
+    }
     if (!deps.authority) return Promise.resolve(fail("risky browser action requires owner approval, but the approval audit is unavailable"));
 
     const crossOwner = request.owner !== undefined && request.owner !== deps.ownerId;
@@ -665,7 +815,20 @@ export function createWebBroker(deps: WebBrokerDeps) {
 
   function onExtensionMessage(raw: unknown): void {
     if (!raw || typeof raw !== "object") return;
-    const message = raw as { type?: string; id?: string; ok?: boolean; data?: unknown; error?: string; origin?: string; url?: string };
+    const message = raw as {
+      type?: string; id?: string; ok?: boolean; data?: unknown; error?: string; origin?: string; url?: string;
+      noticeId?: unknown; tab?: unknown; agent?: unknown; provider?: unknown; sessionId?: unknown; rendered?: unknown;
+    };
+    if (message.type === "notice-ack") {
+      if (typeof message.noticeId !== "string" || typeof message.tab !== "string" || typeof message.agent !== "string" ||
+          typeof message.provider !== "string" || typeof message.sessionId !== "string" || typeof message.rendered !== "boolean") return;
+      const entry = doneNoticeAcks.get(message.noticeId);
+      if (!entry || entry.tab !== message.tab || entry.agent !== message.agent || entry.provider !== message.provider || entry.sessionId !== message.sessionId) return;
+      clearTimeout(entry.timer);
+      doneNoticeAcks.delete(message.noticeId);
+      entry.resolve(message.rendered);
+      return;
+    }
     if (message.type === "tab-closed" && typeof (raw as { tab?: unknown }).tab === "string") {
       const closedTab = (raw as { tab: string }).tab;
       tabUrls.delete(closedTab);
@@ -755,6 +918,65 @@ export function createWebBroker(deps: WebBrokerDeps) {
       entry.resolve(fail("the browser extension disconnected"));
       pending.delete(id);
     }
+    for (const [id, entry] of doneNoticeAcks) {
+      clearTimeout(entry.timer);
+      entry.resolve(false);
+      doneNoticeAcks.delete(id);
+    }
+  }
+
+  /** Runs a bounded, ordered browser sequence. The broker owns the tab claim for every step and never continues after a refusal. */
+  async function submitBatch(input: WebBatchRequest): Promise<WebBatchResponse> {
+    if (!Array.isArray(input.steps) || input.steps.length < 1 || input.steps.length > 24) {
+      return { ok: false, steps: [{ index: 0, action: "scroll", response: fail("m9r_web_do needs 1-24 ordered steps") }], failedAt: 0 };
+    }
+    const results: WebBatchStepResult[] = [];
+    let tab = input.tab;
+    let previousText = "";
+    let lastChanged: string | undefined;
+    for (let index = 0; index < input.steps.length; index += 1) {
+      const step = input.steps[index];
+      const request: WebRequest = {
+        agent: input.agent,
+        provider: input.provider,
+        sessionId: input.sessionId,
+        ...(input.owner ? { owner: input.owner } : {}),
+        ...(input.shareWith ? { shareWith: input.shareWith } : {}),
+        ...(step.tab ?? tab ? { tab: step.tab ?? tab } : {}),
+        action: step.action,
+        ...(step.url !== undefined ? { url: step.url } : {}),
+        ...(step.selector !== undefined ? { selector: step.selector } : {}),
+        ...(step.targetLabel !== undefined ? { targetLabel: step.targetLabel } : {}),
+        ...(step.formSelector !== undefined ? { formSelector: step.formSelector } : {}),
+        ...(step.text !== undefined ? { text: step.text } : {}),
+        ...(step.args !== undefined ? { args: step.args } : {}),
+        batchClaim: true,
+      };
+      const response = await submit(request);
+      if (response.ok && input.includePageState && ["open", "click", "type", "press"].includes(step.action)) {
+        const stateResponse = await submit({
+          agent: input.agent,
+          provider: input.provider,
+          sessionId: input.sessionId,
+          ...(input.owner ? { owner: input.owner } : {}),
+          action: "snapshot",
+          ...(step.tab ?? tab ? { tab: step.tab ?? tab } : {}),
+          args: { limit: 12 },
+        });
+        const parsed = stateResponse.ok ? parseSnapshotState(stateResponse.data, typeof response.data === "object" && response.data !== null && typeof (response.data as { url?: unknown }).url === "string" ? (response.data as { url: string }).url : undefined) : null;
+        if (parsed) {
+          response.pageState = parsed.state;
+          response.changedPart = changedText(previousText, parsed.visibleText);
+          if (response.changedPart) lastChanged = response.changedPart;
+          previousText = parsed.visibleText;
+        }
+      }
+      results.push({ index, action: step.action, response });
+      if (!response.ok) return { ok: false, steps: results, failedAt: index, ...(lastChanged ? { changedPart: lastChanged } : {}) };
+      if (step.tab) tab = step.tab;
+      if (!tab && typeof response.data === "object" && response.data !== null && typeof (response.data as { tab?: unknown }).tab === "string") tab = (response.data as { tab: string }).tab;
+    }
+    return { ok: true, steps: results, ...(lastChanged ? { changedPart: lastChanged } : {}) };
   }
 
   function currentClaims(): Array<{ tab: string; agent: string; expiresAt: number; scope: WebClaimScope }> {
@@ -810,6 +1032,41 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (seenMessageIds.size > 2_000) seenMessageIds.delete(seenMessageIds.values().next().value as string);
     recordPresence(tab, presence, input.owner);
     return true;
+  }
+
+  /**
+   * A NATIVE agent session (one the owner runs directly -- a real Codex/Claude terminal, not a worker this broker
+   * spawned) has no equivalent of web-live-sessions.ts's finish(): nobody here manages its process lifecycle, so
+   * nothing ever told the overlay its turn was over. Its cursor just sat on whatever the last individual action
+   * happened to be ("Read 'page'") forever, indistinguishable from actually being stuck. This is called from the
+   * agent's own Stop hook (handleHookEvent in hook-handler.ts) the moment its turn really ends, and marks every tab
+   * it is tracked on as done. The Stop hook supplies the provider session ID, so another concurrent session using the
+   * same agent/provider is never incorrectly marked complete.
+   */
+  async function markAgentDone(agent: string, provider: string, sessionId: string): Promise<boolean> {
+    const actorKey = `${deps.ownerId ?? ""}\u0000${agent}\u0000${provider}\u0000${sessionId}`;
+    const tabs = [...(tabsByActor.get(actorKey) ?? [])];
+    if (tabs.length === 0) return false;
+    const rendered = await Promise.all(tabs.map((tab) => new Promise<boolean>((resolve) => {
+      const noticeId = `done-${now().toString(36)}-${(++doneNoticeSequence).toString(36)}`;
+      const timer = setTimeout(() => {
+        doneNoticeAcks.delete(noticeId);
+        resolve(false);
+      }, doneNoticeAckTimeoutMs);
+      doneNoticeAcks.set(noticeId, { tab, agent, provider, sessionId, resolve, timer });
+      const sent = deps.send({
+        type: "notice",
+        noticeId,
+        tab,
+        presence: { agent, provider, sessionId, action: "finished", step: "Done", phase: "done", createdAt: now() },
+      });
+      if (!sent) {
+        clearTimeout(timer);
+        doneNoticeAcks.delete(noticeId);
+        resolve(false);
+      }
+    })));
+    return rendered.length > 0 && rendered.every(Boolean);
   }
 
   function setMessageTextVisibility(sessionId: string, show: boolean): boolean {
@@ -919,5 +1176,5 @@ export function createWebBroker(deps: WebBrokerDeps) {
     };
   }
 
-  return { submit, pendingApprovals, decideApproval, onExtensionMessage, onExtensionClosed, currentClaims, notifyAgentMessage, noteOwnerUrls, setMessageTextVisibility, stopAll, feedSnapshot };
+  return { submit, submitBatch, pendingApprovals, decideApproval, onExtensionMessage, onExtensionClosed, currentClaims, notifyAgentMessage, markAgentDone, noteOwnerUrls, setMessageTextVisibility, stopAll, feedSnapshot };
 }

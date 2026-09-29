@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptsDir, "..");
-const allTestFiles = readdirSync(scriptsDir).filter((name) => /\.test\.(?:ts|mjs)$/.test(name)).sort();
+const allTestFiles = readdirSync(scriptsDir).filter((name) => /\.test\.(?:ts|mjs|js)$/.test(name)).sort();
 const suite = process.argv[2];
 
 const webBrokerFiles = new Set([
@@ -19,31 +19,47 @@ const webBrokerFiles = new Set([
   "web-powers-core.test.ts",
   "web-powers-mcp.test.ts",
   "page-actions.test.ts",
+  "page-actions.test.js",
   "web-authority.test.ts",
   "web-authority-store.test.ts",
   "web-authority-cli.test.ts",
+  "owner-pipe.test.ts",
   "presence-logic.test.ts",
   "permission-logic.test.ts",
 ]);
 
 function belongsToSuite(name) {
-  if (suite === "bench") return ["bench-cdp.test.ts", "bench-cdp-driver.test.ts", "bench-data.test.ts", "bench-site.test.ts", "bench-strategies.test.ts"].includes(name);
+  if (suite === "bench") return ["bench-cdp.test.ts", "bench-cdp-driver.test.ts", "bench-data.test.ts", "bench-site.test.ts", "bench-strategies.test.ts", "bench-temp-cleanup.test.ts", "bench-client.test.ts"].includes(name);
   if (suite === "web-broker") return webBrokerFiles.has(name);
   if (suite !== "web-all") return false;
   return name.startsWith("bench-") ||
     name.startsWith("web-") ||
     name.startsWith("native-") ||
     name.startsWith("m9r-native-") ||
+    name.startsWith("opencode-") ||
+    name.startsWith("room-") ||
     [
       ...webBrokerFiles,
+      "content-listener-leak.test.js",
+      "cross-machine-room.test.ts",
+      "engine-mcp-smoke.test.ts",
+      "engine-update-core.test.ts",
+      "export-aware-spec.test.mjs",
+      "frame-common-ring.test.js",
       "finding-ledger-core.test.ts",
       "live-session-core.test.ts",
+      "mcp-inbox.test.ts",
+      "prune-tasks.test.ts",
       "vendor-launch-core.test.ts",
       "mission-relay.test.ts",
+      "m9r-extension-csp.test.ts",
       "page-notes-core.test.ts",
       "page-notes-mcp.test.ts",
       "page-notes-store.test.ts",
       "browser-extension-store-package.test.mjs",
+      "native-input-client.test.js",
+      "newtab-page.test.mjs",
+      "presence-frame-lifecycle.test.js",
     ].includes(name);
 }
 

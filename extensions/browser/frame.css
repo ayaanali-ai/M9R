@@ -44,6 +44,8 @@ button { font: inherit; color: inherit; }
 [data-ring="off"] { opacity: .5; }
 [data-ring="off"] .logo { background: var(--muted); }
 [data-ring="idle"] { box-shadow: 0 0 0 1px rgba(98, 184, 155, .45); }
+[data-ring="done"] { box-shadow: 0 0 0 1.5px var(--open); animation: donePulse 1.8s ease-out 1; }
+@keyframes donePulse { 0% { box-shadow: 0 0 0 1.5px var(--open), 0 0 0 6px rgba(98, 184, 155, .35); } 100% { box-shadow: 0 0 0 1.5px var(--open), 0 0 0 6px rgba(98, 184, 155, 0); } }
 [data-ring="working"]::after { opacity: 1; border-color: rgba(217, 164, 65, .2); border-top-color: var(--working); border-right-color: var(--working); animation: turn 2.4s linear infinite; }
 [data-ring="waiting"]::after { opacity: 1; border-color: var(--accent); animation: breathe 2.4s ease-in-out infinite; }
 [data-ring="blocked"] { box-shadow: 0 0 0 1px var(--blocked); background: #2a1716; }

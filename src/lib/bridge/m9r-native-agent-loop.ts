@@ -17,23 +17,31 @@
  * Provider resolution is catalog-driven (m9r-native-model-catalog.ts, the
  * real models.dev data), not a hand-typed list -- given any model id, the
  * loop looks up which real provider serves it and resolves a language model
- * through the audited registry (m9r-native-provider-registry.ts). The five
- * governed file/repo tools plus send_message are wired; search_memory,
- * draft_section, and the evidence/task-contract tools are a real, honest
- * gap for a later pass -- not silently included, not claimed as done.
+ * through the audited registry (m9r-native-provider-registry.ts). The native
+ * loop exposes the same governed file/repo, collaboration, evidence, and
+ * task-contract surface as the provider MCP server. Unrestricted shell
+ * execution remains intentionally absent; a provider may still report that
+ * a runtime such as Python is unavailable.
  */
 import { z } from "zod";
 import { tool, stepCountIs, streamText, type ModelMessage, type ToolSet, type LanguageModel } from "ai";
 import { getWorkspaceProviderEnv } from "@/lib/mission/m9r-native-credential-service";
 import { findProvidersForModel } from "@/lib/mission/m9r-native-model-catalog";
 import { resolveCatalogModel, CANONICAL_PROVIDER_IDS } from "@/lib/bridge/m9r-native-provider-registry";
+import { CHAT_EVIDENCE_SCHEMA_VERSION } from "@/lib/bridge/chat-evidence-schema";
+import { TERMINAL_ENABLED } from "@/lib/terminal-config";
 import {
   readGovernedFile,
+  createGovernedFile,
   strReplaceGovernedFile,
   listGovernedTree,
   ripgrepSearch,
   gitRead,
+  GIT_READ_OPERATIONS,
+  redactGovernedToolCredential,
   postAgentMessage,
+  todoAction,
+  type TodoItem,
   type GitReadOperation,
 } from "@/lib/bridge/governed-agent-tools";
 
@@ -124,8 +132,40 @@ export async function resolveModelForTurn(workspaceId: string, model: string): P
 /** Bounds how many tool-call/response round trips one turn can take -- a real cap, not an accident. Same category of protection as the reply-depth cap already built for agent-to-agent messages: an agent loop that never stops calling tools is a real, observed failure mode elsewhere in this codebase, not a hypothetical. */
 const MAX_TURN_STEPS = 24;
 
-/** Shared tool construction -- the one place read_file/str_replace/tree/rg/git_read/send_message get wired to the AI SDK's `tool()` shape, used by both the drain-to-completion entry point and the streaming one below so they can never drift apart. */
-function buildTools(root: string, channel: M9rNativeLoopChannel | undefined, emit: (event: M9rNativeActivityEvent) => void): ToolSet {
+function channelConversationId(channel: M9rNativeLoopChannel): string | null {
+  return channel.missionId.startsWith("channel-") ? channel.missionId.slice("channel-".length) : null;
+}
+
+async function channelRequest(channel: M9rNativeLoopChannel, path: string, init?: RequestInit): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(`${channel.appUrl.replace(/\/$/, "")}${path}`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${channel.agentToken}`,
+        ...(init?.body ? { "content-type": "application/json" } : {}),
+        ...(init?.headers ?? {}),
+      },
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "network error";
+    throw new Error(`M9R channel request failed: ${redactGovernedToolCredential(detail, channel.agentToken).slice(0, 300)}`);
+  }
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`M9R channel request failed (HTTP ${response.status}): ${redactGovernedToolCredential(detail, channel.agentToken).slice(0, 300)}`);
+  }
+  const body = await response.text().catch(() => "");
+  try {
+    return JSON.parse(redactGovernedToolCredential(body, channel.agentToken)) as unknown;
+  } catch {
+    return {};
+  }
+}
+
+/** Shared tool construction -- the one place all governed tools get wired to the AI SDK's `tool()` shape, used by both turn entry points so they can never drift apart. */
+export function buildM9rNativeTools(root: string, channel: M9rNativeLoopChannel | undefined, emit: (event: M9rNativeActivityEvent) => void): ToolSet {
+  const todos: TodoItem[] = [];
   return {
     read_file: tool({
       description: "Read a UTF-8 text file in the assigned working directory. Use this when you need to inspect existing code or documentation before making a decision. Paths outside the directory and files over 10MB are refused.",
@@ -134,6 +174,15 @@ function buildTools(root: string, channel: M9rNativeLoopChannel | undefined, emi
         const text = await readGovernedFile(root, path);
         emit({ activityKind: "file.read", summary: `Read ${path}`, filePath: path });
         return text;
+      },
+    }),
+    create_file: tool({
+      description: "Create one new UTF-8 text file inside the assigned working directory. Existing files are never overwritten; read and edit them with str_replace instead.",
+      inputSchema: z.object({ path: z.string(), content: z.string().max(10 * 1024 * 1024) }),
+      execute: async ({ path, content }) => {
+        const result = await createGovernedFile(root, path, content);
+        emit({ activityKind: "file.changed", summary: `Created ${path}`, filePath: path });
+        return result;
       },
     }),
     str_replace: tool({
@@ -164,10 +213,15 @@ function buildTools(root: string, channel: M9rNativeLoopChannel | undefined, emi
       }),
       execute: async ({ pattern, path, caseInsensitive, maxMatches }) => ripgrepSearch(root, pattern, path, caseInsensitive, maxMatches),
     }),
+    todo: tool({
+      description: "Keep a bounded checklist for active work in this session. Use list, add, or complete, and only close items after verification.",
+      inputSchema: z.object({ action: z.enum(["list", "add", "complete"]), text: z.string().optional(), id: z.string().optional() }),
+      execute: async ({ action, text, id }) => todoAction(todos, action, text, id),
+    }),
     git_read: tool({
       description: "Check repository state without changing it. Use this to understand the current branch, recent commits, or local diff before reporting work; the allowed operations are status, log, diff_stat, and branch.",
       inputSchema: z.object({
-        operation: z.enum(["status", "log", "diff_stat", "branch"]),
+        operation: z.enum(GIT_READ_OPERATIONS),
         limit: z.number().int().min(1).max(20).default(1),
       }),
       execute: async ({ operation, limit }) => {
@@ -191,6 +245,114 @@ function buildTools(root: string, channel: M9rNativeLoopChannel | undefined, emi
           return result;
         },
       }),
+      search_memory: tool({
+        description: "Search archived workspace sessions for prior decisions and verified context before starting unfamiliar work.",
+        inputSchema: z.object({ query: z.string().max(160).default(""), limit: z.number().int().min(1).max(25).default(8) }),
+        execute: async ({ query, limit }) => {
+          const params = new URLSearchParams({ q: query, limit: String(limit) });
+          const body = await channelRequest(channel, `/api/agent/memory/search?${params.toString()}`) as {
+            matches?: Array<{ title: string; ownerLabel: string; conversationTopic: string; archivedAtMs: number | null; transcript: Array<{ sender: string; body: string }> }>;
+          };
+          const matches = body.matches ?? [];
+          if (matches.length === 0) return "No past sessions matched.";
+          return matches.map((match) => {
+            const when = match.archivedAtMs ? new Date(match.archivedAtMs).toISOString() : "unknown time";
+            const excerpt = match.transcript.map((line) => `  ${line.sender}: ${line.body}`).join("\n") || "  (no transcript captured)";
+            return `## ${match.title}\nOwner: ${match.ownerLabel} · Channel: #${match.conversationTopic} · Archived: ${when}\n${excerpt}`;
+          }).join("\n\n");
+        },
+      }),
+      draft_section: tool({
+        description: "Write or revise one named section of a shared draft document in this channel. Use prose, not raw code or diffs.",
+        inputSchema: z.object({ draftTitle: z.string().min(1).max(200), heading: z.string().min(1).max(120), body: z.string().min(1).max(8_000) }),
+        execute: async ({ draftTitle, heading, body }) => {
+          const conversationId = channelConversationId(channel);
+          if (!conversationId) throw new Error("This Mission isn't bound to a chat channel, so there's nowhere to write this draft.");
+          await channelRequest(channel, `/api/agent/conversations/${encodeURIComponent(conversationId)}/drafts`, { method: "POST", body: JSON.stringify({ draftTitle, heading, body }) });
+          return `Wrote "${heading}" in "${draftTitle}".`;
+        },
+      }),
+      request_evidence_review: tool({
+        description: "Ask the human to review completed work before submitting structured evidence. Wait for explicit approval.",
+        inputSchema: z.object({ summary: z.string().min(1).max(500) }),
+        execute: async ({ summary }) => {
+          const conversationId = channelConversationId(channel);
+          if (!conversationId) throw new Error("This Mission isn't bound to a chat channel, so there's nowhere to request evidence review.");
+          const body = await channelRequest(channel, `/api/agent/conversations/${encodeURIComponent(conversationId)}/evidence/requests`, { method: "POST", body: JSON.stringify({ summary }) }) as { id?: string };
+          return `Evidence review requested. Wait for explicit human approval, then call submit_evidence with requestId ${body.id ?? "returned-by-the-server"}.`;
+        },
+      }),
+      submit_evidence: tool({
+        description: "Submit structured evidence only after the matching evidence request was explicitly approved in-channel.",
+        inputSchema: z.object({
+          requestId: z.string().min(1),
+          evidence: z.object({
+            schemaVersion: z.literal(CHAT_EVIDENCE_SCHEMA_VERSION),
+            summary: z.string().min(1).max(500),
+            work: z.array(z.string().min(1).max(1_000)).min(1).max(16),
+            files: z.array(z.string().min(1).max(500)).max(32),
+            verification: z.array(z.object({ command: z.string().min(1).max(500), result: z.string().min(1).max(1_000) })).min(1).max(16),
+            limitations: z.array(z.string().min(1).max(1_000)).max(16),
+          }).strict(),
+        }),
+        execute: async ({ requestId, evidence }) => {
+          const conversationId = channelConversationId(channel);
+          if (!conversationId) throw new Error("This Mission isn't bound to a chat channel, so there's nowhere to submit this evidence.");
+          await channelRequest(channel, `/api/agent/conversations/${encodeURIComponent(conversationId)}/evidence`, { method: "POST", body: JSON.stringify({ requestId, evidence }) });
+          return "Structured evidence submitted for final human review in the channel.";
+        },
+      }),
+      submit_task_split: tool({
+        description: "Submit a one-time decomposition of a multi-agent request into directly assigned task-contract items.",
+        inputSchema: z.object({
+          conversationId: z.string().min(1).max(200).optional(),
+          anchorMessageId: z.string().min(1).max(200).optional(),
+          items: z.array(z.object({ description: z.string().min(1).max(2_000), expectedFilePaths: z.array(z.string().min(1).max(500)).max(50).optional(), assignedConnectionId: z.string().min(1).max(200) })).min(1).max(16),
+        }),
+        execute: async ({ conversationId, anchorMessageId, items }) => {
+          const resolvedConversationId = conversationId ?? channelConversationId(channel);
+          if (!resolvedConversationId) throw new Error("This Mission isn't bound to a chat channel, so there's no conversation to split work in.");
+          const body = await channelRequest(channel, "/api/bridge/task-contracts", { method: "POST", body: JSON.stringify({ conversationId: resolvedConversationId, anchorMessageId, items }) }) as { dispatched?: number };
+          return `Split submitted: ${items.length} item(s), ${body.dispatched ?? 0} agent(s) woken with their own piece.`;
+        },
+      }),
+      update_task_item_status: tool({
+        description: "Report progress or completion on a task-contract item assigned to this session.",
+        inputSchema: z.object({ itemId: z.string().min(1).max(200), status: z.enum(["in_progress", "done", "failed"]), resultMessageId: z.string().min(1).max(200).optional() }),
+        execute: async ({ itemId, status, resultMessageId }) => {
+          await channelRequest(channel, `/api/bridge/task-contracts/${encodeURIComponent(itemId)}`, { method: "PATCH", body: JSON.stringify({ status, resultMessageId }) });
+          return `Item marked ${status}.`;
+        },
+      }),
+      list_my_task_items: tool({
+        description: "List active task-contract items assigned to this session across the workspace.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          const body = await channelRequest(channel, "/api/bridge/task-contracts") as { items?: Array<{ id: string; description: string; status: string }> };
+          const items = body.items ?? [];
+          return items.length === 0 ? "No active task-contract items assigned to you right now." : items.map((item) => `- ${item.id} [${item.status}]: ${item.description}`).join("\n");
+        },
+      }),
+      request_assignment_change: tool({
+        description: "Ask the human to change the assignment when the current task-contract item has the wrong scope, dependency, capability, or owner.",
+        inputSchema: z.object({ itemId: z.string().min(1).max(200), reason: z.enum(["wrong_scope", "blocked_by_dependency", "outside_capability", "already_done_by_other", "needs_split"]), detail: z.string().min(1).max(600), suggestedConnectionId: z.string().optional() }),
+        execute: async ({ itemId, reason, detail, suggestedConnectionId }) => {
+          await channelRequest(channel, `/api/agent/task-contracts/items/${encodeURIComponent(itemId)}/change-request`, { method: "POST", body: JSON.stringify({ reason, detail, suggestedConnectionId }) });
+          return "Assignment change requested and the item is now blocked. Stop work and wait for a human decision.";
+        },
+      }),
+      ...(TERMINAL_ENABLED ? {
+        handoff_to_terminal: tool({
+          description: "Show a teammate a human-confirmed terminal handoff card; this never executes anything on their machine.",
+          inputSchema: z.object({ targetSessionId: z.string().min(1).max(200), text: z.string().min(1).max(2_000), reason: z.string().max(300).optional() }),
+          execute: async ({ targetSessionId, text, reason }) => {
+            const conversationId = channelConversationId(channel);
+            if (!conversationId) throw new Error("This Mission isn't bound to a chat channel, so there's no conversation to hand off within.");
+            await channelRequest(channel, `/api/agent/conversations/${encodeURIComponent(conversationId)}/handoff-to-terminal`, { method: "POST", body: JSON.stringify({ targetSessionId, text, reason }) });
+            return "Handed off. The teammate must click Send to terminal; nothing was executed.";
+          },
+        }),
+      } : {}),
     } : {}),
   };
 }
@@ -214,7 +376,7 @@ export interface M9rNativeTurnInput {
  */
 export async function runM9rNativeTurn(input: M9rNativeTurnInput): Promise<{ text: string; steps: number }> {
   const languageModel = await resolveModelForTurn(input.workspaceId, input.model);
-  const tools = buildTools(input.workingDirectory, input.channel, () => {});
+  const tools = buildM9rNativeTools(input.workingDirectory, input.channel, () => {});
   const messages: ModelMessage[] = [{ role: "user", content: input.prompt }];
   const result = streamText({
     model: languageModel,
@@ -250,7 +412,7 @@ export async function* runM9rNativeTurnStream(input: M9rNativeTurnInput): AsyncG
   }
 
   const activityQueue: M9rNativeActivityEvent[] = [];
-  const tools = buildTools(input.workingDirectory, input.channel, (event) => activityQueue.push(event));
+  const tools = buildM9rNativeTools(input.workingDirectory, input.channel, (event) => activityQueue.push(event));
   const messages: ModelMessage[] = [{ role: "user", content: input.prompt }];
 
   let result: ReturnType<typeof streamText>;

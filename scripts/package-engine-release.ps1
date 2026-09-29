@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root 'engine\dist'
-$assets = @('m9r-engine.exe', 'm9r-hook.exe')
+$assets = @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe')
 $extension = Join-Path $root 'cli\dist\extension'
 $destination = [IO.Path]::GetFullPath($OutputDirectory)
 
@@ -26,6 +26,7 @@ try {
     foreach ($asset in $assets) { Copy-Item -LiteralPath (Join-Path $dist $asset) -Destination (Join-Path $stage $asset) }
     Copy-Item -LiteralPath $extension -Destination (Join-Path $stage 'extension') -Recurse
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-m9r.ps1') -Destination (Join-Path $stage 'install-m9r.ps1')
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-m9r.cmd') -Destination (Join-Path $stage 'install-m9r.cmd')
     @'
 M9R standalone Windows engine package
 
@@ -34,7 +35,7 @@ Requirements: 64-bit Windows and PowerShell 5.1 or newer. Node.js and npm are no
 Before extracting, verify the ZIP hash against m9r-engine-windows-x64.zip.sha256:
   Get-FileHash .\m9r-engine-windows-x64.zip -Algorithm SHA256
 
-The executables are currently unsigned; a matching SHA-256 checksum detects corruption but does not prove publisher identity. After verifying and extracting the archive, review install-m9r.ps1. If Windows marks it as downloaded, use the file's Properties > Unblock control, then run it normally (do not pipe downloaded code into PowerShell). To install the exact ZIP you verified, point -PackagePath at it; otherwise the script fetches the latest stable release and verifies that download itself:
+The executables are currently unsigned; a matching SHA-256 checksum detects corruption but does not prove publisher identity. After verifying and extracting the archive, review install-m9r.ps1. If Windows marks it as downloaded, use the file's Properties > Unblock control, then double-click install-m9r.cmd (or run the PowerShell script normally; do not pipe downloaded code into PowerShell). To install the exact ZIP you verified, point -PackagePath at it; otherwise the script fetches the latest stable release and verifies that download itself:
   .\install-m9r.ps1 -PackagePath ..\m9r-engine-windows-x64.zip
 
 The installer shows the engine's exact local setup plan and asks before editing agent configuration.

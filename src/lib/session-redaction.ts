@@ -49,6 +49,8 @@ interface Rule {
 // provider key is labeled as such instead of being swallowed by the generic
 // high-entropy catch-all.
 const RULES: Rule[] = [
+  // M9R session credentials are shorter than the generic high-entropy threshold and must never enter shared summaries.
+  { type: "m9r_session_token", re: /\bM9R\s+(?:session\s+)?token\s+(?:is|[:=])\s*[A-Za-z0-9_-]{16,128}\b/gi },
   // Private keys (PEM blocks) — multiline.
   {
     type: "private_key",

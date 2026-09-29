@@ -20,11 +20,70 @@ export const POWER_ACTIONS: readonly WebPowerAction[] = [
   "select_text", "copy", "paste", "upload", "download", "submit", "buy", "post", "follow", "like", "dm", "point", "link", "adopt",
 ];
 
+/** Actions whose successful result can carry page, room, screenshot, or link contents back to the requesting agent. */
+const DISCLOSURE_ACTIONS: ReadonlySet<string> = new Set([
+  "read", "snapshot", "extract", "copy", "find", "screenshot", "link", "tabs",
+]);
+
+export function isDisclosureAction(action: string): boolean {
+  return DISCLOSURE_ACTIONS.has(action);
+}
+
 export type PressKey = string;
 
 /** Keys that only move the viewport or caret when no target is named; they never claim the tab. */
 const VIEW_KEYS: ReadonlySet<string> = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"]);
-const ACTIVATING_KEYS: ReadonlySet<string> = new Set(["Enter", "Return", "Space"]);
+const ACTIVATING_KEYS: ReadonlySet<string> = new Set(["Enter", " "]);
+const PRESS_MODIFIERS: Readonly<Record<string, string>> = {
+  control: "control",
+  ctrl: "control",
+  alt: "alt",
+  shift: "shift",
+  meta: "meta",
+};
+const PRESS_KEY_NAMES: Readonly<Record<string, string>> = {
+  enter: "Enter",
+  return: "Enter",
+  space: " ",
+  tab: "Tab",
+  escape: "Escape",
+  backspace: "Backspace",
+  delete: "Delete",
+  arrowup: "ArrowUp",
+  arrowdown: "ArrowDown",
+  arrowleft: "ArrowLeft",
+  arrowright: "ArrowRight",
+  pageup: "PageUp",
+  pagedown: "PageDown",
+  home: "Home",
+  end: "End",
+};
+
+interface NormalizedPressKey {
+  key: string;
+  modifiers: ReadonlySet<string>;
+}
+
+/** Canonicalize the same modifier aliases and key names accepted by the page executor. */
+function normalizePressKey(value: unknown): NormalizedPressKey | null {
+  if (typeof value !== "string" || value.length > 48) return null;
+  const parts = value.split("+");
+  if (parts.length < 1 || parts.length > 4 || parts.some((part) => !part)) return null;
+
+  const modifiers = new Set<string>();
+  for (const part of parts.slice(0, -1)) {
+    const modifier = PRESS_MODIFIERS[part.toLowerCase()];
+    if (!modifier) return null;
+    modifiers.add(modifier);
+  }
+
+  const rawKey = parts[parts.length - 1];
+  const lowerKey = rawKey.toLowerCase();
+  const key = PRESS_KEY_NAMES[lowerKey]
+    ?? (/^[A-Za-z0-9]$/.test(rawKey) ? rawKey : undefined)
+    ?? (/^f(?:[1-9]|1[0-2])$/i.test(rawKey) ? rawKey.toUpperCase() : undefined);
+  return key ? { key, modifiers } : null;
+}
 
 export const MAX_WAIT_MS = 15_000;
 export const DEFAULT_WAIT_MS = 10_000;
@@ -73,7 +132,7 @@ export type PowerClaimScope =
   | { kind: "form"; key: string }
   | { kind: "field"; key: string; formKey?: string };
 
-const BASE_FIELDS = new Set(["agent", "provider", "sessionId", "owner", "action", "tab"]);
+const BASE_FIELDS = new Set(["agent", "provider", "sessionId", "owner", "action", "tab", "batchClaim"]);
 const TOP_FIELDS: Record<WebPowerAction, readonly string[]> = {
   scroll: ["selector", "args"],
   wait: ["selector", "args"],
@@ -203,7 +262,7 @@ export function validatePowerRequest(request: PowerRequestShape): string | null 
     case "switch":
       return request.tab === undefined ? "switch needs the tab name to bring forward" : null;
     case "press": {
-      if (typeof args.key !== "string" || !/^(?:(?:Control|Ctrl|Alt|Shift|Meta)\+){0,3}(?:[A-Za-z0-9]|Enter|Return|Tab|Escape|Space|Backspace|Delete|Arrow(?:Up|Down|Left|Right)|PageUp|PageDown|Home|End|F(?:[1-9]|1[0-2]))$/.test(args.key) || args.key.length > 48) return "press key must be one of the supported keys or shortcuts";
+      if (!normalizePressKey(args.key)) return "press key must be one of the supported keys or shortcuts";
       if (!bool("shift")) return "shift must be true or false";
       return null;
     }
@@ -287,11 +346,13 @@ export function validatePowerRequest(request: PowerRequestShape): string | null 
 }
 
 function activates(request: PowerRequestShape): boolean {
-  return request.action === "press" && ACTIVATING_KEYS.has(String(request.args?.key));
+  const parsed = normalizePressKey(request.args?.key);
+  return request.action === "press" && !!parsed && ACTIVATING_KEYS.has(parsed.key);
 }
 
 /**
- * Reading, scrolling, waiting, finding, hovering, listing, switching and screenshots are safe. History moves, closing a
+ * Reading, scrolling, waiting, finding, hovering, listing and switching are safe. Screenshots are owner-consented because
+ * they can capture private page state. History moves, closing a
  * tab, Enter/Space on a target and choosing a dropdown option are judged by exactly the rules m9r_web_click uses, so a
  * submit-, pay-, send- or delete-like target is held for the owner.
  */
@@ -323,6 +384,8 @@ export function classifyPowerRisk(request: PowerRequestShape): Risk {
       return classifyWebActionRisk({ action: "click", selector: [request.selector, request.formSelector].filter(Boolean).join(" ") || request.action, targetLabel: request.targetLabel });
     case "right_click":
       return { risky: false };
+    case "screenshot":
+      return { risky: true, category: "secrets" };
     case "press":
       if (!activates(request)) return { risky: false };
       return classifyWebActionRisk({ action: "click", selector: [request.selector, request.formSelector].filter(Boolean).join(" "), targetLabel: request.targetLabel });
@@ -354,14 +417,14 @@ export function powerScopeFor(request: PowerRequestShape): PowerClaimScope | nul
     case "select":
       return { kind: "field", key: request.selector!, ...(request.formSelector ? { formKey: request.formSelector } : {}) };
     case "press": {
-      const key = String(request.args?.key);
-      if (ACTIVATING_KEYS.has(key)) {
+      const parsed = normalizePressKey(request.args?.key);
+      if (parsed && ACTIVATING_KEYS.has(parsed.key)) {
         const submitLike = /(?:submit|checkout|purchase|buy|pay|send|delete|remove|confirm|place[-_ ]?order)/i.test(`${request.selector ?? ""} ${request.targetLabel ?? ""}`);
         if (!submitLike && request.formSelector) return { kind: "form", key: request.formSelector };
         return { kind: "tab", key: "*" };
       }
       if (request.selector) return { kind: "field", key: request.selector, ...(request.formSelector ? { formKey: request.formSelector } : {}) };
-      return VIEW_KEYS.has(key) ? null : { kind: "tab", key: "*" };
+      return parsed && parsed.modifiers.size === 0 && VIEW_KEYS.has(parsed.key) ? null : { kind: "tab", key: "*" };
     }
     case "double_click":
     case "check":

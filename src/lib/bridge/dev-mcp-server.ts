@@ -57,7 +57,9 @@ import { z } from "zod";
 import { CHAT_EVIDENCE_SCHEMA_VERSION } from "@/lib/bridge/chat-evidence-schema";
 import { TERMINAL_ENABLED } from "@/lib/terminal-config";
 import {
+  MAX_FILE_BYTES,
   MAX_GIT_READ_LINES,
+  createGovernedFile,
   readGovernedFile,
   strReplaceGovernedFile,
   listGovernedTree,
@@ -80,6 +82,18 @@ export function createDevMcpServer(workingDirectory: string, channel?: DevMcpCha
   const todos: TodoItem[] = [];
 
   const server = new McpServer({ name: "m9r-dev-mcp", version: "1.0.0" });
+
+  server.registerTool(
+    "create_file",
+    {
+      description: "Create one new UTF-8 text file inside the assigned working directory. Existing files are never overwritten; read and edit them with str_replace instead.",
+      inputSchema: { path: z.string(), content: z.string().max(MAX_FILE_BYTES).describe("The initial UTF-8 file contents.") },
+    },
+    async ({ path, content }) => {
+      const text = await createGovernedFile(root, path, content);
+      return { content: [{ type: "text", text }] };
+    },
+  );
 
   server.registerTool(
     "read_file",

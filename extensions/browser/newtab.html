@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#08131c">
+    <meta name="description" content="M9R search">
+    <title>M9R</title>
+    <link rel="icon" type="image/jpeg" href="assets/m9r-mark.jpg">
+    <link rel="stylesheet" href="newtab.css">
+  </head>
+  <body>
+    <div class="backdrop" aria-hidden="true"></div>
+    <div class="backdrop-shade" aria-hidden="true"></div>
+
+    <main id="main" class="page-shell">
+      <section class="search-surface" aria-labelledby="page-title">
+        <div class="brand">
+          <span class="brand-emblem"><img class="brand-mark" src="assets/m9r-mark.jpg" alt="" width="96" height="96"></span>
+          <h1 id="page-title">M9R</h1>
+        </div>
+
+        <form id="search-form" class="search-form" role="search">
+          <label for="search-input">Search the web</label>
+          <div class="search-box">
+            <input
+              id="search-input"
+              name="q"
+              type="search"
+              placeholder="Search the web"
+              aria-describedby="search-status"
+              autocomplete="off"
+              spellcheck="false"
+              autofocus
+              required
+            >
+            <div class="provider-control">
+              <select id="search-provider" aria-label="Search provider">
+                <option value="google">Google</option>
+                <option value="duckduckgo">DuckDuckGo</option>
+                <option value="bing">Bing</option>
+                <option value="browser" selected>Browser default</option>
+              </select>
+              <svg class="provider-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+            <button type="submit">Search</button>
+          </div>
+          <p id="search-status" class="search-status" role="status" aria-live="polite" hidden></p>
+        </form>
+      </section>
+    </main>
+
+    <script src="src/presence-logic.js"></script>
+    <script src="src/dock-logic.js"></script>
+    <script src="src/presence-overlay.js"></script>
+    <script src="src/content.js"></script>
+    <script src="src/newtab.js"></script>
+  </body>
+</html>

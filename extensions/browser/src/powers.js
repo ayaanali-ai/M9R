@@ -82,6 +82,30 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
       if (!isVisible(el)) return { error: "element is not visible" };
       return { el };
     };
+    const normalizePressKey = (value) => {
+      if (typeof value !== "string" || value.length > 48) return null;
+      const parts = value.split("+");
+      if (parts.length < 1 || parts.length > 4 || parts.some((part) => !part)) return null;
+      const aliases = { control: "control", ctrl: "control", alt: "alt", shift: "shift", meta: "meta" };
+      const modifiers = new Set();
+      for (const part of parts.slice(0, -1)) {
+        const modifier = aliases[part.toLowerCase()];
+        if (!modifier) return null;
+        modifiers.add(modifier);
+      }
+      const rawKey = parts[parts.length - 1];
+      const names = {
+        enter: "Enter", return: "Enter", space: " ", tab: "Tab", escape: "Escape",
+        backspace: "Backspace", delete: "Delete", arrowup: "ArrowUp", arrowdown: "ArrowDown",
+        arrowleft: "ArrowLeft", arrowright: "ArrowRight", pageup: "PageUp", pagedown: "PageDown",
+        home: "Home", end: "End",
+      };
+      const lowerKey = rawKey.toLowerCase();
+      const key = names[lowerKey]
+        || (/^[A-Za-z0-9]$/.test(rawKey) ? rawKey : null)
+        || (/^f(?:[1-9]|1[0-2])$/i.test(rawKey) ? rawKey.toUpperCase() : null);
+      return key ? { key, modifiers } : null;
+    };
 
     if (action === "page_state") {
       const topControls = [...document.querySelectorAll("a[href],button,input:not([type=hidden]),textarea,select,[role=button],[role=link],[role=textbox],[role=searchbox]")].filter((el) => isVisible(el)).slice(0, 12).map((el, position) => ({ position: position + 1, role: roleOf(el), name: nameOf(el) }));
@@ -160,6 +184,8 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
 
     if (action === "press") {
       const key = String(args.key || "");
+      const parsedKey = normalizePressKey(args.key);
+      if (!parsedKey) return { ok: false, error: "press key must be one of the supported keys or shortcuts" };
       const active = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
       let el = selector ? resolve(selector) : active;
       // Sites like Wikipedia swap the search input for a new element once it is used; the field the agent just typed in is
@@ -169,12 +195,10 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
       if (el && selector && el !== active) el.focus();
       const target = el || document.body;
       const beforePage = { url: location.href, visibleText: String(document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40_000) };
-      const parts = key.split("+");
-      const main = parts[parts.length - 1];
-      const mods = parts.slice(0, -1).map((p) => p.toLowerCase());
-      const norm = { Return: "Enter", Space: " " }[main] || main;
+      const norm = parsedKey.key;
+      const mods = parsedKey.modifiers;
       const codes = { Enter: "Enter", Tab: "Tab", Escape: "Escape", " ": "Space", Backspace: "Backspace", Delete: "Delete", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", PageUp: "PageUp", PageDown: "PageDown", Home: "Home", End: "End" };
-      const init = { key: norm, code: codes[norm] || (norm.length === 1 ? "Key" + norm.toUpperCase() : norm), bubbles: true, cancelable: true, shiftKey: !!args.shift || mods.includes("shift"), ctrlKey: mods.includes("control") || mods.includes("ctrl"), altKey: mods.includes("alt"), metaKey: mods.includes("meta") };
+      const init = { key: norm, code: codes[norm] || (norm.length === 1 ? "Key" + norm.toUpperCase() : norm), bubbles: true, cancelable: true, shiftKey: !!args.shift || mods.has("shift"), ctrlKey: mods.has("control"), altKey: mods.has("alt"), metaKey: mods.has("meta") };
       const down = new KeyboardEvent("keydown", init);
       target.dispatchEvent(down);
       if (norm.length === 1 || norm === "Enter") target.dispatchEvent(new KeyboardEvent("keypress", init));

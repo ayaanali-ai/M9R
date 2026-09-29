@@ -20,31 +20,8 @@
   let sendToBroker = () => false;
   let brokerConnected = () => false;
   let lastState = null;
-  // Site-access requests: an agent asked to open a site the owner has not allowed. The open waits while the pill shows an
-  // Allow card; the owner's click (a real gesture inside this extension's own frame) triggers Chrome's permission prompt.
-  const consents = new Map();
-  function consentItems() {
-    return [...consents.values()].map((c) => ({ id: `consent:${c.origin}`, agent: c.agent, provider: c.provider, text: `Allow M9R on ${new URL(c.origin).host}?`, site: new URL(c.origin).host, action: "site access", kind: "site", origin: c.origin, pattern: `${c.origin}/*` }));
-  }
-  function stateWithConsents() {
-    const base = lastState || { type: "ui-state", agents: [], thread: [], approvals: [] };
-    const extra = consentItems();
-    return extra.length ? { ...base, approvals: [...base.approvals, ...extra] } : base;
-  }
-  function requestConsent(url, presence) {
-    let origin = "";
-    try { const u = new URL(url); if (u.protocol === "http:" || u.protocol === "https:") origin = u.origin; } catch {}
-    if (!origin) return Promise.resolve(false);
-    const existing = consents.get(origin);
-    if (existing) return existing.promise;
-    const entry = { origin, agent: String((presence && presence.agent) || "an agent").slice(0, 64), provider: String((presence && presence.provider) || "").slice(0, 40) };
-    entry.promise = new Promise((resolve) => {
-      entry.resolve = resolve;
-      entry.timer = setTimeout(() => { consents.delete(origin); resolve(false); void broadcastState(); }, 90_000);
-    });
-    consents.set(origin, entry);
-    void broadcastState();
-    return entry.promise;
+  function currentState() {
+    return lastState || { type: "ui-state", agents: [], thread: [], approvals: [] };
   }
   const ports = new Set();
   let noncesLoad = null;
@@ -115,11 +92,10 @@
     return (noncesByTab.get(tabId) || []).includes(nonce);
   }
 
-  /** Only M9R's own content script, in the top frame of a normal web page, may register a nonce. */
+  /** Only a top-frame content script or M9R's own New Tab page may register a nonce. */
   function isOwnContentScript(sender) {
     if (!sender || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return false;
-    if (typeof sender.url !== "string" || !/^https?:\/\//.test(sender.url)) return false;
-    return true;
+    return typeof sender.url === "string" && (/^https?:\/\//.test(sender.url) || sender.url === chrome.runtime.getURL("newtab.html"));
   }
 
   async function registerNonce(sender, nonce) {
@@ -177,17 +153,6 @@
       if (!sendToBroker(built.message)) return { ok: false, error: "the local M9R broker is not connected" };
       return { ok: true };
     }
-    if (message.type === "m9r-consent-result") {
-      if (!await isOwnFrame(sender)) return { ok: false };
-      const entry = typeof message.origin === "string" ? consents.get(message.origin) : null;
-      if (entry) {
-        clearTimeout(entry.timer);
-        consents.delete(entry.origin);
-        entry.resolve(message.granted === true);
-        void broadcastState();
-      }
-      return { ok: true };
-    }
     if (message.type === "m9r-pill-open-mic-setup") {
       if (!await isOwnFrame(sender)) return { ok: false };
       await chrome.tabs.create({ url: chrome.runtime.getURL("permission.html?mic=1") });
@@ -218,9 +183,9 @@
   }
 
   async function broadcastState() {
-    if (!lastState && consents.size === 0) return;
+    if (!lastState) return;
     const active = await activeTabIds();
-    const payload = stateWithConsents();
+    const payload = currentState();
     for (const port of ports) if (active.has(port.sender.tab.id)) post(port, payload);
     // Cursor lifecycle: content scripts learn which agents are still running, never the thread text.
     const agents = (lastState ? lastState.agents : []).map(({ id, provider, state }) => ({ id, provider, state }));
@@ -242,7 +207,7 @@
     ports.add(port);
     port.onDisconnect.addListener(() => ports.delete(port));
     post(port, statusMessage());
-    if (lastState || consents.size) post(port, stateWithConsents());
+    if (lastState) post(port, currentState());
   }
 
   // ---- Content scripts on every site the owner has allowed (and nowhere else). ----
@@ -300,8 +265,8 @@
     if (chrome.runtime.onConnect) chrome.runtime.onConnect.addListener((port) => void onConnect(port));
     if (chrome.tabs.onActivated) {
       chrome.tabs.onActivated.addListener(({ tabId }) => {
-        if (!lastState && consents.size === 0) return;
-        for (const port of ports) if (port.sender.tab.id === tabId) post(port, stateWithConsents());
+        if (!lastState) return;
+        for (const port of ports) if (port.sender.tab.id === tabId) post(port, currentState());
       });
     }
     if (chrome.tabs.onRemoved) {
@@ -327,7 +292,6 @@
 
   global.M9RPillBridge = {
     init,
-    requestConsent,
     state(message) { lastState = sanitizeState(message); void broadcastState(); },
     brokerOpen() { sendToBroker({ type: "ui-subscribe" }); broadcastStatus(); },
     brokerClosed() { broadcastStatus(); },

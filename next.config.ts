@@ -1,12 +1,14 @@
 import type { NextConfig } from "next";
-import path from "path";
 import { missionRelayConnectSource } from "./src/lib/mission-relay-csp";
+import { m9rExtensionFrameSource } from "./src/lib/m9r-extension-csp";
 
 // Development may attach directly to the loopback runtime. Production embeds
 // the runtime-owned provider workspace instead, so hosted JavaScript never
 // receives the shell WebSocket or terminal input.
 const localRuntimeConnectSources = " ws://127.0.0.1:43117 ws://localhost:43117";
 const localRuntimeFrameSources = " http://127.0.0.1:43117 http://localhost:43117";
+const configuredM9rExtensionFrameSource = m9rExtensionFrameSource(process.env.M9R_WEB_EXTENSION_ID, process.env.NODE_ENV);
+const m9rExtensionFrameSources = configuredM9rExtensionFrameSource ? ` ${configuredM9rExtensionFrameSource}` : "";
 const configuredMissionRelaySource = missionRelayConnectSource(process.env.MISSION_RELAY_PUBLIC_URL);
 const missionRelayConnectSources = configuredMissionRelaySource ? ` ${configuredMissionRelaySource}` : "";
 
@@ -14,15 +16,18 @@ const isCloudflareBuild = process.env.CLOUDFLARE_BUILD === "true";
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  // Next 16 uses Turbopack for dev and the default production build; keep the
+  // Monaco alias there instead of making the default path depend on webpack.
+  turbopack: {
+    resolveAlias: {
+      "monaco-editor/editor/editor.api": "monaco-editor/esm/vs/editor/editor.api.js",
+    },
+  },
   typescript: {
     ignoreBuildErrors: isCloudflareBuild,
   },
-  webpack: (config) => {
-    config.resolve.alias = {
-      ...config.resolve.alias,
-      "monaco-editor/editor/editor.api": path.resolve(__dirname, "node_modules/monaco-editor/esm/vs/editor/editor.api.js"),
-    };
-    return config;
+  outputFileTracingExcludes: {
+    "*": [".claude/skills/**/*", ".claude/skills"],
   },
   async rewrites() {
     return [{ source: "/try", destination: "/try/index.html" }];
@@ -51,7 +56,7 @@ const nextConfig: NextConfig = {
               "img-src 'self' data: blob:",
               "font-src 'self'",
               `connect-src 'self' https://eymtshaxpkmojsggdtkh.supabase.co${missionRelayConnectSources}${localRuntimeConnectSources}`,
-              `frame-src 'self'${localRuntimeFrameSources}`,
+              `frame-src 'self'${localRuntimeFrameSources}${m9rExtensionFrameSources}`,
               "worker-src 'self' blob:",
               "manifest-src 'self'",
               "frame-ancestors 'none'",

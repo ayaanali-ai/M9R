@@ -16,6 +16,12 @@ test("risk detection does not inspect the typed value and leaves ordinary reads/
   assert.deepEqual(classifyWebActionRisk({ action: "click", selector: "#expand-details" }), { risky: false });
 });
 
+test("opaque snapshot refs require owner approval when current target identity is unavailable", () => {
+  assert.equal(classifyWebActionRisk({ action: "click", selector: "@m9r-ref:e4" }).risky, true);
+  assert.equal(classifyWebActionRisk({ action: "click", selector: "@m9r-ref:e4", targetLabel: "Continue" }).risky, true,
+    "an agent-supplied benign label cannot establish the identity of an opaque ref");
+});
+
 test("page human_typed tasks require the authenticated extension-page channel", () => {
   assert.equal(canCreateHumanTypedPageTask({ origin: "human_typed", channel: "extension_page", ownerAuthenticated: true }), true);
   for (const channel of ["content_script", "page", "agent", "terminal", "unknown"] as const) {

@@ -70,8 +70,19 @@ async function refOf(needle: string): Promise<string | null> {
   return els.find((e) => String(e.name ?? "").toLowerCase().includes(needle.toLowerCase()))?.ref ?? null;
 }
 const pendingActions = async () => { try { return ((await (await fetch(`http://127.0.0.1:${PORT}/web/actions/pending`, { headers: { "x-m9r-key": key() } })).json()) as { actions: Array<{ id: string; action?: string }> }).actions; } catch { return []; } };
-const denyAll = async () => { for (const a of await pendingActions()) await fetch(`http://127.0.0.1:${PORT}/web/actions/deny`, { method: "POST", headers: { "x-m9r-key": key(), "content-type": "application/json" }, body: JSON.stringify({ id: a.id }) }).catch(() => {}); };
-const approveAll = async () => { for (const a of await pendingActions()) await fetch(`http://127.0.0.1:${PORT}/web/actions/approve`, { method: "POST", headers: { "x-m9r-key": key(), "content-type": "application/json" }, body: JSON.stringify({ id: a.id }) }).catch(() => {}); };
+const decideAll = async (decision: "approve" | "deny") => {
+  const path = `/web/actions/${decision}`;
+  for (const action of await pendingActions()) {
+    const response = await fetch(`http://127.0.0.1:${PORT}${path}`, {
+      method: "POST",
+      headers: { "x-m9r-key": key(), "content-type": "application/json" },
+      body: JSON.stringify({ id: action.id }),
+    });
+    if (!response.ok) throw new Error(`broker refused the isolated capability-sweep ${decision} request (${response.status})`);
+  }
+};
+const denyAll = () => decideAll("deny");
+const approveAll = () => decideAll("approve");
 async function held(action: string, extra: Record<string, unknown>): Promise<string> {
   const p = run(action, extra); const first = await Promise.race([p.then(() => "done" as const), sleep(2500).then(() => "wait" as const)]);
   const pend = await pendingActions(); await denyAll(); const r = await p;
@@ -157,7 +168,7 @@ await t("link click navigates (same tab)", async () => { const l = await refOf("
 await t("back returns to the fixture", async () => { const hl = await evalPage("history.length"); const r = await run("back"); await sleep(1500); const path = await evalPage("location.pathname"); const tabs = await run("tabs"); return ok(path === "/fixture.html", "back worked", `historyLength:${hl} ok:${r.ok} err:${r.error} path:${path} tabs:${JSON.stringify(tabs.data).slice(0, 200)}`); });
 await t("a link that opens a new tab becomes an M9R tab", async () => { const l = await refOf("new tab"); if (!l) return ["FAIL", "no link"]; await run("click", { ref: l }); await sleep(2000); const tabs = await run("tabs"); const txt = JSON.stringify(tabs.data); return ok(/shared-new/.test(txt), "tracked as shared-new", txt.slice(0, 160)); });
 await run("close", { tab: "shared-new" }); await sleep(500); await run("switch", { tab: "shared" });
-await t("adopt the owner's tab (owner approves)", async () => { const p = run("adopt", { tab: "adopted" }); await sleep(2500); const pend = (await pendingActions()).length; await approveAll(); const r = await p; const rd = await run("read", { tab: "adopted" }); return ok(pend > 0 && r.ok && rd.ok, `approval asked (${pend}), joined ${JSON.stringify(r.data).slice(0, 80)}`, `pending:${pend} adopt ok:${r.ok} ${r.error ?? ""} read ok:${rd.ok} ${rd.error ?? ""}`); });
+await t("adopt the owner's tab (owner approves)", async () => { const p = run("adopt", { tab: "adopted" }); await sleep(2500); const pend = (await pendingActions()).length; await approveAll(); const r = await p; const rd = await run("read", { tab: "adopted" }); return ok(pend > 0 && r.ok && rd.ok, `approval asked (${pend}), joined ${String(JSON.stringify(r.data)).slice(0, 80)}`, `pending:${pend} adopt ok:${r.ok} ${r.error ?? ""} read ok:${rd.ok} ${rd.error ?? ""}`); });
 await t("reload keeps working", async () => { const r = await run("reload"); return ok(r.ok, "reloaded", String(r.error)); });
 await t("two agents: second joins the shared tab without reload", async () => { await run("type", { selector: "#nm", text: "keepme" }); const r = await run("open", { url: url() }, B); const v = await evalPage("document.querySelector('#nm').value"); return ok(r.ok && v === "keepme", "joined, field intact", `${r.ok} value:${v}`); });
 await t("two agents: typing in a claimed field is refused", async () => { const a = run("type", { selector: "#em", text: "aaa" }, A); const b = await run("type", { selector: "#em", text: "bbb" }, B); await a; return ["INFO", `B result: ${b.ok ? "allowed" : "refused"} ${String(b.error ?? "").slice(0, 100)}`]; });

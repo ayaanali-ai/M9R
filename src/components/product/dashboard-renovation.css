@@ -25,6 +25,13 @@
 .m9r-workspace .product-rail, .m9r-workspace .product-sidebar-wide { background: transparent; }
 .m9r-workspace .product-nav-trigger { box-shadow: none; }
 .m9r-workspace .product-content:has(.wf-atmosphere) .wf-atmosphere > div { max-width: none; }
+.m9r-workspace .m9r-endpoint-status { margin: 0 28px 8px; color: var(--ol-text-muted); font-size: 11px; }
+.m9r-workspace .m9r-endpoint-status > summary { width: fit-content; cursor: pointer; padding: 4px 0; }
+.m9r-workspace .m9r-endpoint-status > summary:hover { color: var(--ol-text-primary); }
+.m9r-workspace .m9r-endpoint-status__content { margin-top: 5px; padding: 12px; border: 1px solid var(--ol-border-subtle); border-radius: 10px; background: var(--ol-surface-1); color: var(--ol-text-primary); }
+.m9r-workspace .m9r-endpoint-status__content ul { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; padding: 0; list-style: none; }
+.m9r-workspace .m9r-endpoint-status__content li { padding: 5px 8px; border: 1px solid var(--ol-border-subtle); border-radius: 7px; }
+.m9r-workspace .m9r-endpoint-status__content h3 { margin-top: 12px; }
 .m9r-workspace .wf-chat-main { container-type: inline-size; position: relative; isolation: isolate; }
 .m9r-workspace .wf-chat-main > :is(.wf-chat-header, .wf-chat-messages, .wf-chat-composer) { position: relative; z-index: 1; }
 .m9r-etheral-shadow { position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; opacity: .42; mask-image: radial-gradient(ellipse at 52% 50%, transparent 10%, #000 100%); }

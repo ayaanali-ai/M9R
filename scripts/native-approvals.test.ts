@@ -125,6 +125,15 @@ test("a standing rule lets one agent hand work to another for a while, but prote
   assert.equal(s.store.getTask("T3")?.approval, "pending", "the rule is gone");
 });
 
+test("agents that both live in the M9R web room message each other without waiting for approval, but native sessions still ask", () => {
+  const store = createLocalStore(mkdtempSync(join(tmpdir(), "m9r-n5-room-")));
+  const room = store.addTask({ from: "web-claude", to: "web-codex", goal: "Which plan has the API tier?", origin: "agent_initiated", idempotencyKey: "r1" });
+  assert.equal(room.task.approval, "approved");
+  const native = store.addTask({ from: "claude", to: "web-codex", goal: "Do a thing", origin: "agent_initiated", idempotencyKey: "r2" });
+  assert.equal(native.task.approval, "pending");
+  assert.equal(store.pendingApprovals().length, 1);
+});
+
 test("pending approvals lapse after a day instead of waiting forever, and the session card tells the agent about the rest", () => {
   let clock = new Date("2026-09-20T12:00:00Z");
   const store = createLocalStore(mkdtempSync(join(tmpdir(), "m9r-n5-clock-")), { now: () => clock });

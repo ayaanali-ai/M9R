@@ -48,6 +48,12 @@ test("redacts a bearer token", () => {
   assert.ok(result.countsByType.bearer_token >= 1);
 });
 
+test("redacts short M9R session credentials that the generic entropy rule misses", () => {
+  const result = redactSession("Your M9R session token is HH2Q9k8G11dwdY320CwibIvBPuMGasAD.");
+  assert.doesNotMatch(result.redactedText, /HH2Q9k8G11dwdY320CwibIvBPuMGasAD/);
+  assert.match(result.redactedText, /REDACTED:M9R_SESSION_TOKEN/);
+});
+
 test("redacts env secret assignments while keeping the key label", () => {
   const result = redactSession("MY_SERVICE_TOKEN=supersecretvalue123456");
   assert.ok(!result.redactedText.includes("supersecretvalue123456"));

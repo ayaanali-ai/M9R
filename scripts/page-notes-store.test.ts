@@ -43,3 +43,31 @@ test("a malformed append-only log fails closed instead of being replaced", () =>
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the page-notes event log stops before exceeding its byte budget and preserves append-only history", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-notes-compact-"));
+  try {
+    let now = 10_000;
+    const options = { now: () => now++, newId: (() => { let id = 0; return () => `n${++id}`; })(), maxEventLogBytes: 512 };
+    const store = createPageNotesStore(root, options);
+    assert.equal(store.append({ room: "repo", agent: "codex", text: "Keep this active note", source: "agent" }).ok, true);
+    let capacityReached = false;
+    for (let i = 0; i < 20; i += 1) {
+      try { assert.equal(store.clear(`empty-room-${i}`).ok, true); }
+      catch (error) {
+        assert.match(String(error), /safe capacity/);
+        capacityReached = true;
+        break;
+      }
+    }
+
+    assert.equal(capacityReached, true, "the writer refuses additional history rather than growing without a bound");
+    const beforeRejectedWrite = readFileSync(store.filePath, "utf8");
+    assert.ok(Buffer.byteLength(beforeRejectedWrite, "utf8") <= 512);
+    assert.throws(() => store.clear("overflow"), /safe capacity/);
+    assert.equal(readFileSync(store.filePath, "utf8"), beforeRejectedWrite, "rejected writes preserve the append-only log byte-for-byte");
+    assert.equal(value(createPageNotesStore(root, options).list("repo"))[0]?.text, "Keep this active note");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

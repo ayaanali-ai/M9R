@@ -2,19 +2,72 @@
  * One hook call, as a function: given the event JSON an agent sent, return the text the hook prints. Used by the small hook
  * program (`m9r-hook.js`) and by the resident engine's hook server, so there is a single copy of the logic.
  */
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createLocalStore, defaultStoreRoot } from "./local-store";
+import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
 import { handleHookEvent, type HookInput } from "./hook-handler";
 import { collectCodexResults, deliverToCodex, pushAnswerToCodex, realDeps, spawnDeliveryRunner } from "./codex-delivery";
+import { createWebBrokerClient } from "./web-broker-client";
+import { brokerKeyPath } from "./web-broker-paths";
 
 export interface HookRequest {
   event: string;
   provider: string;
   input: HookInput | null;
+  /** Original stdin wire payload; populated only by the standalone m9r-hook entrypoint. */
+  rawPayload?: string;
   /** Only the few settings the hook reads (M9R_HOME, CODEX_HOME, PATH...); the caller's own environment, not the server's. */
   env?: Record<string, string | undefined>;
+}
+
+const RAW_MENTION_CAPTURE_MARKER = "capture-next-raw-mention";
+const RAW_MENTION_CAPTURE_LOG = "mention-hook-payloads.jsonl";
+const MAX_RAW_MENTION_RECORD_BYTES = 64 * 1024;
+const MAX_RAW_MENTION_LOG_BYTES = 4 * 1024 * 1024;
+
+/** Arm one bounded, one-shot local capture of the next Claude mention-triggering hook. */
+export function armRawMentionHookCapture(root: string): boolean {
+  const directory = join(root, "diagnostics");
+  const marker = join(directory, RAW_MENTION_CAPTURE_MARKER);
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(marker, `${new Date().toISOString()}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    return false;
+  }
+}
+
+/** Consume an arm marker atomically and preserve the exact wire payload without printing it. */
+export function captureArmedRawMentionPayloadOnce(
+  root: string,
+  provider: string,
+  targets: readonly string[],
+  rawPayload: string | undefined,
+  at = new Date().toISOString(),
+): boolean {
+  if (provider !== "claude-code" || targets.length === 0 || typeof rawPayload !== "string") return false;
+  const directory = join(root, "diagnostics");
+  const marker = join(directory, RAW_MENTION_CAPTURE_MARKER);
+  const claim = `${marker}.claim-${randomUUID()}`;
+  try { renameSync(marker, claim); } catch { return false; }
+  try {
+    const record = JSON.stringify({ at, provider, targets: [...targets], rawPayload });
+    const recordBytes = Buffer.byteLength(record, "utf8") + 1;
+    if (recordBytes > MAX_RAW_MENTION_RECORD_BYTES) return false;
+    const logPath = join(directory, RAW_MENTION_CAPTURE_LOG);
+    const previousBytes = existsSync(logPath) ? statSync(logPath).size : 0;
+    if (previousBytes + recordBytes > MAX_RAW_MENTION_LOG_BYTES) return false;
+    appendFileSync(logPath, `${record}\n`, { encoding: "utf8", mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { unlinkSync(claim); } catch { /* already consumed */ }
+  }
 }
 
 /** The last thing Claude said in a session: the final assistant message in its transcript. Only the tail of the file is read. */
@@ -49,19 +102,42 @@ export function lastClaudeAnswer(input: HookInput, env: Record<string, string | 
  * `inProcess` (the resident engine) the push runs right here instead: starting a second copy of the 92 MB engine cold took
  * 5 s or more, which is most of the delay between typing `@codex` and Codex receiving it.
  */
-export function runHookRequest(req: HookRequest, runnerEntry: string, baseEnv: Record<string, string | undefined> = process.env, inProcess = false): string {
+export async function runHookRequest(req: HookRequest, runnerEntry: string, baseEnv: Record<string, string | undefined> = process.env, inProcess = false): Promise<string> {
   const env = { ...baseEnv, ...(req.env ?? {}) };
-  const store = createLocalStore(defaultStoreRoot(homedir(), env));
+  const root = defaultStoreRoot(homedir(), env);
+  const store = createLocalStore(root);
   const deps = realDeps(env);
   const input: HookInput = { ...(req.input ?? {}) };
   if (!input.hook_event_name && req.event) input.hook_event_name = req.event;
+  const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
   const result = handleHookEvent(input, {
     provider: req.provider,
     store,
+    rawPayload: req.rawPayload,
+    strictTargetIdentity: true,
+    // Opt-in, bounded local evidence for the phantom mention bug. The raw provider payload is
+    // needed to compare what the hook received with the user's visible prompt; never print it.
+    captureMentionInput: (parsed, targets, rawPayload) => {
+      if (env.M9R_CAPTURE_MENTION_PAYLOAD === "1") {
+        const directory = join(root, "diagnostics");
+        const path = join(directory, RAW_MENTION_CAPTURE_LOG);
+        if (!existsSync(path) || statSync(path).size <= MAX_RAW_MENTION_LOG_BYTES) {
+          mkdirSync(directory, { recursive: true, mode: 0o700 });
+          const record = JSON.stringify({ at: new Date().toISOString(), provider: req.provider, targets, raw: parsed });
+          if (Buffer.byteLength(record, "utf8") <= MAX_RAW_MENTION_RECORD_BYTES) appendFileSync(path, `${record}\n`, { encoding: "utf8", mode: 0o600 });
+        }
+      }
+      captureArmedRawMentionPayloadOnce(root, req.provider, targets, rawPayload);
+    },
     dispatch: (id) => { if (inProcess) void deliverToCodex(store, id, deps).catch(() => undefined); else spawnDeliveryRunner(runnerEntry, id, env); },
     collect: () => { collectCodexResults(store, deps); },
     lastAnswer: (i) => lastClaudeAnswer(i, env),
     answerBack: (id) => { if (inProcess) void pushAnswerToCodex(store, id, deps).catch(() => undefined); else spawnDeliveryRunner(runnerEntry, id, env, "answer"); },
   });
+  // A Stop hook is the only authoritative native-session completion signal. Wait for the local broker to publish it
+  // before this hook process/pipe request exits; a fire-and-forget fetch can be abandoned as the provider shuts down.
+  if ((input.hook_event_name ?? req.event) === "Stop" && input.session_id) {
+    try { await web.markDone?.(handleForProvider(req.provider), req.provider, input.session_id); } catch { /* best effort; never fail a provider turn because the optional overlay could not be updated */ }
+  }
   return result ? JSON.stringify(result) : "";
 }

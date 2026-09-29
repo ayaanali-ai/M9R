@@ -1,9 +1,9 @@
 {
-  "name": "@m9r/protocol-placeholder",
-  "version": "0.0.0",
+  "name": "@m9r/web-protocol",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Unpublished M9R web-coordination protocol v0 draft package",
+  "description": "M9R web-coordination protocol v0 schemas, validator, and conformance ledger",
   "exports": {
     ".": "./src/index.ts",
     "./schema": "./schema/protocol.schema.json"

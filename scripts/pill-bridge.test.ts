@@ -86,6 +86,14 @@ test("only the top frame of a web page may register a nonce", async () => {
   assert.equal((await onRuntimeMessage(msg, scriptSender())).ok, true);
 });
 
+test("extension-owned New Tab can register a nonce, but other extension pages cannot", async () => {
+  const { bridge } = load();
+  const msg = { type: "m9r-pill-register", nonce: NONCE };
+  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}newtab.html` }))).ok, true);
+  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}newtab.html`, frameId: 1 }))).ok, false);
+  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}permission.html` }))).ok, false);
+});
+
 test("ui-state is sanitized", () => {
   const { bridge } = load();
   const out = bridge._internals.sanitizeState({ agents: [{ id: "c", provider: "claude", state: "nonsense", doing: "x" }, null], thread: [{ id: "1", kind: "say", text: "hi", agent: "c", provider: "claude" }, { id: "2", kind: "bogus", text: "no" }], approvals: [{ id: "a", text: "t" }, { text: "no id" }] });

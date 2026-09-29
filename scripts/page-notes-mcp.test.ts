@@ -44,7 +44,30 @@ test("m9r_note refuses invalid identity and missing append fields", async () => 
     await assert.rejects(tool.handler({ token: "invalid", action: "list", room: "repo" }), /invalid or has been revoked/);
     const response = await tool.handler({ token: createLocalStore(root).issueIdentity("codex", "codex", "s").token, action: "append", room: "repo" });
     assert.equal(response.isError, true);
-    assert.match(response.content[0].text, /text, sourceUrl, and source are required/);
+    assert.match(response.content[0].text, /text and source are required/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("m9r_note shares durable room memory across agent identities without requiring a page URL", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-shared-memory-mcp-"));
+  try {
+    const local = createLocalStore(root);
+    const codex = local.issueIdentity("codex", "codex", "web-codex-one");
+    const opencode = local.issueIdentity("opencode", "opencode", "web-opencode-one");
+    const server = createM9rMcpServer({ store: local });
+    const tool = (server as unknown as ToolServer)._registeredTools.m9r_note;
+    assert.ok(tool);
+
+    const added = await tool.handler({ token: codex.token, action: "append", room: "project-test", source: "agent", text: "The demo gate is extension restart stability." });
+    assert.equal(added.isError, undefined);
+    const readByTeammate = await tool.handler({ token: opencode.token, action: "list", room: "project-test" });
+    assert.match(readByTeammate.content[0].text, /The demo gate is extension restart stability/);
+    assert.match(readByTeammate.content[0].text, /room-wide/);
+
+    const pageWithoutUrl = await tool.handler({ token: codex.token, action: "append", room: "project-test", source: "page", text: "Untrusted page text" });
+    assert.equal(pageWithoutUrl.isError, true, "page-derived notes still require a URL for provenance");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

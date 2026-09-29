@@ -41,6 +41,11 @@ test("store package is reproducible and includes the production manifest, runtim
     const names = [...files.keys()];
     assert.ok(names.includes("manifest.json"));
     assert.ok(names.includes("permission.html"));
+    assert.ok(names.includes("newtab.html"));
+    assert.ok(names.includes("newtab.css"));
+    assert.ok(names.includes("src/newtab.js"));
+    assert.ok(names.includes("assets/m9r-mark.jpg"));
+    assert.ok(names.includes("assets/m9r-newtab-background.jpg"));
     assert.ok(names.includes("src/background.js"));
     for (const provider of ["claude", "codex", "opencode"]) assert.ok(names.includes(`assets/providers/${provider}.svg`));
     for (const size of [16, 32, 48, 128]) assert.ok(names.includes(`icons/icon-${size}.png`));
@@ -107,24 +112,38 @@ test("screenshot staging rejects truncated or CRC-corrupted PNG data", async () 
   }
 });
 
-test("store manifest requests no ordinary-site permission at install and injects no static all-sites scripts", async () => {
+test("store manifest grants ordinary-site access at install and owns New Tab", async () => {
   const manifest = JSON.parse(await readFile(new URL("../extensions/browser/store-assets/manifest.template.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.deepEqual(manifest.host_permissions, ["http://127.0.0.1/*", "http://localhost/*"]);
-  assert.deepEqual(manifest.optional_host_permissions, ["http://*/*", "https://*/*"]);
+  assert.deepEqual(manifest.host_permissions, ["http://*/*", "https://*/*"]);
+  assert.equal("optional_host_permissions" in manifest, false);
+  assert.deepEqual(manifest.chrome_url_overrides, { newtab: "newtab.html" });
   assert.equal("content_scripts" in manifest, false);
-  assert.deepEqual(manifest.permissions, ["tabs", "scripting", "alarms", "storage"]);
+  assert.deepEqual(manifest.permissions, ["tabs", "scripting", "alarms", "storage", "nativeMessaging", "search"]);
   assert.deepEqual(manifest.web_accessible_resources, [{ resources: ["assets/providers/*.svg", "composer.html", "pill.html"], matches: ["http://*/*", "https://*/*"] }]);
   assert.ok(manifest.description.length <= 132);
 });
 
-test("store manifest guard rejects broad install permissions, extra APIs, and page-injected scripts", async () => {
+test("development manifest also grants ordinary sites and owns New Tab", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../extensions/browser/manifest.json", import.meta.url), "utf8"));
+  assert.deepEqual(manifest.host_permissions, ["http://*/*", "https://*/*"]);
+  assert.ok(manifest.permissions.includes("nativeMessaging"));
+  assert.equal("optional_host_permissions" in manifest, false);
+  assert.deepEqual(manifest.chrome_url_overrides, { newtab: "newtab.html" });
+});
+
+test("store manifest guard rejects unreviewed permissions, extra APIs, and page-injected scripts", async () => {
   const baseline = JSON.parse(await readFile(new URL("../extensions/browser/store-assets/manifest.template.json", import.meta.url), "utf8"));
   assert.equal(validateStoreManifest(baseline), true);
 
+  const withoutDefaultSearch = structuredClone(baseline);
+  withoutDefaultSearch.permissions = withoutDefaultSearch.permissions.filter((permission) => permission !== "search");
+  assert.throws(() => validateStoreManifest(withoutDefaultSearch), /permissions must remain the reviewed minimum set/);
+
   for (const mutate of [
     (manifest) => { manifest.permissions.push("cookies"); },
-    (manifest) => { manifest.host_permissions.push("https://*/*"); },
+    (manifest) => { manifest.host_permissions.push("file:///*"); },
+    (manifest) => { manifest.chrome_url_overrides.newtab = "missing.html"; },
     (manifest) => { manifest.content_scripts = [{ matches: ["<all_urls>"], js: ["src/content.js"] }]; },
     (manifest) => { manifest.web_accessible_resources[0].resources.push("src/*.js"); },
     (manifest) => { manifest.web_accessible_resources[0].resources.push("permission.html"); },
@@ -151,7 +170,7 @@ test("the store package ships the pill, the message bar, their styles and the M9
   try {
     await buildStorePackage(path.join(temp, "candidate.zip"));
     const files = zipFiles(await readFile(path.join(temp, "candidate.zip")));
-    for (const name of ["pill.html", "composer.html", "frame.css", "permission.html", "assets/m9r-mark.png", "src/composer.js", "src/pill.js", "src/frame-common.js", "src/mention-logic.js", "src/dock-logic.js"]) {
+    for (const name of ["pill.html", "composer.html", "newtab.html", "frame.css", "permission.html", "assets/m9r-mark.png", "src/composer.js", "src/pill.js", "src/frame-common.js", "src/mention-logic.js", "src/dock-logic.js"]) {
       assert.ok(files.has(name), `${name} is in the package`);
     }
     assert.equal(verifyPackageComplete(files), true);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -11,6 +12,7 @@ import {
   mergeCodexWebMcp,
   mergeOpenCodeWebMcp,
   planWebSetup,
+  resolveOpenCodeGlobalPaths,
   removeCodexWebMcp,
   removeOpenCodeWebMcp,
   resolveWebMcpRuntime,
@@ -18,7 +20,9 @@ import {
   parseWebSetupList,
   webConfigUninstallMode,
   webExtensionFileAction,
+  planManagedWebExtensionRefresh,
   webExtensionAllowlist,
+  shouldOpenBrowserSetup,
   WEB_EXTENSION_ID,
   webOpenCodeLayout,
 } from "../src/lib/native/web-setup-core.ts";
@@ -40,6 +44,41 @@ test("OpenCode MCP layout is selected from detected major version", () => {
   assert.equal(webOpenCodeLayout("2.0.0-beta.3"), "servers");
   assert.equal(webOpenCodeLayout("OpenCode v2.1.0"), "servers");
   assert.equal(webOpenCodeLayout("unknown"), "legacy");
+});
+
+test("OpenCode global paths follow XDG or ~/.config and preserve an existing supported config", () => {
+  const existing = new Set([
+    join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc"),
+    join("C:/Users/Ada", "AppData", "Roaming", "opencode", "opencode.json"),
+  ]);
+  const paths = resolveOpenCodeGlobalPaths({
+    home: "C:/Users/Ada",
+    appData: "C:/Users/Ada/AppData/Roaming",
+    exists: (path) => existing.has(path),
+  });
+  assert.equal(paths.configPath, join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc"));
+  assert.equal(paths.pluginDirectory, join("C:/Users/Ada", ".config", "opencode", "plugins"));
+
+  const xdgPaths = resolveOpenCodeGlobalPaths({
+    home: "C:/Users/Ada",
+    xdgConfigHome: "D:/Agent Config",
+    exists: () => false,
+  });
+  assert.equal(xdgPaths.configPath, join("D:/Agent Config", "opencode", "opencode.json"));
+  assert.equal(xdgPaths.pluginDirectory, join("D:/Agent Config", "opencode", "plugins"));
+
+  const legacyConfig = resolveOpenCodeGlobalPaths({
+    home: "C:/Users/Ada",
+    appData: "C:/Users/Ada/AppData/Roaming",
+    exists: (path) => path === join("C:/Users/Ada", "AppData", "Roaming", "opencode", "opencode.json"),
+  });
+  assert.equal(legacyConfig.configPath, join("C:/Users/Ada", "AppData", "Roaming", "opencode", "opencode.json"));
+  assert.equal(legacyConfig.pluginDirectory, join("C:/Users/Ada", "AppData", "Roaming", "opencode", "plugins"));
+});
+
+test("browser setup UI opens only when explicitly requested", () => {
+  assert.equal(shouldOpenBrowserSetup(["setup", "--yes"]), false);
+  assert.equal(shouldOpenBrowserSetup(["setup", "--open-browser-setup"]), true);
 });
 
 test("fixed unpacked extension ID is a valid Chromium extension identifier", () => {
@@ -182,4 +221,42 @@ test("extension refresh updates only files still matching the prior install hash
   assert.equal(webExtensionFileAction({ currentHash: "old", installedHash: "old", desiredHash: "old" }), "unchanged");
   assert.equal(webExtensionFileAction({ currentHash: "old", installedHash: "old" }), "delete");
   assert.equal(webExtensionFileAction({ currentHash: "user", installedHash: "old" }), "preserve");
+});
+
+test("extension-only refresh updates owned files and leaves user edits and untracked files alone", () => {
+  const plan = planManagedWebExtensionRefresh({
+    sourceFiles: [
+      { relativePath: "src/content.js", desiredHash: "new-content" },
+      { relativePath: "src/presence-overlay.js", desiredHash: "new-overlay" },
+      { relativePath: "src/untracked.js", desiredHash: "source-untracked" },
+      { relativePath: "src/missing.js", desiredHash: "new-file" },
+    ],
+    installedFiles: [
+      { relativePath: "src/content.js", installedHash: "old-content" },
+      { relativePath: "src/presence-overlay.js", installedHash: "old-overlay" },
+    ],
+    currentHashes: new Map([
+      ["src/content.js", "old-content"],
+      ["src/presence-overlay.js", "locally-edited"],
+      ["src/untracked.js", "untracked-user-file"],
+    ]),
+  });
+
+  assert.deepEqual(plan.map(({ relativePath, action }) => [relativePath, action]), [
+    ["src/content.js", "write"],
+    ["src/presence-overlay.js", "preserve"],
+    ["src/untracked.js", "preserve"],
+    ["src/missing.js", "write"],
+  ]);
+});
+
+test("extension-only refresh rejects duplicate and path-escaping files", () => {
+  const empty = { installedFiles: [], currentHashes: new Map<string, string | null>() };
+  assert.throws(() => planManagedWebExtensionRefresh({ ...empty, sourceFiles: [
+    { relativePath: "src/../outside.js", desiredHash: "hash" },
+  ] }), /Unsafe managed extension relative path/);
+  assert.throws(() => planManagedWebExtensionRefresh({ ...empty, sourceFiles: [
+    { relativePath: "src/content.js", desiredHash: "one" },
+    { relativePath: "src/content.js", desiredHash: "two" },
+  ] }), /Duplicate extension source path/);
 });

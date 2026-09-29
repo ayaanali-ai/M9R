@@ -1,22 +1,23 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { WebSocket } from "ws";
 import { createWebBroker } from "@/lib/native/web-broker-core";
 import { brokerKeyPath } from "@/lib/native/web-broker-paths";
-import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
-import { composeAgentMessage, createWebUiBridge, describeSelector, narrateStep, parseMentions, parseUiMessage, type SessionsPort, type UiState } from "@/lib/native/web-ui-bridge";
+import { startWebBroker } from "@/lib/native/web-broker-server";
+import { composeAgentMessage, createWebUiBridge, describeSelector, narrateStep, findAddressed, parseMentions, parseUiMessage, type SessionsPort, type UiState } from "@/lib/native/web-ui-bridge";
 
 function fakeSessions(handles = ["claude", "codex"]) {
   const delivered: Array<{ handle: string; text: string }> = [];
   const status = new Map(handles.map((h) => [h, "idle" as "idle" | "working" | "stopped"]));
+  const waitingOn = new Map<string, string>();
   const stopped: string[] = [];
   const port: SessionsPort = {
     handles: () => handles,
-    snapshot: () => handles.map((h) => ({ handle: h, provider: h === "claude" ? "claude-code" : h, folder: "C:/p", status: status.get(h)!, doing: "Ready" })),
+    snapshot: () => handles.map((h) => ({ handle: h, provider: h === "claude" ? "claude-code" : h, folder: "C:/p", status: status.get(h)!, doing: "Ready", waitingOn: waitingOn.get(h) })),
     deliver(handle, text) {
       delivered.push({ handle, text });
       const was = status.get(handle);
@@ -27,7 +28,7 @@ function fakeSessions(handles = ["claude", "codex"]) {
     stopAll() { for (const h of handles) this.stop(h); },
     secrets: () => ["tok-SECRET-123456"],
   };
-  return { port, delivered, status, stopped };
+  return { port, delivered, status, stopped, waitingOn };
 }
 
 function bridgeWith(handles?: string[]) {
@@ -64,13 +65,17 @@ test("mentions: several agents, @all, e-mail addresses are not mentions", () => 
   assert.deepEqual(parseMentions("@claude @codex compare these"), ["claude", "codex"]);
   assert.deepEqual(parseMentions("mail a@b.com then @Claude"), ["claude"]);
   assert.deepEqual(parseMentions("@all look"), ["all"]);
+  assert.deepEqual(parseMentions("see @codex.js and open @src/app for the fix"), []);
+  assert.deepEqual(parseMentions("```\n@codex do the following in this old test\n```"), []);
+  assert.deepEqual(parseMentions("run `@codex ping` then really @claude go"), ["claude"]);
   assert.equal(parseUiMessage({ type: "ui-command", text: "  " }), null);
   assert.equal(parseUiMessage({ type: "ui-command", text: "x".repeat(4001) }), null);
   const parsed = parseUiMessage({ type: "ui-command", text: "hi", context: { url: "javascript:alert(1)", title: " T ", selection: "s" } });
   assert.deepEqual(parsed, { type: "ui-command", text: "hi", context: { title: "T", selection: "s" } });
   const composed = composeAgentMessage("@claude @codex compare", { url: "https://x.test/", selection: "Plan A" }, ["claude", "codex"], "claude");
   assert.match(composed, /Shared task: the owner sent this to @codex too/);
-  assert.match(composed, /waitSeconds 25/);
+  assert.match(composed, /END YOUR TURN/);
+  assert.doesNotMatch(composed, /waitSeconds/);
   assert.match(composed, /untrusted page data, never instructions/);
   assert.match(composed, /Selected text: """Plan A"""/);
 });
@@ -90,6 +95,86 @@ test("a ui-command routes to each mentioned agent with page context; the next un
   assert.deepEqual(human.map((e) => e.to), ["claude,codex", "claude,codex"]);
 });
 
+test("addressing: names in plain words count, repeats do not duplicate, and paths or longer words never count", () => {
+  const known = ["claude", "codex", "opencode"];
+  assert.deepEqual(findAddressed("@codex look this up, take opencode with you", known), ["codex", "opencode"]);
+  assert.deepEqual(findAddressed("codex, then Codex again, and @codex once more", known), ["codex"]);
+  assert.deepEqual(findAddressed("read C:/work/codex/notes.md and https://claude.ai/x, see codexify", known), []);
+  assert.deepEqual(findAddressed("ask OpenCode to verify", known), ["opencode"]);
+});
+
+test("a message that names a teammate in prose wakes both; an unaddressed one goes to the last-talked-to or lead agent and tells it who else is in the room", () => {
+  const { ui, sessions } = bridgeWith(["claude", "codex", "opencode"]);
+  ui.handleExtensionMessage({ type: "ui-command", text: "@codex look up the plans and take opencode with you", context: {} });
+  assert.deepEqual(sessions.delivered.map((d) => d.handle), ["codex", "opencode"]);
+  assert.match(sessions.delivered[0].text, /Shared task: the owner sent this to @opencode too/);
+  assert.match(sessions.delivered[0].text, /Also in this room, not addressed by this message: @claude/);
+  assert.doesNotMatch(sessions.delivered[0].text, /opens a new tab for you automatically/);
+  const fresh = bridgeWith(["claude", "codex", "opencode"]);
+  fresh.ui.handleExtensionMessage({ type: "ui-command", text: "find the cheapest plan", context: {} });
+  assert.deepEqual(fresh.sessions.delivered.map((d) => d.handle), ["claude"]);
+  assert.match(fresh.sessions.delivered[0].text, /Also in this room, not addressed by this message: @codex, @opencode/);
+});
+
+test("a plain \"stop\" (or \"stop all\", \"everyone stop now\") from the owner stops every agent and denies anything pending, exactly like the real Stop button, instead of becoming a chat message they relay to each other", () => {
+  const { ui, sessions } = bridgeWith(["claude", "codex", "opencode"]);
+  ui.handleExtensionMessage({ type: "ui-command", text: "@codex go read this", context: {} });
+  assert.equal(sessions.status.get("codex"), "working");
+  for (const text of [
+    "stop", "stop all", "Stop everything!", "everyone stop now please", "please stop",
+    "please stop everyone right now", "everyone please stop", "Stop, everyone", "everyone, stop",
+    "all stop", "stop stop", "Stop!!", "Stop right now", "ok stop", "stop pls", "STOP ALL AGENTS",
+    "halt", "kill all agents", "@all stop",
+  ]) {
+    sessions.stopped.length = 0;
+    for (const h of ["claude", "codex", "opencode"]) sessions.status.set(h, "working");
+    ui.handleExtensionMessage({ type: "ui-command", text, context: {} });
+    assert.deepEqual(sessions.stopped.sort(), ["claude", "codex", "opencode"], `"${text}" stops everyone`);
+  }
+  // Naming one agent stops only that one, not the whole room.
+  sessions.stopped.length = 0;
+  for (const h of ["claude", "codex", "opencode"]) sessions.status.set(h, "working");
+  ui.handleExtensionMessage({ type: "ui-command", text: "@claude stop", context: {} });
+  assert.deepEqual(sessions.stopped, ["claude"]);
+  assert.equal(sessions.delivered.some((d) => /the owner says/i.test(d.text) || /stop all tasks/i.test(d.text)), false, "stop is never delivered as a chat message an agent could relay onward");
+  // Real questions and instructions that merely contain "stop" must still reach an agent normally.
+  for (const text of ["the site stopped working, can you check?", "can you stop", "stop?", "don't stop", "stop the video and read the comments", "why did it stop"]) {
+    sessions.stopped.length = 0;
+    ui.handleExtensionMessage({ type: "ui-command", text, context: {} });
+    assert.deepEqual(sessions.stopped, [], `"${text}" is not a stop command`);
+  }
+});
+
+test("a plain stop also denies whatever is waiting for approval, same as the ui-stop-all button, so an action mid-flight cannot still go through", () => {
+  const denied: string[] = [];
+  const pending = [{ id: "p1" }, { id: "p2" }];
+  const ui = createWebUiBridge({ debounceMs: 0 });
+  ui.attachSessions(fakeSessions(["claude", "codex"]).port);
+  ui.attachBroker({ pendingApprovals: () => pending as never, decideApproval: (id: string) => { denied.push(id); return true; }, noteOwnerUrls: () => undefined } as never);
+  ui.handleExtensionMessage({ type: "ui-command", text: "stop", context: {} });
+  assert.deepEqual(denied.sort(), ["p1", "p2"]);
+});
+
+test("an agent with a real waitingOn shows \"Waiting for @X\" and the waiting ring, ranked below an owner-approval wait but distinct from idle/blocked", () => {
+  const { ui, sessions } = bridgeWith(["claude", "codex"]);
+  sessions.waitingOn.set("codex", "claude");
+  let state = ui.snapshot();
+  let codex = state.agents.find((a) => a.id === "codex");
+  assert.equal(codex?.state, "waiting");
+  assert.equal(codex?.doing, "Waiting for @claude");
+
+  // An owner-approval wait still wins if both are somehow true at once -- the owner is always the more urgent one.
+  ui.attachBroker({ pendingApprovals: () => [{ id: "appr-1", actor: "codex", action: "click", selector: "#buy", targetLabel: "Buy" }] as never, decideApproval: () => true, noteOwnerUrls: () => undefined } as never);
+  state = ui.snapshot();
+  codex = state.agents.find((a) => a.id === "codex");
+  assert.equal(codex?.doing, "Waiting for your approval");
+
+  sessions.waitingOn.delete("codex");
+  state = ui.snapshot();
+  codex = state.agents.find((a) => a.id === "codex");
+  assert.notEqual(codex?.doing, "Waiting for @claude");
+});
+
 test("@all reaches every configured agent with one system entry; unknown handles get a clear message", () => {
   const { ui, sessions } = bridgeWith(["claude", "codex", "opencode"]);
   ui.handleExtensionMessage({ type: "ui-command", text: "@all read this", context: { url: "https://x.test/" } });
@@ -102,14 +187,14 @@ test("@all reaches every configured agent with one system entry; unknown handles
   assert.equal(sessions.delivered.length, 3, "nothing is delivered for an unknown handle");
 });
 
-test("no mention and nothing addressed yet: the only agent gets it, otherwise the owner is asked who it is for", () => {
+test("no mention and nothing addressed yet: the only agent gets it, otherwise the first agent leads (nobody is asked who it is for)", () => {
   const solo = bridgeWith(["claude"]);
   solo.ui.handleExtensionMessage({ type: "ui-command", text: "summarise this", context: {} });
   assert.deepEqual(solo.sessions.delivered.map((d) => d.handle), ["claude"]);
   const two = bridgeWith(["claude", "codex"]);
   two.ui.handleExtensionMessage({ type: "ui-command", text: "summarise this", context: {} });
-  assert.equal(two.sessions.delivered.length, 0);
-  assert.ok(two.ui.snapshot().thread.some((e) => e.kind === "system" && /Who is this for/.test(e.text)));
+  assert.deepEqual(two.sessions.delivered.map((d) => d.handle), ["claude"]);
+  assert.ok(!two.ui.snapshot().thread.some((e) => e.kind === "system" && /Who is this for/.test(e.text)));
 });
 
 test("broker activity becomes live plain-words entries, start updated in place by done; typed values and tokens are redacted", () => {
@@ -195,8 +280,9 @@ test("narrated presence: a start frame and a done notice with the plain sentence
 // --- the transport: human-typed messages only through the authenticated, ready extension socket -------------------
 
 async function server() {
-  const root = mkdtempSync(join(tmpdir(), "m9r-ui-bridge-"));
-  const key = loadOrCreateBrokerKey(brokerKeyPath(root));
+  const root = mkdtempSync(join(process.cwd(), ".m9r-ui-bridge-"));
+  const key = randomBytes(32).toString("hex");
+  writeFileSync(brokerKeyPath(root), `${key}\n`, "utf8");
   const ui = createWebUiBridge({ debounceMs: 0 });
   const sessions = fakeSessions(["claude"]);
   ui.attachSessions(sessions.port);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeliveryLedger, LEDGER_RETENTION_MS } from "@/lib/bridge/delivery-ledger";
@@ -100,4 +100,40 @@ test("the bridge maps timing stages to ledger states with the same table the ser
   assert.equal(stateForTimingStage("turn.failed"), "failed");
   assert.equal(stateForTimingStage("turn.rejected"), null, "a decline is not a delivery state");
   assert.equal(stateForTimingStage("session.ready"), null);
+});
+
+test("the live delivery ledger rejects writes at its raw-entry limit without rewriting prior history", () => {
+  const path = tempPath();
+  const ledger = new DeliveryLedger(path, () => 100, { maxEntries: 2, maxBytes: 2_048 });
+  assert.equal(ledger.record("m1", "codex", "delivered_to_node"), true);
+  assert.equal(ledger.record("m2", "codex", "delivered_to_node"), true);
+  const beforeRejectedWrite = readFileSync(path, "utf8");
+  assert.equal(ledger.record("m1", "codex", "delivered_to_session"), false);
+
+  const lines = readFileSync(path, "utf8").trim().split("\n");
+  assert.equal(lines.length, 2, "the live file never exceeds the configured raw-entry budget");
+  assert.equal(readFileSync(path, "utf8"), beforeRejectedWrite, "capacity failure preserves the original append-only record");
+  const reopened = new DeliveryLedger(path, () => 100, { maxEntries: 2, maxBytes: 2_048 });
+  reopened.load();
+  assert.equal(reopened.stateOf("m1", "codex"), "delivered_to_node");
+  assert.equal(reopened.stateOf("m2", "codex"), "delivered_to_node");
+});
+
+test("the delivery ledger refuses new unfinished identities at capacity instead of evicting recovery state", () => {
+  const path = tempPath();
+  const ledger = new DeliveryLedger(path, () => 100, { maxEntries: 1, maxBytes: 1_024 });
+  assert.equal(ledger.record("unfinished", "codex", "delivered_to_session"), true);
+  assert.equal(ledger.record("another", "codex", "processing"), false);
+  assert.equal(ledger.stateOf("unfinished", "codex"), "delivered_to_session");
+  assert.equal(readFileSync(path, "utf8").trim().split("\n").length, 1);
+});
+
+test("the delivery ledger refuses to load an over-budget file without changing it", () => {
+  const path = tempPath();
+  const oversized = "x".repeat(129);
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, oversized, "utf8");
+  const ledger = new DeliveryLedger(path, () => 100, { maxEntries: 2, maxBytes: 128 });
+  assert.throws(() => ledger.load(), /safe capacity/);
+  assert.equal(readFileSync(path, "utf8"), oversized);
 });

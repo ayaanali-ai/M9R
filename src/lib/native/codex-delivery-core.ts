@@ -20,8 +20,10 @@ export const queueMarker = (taskId: string) => `[M9R ${taskId}]`;
 /** True for a prompt M9R itself pushed into a session. Its @mentions are the sender's name, not a new request to route. */
 export const isM9rPushedPrompt = (prompt: string) => /^\s*\[M9R T\d+\]/.test(prompt);
 
-export function buildQueueMessage(task: Pick<Task, "id" | "from" | "goal">): string {
-  return `${queueMarker(task.id)} Task from @${task.from} (sent through M9R). ${task.goal}\n\nDo this now, then reply with a short summary of what you did; M9R returns your final message to @${task.from}.`;
+export function buildQueueMessage(task: Pick<Task, "id" | "from" | "goal">, sessionToken?: string): string {
+  // The marker is transport metadata used to correlate the answer. The body is only the task text; never forward the
+  // sender's surrounding prompt, chat transcript, routing explanation, or unrelated context into the target session.
+  return `${queueMarker(task.id)}\n${task.goal}${sessionToken ? `\n\nM9R session token for governed MCP tools: ${sessionToken}\nUse this token for M9R tool calls in this session. Do not include it in replies, files, or messages.` : ""}`;
 }
 
 /**

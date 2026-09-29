@@ -11,6 +11,7 @@ import type { TaskName } from "./bench-data";
 export interface WebApi {
   open(url: string): Promise<void>;
   read(selector: string): Promise<string>;
+  clickAndRead(selector: string): Promise<string>;
   type(selector: string, text: string): Promise<void>;
   click(selector: string): Promise<void>;
 }
@@ -84,18 +85,21 @@ const hotelOk = (p: Policy, day: number, row: Row) => {
 const carOk = (p: Policy, zone: string, row: Row) => row[2].split(", ").includes(zone) && !p.forbidden.includes(row[1]);
 
 /** Reads a listing page by page, stopping as soon as `visit` returns true. Returns every row read. */
-async function scan(web: WebApi, url: RunContext["url"], path: (page: number) => string, pages: number, visit: (all: Row[]) => boolean): Promise<Row[]> {
+async function scan(web: WebApi, url: RunContext["url"], hubPath: string, path: (page: number) => string, pages: number, visit: (all: Row[]) => boolean): Promise<Row[]> {
   const all: Row[] = [];
+  await web.open(url(hubPath));
+  await web.click(`a[href="${path(1)}"]`);
   for (let page = 1; page <= pages; page++) {
-    await web.open(url(path(page)));
     all.push(...rowsFrom(await web.read("#rows")));
     if (visit(all)) break;
+    if (page < pages) await web.click("#next");
   }
   return all;
 }
 
 async function submit(web: WebApi, url: RunContext["url"], task: TaskName, fields: Record<string, string>): Promise<void> {
-  await web.open(url(`/${task}/answer`));
+  await web.open(url(task === "trip" ? "/trip/policy" : "/search/spec"));
+  await web.click(`a[href="/${task}/answer"]`);
   for (const [id, value] of Object.entries(fields)) await web.type(`#${id}`, value);
   await web.click("#submit");
 }
@@ -107,11 +111,11 @@ const carPath = (p: number) => `/trip/cars-${p}`;
 async function tripSolo(ctx: RunContext): Promise<void> {
   const [web] = ctx.agents;
   const p = await readPolicy(web, ctx.url);
-  const flights = await scan(web, ctx.url, flightPath, 3, (all) => all.some((r) => flightOk(p, r)));
+  const flights = await scan(web, ctx.url, "/trip/policy", flightPath, 3, (all) => all.some((r) => flightOk(p, r)));
   const flight = flights.find((r) => flightOk(p, r))!;
-  const hotels = await scan(web, ctx.url, hotelPath, 4, (all) => all.some((r) => hotelOk(p, dayOf(flight[2]), r)));
+  const hotels = await scan(web, ctx.url, "/trip/policy", hotelPath, 4, (all) => all.some((r) => hotelOk(p, dayOf(flight[2]), r)));
   const hotel = hotels.find((r) => hotelOk(p, dayOf(flight[2]), r))!;
-  const cars = await scan(web, ctx.url, carPath, 3, (all) => all.some((r) => carOk(p, hotel[2], r)));
+  const cars = await scan(web, ctx.url, "/trip/policy", carPath, 3, (all) => all.some((r) => carOk(p, hotel[2], r)));
   const car = cars.find((r) => carOk(p, hotel[2], r))!;
   await submit(web, ctx.url, "trip", { flight: flight[0], hotel: hotel[0], car: car[0] });
 }
@@ -121,11 +125,11 @@ async function tripParallel(ctx: RunContext): Promise<void> {
   const { url, board } = ctx;
   const worker = async (web: WebApi, kind: string, path: (p: number) => string, pages: number) => {
     await readPolicy(web, url);
-    board.post(kind, await scan(web, url, path, pages, () => false));
+    board.post(kind, await scan(web, url, "/trip/policy", path, pages, () => false));
   };
   const flightsTask = (async () => {
     const p = await readPolicy(a0, url);
-    const flights = await scan(a0, url, flightPath, 3, () => false);
+    const flights = await scan(a0, url, "/trip/policy", flightPath, 3, () => false);
     const [hotels, cars] = await Promise.all([board.wait<Row[]>("hotels"), board.wait<Row[]>("cars")]);
     const flight = flights.find((r) => flightOk(p, r))!;
     const hotel = hotels.find((r) => hotelOk(p, dayOf(flight[2]), r))!;
@@ -141,7 +145,7 @@ async function tripCoordinated(ctx: RunContext): Promise<void> {
 
   const flights = (async () => {
     const p = await readPolicy(a0, url);
-    const rows = await scan(a0, url, flightPath, 3, (all) => all.some((r) => flightOk(p, r)));
+    const rows = await scan(a0, url, "/trip/policy", flightPath, 3, (all) => all.some((r) => flightOk(p, r)));
     const flight = rows.find((r) => flightOk(p, r))!;
     board.post("flight", { id: flight[0], day: dayOf(flight[2]) });
     const [hotel, car] = await Promise.all([board.wait<{ id: string }>("hotel"), board.wait<{ id: string }>("car")]);
@@ -156,7 +160,7 @@ async function tripCoordinated(ctx: RunContext): Promise<void> {
       if (hit) board.post("hotel", { id: hit[0], zone: hit[2] });
       return Boolean(hit);
     };
-    const all = await scan(a1, url, hotelPath, 4, find);
+    const all = await scan(a1, url, "/trip/policy", hotelPath, 4, find);
     if (!board.peek("hotel")) {
       const flight = await board.wait<{ day: number }>("flight");
       const hit = all.find((r) => hotelOk(p, flight.day, r))!;
@@ -172,7 +176,7 @@ async function tripCoordinated(ctx: RunContext): Promise<void> {
       if (hit) board.post("car", { id: hit[0] });
       return Boolean(hit);
     };
-    const all = await scan(a2, url, carPath, 3, find);
+    const all = await scan(a2, url, "/trip/policy", carPath, 3, find);
     if (!board.peek("car")) {
       const hotel = await board.wait<{ zone: string }>("hotel");
       const hit = all.find((r) => carOk(p, hotel.zone, r))!;
@@ -183,7 +187,28 @@ async function tripCoordinated(ctx: RunContext): Promise<void> {
   await Promise.all([flights, hotels, cars]);
 }
 
-const codeFrom = (text: string) => text.trim();
+/** M9R tool responses may append a collaboration note after the selected value. */
+export const codeFrom = (text: string) => text.split("\n[teammates meanwhile]", 1)[0].trim();
+
+/** Extract the page delta returned by M9R's ordered click-plus-snapshot browser operation. */
+export function pageTextAfterBatchClick(text: string): string {
+  let result: unknown;
+  try {
+    result = JSON.parse(codeFrom(text));
+  } catch {
+    throw new Error("m9r_web_do did not return page text after the click");
+  }
+  if (!result || typeof result !== "object" || !("ok" in result) || result.ok !== true || !("steps" in result) || !Array.isArray(result.steps)) {
+    throw new Error("m9r_web_do did not return page text after the click");
+  }
+  const first = result.steps[0];
+  if (!first || typeof first !== "object" || !("response" in first) || !first.response || typeof first.response !== "object" || !("changedPart" in first.response) || typeof first.response.changedPart !== "string") {
+    throw new Error("m9r_web_do did not return page text after the click");
+  }
+  return first.response.changedPart;
+}
+
+const certFrom = (text: string) => /Certification code:\s*([A-HJ-NP-Z2-9]{6})\b/.exec(text)?.[1] ?? "";
 const listPath = (p: number) => `/search/list-${p}`;
 
 async function readTarget(web: WebApi, url: RunContext["url"]): Promise<string> {
@@ -194,29 +219,36 @@ async function readTarget(web: WebApi, url: RunContext["url"]): Promise<string> 
 async function searchSolo(ctx: RunContext): Promise<void> {
   const [web] = ctx.agents;
   const target = await readTarget(web, ctx.url);
+  await web.click(`a[href="${listPath(1)}"]`);
   for (let page = 1; page <= 3; page++) {
-    await web.open(ctx.url(listPath(page)));
     for (const [id] of rowsFrom(await web.read("#rows"))) {
-      await web.open(ctx.url(`/search/item-${id}`));
-      if (codeFrom(await web.read("#cert")) === target) return submit(web, ctx.url, "search", { item: id });
+      const detail = await web.clickAndRead(`a[href="/search/item-${id}"]`);
+      const matches = certFrom(detail) === target;
+      if (matches) return submit(web, ctx.url, "search", { item: id });
+      await web.open(ctx.url(listPath(page)));
     }
+    if (page < 3) await web.click("#next");
   }
 }
 
 async function searchTeam(ctx: RunContext, coordinated: boolean): Promise<void> {
   const { url, board } = ctx;
+  // Prime the shared room page first so participants can independently read the same visited spec.
+  await ctx.agents[0].open(url("/search/spec"));
   const work = ctx.agents.map(async (web, index) => {
     const target = await readTarget(web, url);
-    await web.open(url(listPath(index + 1)));
+    await web.click(`a[href="${listPath(1)}"]`);
+    for (let page = 1; page <= index; page++) await web.click("#next");
     let match: string | null = null;
     for (const [id] of rowsFrom(await web.read("#rows"))) {
       if (coordinated && board.peek("found")) break;
-      await web.open(url(`/search/item-${id}`));
-      if (codeFrom(await web.read("#cert")) === target) {
+      const detail = await web.clickAndRead(`a[href="/search/item-${id}"]`);
+      if (certFrom(detail) === target) {
         match = id;
         if (coordinated) board.post("found", id);
         break;
       }
+      await web.open(url(listPath(index + 1)));
     }
     board.post(`done${index}`, match);
   });

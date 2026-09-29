@@ -248,3 +248,29 @@ export function renderSessionCard(input: CardInput): string {
 export function renderSentAck(taskId: string, to: string): string {
   return `M9R already sent your message to @${to} as task ${taskId}, so @${to} will do it. Do not do that work yourself: tell the user it was sent to @${to}, and continue with anything else. The result will arrive in your inbox.`;
 }
+
+/**
+ * Keeps the task list from growing forever (a live room can produce thousands of tasks; the file that holds them gets
+ * rewritten whole on every write, so its size directly costs every save). Only a task that is fully done -- the target
+ * has a recorded result that the sender has seen, or a delivered task was denied/expired. Pending approvals,
+ * undelivered tasks, work without a result, and unread results are never touched, however old. Dismissing a
+ * notification only hides it from the overlay; it does not complete the work.
+ */
+export function pruneTasks(tasks: readonly Task[], input: { maxCount: number; maxAgeMs: number; now: number }): Task[] {
+  const resolved = (t: Task): boolean => {
+    if (!t.deliveredAt || t.approval === "pending") return false;
+    const hasResult = t.resultSummary !== undefined;
+    const terminalWithoutResult = t.approval === "denied" || t.approval === "expired";
+    return (hasResult && Boolean(t.resultShownAt)) || (!hasResult && terminalWithoutResult);
+  };
+  const prunable = (t: Task): boolean => resolved(t) && input.now - Date.parse(t.createdAt) > input.maxAgeMs;
+  const kept = tasks.filter((t) => !prunable(t));
+  if (kept.length <= input.maxCount) return kept;
+  // Still over budget even after dropping everything old enough: drop the oldest resolved ones first, oldest first,
+  // until back within budget. Unresolved tasks are never dropped no matter how far over budget the list runs.
+  const unresolved = kept.filter((t) => !resolved(t));
+  const resolvedKept = kept.filter((t) => resolved(t)).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  const budgetForResolved = Math.max(0, input.maxCount - unresolved.length);
+  const trimmedResolved = resolvedKept.slice(Math.max(0, resolvedKept.length - budgetForResolved));
+  return [...unresolved, ...trimmedResolved].sort((a, b) => a.seq - b.seq || Date.parse(a.createdAt) - Date.parse(b.createdAt));
+}

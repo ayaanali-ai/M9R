@@ -1417,23 +1417,23 @@ export function createClaudeAcpAdapter(options: Partial<Omit<AcpStdioAdapterOpti
 /**
  * Codex and Claude Code don't speak ACP natively, so they're launched
  * through a dedicated wrapper package (providerEntry above), via
- * process.execPath + a real .js file -- no shell needed. OpenCode is
- * different -- it implements ACP itself (`opencode acp` starts it as a real
- * ACP server over stdio, confirmed against `opencode --help`), so this
- * spawns the real `opencode` binary directly, no wrapper package needed.
- * shell: true is required here specifically: an npm-global install of
- * opencode is a .cmd shim on Windows, and spawn() without a shell doesn't
- * do the PATHEXT resolution a real shell does -- confirmed live, this
- * failed with ENOENT even though `opencode acp` runs fine typed directly
- * into a terminal. args stay a fixed literal (["acp"]), never
- * user-controlled, so there's no shell-injection surface here.
+ * process.execPath + a real .js file -- no shell needed. OpenCode
+ * implements ACP itself (`opencode acp` starts a real ACP server over
+ * stdio). The default bare command opts into shell/PATHEXT resolution for
+ * npm-global Windows shims; callers with a resolved executable path can
+ * disable the shell and invoke that binary directly. In either case, args
+ * stay the fixed literal ["acp"], never user-controlled.
  */
-export function createOpenCodeAcpAdapter(options: Partial<Omit<AcpStdioAdapterOptions, "id" | "command" | "args">> = {}): AcpStdioProviderAdapter {
+export function createOpenCodeAcpAdapter(
+  options: Partial<Omit<AcpStdioAdapterOptions, "id" | "command" | "args">> & { command?: string } = {},
+): AcpStdioProviderAdapter {
   return new AcpStdioProviderAdapter({
     id: "opencode-acp",
-    command: "opencode",
+    command: options.command ?? "opencode",
     args: ["acp"],
-    shell: true,
+    // The bare npm-global command needs shell/PATHEXT resolution on Windows.
+    // A caller that resolved an exact executable path should spawn it directly.
+    shell: options.shell ?? options.command === undefined,
     serverEnv: ({ assignment, workingDirectory }) => {
       const content = openCodeConfigContent(workingDirectory, assignment.missionId);
       return content ? { OPENCODE_CONFIG_CONTENT: content } : {};

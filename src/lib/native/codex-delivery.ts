@@ -18,6 +18,8 @@ export interface DeliveryDeps {
   readRolloutTail(threadId: string): string | null;
   /** Which of these threads are open right now. Optional: without it (or with `unknown`) recency decides. */
   sessionLiveness?(threadIds: string[]): Promise<Record<string, Liveness>>;
+  /** Production hook delivery must target a session with a live M9R identity. Unit callers may opt into legacy fixtures. */
+  requireTargetIdentity?: boolean;
 }
 
 export type DeliveryOutcome =
@@ -38,15 +40,22 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
     store.setDelivery(taskId, { state: "failed", attempts, error: reason });
     return { state: "failed", reason };
   };
-  const everySession = store.sessionsFor("codex");
+  const queueMessageFor = (sessionId: string): string | null => {
+    if (!deps.requireTargetIdentity) return buildQueueMessage(task);
+    const token = store.identityTokenFor("codex", sessionId);
+    return token ? buildQueueMessage(task, token) : null;
+  };
+  const everySession = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
 
   // Rule 1: an explicit link the person made (or M9R made from one clear match) always wins, even over folder or recency.
   const linked = task.fromSession && !task.targetSession ? store.linkedSession(task.from, task.fromSession, "codex", task.cwd) : undefined;
   const linkedTargets = linked ? everySession.filter((session) => session.sessionId === linked.sessionId && (!linked.cwd || normCwd(session.cwd) === normCwd(linked.cwd))) : [];
   if (linked && linkedTargets.length === 1 && isThreadId(linked.sessionId)) {
+    const message = queueMessageFor(linked.sessionId);
+    if (!message) return fail("The target Codex session has no active M9R token; reconnect it before delivery.");
     const command = deps.resolveCodex();
     if (!command) return fail("The codex command was not found on this machine.");
-    const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(linked.sessionId, buildQueueMessage(task))));
+    const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(linked.sessionId, message)));
     if (!outcome.ok) return fail(outcome.error ?? "codex queue failed");
     store.setDelivery(taskId, { state: "queued", attempts, threadId: linked.sessionId, queuedAt: new Date().toISOString(), error: undefined });
     return { state: "queued", threadId: linked.sessionId };
@@ -59,12 +68,16 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   if (task.cwd && !task.targetSession) {
     const exact = everySession.filter((s) => normCwd(s.cwd) === normCwd(task.cwd));
     known = exact;
-    if (known.length === 0 && everySession.length > 0) return fail(`No Codex session is open in ${task.cwd}. Open Codex there and send it one message (a fresh Codex has no session to push into yet), or aim a task: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
+    if (known.length === 0 && everySession.length > 0) return fail(deps.requireTargetIdentity
+      ? `No Codex session with an active M9R identity is open in ${task.cwd}. Start or reconnect Codex so its M9R SessionStart card is present, then retry.`
+      : `No Codex session is open in ${task.cwd}; it will show at the next prompt in whichever session you use. Send one message explicitly to aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
   }
   // Asking the machine costs about a second, so only when there is a choice to make and nobody pinned one.
   const liveness = !task.targetSession && known.length > 1 && deps.sessionLiveness ? await deps.sessionLiveness(known.map((s) => s.sessionId)).catch(() => undefined) : undefined;
   const choice = pickSession(known, { pinned: task.targetSession, senderCwd: task.cwd, now: new Date(), liveness });
-  if (choice.kind === "none") return fail(task.targetSession ? `No Codex session matches "${task.targetSession}". See: m9r-cli sessions` : "No Codex session is known yet. Start a Codex session (with the M9R engine running) and send again.");
+  if (choice.kind === "none") return fail(task.targetSession
+    ? (deps.requireTargetIdentity ? `No Codex session with an active M9R identity matches "${task.targetSession}". Start or reconnect that session, then retry.` : `No Codex session matches "${task.targetSession}"; start that session, then retry.`)
+    : (deps.requireTargetIdentity ? "No Codex session with an active M9R identity is known. Start Codex with M9R enabled so it receives a SessionStart card, then retry." : "No Codex session is known. Start Codex, then retry."));
   if (choice.kind === "ambiguous") return fail(`${choice.sessions.length} Codex sessions are open here and M9R cannot tell which you mean, so it will show at the next prompt in whichever you use. To aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
   // Rule 2: exactly one candidate was just resolved for a sender with a known session: remember it as an auto-link for next time.
   if (task.fromSession) store.setLink(
@@ -74,22 +87,25 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   );
   const endpoint = choice.session;
   if (!isThreadId(endpoint.sessionId)) return fail("The Codex session id looks wrong; open Codex again and retry.");
+  const message = queueMessageFor(endpoint.sessionId);
+  if (!message) return fail("The target Codex session has no active M9R token; reconnect it before delivery.");
   const command = deps.resolveCodex();
   if (!command) return fail("The codex command was not found on this machine.");
 
-  const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(endpoint.sessionId, buildQueueMessage(task))));
+  const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(endpoint.sessionId, message)));
   if (!outcome.ok) return fail(outcome.error ?? "codex queue failed");
   store.setDelivery(taskId, { state: "queued", attempts, threadId: endpoint.sessionId, queuedAt: new Date().toISOString(), error: undefined });
   return { state: "queued", threadId: endpoint.sessionId };
 }
 
 /** Sends the answer to a task back into the Codex session that asked (queued like any pushed message). */
-export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps: Pick<DeliveryDeps, "resolveCodex" | "runCodex">): Promise<DeliveryOutcome> {
+export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps: Pick<DeliveryDeps, "resolveCodex" | "runCodex" | "requireTargetIdentity">): Promise<DeliveryOutcome> {
   const task = store.getTask(taskId);
   if (!task || !task.resultSummary) return { state: "skipped", reason: "no answer yet" };
   if (task.from !== "codex" || !isThreadId(task.fromSession)) return { state: "skipped", reason: "the asker is not a Codex session we can push into" };
   if (task.answerPushedAt) return { state: "skipped", reason: "already sent back" };
-  const askerSessions = store.sessionsFor("codex").filter((session) => session.sessionId === task.fromSession && (!task.cwd || normCwd(session.cwd) === normCwd(task.cwd)));
+  const sessions = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
+  const askerSessions = sessions.filter((session) => session.sessionId === task.fromSession && (!task.cwd || normCwd(session.cwd) === normCwd(task.cwd)));
   if (askerSessions.length !== 1) return { state: "failed", reason: askerSessions.length === 0 ? "the originating Codex session is no longer registered in its folder" : "the originating Codex session is ambiguous; no answer was pushed" };
   const command = deps.resolveCodex();
   if (!command) return { state: "failed", reason: "The codex command was not found on this machine." };
@@ -174,6 +190,7 @@ export function readRolloutTailFor(threadId: string, env: Record<string, string 
 
 export function realDeps(env: Record<string, string | undefined> = process.env): DeliveryDeps {
   return {
+    requireTargetIdentity: true,
     resolveCodex: () => resolveCodexCommand({
       platform: process.platform,
       pathDirs: (env.PATH ?? env.Path ?? "").split(delimiter).filter(Boolean),

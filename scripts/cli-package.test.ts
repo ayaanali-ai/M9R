@@ -15,6 +15,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -175,6 +176,89 @@ test("built CLI ships the local terminal bridge and routes terminal bridge to it
     const built = readFileSync(resolve(distDir, file), "utf8");
     assert.ok(!built.includes("@/lib/"), `${file} must not retain repository-only aliases`);
     assert.ok(!built.includes("../../../src/"), `${file} must not retain repository-relative imports`);
+  }
+});
+
+test("built standalone web setup includes its broker runtime resolver", () => {
+  const entry = readFileSync(resolve(distDir, "m9r.js"), "utf8");
+  assert.ok(existsSync(resolve(distDir, "web-broker-runtime.js")), "missing packaged standalone broker runtime resolver");
+  assert.match(entry, /\.\/web-broker-runtime\.js/);
+});
+
+test("managed extension refresh changes only owned extension files and preserves user files", () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-extension-refresh-"));
+  const home = join(temporaryRoot, "home");
+  const localAppData = join(temporaryRoot, "local-app-data");
+  const source = join(temporaryRoot, "source-extension");
+  const extensionPath = join(localAppData, "M9R", "extension");
+  const m9rHome = join(home, ".m9r");
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+  const put = (path: string, value: string) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, value);
+  };
+
+  try {
+    const sourceManifest = readFileSync(resolve(repoRoot, "extensions", "browser", "manifest.json"), "utf8");
+    const desiredContent = "current managed content";
+    const desiredEdit = "new packaged file that collides with an untracked user file";
+    const desiredNew = "new managed file";
+    put(join(source, "manifest.json"), sourceManifest);
+    put(join(source, "src", "content.js"), desiredContent);
+    put(join(source, "src", "edited.js"), desiredEdit);
+    put(join(source, "src", "untracked.js"), "new source at untracked destination");
+    put(join(source, "src", "new.js"), desiredNew);
+
+    put(join(extensionPath, "manifest.json"), sourceManifest);
+    put(join(extensionPath, "src", "content.js"), "old managed content");
+    put(join(extensionPath, "src", "edited.js"), "user edited after install");
+    put(join(extensionPath, "src", "untracked.js"), "untracked user file");
+
+    const setupManifest = {
+      version: 1,
+      configs: [],
+      extensionPath,
+      extensionFiles: [
+        { path: join(extensionPath, "manifest.json"), hash: hash(sourceManifest) },
+        { path: join(extensionPath, "src", "content.js"), hash: hash("old managed content") },
+        { path: join(extensionPath, "src", "edited.js"), hash: hash("before user edit") },
+      ],
+      extensionDirectories: [join(extensionPath, "src")],
+      brokerConfigPath: join(m9rHome, "web-broker.json"),
+      brokerConfigHash: "untouched-broker-config-marker",
+      brokerTaskActionHash: "untouched-login-task-marker",
+      identityBootstrap: "not-installed",
+      browsers: ["chrome"],
+    };
+    put(join(m9rHome, "web-setup-manifest.json"), JSON.stringify(setupManifest, null, 2));
+    const env = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      LOCALAPPDATA: localAppData,
+      M9R_HOME: m9rHome,
+      M9R_EXTENSION_SOURCE: source,
+    };
+    const cli = resolve(distDir, "m9r.js");
+    const dryRun = execFileSync(process.execPath, [cli, "web", "update-extension", "--dry-run"], { cwd: repoRoot, env, encoding: "utf8" });
+    assert.match(dryRun, /2 update, 1 unchanged, 2 preserved/);
+    assert.equal(readFileSync(join(extensionPath, "src", "content.js"), "utf8"), "old managed content", "dry-run must not write");
+
+    const applied = execFileSync(process.execPath, [cli, "web", "update-extension", "--yes"], { cwd: repoRoot, env, encoding: "utf8" });
+    assert.match(applied, /\[UPDATED\] src\/content\.js/);
+    assert.match(applied, /\[KEEP\] Preserved changed or untracked extension file: src\/edited\.js/);
+    assert.match(applied, /\[KEEP\] Preserved changed or untracked extension file: src\/untracked\.js/);
+    assert.equal(readFileSync(join(extensionPath, "src", "content.js"), "utf8"), desiredContent);
+    assert.equal(readFileSync(join(extensionPath, "src", "edited.js"), "utf8"), "user edited after install");
+    assert.equal(readFileSync(join(extensionPath, "src", "untracked.js"), "utf8"), "untracked user file");
+    assert.equal(readFileSync(join(extensionPath, "src", "new.js"), "utf8"), desiredNew);
+    const updatedManifest = JSON.parse(readFileSync(join(m9rHome, "web-setup-manifest.json"), "utf8")) as typeof setupManifest;
+    assert.equal(updatedManifest.brokerConfigHash, setupManifest.brokerConfigHash);
+    assert.equal(updatedManifest.brokerTaskActionHash, setupManifest.brokerTaskActionHash);
+    assert.equal(updatedManifest.extensionFiles.find((file) => file.path === join(extensionPath, "src", "content.js"))?.hash, hash(desiredContent));
+    assert.equal(updatedManifest.extensionFiles.find((file) => file.path === join(extensionPath, "src", "new.js"))?.hash, hash(desiredNew));
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });
 

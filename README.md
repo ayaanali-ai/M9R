@@ -8,17 +8,13 @@ M9R connects people and agents across providers through shared tasks, messages, 
 
 ## Start the open-web demo
 
-After Node dependencies are installed, start the local broker and load the browser extension in about a minute:
+Use the one supported local setup path:
 
-1. In Chrome or Edge, open `chrome://extensions` or `edge://extensions`, enable Developer mode, and choose **Load unpacked** from `extensions/browser`.
-2. Copy that browser's extension ID, then run this in PowerShell:
+```powershell
+m9r web setup
+```
 
-   ```powershell
-   $env:M9R_EXTENSION_IDS = "<extension-id>"
-   npx.cmd tsx scripts/m9r-web-broker.ts
-   ```
-
-3. Connect Claude Code, Codex, or OpenCode to the local M9R MCP server using [the Windows extension setup guide](docs/INSTALL_EXTENSION.md).
+For a repository checkout before the updated CLI is installed, run `npm ci`, `npm run build:cli`, then `node .\cli\dist\m9r.js web setup`. Setup configures the local broker and provider entries and gives you the exact unpacked-extension folder to load in Chrome or Edge. Do not also run the development broker script or load a second extension copy; those are manual troubleshooting paths, not additional installs. See the [Windows extension setup guide](docs/INSTALL_EXTENSION.md) for the manual steps and current provider limitations.
 
 The owner grants access per site. M9R coordinates approved page reads and actions through the local broker; it does not bypass sign-in, CAPTCHAs, site rules, or provider limits. Password and selected sensitive-field types are blocked, but ordinary page content may still be sensitive and can be shared with the agent/provider you choose. This is an early local workflow, not universal browser compatibility or a guarantee that every action succeeds.
 

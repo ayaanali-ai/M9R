@@ -114,3 +114,10 @@ test("rejects malformed or non-web source URLs and blank room/text", () => {
   assert.equal(store.append(input({ sourceUrl: "file:///etc/passwd" })).ok, false);
   assert.equal(store.append(input({ sourceUrl: "https://user:pass@example.test/path" })).ok, false);
 });
+
+test("source URLs have a maximum stored length", () => {
+  const store = notes();
+  const oversizedUrl = `https://example.test/${"x".repeat(2_050)}`;
+  assert.equal(store.append(input({ source: "page", sourceUrl: oversizedUrl })).ok, false);
+  assert.deepEqual(store.events(), []);
+});

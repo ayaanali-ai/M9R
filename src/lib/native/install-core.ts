@@ -322,6 +322,200 @@ export interface LocalBrokerAutostartSpec {
   removeOnDisconnect: true;
 }
 
+export interface LocalBrokerScheduledTaskInput {
+  taskName: string;
+  executable: string;
+  args: readonly string[];
+  workingDirectory: string;
+  /** Replace an existing task only after the caller has verified it is M9R-owned. */
+  replaceExisting?: boolean;
+}
+
+export interface LocalBrokerScheduledTaskAction {
+  taskName: string;
+  executable: string;
+  arguments: string;
+  workingDirectory: string;
+}
+
+export interface LocalBrokerScheduledTaskSnapshot {
+  taskName: string;
+  taskPath: string;
+  actions: Array<Pick<LocalBrokerScheduledTaskAction, "executable" | "arguments" | "workingDirectory">>;
+  triggers: Array<{ kind: string; enabled: boolean; userId: string }>;
+  principal: { userId: string; logonType: string; runLevel: string };
+  settings: {
+    hidden: boolean;
+    executionTimeLimit: string;
+    allowStartIfOnBatteries: boolean;
+    dontStopIfGoingOnBatteries: boolean;
+    startWhenAvailable: boolean;
+  };
+}
+
+function powerShellLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+/** Quote one argument using the Windows CommandLineToArgvW backslash/quote rules. */
+export function quoteWindowsCommandLineArgument(value: string): string {
+  if (typeof value !== "string" || value.includes("\0")) throw new Error("scheduled-task arguments must be strings without NUL bytes");
+  let result = '"';
+  let backslashes = 0;
+  for (const character of value) {
+    if (character === "\\") {
+      backslashes += 1;
+    } else if (character === '"') {
+      result += `${"\\".repeat(backslashes * 2 + 1)}"`;
+      backslashes = 0;
+    } else {
+      result += `${"\\".repeat(backslashes)}${character}`;
+      backslashes = 0;
+    }
+  }
+  return `${result}${"\\".repeat(backslashes * 2)}"`;
+}
+
+/** Build and validate the exact executable action stored in the task and ownership manifest. */
+export function buildLocalBrokerScheduledTaskAction(input: LocalBrokerScheduledTaskInput): LocalBrokerScheduledTaskAction {
+  for (const [label, value] of [["task name", input.taskName], ["executable", input.executable], ["working directory", input.workingDirectory]] as const) {
+    if (typeof value !== "string" || value.trim() === "" || value.includes("\0")) throw new Error(`${label} is required for broker autostart`);
+  }
+  if (!Array.isArray(input.args) || input.args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) {
+    throw new Error("scheduled-task arguments must be strings without NUL bytes");
+  }
+  return {
+    taskName: input.taskName,
+    executable: input.executable,
+    arguments: input.args.map(quoteWindowsCommandLineArgument).join(" "),
+    workingDirectory: input.workingDirectory,
+  };
+}
+
+export function hashLocalBrokerScheduledTaskAction(action: LocalBrokerScheduledTaskAction): string {
+  return sha256(JSON.stringify(action));
+}
+
+/**
+ * Compare the entire behavior-bearing portion of the current-user broker task.
+ * Extra actions/triggers, a different principal, elevated execution, or relaxed
+ * safety settings make the task user-modified and therefore not ours to replace.
+ */
+export function matchesLocalBrokerScheduledTaskContract(
+  snapshot: LocalBrokerScheduledTaskSnapshot,
+  expectedAction: LocalBrokerScheduledTaskAction,
+  currentUserId: string,
+): boolean {
+  const sameIdentity = (left: string, right: string) => left.trim().toLocaleLowerCase() === right.trim().toLocaleLowerCase();
+  const samePath = (left: string, right: string) => left.trim().replaceAll("/", "\\").toLocaleLowerCase() === right.trim().replaceAll("/", "\\").toLocaleLowerCase();
+  const noTimeLimit = /^(?:PT0S|P0D|00:00:00)$/i.test(snapshot.settings.executionTimeLimit.trim());
+
+  return sameIdentity(snapshot.taskName, expectedAction.taskName)
+    && snapshot.taskPath.replaceAll("/", "\\") === "\\"
+    && snapshot.actions.length === 1
+    && samePath(snapshot.actions[0].executable, expectedAction.executable)
+    && snapshot.actions[0].arguments === expectedAction.arguments
+    && samePath(snapshot.actions[0].workingDirectory, expectedAction.workingDirectory)
+    && snapshot.triggers.length === 1
+    && sameIdentity(snapshot.triggers[0].kind, "Logon")
+    && snapshot.triggers[0].enabled === true
+    && sameIdentity(snapshot.triggers[0].userId, currentUserId)
+    && sameIdentity(snapshot.principal.userId, currentUserId)
+    && sameIdentity(snapshot.principal.logonType, "Interactive")
+    && sameIdentity(snapshot.principal.runLevel, "Limited")
+    && snapshot.settings.hidden === true
+    && noTimeLimit
+    && snapshot.settings.allowStartIfOnBatteries === true
+    && snapshot.settings.dontStopIfGoingOnBatteries === true
+    && snapshot.settings.startWhenAvailable === true;
+}
+
+/** Hash a previously validated task snapshot; scheduler run state is intentionally excluded. */
+export function hashLocalBrokerScheduledTaskDefinition(snapshot: LocalBrokerScheduledTaskSnapshot): string {
+  return sha256(JSON.stringify({
+    taskName: snapshot.taskName,
+    taskPath: snapshot.taskPath,
+    actions: snapshot.actions,
+    triggers: snapshot.triggers,
+    principal: snapshot.principal,
+    settings: snapshot.settings,
+  }));
+}
+
+export interface LocalBrokerUninstallState {
+  inspectionSucceeded: boolean;
+  taskPresent: boolean;
+  taskDefinitionOwned: boolean;
+  taskRemovalVerified: boolean;
+  hasRecordedOwnership: boolean;
+}
+
+/** Never stop the broker or erase its marker while task ownership is uncertain. */
+export function planLocalBrokerUninstall(state: LocalBrokerUninstallState): {
+  removeTask: boolean;
+  removeMarker: boolean;
+  stopBroker: boolean;
+} {
+  const removeTask = state.inspectionSucceeded && state.taskPresent && state.taskDefinitionOwned;
+  const taskIsClean = state.inspectionSucceeded && (!state.taskPresent || (removeTask && state.taskRemovalVerified));
+  const safeToCleanBroker = taskIsClean && state.hasRecordedOwnership;
+  return {
+    removeTask,
+    removeMarker: safeToCleanBroker,
+    stopBroker: safeToCleanBroker,
+  };
+}
+
+/** Register a hidden, current-user logon task without invoking the schtasks CLI. */
+export function buildLocalBrokerScheduledTaskRegisterScript(input: LocalBrokerScheduledTaskInput): string {
+  const action = buildLocalBrokerScheduledTaskAction(input);
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$action = New-ScheduledTaskAction -Execute ${powerShellLiteral(action.executable)} -Argument ${powerShellLiteral(action.arguments)} -WorkingDirectory ${powerShellLiteral(action.workingDirectory)}`,
+    '$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\\$env:USERNAME"',
+    '$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\\$env:USERNAME" -LogonType Interactive -RunLevel Limited',
+    "$settings = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable",
+    `Register-ScheduledTask -TaskName ${powerShellLiteral(action.taskName)} -TaskPath '\\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings${input.replaceExisting ? " -Force" : ""} | Out-Null`,
+  ].join("\n");
+}
+
+export function buildLocalBrokerScheduledTaskInspectScript(taskName: string): string {
+  if (typeof taskName !== "string" || taskName.trim() === "" || taskName.includes("\0")) throw new Error("task name is required");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$tasks = @(Get-ScheduledTask -TaskName ${powerShellLiteral(taskName)} -TaskPath '\\' -ErrorAction SilentlyContinue)`,
+    "if ($tasks.Count -eq 0) { 'null' } elseif ($tasks.Count -ne 1) { throw 'Ambiguous M9R task registration.' } else {",
+    "  $task = $tasks[0]",
+    "  $actions = @($task.Actions | ForEach-Object { [pscustomobject]@{ executable = [string]$_.Execute; arguments = [string]$_.Arguments; workingDirectory = [string]$_.WorkingDirectory } })",
+    "  $triggers = @($task.Triggers | ForEach-Object { $kind = if ($_.CimClass.CimClassName -match 'LogonTrigger$') { 'Logon' } else { [string]$_.CimClass.CimClassName }; [pscustomobject]@{ kind = $kind; enabled = [bool]$_.Enabled; userId = [string]$_.UserId } })",
+    "  $principal = [pscustomobject]@{ userId = [string]$task.Principal.UserId; logonType = [string]$task.Principal.LogonType; runLevel = [string]$task.Principal.RunLevel }",
+    "  $settings = [pscustomobject]@{ hidden = [bool]$task.Settings.Hidden; executionTimeLimit = [string]$task.Settings.ExecutionTimeLimit; allowStartIfOnBatteries = [bool](-not $task.Settings.DisallowStartIfOnBatteries); dontStopIfGoingOnBatteries = [bool](-not $task.Settings.StopIfGoingOnBatteries); startWhenAvailable = [bool]$task.Settings.StartWhenAvailable }",
+    "  [pscustomobject]@{ taskName = [string]$task.TaskName; taskPath = [string]$task.TaskPath; actions = $actions; triggers = $triggers; principal = $principal; settings = $settings; state = [string]$task.State } | ConvertTo-Json -Compress -Depth 6",
+    "}",
+  ].join("\n");
+}
+
+export function buildLocalBrokerScheduledTaskStartScript(taskName: string): string {
+  if (typeof taskName !== "string" || taskName.trim() === "" || taskName.includes("\0")) throw new Error("task name is required");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$task = Get-ScheduledTask -TaskName ${powerShellLiteral(taskName)} -TaskPath '\\' -ErrorAction Stop`,
+    "if ([string]$task.State -notin @('Running', 'Queued')) { Start-ScheduledTask -TaskName $task.TaskName }",
+  ].join("\n");
+}
+
+export function buildLocalBrokerScheduledTaskRemoveScript(taskName: string): string {
+  if (typeof taskName !== "string" || taskName.trim() === "" || taskName.includes("\0")) throw new Error("task name is required");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$task = Get-ScheduledTask -TaskName ${powerShellLiteral(taskName)} -TaskPath '\\' -ErrorAction SilentlyContinue`,
+    "if ($null -ne $task) {",
+    "  if ([string]$task.State -in @('Running', 'Queued')) { Stop-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue }",
+    "  Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false",
+    "}",
+  ].join("\n");
+}
+
 /** Build the explicit local broker launch plan consumed by the CLI's login-task adapter. */
 export function buildLocalBrokerAutostartSpec(input: LocalBrokerAutostartInput): LocalBrokerAutostartSpec {
   for (const [label, value] of [["node executable", input.nodeExecutable], ["CLI entry path", input.cliEntryPath], ["M9R home", input.m9rHome]] as const) {

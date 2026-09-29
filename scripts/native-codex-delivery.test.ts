@@ -87,6 +87,26 @@ test("a typed task is pushed once with the real thread id, and marked delivered"
   assert.equal(deps.calls.length, 1, "a duplicate dispatch never queues a second prompt");
 });
 
+test("strict production delivery refuses missing identity and carries the existing token into the queued task", async () => {
+  const store = newStore();
+  seedCodex(store);
+  const task = typed(store, "Review only the changed files", "strict-identity");
+  const strictDeps = fakeDeps({ requireTargetIdentity: true });
+  const refused = await deliverToCodex(store, task.id, strictDeps);
+  assert.equal(refused.state, "failed");
+  assert.match(refused.state === "failed" ? refused.reason : "", /active M9R identity/i);
+  assert.equal(strictDeps.calls.length, 0);
+
+  const token = store.issueIdentity("codex", "codex", THREAD).token;
+  const queued = await deliverToCodex(store, task.id, strictDeps);
+  assert.deepEqual(queued, { state: "queued", threadId: THREAD });
+  const message = strictDeps.calls[0]?.[strictDeps.calls[0].indexOf("--message") + 1] ?? "";
+  assert.match(message, /Review only the changed files/);
+  assert.ok(message.includes(token), "Codex can call its governed MCP tools from the queued turn");
+  assert.equal(store.verifyIdentity(token)?.sessionId, THREAD, "delivery does not revoke the existing token");
+  assert.doesNotMatch(message, /Task from @claude|surrounding chat/i);
+});
+
 test("an unapproved agent-initiated task is never queued", async () => {
   const store = newStore(); seedCodex(store);
   const t = store.addTask({ from: "claude", to: "codex", goal: "Delete the build folder", origin: "agent_initiated", idempotencyKey: "a1" }).task;
@@ -154,6 +174,23 @@ test("typing @codex in Claude dispatches the push exactly once, and the result c
   assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", cwd: "C:/p", prompt: "thanks again" }, ctx), null);
 });
 
+test("a handle inside pasted text is not a mention, so nothing is sent to that agent", () => {
+  const store = newStore(); seedCodex(store);
+  const dispatched: string[] = [];
+  const ctx = { provider: "claude-code", store, pathExists: () => false, readIndex: () => null, dispatch: (id: string) => dispatched.push(id) };
+  const prompt = "fix the notch " + '<pasted_content id="a1">@codex do the following: old test chatter</pasted_content id="a1">';
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-9", cwd: "C:/p", prompt }, ctx);
+  assert.equal(dispatched.length, 0);
+});
+
+test("a report another agent sends into the session never routes tasks, even when it names @codex", () => {
+  const store = newStore(); seedCodex(store);
+  const dispatched: string[] = [];
+  const ctx = { provider: "claude-code", store, pathExists: () => false, readIndex: () => null, dispatch: (id: string) => dispatched.push(id) };
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-8", cwd: "C:/p", prompt: '<agent-message from="a1"> the pill routes @codex inside code fences </agent-message>' }, ctx);
+  assert.equal(dispatched.length, 0);
+});
+
 test("when Codex folds the queued task and the next prompt into one turn, the task still gets its own answer", () => {
   const line = (o: unknown) => JSON.stringify(o);
   const user = (text: string) => line({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
@@ -176,7 +213,7 @@ test("a prompt M9R pushed into Codex is not routed as a new mention (it names it
   const store = newStore(); seedCodex(store);
   const task = typed(store, "Reply with only the word: live-ok");
   const pushed = buildQueueMessage(task);
-  assert.match(pushed, /@claude/, "the pushed text does name @claude");
+  assert.doesNotMatch(pushed, /@claude/, "the pushed text contains only the task text, not surrounding chat");
   const dispatched: string[] = [];
   const out = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: pushed }, { provider: "codex", store, pathExists: () => false, readIndex: () => null, dispatch: (id) => dispatched.push(id) });
   assert.equal(store.tasksFor("claude").length, 0, "no task was created for the sender");
@@ -292,6 +329,7 @@ test("an older inbox item is not mixed into a prompt M9R pushed; it waits for th
   const pushedTask = store.addTask({ from: "claude", to: "codex", goal: "Reply with only: pushed-one", origin: "human_typed", idempotencyKey: "new" }).task;
   store.setDelivery(pushedTask.id, { state: "queued", threadId: THREAD });
   const ctx = { provider: "codex", store, pathExists: () => false, readIndex: () => null };
+  handleHookEvent({ hook_event_name: "SessionStart", session_id: THREAD, cwd: "C:/p" }, ctx);
   const pushed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: buildQueueMessage(pushedTask) }, ctx);
   assert.equal(pushed, null, "the pushed prompt gets nothing added");
   const real = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "what next?" }, ctx);

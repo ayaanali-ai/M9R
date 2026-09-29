@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
 
-import { detectInstalledAgents, parseAgentsFlag, DETECTABLE_AGENT_KINDS } from "../src/lib/agent-detection-core.ts";
+import { detectInstalledAgents, parseAgentsFlag, DETECTABLE_AGENT_KINDS, buildAgentVersionProbeEnv } from "../src/lib/agent-detection-core.ts";
 
 test("detectInstalledAgents reports only the binaries the probe actually finds, in a stable order", async () => {
   const found = await detectInstalledAgents(async (binary) => {
@@ -32,6 +33,37 @@ test("detectInstalledAgents covers every DETECTABLE_AGENT_KINDS entry", async ()
   for (const kind of DETECTABLE_AGENT_KINDS) {
     assert.ok(found.some((a) => a.kind === kind), `expected ${kind} to be probed and detected`);
   }
+});
+
+test("OpenCode version probes isolate its XDG state without changing the caller environment", () => {
+  const base = {
+    PATH: "C:/tools",
+    XDG_CONFIG_HOME: "C:/private/opencode-config",
+    XDG_DATA_HOME: "C:/private/opencode-data",
+    XDG_CACHE_HOME: "C:/private/opencode-cache",
+    XDG_STATE_HOME: "C:/private/opencode-state",
+  };
+  const isolated = buildAgentVersionProbeEnv("opencode", base, "C:/temp/m9r-probe");
+
+  assert.deepEqual(isolated, {
+    ...base,
+    XDG_CONFIG_HOME: join("C:/temp/m9r-probe", "config"),
+    XDG_DATA_HOME: join("C:/temp/m9r-probe", "data"),
+    XDG_CACHE_HOME: join("C:/temp/m9r-probe", "cache"),
+    XDG_STATE_HOME: join("C:/temp/m9r-probe", "state"),
+  });
+  assert.deepEqual(base, {
+    PATH: "C:/tools",
+    XDG_CONFIG_HOME: "C:/private/opencode-config",
+    XDG_DATA_HOME: "C:/private/opencode-data",
+    XDG_CACHE_HOME: "C:/private/opencode-cache",
+    XDG_STATE_HOME: "C:/private/opencode-state",
+  });
+});
+
+test("other agent probes preserve their existing environment", () => {
+  const base = { PATH: "C:/tools", XDG_CONFIG_HOME: "C:/user/config" };
+  assert.deepEqual(buildAgentVersionProbeEnv("codex", base, "C:/temp/m9r-probe"), base);
 });
 
 test("parseAgentsFlag splits, trims, lowercases, and drops blanks", () => {

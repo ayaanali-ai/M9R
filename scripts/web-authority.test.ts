@@ -165,3 +165,26 @@ test("path-scoped grants cover only the exact path prefix and its descendants", 
   assert.match(String((authority.check({ grantee: bob, action: "read", origin: SITE, path: "/cartoon" }) as { reason: string }).reason), /does not cover path/);
   assert.match(String((authority.check({ grantee: bob, action: "read", origin: SITE }) as { reason: string }).reason), /unknown/);
 });
+
+
+test("pending web-authority requests and approved grants have fail-closed live capacity limits", () => {
+  const pending = setup().authority;
+  for (let i = 0; i < 256; i += 1) {
+    assert.equal(pending.requestGrant({ grantee: { owner: `bob-${i}`, agent: "codex" }, origin: SITE, actions: ["read"] }).ok, true);
+  }
+  const overPending = pending.requestGrant({ grantee: { owner: "bob-over", agent: "codex" }, origin: SITE, actions: ["read"] });
+  assert.equal(overPending.ok, false, "excess pending requests must not grow the in-memory snapshot");
+  assert.equal(pending.snapshot().requests.length, 256);
+
+  const grants = setup().authority;
+  for (let i = 0; i < 512; i += 1) {
+    const request = grants.requestGrant({ grantee: { owner: `bob-${i}`, agent: "codex" }, origin: SITE, actions: ["read"] });
+    assert.ok(request.ok);
+    assert.ok(grants.approve(request.request.id).ok);
+  }
+  const pendingAtCapacity = grants.requestGrant({ grantee: { owner: "bob-over", agent: "codex" }, origin: SITE, actions: ["read"] });
+  assert.ok(pendingAtCapacity.ok);
+  assert.equal(grants.approve(pendingAtCapacity.request.id).ok, false, "an active grant must never be silently evicted to make room");
+  assert.equal(grants.grants().length, 512);
+  assert.equal(grants.pendingRequests().length, 1, "the pending owner decision remains available after capacity is reached");
+});

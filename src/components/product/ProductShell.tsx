@@ -218,6 +218,16 @@ export default function ProductShell({
           {!reviewerDemo && (
             <div className="product-rail-foot">
               <Link
+                href="/rooms/new"
+                aria-current={isActiveHref("/rooms") ? "page" : undefined}
+                className={isActiveHref("/rooms") ? "product-rail-btn product-nav-active" : "product-rail-btn"}
+                data-tip="Rooms"
+                aria-label="Rooms — get a shareable link guests can join with no account"
+                prefetch={false}
+              >
+                <NavIcon name="room" />
+              </Link>
+              <Link
                 href="/dashboard/settings"
                 aria-current={isActiveHref("/dashboard/settings") ? "page" : undefined}
                 className={isActiveHref("/dashboard/settings") ? "product-rail-btn product-nav-active" : "product-rail-btn"}
@@ -354,6 +364,17 @@ export default function ProductShell({
             </Link>
           );
         })}
+        {!reviewerDemo && (
+          <Link
+            href="/rooms/new"
+            aria-current={isActiveHref("/rooms") ? "page" : undefined}
+            className={isActiveHref("/rooms") ? "product-mobile-active" : ""}
+            prefetch={false}
+          >
+            <NavIcon name="room" />
+            <span>Rooms</span>
+          </Link>
+        )}
         {!reviewerDemo && (
           <Link
             href="/dashboard/settings"
@@ -658,6 +679,8 @@ function NavIcon({ name }: { name: string }) {
     // is a sun/asterisk silhouette, not a gear -- confirmed live and
     // flagged as a bug, not a taste call.
     settings: <><circle cx="9" cy="9" r="2"/><circle cx="9" cy="9" r="4.7"/><path d="M13.7 9L15.3 9M12.32 12.32L13.45 13.45M9 13.7L9 15.3M5.68 12.32L4.55 13.45M4.3 9L2.7 9M5.68 5.68L4.55 4.55M9 4.3L9 2.7M12.32 5.68L13.45 4.55"/></>,
+    // Rooms: a shared link -- two linked rings, for the room-URL join/share surface.
+    room: <><circle cx="6.5" cy="9" r="3"/><circle cx="11.5" cy="9" r="3"/></>,
     help: <><circle cx="9" cy="9" r="6"/><path d="M7.4 7a1.7 1.7 0 1 1 2.4 1.55c-.55.26-.8.65-.8 1.2M9 12.5h.01"/></>,
     // Callsign: a broadcasting beacon — concentric arcs around a center dot.
     callsign: <><circle cx="9" cy="9" r="1.3"/><path d="M6 6a4.2 4.2 0 0 1 6 0M4 4a7 7 0 0 1 10 0"/></>,

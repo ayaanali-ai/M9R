@@ -32,6 +32,7 @@ class FakeElement {
   click() { this.clicked = true; }
   dispatchEvent(event) { this.dispatched.push(event); return true; }
   getBoundingClientRect() { return this.rect; }
+  getClientRects() { return [this.rect]; }
   contains(target) { return target === this || target?.parentElement === this; }
   getAttribute(name) { return name === "autocomplete" ? this.autocomplete : this.attributes[name] ?? null; }
   hasAttribute(name) { return this.getAttribute(name) !== null; }
@@ -56,7 +57,7 @@ function createPage({ origin = "https://allowed.example", pathname = "/cart", el
   body.innerText = body.textContent = "body text";
   const target = hitTarget === undefined ? element : hitTarget;
   const queriedSelectors = [];
-  const window = { __m9rPageActionRefMap: refMap };
+  const window = { __m9rPageActionRefMap: refMap, innerWidth: 1024, innerHeight: 768 };
   const context = {
     document: {
       body,
@@ -167,6 +168,51 @@ test("click only activates a visible, enabled, unobscured element", () => {
   assert.equal(visible.element.clicked, true);
 });
 
+test("trusted click planning returns a bounded visible point without dispatching a DOM click", () => {
+  const page = createPage();
+  const plan = page.m9rPageClickPlan("#target", "https://allowed.example", "/cart", null, null, "left", 1);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.data.viewportWidth, 1024);
+  assert.equal(plan.data.viewportHeight, 768);
+  assert.ok(plan.data.x >= 10 && plan.data.x <= 110);
+  assert.ok(plan.data.y >= 20 && plan.data.y <= 50);
+  assert.equal(page.element.clicked, false);
+  assert.deepEqual(page.element.dispatched, []);
+});
+
+test("trusted click planning refuses bad grants, hidden, disabled, obscured, and out-of-viewport targets", () => {
+  const wrongOrigin = createPage({ origin: "https://attacker.example" });
+  assertPageResult(wrongOrigin.m9rPageClickPlan("#target", "https://allowed.example", "/cart", null, null, "left", 1), { ok: false, error: "page origin or path does not match the granted site" });
+  const wrongPath = createPage({ pathname: "/account" });
+  assertPageResult(wrongPath.m9rPageClickPlan("#target", "https://allowed.example", "/cart", null, null, "left", 1), { ok: false, error: "page origin or path does not match the granted site" });
+  const disabled = createPage();
+  disabled.element.disabled = true;
+  assertPageResult(disabled.m9rPageClickPlan("#target", null, null, null, null, "left", 1), { ok: false, error: "element is disabled" });
+  const hidden = createPage();
+  hidden.element.visibility = "hidden";
+  assertPageResult(hidden.m9rPageClickPlan("#target", null, null, null, null, "left", 1), { ok: false, error: "element is not visible" });
+  const covered = createPage({ hitTarget: new FakeElement() });
+  assertPageResult(covered.m9rPageClickPlan("#target", null, null, null, null, "left", 1), { ok: false, error: "element is obscured" });
+  const outside = createPage();
+  assertPageResult(outside.m9rPageClickPlan(null, null, null, 1024, 10, "left", 1), { ok: false, error: "click point is outside the visible page" });
+});
+
+test("trusted click planning samples actual inline fragments instead of empty space in their union rectangle", () => {
+  const inline = new FakeElement();
+  inline.rect = { left: 10, top: 20, right: 110, bottom: 50, width: 100, height: 30 };
+  inline.getClientRects = () => [
+    { left: 10, top: 20, right: 30, bottom: 50, width: 20, height: 30 },
+    { left: 90, top: 20, right: 110, bottom: 50, width: 20, height: 30 },
+  ];
+  const page = createPage({ element: inline });
+  page.document.elementFromPoint = (x, y) => (y >= 20 && y <= 50 && (x >= 10 && x <= 30 || x >= 90 && x <= 110)) ? inline : new FakeElement();
+
+  const plan = page.m9rPageClickPlan("#target", null, null, null, null, "left", 1);
+  assert.equal(plan.ok, true);
+  assert.ok(plan.data.x >= 10 && plan.data.x <= 30 || plan.data.x >= 90 && plan.data.x <= 110);
+  assert.equal(page.element.clicked, false);
+});
+
 test("rechecks page origin after scrolling and immediately before clicking", () => {
   const element = new FakeElement();
   const page = createPage({ element, onScroll: (context) => { context.location.origin = "https://attacker.example"; } });
@@ -249,14 +295,14 @@ test("snapshot traverses open shadow roots and same-origin frames, caps results,
   assertPageResult(page.m9rPageClick("@m9r-ref:e3"), { ok: true, data: { clicked: true } });
 });
 
-test("page power target returns the action rectangle, find and extract are structured and bounded", () => {
+test("page power target returns the action rectangle, find and extract are structured and bounded", async () => {
   const button = new FakeElement();
   button.attributes["aria-label"] = "Search";
   const page = createPage({ element: button });
-  const target = page.m9rPagePower("target", "#target", {}, "https://allowed.example", "/cart");
+  const target = await page.m9rPagePower("target", "#target", {}, "https://allowed.example", "/cart");
   assert.equal(target.ok, true);
   assert.deepEqual(JSON.parse(JSON.stringify(target.data.rect)), { x: 10, y: 20, width: 100, height: 30 });
-  const found = page.m9rPagePower("find", undefined, { query: "visible page" });
+  const found = await page.m9rPagePower("find", undefined, { query: "visible page" });
   assert.equal(found.ok, true);
   assert.ok(found.data.matches.length >= 1);
 
@@ -266,7 +312,7 @@ test("page power target returns the action rectangle, find and extract are struc
   table.tagName = "TABLE";
   table.querySelectorAll = (selector) => selector === "tr" ? [row] : [];
   page.document.querySelector = () => table;
-  const extracted = page.m9rPagePower("extract", "#target", { maxRows: 1 });
+  const extracted = await page.m9rPagePower("extract", "#target", { maxRows: 1 });
   assert.equal(extracted.ok, true);
   assert.deepEqual(JSON.parse(JSON.stringify(extracted.data.rows)), [["A", "B"]]);
 });
@@ -292,4 +338,15 @@ test("click dispatches page mouse events and type uses insertText with an input 
   assertPageResult(page.m9rPageType("#target", "inserted"), { ok: true, data: { typed: 8 } });
   assert.deepEqual(commands.at(-1), ["insertText", "inserted"]);
   assert.ok(input.dispatched.some((event) => event.type === "input"));
+});
+
+test("live typing keeps a long value bounded instead of animating every character", async () => {
+  const input = new FakeInput();
+  const page = createPage({ element: input });
+  const value = "x".repeat(600);
+  const started = Date.now();
+  const result = await page.m9rPageType("#target", value, undefined, undefined, true);
+  assertPageResult(result, { ok: true, data: { typed: 600 } });
+  assert.equal(input.value, value);
+  assert.ok(Date.now() - started < 2500, "long typing should not block the agent turn for several seconds");
 });

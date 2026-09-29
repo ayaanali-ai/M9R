@@ -13,14 +13,27 @@ import { createHash } from "node:crypto";
  * transport needs.
  */
 
-import { readFile, writeFile, readdir, stat } from "node:fs/promises";
-import { join, relative, resolve as resolvePath, isAbsolute } from "node:path";
+import { readFile, writeFile, readdir, stat, realpath } from "node:fs/promises";
+import { dirname, join, relative, resolve as resolvePath, isAbsolute } from "node:path";
 import { spawn } from "node:child_process";
 
 export const MAX_FILE_BYTES = 10 * 1024 * 1024; // Same cap as Buzz's paths.rs MAX_FILE_BYTES.
 export const MAX_RESULT_CHARS = 200_000; // Bounded tool output, consistent with this codebase's evidence/message size limits elsewhere.
 export const GIT_READ_TIMEOUT_MS = 10_000;
 export const MAX_GIT_READ_LINES = 20;
+export const GIT_READ_OPERATIONS = ["status", "log", "diff_stat", "branch"] as const;
+const GIT_READ_ENVIRONMENT_KEYS = ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE"] as const;
+
+/** Pass only process settings Git needs; never forward provider, M9R, or other application credentials to the child. */
+export function gitReadEnvironment(source: Readonly<Record<string, string | undefined>> = process.env): NodeJS.ProcessEnv {
+  const env = Object.create(null) as NodeJS.ProcessEnv;
+  const sourceKeys = new Map(Object.keys(source).map((key) => [key.toUpperCase(), key]));
+  for (const allowedKey of GIT_READ_ENVIRONMENT_KEYS) {
+    const sourceKey = sourceKeys.get(allowedKey.toUpperCase());
+    if (sourceKey && source[sourceKey] !== undefined) env[allowedKey] = source[sourceKey];
+  }
+  return env;
+}
 
 /** True when `candidate` (an absolute, resolved path) is `root` itself or lies inside it. Pure string/segment comparison on already-resolved paths -- no symlink resolution, matching mission-path-containment.ts's same documented limitation. */
 export function containsPath(root: string, candidate: string): boolean {
@@ -37,12 +50,32 @@ export function resolveWithin(root: string, requestedPath: string): string {
   return candidate;
 }
 
+async function assertCanonicalPathWithin(root: string, requestedPath: string, resolved: string): Promise<void> {
+  const [canonicalRoot, canonicalPath] = await Promise.all([realpath(root), realpath(resolved)]);
+  if (!containsPath(canonicalRoot, canonicalPath)) {
+    throw new Error(`"${requestedPath}" resolves outside the working directory and is refused.`);
+  }
+}
+
+async function assertCanonicalParentWithin(root: string, requestedPath: string, resolved: string): Promise<void> {
+  const [canonicalRoot, canonicalParent] = await Promise.all([realpath(root), realpath(dirname(resolved))]);
+  if (!containsPath(canonicalRoot, canonicalParent)) {
+    throw new Error(`"${requestedPath}" resolves outside the working directory and is refused.`);
+  }
+}
+
 export function truncate(text: string): string {
   return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n...[truncated, ${text.length - MAX_RESULT_CHARS} more characters]` : text;
 }
 
+/** Remove a known credential before forwarding remote error or response text to an agent. */
+export function redactGovernedToolCredential(text: string, credential: string): string {
+  return credential ? text.split(credential).join("[REDACTED]") : text;
+}
+
 export async function readGovernedFile(root: string, path: string): Promise<string> {
   const resolved = resolveWithin(root, path);
+  await assertCanonicalPathWithin(root, path, resolved);
   const info = await stat(resolved);
   if (info.size > MAX_FILE_BYTES) throw new Error(`"${path}" is ${info.size} bytes, over the ${MAX_FILE_BYTES}-byte limit.`);
   const content = await readFile(resolved, "utf8");
@@ -51,12 +84,29 @@ export async function readGovernedFile(root: string, path: string): Promise<stri
 
 export async function strReplaceGovernedFile(root: string, path: string, oldText: string, newText: string): Promise<string> {
   const resolved = resolveWithin(root, path);
+  await assertCanonicalPathWithin(root, path, resolved);
   const content = await readFile(resolved, "utf8");
   const occurrences = content.split(oldText).length - 1;
   if (occurrences === 0) throw new Error(`oldText was not found in "${path}".`);
   if (occurrences > 1) throw new Error(`oldText occurs ${occurrences} times in "${path}"; it must be unique. Include more surrounding context.`);
+  await assertCanonicalPathWithin(root, path, resolved);
   await writeFile(resolved, content.replace(oldText, newText), "utf8");
   return `Replaced 1 occurrence in ${path}.`;
+}
+
+/** Create one new UTF-8 file inside the assigned working directory. Existing files are never overwritten. */
+export async function createGovernedFile(root: string, path: string, content: string): Promise<string> {
+  const resolved = resolveWithin(root, path);
+  await assertCanonicalParentWithin(root, path, resolved);
+  const bytes = Buffer.byteLength(content, "utf8");
+  if (bytes > MAX_FILE_BYTES) throw new Error(`"${path}" is ${bytes} bytes, over the ${MAX_FILE_BYTES}-byte limit.`);
+  try {
+    await writeFile(resolved, content, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") throw new Error(`"${path}" already exists; use str_replace after reading it.`);
+    throw error;
+  }
+  return `Created ${path} (${bytes} bytes).`;
 }
 
 export async function listGovernedTree(root: string, path: string, maxDepth: number): Promise<string> {
@@ -96,9 +146,12 @@ export async function ripgrepSearch(root: string, pattern: string, path: string,
   return truncate(output || "(no matches)");
 }
 
-export type GitReadOperation = "status" | "log" | "diff_stat" | "branch";
+export type GitReadOperation = typeof GIT_READ_OPERATIONS[number];
 
 export function gitReadArgs(operation: GitReadOperation, limit: number): string[] {
+  if (!(GIT_READ_OPERATIONS as readonly string[]).includes(operation)) {
+    throw new Error(`Unsupported git read operation "${String(operation)}".`);
+  }
   switch (operation) {
     case "status": return ["status", "--short", "--branch"];
     case "log": return ["log", `-${Math.min(Math.max(Math.trunc(limit), 1), MAX_GIT_READ_LINES)}`, "--oneline"];
@@ -112,6 +165,7 @@ export async function runGitRead(root: string, operation: GitReadOperation, limi
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn("git", args, {
       cwd: root,
+      env: gitReadEnvironment(),
       shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -217,13 +271,13 @@ export async function postAgentMessage(channel: { appUrl: string; agentToken: st
       });
       if (response.ok) return "Message posted to the channel.";
       const detail = await response.text().catch(() => "");
-      lastFailure = `HTTP ${response.status}: ${detail.slice(0, 300)}`;
+      lastFailure = redactGovernedToolCredential(`HTTP ${response.status}: ${detail}`, channel.agentToken).slice(0, 300);
       // Retry only transient server/rate-limit responses. A validation or
       // authorization failure is deterministic and should reach the model
       // immediately instead of being retried pointlessly.
       if (response.status < 500 && response.status !== 429) break;
     } catch (error) {
-      lastFailure = error instanceof Error ? error.message : "network error";
+      lastFailure = redactGovernedToolCredential(error instanceof Error ? error.message : "network error", channel.agentToken);
     }
     if (attempt === 0) await new Promise<void>((resolve) => setTimeout(resolve, 250));
   }

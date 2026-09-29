@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createWebAuthority, verifyAudit } from "@/lib/native/web-authority-core";
+import { auditSerializedBytes, createWebAuthority, MAX_AUDIT_ENTRIES, MAX_AUDIT_SERIALIZED_BYTES, verifyAudit } from "@/lib/native/web-authority-core";
 import { createWebBroker, validateRequest, type WebRequest } from "@/lib/native/web-broker-core";
 
-function harness(options: { loopGuard?: { repeat: number; budget: number; windowMs: number }; connected?: boolean; timeoutMs?: number; claimTtlMs?: number; approvalEnabled?: boolean; approvalTimeoutMs?: number } = {}) {
+function harness(options: { loopGuard?: { repeat: number; budget: number; windowMs: number }; connected?: boolean; timeoutMs?: number; claimTtlMs?: number; approvalEnabled?: boolean; approvalTimeoutMs?: number; roomMode?: "watch" | "ask" | "hands-off" } = {}) {
   const sent: Array<Record<string, unknown>> = [];
   const notices: Array<Record<string, unknown>> = [];
   let clock = 1_000;
@@ -23,6 +23,7 @@ function harness(options: { loopGuard?: { repeat: number; budget: number; window
     approvalTimeoutMs: options.approvalTimeoutMs,
     loopGuard: options.loopGuard,
     authority,
+    roomMode: options.roomMode ? () => options.roomMode! : undefined,
     newId: () => `c${++n}`,
   });
   return { broker, sent, notices, advance: (ms: number) => (clock += ms) };
@@ -65,6 +66,31 @@ test("an agent with no tab of its own works on the one page the room already has
   assert.equal(sent[1].tab, "research");
   broker.onExtensionMessage({ type: "result", id: "c2", ok: true, data: "Example Domain", origin: "https://example.com", url: "https://example.com/" });
   assert.equal((await read).ok, true);
+});
+
+test("room modes: watch lets page-level actions through and holds what leaves the page; ask holds both; hands-off holds only money and secrets", async () => {
+  for (const [mode, dragHeld, postHeld, buyHeld] of [["watch", false, true, true], ["ask", true, true, true], ["hands-off", false, false, true]] as const) {
+    const h = harness({ approvalEnabled: true, roomMode: mode });
+    const opened = h.broker.submit(req("claude", "open", { url: "https://example.com/", tab: "t" }));
+    h.broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.com", url: "https://example.com/" });
+    await opened;
+    for (const [action, held] of [["click_at", dragHeld], ["post", postHeld], ["buy", buyHeld]] as const) {
+      const before = h.broker.pendingApprovals().length;
+      const sentBefore = h.sent.length;
+      void h.broker.submit(req("claude", action as never, (action === "click_at" ? { tab: "t", args: { x: 5, y: 5 } } : { tab: "t", selector: "#x" }) as never));
+      await new Promise((r) => setTimeout(r, 5));
+      assert.equal(h.broker.pendingApprovals().length - before, held ? 1 : 0, `${mode}: ${action} held=${held}`);
+      assert.equal(h.sent.length - sentBefore, held ? 0 : 1, `${mode}: ${action} reaches the browser only when not held`);
+    }
+    // adopt (whose tab an agent works in) always asks, in every mode including hands-off, where everything else is auto-allowed.
+    const before = h.broker.pendingApprovals().length;
+    const sentBefore = h.sent.length;
+    void h.broker.submit(req("claude", "adopt", { tab: "t" }));
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(h.broker.pendingApprovals().length - before, 1, `${mode}: adopt is always held`);
+    assert.equal(h.sent.length - sentBefore, 0, `${mode}: adopt never reaches the browser unapproved`);
+    h.broker.stopAll("test cleanup");
+  }
 });
 
 test("an omitted tab is refused when the agent has more than one open named tab", async () => {
@@ -462,6 +488,32 @@ test("the host's own requests never need a grant, and the log records what the g
   assert.deepEqual(verifyAudit(audit), { ok: true });
 });
 
+test("authority audit retention stays bounded and remains verifiable from its persisted chain anchor", () => {
+  const authority = createWebAuthority({ ownerId: "alice" });
+  for (let i = 0; i < MAX_AUDIT_ENTRIES + 25; i += 1) {
+    authority.recordActionDecision("action.requested", "bob/codex", { action: "click", origin: "https://example.test", detail: `action-${i}` });
+  }
+
+  const snapshot = authority.snapshot();
+  assert.equal(snapshot.version, 2);
+  assert.ok(snapshot.audit.length <= MAX_AUDIT_ENTRIES);
+  assert.ok(auditSerializedBytes(snapshot.audit) <= MAX_AUDIT_SERIALIZED_BYTES);
+  assert.equal(snapshot.auditAnchor.sequence, MAX_AUDIT_ENTRIES + 25 - snapshot.audit.length);
+  assert.equal(snapshot.audit[0].seq, snapshot.auditAnchor.sequence);
+  assert.deepEqual(verifyAudit(snapshot.audit, snapshot.auditAnchor), { ok: true });
+  const alteredWindow = snapshot.audit.map((entry) => ({ ...entry }));
+  alteredWindow[10].detail = "edited-after-write";
+  assert.deepEqual(verifyAudit(alteredWindow, snapshot.auditAnchor), { ok: false, brokenAt: 10 });
+
+  const restored = createWebAuthority({ ownerId: "alice" });
+  restored.restore(snapshot);
+  const previousSequence = snapshot.audit.at(-1)!.seq;
+  restored.recordActionDecision("action.approved", "alice", { action: "click" });
+  const next = restored.snapshot();
+  assert.equal(next.audit.at(-1)?.seq, previousSequence + 1, "restoring a bounded window must not restart the global sequence");
+  assert.deepEqual(verifyAudit(next.audit, next.auditAnchor), { ok: true });
+});
+
 test("opening a page in a tab another agent is using goes to a new tab instead of failing, and says so", async () => {
   const { broker, sent } = harness();
   const first = broker.submit(req("claude", "open", { url: "https://example.com/", tab: "shared" }));
@@ -609,6 +661,21 @@ test("a page of a site that is already open cannot be opened by URL unless the o
   assert.equal((await back).ok, true, "a page the room already visited can be reopened");
 });
 
+test("m9r_web_do can include press and scroll steps (the batch claim flag is accepted by the power validator)", async () => {
+  const { broker, sent } = harness();
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  void broker.submitBatch({
+    agent: "codex", provider: "codex", sessionId: "codex-s", tab: "research",
+    steps: [{ action: "open", url: "https://example.test/" }, { action: "press", args: { key: "Enter" } }, { action: "scroll", args: { to: "bottom" } }],
+  });
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.test", url: "https://example.test/" });
+  await flush();
+  assert.equal(sent[1]?.action, "press", "the press step reaches the browser instead of failing validation");
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, data: { pressed: true }, origin: "https://example.test", url: "https://example.test/" });
+  await flush();
+  assert.equal(sent[2]?.action, "scroll");
+});
+
 test("m9r_web_do runs ordered steps under one tab claim, returns state after each action, and stops at the first failure", async () => {
   const { broker, sent } = harness();
   const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -616,7 +683,7 @@ test("m9r_web_do runs ordered steps under one tab claim, returns state after eac
     agent: "codex", provider: "codex", sessionId: "codex-s", tab: "research", includePageState: true,
     steps: [
       { action: "open", url: "https://example.test/" },
-      { action: "click", selector: "@m9r-ref:e1" },
+      { action: "click", selector: "button.preview" },
       { action: "type", selector: "@m9r-ref:e2", text: "query" },
     ],
   });
@@ -624,13 +691,13 @@ test("m9r_web_do runs ordered steps under one tab claim, returns state after eac
   broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.test", url: "https://example.test/" });
   await flush();
   assert.equal(sent[1]?.action, "snapshot");
-  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, data: "URL: https://example.test/\nTitle: Example\nText:\nBefore\nControls (act by ref):\ne1 [button] \"Save\"" });
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, data: "URL: https://example.test/\nTitle: Example\nText:\nBefore\nControls (act by ref):\ne1 [button] \"Preview\"" });
   await flush();
   assert.equal(sent[2]?.action, "click");
   broker.onExtensionMessage({ type: "result", id: "c3", ok: true, data: { clicked: true }, origin: "https://example.test", url: "https://example.test/" });
   await flush();
   assert.equal(sent[3]?.action, "snapshot");
-  broker.onExtensionMessage({ type: "result", id: "c4", ok: true, data: "URL: https://example.test/\nTitle: Example\nText:\nAfter\nControls (act by ref):\ne1 [button] \"Save\"" });
+  broker.onExtensionMessage({ type: "result", id: "c4", ok: true, data: "URL: https://example.test/\nTitle: Example\nText:\nAfter\nControls (act by ref):\ne1 [button] \"Preview\"" });
   await flush();
   assert.equal(sent[4]?.action, "type");
   broker.onExtensionMessage({ type: "result", id: "c5", ok: false, error: "the snapshot ref or selector is stale" });
@@ -639,6 +706,38 @@ test("m9r_web_do runs ordered steps under one tab claim, returns state after eac
   assert.equal(result.ok, false);
   assert.equal(result.failedAt, 2);
   assert.equal(result.steps.length, 3);
-  assert.deepEqual(result.steps[0]?.response.pageState, { url: "https://example.test/", title: "Example", topControls: [{ ref: "e1", role: "button", name: "Save", position: 1 }] });
+  assert.deepEqual(result.steps[0]?.response.pageState, { url: "https://example.test/", title: "Example", topControls: [{ ref: "e1", role: "button", name: "Preview", position: 1 }] });
   assert.equal(sent.length, 5, "the failed step must not dispatch a later step");
+});
+
+test("m9r_web_do parses the structured snapshot returned by the browser extension", async () => {
+  const { broker, sent } = harness({ roomMode: "hands-off" });
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const opened = broker.submit(req("codex", "open", { url: "https://example.test/products", tab: "research" }));
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.test", url: "https://example.test/products" });
+  assert.equal((await opened).ok, true);
+
+  const batch = broker.submitBatch({
+    agent: "codex", provider: "codex", sessionId: "codex-s", tab: "research", includePageState: true,
+    steps: [{ action: "click", selector: "a.product" }],
+  });
+  assert.equal(sent[1]?.action, "click");
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, data: { clicked: true }, origin: "https://example.test", url: "https://example.test/product/P-34" });
+  await flush();
+  assert.equal(sent[2]?.action, "snapshot");
+  broker.onExtensionMessage({
+    type: "result", id: "c3", ok: true,
+    data: {
+      url: "https://example.test/product/P-34", title: "Product P-34",
+      text: "Product id: P-34\nCertification code: A7K2QM",
+      elements: [{ ref: "e1", role: "link", name: "Back to products" }],
+    },
+  });
+  const result = await batch;
+  assert.equal(result.ok, true);
+  assert.equal(result.steps[0]?.response.changedPart, "Product id: P-34\nCertification code: A7K2QM");
+  assert.deepEqual(result.steps[0]?.response.pageState, {
+    url: "https://example.test/product/P-34", title: "Product P-34",
+    topControls: [{ ref: "e1", role: "link", name: "Back to products", position: 1 }],
+  });
 });

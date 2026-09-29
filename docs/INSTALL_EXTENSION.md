@@ -30,6 +30,16 @@ To remove the web-managed broker, extension files, and MCP entries:
 m9r web uninstall
 ```
 
+To refresh only the files in an already managed unpacked extension, without changing the broker, login task, provider config, or browser permissions, rebuild the CLI and run:
+
+```powershell
+npm run build:cli
+node .\cli\dist\m9r.js web update-extension --dry-run
+node .\cli\dist\m9r.js web update-extension --yes
+```
+
+The refresh updates only extension files that still match the hashes recorded by M9R setup. User-edited and untracked files are preserved. Reload the extension from `chrome://extensions` afterward.
+
 Use `m9r web setup --dry-run` to preview without writing files or starting processes. The same setup can be selected from the standalone installer with `.install-m9r.ps1 -Web`; the engine form is `m9r-engine.exe web setup` (or `m9r-engine.exe setup --web`).
 
 M9R Web currently has working SessionStart identity bootstraps for Claude Code and Codex. OpenCode's MCP entry can be configured, but OpenCode SessionStart identity delivery is not implemented yet, so authenticated M9R web tools are not ready there.

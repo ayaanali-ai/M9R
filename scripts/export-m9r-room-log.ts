@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { M9R_ENV_PREFIX, LEGACY_ENV_PREFIX } from "../src/lib/native/m9r-compatibility";
+import { checkRoomLitmus } from "../src/lib/mission/room-litmus-core";
 
 type StoredMessage = {
   id?: unknown;
@@ -13,9 +14,13 @@ type StoredMessage = {
   created_at?: unknown;
 };
 
-const [roomId, outputFlag, outputPath] = process.argv.slice(2);
-if (!roomId || (outputFlag !== undefined && (outputFlag !== "--out" || !outputPath))) {
-  throw new Error("Usage: npx tsx scripts/export-m9r-room-log.ts <room-id> [--out <new-file.json>]");
+const args = process.argv.slice(2);
+const roomId = args[0];
+const litmus = args.includes("--litmus");
+const outputIndex = args.indexOf("--out");
+const outputPath = outputIndex >= 0 ? args[outputIndex + 1] : undefined;
+if (!roomId || (outputIndex >= 0 && (!outputPath || outputIndex !== args.length - 2)) || args.some((arg, index) => index > 0 && arg !== "--litmus" && arg !== "--out" && !(outputIndex === index - 1))) {
+  throw new Error("Usage: npx tsx scripts/export-m9r-room-log.ts <room-id> [--litmus] [--out <new-file.json>]");
 }
 const tokenFile = [".m9r/agents/codex/local.json", ".oathlock/agents/codex/local.json"].find((path) => {
   try { return Boolean(JSON.parse(readFileSync(path, "utf8")).token); }
@@ -61,6 +66,13 @@ const output = {
   events,
 };
 const serialized = `${JSON.stringify(output, null, 2)}\n`;
+if (litmus) {
+  const result = checkRoomLitmus(output);
+  for (const [criterion, passed] of Object.entries(result.criteria)) process.stdout.write(`${passed ? "PASS" : "FAIL"} ${criterion}\n`);
+  for (const reason of result.reasons) process.stdout.write(`WHY ${reason}\n`);
+  process.stdout.write(`${result.pass ? "LITMUS PASS" : "LITMUS FAIL"}\n`);
+  if (!result.pass) process.exitCode = 1;
+}
 if (outputPath) {
   const absolutePath = resolve(outputPath);
   if (existsSync(absolutePath)) throw new Error(`Refusing to overwrite existing export: ${absolutePath}`);

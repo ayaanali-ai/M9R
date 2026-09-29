@@ -1,0 +1,13 @@
+{
+  "name": "@m9r/aware-spec",
+  "version": "0.1.0",
+  "private": false,
+  "description": "AWARE web coordination protocol schemas",
+  "license": "Apache-2.0",
+  "files": [
+    "schema",
+    "README.md",
+    "LICENSE-APACHE",
+    "LICENSE-CC-BY-4.0"
+  ]
+}

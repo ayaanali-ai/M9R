@@ -18,7 +18,8 @@
   let active = 0;
   let statusTimer = 0;
 
-  const running = () => state.agents.filter((a) => a.state !== "stopped" && a.state !== "failed");
+  // Stopped agents stay in the list: sending to one starts it again.
+  const running = () => state.agents;
 
   function report() {
     const r = wrap.getBoundingClientRect();
@@ -28,7 +29,7 @@
   function drawLead() {
     const list = running();
     const top = list.find((a) => a.state === "blocked") || list.find((a) => a.state === "waiting") || list.find((a) => a.state === "working" || a.state === "starting") || list[0];
-    lead.dataset.ring = top ? ringOf(top.state) : "off";
+    lead.dataset.ring = top ? ringOf(top.state, top.doing) : "off";
     lead.title = (list.length ? `${list.map((a) => displayName(a.id, a.provider)).join(", ")} running. ` : "") + (small ? "Show the message bar" : "Hide the message bar (Alt+Shift+M)");
     lead.replaceChildren(el("span", `m9r-logo${connected ? "" : " stale"}`));
   }
@@ -124,7 +125,7 @@
       b.setAttribute("role", "option");
       b.setAttribute("aria-selected", String(i === active));
       const agent = state.agents.find((a) => a.id === o.handle);
-      b.append(o.handle === "all" ? el("span", "all-mark", "@") : chip(o.provider, "chip", agent ? ringOf(agent.state) : undefined), el("span", undefined, o.name));
+      b.append(o.handle === "all" ? el("span", "all-mark", "@") : chip(o.provider, "chip", agent ? ringOf(agent.state, agent.doing) : undefined), el("span", undefined, o.name));
       b.append(el("span", "hint", o.hint || (agent ? agent.state : `@${o.handle}`)));
       b.addEventListener("mousedown", (ev) => { ev.preventDefault(); choose(i); });
       return b;
@@ -185,16 +186,6 @@
     const text = address.text;
     const mentions = address.handles;
     send.disabled = true;
-    // The owner's own instruction is the moment to ask, once, for access to every site (a user gesture in this extension's
-    // frame). After that agents open pages without asking; risky actions still wait for approval.
-    try {
-      const all = { origins: ["https://*/*", "http://*/*"] };
-      const asked = (await chrome.storage.local.get("m9rAllSitesAsked")).m9rAllSitesAsked === true;
-      if (!asked && !await chrome.permissions.contains(all)) {
-        await chrome.storage.local.set({ m9rAllSitesAsked: true });
-        await chrome.permissions.request(all);
-      }
-    } catch { /* if Chrome declines, agents fall back to asking per site */ }
     const reply = await F.command({ type: "ui-command", text });
     if (!reply.ok) {
       showStatus(`Not sent: ${reply.error}`, true);

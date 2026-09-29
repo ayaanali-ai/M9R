@@ -99,7 +99,7 @@ export function hookEntryPath(env: Record<string, string | undefined>): string {
  * The hook must not run from where the CLI happens to live: `npx` runs it from a cache that is later cleared, which
  * would silently kill the hooks. Setup copies this small runtime into M9R's own folder and points the hooks there.
  */
-export const HOOK_RUNTIME_FILES = ["m9r-hook.js", "local-store.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js"] as const;
+export const HOOK_RUNTIME_FILES = ["m9r-hook.js", "local-store.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js", "web-broker-client.js", "web-broker-paths.js"] as const;
 
 function hookSourceDir(env: Record<string, string | undefined>): string {
   return env.M9R_HOOK_SOURCE?.trim() || dirname(hookEntryPath(env));
@@ -143,14 +143,18 @@ const sameFile = (a: string, b: string): boolean => {
   try { return statSync(a).size === statSync(b).size && createHash("sha256").update(readFileSync(a)).digest("hex") === createHash("sha256").update(readFileSync(b)).digest("hex"); } catch { return false; }
 };
 
-function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; targetDir: string; missingSource: string[]; engine?: { from: string; to: string }; shim?: { from: string; to: string } } {
+function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; targetDir: string; missingSource: string[]; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string } } {
   const targetDir = join(nativePaths(io).m9r, "bin");
   const engine = engineSource(io.env);
   if (engine && !io.env.M9R_HOOK_ENTRY?.trim()) {
     const to = engineTarget(io);
     const shimFrom = shimSource(io.env);
     const shim = shimFrom ? { from: shimFrom, to: shimTarget(io) } : undefined;
-    return { needed: !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)), sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim };
+    const nativeInputSource = process.platform === "win32" ? join(dirname(engine), "m9r-native-input-host.exe") : "";
+    const nativeInputHost = nativeInputSource && existsSync(nativeInputSource)
+      ? { from: nativeInputSource, to: join(targetDir, "m9r-native-input-host.exe") }
+      : undefined;
+    return { needed: !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)) || (!!nativeInputHost && !sameFile(nativeInputHost.from, nativeInputHost.to)), sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim, nativeInputHost };
   }
   const sourceDir = hookSourceDir(io.env);
   if (io.env.M9R_HOOK_ENTRY?.trim()) return { needed: false, sourceDir, targetDir, missingSource: [] };
@@ -159,12 +163,13 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
   return { needed, sourceDir, targetDir, missingSource };
 }
 
-function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string } }): string[] {
+function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string } }): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
   if (plan.engine) {
     const written = [plan.engine.to];
     copyFileSync(plan.engine.from, plan.engine.to);
     if (plan.shim) { copyFileSync(plan.shim.from, plan.shim.to); written.push(plan.shim.to); }
+    if (plan.nativeInputHost) { copyFileSync(plan.nativeInputHost.from, plan.nativeInputHost.to); written.push(plan.nativeInputHost.to); }
     return written;
   }
   const written: string[] = [];
@@ -185,8 +190,9 @@ function hookSpecs(entry: string, provider = "claude-code", shim?: string): Hook
   return [
     { event: "SessionStart", command: command("SessionStart"), timeoutSec: 5 },
     { event: "UserPromptSubmit", command: command("UserPromptSubmit"), timeoutSec: 5 },
-    // Claude only: when a turn ends, its final message answers any task another agent handed it.
-    ...(provider === "claude-code" ? [{ event: "Stop", command: command("Stop"), timeoutSec: 5 }] : []),
+    // Every provider: when a turn ends, tell the browser overlay (markDone) and, for Claude, answer any task another
+    // agent handed it with its final message.
+    { event: "Stop", command: command("Stop"), timeoutSec: 5 },
   ];
 }
 
@@ -422,6 +428,11 @@ export function nativeStatus(io: NativeIo): StatusRow[] {
   const store = createLocalStore(p.m9r);
   const endpoints = store.listEndpoints();
   rows.push({ id: "endpoints", state: "info", label: endpoints.length ? `Agents seen on this machine: ${endpoints.map((e) => `@${e.handle}`).join(", ")}` : "No agent sessions seen yet. Start a new Claude Code session." });
+  const sessions = endpoints.flatMap((endpoint) => store.sessionsFor(endpoint.handle));
+  const missingIdentity = sessions.filter((session) => !store.sessionsWithIdentity(session.handle, session.cwd).some((live) => live.sessionId === session.sessionId));
+  rows.push(missingIdentity.length > 0
+    ? { id: "target-identities", state: "todo", label: `${missingIdentity.length} provider session(s) lack a live M9R identity; targeted delivery will fail visibly`, fix: "restart that agent session so M9R can issue its session token" }
+    : { id: "target-identities", state: sessions.length > 0 ? "ok" : "info", label: sessions.length > 0 ? "All observed provider sessions have live M9R identities" : "No provider session identities to check yet" });
   const pending = endpoints.reduce((n, e) => n + store.tasksFor(e.handle).filter((t) => t.approval !== "denied" && t.approval !== "expired" && store.cursorFor(e.handle) < t.seq).length, 0);
   if (pending > 0) rows.push({ id: "pending", state: "info", label: `${pending} task(s) waiting in inboxes` });
   return rows;

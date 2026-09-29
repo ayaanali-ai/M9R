@@ -123,7 +123,8 @@ export function classifyRisk(goal: string): Risk {
 
 /**
  * Risk gate for browser controls. `targetLabel` is an untrusted visible-label hint; typed form values are deliberately
- * ignored so a secret or ordinary message body is neither retained nor treated as an authorization signal.
+ * ignored so a secret or ordinary message body is neither retained nor treated as an authorization signal. An opaque
+ * snapshot ref has no trusted live-target semantics at this pre-dispatch gate, so it always requires owner approval.
  */
 export function classifyWebActionRisk(input: {
   action: "open" | "read" | "click" | "type";
@@ -139,5 +140,8 @@ export function classifyWebActionRisk(input: {
     ["destroy", /\b(?:delete|remove|destroy|cancel|erase|revoke)\b/i],
   ];
   for (const [category, pattern] of categories) if (pattern.test(surface)) return { risky: true, category };
-  return classifyRisk(`click ${surface}`);
+  const classified = classifyRisk(`click ${surface}`);
+  if (classified.risky) return classified;
+  if (input.selector?.trim().startsWith("@m9r-ref:")) return { risky: true, category: "guardrails" };
+  return classified;
 }

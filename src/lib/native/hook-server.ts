@@ -34,7 +34,7 @@ function safeUser(): string {
 
 export interface ServerRequest { cmd?: string; event?: string; provider?: string; input?: HookInput | null; env?: Record<string, string | undefined> }
 
-export function startHookServer(options: { path: string; handle: (req: ServerRequest) => string; onShutdown: () => void }): Server {
+export function startHookServer(options: { path: string; handle: (req: ServerRequest) => string | Promise<string>; onShutdown: () => void }): Server {
   if (process.platform !== "win32" && existsSync(options.path)) rmSync(options.path, { force: true });
   const server = createServer((socket) => {
     let buf = "";
@@ -49,7 +49,7 @@ export function startHookServer(options: { path: string; handle: (req: ServerReq
       try {
         const req = JSON.parse(nl < 0 ? buf : buf.slice(0, nl)) as ServerRequest;
         if (req.cmd === "shutdown") { answer("ok"); setTimeout(options.onShutdown, 50); return; }
-        answer(options.handle(req));
+        Promise.resolve(options.handle(req)).then(answer, () => answer(""));
       } catch { answer(""); }
     });
   });

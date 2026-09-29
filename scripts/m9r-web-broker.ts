@@ -4,12 +4,13 @@
  * overrides the port. This entry point never enables arbitrary extension origins.
  */
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { writeWebActivity } from "@/lib/native/feed-writer";
 import { apiKeyLaunchBlock } from "@/lib/native/vendor-launch-core";
 import { createWebLiveSessions, loadAgentsConfig } from "@/lib/native/web-live-sessions";
 import { createWebUiBridge } from "@/lib/native/web-ui-bridge";
-import { DEFAULT_BROKER_PORT, brokerKeyPath } from "@/lib/native/web-broker-paths";
+import { DEFAULT_BROKER_PORT, brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
@@ -30,7 +31,10 @@ async function main(): Promise<void> {
   const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
   // The in-page pill: agents the owner types to, one live session per agent and folder (web-live-sessions.ts).
   const ui = createWebUiBridge();
-  const broker = await startWebBroker({ key, port, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 } });
+  // A real POST /web/shutdown (m9r web restart, or any owner-triggered restart) must stop this whole process, not just
+  // close the HTTP socket, or the unref'd-less feed timer below keeps Node running forever with nothing left listening.
+  let requestShutdown = () => {};
+  const broker = await startWebBroker({ key, port, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
   const config = loadAgentsConfig(root, { cwd: process.cwd() });
   const sessions = createWebLiveSessions({
     agents: config.agents, storeRoot: root, repoRoot: process.cwd(), brokerPort: broker.port,
@@ -50,7 +54,13 @@ async function main(): Promise<void> {
     lastWeb = body;
     try { writeWebActivity(root, ui.recentWeb()); } catch { /* the pill feed is optional */ }
   }, 1000);
-  const stop = () => { clearInterval(webTimer); sessions.close(); ui.close(); void broker.close().then(() => process.exit(0)); };
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    clearInterval(webTimer); sessions.close(); ui.close(); void broker.close().then(() => process.exit(0));
+  };
+  requestShutdown = stop;
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 }

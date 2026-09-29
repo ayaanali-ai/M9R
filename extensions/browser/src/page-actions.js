@@ -46,6 +46,107 @@ function m9rPageRead(selector, expectOrigin, expectPathPrefix) {
 
 // With `live`, the click is a person's: the pointer enters, drifts onto a point inside the element (not its exact center), presses,
 // holds a beat and releases. A promise is returned; without `live` the events are dispatched at once.
+// Prepare a real desktop click. This validates the current page, element, hit target, and visible viewport but
+// deliberately dispatches no DOM event; the extension worker sends the returned point to the Native Messaging host.
+function m9rPageClickPlan(selector, expectOrigin, expectPathPrefix, requestedX, requestedY, button, clickCount, action) {
+  try {
+    const allowedPage = () => (!expectOrigin || location.origin === expectOrigin)
+      && (!expectPathPrefix || expectPathPrefix === "/" || location.pathname === expectPathPrefix
+        || location.pathname.startsWith(expectPathPrefix.endsWith("/") ? expectPathPrefix : expectPathPrefix + "/"));
+    if (!allowedPage()) return { ok: false, error: "page origin or path does not match the granted site" };
+    const view = window;
+    const viewportWidth = Number(view.innerWidth || 0);
+    const viewportHeight = Number(view.innerHeight || 0);
+    if (!Number.isFinite(viewportWidth) || !Number.isFinite(viewportHeight) || viewportWidth < 1 || viewportHeight < 1
+      || viewportWidth > 16384 || viewportHeight > 16384) return { ok: false, error: "the visible page viewport is unavailable" };
+    const allowedButton = ["left", "right", "middle"].includes(button) ? button : "left";
+    const count = Number(clickCount);
+    if (![1, 2].includes(count) || (allowedButton !== "left" && count !== 1)) return { ok: false, error: "unsupported click count" };
+    let target = null;
+    let x;
+    let y;
+    const reachesTargetAt = (pointX, pointY) => {
+      const hit = document.elementFromPoint(pointX, pointY);
+      let reaches = !!hit && (hit === target || target.contains(hit));
+      for (let root = target && target.getRootNode && target.getRootNode(); !reaches && root && root.host; root = root.host.getRootNode && root.host.getRootNode()) {
+        reaches = hit === root.host || !!hit && root.host.contains(hit);
+      }
+      return reaches;
+    };
+    const coordinateClick = requestedX !== null && requestedX !== undefined && requestedY !== null && requestedY !== undefined
+      && Number.isFinite(Number(requestedX)) && Number.isFinite(Number(requestedY));
+    if (coordinateClick) {
+      x = Number(requestedX);
+      y = Number(requestedY);
+      if (x < 0 || y < 0 || x >= viewportWidth || y >= viewportHeight) return { ok: false, error: "click point is outside the visible page" };
+      target = document.elementFromPoint(x, y);
+      if (!target) return { ok: false, error: "no element at those viewport coordinates" };
+    } else {
+      if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
+        const match = /^@m9r-ref:([A-Za-z0-9_-]{1,16})$/.exec(selector);
+        const refs = window.__m9rPageActionRefMap;
+        target = match && refs && typeof refs.get === "function" ? refs.get(match[1]) : null;
+        if (!target || target.isConnected === false) return { ok: false, error: "invalid or stale page element ref" };
+      } else {
+        try { target = document.querySelector(selector); } catch { return { ok: false, error: "invalid click selector" }; }
+      }
+      if (!target) return { ok: false, error: "no element matches " + selector };
+      if (action === "submit") {
+        const tag = String(target.tagName || "").toUpperCase();
+        if (tag === "FORM") {
+          target = target.querySelector('button:not([type]),button[type="submit"],input[type="submit"],input[type="image"]');
+          if (!target) return { ok: false, error: "form has no visible submit control to click" };
+        } else if (!(tag === "BUTTON" && String(target.type || "submit").toLowerCase() === "submit")
+          && !(tag === "INPUT" && ["submit", "image"].includes(String(target.type || "").toLowerCase()))) {
+          return { ok: false, error: "submit target must be a real submit button or form" };
+        }
+      }
+      if (target.disabled || (typeof target.matches === "function" && target.matches(":disabled"))) return { ok: false, error: "element is disabled" };
+      const style = getComputedStyle(target);
+      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return { ok: false, error: "element is not visible" };
+      target.scrollIntoView({ block: "center", inline: "center" });
+      const rect = target.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return { ok: false, error: "element has no visible area" };
+      const fragments = typeof target.getClientRects === "function" ? Array.from(target.getClientRects()) : [];
+      const visibleRects = (fragments.length ? fragments : [rect]).map((fragment) => ({
+        left: Math.max(0, fragment.left),
+        right: Math.min(viewportWidth, Number.isFinite(fragment.right) ? fragment.right : fragment.left + fragment.width),
+        top: Math.max(0, fragment.top),
+        bottom: Math.min(viewportHeight, Number.isFinite(fragment.bottom) ? fragment.bottom : fragment.top + fragment.height),
+      })).filter((fragment) => fragment.right > fragment.left && fragment.bottom > fragment.top);
+      if (visibleRects.length === 0) return { ok: false, error: "element is outside the visible page" };
+      // Inline elements can wrap across lines. Their bounding rectangle includes empty space
+      // between fragments, so sample bounded points from the actual rendered fragments and only
+      // accept one whose hit-test still reaches the requested control.
+      let foundTargetPoint = false;
+      const attempts = Math.max(16, Math.min(64, visibleRects.length * 8));
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const fragment = visibleRects[Math.floor(Math.random() * visibleRects.length)];
+        const candidateX = fragment.left + (fragment.right - fragment.left) * (0.2 + Math.random() * 0.6);
+        const candidateY = fragment.top + (fragment.bottom - fragment.top) * (0.2 + Math.random() * 0.6);
+        if (reachesTargetAt(candidateX, candidateY)) {
+          x = candidateX;
+          y = candidateY;
+          foundTargetPoint = true;
+          break;
+        }
+      }
+      if (!foundTargetPoint) return { ok: false, error: "element is obscured" };
+    }
+    if (coordinateClick && !reachesTargetAt(x, y)) return { ok: false, error: "element is obscured" };
+    if (!allowedPage()) return { ok: false, error: "page origin or path changed while preparing the click" };
+    const rect = target.getBoundingClientRect();
+    return { ok: true, data: {
+      x, y, viewportWidth, viewportHeight, button: allowedButton, clickCount: count,
+      name: String(target.getAttribute && (target.getAttribute("aria-label") || target.getAttribute("title")) || target.innerText || target.textContent || target.tagName || "")
+        .replace(/\s+/g, " ").trim().slice(0, 160),
+      rect: { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) },
+    } };
+  } catch (error) {
+    return { ok: false, error: String(error && error.message ? error.message : error) };
+  }
+}
+
 function m9rPageClick(selector, expectOrigin, expectPathPrefix, live) {
   try {
     let el;
@@ -92,33 +193,56 @@ function m9rPageClick(selector, expectOrigin, expectPathPrefix, live) {
     }
     if (live && typeof MouseEvent === "function") {
       const view = pageDoc.defaultView || window;
-      const Mouse = view.MouseEvent || MouseEvent;
-      const Pointer = typeof (view.PointerEvent || (typeof PointerEvent !== "undefined" ? PointerEvent : undefined)) === "function" ? (view.PointerEvent || PointerEvent) : null;
-      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const spread = (size) => size * (0.3 + Math.random() * 0.4);
-      const endX = rect.left + spread(rect.width);
-      const endY = rect.top + spread(rect.height);
-      const fire = (Type, type, x, y, buttons) => el.dispatchEvent(new Type(type, { bubbles: true, cancelable: true, view, button: 0, buttons, clientX: x, clientY: y, ...(Type === Pointer ? { pointerId: 1, pointerType: "mouse", isPrimary: true } : {}) }));
+      // This function is injected alone (chrome.scripting.executeScript with `func:`), so it cannot import or call a
+      // helper defined elsewhere in this file -- m9rGlideAndClick in m9rPagePower below is a deliberate duplicate, not
+      // a copy-paste accident, and the two must be kept in sync by hand.
       return (async () => {
-        const startX = endX - (30 + Math.random() * 50);
-        const startY = endY - (12 + Math.random() * 30);
+        const Mouse = view.MouseEvent || MouseEvent;
+        const Pointer = typeof (view.PointerEvent || (typeof PointerEvent !== "undefined" ? PointerEvent : undefined)) === "function" ? (view.PointerEvent || PointerEvent) : null;
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const endX = rect.left + rect.width * (0.3 + Math.random() * 0.4);
+        const endY = rect.top + rect.height * (0.3 + Math.random() * 0.4);
+        const previous = window.__m9rLastActionPoint;
+        const nearby = previous && Math.hypot(endX - previous.x, endY - previous.y) < 48;
+        const skipGlide = document.hidden === true || nearby;
+        // A real cursor can be arriving from any direction, not always the upper-left -- a fixed approach vector is
+        // exactly the kind of repeatable signature a site watching for automation would learn to spot.
+        const angle = Math.random() * Math.PI * 2;
+        const dist = 110 + Math.random() * 260;
+        const startX = endX + Math.cos(angle) * dist;
+        const startY = endY + Math.sin(angle) * dist;
+        const travelled = Math.hypot(endX - startX, endY - startY);
+        // Same shape as the on-screen cursor's own glide duration (presence-overlay.js glideDuration): distance-scaled,
+        // not a fixed short window regardless of how far the pointer has to travel.
+        const duration = Math.min(650, Math.max(120, 110 + 75 * Math.log2(1 + travelled / 30)));
+        const steps = Math.max(5, Math.min(14, Math.round(duration / 26)));
+        const overshoot = Math.random() < 0.22;
+        const fire = (Type, type, x, y, buttons) => el.dispatchEvent(new Type(type, { bubbles: true, cancelable: true, view, button: 0, buttons, clientX: x, clientY: y, ...(Type === Pointer ? { pointerId: 1, pointerType: "mouse", isPrimary: true } : {}) }));
         if (Pointer) { fire(Pointer, "pointerover", startX, startY, 0); fire(Pointer, "pointerenter", startX, startY, 0); }
         fire(Mouse, "mouseover", startX, startY, 0);
-        const steps = 4 + Math.floor(Math.random() * 3);
-        for (let i = 1; i <= steps; i += 1) {
+        for (let i = 1; i <= steps && !skipGlide; i += 1) {
           const t = i / steps;
-          const ease = t * t * (3 - 2 * t);
-          const x = startX + (endX - startX) * ease;
-          const y = startY + (endY - startY) * ease;
+          const ease = t * t * t * (t * (t * 6 - 15) + 10); // quintic minimum-jerk, matches the overlay's cursor
+          let x = startX + (endX - startX) * ease;
+          let y = startY + (endY - startY) * ease;
+          // A real hand often slightly overshoots and corrects on the way in, rather than arriving on a perfect curve.
+          if (overshoot && t > 0.68 && t < 0.95) {
+            const bump = 1 - Math.abs(t - 0.82) / 0.13;
+            x += (endX - startX) * 0.035 * bump;
+            y += (endY - startY) * 0.035 * bump;
+          }
           if (Pointer) fire(Pointer, "pointermove", x, y, 0);
           fire(Mouse, "mousemove", x, y, 0);
-          await wait(14 + Math.random() * 16);
+          await wait((duration / steps) * (0.55 + Math.random() * 0.8));
         }
-        await wait(50 + Math.random() * 90);
+        if (Pointer) fire(Pointer, "pointermove", endX, endY, 0);
+        fire(Mouse, "mousemove", endX, endY, 0);
+        window.__m9rLastActionPoint = { x: endX, y: endY };
+        if (!skipGlide) await wait(20 + Math.random() * 35);
         if (Pointer) fire(Pointer, "pointerdown", endX, endY, 1);
         fire(Mouse, "mousedown", endX, endY, 1);
         if (typeof el.focus === "function") el.focus({ preventScroll: true });
-        await wait(55 + Math.random() * 75);
+        await wait(20 + Math.random() * 35);
         if (Pointer) fire(Pointer, "pointerup", endX, endY, 0);
         fire(Mouse, "mouseup", endX, endY, 0);
         el.click();
@@ -218,17 +342,21 @@ function m9rPageType(selector, text, expectOrigin, expectPathPrefix, live) {
         // A person's rhythm: a beat before the first key, log-normal gaps between keys, longer after a space or punctuation,
         // the odd hesitation. Long text is sped up to fit the time budget, and whatever is left is then set at once.
         const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
-        const budgetMs = 3000;
-        const pace = Math.min(1, budgetMs / Math.max(1, chars.length * 55));
+        const budgetMs = Math.min(1400, Math.max(450, chars.length * 3));
+        // Keep short text visibly key-by-key, but do not make a long task spend
+        // several seconds animating hundreds of characters. The tail is inserted
+        // through the same guarded value path after a representative prefix.
+        const animatedChars = chars.length > 220 ? chars.slice(0, 80) : chars;
+        const pace = Math.min(1, budgetMs / Math.max(1, animatedChars.length * 30));
         const gap = (ch) => {
           let ms = Math.exp(Math.log(42) + 0.35 * gauss());
           if (ch === " ") ms += 40 + Math.random() * 100;
           else if (/[.,;:!?]/.test(ch)) ms += 60 + Math.random() * 120;
           if (Math.random() < 0.04) ms += 250 + Math.random() * 250;
-          return Math.max(25, ms * pace);
+          return Math.max(8, ms * pace);
         };
-        await new Promise((resolve) => setTimeout(resolve, 120 + Math.random() * 200));
-        for (const ch of chars) {
+        await new Promise((resolve) => setTimeout(resolve, 40 + Math.random() * 50));
+        for (const ch of animatedChars) {
           if (Date.now() - started > budgetMs || !el.isConnected) break;
           el.dispatchEvent(new KeyboardEvent("keydown", { key: ch, code: /^[a-z]$/i.test(ch) ? "Key" + ch.toUpperCase() : /^[0-9]$/.test(ch) ? "Digit" + ch : ch === " " ? "Space" : "", bubbles: true, cancelable: true }));
           let inserted = false;
@@ -345,7 +473,7 @@ function m9rPageSnapshot(query, requestedLimit) {
   }
 }
 
-function m9rPagePower(action, selector, args, expectOrigin, expectPathPrefix, endSelector, text, targetLabel) {
+async function m9rPagePower(action, selector, args, expectOrigin, expectPathPrefix, endSelector, text, targetLabel) {
   try {
     const allowedPage = () => !expectOrigin || location.origin === expectOrigin
       ? (!expectPathPrefix || expectPathPrefix === "/" || location.pathname === expectPathPrefix || location.pathname.startsWith(expectPathPrefix.endsWith("/") ? expectPathPrefix : expectPathPrefix + "/"))
@@ -489,24 +617,65 @@ function m9rPagePower(action, selector, args, expectOrigin, expectPathPrefix, en
     const rect = target.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return { ok: false, error: "target has no visible area" };
     const view = doc.defaultView || window;
-    const dispatchMouse = (el, type, button = 0, detail = 1) => {
-      const box = el.getBoundingClientRect(); const x = box.left + box.width / 2; const y = box.top + box.height / 2;
+    const dispatchMouse = (el, type, x, y, button = 0, detail = 1) => {
       const Mouse = view.MouseEvent || MouseEvent;
       el.dispatchEvent(new Mouse(type, { bubbles: true, cancelable: true, view, clientX: x, clientY: y, button, buttons: type === "mousedown" ? 1 : 0, detail }));
     };
-    const clickSafely = (el, button = 0, count = 1) => {
+    // This function is injected alone via chrome.scripting.executeScript's `func:`, so it cannot call the glide helper
+    // written inside m9rPageClick above -- that copy is a deliberate duplicate, not an accident, and the two must be
+    // kept in sync by hand. Without this, click_at/double_click/right_click/hover dispatched dead-center with no
+    // movement at all, a far more obvious automation signature than the plain click path ever had.
+    const glideTo = async (endX, endY) => {
+      const Mouse = view.MouseEvent || MouseEvent;
+      const Pointer = typeof (view.PointerEvent || (typeof PointerEvent !== "undefined" ? PointerEvent : undefined)) === "function" ? (view.PointerEvent || PointerEvent) : null;
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 110 + Math.random() * 260;
+      const startX = endX + Math.cos(angle) * dist;
+      const startY = endY + Math.sin(angle) * dist;
+      const travelled = Math.hypot(endX - startX, endY - startY);
+      const duration = Math.min(650, Math.max(120, 110 + 75 * Math.log2(1 + travelled / 30)));
+      const steps = Math.max(5, Math.min(14, Math.round(duration / 26)));
+      const previous = window.__m9rLastActionPoint;
+      const skipGlide = document.hidden === true || (previous && Math.hypot(endX - previous.x, endY - previous.y) < 48);
+      const overshoot = Math.random() < 0.22;
+      for (let i = 1; i <= steps && !skipGlide; i += 1) {
+        const t = i / steps;
+        const ease = t * t * t * (t * (t * 6 - 15) + 10);
+        let x = startX + (endX - startX) * ease;
+        let y = startY + (endY - startY) * ease;
+        if (overshoot && t > 0.68 && t < 0.95) {
+          const bump = 1 - Math.abs(t - 0.82) / 0.13;
+          x += (endX - startX) * 0.035 * bump;
+          y += (endY - startY) * 0.035 * bump;
+        }
+        const hovered = doc.elementFromPoint(x, y);
+        if (hovered) {
+          if (Pointer) hovered.dispatchEvent(new Pointer("pointermove", { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: x, clientY: y }));
+          hovered.dispatchEvent(new Mouse("mousemove", { bubbles: true, cancelable: true, view, clientX: x, clientY: y }));
+        }
+        await wait((duration / steps) * (0.55 + Math.random() * 0.8));
+      }
+      window.__m9rLastActionPoint = { x: endX, y: endY };
+      if (!skipGlide) await wait(20 + Math.random() * 35);
+    };
+    const clickSafely = async (el, button = 0, count = 1) => {
       if (el.disabled || el.matches(":disabled")) throw new Error("target is disabled");
       const style = view.getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") throw new Error("target is not visible");
       el.scrollIntoView({ block: "center" });
       const box = el.getBoundingClientRect();
-      const hit = doc.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      const x = box.left + box.width * (0.3 + Math.random() * 0.4);
+      const y = box.top + box.height * (0.3 + Math.random() * 0.4);
+      const hit = doc.elementFromPoint(x, y);
       if (!hit || (hit !== el && !el.contains(hit))) throw new Error("target is obscured");
       if (!allowedPage()) throw new Error("page origin or path changed before the action");
+      await glideTo(x, y);
+      if (!allowedPage()) throw new Error("page origin or path changed before the action");
       for (let i = 0; i < count; i++) {
-        dispatchMouse(el, "mousemove", button, count);
-        dispatchMouse(el, "mousedown", button, count);
-        dispatchMouse(el, "mouseup", button, count);
+        dispatchMouse(el, "mousemove", x, y, button, count);
+        dispatchMouse(el, "mousedown", x, y, button, count);
+        dispatchMouse(el, "mouseup", x, y, button, count);
         if (button === 0) el.click();
         else el.dispatchEvent(new (view.MouseEvent || MouseEvent)("contextmenu", { bubbles: true, cancelable: true, button }));
       }
@@ -515,28 +684,31 @@ function m9rPagePower(action, selector, args, expectOrigin, expectPathPrefix, en
       if (action === "click_at") {
         const at = doc.elementFromPoint(Number(args.x), Number(args.y));
         if (!at) return { ok: false, error: "no element at those viewport coordinates" };
-        clickSafely(at, args.button === "right" ? 2 : args.button === "middle" ? 1 : 0);
+        await clickSafely(at, args.button === "right" ? 2 : args.button === "middle" ? 1 : 0);
         return { ok: true, data: { clicked: true, target: info(at) } };
       }
       if (action === "submit") {
         const form = String(target.tagName).toUpperCase() === "FORM" ? target : target.form;
         if (form && typeof form.requestSubmit === "function") { if (!allowedPage()) return { ok: false, error: "page origin or path changed before submit" }; form.requestSubmit(target instanceof (view.HTMLButtonElement || HTMLButtonElement) || (target.type === "submit" || target.type === "image") ? target : undefined); return { ok: true, data: { submitted: true, target: info(target) } }; }
       }
-      clickSafely(target);
+      await clickSafely(target);
       return { ok: true, data: { clicked: true, target: info(target) } };
     }
     if (action === "double_click" || action === "right_click") {
-      clickSafely(target, action === "right_click" ? 2 : 0, action === "double_click" ? 2 : 1);
+      await clickSafely(target, action === "right_click" ? 2 : 0, action === "double_click" ? 2 : 1);
       if (action === "double_click") target.dispatchEvent(new (view.MouseEvent || MouseEvent)("dblclick", { bubbles: true, cancelable: true, detail: 2 }));
       return { ok: true, data: { action, target: info(target) } };
     }
     if (action === "hover") { if (!allowedPage()) return { ok: false, error: "page origin or path changed before hover" }; const Pointer = (target.ownerDocument.defaultView || window).PointerEvent;
       const r = target.getBoundingClientRect();
+      const hx = r.left + r.width * (0.3 + Math.random() * 0.4), hy = r.top + r.height * (0.3 + Math.random() * 0.4);
+      await glideTo(hx, hy);
+      if (!allowedPage()) return { ok: false, error: "page origin or path changed before hover" };
       // A person moving onto a control enters it (pointer, then mouse events) and then moves inside it; menus listen for either.
-      for (const type of ["pointerover", "pointerenter"]) if (typeof Pointer === "function") target.dispatchEvent(new Pointer(type, { bubbles: type === "pointerover", cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
-      dispatchMouse(target, "mouseover"); dispatchMouse(target, "mouseenter");
-      if (typeof Pointer === "function") target.dispatchEvent(new Pointer("pointermove", { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
-      dispatchMouse(target, "mousemove"); return { ok: true, data: { hovered: true, target: info(target) } }; }
+      for (const type of ["pointerover", "pointerenter"]) if (typeof Pointer === "function") target.dispatchEvent(new Pointer(type, { bubbles: type === "pointerover", cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: hx, clientY: hy }));
+      dispatchMouse(target, "mouseover", hx, hy); dispatchMouse(target, "mouseenter", hx, hy);
+      if (typeof Pointer === "function") target.dispatchEvent(new Pointer("pointermove", { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: hx, clientY: hy }));
+      dispatchMouse(target, "mousemove", hx, hy); return { ok: true, data: { hovered: true, target: info(target) } }; }
     if (action === "drag" || action === "drop") {
       const destination = action === "drag" ? resolve(endSelector || args.destination) : target;
       const source = action === "drag" ? target : target;
@@ -546,7 +718,7 @@ function m9rPagePower(action, selector, args, expectOrigin, expectPathPrefix, en
       if (!DataTransferType) return { ok: false, error: "this browser does not support page drag data" };
       const transfer = new DataTransferType();
       if (args.mime && typeof args.data === "string") transfer.setData(args.mime, args.data);
-      dispatchMouse(source, "dragstart");
+      { const b = source.getBoundingClientRect(); dispatchMouse(source, "dragstart", b.left + b.width / 2, b.top + b.height / 2); }
       destination.dispatchEvent(new (view.DragEvent || DragEvent)("dragenter", { bubbles: true, dataTransfer: transfer }));
       destination.dispatchEvent(new (view.DragEvent || DragEvent)("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
       destination.dispatchEvent(new (view.DragEvent || DragEvent)("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));

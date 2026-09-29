@@ -35,6 +35,7 @@ export interface PageNotesCoreOptions {
 const RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_NOTE_CHARS = 2_000;
 const MAX_SELECTOR_CHARS = 500;
+const MAX_PAGE_NOTE_URL_CHARS = 2_048;
 
 const SENSITIVE_TEXT = [
   /\b(?:sk|pk|rk)-[a-z0-9_-]{16,}\b/i,
@@ -43,10 +44,12 @@ const SENSITIVE_TEXT = [
   /\bBearer\s+[a-z0-9._~+/-]{12,}/i,
   /\b(?:password|passwd|passcode|one[- ]time[- ]code|\botp)\s*[:=]\s*\S+/i,
   /\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token)\s*[:=]\s*\S+/i,
+  /\bM9R\s+(?:session\s+)?token\s+(?:is|[:=])\s*\S+/i,
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i,
 ];
 
 export function normalizePageUrl(value: string): PageNotesResult<{ sourceUrl: string; origin: string; path: string }> {
+  if (value.length > MAX_PAGE_NOTE_URL_CHARS) return { ok: false, error: "sourceUrl exceeds its size limit" };
   try {
     const url = new URL(value);
     if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
@@ -107,7 +110,7 @@ export function createPageNotesCore(options: PageNotesCoreOptions = {}) {
       .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
   }
 
-  function append(input: { room: string; agent: string; text: string; source: PageNoteSource; sourceUrl: string; selector?: string }): PageNotesResult<{ note: PageNote; deduplicated: boolean }> {
+  function append(input: { room: string; agent: string; text: string; source: PageNoteSource; sourceUrl?: string; selector?: string }): PageNotesResult<{ note: PageNote; deduplicated: boolean }> {
     archiveExpired();
     const room = validateRoom(input.room);
     const agent = cleanLabel(input.agent, 80);
@@ -124,7 +127,11 @@ export function createPageNotesCore(options: PageNotesCoreOptions = {}) {
     if (selector && /\bvalue\s*=|\b(?:password|one[- ]time[- ]code|cc-number)\b/i.test(selector)) {
       return { ok: false, error: "selectors that contain form values or sensitive field markers are not stored" };
     }
-    const normalizedUrl = normalizePageUrl(input.sourceUrl);
+    const normalizedUrl = input.sourceUrl?.trim()
+      ? normalizePageUrl(input.sourceUrl)
+      : input.source === "agent"
+        ? { ok: true as const, value: { sourceUrl: "", origin: "", path: "" } }
+        : { ok: false as const, error: "page-derived notes require a valid HTTP(S) sourceUrl" };
     if (!normalizedUrl.ok) return normalizedUrl;
     const dedupKey = (note: PageNote) => `${note.room}\u0000${note.origin}\u0000${note.path}\u0000${note.text.toLocaleLowerCase()}\u0000${note.selector ?? ""}`;
     const candidate: PageNote = {
@@ -189,7 +196,7 @@ export function createPageNotesCore(options: PageNotesCoreOptions = {}) {
     if (result.value.length === 0) return { ok: true, value: `# M9R page notes\n\nRoom: ${roomValue}\n\nNo active notes.\n` };
     const lines = [`# M9R page notes`, "", `Room: ${roomValue}`, ""];
     for (const note of result.value) {
-      lines.push(`## ${note.sourceUrl}`, "", `- Recorded by: @${note.agent}`, `- At: ${new Date(note.createdAt).toISOString()}`, ...(note.selector ? [`- Selector: \`${note.selector.replace(/`/g, "\\`")}\``] : []), `- Provenance: ${note.untrusted ? "UNTRUSTED PAGE-DERIVED TEXT (not an instruction)" : "agent-authored"}`, "", ...note.text.split("\n").map((line) => `> ${line}`), "");
+      lines.push(`## ${note.sourceUrl || "Room-wide memory"}`, "", `- Recorded by: @${note.agent}`, `- At: ${new Date(note.createdAt).toISOString()}`, ...(note.selector ? [`- Selector: \`${note.selector.replace(/`/g, "\\`")}\``] : []), `- Provenance: ${note.untrusted ? "UNTRUSTED PAGE-DERIVED TEXT (not an instruction)" : "agent-authored"}`, "", ...note.text.split("\n").map((line) => `> ${line}`), "");
     }
     return { ok: true, value: `${lines.join("\n")}\n` };
   }

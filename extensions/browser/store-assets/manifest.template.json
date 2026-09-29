@@ -1,19 +1,18 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "111",
   "name": "M9R Web Presence",
   "version": "0.1.0",
-  "description": "Connect your approved M9R agents to browser pages you choose.",
+  "description": "Connect your approved M9R agents to ordinary websites and shared browser tabs.",
   "permissions": [
     "tabs",
     "scripting",
     "alarms",
-    "storage"
+    "storage",
+    "nativeMessaging",
+    "search"
   ],
   "host_permissions": [
-    "http://127.0.0.1/*",
-    "http://localhost/*"
-  ],
-  "optional_host_permissions": [
     "http://*/*",
     "https://*/*"
   ],
@@ -32,6 +31,9 @@
   ],
   "background": {
     "service_worker": "src/background.js"
+  },
+  "chrome_url_overrides": {
+    "newtab": "newtab.html"
   },
   "action": {
     "default_popup": "permission.html",

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Allow M9R site access</title>
+  <title>M9R browser access</title>
   <style>
     :root{color-scheme:dark;font:15px/1.5 system-ui,sans-serif;background:#111318;color:#f3f4f6}
     body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box}
@@ -18,18 +18,15 @@
 </head>
 <body>
   <main id="site-panel">
-    <h1>Allow M9R on this site?</h1>
-    <p>An M9R agent grant was approved for:</p>
+    <h1>M9R browser access</h1>
+    <p>M9R requests ordinary website access when Chrome installs the extension.</p>
     <p class="scope"><code id="site">Checking site…</code></p>
     <p id="scope"></p>
-    <p>Chrome’s site permission covers the entire site, not just the approved path. M9R will still enforce the grant’s listed actions, path, and expiry locally. The agent may read visible page content and use the approved page controls; passwords and other sensitive fields remain blocked.</p>
+    <p>Chrome’s site permission covers ordinary HTTP/HTTPS sites. M9R still enforces each agent’s grant actions, path, and expiry locally. The agent may read visible page content and use approved page controls; passwords and other sensitive fields remain blocked.</p>
     <section class="disclosure" aria-label="Browser data disclosure">
       <strong>What browser access means</strong>
       <p>When you run an M9R browser task, requested page text, URLs, and action data (including text you ask an agent to type into ordinary fields) go to the M9R broker on this computer and may be sent to the selected agent/provider and authorized M9R collaborators. Password, hidden, payment-card, and one-time-code fields are blocked by targeted checks, but visible pages can still contain sensitive information. No page data is sent merely by granting browser permission.</p>
     </section>
-    <button id="allow" type="button">Continue to Chrome permission</button>
-    <button id="allow-all" class="secondary" type="button" hidden>Allow all websites (for agent research tasks)</button>
-    <button id="deny" class="secondary" type="button">No thanks</button>
     <div id="status" role="status" aria-live="polite"></div>
     <section class="stop-tools" aria-label="Agent browser controls">
       <h2>Agent browser controls</h2>

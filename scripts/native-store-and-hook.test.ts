@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -175,6 +175,19 @@ test("a typed mention creates a task for the target and tells the sender not to 
   done();
 });
 
+test("mention diagnostics receives the unmodified hook input only for routed mentions", () => {
+  const { store, done } = tempStore();
+  const captured: Array<{ prompt?: string; targets: readonly string[]; rawPayload?: string }> = [];
+  const captureMentionInput = (input: { prompt?: string }, targets: readonly string[], rawPayload?: string) => captured.push({ prompt: input.prompt, targets, rawPayload });
+  const input = { hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "@codex inspect this exact prompt" };
+  const rawPayload = '{  "hook_event_name":"UserPromptSubmit", "session_id":"s1", "cwd":"/repo", "prompt":"@codex inspect this exact prompt"  }\n';
+  handleHookEvent(input, { ...ctx(store), rawPayload, captureMentionInput });
+  handleHookEvent({ ...input, prompt: "plain prompt" }, { ...ctx(store), captureMentionInput });
+  assert.deepEqual(captured, [{ prompt: input.prompt, targets: ["codex"], rawPayload }]);
+  assert.equal(store.tasksFor("codex").length, 1);
+  done();
+});
+
 test("the same prompt submitted twice does not create a second task", () => {
   const { store, done } = tempStore();
   const input = { hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "@codex do the thing" };
@@ -217,6 +230,25 @@ test("a pending inbox item is injected once per session at the next prompt, then
   done();
 });
 
+test("Codex inbox work stays held until that session has an active M9R identity", () => {
+  const { store, done } = tempStore();
+  store.addTask({ from: "claude", to: "codex", goal: "review the governed bridge", origin: "human_typed", idempotencyKey: "codex-identity-gate" });
+  const input = { hook_event_name: "UserPromptSubmit", session_id: "c1", cwd: "/repo", prompt: "hi" };
+
+  const held = handleHookEvent(input, ctx(store, "codex"));
+  const heldText = ctxOf(held) ?? "";
+  assert.match(heldText, /reconnect.*M9R identity|M9R identity.*reconnect/i, "the session should get a safe explanation instead of silently losing delegated work");
+  assert.doesNotMatch(heldText, /review the governed bridge|M9R inbox/i, "task contents must not enter an ungoverned session");
+  assert.equal(store.cursorFor("codex", "c1", "/repo"), 0, "holding the task must not advance the session inbox cursor");
+  assert.equal(store.tasksFor("codex")[0].deliveredAt, undefined, "holding the task must not mark it delivered");
+
+  handleHookEvent({ ...input, hook_event_name: "SessionStart" }, ctx(store, "codex"));
+  const delivered = handleHookEvent(input, ctx(store, "codex"));
+  assert.match(ctxOf(delivered) ?? "", /review the governed bridge/, "a session with an issued identity should receive the pending task normally");
+  assert.equal(store.tasksFor("codex")[0].deliveredSession, "c1");
+  done();
+});
+
 test("an agent-initiated task that is still pending is labelled so the receiver does not act on it", () => {
   const { store, done } = tempStore();
   store.addTask({ from: "codex", to: "claude", goal: "delete the old branch", origin: "agent_initiated", idempotencyKey: "b" });
@@ -246,4 +278,47 @@ test("text pasted into Claude Code arrives wrapped in <pasted_content> tags; the
   store.registerEndpoint({ provider: "codex", sessionId: "01a0aaaa-0000-7000-8000-000000000009", cwd: "C:/p" });
   handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", cwd: "C:/p", prompt: '@codex <pasted_content id="6b01"> reply with only the word: ok </pasted_content>' }, { provider: "claude-code", store, pathExists: () => false, readIndex: () => null });
   assert.equal(store.getTask("T1")?.goal, "reply with only the word: ok");
+});
+
+test("mentions found only inside Claude Code pasted content do not dispatch phantom tasks", () => {
+  const { store, done } = tempStore();
+  store.registerEndpoint({ provider: "codex", sessionId: "codex-session", cwd: "C:/p" });
+  const result = handleHookEvent({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "claude-session",
+    cwd: "C:/p",
+    prompt: '<pasted_content id="6b01">@codex reply with only the word: ok</pasted_content>',
+  }, ctx(store));
+
+  assert.equal(store.tasksFor("codex").length, 0);
+  assert.equal(result, null);
+  done();
+});
+
+test("local state refuses an over-budget update and preserves its previous snapshot", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-store-capacity-"));
+  try {
+    const store = createLocalStore(root, { maxStateBytes: 512 });
+    store.noteEvent("agent.connected", "baseline");
+    const path = join(root, "state.json");
+    const before = readFileSync(path, "utf8");
+    assert.throws(() => store.addRule({ from: "codex", to: "claude", ttlMs: 60_000, note: "x".repeat(2_000) }), /capacity|byte limit/i);
+    assert.equal(readFileSync(path, "utf8"), before, "the last complete state file survives the rejected update");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("local state refuses to read a file beyond its configured byte ceiling", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-store-oversized-"));
+  try {
+    const path = join(root, "state.json");
+    const oversized = " ".repeat(513);
+    writeFileSync(path, oversized, "utf8");
+    const store = createLocalStore(root, { maxStateBytes: 512 });
+    assert.throws(() => store.listEndpoints(), /capacity|byte limit/i);
+    assert.equal(readFileSync(path, "utf8"), oversized, "oversized state is not quarantined or overwritten automatically");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

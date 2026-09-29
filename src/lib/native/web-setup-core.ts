@@ -1,5 +1,6 @@
 import { DETECTABLE_AGENT_KINDS, type DetectedAgent, type DetectableAgentKind } from "../agent-detection-core";
 import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
 
 export type WebOpenCodeLayout = "legacy" | "servers";
 export type WebSetupBrowser = "chrome" | "edge";
@@ -10,6 +11,208 @@ export type WebExtensionFileAction = "write" | "preserve" | "unchanged" | "delet
 export const WEB_EXTENSION_ID = "mahhaigfogjneccbmbpbedlnkhgdcmhb";
 /** Set after the Chrome Web Store assigns the production extension ID. */
 export const WEB_STORE_EXTENSION_ID_ENV = "M9R_WEB_STORE_EXTENSION_ID";
+
+/** Prefer XDG paths and retain an existing APPDATA config, with plugins beside the selected config. */
+export function resolveOpenCodeGlobalPaths(input: {
+  home: string;
+  xdgConfigHome?: string;
+  appData?: string;
+  exists?: (path: string) => boolean;
+}): { configPath: string; pluginDirectory: string } {
+  const configHome = input.xdgConfigHome?.trim() || join(input.home, ".config");
+  const configDirectory = join(configHome, "opencode");
+  const configDirectories = [
+    configDirectory,
+    ...(input.appData?.trim() ? [join(input.appData.trim(), "opencode")] : []),
+  ];
+  const supportedConfig = configDirectories
+    .flatMap((directory) => ["opencode.jsonc", "opencode.json"].map((name) => join(directory, name)))
+    .find((path) => input.exists?.(path) ?? false);
+  const configPath = supportedConfig ?? join(configDirectory, "opencode.json");
+  return {
+    configPath,
+    pluginDirectory: join(dirname(configPath), "plugins"),
+  };
+}
+
+/** Browser-internal setup pages are opened only when the user supplies the explicit opt-in. */
+export function shouldOpenBrowserSetup(args: readonly string[]): boolean {
+  return args.includes("--open-browser-setup");
+}
+
+export const OPENCODE_IDENTITY_PLUGIN_FILENAME = "m9r-identity.js";
+
+export interface OpenCodeHookInvocation {
+  command: string;
+  args: readonly string[];
+}
+
+/** Prefer the standalone engine so the plugin invokes the same native SessionStart flow as installed hooks. */
+export function resolveOpenCodeHookInvocation(input: {
+  nodeCommand: string;
+  engineExecutable?: string;
+  compiledHookPath?: string;
+  sourceHookPath?: string;
+  sourceNodeArgs?: readonly string[];
+}): OpenCodeHookInvocation {
+  if (input.engineExecutable?.trim()) {
+    return {
+      command: input.engineExecutable,
+      args: ["m9r-hook", "SessionStart", "opencode"],
+    };
+  }
+  if (input.compiledHookPath) {
+    return {
+      command: input.nodeCommand,
+      args: [input.compiledHookPath, "SessionStart", "opencode"],
+    };
+  }
+  if (input.sourceHookPath) {
+    return {
+      command: input.nodeCommand,
+      args: [...(input.sourceNodeArgs ?? []), input.sourceHookPath, "SessionStart", "opencode"],
+    };
+  }
+  throw new Error("The M9R OpenCode SessionStart hook entry point was not found beside this CLI or in the local M9R installation.");
+}
+
+/** Accept only the additionalContext field returned for the SessionStart hook. */
+export function extractOpenCodeAdditionalContext(raw: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const hookOutput = (parsed as Record<string, unknown>).hookSpecificOutput;
+    if (!hookOutput || typeof hookOutput !== "object" || Array.isArray(hookOutput)) return null;
+    const record = hookOutput as Record<string, unknown>;
+    return record.hookEventName === "SessionStart" && typeof record.additionalContext === "string" && record.additionalContext.length > 0
+      ? record.additionalContext
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export type OpenCodeIdentityPluginInstallAction = "install" | "upgrade" | "unchanged" | "preserve" | "path-changed";
+
+export function planOpenCodeIdentityPluginInstall(input: {
+  targetPath: string;
+  currentHash: string | null;
+  desiredHash: string;
+  ownedPath?: string;
+  ownedHash?: string;
+}): OpenCodeIdentityPluginInstallAction {
+  if (input.ownedPath && input.ownedPath !== input.targetPath) return "path-changed";
+  if (input.currentHash === null) return "install";
+  if (!input.ownedPath || !input.ownedHash || input.currentHash !== input.ownedHash) return "preserve";
+  return input.currentHash === input.desiredHash ? "unchanged" : "upgrade";
+}
+
+export type OpenCodeIdentityPluginRemovalAction = "remove" | "already-absent" | "preserve" | "not-owned" | "path-changed";
+
+export function planOpenCodeIdentityPluginRemoval(input: {
+  targetPath: string;
+  currentHash: string | null;
+  ownedPath?: string;
+  ownedHash?: string;
+}): OpenCodeIdentityPluginRemovalAction {
+  if (!input.ownedPath || !input.ownedHash) return "not-owned";
+  if (input.ownedPath !== input.targetPath) return "path-changed";
+  if (input.currentHash === null) return "already-absent";
+  return input.currentHash === input.ownedHash ? "remove" : "preserve";
+}
+
+/** Build a self-contained OpenCode plugin; parse the hook response before injecting its one trusted field. */
+export function buildOpenCodeIdentityPluginSource(invocation: OpenCodeHookInvocation): string {
+  const parser = extractOpenCodeAdditionalContext.toString().replace(/^function /, "function ");
+  return `import { spawn } from "node:child_process";
+
+const M9R_HOOK_COMMAND = ${JSON.stringify(invocation.command)};
+const M9R_HOOK_ARGS = ${JSON.stringify(invocation.args)};
+const M9R_HOOK_TIMEOUT_MS = 5000;
+const M9R_MAX_CACHED_SESSIONS = 256;
+const M9R_SESSION_BOOTSTRAPS = new Map();
+
+${parser}
+
+function runM9rSessionStart(sessionID, cwd) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let settled = false;
+    let oversized = false;
+    const child = spawn(M9R_HOOK_COMMAND, M9R_HOOK_ARGS, {
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(value);
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish(null);
+    }, M9R_HOOK_TIMEOUT_MS);
+    timeout.unref?.();
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      if (stdout.length + chunk.length > 262144) {
+        oversized = true;
+        child.kill();
+        finish(null);
+        return;
+      }
+      stdout += chunk;
+    });
+    child.once("error", () => finish(null));
+    child.once("close", (code) => finish(!oversized && code === 0 ? stdout : null));
+    child.stdin.once("error", () => finish(null));
+    child.stdin.end(JSON.stringify({ session_id: sessionID, cwd }));
+  });
+}
+
+function bootstrapSession(sessionID, cwd) {
+  const cached = M9R_SESSION_BOOTSTRAPS.get(sessionID);
+  if (cached) {
+    M9R_SESSION_BOOTSTRAPS.delete(sessionID);
+    M9R_SESSION_BOOTSTRAPS.set(sessionID, cached);
+    return cached.promise;
+  }
+
+  if (M9R_SESSION_BOOTSTRAPS.size >= M9R_MAX_CACHED_SESSIONS) {
+    const oldestSettled = [...M9R_SESSION_BOOTSTRAPS.entries()].find(([, entry]) => entry.settled);
+    if (!oldestSettled) return Promise.resolve(null);
+    M9R_SESSION_BOOTSTRAPS.delete(oldestSettled[0]);
+  }
+
+  const entry = { promise: null, settled: false };
+  const promise = Promise.resolve()
+    .then(() => runM9rSessionStart(sessionID, cwd))
+    .then((raw) => typeof raw === "string" ? extractOpenCodeAdditionalContext(raw) : null)
+    .catch(() => null)
+    .then((context) => {
+      entry.settled = true;
+      if (context === null && M9R_SESSION_BOOTSTRAPS.get(sessionID) === entry) {
+        M9R_SESSION_BOOTSTRAPS.delete(sessionID);
+      }
+      return context;
+    });
+  entry.promise = promise;
+  M9R_SESSION_BOOTSTRAPS.set(sessionID, entry);
+  return promise;
+}
+
+export const M9rIdentity = async ({ directory } = {}) => ({
+  "experimental.chat.system.transform": async (input, output) => {
+    const sessionID = input?.sessionID;
+    if (typeof sessionID !== "string" || sessionID.length === 0) return;
+    const cwd = typeof directory === "string" && directory.length > 0 ? directory : process.cwd();
+    const context = await bootstrapSession(sessionID, cwd);
+    if (context !== null && Array.isArray(output?.system)) output.system.push(context);
+  },
+});
+`;
+}
 
 /** One canonical allow-list source for setup, bundled broker, and the CLI broker. */
 export function webExtensionAllowlist(input: {
@@ -169,6 +372,50 @@ export function webExtensionFileAction(input: {
   if (!input.installedHash || input.currentHash !== input.installedHash) return "preserve";
   if (!input.desiredHash) return "delete";
   return input.currentHash === input.desiredHash ? "unchanged" : "write";
+}
+
+export type ManagedWebExtensionSourceFile = { relativePath: string; desiredHash: string };
+export type ManagedWebExtensionInstalledFile = { relativePath: string; installedHash: string };
+export type ManagedWebExtensionRefreshPlan = {
+  relativePath: string;
+  desiredHash: string;
+  installedHash: string | null;
+  currentHash: string | null;
+  action: Exclude<WebExtensionFileAction, "delete">;
+};
+
+/** Plan an extension-only refresh without claiming or overwriting untracked/user-edited files. */
+export function planManagedWebExtensionRefresh(input: {
+  sourceFiles: readonly ManagedWebExtensionSourceFile[];
+  installedFiles: readonly ManagedWebExtensionInstalledFile[];
+  currentHashes: ReadonlyMap<string, string | null>;
+}): ManagedWebExtensionRefreshPlan[] {
+  const normalizeRelativePath = (raw: string): string => {
+    const path = raw.replace(/\\/g, "/");
+    const segments = path.split("/");
+    if (!path || path.startsWith("/") || /^[a-z]:/i.test(path) || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+      throw new Error(`Unsafe managed extension relative path: ${raw}`);
+    }
+    return segments.join("/");
+  };
+  const installed = new Map<string, string>();
+  for (const file of input.installedFiles) {
+    const path = normalizeRelativePath(file.relativePath);
+    if (installed.has(path)) throw new Error(`Duplicate managed extension path: ${path}`);
+    installed.set(path, file.installedHash);
+  }
+  const seen = new Set<string>();
+  return input.sourceFiles.map((file) => {
+    const relativePath = normalizeRelativePath(file.relativePath);
+    if (seen.has(relativePath)) throw new Error(`Duplicate extension source path: ${relativePath}`);
+    seen.add(relativePath);
+    if (!file.desiredHash) throw new Error(`Missing desired hash for extension source path: ${relativePath}`);
+    const currentHash = input.currentHashes.get(relativePath) ?? null;
+    const installedHash = installed.get(relativePath) ?? null;
+    const action = webExtensionFileAction({ currentHash, installedHash, desiredHash: file.desiredHash });
+    if (action === "delete") throw new Error(`Unexpected delete action for extension source path: ${relativePath}`);
+    return { relativePath, desiredHash: file.desiredHash, installedHash, currentHash, action };
+  });
 }
 
 export function parseWebSetupList(raw: string, valid: readonly string[], label: string): string[] {

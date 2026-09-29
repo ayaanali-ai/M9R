@@ -9,7 +9,15 @@ import {
   UnparseableConfigError,
   applyStandingInstruction,
   buildLocalBrokerAutostartSpec,
+  buildLocalBrokerScheduledTaskAction,
+  buildLocalBrokerScheduledTaskInspectScript,
+  buildLocalBrokerScheduledTaskRegisterScript,
+  buildLocalBrokerScheduledTaskRemoveScript,
+  buildLocalBrokerScheduledTaskStartScript,
   decideUninstall,
+  matchesLocalBrokerScheduledTaskContract,
+  planLocalBrokerUninstall,
+  hashLocalBrokerScheduledTaskAction,
   hasOurHooks,
   mergeHooks,
   mergeMcpServerJson,
@@ -18,6 +26,7 @@ import {
   removeMcpServerJson,
   removeMcpServerToml,
   removeStandingInstruction,
+  quoteWindowsCommandLineArgument,
   sha256,
   standingInstructionBlock,
   standingInstructionStatus,
@@ -112,6 +121,106 @@ test("local broker autostart contract rejects invalid ports and incomplete execu
   assert.throws(() => buildLocalBrokerAutostartSpec({ ...input, port: 0 }), /port/i);
   assert.throws(() => buildLocalBrokerAutostartSpec({ ...input, port: 65536 }), /port/i);
   assert.throws(() => buildLocalBrokerAutostartSpec({ ...input, nodeExecutable: "  " }), /executable/i);
+});
+
+test("Windows task arguments preserve spaces, embedded quotes, and trailing backslashes", () => {
+  assert.equal(quoteWindowsCommandLineArgument("plain"), '"plain"');
+  assert.equal(quoteWindowsCommandLineArgument("two words"), '"two words"');
+  assert.equal(quoteWindowsCommandLineArgument('a"b'), '"a\\"b"');
+  assert.equal(quoteWindowsCommandLineArgument("C:\\folder with space\\"), '"C:\\folder with space\\\\"');
+  assert.equal(quoteWindowsCommandLineArgument(""), '""');
+  assert.throws(() => quoteWindowsCommandLineArgument("bad\0arg"), /NUL/i);
+});
+
+test("broker task plan is a per-user hidden logon task with an exact, hashable action", () => {
+  const input = {
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    executable: "C:\\Program Files\\M9R\\m9r-engine.exe",
+    args: ["web", "serve", "--home", "C:\\Users\\Kai User\\.m9r", "--port", "47821"],
+    workingDirectory: "C:\\Users\\Kai User\\.m9r",
+  };
+  const action = buildLocalBrokerScheduledTaskAction(input);
+  assert.equal(action.arguments, '"web" "serve" "--home" "C:\\Users\\Kai User\\.m9r" "--port" "47821"');
+  assert.match(hashLocalBrokerScheduledTaskAction(action), /^[a-f0-9]{64}$/);
+
+  const register = buildLocalBrokerScheduledTaskRegisterScript(input);
+  assert.match(register, /New-ScheduledTaskAction -Execute 'C:\\Program Files\\M9R\\m9r-engine\.exe'/);
+  assert.match(register, /New-ScheduledTaskTrigger -AtLogOn -User "\$env:USERDOMAIN\\\$env:USERNAME"/);
+  assert.match(register, /New-ScheduledTaskPrincipal -UserId .* -LogonType Interactive -RunLevel Limited/);
+  assert.match(register, /-TaskPath '\\'/);
+  assert.match(register, /New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit \(\[TimeSpan\]::Zero\)/);
+  assert.doesNotMatch(register, /-RunLevel Highest|SYSTEM/i);
+  assert.doesNotMatch(register, /-Force/);
+  assert.match(buildLocalBrokerScheduledTaskRegisterScript({ ...input, replaceExisting: true }), /-Force/);
+});
+
+test("broker task ownership covers all actions, trigger, principal, and managed safety settings", () => {
+  const input = {
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    executable: "C:\\Program Files\\M9R\\m9r-engine.exe",
+    args: ["web", "serve", "--home", "C:\\Users\\Kai User\\.m9r", "--port", "47821"],
+    workingDirectory: "C:\\Users\\Kai User\\.m9r",
+  };
+  const action = buildLocalBrokerScheduledTaskAction(input);
+  const userId = "MSI\\Kai";
+  const task = {
+    taskName: input.taskName,
+    taskPath: "\\",
+    actions: [action],
+    triggers: [{ kind: "Logon", enabled: true, userId }],
+    principal: { userId, logonType: "Interactive", runLevel: "Limited" },
+    settings: {
+      hidden: true,
+      executionTimeLimit: "PT0S",
+      allowStartIfOnBatteries: true,
+      dontStopIfGoingOnBatteries: true,
+      startWhenAvailable: true,
+    },
+  };
+
+  assert.equal(matchesLocalBrokerScheduledTaskContract(task, action, userId), true);
+  assert.equal(matchesLocalBrokerScheduledTaskContract({ ...task, actions: [action, action] }, action, userId), false);
+  assert.equal(matchesLocalBrokerScheduledTaskContract({ ...task, triggers: [...task.triggers, task.triggers[0]] }, action, userId), false);
+  assert.equal(matchesLocalBrokerScheduledTaskContract({ ...task, triggers: [{ ...task.triggers[0], userId: "MSI\\Other" }] }, action, userId), false);
+  assert.equal(matchesLocalBrokerScheduledTaskContract({ ...task, principal: { ...task.principal, runLevel: "Highest" } }, action, userId), false);
+  assert.equal(matchesLocalBrokerScheduledTaskContract({ ...task, settings: { ...task.settings, hidden: false } }, action, userId), false);
+  assert.equal(matchesLocalBrokerScheduledTaskContract({ ...task, settings: { ...task.settings, executionTimeLimit: "PT1H" } }, action, userId), false);
+  assert.equal(matchesLocalBrokerScheduledTaskContract({ ...task, settings: { ...task.settings, allowStartIfOnBatteries: false } }, action, userId), false);
+});
+
+test("broker uninstall only removes the marker and stops the broker after ownership and task cleanup are verified", () => {
+  const plan = (overrides: Partial<Parameters<typeof planLocalBrokerUninstall>[0]> = {}) => planLocalBrokerUninstall({
+    inspectionSucceeded: true,
+    taskPresent: false,
+    taskDefinitionOwned: false,
+    taskRemovalVerified: false,
+    hasRecordedOwnership: true,
+    ...overrides,
+  });
+  assert.deepEqual(plan(), { removeTask: false, removeMarker: true, stopBroker: true });
+  assert.deepEqual(plan({ taskPresent: true, taskDefinitionOwned: true, taskRemovalVerified: true }), { removeTask: true, removeMarker: true, stopBroker: true });
+  assert.deepEqual(plan({ taskPresent: true, taskDefinitionOwned: true, taskRemovalVerified: false }), { removeTask: true, removeMarker: false, stopBroker: false });
+  assert.deepEqual(plan({ taskPresent: true, taskDefinitionOwned: false, taskRemovalVerified: false }), { removeTask: false, removeMarker: false, stopBroker: false });
+  assert.deepEqual(plan({ inspectionSucceeded: false }), { removeTask: false, removeMarker: false, stopBroker: false });
+  assert.deepEqual(plan({ hasRecordedOwnership: false }), { removeTask: false, removeMarker: false, stopBroker: false });
+});
+
+test("broker task inspection, start, and removal address only the named task", () => {
+  const inspect = buildLocalBrokerScheduledTaskInspectScript("M9R 'Web' Broker");
+  assert.match(inspect, /Get-ScheduledTask -TaskName 'M9R ''Web'' Broker'/);
+  assert.match(inspect, /\$task\.Actions/);
+  assert.match(inspect, /\$task\.Triggers/);
+  assert.match(inspect, /\$task\.Principal/);
+  assert.match(inspect, /\$task\.Settings/);
+  assert.doesNotMatch(inspect, /Select-Object -First 1/);
+  assert.match(inspect, /ConvertTo-Json -Compress/);
+  const start = buildLocalBrokerScheduledTaskStartScript(LOCAL_BROKER_AUTOSTART_TASK_NAME);
+  assert.match(start, /State -notin @\('Running', 'Queued'\)/);
+  assert.match(start, /Start-ScheduledTask/);
+  const remove = buildLocalBrokerScheduledTaskRemoveScript(LOCAL_BROKER_AUTOSTART_TASK_NAME);
+  assert.match(remove, /Stop-ScheduledTask/);
+  assert.match(remove, /Unregister-ScheduledTask -TaskName \$task\.TaskName -TaskPath \$task\.TaskPath -Confirm:\$false/);
+  assert.doesNotMatch(remove, /schtasks|Remove-ItemProperty|Registry/i);
 });
 
 test("remove takes out only our entries and leaves the user's hooks and settings", () => {

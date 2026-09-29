@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 /**
  * Detects which coding-agent CLIs (Claude Code, Codex, OpenCode) are
  * actually installed on this machine, without needing to run from inside
@@ -51,6 +53,28 @@ export interface DetectedAgent {
  * hang past the timeout -- a hung probe must never block setup).
  */
 export type VersionProbe = (binary: string) => Promise<string | null>;
+
+/**
+ * Build a side-effect-isolated environment for version checks. OpenCode may
+ * initialize its XDG directories even for `--version`; keeping that probe in
+ * a disposable directory avoids touching (or depending on access to) a user's
+ * actual config, data, cache, or state. The caller owns creating and removing
+ * `isolatedRoot`.
+ */
+export function buildAgentVersionProbeEnv(
+  binary: string,
+  baseEnv: Record<string, string | undefined>,
+  isolatedRoot: string,
+): Record<string, string | undefined> {
+  if (binary.toLowerCase() !== "opencode") return baseEnv;
+  return {
+    ...baseEnv,
+    XDG_CONFIG_HOME: join(isolatedRoot, "config"),
+    XDG_DATA_HOME: join(isolatedRoot, "data"),
+    XDG_CACHE_HOME: join(isolatedRoot, "cache"),
+    XDG_STATE_HOME: join(isolatedRoot, "state"),
+  };
+}
 
 /**
  * Detects every known agent CLI present on PATH. Probes run one at a time,

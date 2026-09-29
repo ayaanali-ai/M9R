@@ -4,7 +4,7 @@
   const ROOT_ID = "m9r-presence-root";
   const EDGE = 10;
   const MESSAGE_TTL_MS = 4000;
-  const GLIDE_MS = 480;
+  const FRAME_AUTH_TIMEOUT_MS = 1000;
   const IDLE_AFTER_MS = 4000;
   // Without a roster from the broker there is no "session ended" signal; an agent silent this long is taken as gone.
   const ORPHAN_AFTER_MS = 90000;
@@ -67,14 +67,16 @@
   // Minimum-jerk profile: how a hand actually moves (slow start, fast middle, slow settle), not a symmetric ease.
   const minJerk = (t) => t * t * t * (10 - 15 * t + 6 * t * t);
   // Fitts-style duration: longer trips take longer, but not proportionally.
-  const glideDuration = (dist) => Math.min(1200, Math.max(300, 260 + 140 * Math.log2(1 + dist / 30)));
-  const DWELL_MS = 170;
+  // The cursor is a progress signal, not a second animation to wait through.
+  const glideDuration = (dist) => Math.min(650, Math.max(120, 110 + 75 * Math.log2(1 + dist / 30)));
+  const DWELL_MS = 60;
   let lastGlideStartAt = 0;
-  // People do not start moving the instant something happens, and two people rarely start in the same half second.
-  const reactionDelay = (fromParked) => {
+  // Repeated, nearby, and background actions do not need another theatrical delay.
+  const reactionDelay = (fromParked, fast) => {
+    if (fast) return 0;
     const now = performance.now();
-    const base = fromParked ? 260 + Math.random() * 300 : 60 + Math.random() * 140;
-    const stagger = now - lastGlideStartAt < 700 ? 300 + Math.random() * 500 : 0;
+    const base = fromParked ? 80 + Math.random() * 100 : 20 + Math.random() * 50;
+    const stagger = now - lastGlideStartAt < 300 ? 30 + Math.random() * 70 : 0;
     return base + stagger;
   };
 
@@ -91,6 +93,10 @@
 
   function createPresenceOverlay(doc, options) {
     const view = doc.defaultView;
+    const previousInstance = view.__m9rPresenceOverlayInstance;
+    if (previousInstance && typeof previousInstance.destroy === "function") {
+      try { previousInstance.destroy(); } catch { /* a stale overlay must not block its replacement */ }
+    }
     const host = doc.createElement("div");
     host.id = ROOT_ID;
     host.style.cssText = "all:initial;position:fixed;inset:0;pointer-events:none;z-index:2147483647;";
@@ -111,14 +117,32 @@
     host.setAttribute("data-motion", motionMode);
     const agents = new Map();
     const hiddenSessions = new Set();
+    let destroyed = false;
     const storage = global.chrome && global.chrome.storage && global.chrome.storage.local;
+    let onMotionChange = null;
+    let motionBridge = null;
     const setMotionMode = (value) => {
       motionMode = value === "system" ? "system" : "full";
       host.setAttribute("data-motion", motionMode);
     };
     if (storage) {
       storage.get(MOTION_KEY).then((stored) => setMotionMode(stored && stored[MOTION_KEY])).catch(() => {});
-      if (global.chrome.storage.onChanged) global.chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes[MOTION_KEY]) setMotionMode(changes[MOTION_KEY].newValue); });
+      if (global.chrome.storage.onChanged) {
+        onMotionChange = (changes, area) => {
+          if (!destroyed && area === "local" && changes[MOTION_KEY]) setMotionMode(changes[MOTION_KEY].newValue);
+        };
+        motionBridge = view.__m9rPresenceMotionBridge;
+        if (!motionBridge) {
+          motionBridge = { handler: onMotionChange };
+          motionBridge.listener = (...args) => { if (motionBridge.handler) return motionBridge.handler(...args); };
+          view.__m9rPresenceMotionBridge = motionBridge;
+          try { global.chrome.storage.onChanged.addListener(motionBridge.listener); }
+          catch (error) {
+            if (view.__m9rPresenceMotionBridge === motionBridge) delete view.__m9rPresenceMotionBridge;
+            throw error;
+          }
+        } else motionBridge.handler = onMotionChange;
+      }
     }
     if (storage) {
       storage.get(HIDDEN_SESSIONS_KEY).then((stored) => {
@@ -181,6 +205,7 @@
 
     function destination(agent, now) {
       if (agent.docked) return dockPoint(agent);
+      if (agent.nativePoint) return agent.nativePoint;
       const el = resolveTarget(agent);
       // When the page cannot resolve the selector (a control in a shadow root or a replaced node), the extension still measured
       // the element; travel to that spot so the cursor never stays put while the click happens somewhere else.
@@ -203,11 +228,14 @@
       loop = 0;
       const vw = view.innerWidth;
       const vh = view.innerHeight;
+      let keepFrame = false;
       for (const agent of agents.values()) {
+        if (agent.nativePointerLive) keepFrame = true;
         const dest = destination(agent, now);
         let x = dest.x;
         let y = dest.y;
         if (agent.glide) {
+          keepFrame = true;
           const g = agent.glide;
           const t = Math.max(0, Math.min(1, (performance.now() - g.start) / g.duration));
           const dx = dest.x - g.from.x;
@@ -264,6 +292,7 @@
           agent.caret.style.height = `${agent.caretAt.h}px`;
         }
         if (agent.typingEl && agent.typingUntil > now) {
+          keepFrame = true;
           const value = "value" in agent.typingEl ? agent.typingEl.value : agent.typingEl.textContent;
           if (value !== agent.lastTyped) {
             agent.lastTyped = value;
@@ -274,16 +303,18 @@
           agent.docked = true;
           agent.wasParked = true;
           agent.el.classList.add("parked");
-          setLabel(agent, isWorking(agent) ? "Thinking" : "Waiting", false);
+          if (!agent.completed) setLabel(agent, isWorking(agent) ? "Thinking" : "Waiting", false);
           const to = dockPoint(agent);
           const from = agent.point || to;
           agent.glide = { from: { ...from }, start: performance.now(), duration: glideDuration(Math.hypot(to.x - from.x, to.y - from.y)), side: Math.random() < 0.5 ? -1 : 1, waiters: [] };
+          keepFrame = true;
         }
         const idle = !agent.glide && now - agent.lastSeen > IDLE_AFTER_MS && !(agent.typingUntil > now) && !isWorking(agent);
         agent.el.classList.toggle("idle", idle);
         agent.miniCaret.hidden = !typing;
+        if (agent.typingUntil > now || agent.focusUntil > now || agent.claimedUntil > now || now - agent.lastActionAt <= 3200) keepFrame = true;
       }
-      if (agents.size) loop = view.requestAnimationFrame(frameTick);
+      if (keepFrame) loop = view.requestAnimationFrame(frameTick);
     }
 
     function isWorking(agent) {
@@ -295,10 +326,39 @@
     function whenArrived(id, timeoutMs) {
       return new Promise((resolve) => {
         const agent = agents.get(String(id || "").slice(0, 64));
-        const timer = view.setTimeout(resolve, timeoutMs || 1800);
+        const timeout = Math.min(1000, Math.max(100, Number(timeoutMs) || 1000));
+        const timer = view.setTimeout(resolve, timeout);
         const done = () => { view.clearTimeout(timer); resolve(); };
         if (!agent || !agent.glide) { view.setTimeout(done, DWELL_MS); return; }
         (agent.glide.waiters || (agent.glide.waiters = [])).push(done);
+      });
+    }
+
+    function nativePointer(agentId, x, y, active) {
+      const agent = agents.get(String(agentId || "").slice(0, 64));
+      if (!agent || !Number.isFinite(x) || !Number.isFinite(y)) return Promise.resolve(false);
+      agent.lastSeen = Date.now();
+      agent.lastActionAt = agent.lastSeen;
+      agent.docked = false;
+      agent.el.classList.remove("parked");
+      agent.glide = null;
+      agent.pendingClick = false;
+      agent.point = { x, y };
+      if (active) {
+        agent.nativePoint = { x, y };
+        agent.nativePointerLive = true;
+      } else {
+        agent.nativePoint = null;
+        agent.nativePointerLive = false;
+        agent.selector = null;
+        agent.targetEl = null;
+        agent.hintRect = null;
+      }
+      kick();
+      // Wait for the position update to cross a rendered frame. The trusted OS
+      // input host uses this acknowledgment before pressing the mouse button.
+      return new Promise((resolve) => {
+        view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve(true)));
       });
     }
 
@@ -333,6 +393,21 @@
       layer.appendChild(ring);
       agent.el.classList.add("pressed");
       view.setTimeout(() => agent.el.classList.remove("pressed"), 140);
+    }
+
+    // A slot exists so two agents' cursors don't render on top of each other (it offsets each one's fan/dock position).
+    // It used to be set once, from "how many agents exist right now", at the moment an agent's cursor was first created,
+    // and never touched again. That meant a slot number is really "however many agents happened to exist at that exact
+    // instant" -- if an agent later leaves and a new one joins, the new one can easily land on a slot number an existing
+    // agent already has, and their cursors sit in the literal same spot ("perfectly overlapped"). Slots are now assigned
+    // fresh, in a stable order, from the live roster every time membership changes.
+    function reslot() {
+      let i = 0;
+      for (const agent of agents.values()) {
+        agent.slot = i;
+        agent.el.style.setProperty("--slot", String(agent.slot));
+        i += 1;
+      }
     }
 
     function createAgent(id, provider) {
@@ -388,10 +463,11 @@
         selector: null, targetEl: null, rect: null, point: null, spawn, glide: null, verb: "", pendingClick: false,
         focusUntil: 0, claimedUntil: 0, typingUntil: 0, typingEl: null, lastTyped: null, caretAt: null,
         lastSeen: Date.now(), lastMessage: "", bubbleTimer: 0, fadeTimer: 0, claimTimer: 0, leaveTimer: 0,
+        lastTargetAt: 0, completed: false,
         slot: agents.size, docked: false, lastActionAt: Date.now(),
       };
-      el.style.setProperty("--slot", String(agent.slot));
       agents.set(id, agent);
+      reslot();
       return agent;
     }
 
@@ -421,17 +497,27 @@
       if (isAgentMessage) agent.lastMessage = message;
       const hideText = isAgentMessage && (msg.showMessageText === false || (agent.sessionId && hiddenSessions.has(agent.sessionId)));
 
-      if (!isAgentMessage) setLabel(agent, hideText ? "M9R message hidden" : step || message, phase === "done");
+      if (!isAgentMessage) {
+        agent.completed = phase === "done";
+        setLabel(agent, hideText ? "M9R message hidden" : step || message, agent.completed);
+      }
       const selector = msg.target && typeof msg.target.selector === "string" ? msg.target.selector : null;
       const hint = msg.target && msg.target.rect && Number.isFinite(msg.target.rect.x) && Number.isFinite(msg.target.rect.y) ? msg.target.rect : null;
+      const exactPoint = msg.target && msg.target.point && Number.isFinite(msg.target.point.x) && Number.isFinite(msg.target.point.y)
+        ? { x: msg.target.point.x, y: msg.target.point.y }
+        : null;
       const verb = verbOf(msg);
 
       if (phase === "start" && !isAgentMessage) {
+        agent.nativePoint = exactPoint;
+        agent.nativePointerLive = false;
         agent.hintRect = hint ? { x: hint.x, y: hint.y, width: Number(hint.width) || 0, height: Number(hint.height) || 0, at: now } : null;
         const changedTarget = selector !== agent.selector;
+        const sameTargetRecently = Boolean(selector && !changedTarget && now - agent.lastTargetAt < 1500);
         agent.verb = verb;
         if (selector) {
           agent.selector = selector;
+          agent.lastTargetAt = now;
           if (changedTarget) agent.targetEl = null;
           const el = resolveTarget(agent);
           if (verb === "read") { agent.focusUntil = now + 2400; if (!reducedMotion.matches) readSweep(agent); }
@@ -452,10 +538,17 @@
         if (!reducedMotion.matches) {
           const to = destination(agent, now);
           const dist = Math.hypot(to.x - from.x, to.y - from.y);
-          const wait = reactionDelay(!agent.point || agent.wasParked);
+          const fast = Boolean(view.document && view.document.hidden) || sameTargetRecently || dist < 48;
+          const wait = reactionDelay(!agent.point || agent.wasParked, fast);
           agent.wasParked = false;
           lastGlideStartAt = performance.now() + wait;
-          agent.glide = { from: { ...from }, start: performance.now() + wait, duration: glideDuration(dist), side: Math.random() < 0.5 ? -1 : 1, waiters: [] };
+          agent.glide = fast
+            ? null
+            : { from: { ...from }, start: performance.now() + wait, duration: glideDuration(dist), side: Math.random() < 0.5 ? -1 : 1, waiters: [] };
+          if (fast) {
+            agent.point = { ...to };
+            arrive(agent);
+          }
         } else {
           // Reduced motion trims the decoration, not the movement: the cursor still travels to its target, so people can see where
           // the agent is. It goes briefly and in a straight line, with no bow, overshoot or reaction delay.
@@ -509,6 +602,7 @@
       agent.caret.remove();
       for (const timer of [agent.bubbleTimer, agent.fadeTimer, agent.claimTimer, agent.leaveTimer]) if (timer) view.clearTimeout(timer);
       agents.delete(id);
+      reslot();
     }
 
     /** The broker's roster: agents that stopped, failed or left the session take their cursor with them. */
@@ -528,7 +622,42 @@
       for (const id of [...agents.keys()]) leave(id);
     }
 
-    function resume() {}
+    function resume() {
+      if (destroyed || !host.isConnected) return;
+      for (const state of [...frames.values()]) {
+        clearFrameAuthTimer(state);
+        closeFramePort(state);
+        state.ready = false;
+        state.pending.clear();
+        if (!state.box.isConnected || !state.frame.isConnected) {
+          try { state.frame.removeEventListener("load", state.onLoad); } catch {}
+          frames.delete(state.kind);
+          try { state.box.remove(); } catch {}
+          const replacement = mountFrame(state.kind, state.src, state.defaults);
+          if (replacement) {
+            replacement.size = state.size;
+            replacement.pos = state.pos;
+            replacement.shown = state.shown;
+            replacement.u = state.u;
+            layout(replacement);
+          }
+          continue;
+        }
+        layout(state);
+        state.frame.src = state.src;
+      }
+    }
+
+    function suspend() {
+      if (destroyed) return;
+      for (const state of frames.values()) {
+        clearFrameAuthTimer(state);
+        closeFramePort(state);
+        state.ready = false;
+        state.pending.clear();
+        layout(state);
+      }
+    }
 
     const sweep = view.setInterval(() => {
       const now = Date.now();
@@ -539,12 +668,22 @@
 
     // ---- Extension-owned frames (the thread pill and the message bar), mounted inside this closed shadow root. ----
     const frames = new Map();
-    const extensionOrigin = global.chrome && global.chrome.runtime && typeof global.chrome.runtime.getURL === "function"
-      ? new URL(global.chrome.runtime.getURL("")).origin
-      : "";
+    const extensionOrigin = (() => {
+      if (!global.chrome?.runtime || typeof global.chrome.runtime.getURL !== "function") return "";
+      try {
+        const root = new URL(global.chrome.runtime.getURL(""));
+        // URL.origin serializes custom schemes as "null" in some runtimes. Chrome's
+        // postMessage origin is the concrete extension scheme and host.
+        return root.protocol === "chrome-extension:" && root.host ? `${root.protocol}//${root.host}` : "";
+      } catch { return ""; }
+    })();
 
     function mountFrame(kind, src, defaults) {
       if (frames.has(kind) || !extensionOrigin) return null;
+      const frameStageKey = `m9r${kind.charAt(0).toUpperCase()}${kind.slice(1)}Frame`;
+      const setFrameStage = (stage) => {
+        try { if (host.isConnected && host.dataset) host.dataset[frameStageKey] = stage; } catch {}
+      };
       const box = doc.createElement("div");
       box.className = "frame-host";
       const frame = doc.createElement("iframe");
@@ -555,56 +694,126 @@
       frame.setAttribute("allow", "microphone");
       box.appendChild(frame);
       shadow.appendChild(box);
-      const state = { kind, box, frame, src, size: { w: defaults.w, h: defaults.h }, pos: null, shown: true, loads: 0, defaults };
+      let nonce = "";
+      try { nonce = new URL(src, doc.baseURI).searchParams.get("n") || ""; } catch {}
+      const state = { kind, box, frame, src, nonce, port: null, size: { w: defaults.w, h: defaults.h }, pos: null, shown: true, defaults, ready: false, pending: new Map(), setFrameStage, loadCount: 0, authCount: 0, retryCount: 0 };
+      setFrameStage("mounted");
       // The thread pill rides the dock track when the dock module is loaded; otherwise it keeps its old free position.
       state.dock = kind === "pill" && !!global.M9RDock;
       frames.set(kind, state);
-      frame.addEventListener("load", () => {
-        state.loads += 1;
-        // A page can navigate a child frame it can see through window.frames; if our frame is ever
-        // navigated away from the pill, rebuild it rather than show whatever it was pointed at.
-        if (state.loads > 1) {
-          state.loads = 0;
-          frame.src = src;
-          return;
+      // Only a fixed reason code reaches the host DOM. It lets the owner diagnose a
+      // missing pill without exposing the frame nonce or extension URL to the page.
+      if (host.dataset) host.dataset.m9rFrameHandshake = "awaiting";
+      state.onLoad = () => {
+        if (destroyed || frames.get(kind) !== state || !host.isConnected || !frame.isConnected) return;
+        state.loadCount++;
+        if (host.dataset) host.dataset[`m9r${kind === "pill" ? "Pill" : "Composer"}Loads`] = String(state.loadCount);
+        clearFrameAuthTimer(state);
+        // An about:blank load may precede the extension document, and the frame may
+        // announce itself before its load event. Every load invalidates the old port
+        // and hides the frame; an origin-targeted hello asks the new document to prove
+        // itself. A foreign document cannot receive it, so the retry timer restores
+        // the known extension URL without ever displaying untrusted frame content.
+        closeFramePort(state);
+        state.ready = false;
+        setFrameStage("authenticating");
+        layout(state);
+        scheduleFrameAuthRetry(state);
+        try {
+          frame.contentWindow.postMessage({ m9r: "host-hello", nonce: state.nonce }, extensionOrigin);
+          if (host.dataset) host.dataset[`m9r${kind === "pill" ? "Pill" : "Composer"}Hello`] = "sent";
+        } catch {
+          if (host.dataset) host.dataset[`m9r${kind === "pill" ? "Pill" : "Composer"}Hello`] = "rejected";
         }
         postToFrame(state, { kind: "host", vw: view.innerWidth, vh: view.innerHeight });
         if (state.dock && state.notifiedEdge) postToFrame(state, { kind: "dock", edge: state.notifiedEdge });
-      });
+      };
+      frame.addEventListener("load", state.onLoad);
       frame.src = src;
       if (storage && state.dock) {
         storage.get(DOCK_KEY).then((stored) => {
+          if (destroyed || frames.get(kind) !== state) return;
           const saved = stored && stored[DOCK_KEY];
           if (Number.isFinite(saved) && saved >= 0 && saved <= 1) state.u = saved;
           layout(state);
-        }).catch(() => layout(state));
+        }).catch(() => { if (!destroyed && frames.get(kind) === state) layout(state); });
       } else if (storage) {
         storage.get(POSITION_KEYS[kind]).then((stored) => {
+          if (destroyed || frames.get(kind) !== state) return;
           const saved = stored && stored[POSITION_KEYS[kind]];
           if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.bottom)) state.pos = { left: saved.left, bottom: saved.bottom };
           layout(state);
-        }).catch(() => layout(state));
+        }).catch(() => { if (!destroyed && frames.get(kind) === state) layout(state); });
       } else layout(state);
       return state;
     }
 
+    function closeFramePort(state) {
+      if (!state.port) return;
+      try { state.port.close(); } catch {}
+      state.port = null;
+    }
+
+    function clearFrameAuthTimer(state) {
+      if (!state.authTimer) return;
+      try { view.clearTimeout(state.authTimer); } catch {}
+      state.authTimer = 0;
+    }
+
+    function scheduleFrameAuthRetry(state) {
+      clearFrameAuthTimer(state);
+      state.authTimer = view.setTimeout(() => {
+        state.authTimer = 0;
+        if (destroyed || state.ready || !host.isConnected || !state.frame.isConnected || frames.get(state.kind) !== state) return;
+        // A load event has no origin. Until the frame proves its extension origin with its nonce,
+        // keep it hidden and retry the known extension URL rather than leaving an orphan page mounted.
+        state.setFrameStage("retrying");
+        state.retryCount++;
+        if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Retries`] = String(state.retryCount);
+        closeFramePort(state);
+        state.frame.src = state.src;
+      }, FRAME_AUTH_TIMEOUT_MS);
+    }
+
     function postToFrame(state, payload) {
-      try { state.frame.contentWindow.postMessage({ m9r: "host", ...payload }, extensionOrigin); } catch {}
+      if (!host.isConnected || !state.frame.isConnected) return;
+      // A newly mounted iframe starts as about:blank with the page's origin. A load event alone is
+      // insufficient proof that the extension page is the recipient; wait for its own authenticated
+      // message before posting anything to it.
+      if (!state.ready || !state.port) { state.pending.set(payload.kind, payload); return; }
+      try { state.port.postMessage({ m9r: "host", nonce: state.nonce, ...payload }); }
+      catch {
+        state.ready = false;
+        state.setFrameStage("channel-error");
+        try { state.port.close(); } catch {}
+        state.port = null;
+        state.pending.set(payload.kind, payload);
+      }
+    }
+
+    // Chrome's per-site zoom scales every CSS pixel, the pill included, so the same pill looked bigger on a site zoomed to 125% and
+    // smaller at 80%. The background reports the tab's zoom and the frames are scaled back by 1/zoom (layout sees screen-sized boxes).
+    let zoomK = 1;
+    function setZoom(zoom) {
+      const next = Number.isFinite(zoom) && zoom > 0.2 && zoom < 6 ? Math.min(2.5, Math.max(0.4, 1 / zoom)) : 1;
+      if (Math.abs(next - zoomK) < 0.001) return;
+      zoomK = next;
+      for (const state of frames.values()) { state.appliedBase = false; layout(state); }
     }
 
     function layout(state) {
       if (state.dock) return layoutDock(state);
       const vw = view.innerWidth;
       const vh = view.innerHeight;
-      const w = Math.min(state.size.w, vw - 8);
-      const h = Math.min(state.size.h, vh - 8);
+      const w = Math.min(state.size.w * zoomK, vw - 8);
+      const h = Math.min(state.size.h * zoomK, vh - 8);
       let left = state.pos ? state.pos.left : (vw - w) / 2;
       let bottom = state.pos ? state.pos.bottom : state.defaults.bottom;
       left = Math.min(Math.max(left, 4), Math.max(4, vw - w - 4));
       bottom = Math.min(Math.max(bottom, 4), Math.max(4, vh - h - 4));
-      state.box.style.cssText = `left:${left}px;bottom:${bottom}px;width:${w}px;height:${h}px`;
+      state.box.style.cssText = `left:${left}px;bottom:${bottom}px;width:${w / zoomK}px;height:${h / zoomK}px;transform:scale(${zoomK});transform-origin:0 100%`;
       state.box.classList.add("ready");
-      state.box.classList.toggle("hidden", !state.shown);
+      state.box.classList.toggle("hidden", !state.shown || !state.ready);
       state.shownAt = { left, bottom, w, h };
     }
 
@@ -636,8 +845,8 @@
       if (!Number.isFinite(state.u)) state.u = D.project(path, vw > 900 ? vw - 260 : vw / 2, vh).t / path.length;
       const point = D.pointAt(path, state.u * path.length);
       const o = D.orientationAt(point.theta);
-      const w = Math.min(state.size.w, vw - 8);
-      const h = Math.min(state.size.h, vh - 8);
+      const w = Math.min(state.size.w * zoomK, vw - 8);
+      const h = Math.min(state.size.h * zoomK, vh - 8);
       // The bar sits at the frame's bottom (its top when docked along the top), so growth always opens away from the edge.
       // Along the top and bottom the frame is centred on the track point; on the sides it hugs the edge and slides up and down.
       const half = DOCK.thickness / 2 + DOCK.pad;
@@ -656,11 +865,11 @@
       }
       // On the left and right edges the tab stays exactly where it is and the panel grows around it; the frame only slides when the panel would not fit.
       if ((o.card === 1 || o.card === 3) && state.bar) {
-        top = point.y - (state.bar.top + state.bar.h / 2);
+        top = point.y - (state.bar.top + state.bar.h / 2) * zoomK;
         // Give the panel only the room that is left below the tab, so opening it never has to move the tab; it scrolls inside instead.
         const cap = Math.floor(vh - 4 - Math.max(4, top) - 28);
         const capped = cap >= 240 ? cap : 0;
-        if (capped !== state.lastCap) { state.lastCap = capped; postToFrame(state, { kind: "panel-max", px: capped }); }
+        if (capped !== state.lastCap) { state.lastCap = capped; postToFrame(state, { kind: "panel-max", px: Math.floor(capped / zoomK) }); }
       }
       if (o.card !== 0 && o.card !== 2) top = clampN(top, 4, Math.max(4, vh - h - 4));
       if (o.edge !== state.notifiedEdge) {
@@ -680,7 +889,7 @@
         sp.l.setTarget(left); sp.t.setTarget(top); sp.r.setTarget(left + w); sp.b.setTarget(top + h);
       }
       state.box.classList.add("ready");
-      state.box.classList.toggle("hidden", !state.shown);
+      state.box.classList.toggle("hidden", !state.shown || !state.ready);
       applyDock(state);
       if (!Object.values(sp).every((s) => s.settled()) && !dockLoop) {
         dockLast = 0;
@@ -693,14 +902,18 @@
       const vh = view.innerHeight;
       const left = sp.l.value;
       const top = sp.t.value;
-      const w = Math.max(40, sp.r.value - left);
-      const h = Math.max(40, sp.b.value - top);
+      // The 40px floor is a real on-screen minimum, so it has to be scaled the same way everything else here is: without
+      // this, at a high page zoom the un-scaled 40 CSS px this box gets clamped up to is then multiplied by the browser's
+      // own zoom again on top, landing far bigger on screen than 40px (the notch clipped off the bottom of the viewport
+      // at 2x zoom because of exactly this).
+      const w = Math.max(40 * zoomK, sp.r.value - left);
+      const h = Math.max(40 * zoomK, sp.b.value - top);
       const st = state.box.style;
       if (state.appliedW !== w || state.appliedH !== h || !state.appliedBase) {
-        st.cssText = `left:0;top:0;bottom:auto;width:${w}px;height:${h}px;will-change:transform`;
+        st.cssText = `left:0;top:0;bottom:auto;width:${w / zoomK}px;height:${h / zoomK}px;will-change:transform;transform-origin:0 0`;
         state.appliedW = w; state.appliedH = h; state.appliedBase = true;
       }
-      st.transform = `translate3d(${left}px,${top}px,0)`;
+      st.transform = `translate3d(${left}px,${top}px,0) scale(${zoomK})`;
       state.cur = { left, top, width: w, height: h };
       state.shownAt = { left, bottom: vh - top - h, w, h };
     }
@@ -722,15 +935,52 @@
     }
 
     function frameFor(source) {
-      for (const state of frames.values()) if (state.frame.contentWindow === source) return state;
+      if (!host.isConnected) return null;
+      for (const state of frames.values()) {
+        if (state.box.isConnected && state.frame.isConnected && state.frame.contentWindow === source) return state;
+      }
       return null;
     }
 
     function onFrameMessage(event) {
-      if (!extensionOrigin || event.origin !== extensionOrigin) return;
-      const state = frameFor(event.source);
       const data = event.data;
-      if (!state || !data || data.m9r !== "frame") return;
+      if (!data || data.m9r !== "frame") return;
+      if (!extensionOrigin || event.origin !== extensionOrigin) {
+        if (host.dataset) host.dataset.m9rFrameHandshake = "origin-mismatch";
+        return;
+      }
+      const state = frameFor(event.source);
+      if (!state) {
+        if (host.dataset) host.dataset.m9rFrameHandshake = "source-mismatch";
+        return;
+      }
+      if (!state.nonce || data.nonce !== state.nonce) {
+        if (host.dataset) host.dataset.m9rFrameHandshake = "nonce-mismatch";
+        return;
+      }
+      if (!state.ready) {
+        if (typeof global.MessageChannel !== "function") return;
+        const channel = new global.MessageChannel();
+        state.port = channel.port1;
+        try {
+          state.frame.contentWindow.postMessage({ m9r: "host-port", nonce: state.nonce }, extensionOrigin, [channel.port2]);
+        } catch {
+          try { channel.port1.close(); } catch {}
+          try { channel.port2.close(); } catch {}
+          state.port = null;
+          return;
+        }
+        state.ready = true;
+        state.setFrameStage("ready");
+        state.authCount++;
+        if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Auths`] = String(state.authCount);
+        if (host.dataset) host.dataset.m9rFrameHandshake = "ready";
+        clearFrameAuthTimer(state);
+        layout(state);
+        const pending = [...state.pending.values()];
+        state.pending.clear();
+        for (const payload of pending) postToFrame(state, payload);
+      }
       if (data.kind === "size" && Number.isFinite(data.w) && Number.isFinite(data.h)) {
         const before = state.shownAt;
         const grew = before && data.h !== state.size.h;
@@ -742,12 +992,12 @@
       } else if (data.kind === "drag" && state.dock && state.path && Number.isFinite(data.cx) && Number.isFinite(data.cy)) {
         // The pointer, in window coordinates: where the frame is drawn right now plus where the pointer is inside it.
         const at = state.cur || { left: 0, top: 0 };
-        const hit = global.M9RDock.project(state.path, at.left + data.cx, at.top + data.cy);
+        const hit = global.M9RDock.project(state.path, at.left + data.cx * zoomK, at.top + data.cy * zoomK);
         state.u = hit.t / state.path.length;
         layoutDock(state);
       } else if (data.kind === "drag" && Number.isFinite(data.dx) && Number.isFinite(data.dy)) {
         const at = state.shownAt || { left: 0, bottom: 0 };
-        state.pos = { left: at.left + data.dx, bottom: at.bottom - data.dy };
+        state.pos = { left: at.left + data.dx * zoomK, bottom: at.bottom - data.dy * zoomK };
         layout(state);
       } else if (data.kind === "drag-end" && state.dock) {
         if (storage && Number.isFinite(state.u)) void storage.set({ [DOCK_KEY]: state.u }).catch(() => {});
@@ -812,13 +1062,33 @@
     view.addEventListener("resize", onResize, { passive: true });
 
     function destroy() {
-      view.clearInterval(sweep);
-      if (loop) view.cancelAnimationFrame(loop);
-      if (dockLoop) view.cancelAnimationFrame(dockLoop);
-      for (const id of [...agents.keys()]) remove(id);
-      view.removeEventListener("message", onFrameMessage);
-      view.removeEventListener("resize", onResize);
-      host.remove();
+      if (destroyed) return;
+      destroyed = true;
+      const attempt = (cleanup) => { try { cleanup(); } catch { /* one invalidated extension API must not strand the rest */ } };
+      attempt(() => view.clearInterval(sweep));
+      if (onMotionChange) {
+        if (motionBridge && motionBridge.handler === onMotionChange) motionBridge.handler = null;
+        try {
+          global.chrome.storage.onChanged.removeListener(motionBridge.listener);
+          if (view.__m9rPresenceMotionBridge === motionBridge) delete view.__m9rPresenceMotionBridge;
+        } catch { /* Reuse one inert bridge if Chrome refuses removal during invalidation. */ }
+        onMotionChange = null;
+        motionBridge = null;
+      }
+      if (loop) attempt(() => view.cancelAnimationFrame(loop));
+      if (dockLoop) attempt(() => view.cancelAnimationFrame(dockLoop));
+      for (const id of [...agents.keys()]) attempt(() => remove(id));
+      attempt(() => view.removeEventListener("message", onFrameMessage));
+      attempt(() => view.removeEventListener("resize", onResize));
+      for (const state of frames.values()) {
+        clearFrameAuthTimer(state);
+        attempt(() => state.frame.removeEventListener("load", state.onLoad));
+        attempt(() => closeFramePort(state));
+        state.pending.clear();
+      }
+      frames.clear();
+      attempt(() => host.remove());
+      if (view.__m9rPresenceOverlayInstance === api) delete view.__m9rPresenceOverlayInstance;
     }
 
     function snapshot() {
@@ -833,10 +1103,21 @@
       }));
     }
 
-    return {
-      update, remove, leave, stop, resume, destroy, snapshot, syncAgents,
-      mountFrame, showComposer, toggleComposer, togglePill, talk, whenArrived,
+    function isDoneVisible(agentId, sessionId) {
+      const agent = agents.get(String(agentId || "").slice(0, 64));
+      return Boolean(
+        !destroyed && host.isConnected && agent?.el.isConnected &&
+        typeof sessionId === "string" && sessionId.length > 0 && agent.sessionId === sessionId &&
+        agent.completed && agent.step.textContent === "Done" && agent.label.classList.contains("done")
+      );
+    }
+
+    const api = {
+      update, remove, leave, stop, resume, destroy, snapshot, isDoneVisible, syncAgents, nativePointer,
+      mountFrame, showComposer, toggleComposer, togglePill, talk, whenArrived, setZoom, suspend,
     };
+    view.__m9rPresenceOverlayInstance = api;
+    return api;
   }
 
   global.M9RPresence = { createPresenceOverlay, ROOT_ID };

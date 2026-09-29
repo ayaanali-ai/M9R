@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { nativeStatus, nativePaths, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
+import { HOOK_RUNTIME_FILES, nativeStatus, nativePaths, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
 import { createLocalStore } from "@/lib/native/local-store";
 import { ONBOARDING_STEPS, renderStepsMarkdown } from "@/lib/native/onboarding-steps";
 
@@ -193,6 +193,19 @@ test("status shows what is missing before setup and what is in place after", asy
   s.done();
 });
 
+test("status flags provider sessions that cannot receive targeted delivery without a live identity", () => {
+  const s = sandbox();
+  const store = createLocalStore(s.p.m9r);
+  store.registerEndpoint({ provider: "codex", sessionId: "codex-no-token", cwd: s.home });
+  const missing = nativeStatus(s.io).find((row) => row.id === "target-identities");
+  assert.equal(missing?.state, "todo");
+  assert.match(missing?.label ?? "", /lack a live M9R identity/);
+  store.issueIdentity("codex", "codex", "codex-no-token");
+  const healthy = nativeStatus(s.io).find((row) => row.id === "target-identities");
+  assert.equal(healthy?.state, "ok");
+  s.done();
+});
+
 test("the step list is the single source: every user-only step has a fix and the markdown lists them all", () => {
   for (const step of ONBOARDING_STEPS.filter((x) => x.who === "you" && x.id !== "logins")) assert.ok(step.fix, `${step.id} needs a fix line`);
   const md = renderStepsMarkdown();
@@ -205,7 +218,7 @@ function runtimeSandbox() {
   const home = mkdtempSync(join(tmpdir(), "m9r-rt-"));
   const source = join(home, "cli-dist");
   mkdirSync(source, { recursive: true });
-  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js"]) writeFileSync(join(source, f), `// ${f} v1\n`, "utf8");
+  for (const f of HOOK_RUNTIME_FILES) writeFileSync(join(source, f), `// ${f} v1\n`, "utf8");
   const out: string[] = [];
   const err: string[] = [];
   const io: NativeIo = { homeDir: home, env: { M9R_HOME: join(home, ".m9r"), CLAUDE_CONFIG_DIR: join(home, ".claude"), M9R_HOOK_SOURCE: source }, out: (l) => out.push(l), err: (l) => err.push(l) };
@@ -216,12 +229,12 @@ function runtimeSandbox() {
 test("setup copies the hook program into ~/.m9r/bin and points the hooks there, not at where the CLI happens to live", async () => {
   const s = runtimeSandbox();
   assert.equal(await s.run("setup", ["--yes"]), 0);
-  for (const f of ["m9r-hook.js", "local-store.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js", "package.json"]) assert.equal(existsSync(join(s.bin, f)), true, f);
+  for (const f of [...HOOK_RUNTIME_FILES, "package.json"]) assert.equal(existsSync(join(s.bin, f)), true, f);
   assert.equal(JSON.parse(readFileSync(join(s.bin, "package.json"), "utf8")).type, "module");
   const command: string = JSON.parse(readFileSync(s.p.settings, "utf8")).hooks.UserPromptSubmit[0].hooks[0].command;
   assert.equal(command.includes(s.bin.split(String.fromCharCode(92)).join("/")), true, command);
   assert.equal(command.includes("cli-dist"), false, "the hook must not point at the CLI's own location");
-  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles.length, 13);
+  assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles.length, HOOK_RUNTIME_FILES.length + 1);
   s.done();
 });
 
@@ -321,17 +334,21 @@ test("with the engine and the native hook side by side, the settings point at th
   const shim = join(s.home, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native");
   writeFileSync(engine, "stand-in engine", "utf8");
   writeFileSync(shim, "stand-in native hook", "utf8");
+  const nativeInputHost = join(s.home, "m9r-native-input-host.exe");
+  if (process.platform === "win32") writeFileSync(nativeInputHost, "stand-in trusted input host", "utf8");
   delete s.io.env.M9R_HOOK_ENTRY;
   s.io.env.M9R_ENGINE = engine;
   assert.equal(await s.run("setup", ["--yes"]), 0);
   const bin = join(s.p.m9r, "bin");
   assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native"), "utf8"), "stand-in native hook");
+  if (process.platform === "win32") assert.equal(readFileSync(join(bin, "m9r-native-input-host.exe"), "utf8"), "stand-in trusted input host");
   assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine"), "utf8"), "stand-in engine");
   const settings = readFileSync(s.p.settings, "utf8");
   assert.match(settings, /m9r-hook(\.exe|-native)?.{1,2} UserPromptSubmit claude-code/);
   assert.doesNotMatch(settings, /m9r-engine/);
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(existsSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native")), false);
+  if (process.platform === "win32") assert.equal(existsSync(join(bin, "m9r-native-input-host.exe")), false);
   s.done();
 });
 

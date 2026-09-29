@@ -3,6 +3,8 @@
 (function (global) {
   "use strict";
 
+  const frameNonce = new URL(global.location.href).searchParams.get("n") || "";
+
   const PROVIDERS = {
     claude: { name: "Claude", cls: "p-claude" },
     codex: { name: "Codex", cls: "p-codex" },
@@ -36,11 +38,15 @@
     return node;
   }
 
-  function ringOf(state) {
+  // "Just finished" and "never started" both used to render as the exact same plain dot -- no signal at all that a run
+  // actually completed, which is why the end of a run was invisible unless you opened the panel and read the chat. A
+  // freshly idle agent whose last word was "Done" gets its own distinct ring; it settles to the ordinary idle look the
+  // moment the agent does anything else (a new task, a message).
+  function ringOf(state, doing) {
     if (state === "working" || state === "starting") return "working";
     if (state === "waiting") return "waiting";
     if (state === "blocked" || state === "failed") return "blocked";
-    if (state === "idle") return "idle";
+    if (state === "idle") return typeof doing === "string" && /^Done\b/.test(doing) ? "done" : "idle";
     return "off";
   }
 
@@ -63,7 +69,7 @@
 
   function toParent(payload) {
     // Only sizes and drag deltas go to the embedding page's window; nothing the owner types does.
-    try { global.parent.postMessage({ m9r: "frame", ...payload }, "*"); } catch {}
+    try { global.parent.postMessage({ m9r: "frame", nonce: frameNonce, ...payload }, "*"); } catch {}
   }
 
   const listeners = new Set();
@@ -152,15 +158,26 @@
 
   const host = { vw: 1280, vh: 800 };
   const hostListeners = new Set();
-  global.addEventListener("message", (event) => {
-    // Host messages come from our own content script via the page window; only layout hints are accepted.
-    const data = event.data;
-    if (!data || data.m9r !== "host" || event.source !== global.parent) return;
+  let hostPort = null;
+  function applyHost(data) {
+    if (!data || data.m9r !== "host" || data.nonce !== frameNonce) return;
     if (data.kind === "host" && Number.isFinite(data.vw) && Number.isFinite(data.vh)) {
       host.vw = data.vw;
       host.vh = data.vh;
     }
     for (const fn of hostListeners) fn(data);
+  }
+  global.addEventListener("message", (event) => {
+    const data = event.data;
+    if (event.source === global.parent && data?.m9r === "host-hello" && data.nonce === frameNonce) {
+      toParent({ kind: "ready" });
+      return;
+    }
+    if (event.source !== global.parent || !data || data.m9r !== "host-port" || data.nonce !== frameNonce || !event.ports?.[0]) return;
+    try { hostPort?.close(); } catch {}
+    hostPort = event.ports[0];
+    hostPort.onmessage = (message) => applyHost(message.data);
+    hostPort.start?.();
   });
 
   // Alt+M and Alt+N are handled by the page's content script, not by Chrome's shortcut registration (which can leave a suggested

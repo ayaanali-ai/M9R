@@ -30,8 +30,8 @@ test("the hook server answers one JSON line with the handler's text, shrugs off 
   server.close();
 });
 
-test("a hook call through the shared runner registers the session and prints the card, using the caller's M9R home", () => {
+test("a hook call through the shared runner registers the session and prints the card, using the caller's M9R home", async () => {
   const home = mkdtempSync(join(tmpdir(), "m9r-hr-"));
-  const text = runHookRequest({ event: "SessionStart", provider: "claude-code", input: { hook_event_name: "SessionStart", session_id: "abc", cwd: home }, env: { M9R_HOME: home } }, "unused");
+  const text = await runHookRequest({ event: "SessionStart", provider: "claude-code", input: { hook_event_name: "SessionStart", session_id: "abc", cwd: home }, env: { M9R_HOME: home } }, "unused");
   assert.match(text, /M9R connected as @claude/);
 });

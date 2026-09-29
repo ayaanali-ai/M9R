@@ -40,9 +40,16 @@ export interface HookContext {
   lastAnswer?: (input: HookInput) => string | null;
   /** A task just got its answer: send it back to whoever asked (fire and forget). */
   answerBack?: (taskId: string) => void;
+  /** Production routing fails visibly when a known target has no live M9R identity. */
+  strictTargetIdentity?: boolean;
   /** Endpoints seen more recently than this count as "active now" on the card. */
   activeWindowMs?: number;
   now?: () => Date;
+  /** This agent's turn just ended: tell the browser overlay so a stuck-on-last-action cursor can show "Done". Fire and forget. */
+  /** Diagnostic hook for the unmodified provider payload at the moment a typed mention is routed. */
+  captureMentionInput?: (input: HookInput, targets: readonly string[], rawPayload?: string) => void;
+  /** Exact stdin bytes decoded as UTF-8 by m9r-hook, only forwarded to an explicit diagnostic capture. */
+  rawPayload?: string;
 }
 
 type AdditionalContext = { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
@@ -72,7 +79,7 @@ function readMemoryIndex(cwd: string): string | null {
  * hook-free Codex watcher, and does nothing else (no inbox, no results), so the watcher can call it without side effects on Codex.
  * Returns the "sent" acknowledgements the hook shows to the agent.
  */
-export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "provider" | "store" | "pathExists" | "dispatch">): { acks: string[]; tasks: Array<{ id: string; to: string }> } {
+export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "provider" | "store" | "pathExists" | "dispatch" | "strictTargetIdentity" | "captureMentionInput" | "rawPayload">): { acks: string[]; tasks: Array<{ id: string; to: string }> } {
   const self = handleForProvider(ctx.provider);
   const prompt = input.prompt ?? "";
   const cwd = input.cwd ?? process.cwd();
@@ -80,15 +87,36 @@ export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "pro
   const acks: string[] = [];
   const tasks: Array<{ id: string; to: string }> = [];
   ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: input.cwd });
+  // Handles inside pasted text (old test chatter, logs) were never addressed to anyone, so only what the person typed routes.
+  // Text another agent sent into this session (a subagent report, a notification) is not the person typing, so it never routes.
   // A prompt M9R pushed in ("[M9R T3] Task from @claude ...") names its sender; routing that would bounce it back.
-  const targets = isM9rPushedPrompt(prompt) ? [] : findEndpointMentions(prompt, {
+  const targets = isM9rPushedPrompt(prompt) || /<(?:agent-message|task-notification|cross-session-message)/.test(prompt) ? [] : findEndpointMentions(prompt.replace(/<pasted_content[^>]*>[\s\S]*?<\/pasted_content[^>]*>/gi, " "), {
     aliases: ctx.store.knownAliases().filter((a) => a !== self),
     pathExists: (token) => exists(resolve(join(cwd, token))),
   });
+  if (targets.length) { try { ctx.captureMentionInput?.(input, targets, ctx.rawPayload); } catch { /* diagnostics cannot block delivery */ } }
   for (const to of targets) {
     const goal = goalFor(prompt, to);
     if (!goal) continue;
-    const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", cwd: input.cwd, fromSession: input.session_id, idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
+    const enforceIdentity = ctx.strictTargetIdentity === true;
+    const knownTargetSessions = enforceIdentity ? ctx.store.sessionsFor(to, input.cwd) : [];
+    const identityTargetSessions = enforceIdentity ? ctx.store.sessionsWithIdentity(to, input.cwd) : [];
+    const targetSession = enforceIdentity && knownTargetSessions.length > 0 && identityTargetSessions.length === 1 ? identityTargetSessions[0].sessionId : undefined;
+    const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", cwd: input.cwd, fromSession: input.session_id, ...(targetSession ? { targetSession } : {}), idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
+    if (enforceIdentity && created && identityTargetSessions.length === 0) {
+      const reason = `@${to} has no session with an active M9R identity. Start or reconnect the target session so it receives an M9R SessionStart card, then retry.`;
+      ctx.store.setDelivery(task.id, { state: "failed", error: reason });
+      acks.push(`M9R could not deliver task ${task.id} to @${to}: ${reason}`);
+      tasks.push({ id: task.id, to });
+      continue;
+    }
+    if (enforceIdentity && created && identityTargetSessions.length > 1 && !targetSession) {
+      const reason = `@${to} has multiple authenticated sessions in this folder; M9R will not guess. Aim the task at one session and retry.`;
+      ctx.store.setDelivery(task.id, { state: "failed", error: reason });
+      acks.push(`M9R could not deliver task ${task.id} to @${to}: ${reason}`);
+      tasks.push({ id: task.id, to });
+      continue;
+    }
     acks.push(renderSentAck(task.id, to));
     tasks.push({ id: task.id, to });
     if (created && to === "codex" && canQueue(task)) ctx.dispatch?.(task.id);
@@ -106,7 +134,9 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
     if (event === "SessionStart") {
       ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: input.cwd });
       const others = ctx.store.listEndpoints().filter((e) => e.handle !== self && now.getTime() - Date.parse(e.lastSeenAt) < activeWindow).map((e) => ({ handle: e.handle }));
-      const pending = renderInboxInjection(ctx.store.tasksFor(self), ctx.store.cursorFor(self, input.session_id, input.cwd)).includedIds.length;
+      const pending = input.session_id
+        ? renderInboxInjection(ctx.store.tasksForSession(self, input.session_id), ctx.store.cursorFor(self, input.session_id, input.cwd)).includedIds.length
+        : renderInboxInjection(ctx.store.tasksFor(self), ctx.store.cursorFor(self, input.session_id, input.cwd)).includedIds.length;
       // Only mention memory if the index file really exists here (the earlier card pointed at a file that did not).
       const memoryDir = ctx.memoryDir ?? (input.cwd && (ctx.pathExists ?? existsSync)(join(input.cwd, ".m9r", "memory", "index.md")) ? ".m9r/memory" : undefined);
       ctx.store.sweepExpired();
@@ -135,7 +165,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
     // through a live session's user-turn input (live-session-core.ts). Registering it would add a hook run to every tool call.
     if (event === "PostToolUse") {
       const cursor = ctx.store.cursorFor(self, input.session_id, input.cwd);
-      const injection = renderInboxInjection(ctx.store.tasksFor(self), cursor);
+      const injection = renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor);
       if (!injection.text) return null;
       ctx.store.setCursor(self, input.session_id, injection.newCursor, input.cwd);
       ctx.store.markDelivered(injection.includedIds, input.session_id);
@@ -160,11 +190,16 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
 
       // 2b. Anything new in our own inbox, delta-only.
       const cursor = ctx.store.cursorFor(self, input.session_id, cwd);
-      const injection = renderInboxInjection(ctx.store.tasksFor(self), cursor);
+      const injection = renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor);
       if (injection.text) {
-        parts.push(injection.text);
-        ctx.store.setCursor(self, input.session_id, injection.newCursor, cwd);
-        ctx.store.markDelivered(injection.includedIds, input.session_id);
+        const codexHasIdentity = self !== "codex" || Boolean(input.session_id && ctx.store.identityTokenFor(self, input.session_id));
+        if (!codexHasIdentity) {
+          parts.push("M9R is holding incoming work until this Codex session reconnects and receives an active M9R identity. No task details were included.");
+        } else {
+          parts.push(injection.text);
+          ctx.store.setCursor(self, input.session_id, injection.newCursor, cwd);
+          ctx.store.markDelivered(injection.includedIds, input.session_id);
+        }
       }
 
       // 3. A pointer to earlier sessions, only when this prompt matches the local memory index.

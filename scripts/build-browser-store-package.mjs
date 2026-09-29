@@ -99,9 +99,10 @@ export function validateStoreManifest(manifest) {
   if (typeof manifest.description !== "string" || manifest.description.trim().length === 0 || manifest.description.length > 132) fail("description must be 1-132 characters");
   if (manifest.content_scripts !== undefined) fail("static content scripts are not allowed in the store build");
   if (manifest.externally_connectable !== undefined) fail("externally_connectable is not part of the store build");
-  if (JSON.stringify(manifest.permissions) !== JSON.stringify(["tabs", "scripting", "alarms", "storage"])) fail("permissions must remain the reviewed minimum set");
-  if (JSON.stringify(manifest.host_permissions) !== JSON.stringify(["http://127.0.0.1/*", "http://localhost/*"])) fail("required host access must remain loopback-only");
-  if (JSON.stringify(manifest.optional_host_permissions) !== JSON.stringify(["http://*/*", "https://*/*"])) fail("site access must remain optional and limited to HTTP/HTTPS origins");
+  if (JSON.stringify(manifest.permissions) !== JSON.stringify(["tabs", "scripting", "alarms", "storage", "nativeMessaging", "search"])) fail("permissions must remain the reviewed minimum set");
+  if (JSON.stringify(manifest.host_permissions) !== JSON.stringify(["http://*/*", "https://*/*"])) fail("required host access must remain limited to HTTP/HTTPS sites");
+  if (manifest.optional_host_permissions !== undefined) fail("site access must not require per-site prompts");
+  if (JSON.stringify(manifest.chrome_url_overrides) !== JSON.stringify({ newtab: "newtab.html" })) fail("the New Tab override must be the reviewed M9R page");
   // The overlay embeds the thread pill and the message bar as extension frames inside pages (so a page's scripts cannot read what the
   // owner types), which requires exactly those two pages, plus the static provider badges, to be web-accessible. Nothing else may be.
   const war = manifest.web_accessible_resources;
@@ -151,6 +152,7 @@ export function verifyPackageComplete(files) {
   for (const ref of Object.values(manifest.action?.default_icon ?? {})) need("manifest.json", ref);
   need("manifest.json", manifest.background?.service_worker);
   need("manifest.json", manifest.action?.default_popup);
+  need("manifest.json", manifest.chrome_url_overrides?.newtab);
   for (const entry of manifest.web_accessible_resources ?? []) {
     for (const resource of entry.resources) {
       if (resource.includes("*")) {
@@ -182,11 +184,14 @@ export async function buildStorePackage(outputPath) {
     const stage = path.join(tempRoot, "package");
     await mkdir(stage, { recursive: true });
     // The pages and styles the overlay embeds as frames, and the M9R mark their styles mask onto.
-    for (const name of ["permission.html", "pill.html", "composer.html", "frame.css"]) {
+    for (const name of ["permission.html", "pill.html", "composer.html", "newtab.html", "newtab.css", "frame.css"]) {
       await copyFile(path.join(browserRoot, name), path.join(stage, name));
     }
     await mkdir(path.join(stage, "assets"), { recursive: true });
     await copyFile(path.join(browserRoot, "assets", "m9r-mark.png"), path.join(stage, "assets", "m9r-mark.png"));
+    for (const name of ["m9r-mark.jpg", "m9r-newtab-background.jpg"]) {
+      await copyFile(path.join(browserRoot, "assets", name), path.join(stage, "assets", name));
+    }
     await mkdir(path.join(stage, "src"), { recursive: true });
     for (const entry of await walkFiles(path.join(browserRoot, "src"))) {
       const destination = path.join(stage, "src", entry.name);

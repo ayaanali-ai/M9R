@@ -122,3 +122,10 @@ M9R_COMPLETE_HANDOFF*.docx
 /overlay/src-tauri/gen
 engine/dist/
 /hook/target
+/native-input-host/target/
+runleak-analyzer-mvp/node_modules/
+.claude/skills/
+skills-lock.json
+/.m9r-chrome-probe-*/
+/.m9r-coordinator-worker-*/
+/.m9r-web-broker-*/

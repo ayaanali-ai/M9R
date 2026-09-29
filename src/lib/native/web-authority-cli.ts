@@ -27,6 +27,37 @@ function durationMs(value: string): number | null {
 
 export function buildWebAuthorityCliRequest(args: string[]): { ok: true; request: WebAuthorityCliRequest } | { ok: false; error: string } {
   const [command, ...rest] = args;
+  if (command === "members" || command === "disclosures") {
+    if (rest.length) return { ok: false, error: `Usage: m9r-cli web ${command}` };
+    return { ok: true, request: { method: "GET", path: `/web/aware/${command}` } };
+  }
+  if (command === "invite" || command === "remove") {
+    const [agent, ...flags] = rest;
+    let owner: string | undefined;
+    if (!agent || !/^[A-Za-z0-9_.-]{1,80}$/.test(agent)) return { ok: false, error: `Usage: m9r-cli web ${command} <agent> [--owner owner-id]` };
+    for (let index = 0; index < flags.length; index += 1) {
+      const value = flags[index + 1];
+      if (flags[index] !== "--owner" || owner !== undefined || !value || !/^[A-Za-z0-9_.-]{1,80}$/.test(value)) {
+        return { ok: false, error: `Usage: m9r-cli web ${command} <agent> [--owner owner-id]` };
+      }
+      owner = value;
+      index += 1;
+    }
+    return { ok: true, request: {
+      method: "POST", path: `/web/aware/members/${command}`, body: { agent, ...(owner ? { owner } : {}) },
+      confirmation: command === "invite" ? `Invite @${agent}${owner ? ` from ${owner}` : ""} to act in this browser room?` : `Remove @${agent}${owner ? ` from ${owner}` : ""} from this browser room?`,
+    } };
+  }
+  if (command === "disclosure") {
+    const [decision, requestId, ...extra] = rest;
+    if ((decision !== "approve" && decision !== "deny") || !requestId || requestId.length > 128 || extra.length) {
+      return { ok: false, error: "Usage: m9r-cli web disclosure <approve|deny> <request-id>" };
+    }
+    return { ok: true, request: {
+      method: "POST", path: "/web/aware/disclosures/decision", body: { requestId, decision },
+      confirmation: `${decision === "approve" ? "Approve" : "Deny"} AWARE disclosure request ${requestId}?`,
+    } };
+  }
   if (command === "pending" || command === "grants") {
     if (rest.length) return { ok: false, error: `Usage: m9r-cli web ${command}` };
     return { ok: true, request: { method: "GET", path: `/web/${command}` } };
@@ -74,7 +105,7 @@ export function buildWebAuthorityCliRequest(args: string[]): { ok: true; request
     }
     return { ok: true, request: { method: "POST", path: "/web/approve", body, confirmation: `Approve web access request ${id}?` } };
   }
-  return { ok: false, error: "Usage: m9r-cli web <pending|approve|deny|grants|revoke|revoke-all|audit> ..." };
+  return { ok: false, error: "Usage: m9r-cli web <pending|approve|deny|grants|revoke|revoke-all|audit|members|invite|remove|disclosures|disclosure> ..." };
 }
 
 export async function runWebAuthorityCli(args: string[], deps: WebAuthorityCliDeps): Promise<number> {

@@ -7,7 +7,10 @@ const LOCK_WAIT_MS = 3_000;
 const LOCK_STALE_MS = 15_000;
 const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-export type PageNotesStoreOptions = Omit<PageNotesCoreOptions, "events">;
+export type PageNotesStoreOptions = Omit<PageNotesCoreOptions, "events"> & { maxEventLogBytes?: number };
+
+/** The append-only event log rejects writes before crossing this whole-file limit. */
+export const MAX_PAGE_NOTES_EVENT_LOG_BYTES = 8 * 1024 * 1024;
 
 function isEvent(value: unknown): value is PageNoteEvent {
   if (!value || typeof value !== "object") return false;
@@ -24,6 +27,7 @@ function isEvent(value: unknown): value is PageNoteEvent {
 export function createPageNotesStore(root: string, options: PageNotesStoreOptions = {}) {
   const eventPath = join(root, "page-notes.jsonl");
   const lockPath = join(root, "page-notes.lock");
+  const maxEventLogBytes = Math.min(MAX_PAGE_NOTES_EVENT_LOG_BYTES, Math.max(1, Math.floor(options.maxEventLogBytes ?? MAX_PAGE_NOTES_EVENT_LOG_BYTES)));
 
   function acquire(): void {
     mkdirSync(root, { recursive: true });
@@ -52,6 +56,8 @@ export function createPageNotesStore(root: string, options: PageNotesStoreOption
 
   function readEvents(): PageNoteEvent[] {
     if (!existsSync(eventPath)) return [];
+    const fileBytes = statSync(eventPath).size;
+    if (fileBytes > maxEventLogBytes) throw new Error(`The M9R page-notes log is at or beyond its safe capacity (${fileBytes}/${maxEventLogBytes} bytes); refusing to read or overwrite it.`);
     const raw = readFileSync(eventPath, "utf8");
     const events: PageNoteEvent[] = [];
     for (const [index, line] of raw.split(/\r?\n/).entries()) {
@@ -71,7 +77,13 @@ export function createPageNotesStore(root: string, options: PageNotesStoreOption
       const priorCount = core.events().length;
       const result = operation(core);
       const added = core.events().slice(priorCount);
-      if (added.length) appendFileSync(eventPath, `${added.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+      if (added.length) {
+        const serialized = `${added.map((event) => JSON.stringify(event)).join("\n")}\n`;
+        const currentBytes = existsSync(eventPath) ? statSync(eventPath).size : 0;
+        const nextBytes = currentBytes + Buffer.byteLength(serialized, "utf8");
+        if (nextBytes > maxEventLogBytes) throw new Error(`The M9R page-notes log reached its safe capacity (${nextBytes}/${maxEventLogBytes} bytes); the event was not persisted and existing history was left unchanged.`);
+        appendFileSync(eventPath, serialized, "utf8");
+      }
       return result;
     } finally {
       release();

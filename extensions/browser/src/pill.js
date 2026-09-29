@@ -51,17 +51,19 @@
 
   function drawBar() {
     mark.classList.toggle("stale", !connected);
-    const list = running();
+    // A stopped agent keeps its tile (dimmed): a new message starts it again, so it must stay visible and addressable.
+    const list = state.agents;
     const shown = list.slice(0, MAX_MARKS);
     const nodes = shown.map((a) => {
       const who = el("span", "who");
-      const dot = chip(a.provider || a.id, "dot", ringOf(a.state));
+      if (a.state === "stopped" || a.state === "failed") who.style.opacity = "0.45";
+      const dot = chip(a.provider || a.id, "dot", ringOf(a.state, a.doing));
       who.title = `${displayName(a.id, a.provider)}: ${a.state}${a.doing ? " · " + a.doing : ""}`;
       who.append(dot, el("span", "doing", a.doing || (a.state === "idle" ? "Idle" : a.state.charAt(0).toUpperCase() + a.state.slice(1))));
       return who;
     });
     if (list.length > shown.length) nodes.push(el("span", "more", `+${list.length - shown.length}`));
-    const idleText = connected ? "No agents working" : "M9R is not running on this computer";
+    const idleText = connected ? (list.length ? "No agents working" : "No agents set up") : "M9R is not running on this computer";
     if (!nodes.length) nodes.push(el("span", "quiet", idleText));
     // The notch shows only tiles, so the empty state's words move into the tooltip.
     const barEl = document.getElementById("bar");
@@ -220,27 +222,8 @@
           if (!reply.ok) setTimeout(() => { decided.delete(p.id); render(); }, 5000);
           render();
         };
-        if (p.kind === "site") {
-          approve.textContent = "Allow site";
-          // The click itself must call chrome.permissions.request (a user gesture in this extension page).
-          approve.addEventListener("click", async () => {
-            approve.disabled = deny.disabled = true;
-            let granted = false;
-            try { granted = await chrome.permissions.request({ origins: [p.pattern] }); } catch {}
-            try { await chrome.runtime.sendMessage({ type: "m9r-consent-result", origin: p.origin, granted }); } catch {}
-            decided.set(p.id, { ok: granted, text: granted ? "Allowed. The agent continues." : "Chrome did not allow it." });
-            render();
-          });
-          deny.addEventListener("click", async () => {
-            approve.disabled = deny.disabled = true;
-            try { await chrome.runtime.sendMessage({ type: "m9r-consent-result", origin: p.origin, granted: false }); } catch {}
-            decided.set(p.id, { ok: true, text: "Denied. The agent is told no." });
-            render();
-          });
-        } else {
-          approve.addEventListener("click", () => void decide("ui-approve"));
-          deny.addEventListener("click", () => void decide("ui-deny"));
-        }
+        approve.addEventListener("click", () => void decide("ui-approve"));
+        deny.addEventListener("click", () => void decide("ui-deny"));
         actions.append(approve, deny);
         card.append(actions);
       }
@@ -262,7 +245,7 @@
     top.append(all);
     const nodes = state.agents.map((a) => {
       const row = el("div", "agent");
-      row.append(chip(a.provider || a.id, "chip", ringOf(a.state)));
+      row.append(chip(a.provider || a.id, "chip", ringOf(a.state, a.doing)));
       const main = el("div", "main");
       const title = el("div", "title", displayName(a.id, a.provider));
       title.append(el("span", `state ${a.state}`, ` · ${a.state === "waiting" ? "waiting for you" : a.state}`));

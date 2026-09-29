@@ -1,6 +1,6 @@
 # M9R cross-machine room — design for approval
 
-Status: step 1 is implemented in the local branch: room, member, and invite tables, plus authenticated room-create and room-invite endpoints. The migration has not been applied to any database. Invitation acceptance, room joining, relay coordination, browser authority, and UI are not implemented. The recommended same-origin, same-page v0 collaboration profile remains a design boundary to approve before those follow-on steps.
+Status: step 2 is implemented in the local branch: authenticated invite acceptance, URL-based requested membership with owner admission, minimized room-event append/export primitives, disclosure gates, and a local membership-bound relay core. The migration has not been applied to any database, and no production relay deployment or browser/UI claim is made here. Local browser authority remains owner-local; the recommended same-origin, same-page v0 collaboration profile remains the boundary for production rollout.
 
 ## Goal and boundary
 
@@ -84,4 +84,4 @@ Claim: `free -> held -> shared -> releasing -> free`; expiry, tab close, member 
 
 ## Approval boundary
 
-Step 1 only is implemented locally; no migration has been applied. Before implementing invite acceptance or cross-machine coordination, approve the “both owners open the same URL in their own browser” v0 boundary, or specify another sharing model. The current same-token two-socket relay smoke check is transport evidence only, not proof of two-owner or two-machine membership.
+Step 2 is implemented locally; no migration has been applied and no production relay has been claimed. The “both owners open the same URL in their own browser” v0 boundary still governs browser coordination: a room member can request admission, exchange minimized authenticated events, and export evidence, but cannot inherit another owner’s browser authority, cookies, grants, or approvals. A two-machine pilot still requires the relay integration gates above.

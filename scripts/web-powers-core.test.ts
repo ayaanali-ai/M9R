@@ -5,6 +5,7 @@ import {
   describePower,
   extraTimeoutFor,
   grantActionFor,
+  isDisclosureAction,
   isPowerAction,
   powerScopeFor,
   sanitizeLabel,
@@ -12,6 +13,11 @@ import {
 } from "../src/lib/native/web-powers-core.ts";
 
 const power = (action: string, extra: Record<string, unknown> = {}) => ({ action, ...extra });
+
+test("page-bearing web actions are explicitly disclosure-gated at the broker boundary", () => {
+  for (const action of ["read", "snapshot", "extract", "copy", "find", "screenshot", "link", "tabs"]) assert.equal(isDisclosureAction(action), true, action);
+  for (const action of ["open", "click", "type", "scroll", "press", "submit", "buy"]) assert.equal(isDisclosureAction(action), false, action);
+});
 
 test("the supported power set is explicit and rejects malformed or extra arguments", () => {
   assert.equal(isPowerAction("scroll"), true);
@@ -38,6 +44,21 @@ test("risky powers reuse click classification for activation and selection targe
   assert.deepEqual(classifyPowerRisk(power("select", { selector: "#plan", targetLabel: "Buy subscription" })), { risky: true, category: "money" });
   assert.deepEqual(classifyPowerRisk(power("press", { selector: "input.search", args: { key: "Enter" } })), { risky: false });
   assert.deepEqual(classifyPowerRisk(power("hover", { selector: "#menu" })), { risky: false });
+  assert.deepEqual(classifyPowerRisk(power("screenshot")), { risky: true, category: "secrets" });
+});
+
+test("modified Enter chords on consequential forms are validated and owner-gated", () => {
+  for (const key of ["Control+Enter", "Alt+Enter", "control+enter", "ALT+Return"]) {
+    const request = power("press", {
+      selector: "input.email",
+      formSelector: "form#checkout",
+      args: { key },
+    });
+    assert.equal(validatePowerRequest(request), null, `${key} should normalize as a supported shortcut`);
+    assert.deepEqual(classifyPowerRisk(request), { risky: true, category: "money" }, `${key} can submit the checkout form`);
+    assert.deepEqual(powerScopeFor(request), { kind: "form", key: "form#checkout" }, `${key} reserves the consequential form`);
+    assert.equal(grantActionFor("press", request), "click", `${key} uses click authorization`);
+  }
 });
 
 test("claim scopes reserve only the affected control except page navigation and activation", () => {

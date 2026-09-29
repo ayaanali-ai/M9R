@@ -216,28 +216,71 @@ export function parseUiMessage(raw: unknown): UiInbound | null {
   }
 }
 
-/** `@claude @codex compare these` -> handles in order of first mention; `a@b.com` is not a mention. */
+/**
+ * True for a message whose entire content, once filler words, punctuation, emoji and a leading `@handle`/`@all` are
+ * stripped, is nothing but "stop" or "halt" (repeated any number of times). This is deliberately narrow: it must NOT
+ * fire on a real question ("can you stop?", "why did it stop") or a real instruction that happens to use the word
+ * ("stop the video and read the comments", "the site stopped working"). "cancel"/"abort"/"freeze" are left out on
+ * purpose -- those verbs are too often aimed at the page itself ("cancel the checkout"), not the agents.
+ */
+export function isStopCommand(text: string): boolean {
+  const body = text.replace(/^\s*@[A-Za-z][A-Za-z0-9_-]{0,39}[\s,:]*/, "");
+  if (/[?]/.test(body) || /\b(?:don'?t|do not|why|can you|could you|would you|never|please don'?t)\b/i.test(body)) return false;
+  const words = body
+    .toLowerCase()
+    .replace(/[\p{Emoji_Presentation}\u{1F300}-\u{1FAFF}☀-➿]/gu, " ")
+    .replace(/[.!,;:'"()]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) return false;
+  const filler = new Set(["all", "everyone", "everything", "agents", "now", "please", "pls", "ok", "okay", "right", "immediately", "asap", "it", "them"]);
+  const remaining = words.filter((w) => !filler.has(w));
+  return remaining.length > 0 && remaining.every((w) => w === "stop" || w === "halt" || (w === "kill" && words.includes("all")));
+}
+
+/**
+ * `@claude @codex compare these` -> handles in order of first mention; `a@b.com` is not a mention. A fenced or inline code
+ * block never mentions anyone (pasted logs, code and old chatter routinely contain `@handle`), and `@codex.js`, `@codex/x`
+ * or `@codex-analytics` are a filename, a path or a longer word, not the agent.
+ */
 export function parseMentions(text: string): string[] {
+  const stripped = text.replace(/```[\s\S]*?```/g, (m) => " ".repeat(m.length)).replace(/`[^`\n]*`/g, (m) => " ".repeat(m.length));
   const out: string[] = [];
-  for (const match of text.matchAll(/(^|[\s(,;:])@([A-Za-z][A-Za-z0-9_-]{0,39})\b/g)) {
+  for (const match of stripped.matchAll(/(^|[\s(,;:])@([A-Za-z][A-Za-z0-9_-]{0,39})(?=$|[\s,;:!?)]|\.(?=$|\s))/g)) {
     const handle = match[2].toLowerCase();
     if (!out.includes(handle)) out.push(handle);
   }
   return out;
 }
 
+/**
+ * Who a message is for: every `@handle`, plus a known agent named in plain words ("take opencode with you"). Each agent appears
+ * once however many times it is named, and a name inside a path, URL, email or longer word never counts.
+ */
+export function findAddressed(text: string, known: readonly string[]): string[] {
+  const out = parseMentions(text).filter((h) => known.includes(h));
+  for (const handle of known) {
+    if (out.includes(handle) || handle.length < 3) continue;
+    const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(^|[^A-Za-z0-9_@./:-])${escaped}(?![A-Za-z0-9_@./:-])`, "i").test(text)) out.push(handle);
+  }
+  return out;
+}
+
 /** What the agent receives: the owner's words, then the page context clearly marked as untrusted data. */
-export function composeAgentMessage(text: string, context: UiPageContext, recipients: string[], self: string): string {
+export function composeAgentMessage(text: string, context: UiPageContext, recipients: string[], self: string, roster: readonly string[] = []): string {
   const others = recipients.filter((h) => h !== self);
   const lines = [text];
+  const quiet = roster.filter((h) => h !== self && !recipients.includes(h));
+  if (quiet.length) lines.push("", `Also in this room, not addressed by this message: ${quiet.map((h) => `@${h}`).join(", ")}. They are listening and can be woken any time with m9r_send; bring one in when the task can be split or checked by a second pair of eyes. If the owner named you and a teammate in the same sentence, each of you does the part written for you.`);
   if (others.length) {
     lines.push(
       "",
       `Shared task: the owner sent this to ${others.map((h) => `@${h}`).join(" and ")} too. Work together without collisions, cheaply:`,
-      "1. First, send each teammate ONE line with the part you are taking (m9r_send), and read theirs (m9r_inbox). Do not repeat a teammate's part.",
-      "2. Read only what you need. You may read or switch to any tab a teammate opened (m9r_web_tabs); navigating a tab a teammate is on opens a new tab for you automatically. Typing into a field is claimed for you; if a field is refused, work on another part and come back.",
-      "3. Post short findings to teammates (one or two lines). Do not poll: to wait for a teammate, call m9r_inbox with waitSeconds 25 once.",
-      "4. At a hand-off point send 'ready: <one line>' to teammates and wait once (m9r_inbox, waitSeconds 25) for theirs before the combined step. If someone does not answer, continue without them.",
+      "1. First, send each teammate ONE line with the part you are taking (m9r_send). Do not repeat a teammate's part.",
+      "2. Read only what you need. You may read or switch to any tab a teammate opened (m9r_web_tabs). Work on the same page a teammate is on unless you truly need a second page at the same time. Typing into a field is claimed for you; if a field is refused, work on another part and come back.",
+      "3. Post short findings to teammates (one or two lines) with m9r_send. Never poll and never sit waiting: after you send something you need an answer to, END YOUR TURN with one line saying what you are waiting for. The teammate's reply is delivered to you automatically as your next message.",
+      "4. At a hand-off point send 'ready: <one line>' to teammates, then end your turn; carry on when their reply arrives.",
       "5. Never repeat an action that already worked. Stop as soon as the task is done and give a two-sentence summary.",
     );
   }
@@ -257,7 +300,10 @@ export function composeAgentMessage(text: string, context: UiPageContext, recipi
 export type SessionStatus = "idle" | "starting" | "working" | "stopped" | "failed";
 export interface SessionsPort {
   handles(): string[];
-  snapshot(): Array<{ handle: string; provider: string; folder: string; status: SessionStatus; doing: string }>;
+  /** waitingOn: set when an idle/done agent has a real, still-open ask sent to a teammate -- "ended its turn to wait",
+   * not "genuinely finished". Computed fresh on every snapshot from live task state, not baked in at exit time, so it
+   * clears itself the moment the answer actually lands. */
+  snapshot(): Array<{ handle: string; provider: string; folder: string; status: SessionStatus; doing: string; waitingOn?: string }>;
   deliver(handle: string, text: string): { ok: true; mode: "sent" | "interrupted" | "started" | "restarted-worker" } | { ok: false; error: string };
   stop(handle: string): boolean;
   stopAll(): void;
@@ -361,6 +407,10 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       let state: UiAgentState = s.status;
       let what = s.doing;
       if (waiting.has(s.handle)) { state = "waiting"; what = "Waiting for your approval"; }
+      // An agent that "ended its turn" to wait on a teammate used to look identical to one that had simply finished --
+      // same idle state, same "Done" text. This is the room's own version of a real wait, distinct from waiting on the
+      // owner: it's ranked below an owner-approval wait (that one needs YOU) but still visibly different from idle.
+      else if (s.waitingOn) { state = "waiting"; what = `Waiting for @${s.waitingOn}`; }
       else if (blocked.has(s.handle) && (s.status === "working" || s.status === "idle")) { state = "blocked"; what = doing.get(s.handle) ?? "Blocked by another agent"; }
       else if (s.status === "working" && doing.get(s.handle)) what = doing.get(s.handle)!;
       return { id: s.handle, provider: s.provider, folder: s.folder, state, doing: redact(what) };
@@ -480,15 +530,34 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
 
   function command(message: Extract<UiInbound, { type: "ui-command" }>): void {
     const known = sessions?.handles() ?? [];
+    // "@claude stop" names one agent, unlike a bare "stop" or "@all stop" (not a real handle): stop only that one.
+    const named = known.find((h) => new RegExp(`^\\s*@${h}\\b`, "i").test(message.text));
+    if (isStopCommand(message.text) && known.length) {
+      push({ kind: "say", agent: "you", provider: "you", text: message.text });
+      if (named) {
+        for (const p of broker?.pendingApprovals() ?? []) if (p.actor === named) broker?.decideApproval(p.id, "deny");
+        sessions?.stop(named);
+        system(`Stopped @${named}. Message it to start again.`, named);
+        return;
+      }
+      // Same as the real Stop button: deny anything already waiting for approval too, so an action that was mid-flight
+      // when "stop" was typed cannot still go through after the agents themselves have been killed.
+      for (const p of broker?.pendingApprovals() ?? []) broker?.decideApproval(p.id, "deny");
+      sessions?.stopAll();
+      system(`Stopped ${known.join(", ")} and turned down anything waiting for approval. Message any of them to start again.`);
+      return;
+    }
     broker?.noteOwnerUrls?.(message.text);
     const mentioned = parseMentions(message.text);
     const everyone = mentioned.includes("all") && !known.includes("all");
     const unknown = mentioned.filter((h) => !known.includes(h) && !(everyone && h === "all"));
-    let targets = everyone ? [...known] : mentioned.filter((h) => known.includes(h));
-    if (mentioned.length === 0) {
+    let targets = everyone ? [...known] : findAddressed(message.text, known);
+    if (targets.length === 0 && mentioned.length === 0) {
       const running = (sessions?.snapshot() ?? []).filter((s) => s.status === "working" || s.status === "idle" || s.status === "starting");
       const lastLive = lastAddressed.filter((h) => known.includes(h));
-      targets = lastLive.length ? lastLive : running.length === 1 ? [running[0].handle] : known.length === 1 ? [known[0]] : [];
+      // Nobody named: whoever was last talked to keeps the thread; otherwise the first agent leads and brings teammates in itself,
+      // so a message never spends a run on every agent and never stops at "who is this for?".
+      targets = lastLive.length ? lastLive : running.length === 1 ? [running[0].handle] : known.length ? [known[0]] : [];
     }
     push({ kind: "say", agent: "you", provider: "you", to: targets.join(",") || undefined, text: message.text });
     for (const handle of unknown) {
@@ -501,7 +570,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     lastAddressed = targets;
     if (everyone) system(`Sent to ${targets.join(", ")}`);
     for (const handle of targets) {
-      const result = sessions!.deliver(handle, composeAgentMessage(message.text, message.context, targets, handle));
+      const result = sessions!.deliver(handle, composeAgentMessage(message.text, message.context, targets, handle, known));
       if (!result.ok) system(`Couldn't reach @${handle}: ${result.error}`, handle);
       else if (result.mode === "interrupted") system(`Interrupted @${handle} with your new message.`, handle);
       else if (result.mode === "restarted-worker") system(`Stopped @${handle}'s current run and started again with your new message.`, handle);
@@ -552,6 +621,8 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     onActivity,
     onSessionEvent,
     handleExtensionMessage,
+    /** Every agent handle configured in this room, for m9r_agents (a plain web-* endpoint lookup finds nobody). */
+    roster: (): string[] => sessions?.handles() ?? [],
     /** The socket that subscribed went away. */
     unsubscribe(reply?: (message: UiState) => boolean) { if (!reply || sink === reply) sink = null; },
     snapshot,

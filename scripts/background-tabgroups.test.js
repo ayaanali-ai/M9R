@@ -8,8 +8,8 @@ const background = readFileSync(
   "utf8",
 );
 
-function createHarness() {
-  const session = {};
+function createHarness(sessionSeed = {}) {
+  const session = { ...sessionSeed };
   const tabs = new Map();
   const groups = new Map();
   const sockets = [];
@@ -40,6 +40,7 @@ function createHarness() {
     runtime: {
       getURL: (path) => `chrome-extension://m9r/${path}`,
       onMessage: { addListener() {} },
+      onInstalled: { addListener() {} },
     },
     permissions: { contains: async () => true },
     storage: {
@@ -60,6 +61,11 @@ function createHarness() {
         const group = groups.get(groupId);
         if (!group) throw new Error("group not found");
         Object.assign(group, changes);
+        return { ...group };
+      },
+      async get(groupId) {
+        const group = groups.get(groupId);
+        if (!group) throw new Error("group not found");
         return { ...group };
       },
     },
@@ -102,6 +108,7 @@ function createHarness() {
 
   const context = {
     chrome,
+    M9RNativeInputClient: { create: () => ({ click: async () => ({ ok: true }) }) },
     m9rPagePower() { return { ok: true, data: { rect: { x: 0, y: 0, width: 800, height: 600 } } }; },
     WebSocket: FakeWebSocket,
     importScripts() {},
@@ -122,11 +129,11 @@ function createHarness() {
 
   runInNewContext(background, context);
   runInNewContext(
-    "globalThis.__testApi = { handle, listM9rTabGroups, tabsByName };",
+    "globalThis.__testApi = { handle, listM9rTabGroups, loadNamedTabs, tabsByName };",
     context,
   );
 
-  return { context, groups, sockets, tabs };
+  return { context, groups, sockets, tabs, session };
 }
 
 async function openAgentTab(worker, tab, presence) {
@@ -210,4 +217,62 @@ test("agents can list and switch to another agent's named tab group", async () =
   const codexTab = [...h.tabs.values()].find((tab) => tab.groupId === codexGroup?.id);
   assert.equal(codexGroup?.collapsed, false);
   assert.equal(codexTab?.active, true);
+});
+
+test("a tab already in the owner's own, unrelated Chrome tab group is never retitled or recolored", async () => {
+  const h = createHarness();
+  const worker = h.context.__testApi;
+  await worker.handle({ id: "open-work", action: "open", tab: "work", url: "https://example.com/", presence: { agent: "codex", provider: "codex-cli", target: null } });
+  const tab = [...h.tabs.values()][0];
+  h.groups.set(999, { id: 999, windowId: 1, title: "Research for the quarterly report", color: "blue" });
+  tab.groupId = 999;
+
+  await worker.handle({ id: "r1", action: "read", tab: "work", presence: { agent: "codex", provider: "codex-cli" } });
+
+  const ownerGroup = h.groups.get(999);
+  assert.equal(ownerGroup.title, "Research for the quarterly report", "the owner's own group keeps its own title");
+  assert.equal(ownerGroup.color, "blue", "and its own color");
+  const m9rGroup = [...h.groups.values()].find((g) => g.title.startsWith("M9R:"));
+  assert.ok(m9rGroup, "M9R still groups its own tab, just not by hijacking the owner's group");
+  assert.notEqual(m9rGroup.id, 999);
+});
+
+test("a teammate that acts in another agent's tab joins its group; the title shows both", async () => {
+  const h = createHarness();
+  const worker = h.context.__testApi;
+  await openAgentTab(worker, "shared", { agent: "codex", provider: "codex-cli" });
+  let group = [...h.groups.values()][0];
+  assert.equal(group.title, "M9R: codex · Codex");
+
+  await worker.handle({ id: "r1", action: "read", tab: "shared", presence: { agent: "opencode", provider: "opencode" } });
+  group = [...h.groups.values()][0];
+  assert.equal(group.title, "M9R: codex + opencode", "the group now names both agents that worked in the shared tab");
+
+  // Merely switching to look does not add a name.
+  await worker.handle({ id: "sw1", action: "switch", tab: "shared", presence: { agent: "claude", provider: "claude-code" } });
+  group = [...h.groups.values()][0];
+  assert.equal(group.title, "M9R: codex + opencode", "a look-only switch is not collaboration");
+});
+
+test("adopting an already named tab does not create a second stale name for the same tab", async () => {
+  const h = createHarness();
+  const worker = h.context.__testApi;
+  await openAgentTab(worker, "shared", { agent: "codex", provider: "codex-cli" });
+  h.sockets.at(-1).readyState = 1;
+  await worker.handle({ id: "adopt-existing", action: "adopt", tab: "adopted", presence: { agent: "claude", provider: "claude-code" } });
+  const result = h.sockets.at(-1).sent.find((message) => message.type === "result" && message.id === "adopt-existing");
+  assert.equal(result?.ok, true);
+  assert.equal(result?.data.tab, "shared");
+  assert.deepEqual([...worker.tabsByName.keys()], ["shared"]);
+});
+
+test("restoring named tabs drops duplicate names that point to the same real tab", async () => {
+  const h = createHarness({ m9rNamedTabs: { shared: 7, duplicate: 7 } });
+  const worker = h.context.__testApi;
+  h.tabs.set(7, { id: 7, windowId: 1, url: "https://example.com/", active: true, status: "complete", groupId: -1 });
+
+  await worker.loadNamedTabs();
+
+  assert.deepEqual(JSON.parse(JSON.stringify([...worker.tabsByName.entries()])), [["shared", 7]], "the canonical shared-tab name wins after a service-worker restart");
+  assert.deepEqual(JSON.parse(JSON.stringify(h.session.m9rNamedTabs)), { shared: 7 }, "the repaired mapping is persisted");
 });

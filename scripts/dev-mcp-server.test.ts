@@ -68,6 +68,24 @@ test("read_file reads a file within the working directory", async () => {
   }
 });
 
+test("create_file creates a new file and refuses to overwrite it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oathlock-devmcp-"));
+  try {
+    await withClient(root, async (client) => {
+      const created = await client.callTool({ name: "create_file", arguments: { path: "hello.txt", content: "hi from codex" } }) as any;
+      assert.equal(isSuccess(created), true);
+      assert.match(textOf(created), /Created hello\.txt/);
+      const read = await client.callTool({ name: "read_file", arguments: { path: "hello.txt" } }) as any;
+      assert.equal(textOf(read), "hi from codex");
+      const duplicate = await client.callTool({ name: "create_file", arguments: { path: "hello.txt", content: "replacement" } }) as any;
+      assert.equal(duplicate.isError, true);
+      assert.match(textOf(duplicate), /already exists/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("read_file refuses a path outside the working directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "oathlock-devmcp-"));
   try {
@@ -197,7 +215,7 @@ test("server exposes exactly the governed tool set (no unrestricted shell or vie
       // handoff_to_terminal is registered only while the terminal multiplayer
       // view is enabled (NEXT_PUBLIC_M9R_TERMINAL_ENABLED), which is off by
       // default -- so the governed set shrinks by exactly that one tool.
-      const expected = ["draft_section", "git_read", "list_my_task_items", "read_file", "request_assignment_change", "request_evidence_review", "rg", "search_memory", "send_message", "str_replace", "submit_evidence", "submit_task_split", "todo", "tree", "update_task_item_status"];
+      const expected = ["create_file", "draft_section", "git_read", "list_my_task_items", "read_file", "request_assignment_change", "request_evidence_review", "rg", "search_memory", "send_message", "str_replace", "submit_evidence", "submit_task_split", "todo", "tree", "update_task_item_status"];
       if (TERMINAL_ENABLED) expected.push("handoff_to_terminal");
       assert.deepEqual(names, expected.sort());
     });

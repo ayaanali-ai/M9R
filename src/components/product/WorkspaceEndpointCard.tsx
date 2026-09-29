@@ -43,8 +43,9 @@ export default function WorkspaceEndpointCard() {
     const activityInterval = window.setInterval(() => void refreshActivity(), 30_000);
     return () => { active = false; window.clearInterval(interval); window.clearInterval(activityInterval); };
   }, []);
-  return <section aria-label="Connected endpoints" className="mx-4 mb-4 rounded-xl border border-white/15 bg-black/25 p-4 text-sm text-white/85">
-    <h2 className="mb-2 font-semibold">Agent endpoints</h2>
+  return <details className="m9r-endpoint-status">
+    <summary>Agent endpoints{rows?.length ? ` · ${rows.filter((row) => row.reachability === "live").length} connected` : ""}</summary>
+    <div className="m9r-endpoint-status__content">
     {error && <p role="status">Endpoint status is temporarily unavailable.</p>}
     {rows?.length ? <ul className="flex flex-wrap gap-2">{rows.map((row) => <li key={row.id} className="rounded-lg border border-white/15 px-3 py-2">
       <span aria-label={row.reachability} className={`mr-2 inline-block size-2 rounded-full ${row.reachability === "live" ? "bg-green-400" : "bg-amber-400"}`} />
@@ -57,5 +58,6 @@ export default function WorkspaceEndpointCard() {
       <details className="mt-2"><summary className="cursor-pointer">Setup steps</summary><ol className="mt-2 list-inside list-decimal">{ONBOARDING_STEPS.filter((step) => step.id !== "undo").map((step) => <li key={step.id}>{step.title}: {step.detail} {step.fix && <code>{step.fix}</code>}</li>)}</ol></details>
     </div>}
     {nativeEvents.length > 0 && <div className="mt-3 border-t border-white/10 pt-2"><h3 className="font-medium">Recent native activity</h3><ul>{nativeEvents.map((event) => <li key={event.id}>{event.eventKind.replaceAll("_", " ")}{event.handle ? ` · @${event.handle}` : ""} · {new Date(event.at).toLocaleString()}</li>)}</ul></div>}
-  </section>;
+    </div>
+  </details>;
 }

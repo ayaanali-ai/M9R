@@ -8,7 +8,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
-import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, normalizeHandle, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
+import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 
 export interface EndpointRecord {
@@ -38,6 +38,29 @@ export interface EventRecord {
 }
 
 const MAX_EVENTS = 500;
+/** Hard ceiling for the complete local snapshot, including extensible cursor and rule maps. */
+export const MAX_LOCAL_STATE_BYTES = 16 * 1024 * 1024;
+/** Keep each rewritten local state file within a predictable task count when user work can be retired safely. */
+export const MAX_STORED_TASKS = 2_000;
+const RESOLVED_TASK_RETENTION_MS = 7 * 24 * 60 * 60_000;
+
+export class LocalStateCapacityError extends Error {
+  readonly code = "M9R_LOCAL_STATE_CAPACITY";
+
+  constructor(bytes: number, limit: number) {
+    super(`The local state file exceeds its safe capacity (${bytes}/${limit} bytes); it was left unchanged.`);
+    this.name = "LocalStateCapacityError";
+  }
+}
+
+export class LocalTaskCapacityError extends Error {
+  readonly code = "M9R_LOCAL_TASK_CAPACITY";
+
+  constructor(retainedTasks: number) {
+    super(`The local task store is at capacity (${retainedTasks}/${MAX_STORED_TASKS} tasks remain unresolved or unread). Complete or read existing work before sending more.`);
+    this.name = "LocalTaskCapacityError";
+  }
+}
 
 interface StoreState {
   version: 1;
@@ -119,12 +142,15 @@ const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuf
 
 export interface LocalStoreDeps {
   now?: () => Date;
+  /** Tests and embedded callers may choose a lower limit; the production maximum cannot be raised. */
+  maxStateBytes?: number;
 }
 
 export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
   const now = deps.now ?? (() => new Date());
   const statePath = join(root, "state.json");
   const lockPath = join(root, "state.lock");
+  const maxStateBytes = Math.min(MAX_LOCAL_STATE_BYTES, Math.max(1, Math.floor(deps.maxStateBytes ?? MAX_LOCAL_STATE_BYTES)));
 
   function acquire(): void {
     mkdirSync(root, { recursive: true });
@@ -146,6 +172,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
   function readState(): StoreState {
     if (!existsSync(statePath)) return emptyState();
+    const fileBytes = statSync(statePath).size;
+    if (fileBytes > maxStateBytes) throw new LocalStateCapacityError(fileBytes, maxStateBytes);
     try {
       const parsed = JSON.parse(readFileSync(statePath, "utf8")) as StoreState;
       return parsed && parsed.version === 1 ? { ...emptyState(), ...parsed } : emptyState();
@@ -182,8 +210,11 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     try {
       const state = readState();
       const out = fn(state);
+      const serialized = JSON.stringify(state);
+      const serializedBytes = Buffer.byteLength(serialized, "utf8");
+      if (serializedBytes > maxStateBytes) throw new LocalStateCapacityError(serializedBytes, maxStateBytes);
       const tmp = `${statePath}.tmp-${process.pid}`;
-      writeFileSync(tmp, JSON.stringify(state), "utf8");
+      writeFileSync(tmp, serialized, "utf8");
       renameWithRetry(tmp, statePath);
       return out;
     } finally {
@@ -233,6 +264,16 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return readState().sessions.filter((x) => normalizeHandle(x.handle) === normalizeHandle(handle) && (folder === undefined || normalizeSessionFolder(x.cwd) === folder)).sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
     },
 
+    /** Sessions that have a live M9R identity token. Delivery must never guess a provider session without one. */
+    sessionsWithIdentity(handle: string, cwd?: string): SessionRecord[] {
+      const folder = cwd === undefined ? undefined : normalizeSessionFolder(cwd);
+      const state = readState();
+      const live = new Set(state.identities.filter((identity) => !identity.revokedAt && normalizeHandle(identity.handle) === normalizeHandle(handle)).map((identity) => identity.sessionId));
+      return state.sessions
+        .filter((session) => normalizeHandle(session.handle) === normalizeHandle(handle) && live.has(session.sessionId) && (folder === undefined || normalizeSessionFolder(session.cwd) === folder))
+        .sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
+    },
+
     listEndpoints(): EndpointRecord[] {
       return Object.values(readState().endpoints);
     },
@@ -249,12 +290,22 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const existing = findByIdempotencyKey(s.tasks, normalizedInput.to, normalizedInput.idempotencyKey);
         if (existing) return { task: existing, created: false };
+        // Retire aged or over-budget resolved work before admitting a task. Anything still in flight, awaiting
+        // approval, undelivered, or unread is retained, so a full backlog becomes an explicit send failure.
+        const retainedTasks = pruneTasks(s.tasks, {
+          maxCount: MAX_STORED_TASKS - 1,
+          maxAgeMs: RESOLVED_TASK_RETENTION_MS,
+          now: now().getTime(),
+        });
+        if (retainedTasks.length >= MAX_STORED_TASKS) throw new LocalTaskCapacityError(retainedTasks.length);
+        s.tasks = retainedTasks;
         const seq = (s.nextSeq[normalizedInput.to] ?? 0) + 1;
         s.nextSeq[normalizedInput.to] = seq;
         const id = `T${s.nextTaskNo}`;
         s.nextTaskNo += 1;
-        const rule = normalizedInput.origin === "agent_initiated" && normalizedInput.standingRuleApplies === undefined ? ruleCovers(s.rules, { from: normalizedInput.from, to: normalizedInput.to, goal: normalizedInput.goal }, now()) : undefined;
-        const task = newTask({ ...normalizedInput, standingRuleApplies: normalizedInput.standingRuleApplies ?? !!rule }, { id, seq }, now().toISOString());
+        const sameRoom = normalizedInput.origin === "agent_initiated" && normalizedInput.standingRuleApplies === undefined && String(normalizedInput.from).startsWith("web-") && String(normalizedInput.to).startsWith("web-");
+        const rule = sameRoom ? undefined : normalizedInput.origin === "agent_initiated" && normalizedInput.standingRuleApplies === undefined ? ruleCovers(s.rules, { from: normalizedInput.from, to: normalizedInput.to, goal: normalizedInput.goal }, now()) : undefined;
+        const task = newTask({ ...normalizedInput, standingRuleApplies: normalizedInput.standingRuleApplies ?? (sameRoom || !!rule) }, { id, seq }, now().toISOString());
         s.tasks.push(task);
         if (rule) pushEvent(s, { kind: "task.approved", taskId: id, handle: task.to, text: `${id} approved by standing rule ${rule.id}` });
         pushEvent(s, { kind: "task.created", taskId: id, handle: task.to, text: `@${task.from} to @${task.to}: ${task.goal.slice(0, 120)}` });
@@ -302,6 +353,12 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     /** Checks a presented token; does not mutate. */
     verifyIdentity(token: string, claimedSessionId?: string): VerifiedIdentity | null {
       return verifyToken(readState().identities, token, claimedSessionId);
+    },
+
+    /** Return the already-issued token for one authenticated session without rotating its other tools' credentials. */
+    identityTokenFor(handle: string, sessionId: string): string | null {
+      const identity = readState().identities.find((item) => !item.revokedAt && item.sessionId === sessionId && normalizeHandle(item.handle) === normalizeHandle(handle));
+      return identity?.token ?? null;
     },
 
     /** Ends a session's token early (the person revoked it from the pill, or the session closed). */
@@ -435,6 +492,12 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     tasksFor(handle: string): Task[] {
       const normalizedHandle = normalizeHandle(handle);
       return readState().tasks.filter((t) => normalizeHandle(t.to) === normalizedHandle);
+    },
+
+    /** Inbox view for one authenticated provider session. An explicitly targeted task never leaks to another session. */
+    tasksForSession(handle: string, sessionId: string): Task[] {
+      const normalizedHandle = normalizeHandle(handle);
+      return readState().tasks.filter((task) => normalizeHandle(task.to) === normalizedHandle && (!task.targetSession || task.targetSession === sessionId));
     },
 
     setApproval(id: string, approval: Approval): Task | undefined {
