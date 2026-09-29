@@ -357,7 +357,7 @@ create or replace function public.create_m9r_disclosure_request(
 )
 returns table (request_id uuid, state text, receipt_id uuid)
 language plpgsql security definer set search_path = public as $$
-declare caller_id uuid := auth.uid(); request_row public.m9r_disclosure_requests%rowtype; allowed boolean;
+declare caller_id uuid := auth.uid(); request_row public.m9r_disclosure_requests%rowtype; allowed boolean; auto_receipt_id uuid;
 begin
   if caller_id is null then raise exception 'authentication required' using errcode = '42501'; end if;
   if not public.is_m9r_room_member(p_room_id, caller_id) then raise exception 'room membership required' using errcode = '42501'; end if;
@@ -368,7 +368,16 @@ begin
   ) then raise exception 'active agent seat required' using errcode = '42501'; end if;
   if p_expires_at <= now() or p_expires_at > now() + interval '10 minutes' + interval '1 minute' then raise exception 'disclosure request expiry is invalid' using errcode = '22023'; end if;
   select p_data_class = any(s.classes) and (s.audience = 'room' or p_audience = 'members') into allowed from public.m9r_disclosure_scopes s where s.room_id = p_room_id and s.owner_id = caller_id;
-  if coalesce(allowed, false) then return query select null::uuid, 'allowed'::text, null::uuid; return; end if;
+  if coalesce(allowed, false) then
+    insert into public.m9r_disclosure_requests (room_id, owner_id, agent_seat_id, asked_by, subject, data_class, audience, proposed_text_digest, expires_at, state, decided_by)
+      values (p_room_id, caller_id, p_agent_seat_id, p_asked_by, p_subject, p_data_class, p_audience, p_proposed_text_digest, p_expires_at, 'approved', caller_id)
+      returning * into request_row;
+    insert into public.m9r_disclosure_receipts (request_id, room_id, owner_id, data_class, audience, decision, payload_digest)
+      values (request_row.id, p_room_id, caller_id, p_data_class, p_audience, 'approved', p_proposed_text_digest)
+      returning id into auto_receipt_id;
+    return query select request_row.id, 'allowed'::text, auto_receipt_id;
+    return;
+  end if;
   insert into public.m9r_disclosure_requests (room_id, owner_id, agent_seat_id, asked_by, subject, data_class, audience, proposed_text_digest, expires_at)
     values (p_room_id, caller_id, p_agent_seat_id, p_asked_by, p_subject, p_data_class, p_audience, p_proposed_text_digest, p_expires_at)
     returning * into request_row;

@@ -63,6 +63,7 @@ test('frame messaging waits for the extension origin instead of targeting the pa
       const node = element(tag);
       if (tag === 'iframe') {
         let recipientOrigin = 'https://example.test';
+        node.contentDocument = {};
         node.contentWindow = {
           postMessage(payload, origin, ports) {
             if (origin !== recipientOrigin) {
@@ -78,7 +79,10 @@ test('frame messaging waits for the extension origin instead of targeting the pa
             }
           },
         };
-        node.setRecipientOrigin = (origin) => { recipientOrigin = origin; };
+        node.setRecipientOrigin = (origin) => {
+          recipientOrigin = origin;
+          node.contentDocument = origin.startsWith('chrome-extension:') ? null : {};
+        };
         frames.push(node);
       }
       return node;
@@ -95,6 +99,7 @@ test('frame messaging waits for the extension origin instead of targeting the pa
   assert.equal(doc.documentElement.child.dataset.m9rFrameHandshake, 'awaiting');
   frames[0].fire('load');
   assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'authenticating');
+  assert.match(doc.documentElement.child.dataset.m9rComposerLifecycle, /^L1PN;$/);
   overlay.showComposer(true);
   assert.deepEqual(badTargetPosts, [], 'no message should be sent while the iframe still has its page-origin initial window');
   assert.equal(sent.length, 0);
@@ -107,10 +112,11 @@ test('frame messaging waits for the extension origin instead of targeting the pa
   handlers.get('message')({ origin: extensionOrigin, source: frame.contentWindow, data: { m9r: 'frame', nonce: 'fixture-nonce', kind: 'size', w: 448, h: 72 } });
   assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'ready');
   assert.equal(doc.documentElement.child.dataset.m9rFrameHandshake, 'ready');
+  assert.match(doc.documentElement.child.dataset.m9rComposerLifecycle, /A1X;$/);
   assert.ok(sent.some((payload) => payload.kind === 'focus'), 'queued focus reaches the confirmed extension frame');
   frame.fire('load');
-  assert.equal(hostHellos, 1, 'a late iframe load asks the extension page to prove itself again');
-  assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'ready', 'the late load must not strand the frame in authentication');
+  assert.equal(hostHellos, 0, 'a late load after authentication does not restart the handshake');
+  assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'ready', 'the late load preserves the authenticated channel');
   assert.deepEqual(badTargetPosts, []);
   overlay.destroy();
 });
@@ -149,6 +155,7 @@ test('an iframe navigation cannot send host messages to the new page origin and 
       const node = element(tag);
       if (tag === 'iframe') {
         let recipientOrigin = extensionOrigin;
+        node.contentDocument = null;
         node.contentWindow = {
           postMessage(payload, origin, ports) {
             node.windowMessages = (node.windowMessages || []).concat([{ payload, origin, portCount: ports?.length || 0 }]);
@@ -162,7 +169,7 @@ test('an iframe navigation cannot send host messages to the new page origin and 
             }
           },
         };
-        node.setRecipientOrigin = (origin) => { recipientOrigin = origin; };
+        node.setRecipientOrigin = (origin) => { recipientOrigin = origin; node.contentDocument = origin === extensionOrigin ? null : {}; };
         frames.push(node);
       }
       return node;
@@ -182,12 +189,14 @@ test('an iframe navigation cannot send host messages to the new page origin and 
 
   // The page navigates its child iframe. A resize before the iframe's load handler must not target the page origin.
   frame.setRecipientOrigin('https://news.ycombinator.com');
+  frame.contentDocument = {};
   handlers.get('resize')();
   assert.deepEqual(badTargetPosts, []);
   frame.fire('load');
   assert.equal(firstPort.closed, true, 'the old extension document channel is disposed on navigation');
 
   frame.setRecipientOrigin(extensionOrigin);
+  frame.contentDocument = null;
   frame.fire('load');
   handlers.get('message')({ origin: extensionOrigin, source: frame.contentWindow, data: { m9r: 'frame', nonce: 'fixture-nonce', kind: 'size', w: 448, h: 72 } });
   handlers.get('resize')();
@@ -202,6 +211,70 @@ test('an iframe navigation cannot send host messages to the new page origin and 
   handlers.get('message')({ origin: extensionOrigin, source: frame.contentWindow, data: { m9r: 'frame', nonce: 'fixture-nonce', kind: 'size', w: 448, h: 72 } });
   assert.notEqual(frame.framePort, beforeBfCache, 'pageshow creates a fresh channel for the restored page');
   assert.ok(sent.length >= 3, 'restored frame receives host state after authenticating again');
+  overlay.destroy();
+});
+
+test('an authenticated extension frame keeps its port when its later load event fires', () => {
+  const handlers = new Map();
+  const sent = [];
+  class FakePort {
+    postMessage(data) { if (this.closed) throw new Error('port is closed'); this.peer.onmessage?.({ data }); }
+    close() { this.closed = true; if (this.peer) this.peer.closed = true; }
+    start() {}
+  }
+  class FakeMessageChannel {
+    constructor() {
+      this.port1 = new FakePort();
+      this.port2 = new FakePort();
+      this.port1.peer = this.port2;
+      this.port2.peer = this.port1;
+    }
+  }
+  const win = {
+    innerWidth: 1000, innerHeight: 800,
+    addEventListener(type, fn) { handlers.set(type, fn); },
+    removeEventListener(type, fn) { if (handlers.get(type) === fn) handlers.delete(type); },
+    setInterval() { return 1; }, clearInterval() {},
+    setTimeout() { return 1; }, clearTimeout() {},
+    requestAnimationFrame() { return 1; }, cancelAnimationFrame() {},
+  };
+  const extensionOrigin = 'chrome-extension://test-id';
+  let frame;
+  const doc = {
+    defaultView: win,
+    documentElement: element('html'),
+    createElement(tag) {
+      const node = element(tag);
+      if (tag === 'iframe') {
+        node.contentDocument = null;
+        node.contentWindow = { postMessage(payload, _origin, ports) {
+          if (payload.m9r === 'host-port' && Array.isArray(ports)) {
+            node.framePort = ports[0];
+            node.framePort.onmessage = (event) => sent.push(event.data);
+          }
+        } };
+        frame = node;
+      }
+      return node;
+    },
+  };
+  win.MessageChannel = FakeMessageChannel;
+  win.chrome = { runtime: { getURL: (path) => `chrome-extension://test-id/${path}` } };
+  runInNewContext(source, { window: win, URL, Date, Map, Set, Math, performance, console });
+  const overlay = win.M9RPresence.createPresenceOverlay(doc, {});
+  overlay.mountFrame('composer', 'chrome-extension://test-id/composer.html?n=fixture-nonce', { w: 448, h: 72, bottom: 6 });
+
+  handlers.get('message')({ origin: extensionOrigin, source: frame.contentWindow, data: { m9r: 'frame', nonce: 'fixture-nonce', kind: 'ready' } });
+  const authenticatedPort = frame.framePort;
+  assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'ready');
+  overlay.resume(); // Broker startup broadcasts owner-resume even to already-live tabs.
+  assert.equal(authenticatedPort.closed, undefined, 'owner-resume preserves a healthy frame channel');
+  frame.fire('load'); // Chrome can deliver the load event after the extension handshake.
+  handlers.get('resize')();
+
+  assert.equal(authenticatedPort.closed, undefined, 'a valid channel is not closed by the trailing load event');
+  assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'ready');
+  assert.ok(sent.some((payload) => payload.kind === 'host'), 'the live frame keeps receiving host updates');
   overlay.destroy();
 });
 
@@ -340,6 +413,7 @@ test('an unauthenticated first frame load is retried at the trusted extension UR
       const node = element(tag);
       if (tag === 'iframe') {
         let recipientOrigin = 'https://redirected.example';
+        node.contentDocument = {};
         Object.defineProperty(node, 'src', {
           get() { return this._src; },
           set(value) { this._src = value; srcAssignments += 1; },
@@ -353,7 +427,10 @@ test('an unauthenticated first frame load is retried at the trusted extension UR
             }
           },
         };
-        node.setRecipientOrigin = (origin) => { recipientOrigin = origin; };
+        node.setRecipientOrigin = (origin) => {
+          recipientOrigin = origin;
+          node.contentDocument = origin.startsWith('chrome-extension:') ? null : {};
+        };
         frame = node;
       }
       return node;
@@ -377,7 +454,8 @@ test('an unauthenticated first frame load is retried at the trusted extension UR
 
   assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'retrying');
   assert.equal(srcAssignments, 2, 'the frame is reloaded to the trusted extension URL');
-  assert.equal(frame.src, src);
+  assert.equal(new URL(frame.src).searchParams.get('n'), 'fixture-nonce');
+  assert.equal(new URL(frame.src).searchParams.get('m9r_retry'), '1');
   assert.deepEqual(sent, [], 'no host data is delivered before an authenticated extension message');
   overlay.destroy();
 });

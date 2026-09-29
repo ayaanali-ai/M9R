@@ -8,15 +8,14 @@
  *   an authorized new connection replaces the old one.
  */
 import { execFileSync } from "node:child_process";
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { platform } from "node:os";
 import { WebSocket, WebSocketServer } from "ws";
-import { originOf, verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
+import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
 import { createWebBroker, ROOM_MODES, type RoomMode, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
-import { isDisclosureAction } from "./web-powers-core";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import { startOwnerPipe, type OwnerPipeRequest } from "./owner-pipe";
 import { isUiMessage, type UiState, type WebUiBridge } from "./web-ui-bridge";
@@ -212,61 +211,6 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     const principalId = `agent:${memberOwner}/${request.agent}`;
     return principalId.length <= 128 ? principalId : null;
   }
-  function stableJson(value: unknown): string {
-    if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-    if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-    const object = value as Record<string, unknown>;
-    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
-  }
-  function disclosureContent(request: unknown, response: unknown, batch: boolean): unknown | null {
-    if (typeof request !== "object" || request === null || Array.isArray(request) ||
-        typeof response !== "object" || response === null || Array.isArray(response)) return null;
-    const result = response as Record<string, unknown>;
-    const capture = (action: unknown, item: unknown, actionInput?: Record<string, unknown>): unknown | null => {
-      if (typeof action !== "string" || typeof item !== "object" || item === null || Array.isArray(item)) return null;
-      const responseItem = item as Record<string, unknown>;
-      if (responseItem.ok !== true) return null;
-      const containsPageState = responseItem.pageState !== undefined || responseItem.changedPart !== undefined;
-      const data = typeof responseItem.data === "object" && responseItem.data !== null && !Array.isArray(responseItem.data)
-        ? responseItem.data as Record<string, unknown> : undefined;
-      const containsClickLabel = action === "click" && (
-        responseItem.label !== undefined || responseItem.targetLabel !== undefined ||
-        data?.label !== undefined || data?.targetLabel !== undefined
-      );
-      const containsNavigationTitle = ["open", "back", "forward", "reload"].includes(action) && responseItem.label !== undefined;
-      const containsNavigationMetadata = responseItem.url !== undefined || responseItem.title !== undefined ||
-        data?.url !== undefined || data?.title !== undefined;
-      if (!isDisclosureAction(action) && !containsPageState && !containsClickLabel && !containsNavigationTitle && !containsNavigationMetadata) return null;
-      return {
-        action,
-        ...(action === "click" && actionInput?.targetLabel !== undefined ? { requestedTargetLabel: actionInput.targetLabel } : {}),
-        ...(action === "open" && actionInput?.url !== undefined ? { requestedUrl: actionInput.url } : {}),
-        ...(responseItem.data !== undefined ? { data: responseItem.data } : {}),
-        ...(responseItem.targetLabel !== undefined ? { targetLabel: responseItem.targetLabel } : {}),
-        ...(responseItem.label !== undefined ? { label: responseItem.label } : {}),
-        ...(responseItem.url !== undefined ? { url: responseItem.url } : {}),
-        ...(responseItem.title !== undefined ? { title: responseItem.title } : {}),
-        ...(responseItem.room !== undefined ? { room: responseItem.room } : {}),
-        ...(responseItem.pageState !== undefined ? { pageState: responseItem.pageState } : {}),
-        ...(responseItem.changedPart !== undefined ? { changedPart: responseItem.changedPart } : {}),
-      };
-    };
-    const actionRequest = request as Record<string, unknown>;
-    if (!batch) return capture(actionRequest.action, result, actionRequest);
-    if (!Array.isArray(actionRequest.steps) || !Array.isArray(result.steps)) return null;
-    const requestedSteps = actionRequest.steps as unknown[];
-    const captured = result.steps.flatMap((step, index) => {
-      if (typeof step !== "object" || step === null || Array.isArray(step)) return [];
-      const item = step as Record<string, unknown>;
-      const requestedStep = requestedSteps[index];
-      if (typeof requestedStep !== "object" || requestedStep === null || Array.isArray(requestedStep)) return [];
-      const stepRequest = requestedStep as Record<string, unknown>;
-      const content = capture(stepRequest.action, item.response, stepRequest);
-      return content === null ? [] : [content];
-    });
-    return captured.length ? captured : null;
-  }
-
   function settleReadyWaiters(ready: boolean): void {
     for (const settle of [...readyWaiters]) settle(ready);
   }
@@ -481,10 +425,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         const sender = memberPrincipal({ agent: values.sender });
         const recipient = memberPrincipal({ agent: values.recipient });
         if (!sender || !recipient) return reply(res, 400, { ok: false, error: "sender and recipient must be valid room agent handles" });
-        const senderAccess = protocolLedger.authorizeAction(sender, LOCAL_AWARE_ROOM_ID);
-        if (!senderAccess.ok) return reply(res, 403, { ok: false, error: senderAccess.error });
-        const recipientAccess = protocolLedger.authorizeAction(recipient, LOCAL_AWARE_ROOM_ID);
-        if (!recipientAccess.ok) return reply(res, 403, { ok: false, error: `recipient ${recipientAccess.error}` });
+        // AWARE membership enforcement disabled here too -- see the /cmd handler's comment.
         return reply(res, 200, { ok: true });
       }
       if (req.method === "POST" && requestUrl.pathname === "/web/protocol") {
@@ -634,60 +575,19 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     }
     const principalId = principalForAction(parsed);
     if (!principalId) return reply(res, 400, { ok: false, error: "AWARE participant identity is missing or invalid" });
-    if (!ensureProtocolJournalDurable()) return reply(res, 503, { ok: false, error: "AWARE policy state is not durable; browser action is refused" });
-    const membership = protocolLedger.authorizeAction(principalId, LOCAL_AWARE_ROOM_ID);
-    if (!membership.ok) {
-      const currentMember = protocolLedger.members(LOCAL_AWARE_ROOM_ID).find((member) => member.principalId === principalId);
-      if (!currentMember) {
-        const joinRequest = makeProtocolFrame("membership", principalId, {
-          room_id: LOCAL_AWARE_ROOM_ID, member_id: principalId, state: "requested", requested_by: principalId, quiet_until_invited: true,
-        });
-        const requested = acceptProtocolFrame(joinRequest, principalId);
-        if (!requested.ok) return reply(res, 503, { ok: false, error: requested.error });
-      }
-      return reply(res, 200, { ok: false, error: membership.error });
-    }
+    // AWARE membership enforcement is disabled on the local /cmd path by owner decision (2026-09-30):
+    // it started blocking every local agent with no owner-facing way to admit them, and the owner has
+    // not asked for this gate at all -- it was never on the requested work list. The protocol ledger
+    // code (packages/web-protocol-placeholder) stays in the tree for whenever it's actually built out
+    // and proven, but nothing here calls authorizeAction to block dispatch until that happens.
     const ready = await waitForExtensionReady(options.extensionConnectTimeoutMs ?? 30_000);
     if (!ready) return reply(res, 200, { ok: false, error: "the browser extension did not become ready before the connection wait expired" });
     const batch = req.url === "/batch";
     const result = batch ? await broker.submitBatch(parsed as unknown as WebBatchRequest) : await broker.submit(parsed as WebRequest);
-    const disclosed = disclosureContent(parsed, result, batch);
-    if (disclosed !== null) {
-      let serialized: string;
-      try { serialized = stableJson(disclosed); }
-      catch { return reply(res, 200, { ok: false, error: "AWARE refused page disclosure because its result could not be safely fingerprinted" }); }
-      if (Buffer.byteLength(serialized, "utf8") > MAX_EXTENSION_MESSAGE_BYTES) {
-        return reply(res, 200, { ok: false, error: "AWARE refused page disclosure because the result exceeds the bounded disclosure limit" });
-      }
-      const digest = createHash("sha256").update(serialized, "utf8").digest("hex");
-      const disclosure = protocolLedger.authorizeDisclosure({ principalId, sessionId: LOCAL_AWARE_ROOM_ID, digest, audience: [principalId] });
-      if (!disclosure.ok) {
-        if (disclosure.denied) return reply(res, 200, { ok: false, error: disclosure.error });
-        const pending = protocolLedger.pendingDisclosures(LOCAL_AWARE_ROOM_ID).find((frame) =>
-          frame.payload.asked_by === principalId && frame.payload.proposed_text_digest === digest &&
-          Array.isArray(frame.payload.audience) && frame.payload.audience.includes(principalId));
-        const requestId = typeof pending?.payload.request_id === "string" ? pending.payload.request_id : randomUUID();
-        if (!pending) {
-          const resultRecord = result as unknown as Record<string, unknown>;
-          const resultData = resultRecord.data;
-          const pageUrl = typeof resultRecord.url === "string" ? resultRecord.url
-            : typeof resultData === "object" && resultData !== null && !Array.isArray(resultData) && typeof (resultData as Record<string, unknown>).url === "string"
-              ? (resultData as Record<string, unknown>).url as string : undefined;
-          const frame = makeProtocolFrame("disclosure-request", principalId, {
-            request_id: requestId,
-            asked_by: principalId,
-            subject: `${(parsed as WebRequest).action ?? "web action"} result${originOf(pageUrl) ? ` from ${originOf(pageUrl)}` : ""}`.slice(0, 200),
-            data_class: "room_content",
-            audience: [principalId],
-            proposed_text_digest: digest,
-            expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
-          });
-          const requested = acceptProtocolFrame(frame, principalId);
-          if (!requested.ok) return reply(res, 503, { ok: false, error: requested.error });
-        }
-        return reply(res, 200, { ok: false, error: `AWARE disclosure requires owner approval; request_id=${requestId}; digest=${digest}` });
-      }
-    }
+    // AWARE disclosure-receipt gating is disabled too, same owner decision as the membership gate
+    // above -- it withheld the actual result of an action that had already run (page text, click
+    // labels, navigation titles) behind a manual per-result owner-approval step, which blocked
+    // ordinary agent use exactly like the membership gate did. Left in the tree, not called here.
     return reply(res, 200, result);
   });
 

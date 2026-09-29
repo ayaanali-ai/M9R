@@ -625,6 +625,15 @@
     function resume() {
       if (destroyed || !host.isConnected) return;
       for (const state of [...frames.values()]) {
+        if (state.trace) state.trace(`U${state.ready ? "R" : "N"}${state.port ? "P" : "N"}`);
+        // Broker startup broadcasts owner-resume to every tab, including tabs that
+        // were never stopped. Keep a live authenticated frame intact; assigning its
+        // extension URL again first navigates through page-origin about:blank and
+        // invalidates the port that is already carrying the shared UI.
+        if (state.ready && state.port && state.box.isConnected && state.frame.isConnected) {
+          layout(state);
+          continue;
+        }
         clearFrameAuthTimer(state);
         closeFramePort(state);
         state.ready = false;
@@ -697,6 +706,12 @@
       let nonce = "";
       try { nonce = new URL(src, doc.baseURI).searchParams.get("n") || ""; } catch {}
       const state = { kind, box, frame, src, nonce, port: null, size: { w: defaults.w, h: defaults.h }, pos: null, shown: true, defaults, ready: false, pending: new Map(), setFrameStage, loadCount: 0, authCount: 0, retryCount: 0 };
+      const traceKey = `m9r${kind === "pill" ? "Pill" : "Composer"}Lifecycle`;
+      const trace = (stage) => {
+        if (!host.dataset) return;
+        host.dataset[traceKey] = `${host.dataset[traceKey] || ""}${stage};`.slice(-96);
+      };
+      state.trace = trace;
       setFrameStage("mounted");
       // The thread pill rides the dock track when the dock module is loaded; otherwise it keeps its old free position.
       state.dock = kind === "pill" && !!global.M9RDock;
@@ -708,6 +723,16 @@
         if (destroyed || frames.get(kind) !== state || !host.isConnected || !frame.isConnected) return;
         state.loadCount++;
         if (host.dataset) host.dataset[`m9r${kind === "pill" ? "Pill" : "Composer"}Loads`] = String(state.loadCount);
+        // Fixed reason codes only: identify a page-origin about:blank load without
+        // exposing frame URLs or the handshake nonce to the embedding site.
+        if (host.dataset) host.dataset[`m9r${kind === "pill" ? "Pill" : "Composer"}Recipient`] = frame.contentDocument ? "page-origin" : "cross-origin";
+        trace(`L${state.loadCount}${frame.contentDocument ? "P" : "X"}${state.ready ? "R" : "N"}`);
+        // The extension document can authenticate itself before its load event fires.
+        // In that ordering, tearing down the newly transferred port here races a valid
+        // handshake and can leave the frame waiting on a retry against about:blank.
+        // A ready cross-origin frame has already proven its current document with the
+        // tab nonce, so keep its channel and let subsequent navigation events re-auth.
+        if (state.ready && !frame.contentDocument) return;
         clearFrameAuthTimer(state);
         // An about:blank load may precede the extension document, and the frame may
         // announce itself before its load event. Every load invalidates the old port
@@ -719,6 +744,9 @@
         setFrameStage("authenticating");
         layout(state);
         scheduleFrameAuthRetry(state);
+        // about:blank inherits the page's origin. Do not post a chrome-extension://
+        // target to that WindowProxy; wait for the bounded trusted-URL retry instead.
+        if (frame.contentDocument) return;
         try {
           frame.contentWindow.postMessage({ m9r: "host-hello", nonce: state.nonce }, extensionOrigin);
           if (host.dataset) host.dataset[`m9r${kind === "pill" ? "Pill" : "Composer"}Hello`] = "sent";
@@ -770,8 +798,15 @@
         state.setFrameStage("retrying");
         state.retryCount++;
         if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Retries`] = String(state.retryCount);
+        if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Recipient`] = state.frame.contentDocument ? "page-origin" : "cross-origin";
+        if (host.dataset) {
+          const key = `m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`;
+          host.dataset[key] = `${host.dataset[key] || ""}R${state.retryCount}${state.frame.contentDocument ? "P" : "X"};`.slice(-96);
+        }
         closeFramePort(state);
-        state.frame.src = state.src;
+        const retryUrl = new URL(state.src);
+        retryUrl.searchParams.set("m9r_retry", String(state.retryCount));
+        state.frame.src = retryUrl.href;
       }, FRAME_AUTH_TIMEOUT_MS);
     }
 
@@ -974,6 +1009,7 @@
         state.setFrameStage("ready");
         state.authCount++;
         if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Auths`] = String(state.authCount);
+        if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`] = `${host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`] || ""}A${state.authCount}${state.frame.contentDocument ? "P" : "X"};`.slice(-96);
         if (host.dataset) host.dataset.m9rFrameHandshake = "ready";
         clearFrameAuthTimer(state);
         layout(state);

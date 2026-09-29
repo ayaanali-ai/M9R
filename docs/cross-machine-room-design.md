@@ -1,6 +1,6 @@
-# M9R cross-machine room — design for approval
+# M9R cross-machine room — approved v0 design
 
-Status: step 2 is implemented in the local branch: authenticated invite acceptance, URL-based requested membership with owner admission, minimized room-event append/export primitives, disclosure gates, and a local membership-bound relay core. The migration has not been applied to any database, and no production relay deployment or browser/UI claim is made here. Local browser authority remains owner-local; the recommended same-origin, same-page v0 collaboration profile remains the boundary for production rollout.
+Status: the owner approved the same-URL, per-owner browser-control v0 boundary on 2026-09-29. Step 2 is implemented in the local branch: authenticated invite acceptance, URL-based requested membership with owner admission, minimized room-event append/export primitives, disclosure gates, and a local membership-bound relay core. The migration has not been applied to any database, and no production relay deployment or browser/UI claim is made here. Local browser authority remains owner-local.
 
 ## Goal and boundary
 
@@ -76,7 +76,7 @@ Claim: `free -> held -> shared -> releasing -> free`; expiry, tab close, member 
 
 ## Rollout and proof gates
 
-1. Approve this model and select whether v0 requires both owners to open the same URL themselves (recommended) or permits one owner to invite another into an already-open tab.
+1. Approved: v0 requires both owners to open the same room URL and web page themselves. No remote tab control or inherited grants.
 2. Add membership-bound browser credential tests and unauthorized-room denial tests.
 3. Build a local relay integration test with two distinct authenticated principals and two browser clients before any production pilot.
 4. Demonstrate presence, message delivery, field-claim conflict, distinct-field concurrency, lease expiry, path drift, and local owner stop across two machines.

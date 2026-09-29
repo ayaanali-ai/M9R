@@ -28,14 +28,28 @@ test("shared-target confirmation preserves owner authority while allowing the ow
     "a supplied seat must be active, in this room, and owned by the authenticated member");
 });
 
-test("authoritative append requires an exact approved room disclosure receipt for agent text", () => {
+test("authoritative append requires an exact approved disclosure receipt for every generic agent event", () => {
   const guardMigration = read("supabase/migrations/20260928030000_authoritative_room_events.sql");
-  assert.match(guardMigration, /p_actor_seat_id is not null and p_payload \? 'text'/i);
+  assert.match(guardMigration, /p_actor_seat_id is not null and p_kind <> 'action'/i);
   assert.match(guardMigration, /receipt\.decision = 'approved'/i);
   assert.match(guardMigration, /receipt\.audience in \('room', 'members'\)/i);
-  assert.match(guardMigration, /receipt\.payload_digest = encode\(digest\(convert_to\(p_payload->>'text', 'UTF8'\), 'sha256'\), 'hex'\)/i);
+  assert.match(guardMigration, /receipt\.payload_digest = encode\(digest\(p_payload::text, 'sha256'\), 'hex'\)/i);
   assert.match(guardMigration, /request\.agent_seat_id = p_actor_seat_id::text/i);
   assert.match(guardMigration, /request\.state = 'approved'/i);
+  assert.match(guardMigration, /request\.proposed_text_digest = encode\(digest\(p_payload::text, 'sha256'\), 'hex'\)/i);
   assert.match(guardMigration, /request\.expires_at > now\(\)/i);
-  assert.match(guardMigration, /approved disclosure receipt required for agent room text/i);
+  assert.match(guardMigration, /approved disclosure receipt required for agent room event/i);
+});
+
+test("event approval hashes PostgreSQL's full JSONB payload and scoped auto-allow creates a receipt", () => {
+  const guardMigration = read("supabase/migrations/20260928030000_authoritative_room_events.sql");
+  const roomsMigration = read("supabase/migrations/20260926010000_cross_machine_rooms.sql");
+  const route = read("src/app/api/rooms/[roomId]/disclosures/route.ts");
+  assert.match(guardMigration, /create function public\.request_m9r_room_event_disclosure/i);
+  assert.match(guardMigration, /digest\(p_proposed_payload::text, 'sha256'\)/i);
+  assert.match(guardMigration, /grant execute on function public\.request_m9r_room_event_disclosure[\s\S]*?to authenticated/i);
+  assert.match(route, /normalizeRoomEvent\(value\.proposedEvent\)/);
+  assert.match(route, /event\.value\.actorSeatId !== agentSeatId/);
+  assert.match(route, /p_proposed_payload: event\.value\.payload/);
+  assert.match(roomsMigration, /if coalesce\(allowed, false\) then[\s\S]*?insert into public\.m9r_disclosure_receipts[\s\S]*?'approved'/i);
 });

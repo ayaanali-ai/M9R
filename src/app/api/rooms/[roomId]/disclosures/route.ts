@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { normalizeRoomEvent } from "@/lib/rooms/room-events";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -23,12 +24,23 @@ export async function POST(request: NextRequest, context: RouteContext) {
   const dataClass = typeof value.dataClass === "string" ? value.dataClass : "";
   const audience = typeof value.audience === "string" ? value.audience : "";
   const proposedText = typeof value.proposedText === "string" ? value.proposedText : "";
-  if (!UUID.test(agentSeatId) || !askedBy || askedBy.length > 128 || !subject || subject.length > 200 || !CLASSES.has(dataClass) || !audience || audience.length > 256 || !proposedText || proposedText.length > 4_000) return NextResponse.json({ error: "Disclosure details are invalid." }, { status: 400 });
-  const { data, error } = await db.rpc("create_m9r_disclosure_request", {
+  const event = value.proposedEvent === undefined ? null : normalizeRoomEvent(value.proposedEvent);
+  if (event && (!event.ok || event.value.actorSeatId !== agentSeatId || ["action", "handoff"].includes(event.value.kind))) {
+    return NextResponse.json({ error: "Proposed agent event is invalid." }, { status: 400 });
+  }
+  if (!UUID.test(agentSeatId) || !askedBy || askedBy.length > 128 || !subject || subject.length > 200 || !CLASSES.has(dataClass) || !audience || audience.length > 256 || (!event && (!proposedText || proposedText.length > 4_000))) return NextResponse.json({ error: "Disclosure details are invalid." }, { status: 400 });
+  const expiry = new Date(Date.now() + 10 * 60_000).toISOString();
+  const details = {
     p_room_id: roomId, p_agent_seat_id: agentSeatId, p_asked_by: askedBy, p_subject: subject, p_data_class: dataClass,
     p_audience: audience, p_proposed_text_digest: createHash("sha256").update(proposedText).digest("hex"),
-    p_expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
-  });
+    p_expires_at: expiry,
+  };
+  const { data, error } = event && event.ok
+    ? await db.rpc("request_m9r_room_event_disclosure", {
+      p_room_id: roomId, p_agent_seat_id: agentSeatId, p_asked_by: askedBy, p_subject: subject, p_data_class: dataClass,
+      p_audience: audience, p_proposed_payload: event.value.payload, p_expires_at: expiry,
+    })
+    : await db.rpc("create_m9r_disclosure_request", details);
   if (error || !Array.isArray(data) || !data[0]) {
     const status = error?.code === "42501" ? 403 : error?.code === "P0002" ? 404 : 500;
     if (status === 500) console.error("Create disclosure request failed:", error?.message);
