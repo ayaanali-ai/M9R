@@ -216,7 +216,9 @@ test("MCP-delivered Codex task reads only its own repository through the governe
   const otherProject = mkdtempSync(join(tmpdir(), "m9r-mcp-inbox-other-project-"));
   const store = createLocalStore(storeRoot);
   const codexSession = "codex-session-governed-read";
+  // eslint-disable-next-line prefer-const -- declared here so tctx.after's cleanup closure can read them even if assignment below throws; each assigned exactly once.
   let sender: Awaited<ReturnType<typeof connectMcp>> | undefined;
+  // eslint-disable-next-line prefer-const
   let receiver: Awaited<ReturnType<typeof connectMcp>> | undefined;
 
   tctx.after(async () => {

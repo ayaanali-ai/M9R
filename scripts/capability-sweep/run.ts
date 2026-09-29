@@ -32,6 +32,7 @@ const site = createServer((req, res) => {
 
 const broker = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", "--import", "./scripts/register-alias.mjs", "scripts/m9r-web-broker.ts", "--home", home, "--port", String(PORT)], { cwd: REPO, env: { ...process.env, M9R_ALLOW_ANY_EXTENSION: "1", M9R_HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
 let brokerOut = ""; broker.stdout.on("data", (d) => (brokerOut += d)); broker.stderr.on("data", (d) => (brokerOut += d));
+// eslint-disable-next-line prefer-const -- declared here so cleanup's closure can read chrome?.pid even if it exits before the spawn below runs; assigned once, deliberately after the exit handler is registered.
 let chrome: ReturnType<typeof spawn>;
 const cleanup = () => { try { spawnSync("taskkill", ["/pid", String(chrome?.pid), "/T", "/F"], { stdio: "ignore" }); } catch {} try { spawnSync("taskkill", ["/pid", String(broker.pid), "/T", "/F"], { stdio: "ignore" }); } catch {} site.close(); try { rmSync(work, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); } catch {} };
 process.on("exit", cleanup);
