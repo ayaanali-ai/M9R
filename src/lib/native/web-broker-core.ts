@@ -529,7 +529,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
     const entry = recentActs.get(key) ?? { sig: "", count: 0, times: [] };
     entry.times = entry.times.filter((time) => at - time < guard.windowMs);
     if (entry.times.length >= guard.budget) return `action budget reached (${guard.budget} in ${Math.round(guard.windowMs / 60000)} minutes); stop and tell the owner what you did and what is left`;
-    const sig = [request.action, request.tab, request.url, request.selector, request.text].join(" ");
+    const sig = [request.action, request.tab, request.url, request.selector, request.text].join("\0");
     entry.count = entry.sig === sig ? entry.count + 1 : 1;
     entry.sig = sig;
     entry.times.push(at);

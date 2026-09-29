@@ -274,13 +274,13 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   function waitForExtensionReady(timeoutMs: number): Promise<boolean> {
     if (extension && extension === readyExtension && extension.readyState === WebSocket.OPEN) return Promise.resolve(true);
     return new Promise((resolve) => {
-      const timer = setTimeout(() => settle(false), Math.max(0, timeoutMs));
       const settle = (ready: boolean) => {
         clearTimeout(timer);
         readyWaiters.delete(settle);
         resolve(ready);
       };
       readyWaiters.add(settle);
+      const timer = setTimeout(() => settle(false), Math.max(0, timeoutMs));
     });
   }
 
