@@ -22,7 +22,7 @@ function eventSlot() {
   };
 }
 
-function createClient({ connectError, timeoutMs = 500 } = {}) {
+function createClient({ connectError, timeoutMs = 500, now = () => 0 } = {}) {
   const ports = [];
   const runtime = {
     lastError: null,
@@ -41,7 +41,7 @@ function createClient({ connectError, timeoutMs = 500 } = {}) {
       return port;
     },
   };
-  const context = { console, setTimeout, clearTimeout };
+  const context = { console, setTimeout, clearTimeout, performance: { now } };
   runInNewContext(source, context);
   return { client: context.M9RNativeInputClient.create(runtime, timeoutMs), ports, runtime };
 }
@@ -78,6 +78,35 @@ test("trusted input client correlates results, streams pointer progress, and reu
   await waitForProgressAck(ports[0], "second_2");
   ports[0].onMessage.emit({ type: "result", requestId: "second_2", ok: true, arrivalSequence: 1 });
   await second;
+});
+
+test("trusted input client reports native round-trip and cursor-arrival timing", async () => {
+  let clockMs = 100;
+  const { client, ports } = createClient({ now: () => clockMs });
+  const click = client.click(clickRequest("timing"), () => {
+    clockMs = 120;
+    return { painted: true };
+  }, {
+    beforeMouseDown() {
+      clockMs = 180;
+      return true;
+    },
+  });
+  const port = ports[0];
+
+  clockMs = 110;
+  port.onMessage.emit({ type: "progress", requestId: "timing", sequence: 1, phase: "arrived", x: 12, y: 20 });
+  await waitForProgressAck(port, "timing");
+  clockMs = 203;
+  port.onMessage.emit({ type: "result", requestId: "timing", ok: true, arrivalSequence: 1 });
+
+  const result = await click;
+  assert.ok(result.timingMs, "successful trusted click returns timing diagnostics");
+  assert.deepEqual(JSON.parse(JSON.stringify(result.timingMs)), {
+    totalMs: 103,
+    arrivalToAckMs: 70,
+    ackToResultMs: 23,
+  });
 });
 
 test("trusted input client refuses invalid and duplicate request identities", async () => {

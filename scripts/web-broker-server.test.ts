@@ -504,38 +504,50 @@ test("authorized extension stop-all blocks subsequent agent actions and appears 
   }
 });
 
-test("through the whole stack, a second agent is refused on a tab the first one is using", async () => {
+test("through the whole stack, a second agent waits for the current tab writer", async () => {
   const t = await setup({ allowAnyExtension: true });
   const claude = await t.issueIdentity("claude", "claude-code", "s1");
   const codex = await t.issueIdentity("codex", "codex", "s2");
-  const { received } = await t.connectExtension();
+  const { ws, received, notices } = await t.connectExtension();
 
-  void t.call("m9r_web_click", { token: claude.token, selector: "#a", tab: "shared" });
+  const active = t.call("m9r_web_click", { token: claude.token, selector: "#a", tab: "shared" });
   await until(() => received.length === 1);
-  const refused = await t.call("m9r_web_type", { token: codex.token, selector: "#b", text: "hi", tab: "shared" });
-  assert.equal(refused.isError, true);
-  assert.match(refused.content[0].text, /in use by @claude/);
-  assert.equal(received.length, 1, "the refused command never reached the browser");
+  const queued = t.call("m9r_web_type", { token: codex.token, selector: "#b", text: "hi", tab: "shared" });
+  await until(() => notices.length === 1);
+  assert.equal((notices[0].presence as Record<string, unknown>).message, "Waiting on @claude");
+  assert.equal(received.length, 1, "a conflicting write waits instead of reaching the browser early");
+  ws.send(JSON.stringify({ type: "result", id: received[0].id, ok: true, data: { clicked: true } }));
+  assert.equal((await active).isError, undefined);
+  await until(() => received.length === 2);
+  assert.equal(received[1].action, "type");
+  ws.send(JSON.stringify({ type: "result", id: received[1].id, ok: true, data: { typed: true } }));
+  assert.equal((await queued).isError, undefined);
   await t.done();
 });
 
-test("the MCP surface permits concurrent field claims and rejects a duplicate field", async () => {
+test("the MCP surface permits concurrent field claims and queues a duplicate field", async () => {
   const t = await setup({ allowAnyExtension: true });
   const claude = await t.issueIdentity("claude", "claude-code", "field-1");
   const codex = await t.issueIdentity("codex", "codex", "field-2");
   const gemini = await t.issueIdentity("gemini", "gemini", "field-3");
-  const { ws, received } = await t.connectExtension();
+  const { ws, received, notices } = await t.connectExtension();
   const first = t.call("m9r_web_type", { token: claude.token, selector: "#email", text: "a", tab: "shared" });
   const second = t.call("m9r_web_type", { token: codex.token, selector: "#name", text: "b", tab: "shared" });
   await until(() => received.length === 2);
   assert.equal((received[0].presence as Record<string, unknown>).claimScope !== undefined, true);
   assert.equal((received[1].presence as Record<string, unknown>).claimScope !== undefined, true);
-  const collision = await t.call("m9r_web_type", { token: gemini.token, selector: "#email", text: "c", tab: "shared" });
-  assert.equal(collision.isError, true);
+  const collision = t.call("m9r_web_type", { token: gemini.token, selector: "#email", text: "c", tab: "shared" });
+  await until(() => notices.length === 1);
+  assert.equal((notices[0].presence as Record<string, unknown>).message, "Waiting on @claude");
+  assert.equal(received.length, 2, "the duplicate field request is queued while the other form field remains concurrent");
   ws.send(JSON.stringify({ type: "result", id: received[0].id, ok: true, data: { typed: 1 } }));
   ws.send(JSON.stringify({ type: "result", id: received[1].id, ok: true, data: { typed: 1 } }));
   assert.equal((await first).isError, undefined);
   assert.equal((await second).isError, undefined);
+  await until(() => received.length === 3);
+  assert.equal(received[2].action, "type");
+  ws.send(JSON.stringify({ type: "result", id: received[2].id, ok: true, data: { typed: 1 } }));
+  assert.equal((await collision).isError, undefined);
   await t.done();
 });
 

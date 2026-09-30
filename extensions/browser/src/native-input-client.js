@@ -4,6 +4,16 @@
   const POINTER_ARRIVAL_SETTLE_MS = 50;
   const POINTER_ARRIVAL_TIMEOUT_MS = 1000;
 
+  function nowMs() {
+    return root.performance && typeof root.performance.now === "function"
+      ? root.performance.now()
+      : Date.now();
+  }
+
+  function elapsedMs(start, end) {
+    return Math.round(Math.max(0, end - start) * 100) / 100;
+  }
+
   function create(runtime, timeoutMs = 5000) {
     const requestTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, 300000) : 5000;
     let port = null;
@@ -73,6 +83,7 @@
             return;
           }
           const arrived = message.phase === "arrived";
+          if (arrived) item.arrivedAtMs = nowMs();
           let observed;
           try { observed = item.onProgress && item.onProgress(message); } catch (error) {
             abortRequest(message.requestId, new Error(`M9R visible pointer update failed; click cancelled: ${String(error && error.message || error)}`));
@@ -105,6 +116,7 @@
             if (pending.get(message.requestId) !== item || port !== candidate) return;
             clearTimeout(item.arrivalTimer);
             item.arrivalTimer = null;
+            item.acknowledgedAtMs = nowMs();
             candidate.postMessage({ type: "progressAck", requestId: message.requestId, sequence: message.sequence });
           }).catch((error) => {
             abortRequest(message.requestId, new Error(`M9R visible pointer arrival failed; click cancelled: ${String(error && error.message || error)}`));
@@ -112,6 +124,7 @@
           return;
         }
         if (message.type !== "result") return;
+        const completedAtMs = nowMs();
         if (message.ok === true && (!Number.isSafeInteger(item.arrivalSequence)
           || message.arrivalSequence !== item.arrivalSequence)) {
           abortRequest(message.requestId, new Error("M9R native host completed a click without acknowledged cursor arrival"));
@@ -119,7 +132,16 @@
         }
         pending.delete(message.requestId);
         cleanup(item);
-        if (message.ok === true) item.resolve(message);
+        if (message.ok === true) {
+          item.resolve({
+            ...message,
+            timingMs: {
+              totalMs: elapsedMs(item.startedAtMs, completedAtMs),
+              arrivalToAckMs: elapsedMs(item.arrivedAtMs, item.acknowledgedAtMs),
+              ackToResultMs: elapsedMs(item.acknowledgedAtMs, completedAtMs),
+            },
+          });
+        }
         else item.reject(new Error(typeof message.error === "string" ? message.error : "M9R native input was refused"));
       });
       candidate.onDisconnect.addListener(() => {
@@ -160,12 +182,14 @@
           error.name = "AbortError";
           return Promise.reject(error);
         }
+        const startedAtMs = nowMs();
         let active;
         try { active = connect(); } catch (error) { return Promise.reject(error); }
         return new Promise((resolve, reject) => {
           const item = {
             resolve,
             reject,
+            startedAtMs,
             timer: null,
             arrivalTimer: null,
             onProgress,

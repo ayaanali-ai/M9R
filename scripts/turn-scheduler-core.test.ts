@@ -164,3 +164,23 @@ test("burst size is clamped to a sane minimum of one", () => {
   const result = scheduler.recordAction("a");
   assert.equal(result.yielded, true, "a burst of zero must still grant at least one action before yielding");
 });
+
+test("one tab scheduler can keep independent claim-scope lanes moving independently", () => {
+  const scheduler = createTurnScheduler();
+  const profile = scheduler.forLane("form:profile");
+  const search = scheduler.forLane("field:search");
+  profile.register("claude");
+  profile.register("codex");
+  search.register("gemini");
+  search.register("opencode");
+  profile.setPending("claude", true);
+  profile.setPending("codex", true);
+  search.setPending("gemini", true);
+  search.setPending("opencode", true);
+
+  assert.equal(profile.currentHolder(), "claude");
+  assert.equal(search.currentHolder(), "gemini", "another contested scope in the same tab gets its own turn");
+  assert.equal(profile.recordAction("claude").yielded, true);
+  assert.equal(profile.currentHolder(), "codex");
+  assert.equal(search.currentHolder(), "gemini", "progress in the profile lane does not rotate the search lane");
+});

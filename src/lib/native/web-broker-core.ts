@@ -1,9 +1,9 @@
 /**
  * Web broker core (spike, docs: M9R_DEMO_BUILD_PLAN_2026-09-23.md Phase 1-2). Pure logic, no sockets: an agent's
  * browser command goes in through submit(), the connected extension does the work and answers through
- * onExtensionMessage(). Two things live here so they cannot be bypassed by the transport: the per-tab claim (a
- * second agent's click/type/open on a tab another agent is using is refused) and the presence label the overlay
- * draws, which is derived from the command that really ran rather than reported by the agent.
+ * onExtensionMessage(). Two things live here so they cannot be bypassed by the transport: per-tab claims and
+ * fair, scope-aware turns for conflicting writers; and the presence label the overlay draws, derived from the
+ * command that really ran rather than reported by the agent.
  */
 
 import { originOf, pathOf, type WebAuthority } from "./web-authority-core";
@@ -11,6 +11,7 @@ import { redactSecrets } from "./inbox-core";
 import { classifyWebActionRisk } from "./risk-core";
 import { narrateStep, type WebActivity } from "./web-ui-bridge";
 import { classifyPowerRisk, describePower, extraTimeoutFor, grantActionFor, isPowerAction, powerScopeFor, sanitizeLabel, validatePowerRequest, type WebPowerAction, type WebPowerArgs } from "./web-powers-core";
+import { createTurnScheduler, type TurnScheduler, type TurnSchedulerLane } from "./turn-scheduler-core";
 
 export type WebAction = "open" | "read" | "click" | "type" | WebPowerAction;
 
@@ -212,6 +213,9 @@ export type WebClaimScope =
 
 interface Claim {
   agent: string;
+  participantId: string;
+  provider: string;
+  sessionId: string;
   expiresAt: number;
   scope: WebClaimScope;
   sharedWith: Set<string>;
@@ -228,6 +232,39 @@ interface Pending {
   expectedPathPrefix?: string;
   request?: WebRequest;
   presence?: Record<string, unknown>;
+  claimKey?: string;
+  participantId: string;
+  turnLaneKey?: string;
+  turnToken?: string;
+}
+
+interface TurnParticipant {
+  agent: string;
+  provider: string;
+  sessionId: string;
+}
+
+interface QueuedTurn {
+  request: WebRequest;
+  resolve: (response: WebResponse) => void;
+}
+
+interface TurnLane {
+  key: string;
+  tab: string;
+  scope: WebClaimScope;
+  scheduler: TurnSchedulerLane;
+  participants: Map<string, TurnParticipant>;
+  queues: Map<string, QueuedTurn[]>;
+  activeParticipantId: string | null;
+  activeTokens: Set<string>;
+  activeQueued?: QueuedTurn;
+}
+
+interface TurnDispatchContext {
+  laneKey: string;
+  participantId: string;
+  token: string;
 }
 
 function fail(error: string): WebResponse {
@@ -308,6 +345,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
   const newId = deps.newId ?? (() => crypto.randomUUID());
   const claims = new Map<string, Claim>();
   const pending = new Map<string, Pending>();
+  const turnSchedulersByTab = new Map<string, TurnScheduler>();
+  const turnLanes = new Map<string, TurnLane>();
   const tabUrls = new Map<string, string>();
   // URLs an agent may open directly: exact URLs the owner typed to it, and pages this room has already been on.
   const ownerUrls = new Set<string>();
@@ -477,6 +516,199 @@ export function createWebBroker(deps: WebBrokerDeps) {
     return `${tab}\u0000${scope.kind}\u0000${scope.kind === "tab" ? "*" : scope.key}`;
   }
 
+  function turnParticipantId(actor: string, request: WebRequest): string {
+    return JSON.stringify([actor, request.provider, request.sessionId]);
+  }
+
+  function turnParticipant(actor: string, request: WebRequest): TurnParticipant {
+    return { agent: actor, provider: request.provider, sessionId: request.sessionId };
+  }
+
+  function registerTurnParticipant(lane: TurnLane, actor: string, request: WebRequest): string {
+    const id = turnParticipantId(actor, request);
+    if (!lane.participants.has(id)) {
+      lane.participants.set(id, turnParticipant(actor, request));
+      lane.scheduler.register(id, { burstSize: request.provider.toLowerCase().includes("codex") ? 4 : 1 });
+    }
+    return id;
+  }
+
+  function schedulerForTab(tab: string): TurnScheduler {
+    let scheduler = turnSchedulersByTab.get(tab);
+    if (!scheduler) {
+      scheduler = createTurnScheduler({ now });
+      turnSchedulersByTab.set(tab, scheduler);
+    }
+    return scheduler;
+  }
+
+  function turnLaneForClaim(tab: string, claim: Claim): TurnLane {
+    const key = claimKey(tab, claim.scope);
+    let lane = turnLanes.get(key);
+    if (lane) return lane;
+    lane = {
+      key,
+      tab,
+      scope: claim.scope,
+      scheduler: schedulerForTab(tab).forLane(key),
+      participants: new Map(),
+      queues: new Map(),
+      activeParticipantId: null,
+      activeTokens: new Set(),
+    };
+    lane.participants.set(claim.participantId, {
+      agent: claim.agent,
+      provider: claim.provider,
+      sessionId: claim.sessionId,
+    });
+    lane.scheduler.register(claim.participantId, { burstSize: claim.provider.toLowerCase().includes("codex") ? 4 : 1 });
+    const inFlight = [...pending.entries()].filter(([, entry]) => entry.claimKey === key);
+    lane.activeParticipantId = inFlight.length > 0 ? claim.participantId : null;
+    lane.scheduler.setPending(claim.participantId, inFlight.length > 0);
+    if (inFlight.length > 0) lane.scheduler.requestTurn(claim.participantId);
+    for (const [token, entry] of inFlight) {
+      entry.turnLaneKey = key;
+      entry.turnToken = token;
+      lane.activeTokens.add(token);
+    }
+    turnLanes.set(key, lane);
+    return lane;
+  }
+
+  function turnLaneIsBusy(lane: TurnLane): boolean {
+    return lane.activeTokens.size > 0 || [...lane.queues.values()].some((queue) => queue.length > 0);
+  }
+
+  function sendTurnNotice(tab: string, participant: TurnParticipant, message: string, phase: "waiting" | "done", scope?: WebClaimScope): void {
+    deps.send({
+      type: "notice",
+      tab,
+      presence: {
+        id: newId(),
+        agent: participant.agent,
+        provider: participant.provider,
+        sessionId: participant.sessionId,
+        action: message,
+        message,
+        step: message,
+        phase,
+        ...(phase === "waiting" ? { blocked: true } : {}),
+        claimed: false,
+        claimMs: 0,
+        ...(scope ? { claimScope: scope } : {}),
+      },
+    });
+  }
+
+  function updateTurnClaim(lane: TurnLane, participant: TurnParticipant): void {
+    const claim = claims.get(lane.key);
+    if (!claim) return;
+    claim.agent = participant.agent;
+    claim.participantId = JSON.stringify([participant.agent, participant.provider, participant.sessionId]);
+    claim.provider = participant.provider;
+    claim.sessionId = participant.sessionId;
+    claim.expiresAt = now() + claimTtlMs;
+  }
+
+  function completeTurnLane(laneKey: string, token: string): void {
+    const lane = turnLanes.get(laneKey);
+    if (!lane || !lane.activeTokens.delete(token) || lane.activeTokens.size > 0) return;
+    const departingId = lane.activeParticipantId;
+    lane.activeParticipantId = null;
+    lane.activeQueued = undefined;
+    if (!departingId) return;
+
+    const remaining = lane.queues.get(departingId)?.length ?? 0;
+    lane.scheduler.setPending(departingId, remaining > 0);
+    lane.scheduler.recordAction(departingId);
+    const nextId = lane.scheduler.currentHolder();
+    if (nextId && nextId !== departingId) {
+      const departing = lane.participants.get(departingId);
+      const next = lane.participants.get(nextId);
+      if (departing && next) sendTurnNotice(lane.tab, departing, `Go @${next.agent}, I'm done for now`, "done");
+    }
+    pumpTurnLane(lane);
+  }
+
+  function pumpTurnLane(lane: TurnLane): void {
+    if (lane.activeTokens.size > 0) return;
+    const holderId = lane.scheduler.currentHolder();
+    if (!holderId) return;
+    const queue = lane.queues.get(holderId);
+    if (!queue?.length) {
+      lane.scheduler.setPending(holderId, false);
+      if (lane.scheduler.currentHolder() !== holderId) pumpTurnLane(lane);
+      return;
+    }
+    if (!lane.scheduler.requestTurn(holderId).granted) return;
+
+    const queued = queue.shift()!;
+    if (queue.length === 0) lane.queues.delete(holderId);
+    lane.scheduler.setPending(holderId, true);
+    const participant = lane.participants.get(holderId);
+    if (!participant) {
+      queued.resolve(fail("the scheduled browser turn no longer has an agent"));
+      lane.scheduler.setPending(holderId, false);
+      pumpTurnLane(lane);
+      return;
+    }
+    updateTurnClaim(lane, participant);
+    const token = `turn-${newId()}`;
+    lane.activeParticipantId = holderId;
+    lane.activeQueued = queued;
+    lane.activeTokens.add(token);
+    void dispatch(queued.request, { laneKey: lane.key, participantId: holderId, token }).then(
+      (response) => {
+        queued.resolve(response);
+        completeTurnLane(lane.key, token);
+      },
+      () => {
+        queued.resolve(fail("the scheduled browser action failed"));
+        completeTurnLane(lane.key, token);
+      },
+    );
+  }
+
+  function queueTurnRequest(lane: TurnLane, request: WebRequest, actor: string): Promise<WebResponse> {
+    return new Promise((resolve) => {
+      const participantId = registerTurnParticipant(lane, actor, request);
+      const queue = lane.queues.get(participantId) ?? [];
+      queue.push({ request, resolve });
+      lane.queues.set(participantId, queue);
+      lane.scheduler.setPending(participantId, true);
+      const holderId = lane.scheduler.currentHolder();
+      if (holderId && holderId !== participantId) {
+        const holder = lane.participants.get(holderId);
+        if (holder) {
+          const message = `Waiting on @${holder.agent}`;
+          sendTurnNotice(lane.tab, turnParticipant(actor, request), message, "waiting", lane.scope);
+        }
+      }
+      pumpTurnLane(lane);
+    });
+  }
+
+  function cancelTurnLane(lane: TurnLane, error: string): void {
+    for (const queue of lane.queues.values()) for (const queued of queue) queued.resolve(fail(error));
+    lane.queues.clear();
+    lane.activeQueued?.resolve(fail(error));
+    lane.activeQueued = undefined;
+    lane.activeTokens.clear();
+    lane.activeParticipantId = null;
+    for (const participantId of lane.participants.keys()) lane.scheduler.setPending(participantId, false);
+    turnLanes.delete(lane.key);
+  }
+
+  function cancelTurnLanesForTab(tab: string, error: string): void {
+    for (const lane of [...turnLanes.values()]) if (lane.tab === tab) cancelTurnLane(lane, error);
+    turnSchedulersByTab.delete(tab);
+  }
+
+  function cancelAllTurnLanes(error: string): void {
+    for (const lane of [...turnLanes.values()]) cancelTurnLane(lane, error);
+    turnSchedulersByTab.clear();
+  }
+
   function actorTabsKey(request: WebRequest): string {
     return `${request.owner ?? deps.ownerId ?? ""}\u0000${request.agent}\u0000${request.provider}\u0000${request.sessionId}`;
   }
@@ -538,7 +770,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
     return null;
   }
 
-  function dispatch(request: WebRequest): Promise<WebResponse> {
+  function dispatch(request: WebRequest, turnContext?: TurnDispatchContext): Promise<WebResponse> {
     if (stopState.state === "stopped") return Promise.resolve(fail("browser actions are stopped by the owner; restart the local broker to resume"));
     const problem = validateRequest(request);
     if (problem) return Promise.resolve(fail(problem));
@@ -551,6 +783,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if ("error" in resolvedTab) return Promise.resolve(fail(resolvedTab.error));
     const { tab, actorKey } = resolvedTab;
     const actor = crossOwner ? `${request.agent}@${request.owner}` : request.agent;
+    const participantId = turnParticipantId(actor, request);
     const publicTab = (name: string) => crossOwner && name.startsWith(`${request.owner}/`) ? name.slice(request.owner!.length + 1) : name;
     if (request.action === "switch" && !tabsByActor.get(actorKey)?.has(tab) && !tabUrls.has(tab) && !openedBy.has(tab)) return Promise.resolve(fail(`tab "${resolvedTab.publicName}" is not open in the room; m9r_web_tabs lists every tab`));
     if (request.action === "close" && openedBy.get(tab) !== actorKey) return Promise.resolve(fail(`tab "${resolvedTab.publicName}" was not opened by you; you can only close tabs you opened`));
@@ -614,7 +847,14 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (siteJump) return Promise.resolve(fail(siteJump));
 
     const requestedScope = scopeFor(request);
+    if (requestedScope && !(request.action === "open" && !crossOwner)) {
+      const activeLane = [...turnLanes.values()].find((lane) => lane.tab === tab && lane.key !== turnContext?.laneKey && turnLaneIsBusy(lane) && scopesOverlap(lane.scope, requestedScope));
+      const activeLaneClaim = activeLane ? claims.get(activeLane.key) : undefined;
+      const mayShareActiveClaim = activeLaneClaim?.agent !== actor && activeLaneClaim?.sharedWith.has(actor) === true;
+      if (activeLane && !mayShareActiveClaim) return queueTurnRequest(activeLane, request, actor);
+    }
     let claimHolder: Claim | undefined;
+    let commandClaimKey: string | undefined;
     if (requestedScope) {
       const conflicting = activeClaims(tab).find((claim) => scopesOverlap(claim.scope, requestedScope) && claim.agent !== actor && !claim.sharedWith.has(actor));
       if (conflicting && request.action === "open" && !crossOwner) {
@@ -627,39 +867,30 @@ export function createWebBroker(deps: WebBrokerDeps) {
           : response);
       }
       if (conflicting) {
-        const seconds = Math.max(1, Math.ceil((conflicting.expiresAt - now()) / 1000));
-        const scopeName = conflicting.scope.kind;
-        const blockedStep = `Waiting: @${conflicting.agent} is using this ${scopeName === "field" ? "field" : scopeName === "form" ? "form" : "tab"} (${narrateStep(request, "start")})`;
-        emit({ kind: "blocked", agent: actor, provider: request.provider, sessionId: request.sessionId, tab, step: blockedStep });
-        // Display-only: lets the page show that the guardrail fired. It carries no request text and no page values.
-        deps.send({
-          type: "notice",
-          tab,
-          presence: {
-            id: newId(),
-            agent: actor,
-            provider: request.provider,
-            action: `blocked: @${conflicting.agent} has this ${scopeName}`,
-            message: `blocked: @${conflicting.agent} has this ${scopeName}`,
-            blocked: true,
-            claimed: false,
-            claimMs: 0,
-            target: request.selector ? { selector: request.selector } : undefined,
-            claimScope: conflicting.scope,
-            ...(narrate ? { phase: "done", step: blockedStep } : {}),
-          },
-        });
-        return Promise.resolve(
-          fail(`${scopeName} in tab "${tab}" is in use by @${conflicting.agent} for about ${seconds}s. Reading is allowed; wait, or use a different tab name.`),
-        );
+        const lane = turnLaneForClaim(tab, conflicting);
+        return queueTurnRequest(lane, request, actor);
       }
       const key = claimKey(tab, requestedScope);
+      commandClaimKey = key;
       const existing = claims.get(key);
       const sharedWith = new Set(existing?.sharedWith ?? []);
       if (!existing || existing.agent === actor) for (const name of request.shareWith ?? []) sharedWith.add(name);
-      claimHolder = existing && existing.agent !== actor ? existing : { agent: actor, scope: requestedScope, sharedWith, expiresAt: now() + claimTtlMs };
+      claimHolder = existing && existing.agent !== actor ? existing : {
+        agent: actor,
+        participantId,
+        provider: request.provider,
+        sessionId: request.sessionId,
+        scope: requestedScope,
+        sharedWith,
+        expiresAt: now() + claimTtlMs,
+      };
       claimHolder.expiresAt = now() + claimTtlMs;
-      if (claimHolder.agent === actor) claimHolder.sharedWith = sharedWith;
+      if (claimHolder.agent === actor) {
+        claimHolder.sharedWith = sharedWith;
+        claimHolder.participantId = participantId;
+        claimHolder.provider = request.provider;
+        claimHolder.sessionId = request.sessionId;
+      }
       claims.set(key, claimHolder);
     }
 
@@ -700,10 +931,26 @@ export function createWebBroker(deps: WebBrokerDeps) {
 
     return new Promise<WebResponse>((resolve) => {
       const timer = setTimeout(() => {
+        const entry = pending.get(id);
         pending.delete(id);
         resolve(fail("timed out waiting for the browser"));
+        if (entry?.turnLaneKey && entry.turnToken) completeTurnLane(entry.turnLaneKey, entry.turnToken);
       }, timeoutMs + extraTimeoutFor(request as unknown as Parameters<typeof extraTimeoutFor>[0]));
-      pending.set(id, { resolve, timer, tab, actorTabsKey: actorKey, action: request.action, addedOpenCandidate, expectedOrigin: expectOrigin, expectedPathPrefix: expectPathPrefix, request: { ...request, text: undefined }, presence: message.presence });
+      pending.set(id, {
+        resolve,
+        timer,
+        tab,
+        actorTabsKey: actorKey,
+        action: request.action,
+        addedOpenCandidate,
+        expectedOrigin: expectOrigin,
+        expectedPathPrefix: expectPathPrefix,
+        request: { ...request, text: undefined },
+        presence: message.presence,
+        ...(commandClaimKey ? { claimKey: commandClaimKey } : {}),
+        participantId: turnContext?.participantId ?? participantId,
+        ...(turnContext ? { turnLaneKey: turnContext.laneKey, turnToken: turnContext.token } : {}),
+      });
       if (!deps.send(message)) {
         clearTimeout(timer);
         pending.delete(id);
@@ -831,6 +1078,14 @@ export function createWebBroker(deps: WebBrokerDeps) {
     }
     if (message.type === "tab-closed" && typeof (raw as { tab?: unknown }).tab === "string") {
       const closedTab = (raw as { tab: string }).tab;
+      cancelTurnLanesForTab(closedTab, `browser tab "${closedTab}" was closed`);
+      for (const [id, entry] of pending) {
+        if (entry.tab !== closedTab) continue;
+        clearTimeout(entry.timer);
+        pending.delete(id);
+        entry.resolve(fail(`browser tab "${closedTab}" was closed`));
+      }
+      for (const key of claims.keys()) if (key.startsWith(`${closedTab}\u0000`)) claims.delete(key);
       tabUrls.delete(closedTab);
       openedBy.delete(closedTab);
       for (const [actorKey, focused] of focusedTabByActor) if (focused === closedTab) focusedTabByActor.delete(actorKey);
@@ -910,9 +1165,11 @@ export function createWebBroker(deps: WebBrokerDeps) {
       }
     }
     entry.resolve(response);
+    if (entry.turnLaneKey && entry.turnToken) completeTurnLane(entry.turnLaneKey, entry.turnToken);
   }
 
   function onExtensionClosed(): void {
+    cancelAllTurnLanes("the browser extension disconnected");
     for (const [id, entry] of pending) {
       clearTimeout(entry.timer);
       entry.resolve(fail("the browser extension disconnected"));
@@ -1081,6 +1338,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
   function stopAll(owner: string): boolean {
     if (stopState.state === "stopped") return true;
     stopState = { state: "stopped", stoppedAt: now(), stoppedBy: owner.trim().slice(0, 80) || "owner" };
+    cancelAllTurnLanes("browser work was stopped by the owner");
     claims.clear();
     advanceFeed();
     // The extension signal stops future dispatch and page-side presence. An action already running in a page

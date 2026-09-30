@@ -189,23 +189,33 @@ test("with no extension connected the command fails at once instead of hanging",
   assert.match(result.error ?? "", /no browser extension/);
 });
 
-test("a tab-scoped click still blocks a second agent while reads remain allowed", async () => {
+test("a tab-scoped click queues a conflicting writer while reads remain concurrent", async () => {
   const { broker, sent, notices } = harness();
-  void broker.submit(req("claude", "click", { selector: "#a", tab: "shared" }));
-  const blocked = await broker.submit(req("codex", "type", { selector: "#b", text: "secret-value", tab: "shared" }));
-  assert.equal(blocked.ok, false);
-  assert.match(blocked.error ?? "", /in use by @claude/);
-  assert.equal(sent.length, 1, "the refused command must never reach the browser");
-  assert.equal(notices.length, 1, "the page is told the guardrail fired");
+  const first = broker.submit(req("claude", "click", { selector: "#a", tab: "shared" }));
+  const queued = broker.submit(req("codex", "type", { selector: "#b", text: "secret-value", tab: "shared" }));
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  await flush();
+  assert.equal(sent.length, 1, "a conflicting write waits instead of reaching the browser early");
+  assert.equal(notices.length, 1);
   const presence = notices[0].presence as Record<string, unknown>;
   assert.equal(notices[0].tab, "shared");
-  assert.equal(presence.blocked, true);
   assert.equal(presence.agent, "codex");
-  assert.match(String(presence.message), /blocked: @claude has this tab/);
-  assert.ok(!JSON.stringify(notices[0]).includes("secret-value"), "a notice never carries the refused request's text");
+  assert.equal(presence.message, "Waiting on @claude");
+  assert.equal(presence.step, "Waiting on @claude");
+  assert.ok(!JSON.stringify(notices[0]).includes("secret-value"), "a waiting notice never carries the request's text");
 
-  void broker.submit(req("codex", "read", { selector: "#b", tab: "shared" }));
-  assert.equal(sent.length, 2, "reading a claimed tab is allowed");
+  const read = broker.submit(req("codex", "read", { selector: "#b", tab: "shared" }));
+  assert.equal(sent.length, 2, "reading a claimed tab remains concurrent");
+  broker.onExtensionMessage({ type: "result", id: String(sent[1].id), ok: true, data: "safe to read" });
+  assert.equal((await read).ok, true);
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, data: { clicked: true } });
+  assert.equal((await first).ok, true);
+  await flush();
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].action, "type");
+  broker.onExtensionMessage({ type: "result", id: String(sent[2].id), ok: true, data: { typed: true } });
+  assert.equal((await queued).ok, true);
 });
 
 test("typing claims only its field so agents can type in different fields concurrently", async () => {
@@ -214,23 +224,102 @@ test("typing claims only its field so agents can type in different fields concur
   void broker.submit(req("codex", "type", { selector: "#name", text: "b", tab: "shared" }));
   assert.equal(sent.length, 2);
   assert.equal(notices.length, 0);
-  const blocked = await broker.submit(req("gemini", "type", { selector: "#email", text: "c", tab: "shared" }));
-  assert.equal(blocked.ok, false);
-  assert.match(blocked.error ?? "", /field/);
+  const queued = broker.submit(req("gemini", "type", { selector: "#email", text: "c", tab: "shared" }));
+  assert.equal(notices.length, 1);
+  assert.equal((notices[0].presence as Record<string, unknown>).message, "Waiting on @claude");
   assert.equal(sent.length, 2);
+  broker.onExtensionMessage({ type: "result", id: String(sent[0].id), ok: true, data: { typed: true } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 3);
+  assert.equal((sent[2].presence as Record<string, unknown>).agent, "gemini");
+  broker.onExtensionMessage({ type: "result", id: String(sent[2].id), ok: true, data: { typed: true } });
+  assert.equal((await queued).ok, true);
+});
+
+test("same-scope claimants queue in fair order and receive the waiting and handoff notices", async () => {
+  const { broker, sent, notices } = harness();
+  const first = broker.submit(req("claude", "click", { selector: "#save", tab: "shared" }));
+  const second = broker.submit(req("codex", "click", { selector: "#save", tab: "shared" }));
+  const third = broker.submit(req("gemini", "click", { selector: "#save", tab: "shared" }));
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  await flush();
+  assert.equal(sent.length, 1, "same-scope waiters must not dispatch before the current holder finishes");
+  assert.equal(notices.length, 2);
+  assert.equal((notices[0].presence as Record<string, unknown>).message, "Waiting on @claude");
+  assert.equal((notices[1].presence as Record<string, unknown>).message, "Waiting on @claude");
+  assert.equal((notices[0].presence as Record<string, unknown>).step, "Waiting on @claude");
+
+  broker.onExtensionMessage({ type: "result", id: String(sent[0].id), ok: true, data: { clicked: true } });
+  assert.equal((await first).ok, true);
+  await flush();
+  assert.equal(sent.length, 2);
+  assert.equal((sent[1].presence as Record<string, unknown>).agent, "codex", "the first waiter gets the next turn");
+  assert.ok(notices.some((notice) => {
+    const presence = notice.presence as Record<string, unknown>;
+    return presence.agent === "claude" && presence.message === "Go @codex, I'm done for now" && presence.step === presence.message;
+  }));
+
+  broker.onExtensionMessage({ type: "result", id: String(sent[1].id), ok: true, data: { clicked: true } });
+  assert.equal((await second).ok, true);
+  await flush();
+  assert.equal(sent.length, 3);
+  assert.equal((sent[2].presence as Record<string, unknown>).agent, "gemini", "the next waiter follows in round-robin order");
+  assert.ok(notices.some((notice) => (notice.presence as Record<string, unknown>).message === "Go @gemini, I'm done for now"));
+
+  broker.onExtensionMessage({ type: "result", id: String(sent[2].id), ok: true, data: { clicked: true } });
+  assert.equal((await third).ok, true);
+});
+
+test("Codex gets up to four queued same-scope actions before yielding", async () => {
+  const { broker, sent, notices } = harness();
+  const first = broker.submit(req("claude", "click", { selector: "#save", tab: "shared" }));
+  const codexTurns = Array.from({ length: 4 }, () => broker.submit(req("codex", "click", { selector: "#save", tab: "shared" })));
+  const geminiTurn = broker.submit(req("gemini", "click", { selector: "#save", tab: "shared" }));
+
+  broker.onExtensionMessage({ type: "result", id: String(sent[0].id), ok: true, data: { clicked: true } });
+  assert.equal((await first).ok, true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  for (let index = 0; index < codexTurns.length; index += 1) {
+    assert.equal((sent[index + 1].presence as Record<string, unknown>).agent, "codex");
+    broker.onExtensionMessage({ type: "result", id: String(sent[index + 1].id), ok: true, data: { clicked: true } });
+    assert.equal((await codexTurns[index]).ok, true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal((sent[5].presence as Record<string, unknown>).agent, "gemini");
+  assert.ok(notices.some((notice) => (notice.presence as Record<string, unknown>).message === "Go @gemini, I'm done for now"));
+  broker.onExtensionMessage({ type: "result", id: String(sent[5].id), ok: true, data: { clicked: true } });
+  assert.equal((await geminiTurn).ok, true);
+});
+
+test("a same-scope queue in one tab does not gate another tab", async () => {
+  const { broker, sent, notices } = harness();
+  void broker.submit(req("claude", "type", { selector: "#email", text: "a", tab: "shared" }));
+  const otherTab = broker.submit(req("codex", "type", { selector: "#email", text: "b", tab: "research" }));
+
+  assert.equal(sent.length, 2);
+  assert.equal(notices.length, 0);
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, data: { typed: 1 } });
+  assert.equal((await otherTab).ok, true);
 });
 
 test("a form claim conflicts with fields in that form but not another form", async () => {
-  const { broker, sent } = harness();
+  const { broker, sent, notices } = harness();
   void broker.submit(req("claude", "click", { selector: "#save", tab: "shared", claimScope: { kind: "form", key: "#profile" } } as never));
-  const blocked = await broker.submit(req("codex", "type", { selector: "#email", text: "a", tab: "shared", formSelector: "#profile" } as never));
-  assert.equal(blocked.ok, false);
-  assert.match(blocked.error ?? "", /form/);
+  const queued = broker.submit(req("codex", "type", { selector: "#email", text: "a", tab: "shared", formSelector: "#profile" } as never));
+  assert.equal(notices.length, 1);
+  assert.equal((notices[0].presence as Record<string, unknown>).message, "Waiting on @claude");
   assert.equal(sent.length, 1);
   const independent = broker.submit(req("gemini", "type", { selector: "#search", text: "x", tab: "shared", formSelector: "#search-form" } as never));
   assert.equal(sent.length, 2);
   broker.onExtensionMessage({ type: "result", id: sent[1].id, ok: true, data: { typed: 1 } });
   assert.deepEqual(await independent, { ok: true, data: { typed: 1 } });
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, data: { clicked: true } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 3);
+  assert.equal((sent[2].presence as Record<string, unknown>).agent, "codex");
+  broker.onExtensionMessage({ type: "result", id: sent[2].id, ok: true, data: { typed: 1 } });
+  assert.equal((await queued).ok, true);
 });
 
 test("a claimant can explicitly share its field claim with a named agent", async () => {
@@ -245,22 +334,31 @@ test("a claimant can explicitly share its field claim with a named agent", async
 
 test("opening or clicking a submit control claims the whole tab", async () => {
   const { broker, sent } = harness({ approvalEnabled: true });
-  void broker.submit(req("claude", "open", { url: "https://example.com", tab: "shared" }));
-  const afterOpen = await broker.submit(req("codex", "type", { selector: "#email", text: "x", tab: "shared" }));
-  assert.equal(afterOpen.ok, false);
-  broker.onExtensionMessage({ type: "result", id: "c1", ok: true });
+  const opened = broker.submit(req("claude", "open", { url: "https://example.com", tab: "shared" }));
+  const afterOpen = broker.submit(req("codex", "type", { selector: "#email", text: "x", tab: "shared" }));
+  assert.equal(sent.length, 1, "a field action waits for an in-flight tab claim");
+  broker.onExtensionMessage({ type: "result", id: sent[0].id, ok: true });
+  assert.equal((await opened).ok, true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 2);
+  broker.onExtensionMessage({ type: "result", id: sent[1].id, ok: true, data: { typed: true } });
+  assert.equal((await afterOpen).ok, true);
+
   const submit = broker.submit(req("gemini", "click", { selector: "button[type=submit]", tab: "checkout" }));
   const approval = broker.pendingApprovals()[0];
   assert.equal(approval.action, "click");
-  assert.equal(sent.length, 1, "risky submit-like click is held before browser dispatch");
+  assert.equal(sent.length, 2, "risky submit-like click is held before browser dispatch");
   assert.equal(broker.decideApproval(approval.id, "approve"), true);
-  const afterSubmit = await broker.submit(req("codex", "type", { selector: "#card", text: "x", tab: "checkout" }));
-  assert.equal(afterSubmit.ok, false);
-  assert.equal(sent.length, 2);
-  broker.onExtensionMessage({ type: "result", id: sent[1].id, ok: true, data: { clicked: true } });
+  const afterSubmit = broker.submit(req("codex", "type", { selector: "#card", text: "x", tab: "checkout" }));
+  assert.equal(sent.length, 3, "the queued field write does not overlap the submit click");
+  broker.onExtensionMessage({ type: "result", id: sent[2].id, ok: true, data: { clicked: true } });
   const submitted = await submit;
   assert.equal(submitted.ok, true);
   assert.deepEqual(submitted.data, { clicked: true });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 4);
+  broker.onExtensionMessage({ type: "result", id: sent[3].id, ok: true, data: { typed: true } });
+  assert.equal((await afterSubmit).ok, true);
 });
 
 test("agents in their own tabs never conflict, and a claim ends after its ttl", async () => {
@@ -281,9 +379,16 @@ test("the claim holder keeps working and renews the claim", async () => {
   advance(4_000);
   void broker.submit(req("claude", "click", { selector: "#b", tab: "shared" }));
   advance(4_000);
-  const blocked = await broker.submit(req("codex", "click", { selector: "#c", tab: "shared" }));
-  assert.equal(blocked.ok, false, "the second click renewed the claim, so it is still held 8s after the first");
+  const queued = broker.submit(req("codex", "click", { selector: "#c", tab: "shared" }));
   assert.equal(sent.length, 2);
+  broker.onExtensionMessage({ type: "result", id: sent[0].id, ok: true, data: { clicked: true } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 2, "the next agent waits for all already-running holder actions");
+  broker.onExtensionMessage({ type: "result", id: sent[1].id, ok: true, data: { clicked: true } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 3);
+  broker.onExtensionMessage({ type: "result", id: sent[2].id, ok: true, data: { clicked: true } });
+  assert.equal((await queued).ok, true);
 });
 
 test("a command that gets no answer times out", async () => {
@@ -300,6 +405,50 @@ test("when the extension disconnects, waiting commands fail immediately", async 
   const result = await pending;
   assert.equal(result.ok, false);
   assert.match(result.error ?? "", /disconnected/);
+});
+
+test("extension disconnect fails both the active turn and its queued same-scope requests", async () => {
+  const { broker, sent } = harness({ timeoutMs: 5_000 });
+  const active = broker.submit(req("claude", "click", { selector: "#save", tab: "shared" }));
+  const queued = broker.submit(req("codex", "click", { selector: "#save", tab: "shared" }));
+  assert.equal(sent.length, 1);
+
+  broker.onExtensionClosed();
+
+  const [activeResult, queuedResult] = await Promise.all([active, queued]);
+  assert.equal(activeResult.ok, false);
+  assert.match(activeResult.error ?? "", /disconnected/);
+  assert.equal(queuedResult.ok, false);
+  assert.match(queuedResult.error ?? "", /disconnected/);
+  assert.equal(sent.length, 1, "disconnect must not dispatch another queued command");
+});
+
+test("closing a tab cancels its queued turns and clears its claim before reuse", async () => {
+  const { broker, sent, notices } = harness({ timeoutMs: 5_000 });
+  const active = broker.submit(req("claude", "click", { selector: "#save", tab: "shared" }));
+  const queued = broker.submit(req("codex", "click", { selector: "#save", tab: "shared" }));
+  broker.onExtensionMessage({ type: "tab-closed", tab: "shared" });
+
+  const [activeResult, queuedResult] = await Promise.all([active, queued]);
+  assert.match(activeResult.error ?? "", /tab "shared" was closed/);
+  assert.match(queuedResult.error ?? "", /tab "shared" was closed/);
+
+  const reusedName = broker.submit(req("gemini", "click", { selector: "#save", tab: "shared" }));
+  assert.equal(sent.length, 2, "a tab reopened under the same name does not inherit the old scheduler or claim");
+  assert.equal(notices.length, 1, "the canceled waiter is not left in a stale lane");
+  broker.onExtensionMessage({ type: "result", id: String(sent[1].id), ok: true, data: { clicked: true } });
+  assert.equal((await reusedName).ok, true);
+});
+
+test("a timed-out active writer releases its queued same-scope turn", async () => {
+  const { broker, sent } = harness({ timeoutMs: 20 });
+  const active = broker.submit(req("claude", "click", { selector: "#save", tab: "shared" }));
+  const queued = broker.submit(req("codex", "click", { selector: "#save", tab: "shared" }));
+
+  assert.match((await active).error ?? "", /timed out/);
+  assert.equal(sent.length, 2, "the next claimant starts when the prior owner times out");
+  broker.onExtensionMessage({ type: "result", id: String(sent[1].id), ok: true, data: { clicked: true } });
+  assert.equal((await queued).ok, true);
 });
 
 test("long read results are cut, and results for unknown ids are ignored", async () => {

@@ -33,9 +33,26 @@ export interface TurnRequestResult {
   reason: string;
 }
 
+export interface TurnSchedulerLane {
+  register(id: string, opts?: { burstSize?: number }): void;
+  unregister(id: string): void;
+  setPending(id: string, pending: boolean): void;
+  requestTurn(id: string): TurnRequestResult;
+  recordAction(id: string): { ok: boolean; yielded: boolean };
+  yieldTurn(id: string): void;
+  releaseIfStale(maxHoldMs: number): boolean;
+  currentHolder(): string | null;
+  snapshot(): Array<{ id: string; pending: boolean; isHolder: boolean; burstSize: number; actionsTakenThisTurn: number }>;
+}
+
+export interface TurnScheduler extends TurnSchedulerLane {
+  /** Independent round-robin lane owned by this scheduler (for example, one contended claim scope in a tab). */
+  forLane(key: string): TurnSchedulerLane;
+}
+
 const MAX_BURST = 50;
 
-export function createTurnScheduler(deps: TurnSchedulerDeps = {}) {
+export function createTurnScheduler(deps: TurnSchedulerDeps = {}): TurnScheduler {
   const now = deps.now ?? Date.now;
   const agents = new Map<string, AgentState>();
   const order: string[] = [];
@@ -147,7 +164,24 @@ export function createTurnScheduler(deps: TurnSchedulerDeps = {}) {
     });
   }
 
-  return { register, unregister, setPending, requestTurn, recordAction, yieldTurn, releaseIfStale, currentHolder, snapshot };
+  const lanes = new Map<string, TurnSchedulerLane>();
+  return {
+    register,
+    unregister,
+    setPending,
+    requestTurn,
+    recordAction,
+    yieldTurn,
+    releaseIfStale,
+    currentHolder,
+    snapshot,
+    forLane(key: string): TurnSchedulerLane {
+      let lane = lanes.get(key);
+      if (!lane) {
+        lane = createTurnScheduler({ now });
+        lanes.set(key, lane);
+      }
+      return lane;
+    },
+  };
 }
-
-export type TurnScheduler = ReturnType<typeof createTurnScheduler>;

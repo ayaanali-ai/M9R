@@ -773,8 +773,9 @@ async function handle(command) {
               ], 0, false);
               result = { ok: false, error: "browser actions are stopped by the owner" };
             } else {
+              let nativeInputTiming = null;
               try {
-                await nativeInput.click({
+                const nativeInputResult = await nativeInput.click({
                   requestId,
                   x: plan.data.x,
                   y: plan.data.y,
@@ -812,6 +813,7 @@ async function handle(command) {
                     return true;
                   },
                 });
+                nativeInputTiming = nativeInputResult && nativeInputResult.timingMs || null;
               } finally {
                 await run(tab.id, m9rPageNativeClickTarget, [
                   command.selector || null, command.action, plan.data.x, plan.data.y, null, null,
@@ -825,7 +827,7 @@ async function handle(command) {
                   active: false,
                 }).catch(() => {});
               }
-              result = { ok: true, data: { clicked: true, trustedInput: "native-desktop", target: plan.data.name, rect: plan.data.rect } };
+              result = { ok: true, data: { clicked: true, trustedInput: "native-desktop", target: plan.data.name, rect: plan.data.rect, nativeInputTiming } };
             }
           }
         }
