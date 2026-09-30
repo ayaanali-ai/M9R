@@ -5,8 +5,8 @@ import test from "node:test";
 
 const pageActions = readFileSync(new URL("../extensions/browser/src/page-actions.js", import.meta.url), "utf8");
 
-function assertPageResult(actual: unknown, expected: unknown): void {
-  assert.deepEqual(JSON.parse(JSON.stringify(actual)), expected);
+async function assertPageResult(actual: unknown, expected: unknown): Promise<void> {
+  assert.deepEqual(JSON.parse(JSON.stringify(await actual)), expected);
 }
 
 class FakeElement {
@@ -74,25 +74,26 @@ function createPage(options: { origin?: string; pathname?: string; element?: Fak
       init?: unknown;
       constructor(type: string, init?: unknown) { this.type = type; this.init = init; }
     },
+    setTimeout,
   };
   runInNewContext(pageActions, context);
   return context as unknown as PageHarness;
 }
 
-test("page actions refuse when the page origin changed after broker authorization", () => {
+test("page actions refuse when the page origin changed after broker authorization", async () => {
   const page = createPage({ origin: "https://attacker.example", element: new FakeInput() });
   const expected = "https://allowed.example";
-  assertPageResult(page.m9rPageRead("#target", expected), { ok: false, error: "page origin does not match the granted site" });
+  await assertPageResult(page.m9rPageRead("#target", expected), { ok: false, error: "page origin does not match the granted site" });
   assertPageResult(page.m9rPageClick("#target", expected), { ok: false, error: "page origin does not match the granted site" });
   assertPageResult(page.m9rPageType("#target", "secret", expected), { ok: false, error: "page origin does not match the granted site" });
   assert.equal(page.element.clicked, false);
   assert.equal((page.element as FakeInput).value, "input value");
 });
 
-test("page actions refuse a path redirect immediately before reading, clicking, or typing", () => {
+test("page actions refuse a path redirect immediately before reading, clicking, or typing", async () => {
   const element = new FakeInput();
   const page = createPage({ pathname: "/account", element });
-  assertPageResult(page.m9rPageRead("#target", "https://allowed.example", "/cart"), { ok: false, error: "page path does not match the granted path" });
+  await assertPageResult(page.m9rPageRead("#target", "https://allowed.example", "/cart"), { ok: false, error: "page path does not match the granted path" });
   assertPageResult(page.m9rPageClick("#target", "https://allowed.example", "/cart"), { ok: false, error: "page path does not match the granted path" });
   assertPageResult(page.m9rPageType("#target", "sensitive text", "https://allowed.example", "/cart"), { ok: false, error: "page path does not match the granted path" });
   assert.equal(element.clicked, false);
@@ -110,26 +111,59 @@ test("page read and type refuse hidden, password, and sensitive-autocomplete inp
   ] as const;
 
   for (const [name, values] of cases) {
-    await t.test(name, () => {
+    await t.test(name, async () => {
       const page = createPage({ element: Object.assign(new FakeInput(), values) });
-      assertPageResult(page.m9rPageRead("#target"), { ok: false, error: "sensitive fields are off limits" });
+      await assertPageResult(page.m9rPageRead("#target"), { ok: false, error: "sensitive fields are off limits" });
       assertPageResult(page.m9rPageType("#target", "new value"), { ok: false, error: "sensitive fields are off limits" });
     });
   }
 });
 
-test("visible text inputs can be read and textarea fields can be read and typed", () => {
+test("visible text inputs can be read and textarea fields can be read and typed", async () => {
   const inputPage = createPage({ element: new FakeInput() });
-  assertPageResult(inputPage.m9rPageRead("#target"), { ok: true, data: "input value" });
+  await assertPageResult(inputPage.m9rPageRead("#target"), { ok: true, data: "input value" });
 
   const textareaPage = createPage({ element: new FakeTextArea() });
-  assertPageResult(textareaPage.m9rPageRead("#target"), { ok: true, data: "textarea value" });
+  await assertPageResult(textareaPage.m9rPageRead("#target"), { ok: true, data: "textarea value" });
   assertPageResult(textareaPage.m9rPageType("#target", "updated note"), { ok: true, data: { typed: 12 } });
   assert.equal((textareaPage.element as FakeTextArea & { value: string }).value, "updated note");
 
   const sensitiveTextarea = createPage({ element: Object.assign(new FakeTextArea(), { autocomplete: "one-time-code" }) });
-  assertPageResult(sensitiveTextarea.m9rPageRead("#target"), { ok: false, error: "sensitive fields are off limits" });
+  await assertPageResult(sensitiveTextarea.m9rPageRead("#target"), { ok: false, error: "sensitive fields are off limits" });
   assertPageResult(sensitiveTextarea.m9rPageType("#target", "123456"), { ok: false, error: "sensitive fields are off limits" });
+});
+
+test("a target that is not rendered yet (a virtualized feed catching up) is retried instead of failing at once", async () => {
+  const element = new FakeElement();
+  let calls = 0;
+  const context = {
+    document: { body: new FakeElement(), querySelector: (selector: string) => { calls += 1; return selector === "#target" && calls >= 3 ? element : null; } },
+    location: { origin: "https://allowed.example", pathname: "/cart" },
+    HTMLInputElement: FakeInput,
+    HTMLTextAreaElement: FakeTextArea,
+    setTimeout,
+  };
+  runInNewContext(pageActions, context);
+  const start = Date.now();
+  const result = await (context as unknown as PageHarness).m9rPageRead("#target");
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { ok: true, data: "visible page text" });
+  assert.equal(calls, 3, "the first two misses must be retried, not failed immediately");
+  assert.ok(Date.now() - start < 1000, "the retry window must stay well under a second");
+});
+
+test("a selector that will never match still fails, bounded, instead of retrying forever", async () => {
+  const context = {
+    document: { body: new FakeElement(), querySelector: () => null },
+    location: { origin: "https://allowed.example", pathname: "/cart" },
+    HTMLInputElement: FakeInput,
+    HTMLTextAreaElement: FakeTextArea,
+    setTimeout,
+  };
+  runInNewContext(pageActions, context);
+  const start = Date.now();
+  const result = await (context as unknown as PageHarness).m9rPageRead("#missing");
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { ok: false, error: "no element matches #missing" });
+  assert.ok(Date.now() - start < 1000, "a truly missing element must still fail in well under a second");
 });
 
 test("click refuses disabled controls", () => {

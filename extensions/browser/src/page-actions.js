@@ -1,17 +1,31 @@
 // Each function is serialized into the page by chrome.scripting.executeScript, so it must not use anything outside itself.
 
-function m9rPageRead(selector, expectOrigin, expectPathPrefix) {
+async function m9rPageRead(selector, expectOrigin, expectPathPrefix) {
   try {
-    let el;
-    if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
-      const match = /^@m9r-ref:([A-Za-z0-9_-]{1,16})$/.exec(selector);
-      const refs = window.__m9rPageActionRefMap;
-      if (!match || !refs) return { ok: false, error: "invalid page element ref" };
-      const refId = match[1];
-      el = typeof refs.get === "function" ? refs.get(refId) : Object.prototype.hasOwnProperty.call(refs, refId) ? refs[refId] : null;
-      if (!el || typeof el !== "object" || el.isConnected === false) return { ok: false, error: "invalid page element ref" };
-    } else {
-      el = selector ? document.querySelector(selector) : document.body;
+    const resolveOnce = () => {
+      if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
+        const match = /^@m9r-ref:([A-Za-z0-9_-]{1,16})$/.exec(selector);
+        const refs = window.__m9rPageActionRefMap;
+        if (!match || !refs) return { fatal: "invalid page element ref" };
+        const refId = match[1];
+        const found = typeof refs.get === "function" ? refs.get(refId) : Object.prototype.hasOwnProperty.call(refs, refId) ? refs[refId] : null;
+        if (!found || typeof found !== "object" || found.isConnected === false) return { fatal: "invalid page element ref" };
+        return { el: found };
+      }
+      return { el: selector ? document.querySelector(selector) : document.body };
+    };
+    let el = null;
+    // Sites with virtualized feeds (X, infinite scroll) can momentarily not have the target rendered yet, or
+    // detach and re-render it, between when the agent snapshotted it and when this read actually runs. A few
+    // short retries covers that gap here, in the page, instead of costing the agent a whole extra turn -- a
+    // full process spin-up for Codex -- just to re-snapshot and try again. Bounded to under 300ms total so a
+    // selector that will genuinely never match still fails fast.
+    const RETRY_DELAYS_MS = [40, 80, 160];
+    for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+      const found = resolveOnce();
+      if (found.fatal) return { ok: false, error: found.fatal };
+      if (found.el) { el = found.el; break; }
+      if (attempt < RETRY_DELAYS_MS.length) await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
     }
     if (!el) return { ok: false, error: "no element matches " + selector };
     const isInput = String(el.tagName || "").toUpperCase() === "INPUT" || (typeof HTMLInputElement === "function" && el instanceof HTMLInputElement);
