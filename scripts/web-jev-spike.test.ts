@@ -5,8 +5,8 @@ import { measureJevControlSelection } from "../src/lib/native/web-jev-spike.ts";
 test("Jev control spike measures choice accuracy without wiring into broker dispatch", async () => {
   const result = await measureJevControlSelection({
     pageText: "Search the docs",
-    controls: [{ ref: "e1", role: "textbox", name: "Search", position: 1 }, { ref: "e2", role: "button", name: "Save", position: 2 }],
-    expectedRef: "e1",
+    controls: [{ ref: "e0123456789abcdef01234567_1", role: "textbox", name: "Search", position: 1 }, { ref: "e0123456789abcdef01234567_2", role: "button", name: "Save", position: 2 }],
+    expectedRef: "e0123456789abcdef01234567_1",
     mode: "mock",
   });
   assert.equal(result.status, "measured");

@@ -265,6 +265,8 @@ test("managed extension refresh changes only owned extension files and preserves
 test("built mission bridge runtime has no unresolved monorepo source imports", () => {
   const bridgeRuntime = readFileSync(resolve(distDir, "bridge-runtime.js"), "utf8");
   assert.doesNotMatch(bridgeRuntime, /\.\.\/\.\.\/\.\.\/src\/lib\//);
+  assert.match(bridgeRuntime, /from "\.\/workspace-result-idempotency\.js"/);
+  assert.ok(existsSync(resolve(distDir, "workspace-result-idempotency.js")));
 });
 
 test("packed CLI entry boots the terminal runtime without printing a pairing secret", { timeout: 20_000 }, async () => {

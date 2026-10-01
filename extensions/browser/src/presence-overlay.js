@@ -48,9 +48,10 @@
     .agent.claimed .lock{display:block}
     .bubble{position:absolute;left:42px;top:calc(52px + var(--slot,0) * 36px);width:max-content;max-width:min(320px,70vw);padding:8px 11px;font:500 14px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif;border:1px solid rgba(255,255,255,.14);border-radius:3px 10px 10px 10px;background:rgba(22,25,30,.96);color:#ebe8e1;box-shadow:0 2px 8px rgba(0,0,0,.32);opacity:1;transition:opacity 350ms ease;white-space:normal;overflow-wrap:break-word;word-break:normal}
     .bubble:empty{display:none}.bubble.fading{opacity:0}
-    .focus{position:absolute;left:0;top:0;border-radius:7px;pointer-events:none;opacity:0;transition:opacity 260ms ease;box-shadow:0 0 0 2px color-mix(in srgb,var(--c) 70%,transparent),0 0 0 6px color-mix(in srgb,var(--c) 18%,transparent),0 0 22px color-mix(in srgb,var(--c) 30%,transparent)}
+    .focus{position:absolute;left:0;top:0;box-sizing:border-box;border:2px solid color-mix(in srgb,var(--c) 88%,white);border-radius:7px;pointer-events:none;opacity:0;transition:opacity 180ms ease;box-shadow:0 0 0 4px color-mix(in srgb,var(--c) 18%,transparent),0 0 22px color-mix(in srgb,var(--c) 30%,transparent)}
     .focus.on{opacity:1}
     .focus.claimed{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--c),0 0 18px var(--c)}
+    .focus-tag{position:absolute;box-sizing:border-box;max-width:min(320px,calc(100vw - 16px));padding:4px 8px;border:1px solid color-mix(in srgb,var(--c) 88%,white);border-radius:6px;background:color-mix(in srgb,var(--c) 82%,#101216);color:#fff;font:700 11px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 2px 8px rgba(0,0,0,.35);pointer-events:none}
     .ripple{position:absolute;width:52px;height:52px;margin:-26px 0 0 -26px;border-radius:50%;border:3px solid var(--c);background:color-mix(in srgb,var(--c) 34%,transparent);animation:ripple 560ms cubic-bezier(.2,.7,.2,1) forwards;pointer-events:none}
     .caret{position:absolute;width:2px;margin-left:1px;border-radius:1px;background:var(--c);box-shadow:0 0 6px var(--c);animation:blink 1s steps(1) infinite;pointer-events:none;display:none}
     .caret.on{display:block}
@@ -70,6 +71,7 @@
   // The cursor is a progress signal, not a second animation to wait through.
   const glideDuration = (dist) => Math.min(650, Math.max(120, 110 + 75 * Math.log2(1 + dist / 30)));
   const DWELL_MS = 60;
+  const FOCUS_FADE_MS = 500;
   let lastGlideStartAt = 0;
   // Repeated, nearby, and background actions do not need another theatrical delay.
   const reactionDelay = (fromParked, fast) => {
@@ -177,6 +179,33 @@
       return agent.targetEl;
     }
 
+    function elementRect(element) {
+      if (!element || typeof element.getBoundingClientRect !== "function") return null;
+      let rect;
+      try { rect = element.getBoundingClientRect(); } catch { return null; }
+      if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.top) || !Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) return null;
+      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    }
+
+    function highlightRect(agent, now) {
+      const selected = elementRect(resolveTarget(agent));
+      if (selected) return selected;
+      if (agent.nativePoint && typeof doc.elementFromPoint === "function") {
+        let hit = null;
+        try { hit = doc.elementFromPoint(agent.nativePoint.x, agent.nativePoint.y); } catch { /* A page may reject hit-testing during navigation. */ }
+        if (hit && typeof hit.closest === "function") {
+          try { hit = hit.closest("button,a,input,textarea,select,[role='button'],[contenteditable='true']") || hit; } catch { /* Keep the exact hit target. */ }
+        }
+        const hitRect = elementRect(hit);
+        if (hitRect) return hitRect;
+      }
+      const hint = agent.hintRect;
+      if (hint && now - hint.at < 4000 && Number.isFinite(hint.x) && Number.isFinite(hint.y) && Number.isFinite(hint.width) && Number.isFinite(hint.height) && hint.width > 0 && hint.height > 0) {
+        return { left: hint.x, top: hint.y, width: hint.width, height: hint.height };
+      }
+      return null;
+    }
+
     /** Where the end of the text in a field is on screen, so the caret (and the cursor) can sit on it while typing. */
     function caretPoint(field, rect) {
       const cs = view.getComputedStyle(field);
@@ -276,14 +305,24 @@
         agent.el.classList.toggle("offscreen", cx !== x || cy !== y);
         agent.el.classList.toggle("flip-x", cx > vw - 300);
         agent.el.classList.toggle("flip-y", cy > vh - 110);
-        const showFocus = agent.rect && (agent.focusUntil > now || agent.claimedUntil > now);
+        const activeRect = highlightRect(agent, now);
+        const showFocus = activeRect && (agent.targetActive || agent.nativePointerLive || agent.focusUntil > now || agent.claimedUntil > now);
         agent.focus.classList.toggle("on", !!showFocus);
         agent.focus.classList.toggle("claimed", agent.claimedUntil > now && !(agent.focusUntil > now));
         if (showFocus) {
-          const r = agent.rect;
-          agent.focus.style.transform = `translate3d(${r.left - 4}px, ${r.top - 4}px, 0)`;
-          agent.focus.style.width = `${r.width + 8}px`;
-          agent.focus.style.height = `${r.height + 8}px`;
+          const r = activeRect;
+          // Nested outlines make simultaneous agents legible on the same target; cursor coordinates remain untouched.
+          const inset = 4 + agent.slot * 3;
+          const tagHeight = 21;
+          const tagStack = agent.slot * 20;
+          const tagAbove = r.top >= inset + tagHeight + tagStack + 4;
+          const tagMaxWidth = Math.min(320, Math.max(0, vw - 16));
+          const tagLeft = Math.min(Math.max(r.left, 4), Math.max(4, vw - tagMaxWidth - 4));
+          agent.focus.style.transform = `translate3d(${r.left - inset}px, ${r.top - inset}px, 0)`;
+          agent.focus.style.width = `${r.width + inset * 2}px`;
+          agent.focus.style.height = `${r.height + inset * 2}px`;
+          agent.focusTag.style.left = `${tagLeft - r.left + inset}px`;
+          agent.focusTag.style.top = tagAbove ? `${-tagHeight - 3 - tagStack}px` : `${r.height + inset + 3 + tagStack}px`;
         }
         const typing = agent.verb === "type" && agent.typingUntil > now && agent.caretAt;
         agent.caret.classList.toggle("on", !!typing);
@@ -312,7 +351,7 @@
         const idle = !agent.glide && now - agent.lastSeen > IDLE_AFTER_MS && !(agent.typingUntil > now) && !isWorking(agent);
         agent.el.classList.toggle("idle", idle);
         agent.miniCaret.hidden = !typing;
-        if (agent.typingUntil > now || agent.focusUntil > now || agent.claimedUntil > now || now - agent.lastActionAt <= 3200) keepFrame = true;
+        if (agent.nativePointerLive || agent.typingUntil > now || agent.focusUntil > now || agent.claimedUntil > now || now - agent.lastActionAt <= 3200) keepFrame = true;
       }
       if (keepFrame) loop = view.requestAnimationFrame(frameTick);
     }
@@ -347,9 +386,12 @@
       if (active) {
         agent.nativePoint = { x, y };
         agent.nativePointerLive = true;
+        agent.targetActive = true;
       } else {
         agent.nativePoint = null;
         agent.nativePointerLive = false;
+        agent.targetActive = false;
+        agent.focusUntil = Math.max(agent.focusUntil, Date.now() + FOCUS_FADE_MS);
         agent.selector = null;
         agent.targetEl = null;
         agent.hintRect = null;
@@ -363,7 +405,7 @@
     }
 
     function kick() {
-      if (!loop && agents.size) loop = view.requestAnimationFrame(frameTick);
+      if (!destroyed && !loop && agents.size) loop = view.requestAnimationFrame(frameTick);
     }
 
     function arrive(agent) {
@@ -408,6 +450,7 @@
         agent.el.style.setProperty("--slot", String(agent.slot));
         i += 1;
       }
+      kick();
     }
 
     function createAgent(id, provider) {
@@ -452,6 +495,10 @@
       const focus = doc.createElement("div");
       focus.className = "focus";
       focus.style.setProperty("--c", spec.color);
+      const focusTag = doc.createElement("span");
+      focusTag.className = "focus-tag";
+      focusTag.textContent = name.textContent;
+      focus.appendChild(focusTag);
       const caret = doc.createElement("div");
       caret.className = "caret";
       caret.style.setProperty("--c", spec.color);
@@ -459,9 +506,9 @@
       // New agents come in from the bottom centre of the page, where the pill and message bar live.
       const spawn = { x: view.innerWidth / 2, y: view.innerHeight - 90 };
       const agent = {
-        id, el, label, step, bubble, focus, caret, miniCaret, color: spec.color, provider: spec.label, sessionId: "",
+        id, el, label, step, bubble, focus, focusTag, caret, miniCaret, color: spec.color, provider: spec.label, sessionId: "",
         selector: null, targetEl: null, rect: null, point: null, spawn, glide: null, verb: "", pendingClick: false,
-        focusUntil: 0, claimedUntil: 0, typingUntil: 0, typingEl: null, lastTyped: null, caretAt: null,
+        focusUntil: 0, claimedUntil: 0, targetActive: false, typingUntil: 0, typingEl: null, lastTyped: null, caretAt: null,
         lastSeen: Date.now(), lastMessage: "", bubbleTimer: 0, fadeTimer: 0, claimTimer: 0, leaveTimer: 0,
         lastTargetAt: 0, completed: false,
         slot: agents.size, docked: false, lastActionAt: Date.now(),
@@ -512,6 +559,8 @@
         agent.nativePoint = exactPoint;
         agent.nativePointerLive = false;
         agent.hintRect = hint ? { x: hint.x, y: hint.y, width: Number(hint.width) || 0, height: Number(hint.height) || 0, at: now } : null;
+        agent.targetActive = Boolean(selector || agent.hintRect || exactPoint);
+        agent.focusUntil = 0;
         const changedTarget = selector !== agent.selector;
         const sameTargetRecently = Boolean(selector && !changedTarget && now - agent.lastTargetAt < 1500);
         agent.verb = verb;
@@ -526,7 +575,7 @@
             agent.lastTyped = null;
             agent.typingUntil = now + 2600;
           }
-        } else if (verb === "open") {
+        } else {
           agent.selector = null;
           agent.targetEl = null;
         }
@@ -558,7 +607,10 @@
           agent.glide = { from: { ...from }, start: performance.now(), duration: Math.min(380, 180 + dist * 0.18), side: 1, simple: true, waiters: [] };
         }
       } else if (phase === "done") {
-        if (agent.verb === "read") agent.focusUntil = Math.min(agent.focusUntil, now + 500);
+        const hadActiveTarget = agent.targetActive;
+        agent.targetActive = false;
+        if (hadActiveTarget) agent.focusUntil = now + FOCUS_FADE_MS;
+        else if (agent.verb === "read") agent.focusUntil = Math.min(agent.focusUntil, now + FOCUS_FADE_MS);
         if (agent.verb === "type") agent.typingUntil = Math.min(agent.typingUntil, now + 300);
         if (verb === "click" && agent.pendingClick && !agent.glide) arrive(agent);
       }
@@ -1092,10 +1144,14 @@
         layout(state);
         postToFrame(state, { kind: "host", vw: view.innerWidth, vh: view.innerHeight });
       }
+      kick();
     }
+
+    function onScroll() { kick(); }
 
     view.addEventListener("message", onFrameMessage);
     view.addEventListener("resize", onResize, { passive: true });
+    view.addEventListener("scroll", onScroll, true);
 
     function destroy() {
       if (destroyed) return;
@@ -1116,6 +1172,7 @@
       for (const id of [...agents.keys()]) attempt(() => remove(id));
       attempt(() => view.removeEventListener("message", onFrameMessage));
       attempt(() => view.removeEventListener("resize", onResize));
+      attempt(() => view.removeEventListener("scroll", onScroll, true));
       for (const state of frames.values()) {
         clearFrameAuthTimer(state);
         attempt(() => state.frame.removeEventListener("load", state.onLoad));

@@ -4,7 +4,7 @@ async function m9rPageRead(selector, expectOrigin, expectPathPrefix) {
   try {
     const resolveOnce = () => {
       if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
-        const match = /^@m9r-ref:([A-Za-z0-9_-]{1,16})$/.exec(selector);
+        const match = /^@m9r-ref:(e[a-f0-9]{24}_\d{1,3})$/.exec(selector);
         const refs = window.__m9rPageActionRefMap;
         if (!match || !refs) return { fatal: "invalid page element ref" };
         const refId = match[1];
@@ -97,7 +97,7 @@ function m9rPageClickPlan(selector, expectOrigin, expectPathPrefix, requestedX, 
       if (!target) return { ok: false, error: "no element at those viewport coordinates" };
     } else {
       if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
-        const match = /^@m9r-ref:([A-Za-z0-9_-]{1,16})$/.exec(selector);
+        const match = /^@m9r-ref:(e[a-f0-9]{24}_\d{1,3})$/.exec(selector);
         const refs = window.__m9rPageActionRefMap;
         target = match && refs && typeof refs.get === "function" ? refs.get(match[1]) : null;
         if (!target || target.isConnected === false) return { ok: false, error: "invalid or stale page element ref" };
@@ -165,7 +165,7 @@ function m9rPageClick(selector, expectOrigin, expectPathPrefix, live) {
   try {
     let el;
     if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
-      const match = /^@m9r-ref:([A-Za-z0-9_-]{1,16})$/.exec(selector);
+      const match = /^@m9r-ref:(e[a-f0-9]{24}_\d{1,3})$/.exec(selector);
       const refs = window.__m9rPageActionRefMap;
       if (!match || !refs) return { ok: false, error: "invalid page element ref" };
       const refId = match[1];
@@ -285,7 +285,7 @@ function m9rPageType(selector, text, expectOrigin, expectPathPrefix, live) {
   try {
     let el;
     if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
-      const match = /^@m9r-ref:([A-Za-z0-9_-]{1,16})$/.exec(selector);
+      const match = /^@m9r-ref:(e[a-f0-9]{24}_\d{1,3})$/.exec(selector);
       const refs = window.__m9rPageActionRefMap;
       if (!match || !refs) return { ok: false, error: "invalid page element ref" };
       const refId = match[1];
@@ -408,7 +408,26 @@ function m9rPageSnapshot(query, requestedLimit) {
   try {
     const limit = Math.min(150, Math.max(1, Number.isSafeInteger(requestedLimit) ? requestedLimit : 150));
     const filter = typeof query === "string" ? query.trim().toLowerCase() : "";
+    const refPattern = /^e[a-f0-9]{24}_\d{1,3}$/;
+    const existingRefs = window.__m9rPageActionRefMap;
     const refs = new Map();
+    if (existingRefs) {
+      try {
+        for (const [ref, element] of Map.prototype.entries.call(existingRefs)) {
+          if (refPattern.test(ref) && element && element.isConnected !== false) refs.set(ref, element);
+        }
+      } catch {
+        refs.clear();
+      }
+    }
+    const randomBytes = new Uint8Array(12);
+    const cryptoApi = window.crypto;
+    if (!cryptoApi || typeof cryptoApi.getRandomValues !== "function") {
+      return { ok: false, error: "secure snapshot refs are unavailable" };
+    }
+    cryptoApi.getRandomValues(randomBytes);
+    const snapshotId = Array.from(randomBytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const maxTrackedRefs = 4_800;
     const elements = [];
     const keyText = String(document.body && (document.body.innerText || document.body.textContent) || "").trim().slice(0, 3000);
     const interactive = /^(A|BUTTON|INPUT|TEXTAREA|SELECT|SUMMARY)$/;
@@ -466,7 +485,7 @@ function m9rPageSnapshot(query, requestedLimit) {
           const name = accessibleName(el);
           const description = `${name} ${role} ${tag}`.toLowerCase();
           if (!filter || description.includes(filter)) {
-            const ref = `e${elements.length + 1}`;
+            const ref = `e${snapshotId}_${elements.length + 1}`;
             refs.set(ref, el);
             const rect = rectInTopViewport(el, doc);
             elements.push({ ref, role: role || tag.toLowerCase(), name, rect, disabled: el.disabled === true, sensitive: sensitive(el) });
@@ -480,6 +499,11 @@ function m9rPageSnapshot(query, requestedLimit) {
       }
     };
     visit(document, document);
+    while (refs.size > maxTrackedRefs) {
+      const oldestRef = refs.keys().next().value;
+      if (oldestRef === undefined) break;
+      refs.delete(oldestRef);
+    }
     window.__m9rPageActionRefMap = refs;
     return { ok: true, data: { url: location.href, title: document.title || "", text: keyText, elements } };
   } catch (error) {
@@ -495,7 +519,7 @@ async function m9rPagePower(action, selector, args, expectOrigin, expectPathPref
     const resolve = (value) => {
       if (typeof value !== "string" || !value) return null;
       if (value.startsWith("@m9r-ref:")) {
-        const match = /^@m9r-ref:([A-Za-z0-9_-]{1,16})$/.exec(value);
+        const match = /^@m9r-ref:(e[a-f0-9]{24}_\d{1,3})$/.exec(value);
         const map = window.__m9rPageActionRefMap;
         const element = match && map && typeof map.get === "function" ? map.get(match[1]) : null;
         return element && element.isConnected !== false ? element : null;

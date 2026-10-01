@@ -4,7 +4,7 @@
  * overrides the port. This entry point never enables arbitrary extension origins.
  */
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { writeWebActivity } from "@/lib/native/feed-writer";
 import { apiKeyLaunchBlock } from "@/lib/native/vendor-launch-core";
@@ -22,6 +22,10 @@ async function main(): Promise<void> {
   if (homeIndex >= 0 && args[homeIndex + 1]) process.env.M9R_HOME = args[homeIndex + 1];
   const portIndex = args.indexOf("--port");
   if (portIndex >= 0 && args[portIndex + 1]) process.env.M9R_WEB_BROKER_PORT = args[portIndex + 1];
+  const projectRootIndex = args.indexOf("--project-root");
+  if (projectRootIndex >= 0 && args[projectRootIndex + 1]) process.env.M9R_PROJECT_ROOT = args[projectRootIndex + 1];
+  const projectRoot = resolve(process.env.M9R_PROJECT_ROOT?.trim() || process.cwd());
+  process.env.M9R_PROJECT_ROOT = projectRoot;
   const root = defaultStoreRoot(homedir(), process.env);
   const key = loadOrCreateBrokerKey(brokerKeyPath(root));
   const ownerId = process.env.M9R_OWNER_ID?.trim() || "local-machine";
@@ -35,13 +39,14 @@ async function main(): Promise<void> {
   // close the HTTP socket, or the unref'd-less feed timer below keeps Node running forever with nothing left listening.
   let requestShutdown = () => {};
   const broker = await startWebBroker({ key, port, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
-  const config = loadAgentsConfig(root, { cwd: process.cwd() });
+  const config = loadAgentsConfig(root, { cwd: projectRoot });
   const sessions = createWebLiveSessions({
-    agents: config.agents, storeRoot: root, repoRoot: process.cwd(), brokerPort: broker.port,
+    agents: config.agents, storeRoot: root, repoRoot: projectRoot, brokerPort: broker.port,
     store: createLocalStore(root), onEvent: (event) => ui.onSessionEvent(event),
   });
   ui.attachSessions(sessions);
   process.stdout.write(`M9R web broker listening on 127.0.0.1:${broker.port}\n`);
+  process.stdout.write(`Project root: ${projectRoot}\n`);
   process.stdout.write(`Agents (${config.source === "default" ? "defaults; add agents.json to your M9R folder to change" : config.source}): ${config.agents.map((a) => `@${a.handle} (${a.provider}, ${a.folder})`).join(", ")}\n`);
   for (const problem of config.problems) process.stdout.write(`  note: ${problem}\n`);
   const blocked = apiKeyLaunchBlock(process.env, false);

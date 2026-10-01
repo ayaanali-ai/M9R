@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createOpenCodeAcpRuntime } from "@/lib/native/web-opencode-acp";
 import { createPageNotesStore } from "@/lib/native/page-notes-store";
-import { codexWorkerArgs, createWebLiveSessions, loadAgentsConfig, opencodeExePath, parseCodexLine, projectRoomId, webAgentPrompt, type WorkerProcess } from "@/lib/native/web-live-sessions";
+import { codexWorkerArgs, createWebLiveSessions, loadAgentsConfig, opencodeExePath, parseCodexLine, projectRoomId, webAgentPrompt, writeWebMcpConfig, type WorkerProcess } from "@/lib/native/web-live-sessions";
 import type { SessionEvent } from "@/lib/native/web-ui-bridge";
 
 interface TestRoomTask {
@@ -16,6 +16,7 @@ interface TestRoomTask {
   goal: string;
   origin?: string;
   approval: string;
+  createdAt?: string;
   deliveredAt?: string;
   resultSummary?: string;
   answerPushedAt?: string;
@@ -277,6 +278,10 @@ test("agents.json: valid entries load, bad ones are skipped with a reason; defau
   try {
     const d = loadAgentsConfig(root, { env: {}, cwd: root, detect: { codex: () => true, opencode: () => false } });
     assert.deepEqual(d.agents.map((a) => [a.handle, a.provider, a.folder]), [["claude", "claude-code", root], ["codex", "codex", root]]);
+    const projectRoot = join(root, "project");
+    mkdirSync(projectRoot);
+    assert.equal(loadAgentsConfig(root, { env: { M9R_PROJECT_ROOT: projectRoot }, cwd: root, detect: { codex: () => false, opencode: () => false } }).agents[0].folder, projectRoot,
+      "the scheduled broker must use the saved project root, not its M9R home working directory");
     assert.equal(loadAgentsConfig(root, { env: { M9R_AGENT_FOLDER: "C:/proj" }, cwd: root, detect: { codex: () => false, opencode: () => false } }).agents[0].folder, "C:/proj");
     mkdirSync(join(root, "proj"));
     writeFileSync(join(root, "agents.json"), JSON.stringify({ agents: [
@@ -291,11 +296,54 @@ test("agents.json: valid entries load, bad ones are skipped with a reason; defau
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("web MCP config carries the broker-room start time used to suppress stale inbox replay", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-web-mcp-config-"));
+  const roomStartedAt = 1_790_769_600_000;
+  try {
+    const { configPath } = writeWebMcpConfig(root, { repoRoot: root, storeRoot: root, brokerPort: 47821, roomStartedAt });
+    const config = JSON.parse(readFileSync(configPath, "utf8")) as { mcpServers: { m9r: { env: Record<string, string> } } };
+    assert.equal(config.mcpServers.m9r.env.M9R_ROOM_STARTED_AT, String(roomStartedAt));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the broker bridge does not replay tasks from before startup, including the old two-second grace and missing timestamps", async () => {
+  const tasks: TestRoomTask[] = [
+    { id: "T-old-window", from: "claude", to: "opencode", goal: "stale task inside old grace window", origin: "agent_initiated", approval: "pending", createdAt: new Date(Date.now() - 1_500).toISOString() },
+    { id: "T-no-time", from: "claude", to: "opencode", goal: "legacy task with no timestamp", origin: "agent_initiated", approval: "pending" },
+  ];
+  const store = {
+    issueIdentity: (handle: string, _p: string, sessionId: string) => ({ token: `tok-${handle}-${sessionId.slice(-4)}` }),
+    revokeIdentity: () => undefined,
+    tasksFor: (handle: string) => tasks.filter((task) => task.to === handle),
+    tasksFrom: (handle: string) => tasks.filter((task) => task.from === handle),
+    setApproval: (id: string, approval: string) => { const task = tasks.find((item) => item.id === id); if (task) task.approval = approval; },
+    markDelivered: (ids: string[]) => { for (const id of ids) { const task = tasks.find((item) => item.id === id); if (task) task.deliveredAt = "now"; } },
+    setAnswerPushed: () => undefined,
+    markResultShown: () => undefined,
+  };
+  const root = mkdtempSync(join(tmpdir(), "m9r-stale-bridge-"));
+  const claude = fakeClaude();
+  const sessions = createWebLiveSessions({
+    agents: [{ handle: "claude", provider: "claude-code", folder: root }, { handle: "opencode", provider: "claude-code", folder: root }],
+    storeRoot: root, repoRoot: process.cwd(), brokerPort: 47994, store, env: {}, spawnClaude: claude.spawn,
+    authorizeRoomMessage: allowRoomMessage,
+  } as never);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    assert.equal(claude.spawned.length, 0, "pre-start work must remain in the durable inbox, not be replayed into a fresh browser session");
+    assert.equal(tasks.every((task) => !task.deliveredAt), true, "stale work must not be marked delivered");
+  } finally {
+    sessions.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("helpers: codex JSONL parsing, resume args, and the agent prompt", () => {
   assert.deepEqual(parseCodexLine(JSON.stringify({ type: "thread.started", thread_id: "a" })), [{ kind: "thread", id: "a" }]);
   assert.deepEqual(parseCodexLine("nope"), []);
-  const fresh = codexWorkerArgs({ prompt: "p", folder: "C:/f", launcher: "L", storeRoot: "R", brokerPort: 1 });
+  const fresh = codexWorkerArgs({ prompt: "p", folder: "C:/f", launcher: "L", storeRoot: "R", brokerPort: 1, roomStartedAt: 1 });
   assert.deepEqual(fresh.slice(0, 4), ["exec", "p", "--cd", "C:/f"]);
+  assert.match(fresh.join(" "), /M9R_ROOM_STARTED_AT="1"/);
   assert.ok(fresh.includes('sandbox_mode="read-only"'));
   assert.match(webAgentPrompt("claude", "T", ["codex"]), /@codex/);
   const prompt = webAgentPrompt("claude", "T", ["codex"], "project-test");
@@ -532,7 +580,7 @@ test("agents in the room message each other directly: the ask reaches the teamma
     authorizeRoomMessage: allowRoomMessage,
   } as never);
   try {
-    tasks.push({ id: "T1", from: "claude", to: "opencode", goal: "Which plan has the API tier?", origin: "agent_initiated", approval: "pending" });
+    tasks.push({ id: "T1", from: "claude", to: "opencode", goal: "Which plan has the API tier?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     await new Promise((r) => setTimeout(r, 1000));
     assert.equal(claude.spawned.length, 1, "the teammate's session was started for the ask");
     assert.match(claude.spawned[0].written.join(""), /@claude messaged you \(T1\)/);
@@ -573,7 +621,7 @@ test("a stopped agent is still woken by a teammate's ask, not just by the owner"
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(sessions.stop("claude"), true);
     assert.equal(sessions.snapshot().find((s) => s.handle === "claude")?.status, "stopped");
-    tasks.push({ id: "T1", from: "opencode", to: "claude", goal: "What did you find?", origin: "agent_initiated", approval: "pending" });
+    tasks.push({ id: "T1", from: "opencode", to: "claude", goal: "What did you find?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     await new Promise((r) => setTimeout(r, 1000));
     assert.equal(claude.spawned.length, 2, "the stopped agent was started again by the teammate's ask");
     assert.match(claude.spawned[1].written.join(""), /@opencode messaged you \(T1\)/);
@@ -606,7 +654,7 @@ test("Stop All is not undone by an ask that was already queued: the bridge stays
   try {
     sessions.deliver("claude", "get started");
     await new Promise((r) => setTimeout(r, 50));
-    tasks.push({ id: "T1", from: "opencode", to: "claude", goal: "queued right before stop", origin: "agent_initiated", approval: "pending" });
+    tasks.push({ id: "T1", from: "opencode", to: "claude", goal: "queued right before stop", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 1800));
     assert.equal(claude.spawned.length, 1, "the halted room does not re-spawn the agent it just stopped");
@@ -643,7 +691,7 @@ test("snapshot() reports waitingOn for an idle agent with a real, still-open ask
     const before = sessions.snapshot().find((s) => s.handle === "opencode");
     assert.equal(before?.waitingOn, undefined, "no open ask yet, nothing to wait on");
 
-    tasks.push({ id: "T1", from: "web-opencode", to: "web-claude", goal: "check the price", origin: "agent_initiated", approval: "approved" });
+    tasks.push({ id: "T1", from: "web-opencode", to: "web-claude", goal: "check the price", origin: "agent_initiated", approval: "approved", createdAt: new Date().toISOString() });
     const waiting = sessions.snapshot().find((s) => s.handle === "opencode");
     assert.equal(waiting?.waitingOn, "claude", "opencode has a real, unanswered ask out to claude");
     const claudeEntry = sessions.snapshot().find((s) => s.handle === "claude");
@@ -679,7 +727,7 @@ test("room asks stored under web-<handle> (what m9r_send really writes) reach th
     authorizeRoomMessage: allowRoomMessage,
   } as never);
   try {
-    tasks.push({ id: "T1", from: "web-claude", to: "web-opencode", goal: "Which plan has the API tier?", origin: "agent_initiated", approval: "pending" });
+    tasks.push({ id: "T1", from: "web-claude", to: "web-opencode", goal: "Which plan has the API tier?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     await new Promise((r) => setTimeout(r, 1000));
     assert.equal(claude.spawned.length, 1, "the teammate's session was started for the ask");
     assert.match(claude.spawned[0].written.join(""), /@claude messaged you \(T1\)/);
@@ -724,7 +772,7 @@ test("a queued room ask is not pushed after AWARE authorization is revoked", asy
   } as never);
   try {
     assert.deepEqual(await authorizeRoomMessage("claude", "opencode"), { ok: true }, "enqueue happened while both members were authorized");
-    tasks.push({ id: "T-revoked", from: "web-claude", to: "web-opencode", goal: "Read the private project notes.", origin: "agent_initiated", approval: "pending" });
+    tasks.push({ id: "T-revoked", from: "web-claude", to: "web-opencode", goal: "Read the private project notes.", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     membersAuthorized = false;
 
     await new Promise((resolve) => setTimeout(resolve, 950));

@@ -833,20 +833,20 @@ test("m9r_web_do runs ordered steps under one tab claim, returns state after eac
     steps: [
       { action: "open", url: "https://example.test/" },
       { action: "click", selector: "button.preview" },
-      { action: "type", selector: "@m9r-ref:e2", text: "query" },
+      { action: "type", selector: "@m9r-ref:e0123456789abcdef01234567_2", text: "query" },
     ],
   });
   assert.equal(sent[0]?.action, "open");
   broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.test", url: "https://example.test/" });
   await flush();
   assert.equal(sent[1]?.action, "snapshot");
-  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, data: "URL: https://example.test/\nTitle: Example\nText:\nBefore\nControls (act by ref):\ne1 [button] \"Preview\"" });
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, data: "URL: https://example.test/\nTitle: Example\nText:\nBefore\nControls (act by ref):\ne0123456789abcdef01234567_1 [button] \"Preview\"" });
   await flush();
   assert.equal(sent[2]?.action, "click");
   broker.onExtensionMessage({ type: "result", id: "c3", ok: true, data: { clicked: true }, origin: "https://example.test", url: "https://example.test/" });
   await flush();
   assert.equal(sent[3]?.action, "snapshot");
-  broker.onExtensionMessage({ type: "result", id: "c4", ok: true, data: "URL: https://example.test/\nTitle: Example\nText:\nAfter\nControls (act by ref):\ne1 [button] \"Preview\"" });
+  broker.onExtensionMessage({ type: "result", id: "c4", ok: true, data: "URL: https://example.test/\nTitle: Example\nText:\nAfter\nControls (act by ref):\ne0123456789abcdef01234567_1 [button] \"Preview\"" });
   await flush();
   assert.equal(sent[4]?.action, "type");
   broker.onExtensionMessage({ type: "result", id: "c5", ok: false, error: "the snapshot ref or selector is stale" });
@@ -855,7 +855,7 @@ test("m9r_web_do runs ordered steps under one tab claim, returns state after eac
   assert.equal(result.ok, false);
   assert.equal(result.failedAt, 2);
   assert.equal(result.steps.length, 3);
-  assert.deepEqual(result.steps[0]?.response.pageState, { url: "https://example.test/", title: "Example", topControls: [{ ref: "e1", role: "button", name: "Preview", position: 1 }] });
+  assert.deepEqual(result.steps[0]?.response.pageState, { url: "https://example.test/", title: "Example", topControls: [{ ref: "e0123456789abcdef01234567_1", role: "button", name: "Preview", position: 1 }] });
   assert.equal(sent.length, 5, "the failed step must not dispatch a later step");
 });
 
@@ -879,7 +879,7 @@ test("m9r_web_do parses the structured snapshot returned by the browser extensio
     data: {
       url: "https://example.test/product/P-34", title: "Product P-34",
       text: "Product id: P-34\nCertification code: A7K2QM",
-      elements: [{ ref: "e1", role: "link", name: "Back to products" }],
+      elements: [{ ref: "e0123456789abcdef01234567_1", role: "link", name: "Back to products" }],
     },
   });
   const result = await batch;
@@ -887,6 +887,6 @@ test("m9r_web_do parses the structured snapshot returned by the browser extensio
   assert.equal(result.steps[0]?.response.changedPart, "Product id: P-34\nCertification code: A7K2QM");
   assert.deepEqual(result.steps[0]?.response.pageState, {
     url: "https://example.test/product/P-34", title: "Product P-34",
-    topControls: [{ ref: "e1", role: "link", name: "Back to products", position: 1 }],
+    topControls: [{ ref: "e0123456789abcdef01234567_1", role: "link", name: "Back to products", position: 1 }],
   });
 });

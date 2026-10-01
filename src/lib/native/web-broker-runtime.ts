@@ -9,6 +9,7 @@ export interface StandaloneWebBrokerRuntime {
 export function standaloneWebBrokerRuntime(input: {
   engineExecutable: string;
   home: string;
+  projectRoot: string;
   port: number;
   exists: (path: string) => boolean;
 }): StandaloneWebBrokerRuntime {
@@ -18,6 +19,6 @@ export function standaloneWebBrokerRuntime(input: {
   }
   return {
     executable,
-    args: ["--home", input.home, "--port", String(input.port)],
+    args: ["--home", input.home, "--port", String(input.port), "--project-root", input.projectRoot],
   };
 }

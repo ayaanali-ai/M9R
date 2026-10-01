@@ -16,7 +16,8 @@ async function main(): Promise<void> {
   const root = defaultStoreRoot(homedir(), process.env);
   const store = createLocalStore(root);
   const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: Number(process.env.M9R_WEB_BROKER_PORT) || undefined });
-  const server: McpServer = createM9rMcpServer({ store, web });
+  const roomStartedAt = Number(process.env.M9R_ROOM_STARTED_AT);
+  const server: McpServer = createM9rMcpServer({ store, web, ...(Number.isSafeInteger(roomStartedAt) && roomStartedAt > 0 ? { roomStartedAt } : {}) });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

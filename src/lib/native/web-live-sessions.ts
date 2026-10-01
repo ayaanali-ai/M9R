@@ -83,12 +83,12 @@ export function opencodeExePath(env: Record<string, string | undefined> = proces
 
 /**
  * Reads `agents.json` ({ "agents": [{ handle, provider, folder }] } or a bare array). Missing file: @claude in
- * M9R_AGENT_FOLDER or the broker's folder, plus @codex / @opencode when their CLIs are installed. Bad entries are
- * skipped with a reason, never guessed.
+ * M9R_AGENT_FOLDER, M9R_PROJECT_ROOT, or the broker's folder, plus @codex / @opencode when their CLIs are installed.
+ * Bad entries are skipped with a reason, never guessed.
  */
 export function loadAgentsConfig(storeRoot: string, options: { env?: Record<string, string | undefined>; cwd?: string; detect?: { codex(): boolean; opencode(): boolean } } = {}): { agents: WebAgentConfig[]; source: string; problems: string[] } {
   const env = options.env ?? process.env;
-  const fallbackFolder = env.M9R_AGENT_FOLDER?.trim() || options.cwd || process.cwd();
+  const fallbackFolder = env.M9R_AGENT_FOLDER?.trim() || env.M9R_PROJECT_ROOT?.trim() || options.cwd || process.cwd();
   const path = join(storeRoot, AGENTS_FILE);
   const problems: string[] = [];
   if (!existsSync(path)) {
@@ -223,7 +223,7 @@ function packagedMcpEntry(): string | null {
  * runs the source from the repo root (it needs the path alias loader). The broker's own working folder must never decide this:
  * started at login it runs from the M9R folder, and an agent whose MCP server cannot start silently loses every M9R tool.
  */
-export function writeWebMcpConfig(dir: string, options: { repoRoot: string; storeRoot: string; brokerPort: number }): { configPath: string; launcher: string } {
+export function writeWebMcpConfig(dir: string, options: { repoRoot: string; storeRoot: string; brokerPort: number; roomStartedAt: number }): { configPath: string; launcher: string } {
   mkdirSync(dir, { recursive: true });
   const launcher = join(dir, "launch-m9r-mcp.cjs");
   const packaged = packagedMcpEntry();
@@ -233,14 +233,26 @@ const child = spawn(process.execPath, ${JSON.stringify(spawnArgs)}, { cwd: ${JSO
 child.on("exit", (code) => process.exit(code ?? 0));
 `);
   const configPath = join(dir, "mcp.json");
-  writeFileSync(configPath, JSON.stringify({ mcpServers: { m9r: { command: process.execPath, args: [launcher], env: { M9R_HOME: options.storeRoot, M9R_WEB_BROKER_PORT: String(options.brokerPort) } } } }));
+  writeFileSync(configPath, JSON.stringify({
+    mcpServers: {
+      m9r: {
+        command: process.execPath,
+        args: [launcher],
+        env: {
+          M9R_HOME: options.storeRoot,
+          M9R_WEB_BROKER_PORT: String(options.brokerPort),
+          M9R_ROOM_STARTED_AT: String(options.roomStartedAt),
+        },
+      },
+    },
+  }));
   return { configPath, launcher };
 }
 
 const toml = (value: string) => JSON.stringify(value);
 
-export function codexWorkerArgs(options: { prompt: string; folder: string; launcher: string; storeRoot: string; brokerPort: number; threadId?: string; model?: string }): string[] {
-  const mcp = `mcp_servers={m9r={command=${toml(process.execPath)},args=[${toml(options.launcher)}],env={M9R_HOME=${toml(options.storeRoot)},M9R_WEB_BROKER_PORT=${toml(String(options.brokerPort))}},default_tools_approval_mode="approve"}}`;
+export function codexWorkerArgs(options: { prompt: string; folder: string; launcher: string; storeRoot: string; brokerPort: number; roomStartedAt: number; threadId?: string; model?: string }): string[] {
+  const mcp = `mcp_servers={m9r={command=${toml(process.execPath)},args=[${toml(options.launcher)}],env={M9R_HOME=${toml(options.storeRoot)},M9R_WEB_BROKER_PORT=${toml(String(options.brokerPort))},M9R_ROOM_STARTED_AT=${toml(String(options.roomStartedAt))}},default_tools_approval_mode="approve"}}`;
   // A browser worker must only ever touch the browser through M9R. Codex ships its own computer-use, browser, app and plugin
   // tools (on by default); a worker that reaches for them takes over the owner's real screen, so they are all switched off.
   const noOwnControl = ["computer_use", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser", "in_app_local_automation", "apps", "plugins", "remote_plugin", "multi_agent", "image_generation", "view_image", "tool_suggest", "skill_search"].flatMap((feature) => ["-c", `features.${feature}=false`]);
@@ -352,6 +364,7 @@ const PERSISTENCE: Record<WebAgentProvider, string> = {
 };
 
 export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
+  const bridgeStartedAt = Date.now();
   const env = deps.env ?? process.env;
   const authorizeRoomMessage = deps.authorizeRoomMessage ?? createWebBrokerClient({
     keyPath: brokerKeyPath(deps.storeRoot),
@@ -391,7 +404,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   }
 
   function mcpFor(slot: Slot) {
-    return writeWebMcpConfig(join(deps.storeRoot, "web-sessions", slot.config.handle), { repoRoot: deps.repoRoot, storeRoot: deps.storeRoot, brokerPort: deps.brokerPort });
+    return writeWebMcpConfig(join(deps.storeRoot, "web-sessions", slot.config.handle), { repoRoot: deps.repoRoot, storeRoot: deps.storeRoot, brokerPort: deps.brokerPort, roomStartedAt: bridgeStartedAt });
   }
 
   const teammates = (slot: Slot) => [...slots.keys()].filter((h) => h !== slot.config.handle);
@@ -456,7 +469,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
     const cli = (deps.codexCli ?? (() => codexCliPath(env)))();
     if (!cli) throw new Error("the Codex CLI was not found (set M9R_CODEX_CLI_JS)");
     const command = process.execPath;
-    const args = [cli, ...codexWorkerArgs({ prompt: `${CODEX_WEB_PREFACE}\n\n${prompt}`, folder: slot.config.folder, launcher, storeRoot: deps.storeRoot, brokerPort: deps.brokerPort, threadId: slot.resumeId, model: slot.config.model })];
+    const args = [cli, ...codexWorkerArgs({ prompt: `${CODEX_WEB_PREFACE}\n\n${prompt}`, folder: slot.config.folder, launcher, storeRoot: deps.storeRoot, brokerPort: deps.brokerPort, roomStartedAt: bridgeStartedAt, threadId: slot.resumeId, model: slot.config.model })];
     const workerEnv = env;
     const child = spawnWorker(command, args, { cwd: slot.config.folder, env: workerEnv });
     slot.worker = child;
@@ -510,7 +523,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
     const off = Object.fromEntries(["bash", "edit", "write", "read", "grep", "glob", "list", "webfetch", "websearch", "task", "todowrite", "todoread", "patch", "codesearch", "skill"].map((tool) => [tool, false]));
     writeFileSync(join(xdg, "opencode", "opencode.json"), JSON.stringify({
       $schema: "https://opencode.ai/config.json",
-      mcp: { m9r: { type: "local", command: [process.execPath, launcher], environment: { M9R_HOME: deps.storeRoot, M9R_WEB_BROKER_PORT: String(deps.brokerPort) }, enabled: true } },
+      mcp: { m9r: { type: "local", command: [process.execPath, launcher], environment: { M9R_HOME: deps.storeRoot, M9R_WEB_BROKER_PORT: String(deps.brokerPort), M9R_ROOM_STARTED_AT: String(bridgeStartedAt) }, enabled: true } },
       tools: off,
     }));
     // Bun/OpenCode also writes logs and cache below XDG_DATA_HOME/XDG_CACHE_HOME.
@@ -683,9 +696,13 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   const MAX_EXCHANGES = 14;
   const WINDOW_MS = 10 * 60_000;
   const exchanges: number[] = [];
-  const bridgeStartedAt = Date.now();
-  // Tasks that were already waiting before this broker started belong to that session's own inbox and must never be pushed into a web session.
-  const isRoomTask = (t: Task): boolean => Boolean((t as { createdAt?: string }).createdAt ? Date.parse((t as { createdAt?: string }).createdAt as string) >= bridgeStartedAt - 2000 : true);
+  // Old or malformed tasks remain available in the durable inbox but must never be replayed into a newly started web session.
+  const isRoomTask = (t: Task): boolean => {
+    const createdAt = (t as { createdAt?: unknown }).createdAt;
+    if (typeof createdAt !== "string") return false;
+    const timestamp = Date.parse(createdAt);
+    return Number.isFinite(timestamp) && timestamp >= bridgeStartedAt;
+  };
   const roomSlot = (name: string): { handle: string; slot: Slot } | null => {
     // Room chatter is stored under web-<handle> (see roomHandle in mcp-server.ts); a plain handle is the same agent.
     const wanted = normalizeHandle(name).replace(/^web-/, "");

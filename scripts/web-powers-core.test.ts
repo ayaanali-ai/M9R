@@ -89,7 +89,7 @@ test("snapshots, coordinates, refs, drag, and forms are bounded and explicitly v
   assert.match(validatePowerRequest(power("snapshot", { args: { limit: 151 } })) ?? "", /1-150/);
   assert.equal(validatePowerRequest(power("click_at", { args: { x: 640, y: 480 } })), null);
   assert.match(validatePowerRequest(power("click_at", { args: { x: -1, y: 1 } })) ?? "", /coordinates/);
-  assert.equal(validatePowerRequest(power("drag", { selector: "@m9r-ref:e2", endSelector: "@m9r-ref:e8", args: { destination: "@m9r-ref:e8" } })), null);
+  assert.equal(validatePowerRequest(power("drag", { selector: "@m9r-ref:e0123456789abcdef01234567_2", endSelector: "@m9r-ref:e0123456789abcdef01234567_8", args: { destination: "@m9r-ref:e0123456789abcdef01234567_8" } })), null);
   assert.equal(validatePowerRequest(power("fill_form", { formSelector: "form#profile", args: { fields: [{ selector: "#name", value: "Ada" }] } })), null);
 });
 
@@ -98,7 +98,7 @@ test("externally consequential browser actions are always owner-gated and claim 
     assert.equal(classifyPowerRisk(power(action, { selector: "#safe-looking" })).risky, true, `${action} must always require approval`);
     assert.deepEqual(powerScopeFor(power(action, { selector: "#target" })), { kind: "tab", key: "*" }, `${action} reserves the tab`);
   }
-  assert.equal(classifyPowerRisk(power("point", { selector: "@m9r-ref:e4" })).risky, false);
+  assert.equal(classifyPowerRisk(power("point", { selector: "@m9r-ref:e0123456789abcdef01234567_4" })).risky, false);
   assert.equal(powerScopeFor(power("snapshot")), null);
   assert.deepEqual(powerScopeFor(power("fill_form", { formSelector: "form#profile", args: { fields: [{ selector: "#name", value: "x" }] } })), { kind: "form", key: "form#profile" });
 });

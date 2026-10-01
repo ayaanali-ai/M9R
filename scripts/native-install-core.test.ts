@@ -14,7 +14,9 @@ import {
   buildLocalBrokerScheduledTaskRegisterScript,
   buildLocalBrokerScheduledTaskRemoveScript,
   buildLocalBrokerScheduledTaskStartScript,
+  hashLocalBrokerScheduledTaskDefinition,
   decideUninstall,
+  isLocalBrokerScheduledTaskOwned,
   matchesLocalBrokerScheduledTaskContract,
   planLocalBrokerUninstall,
   hashLocalBrokerScheduledTaskAction,
@@ -91,6 +93,7 @@ test("local broker autostart contract is user-scoped, loopback-service-only, and
     nodeArgs: ["--no-warnings"],
     cliEntryPath: "C:\\Tools\\m9r-cli.cjs",
     m9rHome: "C:\\Users\\Kai\\.m9r",
+    projectRoot: "C:\\Users\\Kai\\source\\runleak",
     port: 47821,
   });
 
@@ -98,8 +101,8 @@ test("local broker autostart contract is user-scoped, loopback-service-only, and
     nodeExecutable: "C:\\Program Files\\nodejs\\node.exe",
     nodeArgs: ["--no-warnings"],
     cliEntryPath: "C:\\Tools\\m9r-cli.cjs",
-    args: ["web", "serve", "--home", "C:\\Users\\Kai\\.m9r", "--port", "47821"],
-    workingDirectory: "C:\\Users\\Kai\\.m9r",
+    args: ["web", "serve", "--home", "C:\\Users\\Kai\\.m9r", "--port", "47821", "--project-root", "C:\\Users\\Kai\\source\\runleak"],
+    workingDirectory: "C:\\Users\\Kai\\source\\runleak",
     taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
     bindAddress: "127.0.0.1",
     startImmediately: true,
@@ -116,6 +119,7 @@ test("local broker autostart contract rejects invalid ports and incomplete execu
     nodeArgs: [],
     cliEntryPath: "m9r-cli.cjs",
     m9rHome: ".m9r",
+    projectRoot: "C:\\repo",
     port: 47821,
   };
   assert.throws(() => buildLocalBrokerAutostartSpec({ ...input, port: 0 }), /port/i);
@@ -186,6 +190,65 @@ test("broker task ownership covers all actions, trigger, principal, and managed 
   assert.equal(matchesLocalBrokerScheduledTaskContract({ ...task, settings: { ...task.settings, hidden: false } }, action, userId), false);
   assert.equal(matchesLocalBrokerScheduledTaskContract({ ...task, settings: { ...task.settings, executionTimeLimit: "PT1H" } }, action, userId), false);
   assert.equal(matchesLocalBrokerScheduledTaskContract({ ...task, settings: { ...task.settings, allowStartIfOnBatteries: false } }, action, userId), false);
+
+  const currentUserSid = "S-1-5-21-100-200-300-1001";
+  const windowsResolvedTask = {
+    ...task,
+    triggers: [{ ...task.triggers[0], userId: "MSI\\Kai", userSid: currentUserSid }],
+    principal: { ...task.principal, userId: "Kai", userSid: currentUserSid },
+  };
+  assert.equal(matchesLocalBrokerScheduledTaskContract(windowsResolvedTask, action, currentUserSid), true,
+    "Windows may report the same account in short and domain-qualified forms; the resolved SID is authoritative");
+  assert.equal(matchesLocalBrokerScheduledTaskContract({
+    ...windowsResolvedTask,
+    principal: { ...windowsResolvedTask.principal, userSid: "S-1-5-21-100-200-300-1002" },
+  }, action, currentUserSid), false, "a different principal SID must not be accepted by matching account-name text");
+  const legacyDisplayNameTask = {
+    ...task,
+    triggers: [{ ...task.triggers[0], userId: "MSI\\Kai" }],
+    principal: { ...task.principal, userId: "Kai" },
+  };
+  assert.equal(hashLocalBrokerScheduledTaskDefinition(windowsResolvedTask), hashLocalBrokerScheduledTaskDefinition(legacyDisplayNameTask),
+    "adding resolved SIDs must not invalidate existing task-definition ownership hashes");
+});
+
+test("a recorded M9R broker task remains owned when M9R changes its project-root action", () => {
+  const oldAction = buildLocalBrokerScheduledTaskAction({
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    executable: "C:\\Program Files\\M9R\\m9r-engine.exe",
+    args: ["web", "serve", "--home", "C:\\Users\\Kai\\.m9r", "--port", "47821"],
+    workingDirectory: "C:\\Users\\Kai\\.m9r",
+  });
+  const snapshot = {
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    taskPath: "\\",
+    actions: [oldAction],
+    triggers: [{ kind: "Logon", enabled: true, userId: "MSI\\Kai" }],
+    principal: { userId: "MSI\\Kai", logonType: "Interactive", runLevel: "Limited" },
+    settings: {
+      hidden: true,
+      executionTimeLimit: "PT0S",
+      allowStartIfOnBatteries: true,
+      dontStopIfGoingOnBatteries: true,
+      startWhenAvailable: true,
+    },
+  };
+  const recordedDefinition = hashLocalBrokerScheduledTaskDefinition(snapshot);
+  const recordedAction = hashLocalBrokerScheduledTaskAction(oldAction);
+  const desiredAction = buildLocalBrokerScheduledTaskAction({
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    executable: oldAction.executable,
+    args: ["web", "serve", "--home", "C:\\Users\\Kai\\.m9r", "--port", "47821", "--project-root", "C:\\repo"],
+    workingDirectory: "C:\\repo",
+  });
+
+  assert.notEqual(oldAction.arguments, desiredAction.arguments, "the desired broker task advances to the configured project root");
+  assert.equal(isLocalBrokerScheduledTaskOwned(snapshot, "MSI\\Kai", recordedDefinition, recordedAction), true,
+    "M9R may replace the unchanged prior definition with its new project-root definition");
+  assert.equal(isLocalBrokerScheduledTaskOwned(snapshot, "MSI\\Kai", undefined, recordedAction), true,
+    "the legacy action-only ownership marker remains supported");
+  assert.equal(isLocalBrokerScheduledTaskOwned({ ...snapshot, actions: [desiredAction] }, "MSI\\Kai", recordedDefinition, recordedAction), false,
+    "an action changed outside M9R no longer matches the recorded ownership hash");
 });
 
 test("broker uninstall only removes the marker and stops the broker after ownership and task cleanup are verified", () => {
@@ -212,6 +275,8 @@ test("broker task inspection, start, and removal address only the named task", (
   assert.match(inspect, /\$task\.Triggers/);
   assert.match(inspect, /\$task\.Principal/);
   assert.match(inspect, /\$task\.Settings/);
+  assert.match(inspect, /WindowsIdentity/);
+  assert.match(inspect, /SecurityIdentifier/);
   assert.doesNotMatch(inspect, /Select-Object -First 1/);
   assert.match(inspect, /ConvertTo-Json -Compress/);
   const start = buildLocalBrokerScheduledTaskStartScript(LOCAL_BROKER_AUTOSTART_TASK_NAME);

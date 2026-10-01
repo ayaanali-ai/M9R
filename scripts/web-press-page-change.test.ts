@@ -10,10 +10,15 @@ class FakeElement {
   type = "search";
   disabled = false;
   isContentEditable = false;
+  isConnected = true;
+  innerText = "Search";
+  textContent = "Search";
   parentElement: FakeElement | null = null;
   form: { requestSubmit: () => void; submit?: () => void } | null = null;
   dispatchEvent(event: { type: string }) { this.onEvent?.(event); return true; }
   closest() { return null; }
+  getAttribute() { return null; }
+  getBoundingClientRect() { return { left: 10, top: 10, right: 130, bottom: 42, width: 120, height: 32 }; }
   focus() {}
   onEvent?: (event: { type: string }) => void;
 }
@@ -115,4 +120,84 @@ test("press normalizes modifier and Enter names before dispatching a form submis
     assert.equal(observed[0]?.[modifier], true, key);
     assert.deepEqual(submitted, ["requestSubmit"], key);
   }
+});
+
+test("heal never rebinds a disconnected snapshot ref to a lookalike element", async () => {
+  const stale = Object.assign(new FakeElement(), { isConnected: false });
+  const lookalike = new FakeElement();
+  const ref = "e0123456789abcdef01234567_1";
+  const context: Record<string, unknown> = {
+    document: {
+      body: { innerText: "Search", textContent: "Search" },
+      querySelectorAll: () => [lookalike],
+    },
+    window: { __m9rPageActionRefMap: new Map([[ref, stale]]) },
+    location: { origin: "https://search.example", pathname: "/", href: "https://search.example/" },
+    getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+    setTimeout,
+    Math,
+  };
+  runInNewContext(source, context);
+  const run = context.m9rPageMine as (...args: unknown[]) => Promise<{ ok: boolean }>;
+
+  const result = await run("heal", null, {}, null, null);
+  const window = context.window as { __m9rPageActionRefMap: Map<string, FakeElement> };
+
+  assert.equal(result.ok, true);
+  assert.equal(window.__m9rPageActionRefMap.get(ref), undefined, "stale IDs must fail closed instead of binding to a similar control");
+});
+
+test("legacy short refs cannot resolve through the old page map", async () => {
+  const connected = new FakeElement();
+  const context: Record<string, unknown> = {
+    document: { body: { innerText: "Search", textContent: "Search" } },
+    window: { __m9rPageActionRefMap: new Map([["e1", connected]]) },
+    location: { origin: "https://search.example", pathname: "/" },
+    Math,
+  };
+  runInNewContext(source, context);
+  const run = context.m9rPageMine as (...args: unknown[]) => Promise<{ ok: boolean; data?: unknown }>;
+
+  const result = await run("ensure_visible", "@m9r-ref:e1", {}, null, null);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { ok: true, data: { skipped: true } });
+});
+
+test("the legacy text snapshot also assigns unique refs and preserves connected targets", async () => {
+  const first = new FakeElement();
+  first.innerText = first.textContent = "Search";
+  let controls = [first];
+  let nonce = 0;
+  const context: Record<string, unknown> = {
+    document: {
+      body: { innerText: "Search", textContent: "Search" },
+      title: "Search",
+      querySelectorAll: () => controls,
+    },
+    window: {
+      innerHeight: 768,
+      crypto: { getRandomValues: (bytes: Uint8Array) => { bytes.fill(++nonce); return bytes; } },
+    },
+    location: { origin: "https://search.example", pathname: "/", href: "https://search.example/" },
+    HTMLInputElement: FakeElement,
+    getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+    Math,
+  };
+  runInNewContext(source, context);
+  const run = context.m9rPageMine as (...args: unknown[]) => Promise<{ ok: boolean; data?: string }>;
+  const firstSnapshot = await run("snapshot", null, { limit: 10 }, null, null);
+  const firstRef = firstSnapshot.data?.match(/\b(e[a-f0-9]{24}_\d{1,3}) \[/)?.[1];
+  assert.ok(firstSnapshot.ok && firstRef, JSON.stringify(firstSnapshot));
+
+  const second = new FakeElement();
+  second.innerText = second.textContent = "Search";
+  controls = [second];
+  const secondSnapshot = await run("snapshot", null, { limit: 10 }, null, null);
+  const secondRef = secondSnapshot.data?.match(/\b(e[a-f0-9]{24}_\d{1,3}) \[/)?.[1];
+  const window = context.window as { __m9rPageActionRefMap: Map<string, FakeElement> };
+
+  assert.ok(secondSnapshot.ok && secondRef, JSON.stringify(secondSnapshot));
+  assert.notEqual(firstRef, secondRef);
+  assert.equal(window.__m9rPageActionRefMap.get(firstRef!), first);
+  assert.equal(window.__m9rPageActionRefMap.get(secondRef!), second);
 });

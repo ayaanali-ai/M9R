@@ -12,6 +12,10 @@ async function assertPageResult(actual: unknown, expected: unknown): Promise<voi
 class FakeElement {
   innerText = "visible page text";
   textContent = "visible page text";
+  tagName = "BUTTON";
+  id = "";
+  children: FakeElement[] = [];
+  isConnected = true;
   isContentEditable = false;
   autocomplete = "";
   disabled = false;
@@ -47,6 +51,7 @@ class FakeTextArea extends FakeElement {
 
 interface PageHarness {
   m9rPageRead: (selector: string | null, expectOrigin?: string | null, expectPathPrefix?: string | null) => unknown;
+  m9rPageSnapshot: (query?: string | null, limit?: number | null) => { ok: boolean; data: { elements: Array<{ ref: string; name: string }> } };
   m9rPageClick: (selector: string, expectOrigin?: string | null, expectPathPrefix?: string | null) => unknown;
   m9rPageType: (selector: string, value: string, expectOrigin?: string | null, expectPathPrefix?: string | null) => unknown;
   element: FakeElement;
@@ -76,6 +81,34 @@ function createPage(options: { origin?: string; pathname?: string; element?: Fak
     },
     setTimeout,
   };
+  runInNewContext(pageActions, context);
+  return context as unknown as PageHarness;
+}
+
+function createSnapshotPage(elements: FakeElement[]): PageHarness {
+  const body = new FakeElement();
+  body.tagName = "BODY";
+  body.children = elements;
+  let nonce = 0;
+  const document = {
+    body,
+    title: "snapshot test",
+    defaultView: null as unknown,
+    querySelectorAll: () => [],
+  };
+  const context: Record<string, unknown> = {
+    document,
+    location: { href: "https://allowed.example/", origin: "https://allowed.example", pathname: "/" },
+    crypto: { getRandomValues: (bytes: Uint8Array) => { bytes.fill(++nonce); return bytes; } },
+    HTMLInputElement: FakeInput,
+    HTMLTextAreaElement: FakeTextArea,
+    getComputedStyle: (target: FakeElement) => ({ display: target.display, visibility: target.visibility }),
+    setTimeout,
+  };
+  context.window = context;
+  context.top = context;
+  context.parent = context;
+  document.defaultView = context;
   runInNewContext(pageActions, context);
   return context as unknown as PageHarness;
 }
@@ -131,6 +164,30 @@ test("visible text inputs can be read and textarea fields can be read and typed"
   const sensitiveTextarea = createPage({ element: Object.assign(new FakeTextArea(), { autocomplete: "one-time-code" }) });
   await assertPageResult(sensitiveTextarea.m9rPageRead("#target"), { ok: false, error: "sensitive fields are off limits" });
   assertPageResult(sensitiveTextarea.m9rPageType("#target", "123456"), { ok: false, error: "sensitive fields are off limits" });
+});
+
+test("a snapshot ref keeps its original target after another snapshot on the shared page", async () => {
+  const first = new FakeElement();
+  first.innerText = "first target";
+  first.textContent = first.innerText;
+  const page = createSnapshotPage([first]);
+  const firstSnapshot = page.m9rPageSnapshot();
+  const firstRef = firstSnapshot.data.elements[0].ref;
+
+  const second = new FakeElement();
+  second.innerText = "second unrelated target";
+  second.textContent = second.innerText;
+  const refMap = (page as unknown as { __m9rPageActionRefMap: Map<string, FakeElement> }).__m9rPageActionRefMap;
+  const nativeGet = Map.prototype.get;
+  refMap.get = function (ref: string) {
+    return ref === firstRef ? second : nativeGet.call(this, ref);
+  };
+  ((page as unknown as { document: { body: FakeElement } }).document.body).children = [second];
+  const secondSnapshot = page.m9rPageSnapshot();
+
+  await assertPageResult(page.m9rPageRead(`@m9r-ref:${firstRef}`), { ok: true, data: "first target" });
+  assert.notEqual(firstRef, secondSnapshot.data.elements[0].ref, "refs from separate snapshots must not collide");
+  await assertPageResult(page.m9rPageRead(`@m9r-ref:${secondSnapshot.data.elements[0].ref}`), { ok: true, data: "second unrelated target" });
 });
 
 test("a target that is not rendered yet (a virtualized feed catching up) is retried instead of failing at once", async () => {

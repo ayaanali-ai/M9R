@@ -60,6 +60,7 @@ function belongsToSuite(name) {
       "native-input-client.test.js",
       "newtab-page.test.mjs",
       "presence-frame-lifecycle.test.js",
+      "presence-target-highlight.test.js",
     ].includes(name);
 }
 

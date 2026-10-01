@@ -18,7 +18,9 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
     const resolve = (sel) => {
       if (!sel) return null;
       if (sel.startsWith("@m9r-ref:")) {
-        const el = refs().get(sel.slice(9));
+        const match = /^@m9r-ref:(e[a-f0-9]{24}_\d{1,3})$/.exec(sel);
+        if (!match) return null;
+        const el = refs().get(match[1]);
         return el && el.isConnected ? el : null;
       }
       try { return document.querySelector(sel); } catch { return null; }
@@ -128,46 +130,26 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
       const inView = visible.filter((el) => { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < vh; });
       const rest = visible.filter((el) => !inView.includes(el));
       const ordered = [...inView, ...rest].filter((el) => !query || (nameOf(el) + " " + roleOf(el)).toLowerCase().includes(query));
-      // Refs are stable across snapshots: an element keeps its ref while it stays on the page, so an older ref never
-      // silently points at a different element after the page changed. Refs restart only when the counter runs out.
-      const ids = window.__m9rPageActionRefIds || (window.__m9rPageActionRefIds = new WeakMap());
-      const desc = window.__m9rPageActionRefDesc || (window.__m9rPageActionRefDesc = new Map());
-      // Sites like Wikipedia replace a search input the moment it gets focus. A ref whose element is gone is re-resolved to the
-      // equivalent element now on the page (same tag, role and name), so the agent's ref keeps working.
-      const findAgain = (d) => {
-        const list = [];
-        const gather = (root) => {
-          for (const el of root.querySelectorAll(SEL)) list.push(el);
-          for (const host of root.querySelectorAll("*")) if (host.shadowRoot) gather(host.shadowRoot);
-        };
-        gather(document);
-        const same = list.filter((el) => el.tagName === d.tag && roleOf(el) === d.role && isVisible(el));
-        return same.find((el) => nameOf(el) === d.name) || (same.length === 1 ? same[0] : null);
-      };
-      const LiveRefs = class extends Map {
-        get(id) {
-          const el = super.get(id);
-          if (el && el.isConnected) return el;
-          const d = desc.get(id);
-          const again = d ? findAgain(d) : null;
-          if (again) { super.set(id, again); ids.set(again, id); return again; }
-          return el;
-        }
-      };
-      let map = new LiveRefs();
-      if (window.__m9rPageActionRefMap && (window.__m9rPageActionRefNext || 1) <= 900) for (const [key, node] of window.__m9rPageActionRefMap.entries()) map.set(key, node);
-      if ((window.__m9rPageActionRefNext || 1) > 900) { window.__m9rPageActionRefIds = new WeakMap(); window.__m9rPageActionRefNext = 1; desc.clear(); }
-      const idOf = window.__m9rPageActionRefIds || ids;
+      const refPattern = /^e[a-f0-9]{24}_\d{1,3}$/;
+      const existingRefs = window.__m9rPageActionRefMap;
+      const map = new Map();
+      if (existingRefs) {
+        try {
+          for (const [ref, element] of Map.prototype.entries.call(existingRefs)) {
+            if (refPattern.test(ref) && element && element.isConnected !== false) map.set(ref, element);
+          }
+        } catch { map.clear(); }
+      }
+      const randomBytes = new Uint8Array(12);
+      const cryptoApi = window.crypto;
+      if (!cryptoApi || typeof cryptoApi.getRandomValues !== "function") return { ok: false, error: "secure snapshot refs are unavailable" };
+      cryptoApi.getRandomValues(randomBytes);
+      const snapshotId = Array.from(randomBytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      const maxTrackedRefs = 4_800;
       const lines = [];
       ordered.slice(0, limit).forEach((el, index) => {
-        let id = idOf.get(el);
-        if (!id || map.get(id) !== el) {
-          id = "e" + (window.__m9rPageActionRefNext || 1);
-          window.__m9rPageActionRefNext = (window.__m9rPageActionRefNext || 1) + 1;
-          idOf.set(el, id);
-        }
+        const id = "e" + snapshotId + "_" + (index + 1);
         map.set(id, el);
-        desc.set(id, { tag: el.tagName, role: roleOf(el), name: nameOf(el) });
         const type = el instanceof HTMLInputElement ? (el.type || "text").toLowerCase() : "";
         const sensitive = type === "password";
         const box = rectOf(el);
@@ -176,10 +158,15 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
         const link = el.tagName === "A" && el.getAttribute("href") ? " -> " + String(el.getAttribute("href")).slice(0, 80) : "";
         lines.push(id + " [" + roleOf(el) + '] "' + nameOf(el) + '"' + value + state + link + " @" + box.x + "," + box.y + " " + box.w + "x" + box.h + (index >= inView.length ? " (below the fold)" : ""));
       });
+      while (map.size > maxTrackedRefs) {
+        const oldestRef = map.keys().next().value;
+        if (oldestRef === undefined) break;
+        map.delete(oldestRef);
+      }
       window.__m9rPageActionRefMap = map;
       const text = String(document.body ? document.body.innerText : "").replace(/\s+/g, " ").trim().slice(0, 700);
       const more = ordered.length > limit ? "\n(" + (ordered.length - limit) + " more controls not shown; pass query to filter)" : "";
-      return { ok: true, data: "URL: " + location.href + "\nTitle: " + document.title + "\nText: " + text + "\nControls (act by ref, e.g. m9r_web_click ref=e3):\n" + (lines.join("\n") || "(none visible)") + more };
+      return { ok: true, data: "URL: " + location.href + "\nTitle: " + document.title + "\nText: " + text + "\nControls (act by snapshot-scoped ref):\n" + (lines.join("\n") || "(none visible)") + more };
     }
 
     if (action === "press") {
@@ -267,36 +254,20 @@ async function m9rPageMine(action, selector, args, expectOrigin, expectPathPrefi
     }
 
     if (action === "heal") {
-      // Upgrade the ref map so a ref whose element the site replaced (Wikipedia swaps its search input on focus) resolves to the
-      // equivalent element now on the page instead of failing as stale.
       const current = window.__m9rPageActionRefMap;
-      if (!current || current.__healing) return { ok: true, data: { healed: false } };
-      const SEL = "a[href],button,input:not([type=hidden]),textarea,select,summary,[role=button],[role=link],[role=textbox],[role=searchbox],[role=combobox],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=option],[role=switch],[contenteditable=''],[contenteditable=true],[onclick]";
-      const descs = new Map();
-      for (const [id, el] of current.entries()) if (el) descs.set(id, { tag: el.tagName, role: roleOf(el), name: nameOf(el) });
-      const findAgain = (d) => {
-        const list = [];
-        const gather = (root) => {
-          for (const el of root.querySelectorAll(SEL)) list.push(el);
-          for (const host of root.querySelectorAll("*")) if (host.shadowRoot) gather(host.shadowRoot);
-        };
-        gather(document);
-        const same = list.filter((el) => el.tagName === d.tag && roleOf(el) === d.role && isVisible(el));
-        return same.find((el) => nameOf(el) === d.name) || (same.length === 1 ? same[0] : null);
-      };
-      const live = new Map(current);
-      const original = Map.prototype.get;
-      live.get = function (id) {
-        const el = original.call(this, id);
-        if (el && el.isConnected) return el;
-        const d = descs.get(id);
-        const again = d ? findAgain(d) : null;
-        if (again) { this.set(id, again); return again; }
-        return el;
-      };
-      live.__healing = true;
+      const refPattern = /^e[a-f0-9]{24}_\d{1,3}$/;
+      const live = new Map();
+      let staleRefsRemoved = 0;
+      if (current) {
+        try {
+          for (const [ref, element] of Map.prototype.entries.call(current)) {
+            if (refPattern.test(ref) && element && element.isConnected !== false) live.set(ref, element);
+            else staleRefsRemoved += 1;
+          }
+        } catch { live.clear(); staleRefsRemoved = 0; }
+      }
       window.__m9rPageActionRefMap = live;
-      return { ok: true, data: { healed: true } };
+      return { ok: true, data: { healed: staleRefsRemoved > 0, staleRefsRemoved } };
     }
 
     if (action === "ensure_visible") {

@@ -61,8 +61,8 @@ test("snapshot refs map into the protected broker selector slot without changing
 
   await client.callTool({ name: "m9r_web_snapshot", arguments: { token: "valid", tab: "research", query: "search", limit: 150 } });
   assert.deepEqual(requests[0], { agent: "codex", provider: "codex", sessionId: "session-ref", action: "snapshot", tab: "research", args: { query: "search", limit: 150 } });
-  await client.callTool({ name: "m9r_web_click", arguments: { token: "valid", tab: "research", ref: "e12" } });
-  assert.equal(requests[1]?.selector, "@m9r-ref:e12");
+  await client.callTool({ name: "m9r_web_click", arguments: { token: "valid", tab: "research", ref: "e0123456789abcdef01234567_12" } });
+  assert.equal(requests[1]?.selector, "@m9r-ref:e0123456789abcdef01234567_12");
   assert.equal(requests[1]?.action, "click");
 });
 
@@ -98,7 +98,7 @@ test("m9r_web_do sends one ordered batch request and returns the broker result",
       run: async () => ({ ok: true }),
       runBatch: async (request) => {
         batches.push(request);
-        return { ok: true, steps: [{ index: 0, action: "open", response: { ok: true, pageState: { url: "https://example.test/", title: "Example", topControls: [{ ref: "e1", role: "button", name: "Save", position: 1 }] } } }] };
+        return { ok: true, steps: [{ index: 0, action: "open", response: { ok: true, pageState: { url: "https://example.test/", title: "Example", topControls: [{ ref: "e0123456789abcdef01234567_1", role: "button", name: "Save", position: 1 }] } } }] };
       },
     },
   });
@@ -109,12 +109,12 @@ test("m9r_web_do sends one ordered batch request and returns the broker result",
 
   const response = await client.callTool({ name: "m9r_web_do", arguments: {
     token: "valid", tab: "research", includePageState: true,
-    steps: [{ action: "open", url: "https://example.test/" }, { action: "click", ref: "e1" }],
+    steps: [{ action: "open", url: "https://example.test/" }, { action: "click", ref: "e0123456789abcdef01234567_1" }],
   } });
   assert.equal(batches.length, 1);
   assert.deepEqual(batches[0], {
     agent: "codex", provider: "codex", sessionId: "session-batch", tab: "research", includePageState: true,
-    steps: [{ action: "open", url: "https://example.test/" }, { action: "click", selector: "@m9r-ref:e1" }],
+    steps: [{ action: "open", url: "https://example.test/" }, { action: "click", selector: "@m9r-ref:e0123456789abcdef01234567_1" }],
   });
   const content = response.content as Array<{ type: string; text?: string }>;
   assert.match(content[0]?.text ?? "", /\"topControls\"/);

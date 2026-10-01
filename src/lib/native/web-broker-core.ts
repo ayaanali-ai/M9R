@@ -54,7 +54,7 @@ export interface WebResponse {
   label?: string;
   /** What teammates did since this agent's last action (newest last, at most 5): the shared-room awareness. */
   room?: string[];
-  /** Compact state returned after a batched action; controls are ordered and carry stable snapshot refs. */
+  /** Compact state returned after a batched action; controls carry unique snapshot-scoped refs. */
   pageState?: WebPageState;
   /** Bounded text that changed since the previous state in the same batched call. */
   changedPart?: string;
@@ -151,6 +151,7 @@ export interface WebBrokerDeps {
 }
 
 function parseSnapshotState(data: unknown, urlHint?: string): { state: WebPageState; visibleText: string } | null {
+  const snapshotRefPattern = /^e[a-f0-9]{24}_\d{1,3}$/;
   if (data && typeof data === "object") {
     const snapshot = data as { url?: unknown; title?: unknown; text?: unknown; elements?: unknown };
     const url = typeof snapshot.url === "string" ? snapshot.url : urlHint || "";
@@ -161,7 +162,7 @@ function parseSnapshotState(data: unknown, urlHint?: string): { state: WebPageSt
       for (const element of snapshot.elements.slice(0, 12)) {
         if (!element || typeof element !== "object") continue;
         const candidate = element as { ref?: unknown; role?: unknown; name?: unknown };
-        if (typeof candidate.ref !== "string" || !/^e\d{1,3}$/.test(candidate.ref)
+        if (typeof candidate.ref !== "string" || !snapshotRefPattern.test(candidate.ref)
           || typeof candidate.role !== "string" || typeof candidate.name !== "string") continue;
         controls.push({ ref: candidate.ref, role: candidate.role.slice(0, 40), name: candidate.name.slice(0, 160), position: controls.length + 1 });
       }
@@ -172,9 +173,9 @@ function parseSnapshotState(data: unknown, urlHint?: string): { state: WebPageSt
   if (typeof data !== "string") return null;
   const url = data.match(/^URL:\s*(.*)$/m)?.[1]?.trim() || urlHint || "";
   const title = data.match(/^Title:\s*(.*)$/m)?.[1]?.trim() || "";
-  if (!url && !title && !data.includes("Controls (act by ref")) return null;
+  if (!url && !title && !data.includes("Controls (act by ")) return null;
   const controls: WebPageControl[] = [];
-  const controlPattern = /^(e\d{1,3})\s+\[([^\]]+)\]\s+"([^"]*)"[^\n]*$/gm;
+  const controlPattern = /^(e[a-f0-9]{24}_\d{1,3})\s+\[([^\]]+)\]\s+"([^"]*)"[^\n]*$/gm;
   let match: RegExpExecArray | null;
   while ((match = controlPattern.exec(data)) && controls.length < 12) {
     controls.push({ ref: match[1], role: match[2], name: match[3], position: controls.length + 1 });

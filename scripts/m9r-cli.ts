@@ -15,7 +15,7 @@
  */
 
 import { createRequire } from "node:module";
-import { mkdir, mkdtemp, readFile, writeFile, access, unlink, chmod, rm, readdir, rename, rmdir, lstat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, access, unlink, chmod, rm, readdir, rename, rmdir, lstat, stat } from "node:fs/promises";
 import { connect } from "node:net";
 import { spawn, execFile } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -83,6 +83,7 @@ import {
   buildLocalBrokerScheduledTaskStartScript,
   hashLocalBrokerScheduledTaskAction,
   hashLocalBrokerScheduledTaskDefinition,
+  isLocalBrokerScheduledTaskOwned,
   matchesLocalBrokerScheduledTaskContract,
   planLocalBrokerUninstall,
   type LocalBrokerScheduledTaskAction,
@@ -1186,6 +1187,7 @@ type WebSetupManifest = {
   brokerKeyHash?: string;
   brokerTaskActionHash?: string;
   brokerTaskDefinitionHash?: string;
+  projectRoot?: string;
   identityBootstrap: "installed" | "preexisting" | "not-installed";
   identityManifestHash?: string;
   openCodeIdentityPluginPath?: string;
@@ -1206,6 +1208,11 @@ const writeAtomic = async (path: string, value: string | Uint8Array) => {
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index < 0 ? undefined : args[index + 1];
+}
+
+function isPathWithin(parent: string, candidate: string): boolean {
+  const pathFromParent = relative(resolve(parent), resolve(candidate));
+  return pathFromParent === "" || (!isAbsolute(pathFromParent) && pathFromParent !== ".." && !pathFromParent.startsWith(`..${sep}`));
 }
 
 function hasClaudeMcpEntry(raw: string): boolean {
@@ -1335,11 +1342,12 @@ function webExtensionSource(destination: string): string {
   return candidates.find((path) => awaitableExists(join(path, "manifest.json"))) ?? "";
 }
 
-function webBrokerRuntime(root: string, port: number): { executable: string; args: string[]; copiedBundle?: string; sourceBundle?: string } {
+function webBrokerRuntime(root: string, port: number, projectRoot: string): { executable: string; args: string[]; copiedBundle?: string; sourceBundle?: string } {
   if (isStandaloneEngine()) {
     return standaloneWebBrokerRuntime({
       engineExecutable: process.execPath,
       home: root,
+      projectRoot,
       port,
       exists: awaitableExists,
     });
@@ -1347,7 +1355,7 @@ function webBrokerRuntime(root: string, port: number): { executable: string; arg
   const sourceBundle = join(dirname(fileURLToPath(import.meta.url)), "m9r-web-broker.cjs");
   if (!awaitableExists(sourceBundle)) throw new Error("The packaged broker runtime is missing; run the CLI build and reinstall the package.");
   const copiedBundle = join(root, "web-runtime", "m9r-web-broker.cjs");
-  return { executable: process.execPath, args: [copiedBundle, "--home", root, "--port", String(port)], copiedBundle, sourceBundle };
+  return { executable: process.execPath, args: [copiedBundle, "--home", root, "--port", String(port), "--project-root", projectRoot], copiedBundle, sourceBundle };
 }
 
 function isStandaloneEngine(): boolean {
@@ -1361,6 +1369,7 @@ function formatWebPlan(
   mcpCommand: { command: string; args: readonly string[]; m9rHome?: string; brokerPort?: number },
   brokerRuntime: { executable: string; args: readonly string[] },
   root: string,
+  projectRoot: string,
   nativeInput: { hostPath: string; manifestPath: string; registrationKeys: string[] },
   openCodePlugin: { path: string; action: OpenCodeIdentityPluginInstallAction; command: string; args: readonly string[] } | null,
   openBrowserSetup: boolean,
@@ -1369,9 +1378,9 @@ function formatWebPlan(
     taskName: WEB_TASK_NAME,
     executable: brokerRuntime.executable,
     args: brokerRuntime.args,
-    workingDirectory: root,
+    workingDirectory: projectRoot,
   };
-  const rows = ["M9R Web setup will:", `  - install/update the browser extension at ${plan.extensionPath}`, `  - allow extension IDs ${plan.allowedExtensionIds.join(", ")} on 127.0.0.1 only`, "  - register the local broker to start at Windows sign-in (current user; no admin)", "  - configure these user-level MCP entries:"];
+  const rows = ["M9R Web setup will:", `  - install/update the browser extension at ${plan.extensionPath}`, `  - allow extension IDs ${plan.allowedExtensionIds.join(", ")} on 127.0.0.1 only`, `  - run the broker and default agents from project root ${projectRoot}`, "  - register the local broker to start at Windows sign-in (current user; no admin)", "  - configure these user-level MCP entries:"];
   rows.push("  - files:");
   for (const item of plan.agentFiles) rows.push(`      ${item.path}`);
   rows.push(`      ${join(root, "web-broker.json")}`, `      ${join(root, "web-broker.key")} (generated locally; value is never shown)`, `      ${join(root, WEB_SETUP_MANIFEST)}`, `      ${plan.extensionPath}\\<packaged extension files>`);
@@ -1421,7 +1430,7 @@ function runClaudeMcpCommand(binary: string, args: readonly string[]) {
   });
 }
 
-type InspectedLocalBrokerTask = LocalBrokerScheduledTaskSnapshot & { state: string };
+type InspectedLocalBrokerTask = LocalBrokerScheduledTaskSnapshot & { state: string; currentUserId: string };
 
 async function inspectLocalBrokerTask(taskName: string): Promise<InspectedLocalBrokerTask | null> {
   const { stdout } = await powerShell(buildLocalBrokerScheduledTaskInspectScript(taskName));
@@ -1436,7 +1445,7 @@ async function inspectLocalBrokerTask(taskName: string): Promise<InspectedLocalB
   const task = parsed as Record<string, unknown>;
   const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
   const stringField = (value: Record<string, unknown>, key: string): boolean => typeof value[key] === "string";
-  if (!stringField(task, "taskName") || !stringField(task, "taskPath") || !stringField(task, "state")
+  if (!stringField(task, "taskName") || !stringField(task, "taskPath") || !stringField(task, "state") || !stringField(task, "currentUserId")
     || !Array.isArray(task.actions) || !Array.isArray(task.triggers) || !record(task.principal) || !record(task.settings)) {
     throw new Error(`Windows Task Scheduler returned an incomplete definition for ${taskName}.`);
   }
@@ -1445,8 +1454,8 @@ async function inspectLocalBrokerTask(taskName: string): Promise<InspectedLocalB
   const principal = task.principal;
   const settings = task.settings;
   if (actions.some((value) => !record(value) || !stringField(value, "executable") || !stringField(value, "arguments") || !stringField(value, "workingDirectory"))
-    || triggers.some((value) => !record(value) || !stringField(value, "kind") || typeof value.enabled !== "boolean" || !stringField(value, "userId"))
-    || !stringField(principal, "userId") || !stringField(principal, "logonType") || !stringField(principal, "runLevel")
+    || triggers.some((value) => !record(value) || !stringField(value, "kind") || typeof value.enabled !== "boolean" || !stringField(value, "userId") || !stringField(value, "userSid"))
+    || !stringField(principal, "userId") || !stringField(principal, "userSid") || !stringField(principal, "logonType") || !stringField(principal, "runLevel")
     || typeof settings.hidden !== "boolean" || !stringField(settings, "executionTimeLimit")
     || typeof settings.allowStartIfOnBatteries !== "boolean" || typeof settings.dontStopIfGoingOnBatteries !== "boolean"
     || typeof settings.startWhenAvailable !== "boolean") {
@@ -1461,6 +1470,7 @@ async function inspectLocalBrokerTask(taskName: string): Promise<InspectedLocalB
       userId: principal.userId as string,
       logonType: principal.logonType as string,
       runLevel: principal.runLevel as string,
+      userSid: principal.userSid as string,
     },
     settings: {
       hidden: settings.hidden as boolean,
@@ -1470,6 +1480,7 @@ async function inspectLocalBrokerTask(taskName: string): Promise<InspectedLocalB
       startWhenAvailable: settings.startWhenAvailable as boolean,
     },
     state: task.state as string,
+    currentUserId: task.currentUserId as string,
   };
 }
 
@@ -1480,21 +1491,15 @@ function localBrokerTaskActionHash(task: InspectedLocalBrokerTask): string {
 }
 
 function localBrokerTaskMatchesContract(task: InspectedLocalBrokerTask, expected: LocalBrokerScheduledTaskAction): boolean {
-  const domain = process.env.USERDOMAIN?.trim();
-  const username = process.env.USERNAME?.trim();
-  if (!domain || !username) return false;
-  return matchesLocalBrokerScheduledTaskContract(task, expected, `${domain}\\${username}`);
+  return matchesLocalBrokerScheduledTaskContract(task, expected, task.currentUserId);
 }
 
 function localBrokerTaskDefinitionOwned(
   task: InspectedLocalBrokerTask,
-  expected: LocalBrokerScheduledTaskAction,
   recordedDefinitionHash?: string,
   recordedLegacyActionHash?: string,
 ): boolean {
-  if (!localBrokerTaskMatchesContract(task, expected)) return false;
-  if (recordedDefinitionHash) return hashLocalBrokerScheduledTaskDefinition(task) === recordedDefinitionHash;
-  return Boolean(recordedLegacyActionHash) && localBrokerTaskActionHash(task) === recordedLegacyActionHash;
+  return isLocalBrokerScheduledTaskOwned(task, task.currentUserId, recordedDefinitionHash, recordedLegacyActionHash);
 }
 
 async function stopAuthenticatedLocalBroker(root: string, port: number): Promise<"stopped" | "already-stopped" | "not-owned-or-unavailable"> {
@@ -1689,6 +1694,8 @@ async function runWebExtensionUpdate(args: string[]): Promise<number> {
 async function runWebSetup(args: string[]): Promise<number> {
   if (platform() !== "win32") { process.stderr.write("M9R Web setup currently supports Windows 10/11 only.\n"); return 2; }
   if (args.includes("--broker-only")) {
+    const configuredProjectRoot = valueAfter(args, "--project-root");
+    if (configuredProjectRoot) process.env.M9R_PROJECT_ROOT = resolve(configuredProjectRoot);
     const result = await ensureLocalBrokerAutostart();
     process.stdout.write(`${result.ok ? "[PASS]" : "[FAIL]"} ${result.message}\n`);
     return result.ok ? 0 : 1;
@@ -1711,6 +1718,18 @@ async function runWebSetup(args: string[]): Promise<number> {
       : installedBrowsers;
     const home = homeDirectory();
     const root = defaultStoreRoot(home, process.env);
+    const manifestPath = join(root, WEB_SETUP_MANIFEST);
+    const previousManifestBytes = await readOptional(manifestPath);
+    const previous = previousManifestBytes ? JSON.parse(previousManifestBytes.toString("utf8")) as WebSetupManifest : null;
+    const configuredProjectRoot = valueAfter(args, "--project-root") || process.env.M9R_PROJECT_ROOT?.trim();
+    const projectRoot = resolve(configuredProjectRoot || previous?.projectRoot || process.cwd());
+    if (!configuredProjectRoot && isPathWithin(root, projectRoot)) {
+      throw new Error("The broker's current folder is inside M9R home, not a project root. Run setup from the project folder or pass --project-root <path>.");
+    }
+    if (!(await stat(projectRoot).then((info) => info.isDirectory()).catch(() => false))) {
+      throw new Error(`The configured project root is not an accessible directory: ${projectRoot}`);
+    }
+    process.env.M9R_PROJECT_ROOT = projectRoot;
     const extensionPath = join(process.env.LOCALAPPDATA || join(home, "AppData", "Local"), "M9R", "extension");
     const extensionSource = webExtensionSource(extensionPath);
     if (!extensionSource) throw new Error("The packaged browser extension was not found. Install from the M9R package or set M9R_EXTENSION_SOURCE to its folder.");
@@ -1725,14 +1744,11 @@ async function runWebSetup(args: string[]): Promise<number> {
     });
     const configPaths = resolveWebConfigPaths(home);
     const plan = planWebSetup({ detected, selectedAgents: selected, engineCommand: runtime.command, mcpArgs: runtime.args, m9rHome: root, configPaths, extensionPath, browsers, extensionId: WEB_EXTENSION_ID });
-    const brokerRuntime = webBrokerRuntime(root, port);
+    const brokerRuntime = webBrokerRuntime(root, port, projectRoot);
     const nativeInputHostPath = join(root, "bin", "m9r-native-input-host.exe");
     const nativeInputManifestPath = join(root, "native-messaging", `${NATIVE_INPUT_HOST_NAME}.json`);
     const nativeInputRegistrationKeys = browsers.map(nativeInputRegistryKey);
     const nativeInputManifest = Buffer.from(buildNativeInputManifest(nativeInputHostPath, WEB_EXTENSION_ID));
-    const manifestPath = join(root, WEB_SETUP_MANIFEST);
-    const previousManifestBytes = await readOptional(manifestPath);
-    const previous = previousManifestBytes ? JSON.parse(previousManifestBytes.toString("utf8")) as WebSetupManifest : null;
     const openBrowserSetup = shouldOpenBrowserSetup(args);
     let openCodePlugin: {
       path: string;
@@ -1765,6 +1781,7 @@ async function runWebSetup(args: string[]): Promise<number> {
       runtimePlan,
       brokerRuntime,
       root,
+      projectRoot,
       { hostPath: nativeInputHostPath, manifestPath: nativeInputManifestPath, registrationKeys: nativeInputRegistrationKeys },
       openCodePlugin,
       openBrowserSetup,
@@ -1793,6 +1810,7 @@ async function runWebSetup(args: string[]): Promise<number> {
     }
 
     const manifest: WebSetupManifest = previous ?? { version: 1, configs: [], extensionPath, extensionFiles: [], extensionDirectories: [], brokerConfigPath: join(root, "web-broker.json"), brokerConfigHash: "", identityBootstrap: "not-installed", browsers };
+    manifest.projectRoot = projectRoot;
     manifest.extensionFiles ??= [];
     const nativeInputHostBytes = await readOptional(nativeInputHostPath);
     if (browsers.length && !nativeInputHostBytes) throw new Error(`The trusted-input host is missing at ${nativeInputHostPath}; install the Windows M9R engine package built with the native input host before configuring browser clicks.`);
@@ -1829,14 +1847,14 @@ async function runWebSetup(args: string[]): Promise<number> {
       taskName: WEB_TASK_NAME,
       executable: brokerRuntime.executable,
       args: brokerRuntime.args,
-      workingDirectory: root,
+      workingDirectory: projectRoot,
     };
     const desiredBrokerTask = buildLocalBrokerScheduledTaskAction(brokerTaskInput);
     const desiredBrokerTaskHash = hashLocalBrokerScheduledTaskAction(desiredBrokerTask);
     const existingTask = await inspectLocalBrokerTask(WEB_TASK_NAME);
     if (existingTask && !previous) throw new Error(`A Windows task named ${WEB_TASK_NAME} already exists but is not owned by this web setup; refusing to overwrite it.`);
     if (existingTask) {
-      if (!localBrokerTaskDefinitionOwned(existingTask, desiredBrokerTask, previous?.brokerTaskDefinitionHash, previous?.brokerTaskActionHash)) {
+      if (!localBrokerTaskDefinitionOwned(existingTask, previous?.brokerTaskDefinitionHash, previous?.brokerTaskActionHash)) {
         throw new Error(`The M9R Web Broker task changed outside M9R setup; refusing to replace it.`);
       }
     }
@@ -2049,7 +2067,7 @@ async function runWebSetup(args: string[]): Promise<number> {
     }
     const taskBeforeRegistration = await inspectLocalBrokerTask(WEB_TASK_NAME);
     if (taskBeforeRegistration) {
-      if (!localBrokerTaskDefinitionOwned(taskBeforeRegistration, desiredBrokerTask, previous?.brokerTaskDefinitionHash, previous?.brokerTaskActionHash)) {
+      if (!localBrokerTaskDefinitionOwned(taskBeforeRegistration, previous?.brokerTaskDefinitionHash, previous?.brokerTaskActionHash)) {
         throw new Error(`The M9R Web Broker task changed during setup; refusing to replace it.`);
       }
     }
@@ -2124,7 +2142,7 @@ async function uninstallBrokerOnlySetup(root: string, args: string[]): Promise<n
   const taskInput = {
     taskName: WEB_TASK_NAME,
     executable: typeof marker.executable === "string" ? marker.executable : process.execPath,
-    args: [marker.entry, "web", "serve", "--home", root, "--port", String(port)],
+    args: [marker.entry, "web", "serve", "--home", root, "--port", String(port), ...(typeof marker.projectRoot === "string" ? ["--project-root", marker.projectRoot] : [])],
     workingDirectory: typeof marker.workingDirectory === "string" ? marker.workingDirectory : root,
   };
   const expectedAction = buildLocalBrokerScheduledTaskAction(taskInput);
@@ -2242,9 +2260,8 @@ async function runWebUninstall(args: string[]): Promise<number> {
   let brokerTaskCleanupSucceeded = brokerTaskInspectionSucceeded && !brokerTask;
   let brokerTaskWasOwned = false;
   if (brokerTask) {
-    const action = brokerTask.actions.length === 1 ? { taskName: brokerTask.taskName, ...brokerTask.actions[0] } : null;
-    brokerTaskWasOwned = Boolean(action && (recordedTaskDefinitionHash || recordedTaskActionHash)
-      && localBrokerTaskDefinitionOwned(brokerTask, action!, recordedTaskDefinitionHash ?? undefined, recordedTaskActionHash ?? undefined));
+    brokerTaskWasOwned = Boolean((recordedTaskDefinitionHash || recordedTaskActionHash)
+      && localBrokerTaskDefinitionOwned(brokerTask, recordedTaskDefinitionHash ?? undefined, recordedTaskActionHash ?? undefined));
   }
   let brokerUninstallPlan = planLocalBrokerUninstall({
     inspectionSucceeded: brokerTaskInspectionSucceeded,
@@ -2388,8 +2405,10 @@ async function runWebUninstall(args: string[]): Promise<number> {
 async function runWebBrokerServer(args: string[]): Promise<number> {
   const home = valueAfter(args, "--home") || defaultStoreRoot(homeDirectory(), process.env);
   const configuredPort = valueAfter(args, "--port");
+  const projectRoot = resolve(valueAfter(args, "--project-root") || process.env.M9R_PROJECT_ROOT?.trim() || process.cwd());
   process.env.M9R_HOME = home;
   if (configuredPort) process.env.M9R_WEB_BROKER_PORT = configuredPort;
+  process.env.M9R_PROJECT_ROOT = projectRoot;
   // Login startup must run the SAME broker as scripts/m9r-web-broker.ts: the in-page pill (agents, messages, approvals), the live agent
   // sessions, the loop guard and the activity feed. A bare broker starts fine but leaves the pill showing "No agents yet".
   const bundled = join(dirname(fileURLToPath(import.meta.url)), "m9r-web-broker.cjs");
@@ -2439,6 +2458,18 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
   };
   const marker = readJson(markerBytes);
   const setupManifest = readJson(setupBytes);
+  const savedProjectRoot = typeof marker?.projectRoot === "string"
+    ? marker.projectRoot
+    : typeof setupManifest?.projectRoot === "string" ? setupManifest.projectRoot : undefined;
+  const configuredProjectRoot = process.env.M9R_PROJECT_ROOT?.trim();
+  const projectRoot = resolve(configuredProjectRoot || savedProjectRoot || process.cwd());
+  if (!configuredProjectRoot && isPathWithin(root, projectRoot)) {
+    return { ok: false, message: "The broker's current folder is inside M9R home, not a project root. Run setup from the project folder or set M9R_PROJECT_ROOT." };
+  }
+  if (!(await stat(projectRoot).then((info) => info.isDirectory()).catch(() => false))) {
+    return { ok: false, message: `The configured project root is not an accessible directory: ${projectRoot}.` };
+  }
+  process.env.M9R_PROJECT_ROOT = projectRoot;
   const hasMarker = marker?.version === 1 && marker.taskName === WEB_TASK_NAME;
   const hasSetupManifest = setupManifest?.version === 1 && typeof setupManifest.brokerConfigPath === "string" && Array.isArray(setupManifest.configs);
   if (markerBytes && !hasMarker) {
@@ -2450,6 +2481,7 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
     nodeArgs: [],
     cliEntryPath: entry,
     m9rHome: root,
+    projectRoot,
     port,
   });
   const brokerTaskInput = {
@@ -2475,7 +2507,7 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
     const recordedDefinitionHash = typeof marker?.taskDefinitionHash === "string"
       ? marker.taskDefinitionHash
       : typeof setupManifest?.brokerTaskDefinitionHash === "string" ? setupManifest.brokerTaskDefinitionHash : undefined;
-    if (!localBrokerTaskDefinitionOwned(existingTask, desiredTaskAction, recordedDefinitionHash, recordedActionHash ?? undefined)) {
+    if (!localBrokerTaskDefinitionOwned(existingTask, recordedDefinitionHash, recordedActionHash ?? undefined)) {
       return { ok: false, message: `The ${WEB_TASK_NAME} task changed outside M9R; refusing to replace it.` };
     }
   }
@@ -2484,7 +2516,7 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
     // the final marker write cannot strand a task that every retry must refuse.
     await writeAtomic(markerPath, JSON.stringify({
       version: 1, taskName: WEB_TASK_NAME, entry, port, executable: spec.nodeExecutable,
-      workingDirectory: spec.workingDirectory, taskActionHash: desiredTaskHash, state: "registering",
+      projectRoot, workingDirectory: spec.workingDirectory, taskActionHash: desiredTaskHash, state: "registering",
     }) + "\n");
     await powerShell(buildLocalBrokerScheduledTaskRegisterScript({ ...brokerTaskInput, replaceExisting: Boolean(existingTask) }));
     const registeredTask = await inspectLocalBrokerTask(spec.taskName);
@@ -2494,11 +2526,12 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
     const taskDefinitionHash = hashLocalBrokerScheduledTaskDefinition(registeredTask);
     await writeAtomic(markerPath, JSON.stringify({
       version: 1, taskName: WEB_TASK_NAME, entry, port, executable: spec.nodeExecutable,
-      workingDirectory: spec.workingDirectory, taskActionHash: desiredTaskHash, taskDefinitionHash, state: "ready",
+      projectRoot, workingDirectory: spec.workingDirectory, taskActionHash: desiredTaskHash, taskDefinitionHash, state: "ready",
     }) + "\n");
     if (hasSetupManifest && setupManifest) {
       setupManifest.brokerTaskActionHash = desiredTaskHash;
       setupManifest.brokerTaskDefinitionHash = taskDefinitionHash;
+      setupManifest.projectRoot = projectRoot;
       await writeAtomic(setupManifestPath, JSON.stringify(setupManifest, null, 2) + "\n");
     }
     if (!brokerAlreadyRunning) await powerShell(buildLocalBrokerScheduledTaskStartScript(spec.taskName));
@@ -2516,7 +2549,7 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
     await new Promise((wait) => setTimeout(wait, 250));
   }
   if (!authenticated) return { ok: false, message: `The login task was installed, but authenticated broker health did not pass on 127.0.0.1:${port}. The approved provider connections remain saved.` };
-  return { ok: true, message: `M9R local web broker is running on 127.0.0.1:${port} and will start at login for this Windows user. The browser extension becomes ready after its authenticated handshake.` };
+  return { ok: true, message: `M9R local web broker is running on 127.0.0.1:${port} for project root ${projectRoot} and will start at login for this Windows user. The browser extension becomes ready after its authenticated handshake.` };
 }
 
 async function runWebCli(args: string[]): Promise<number> {

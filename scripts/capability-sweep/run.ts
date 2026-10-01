@@ -64,8 +64,8 @@ async function refOf(needle: string): Promise<string | null> {
   const r = await run("snapshot", { args: { limit: 150 } });
   const d = r.data;
   if (typeof d === "string") {
-    const line = d.split(String.fromCharCode(10)).find((l) => l.toLowerCase().includes(needle.toLowerCase()) && /e[0-9]+/.test(l));
-    return line ? (line.match(/e[0-9]+/) ?? [null])[0] : null;
+    const line = d.split(String.fromCharCode(10)).find((l) => l.toLowerCase().includes(needle.toLowerCase()) && /e[a-f0-9]{24}_\d{1,3}/.test(l));
+    return line ? (line.match(/e[a-f0-9]{24}_\d{1,3}/) ?? [null])[0] : null;
   }
   const els = ((d as { elements?: Array<{ name?: string; ref?: string }> } | undefined)?.elements ?? []);
   return els.find((e) => String(e.name ?? "").toLowerCase().includes(needle.toLowerCase()))?.ref ?? null;
@@ -109,7 +109,30 @@ await run("close", { tab: "warm" });
 
 await t("open a normal page", async () => { const r = await run("open", { url: url() }); return ok(r.ok, "opened", String(r.error)); });
 await t("open a search-query URL is refused", async () => { const r = await run("open", { tab: "s2", url: url("/fixture.html?q=cats") }); return ok(!r.ok, "refused with a hint", "was allowed"); });
-await t("snapshot lists controls with refs", async () => { const r = await run("snapshot", { args: {} }); const s = typeof r.data === "string" ? r.data : JSON.stringify(r.data);  return ok(/\be\d+\b/.test(s) && /Search fixture|search/i.test(s), `${(s.match(/\be\d+\b/g) ?? []).length} refs`, s.slice(0, 120)); });
+await t("snapshot lists controls with refs", async () => { const r = await run("snapshot", { args: {} }); const s = typeof r.data === "string" ? r.data : JSON.stringify(r.data);  return ok(/\be[a-f0-9]{24}_\d{1,3}\b/.test(s) && /Search fixture|search/i.test(s), `${(s.match(/\be[a-f0-9]{24}_\d{1,3}\b/g) ?? []).length} refs`, s.slice(0, 120)); });
+await t("two agents: snapshot refs never retarget after a control is replaced", async () => {
+  const opened = await run("open", { tab: "shared", url: url() }, A);
+  if (!opened.ok) return ["FAIL", `fixture did not open: ${String(opened.error)}`];
+  await evalPage("(() => { const target = document.createElement('button'); target.id = 'm9r-ref-collision-target'; target.setAttribute('aria-label', 'M9R collision target'); target.textContent = 'Collision target'; target.addEventListener('click', () => window.__log.push(['collision-target-click', Date.now()])); document.body.appendChild(target); return true; })()");
+  const firstSnapshot = await run("snapshot", { tab: "shared", args: { query: "M9R collision target", limit: 10 } }, A);
+  const firstControls = ((firstSnapshot.data as { elements?: Array<{ ref?: string; name?: string }> } | undefined)?.elements ?? []);
+  const firstRef = firstControls.find((control) => control.name === "M9R collision target")?.ref;
+  if (!firstSnapshot.ok || !firstRef) return ["FAIL", `agent A did not receive a collision-target ref: ${JSON.stringify(firstSnapshot).slice(0, 180)}`];
+
+  await evalPage("(() => { const old = document.getElementById('m9r-ref-collision-target'); if (!old) return false; old.remove(); const replacement = document.createElement('button'); replacement.id = 'm9r-ref-collision-target'; replacement.setAttribute('aria-label', 'M9R collision target'); replacement.textContent = 'Collision target'; replacement.addEventListener('click', () => window.__log.push(['collision-target-replacement-click', Date.now()])); document.body.appendChild(replacement); return true; })()");
+  const secondSnapshot = await run("snapshot", { tab: "shared", args: { query: "M9R collision target", limit: 10 } }, B);
+  const secondControls = ((secondSnapshot.data as { elements?: Array<{ ref?: string; name?: string }> } | undefined)?.elements ?? []);
+  const secondRef = secondControls.find((control) => control.name === "M9R collision target")?.ref;
+  if (!secondSnapshot.ok || !secondRef) return ["FAIL", `agent B did not receive a replacement-target ref: ${JSON.stringify(secondSnapshot).slice(0, 180)}`];
+
+  const staleClickPromise = run("click", { tab: "shared", ref: firstRef }, A);
+  await sleep(500);
+  if ((await pendingActions()).length) await approveAll();
+  const staleClick = await Promise.race([staleClickPromise, sleep(5_000).then(() => null)]);
+  const replacementClicks = await evalPage("JSON.stringify(window.__log.filter(([message]) => message === 'collision-target-replacement-click'))");
+  const notRetargeted = firstRef !== secondRef && staleClick !== null && !staleClick.ok && /stale|invalid/i.test(String(staleClick.error)) && replacementClicks === "[]";
+  return ok(notRetargeted, "refs differ; agent A's stale ref was refused and did not click agent B's replacement", `refs same:${firstRef === secondRef}; stale click:${staleClick ? `${staleClick.ok ? "allowed" : "refused"}: ${String(staleClick.error)}` : "timed out"}; replacement clicks:${String(replacementClicks)}`);
+});
 await t("snapshot sees shadow-DOM button", async () => ok(!!(await refOf("Shadow button")), "found", "shadow control not in snapshot"));
 await t("snapshot sees same-origin iframe button", async () => ok(!!(await refOf("Frame button")), "found", "iframe control not in snapshot"));
 await t("click search box then type then Enter (no form)", async () => {

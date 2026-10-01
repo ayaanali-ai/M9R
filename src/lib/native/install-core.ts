@@ -304,6 +304,7 @@ export interface LocalBrokerAutostartInput {
   nodeArgs: readonly string[];
   cliEntryPath: string;
   m9rHome: string;
+  projectRoot: string;
   port: number;
 }
 
@@ -342,8 +343,8 @@ export interface LocalBrokerScheduledTaskSnapshot {
   taskName: string;
   taskPath: string;
   actions: Array<Pick<LocalBrokerScheduledTaskAction, "executable" | "arguments" | "workingDirectory">>;
-  triggers: Array<{ kind: string; enabled: boolean; userId: string }>;
-  principal: { userId: string; logonType: string; runLevel: string };
+  triggers: Array<{ kind: string; enabled: boolean; userId: string; userSid?: string }>;
+  principal: { userId: string; logonType: string; runLevel: string; userSid?: string };
   settings: {
     hidden: boolean;
     executionTimeLimit: string;
@@ -396,6 +397,20 @@ export function hashLocalBrokerScheduledTaskAction(action: LocalBrokerScheduledT
   return sha256(JSON.stringify(action));
 }
 
+/** Proves ownership against the task's recorded prior definition without requiring it to match the next desired version. */
+export function isLocalBrokerScheduledTaskOwned(
+  snapshot: LocalBrokerScheduledTaskSnapshot,
+  currentUserId: string,
+  recordedDefinitionHash?: string,
+  recordedActionHash?: string,
+): boolean {
+  if (snapshot.actions.length !== 1) return false;
+  const action: LocalBrokerScheduledTaskAction = { taskName: snapshot.taskName, ...snapshot.actions[0] };
+  if (!matchesLocalBrokerScheduledTaskContract(snapshot, action, currentUserId)) return false;
+  if (recordedDefinitionHash) return hashLocalBrokerScheduledTaskDefinition(snapshot) === recordedDefinitionHash;
+  return Boolean(recordedActionHash) && hashLocalBrokerScheduledTaskAction(action) === recordedActionHash;
+}
+
 /**
  * Compare the entire behavior-bearing portion of the current-user broker task.
  * Extra actions/triggers, a different principal, elevated execution, or relaxed
@@ -408,6 +423,7 @@ export function matchesLocalBrokerScheduledTaskContract(
 ): boolean {
   const sameIdentity = (left: string, right: string) => left.trim().toLocaleLowerCase() === right.trim().toLocaleLowerCase();
   const samePath = (left: string, right: string) => left.trim().replaceAll("/", "\\").toLocaleLowerCase() === right.trim().replaceAll("/", "\\").toLocaleLowerCase();
+  const sameUser = (userId: string, userSid?: string) => sameIdentity(userSid || userId, currentUserId);
   const noTimeLimit = /^(?:PT0S|P0D|00:00:00)$/i.test(snapshot.settings.executionTimeLimit.trim());
 
   return sameIdentity(snapshot.taskName, expectedAction.taskName)
@@ -419,8 +435,8 @@ export function matchesLocalBrokerScheduledTaskContract(
     && snapshot.triggers.length === 1
     && sameIdentity(snapshot.triggers[0].kind, "Logon")
     && snapshot.triggers[0].enabled === true
-    && sameIdentity(snapshot.triggers[0].userId, currentUserId)
-    && sameIdentity(snapshot.principal.userId, currentUserId)
+    && sameUser(snapshot.triggers[0].userId, snapshot.triggers[0].userSid)
+    && sameUser(snapshot.principal.userId, snapshot.principal.userSid)
     && sameIdentity(snapshot.principal.logonType, "Interactive")
     && sameIdentity(snapshot.principal.runLevel, "Limited")
     && snapshot.settings.hidden === true
@@ -436,8 +452,8 @@ export function hashLocalBrokerScheduledTaskDefinition(snapshot: LocalBrokerSche
     taskName: snapshot.taskName,
     taskPath: snapshot.taskPath,
     actions: snapshot.actions,
-    triggers: snapshot.triggers,
-    principal: snapshot.principal,
+    triggers: snapshot.triggers.map(({ kind, enabled, userId }) => ({ kind, enabled, userId })),
+    principal: { userId: snapshot.principal.userId, logonType: snapshot.principal.logonType, runLevel: snapshot.principal.runLevel },
     settings: snapshot.settings,
   }));
 }
@@ -486,11 +502,14 @@ export function buildLocalBrokerScheduledTaskInspectScript(taskName: string): st
     `$tasks = @(Get-ScheduledTask -TaskName ${powerShellLiteral(taskName)} -TaskPath '\\' -ErrorAction SilentlyContinue)`,
     "if ($tasks.Count -eq 0) { 'null' } elseif ($tasks.Count -ne 1) { throw 'Ambiguous M9R task registration.' } else {",
     "  $task = $tasks[0]",
+    "  $currentUserId = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+    "  $resolveSid = { param([string]$userId) try { ([Security.Principal.NTAccount]::new($userId)).Translate([Security.Principal.SecurityIdentifier]).Value } catch { '' } }",
     "  $actions = @($task.Actions | ForEach-Object { [pscustomobject]@{ executable = [string]$_.Execute; arguments = [string]$_.Arguments; workingDirectory = [string]$_.WorkingDirectory } })",
-    "  $triggers = @($task.Triggers | ForEach-Object { $kind = if ($_.CimClass.CimClassName -match 'LogonTrigger$') { 'Logon' } else { [string]$_.CimClass.CimClassName }; [pscustomobject]@{ kind = $kind; enabled = [bool]$_.Enabled; userId = [string]$_.UserId } })",
-    "  $principal = [pscustomobject]@{ userId = [string]$task.Principal.UserId; logonType = [string]$task.Principal.LogonType; runLevel = [string]$task.Principal.RunLevel }",
+    "  $triggers = @($task.Triggers | ForEach-Object { $kind = if ($_.CimClass.CimClassName -match 'LogonTrigger$') { 'Logon' } else { [string]$_.CimClass.CimClassName }; $userId = [string]$_.UserId; [pscustomobject]@{ kind = $kind; enabled = [bool]$_.Enabled; userId = $userId; userSid = [string](& $resolveSid $userId) } })",
+    "  $principalUserId = [string]$task.Principal.UserId",
+    "  $principal = [pscustomobject]@{ userId = $principalUserId; userSid = [string](& $resolveSid $principalUserId); logonType = [string]$task.Principal.LogonType; runLevel = [string]$task.Principal.RunLevel }",
     "  $settings = [pscustomobject]@{ hidden = [bool]$task.Settings.Hidden; executionTimeLimit = [string]$task.Settings.ExecutionTimeLimit; allowStartIfOnBatteries = [bool](-not $task.Settings.DisallowStartIfOnBatteries); dontStopIfGoingOnBatteries = [bool](-not $task.Settings.StopIfGoingOnBatteries); startWhenAvailable = [bool]$task.Settings.StartWhenAvailable }",
-    "  [pscustomobject]@{ taskName = [string]$task.TaskName; taskPath = [string]$task.TaskPath; actions = $actions; triggers = $triggers; principal = $principal; settings = $settings; state = [string]$task.State } | ConvertTo-Json -Compress -Depth 6",
+    "  [pscustomobject]@{ taskName = [string]$task.TaskName; taskPath = [string]$task.TaskPath; actions = $actions; triggers = $triggers; principal = $principal; settings = $settings; state = [string]$task.State; currentUserId = $currentUserId } | ConvertTo-Json -Compress -Depth 6",
     "}",
   ].join("\n");
 }
@@ -518,7 +537,7 @@ export function buildLocalBrokerScheduledTaskRemoveScript(taskName: string): str
 
 /** Build the explicit local broker launch plan consumed by the CLI's login-task adapter. */
 export function buildLocalBrokerAutostartSpec(input: LocalBrokerAutostartInput): LocalBrokerAutostartSpec {
-  for (const [label, value] of [["node executable", input.nodeExecutable], ["CLI entry path", input.cliEntryPath], ["M9R home", input.m9rHome]] as const) {
+  for (const [label, value] of [["node executable", input.nodeExecutable], ["CLI entry path", input.cliEntryPath], ["M9R home", input.m9rHome], ["project root", input.projectRoot]] as const) {
     if (typeof value !== "string" || value.trim() === "") throw new Error(`${label} is required for broker autostart`);
   }
   if (!Array.isArray(input.nodeArgs) || input.nodeArgs.some((arg) => typeof arg !== "string")) {
@@ -531,8 +550,8 @@ export function buildLocalBrokerAutostartSpec(input: LocalBrokerAutostartInput):
     nodeExecutable: input.nodeExecutable,
     nodeArgs: [...input.nodeArgs],
     cliEntryPath: input.cliEntryPath,
-    args: ["web", "serve", "--home", input.m9rHome, "--port", String(input.port)],
-    workingDirectory: input.m9rHome,
+    args: ["web", "serve", "--home", input.m9rHome, "--port", String(input.port), "--project-root", input.projectRoot],
+    workingDirectory: input.projectRoot,
     taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
     bindAddress: "127.0.0.1",
     startImmediately: true,

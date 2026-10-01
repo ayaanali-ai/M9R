@@ -555,7 +555,7 @@ function m9rPageNativeClickTarget(selector, action, planX, planY, pointerX, poin
     if (action === "click_at") {
       target = document.elementFromPoint(planX, planY);
     } else if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
-      const match = /^@m9r-ref:([A-Za-z0-9_-]{1,16})$/.exec(selector);
+      const match = /^@m9r-ref:(e[a-f0-9]{24}_\d{1,3})$/.exec(selector);
       const refs = window.__m9rPageActionRefMap;
       target = match && refs
         ? typeof refs.get === "function" ? refs.get(match[1])

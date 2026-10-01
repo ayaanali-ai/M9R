@@ -343,6 +343,8 @@ function build() {
       .replace(/['"]@\/lib\/provider-adapter-config['"]/g, '"./provider-adapter-config.js"')
       .replace(/['"]@\/lib\/agent-presence['"]/g, '"./agent-presence.js"'),
   );
+  const workspaceResultIdempotencyTs = readFileSync(resolve(repoRoot, "src/lib/bridge/workspace-result-idempotency.ts"), "utf8");
+  writeFileSync(resolve(outDir, "workspace-result-idempotency.js"), transpile(workspaceResultIdempotencyTs));
   const bridgeRuntimeTs = readFileSync(resolve(repoRoot, "services/mission-bridge/src/bridge-runtime.ts"), "utf8");
   const bridgeRuntimeJs = transpile(bridgeRuntimeTs)
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/bridge-protocol['"]/g, '"./bridge-protocol.js"')
@@ -361,6 +363,7 @@ function build() {
     .replace('"../../../src/lib/mission/mission-participant-ids"', '"./mission-participant-ids.js"')
     .replace('"../../../src/lib/mission/workspace-cursor"', '"./workspace-cursor.js"')
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/workspace-prompt-queue['"]/g, '"./workspace-prompt-queue.js"')
+    .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/workspace-result-idempotency['"]/g, '"./workspace-result-idempotency.js"')
     // Dynamic import (inside ensureTerminalPane), not a static one -- this
     // one was missing from the rewrite list entirely. Confirmed live: the
     // packaged CLI crashed every provider the moment M9R_TERMINAL_PANES

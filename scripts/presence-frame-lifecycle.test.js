@@ -300,7 +300,7 @@ test('creating a second overlay in one isolated world destroys the old singleton
   assert.notEqual(first, second);
   assert.equal(firstHost.isConnected, false);
   assert.equal(secondHost.isConnected, true);
-  assert.equal(handlers.size, 2, 'only the live singleton owns window listeners');
+  assert.equal(handlers.size, 3, 'only the live singleton owns message, resize, and scroll listeners');
   second.destroy();
   assert.equal(handlers.size, 0);
 });
@@ -337,10 +337,10 @@ test('destroy releases overlay DOM and window listeners even when Chrome invalid
   const overlay = win.M9RPresence.createPresenceOverlay(doc, {});
 
   assert.equal(storageListeners.length, 1);
-  assert.equal(handlers.size, 2);
+  assert.equal(handlers.size, 3);
   assert.doesNotThrow(() => overlay.destroy());
   assert.equal(root.child.isConnected, false, 'a failed extension API cleanup must not strand the visible overlay');
-  assert.equal(handlers.size, 0, 'window message/resize handlers are removed independently');
+  assert.equal(handlers.size, 0, 'window message/resize/scroll handlers are removed independently');
   assert.deepEqual(clearedIntervals, [17]);
 });
 

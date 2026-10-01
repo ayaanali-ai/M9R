@@ -43,10 +43,10 @@ test("presence formatting only displays safe summaries and ignores typed or page
 
 test("presence preserves a bounded viewport target rectangle for the live cursor path", () => {
   const formatted = logic().formatPresenceMessage({
-    agent: "codex", message: "clicking Search", target: { selector: "@m9r-ref:e12", rect: { x: 24, y: 48, width: 180, height: 36, extra: "ignored" } },
+    agent: "codex", message: "clicking Search", target: { selector: "@m9r-ref:e0123456789abcdef01234567_12", rect: { x: 24, y: 48, width: 180, height: 36, extra: "ignored" } },
   }, 100);
   assert.deepEqual(JSON.parse(JSON.stringify(formatted?.target)), {
-    selector: "@m9r-ref:e12", rect: { x: 24, y: 48, width: 180, height: 36 },
+    selector: "@m9r-ref:e0123456789abcdef01234567_12", rect: { x: 24, y: 48, width: 180, height: 36 },
   });
 });
 

@@ -14,11 +14,11 @@ import type { WebBrokerClient } from "@/lib/native/web-broker-client";
 
 type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ type: string; text: string }> }> }> };
 
-function setup(options: { allowRule?: boolean; web?: WebBrokerClient } = {}) {
+function setup(options: { allowRule?: boolean; web?: WebBrokerClient; roomStartedAt?: number; now?: () => Date } = {}) {
   const root = mkdtempSync(join(tmpdir(), "m9r-inbox-"));
-  const store = createLocalStore(root);
+  const store = createLocalStore(root, { now: options.now });
   if (options.allowRule !== false) store.addRule({ from: "claude", to: "codex", ttlMs: 3_600_000 });
-  const server = createM9rMcpServer({ store, web: options.web });
+  const server = createM9rMcpServer({ store, web: options.web, roomStartedAt: options.roomStartedAt });
   const call = async (name: string, args: unknown) => (await (server as unknown as ToolServer)._registeredTools[name].handler(args)).content[0].text;
   return {
     store,
@@ -103,6 +103,28 @@ test("two sessions of the same agent each see a message once, and one session's 
   assert.match(await t.call("m9r_inbox", { token: second }), /shared finding/);
   assert.equal(await t.call("m9r_inbox", { token: second }), "Inbox is empty.");
   t.done();
+});
+
+test("a new browser room inbox ignores pre-start work but still shows tasks created during this broker lifetime", async () => {
+  const roomStartedAt = Date.parse("2026-09-30T12:00:00.000Z");
+  let now = new Date(roomStartedAt - 1_000);
+  const t = setup({
+    roomStartedAt,
+    now: () => new Date(now),
+    web: { authorizeRoomMessage: async () => ({ ok: true }) } as unknown as WebBrokerClient,
+  });
+  const sender = t.store.issueIdentity("claude", "claude-code", "web-claude-room").token;
+  const receiver = t.store.issueIdentity("codex", "codex", "web-codex-room").token;
+  try {
+    await t.call("m9r_send", { token: sender, to: "codex", goal: "old project work" });
+    assert.equal(await t.call("m9r_inbox", { token: receiver }), "Inbox is empty.", "work from before broker startup is not replayed into a fresh room");
+
+    now = new Date(roomStartedAt + 1_000);
+    await t.call("m9r_send", { token: sender, to: "codex", goal: "current project work" });
+    const fresh = await t.call("m9r_inbox", { token: receiver });
+    assert.match(fresh, /current project work/);
+    assert.doesNotMatch(fresh, /old project work/);
+  } finally { t.done(); }
 });
 
 test("a bad token is refused", async () => {

@@ -10,13 +10,14 @@ test("standalone web setup schedules the packaged broker executable, not the uns
   const plan = standaloneWebBrokerRuntime({
     engineExecutable,
     home: "C:/Users/demo/.m9r",
+    projectRoot: "C:/Users/demo/source/runleak",
     port: 47821,
     exists: (path) => path === executable,
   });
 
   assert.deepEqual(plan, {
     executable,
-    args: ["--home", "C:/Users/demo/.m9r", "--port", "47821"],
+    args: ["--home", "C:/Users/demo/.m9r", "--port", "47821", "--project-root", "C:/Users/demo/source/runleak"],
   });
 });
 
@@ -25,6 +26,7 @@ test("standalone web setup refuses to produce a broken service plan without the 
     () => standaloneWebBrokerRuntime({
       engineExecutable: "C:/Users/demo/.m9r/bin/m9r-engine.exe",
       home: "C:/Users/demo/.m9r",
+      projectRoot: "C:/Users/demo/source/runleak",
       port: 47821,
       exists: () => false,
     }),

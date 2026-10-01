@@ -17,8 +17,8 @@ test("risk detection does not inspect the typed value and leaves ordinary reads/
 });
 
 test("opaque snapshot refs require owner approval when current target identity is unavailable", () => {
-  assert.equal(classifyWebActionRisk({ action: "click", selector: "@m9r-ref:e4" }).risky, true);
-  assert.equal(classifyWebActionRisk({ action: "click", selector: "@m9r-ref:e4", targetLabel: "Continue" }).risky, true,
+  assert.equal(classifyWebActionRisk({ action: "click", selector: "@m9r-ref:e0123456789abcdef01234567_4" }).risky, true);
+  assert.equal(classifyWebActionRisk({ action: "click", selector: "@m9r-ref:e0123456789abcdef01234567_4", targetLabel: "Continue" }).risky, true,
     "an agent-supplied benign label cannot establish the identity of an opaque ref");
 });
 
