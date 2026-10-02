@@ -3,12 +3,17 @@
 import type { BotStateName } from "../core/layout";
 import type { Provider } from "../core/state";
 import { h } from "./dom";
+// Imported (not referenced by path) so the files are bundled and resolved relative to wherever the bundle is loaded from.
+import claudeLogo from "../assets/providers/claude.svg";
+import codexLogo from "../assets/providers/codex.svg";
+import opencodeLogo from "../assets/providers/opencode.svg";
+import agentLogo from "../assets/providers/agent.svg";
 
 const FILES: Record<Provider, string> = {
-  claude: "providers/claude.svg",
-  codex: "providers/codex.svg",
-  opencode: "providers/opencode.svg",
-  agent: "providers/agent.svg",
+  claude: claudeLogo,
+  codex: codexLogo,
+  opencode: opencodeLogo,
+  agent: agentLogo,
 };
 
 /** `size` in pixels, or "fill" to take the size of the container. */

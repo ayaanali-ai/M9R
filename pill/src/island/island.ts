@@ -80,6 +80,7 @@ export class Island {
       },
       decide: (d) => this.decide(d),
       send: (text) => this.transport.send(text),
+      canAllowForADay: () => this.transport.capabilities?.allowForADay === true,
       toggleSound: () => {
         State.settings.soundEnabled = !State.settings.soundEnabled;
         Sound.setEnabled(State.settings.soundEnabled);
@@ -327,10 +328,17 @@ export class Island {
       if (State.mode === "hidden") this.fsm.mouseEntered();
     });
 
-    this.islandEl.addEventListener("mousedown", () => {
+    this.islandEl.addEventListener("mousedown", (e) => {
       Sound.resume();
       State.lastActivity = performance.now();
-      if (State.mode !== "expanded") this.fsm.click();
+      if (State.mode !== "expanded") {
+        this.fsm.click();
+        return;
+      }
+      // Clicking the empty part of the header folds the island away, even while an approval waits (it stays pending and
+      // its badge stays on the agent). Buttons, tabs and fields keep their own clicks.
+      const target = e.target as HTMLElement;
+      if (target.closest("#header") && !target.closest("button")) this.collapse();
     });
 
     window.addEventListener("keydown", (e) => {

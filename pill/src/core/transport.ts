@@ -6,8 +6,10 @@ import type { PillSnapshot, Settings } from "./state";
 export type Decision = "allow" | "deny" | "allow_day";
 
 export interface PillTransport {
+  /** What this host can actually do; the UI hides controls a host cannot honour instead of faking them. */
+  capabilities?: { allowForADay?: boolean };
   /** Starts delivering snapshots. The first call should arrive promptly with the current state. */
-  subscribe(listener: (snapshot: PillSnapshot) => void): void;
+  subscribe(listener: (snapshot: PillSnapshot) => void): void | (() => void);
   /** Owner typed a message; `@handle` mentions inside it address agents. */
   send(text: string): Promise<void>;
   decide(approvalId: string, decision: Decision): Promise<void>;
@@ -52,6 +54,7 @@ export function createMockTransport(): PillTransport {
     }, 9000);
   }
   return {
+    capabilities: { allowForADay: true },
     subscribe(l) { listener = l; setTimeout(push, 0); },
     async send(text) {
       const target = /@(\w+)/.exec(text)?.[1] ?? "claude";

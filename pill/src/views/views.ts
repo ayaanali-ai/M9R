@@ -14,6 +14,7 @@ export interface ViewActions {
   setFocus(id: string): void;
   decide(d: "allow" | "deny" | "allow_day"): void;
   send(text: string): Promise<void>;
+  canAllowForADay(): boolean;
   toggleSound(): void;
   setAutoClose(seconds: number): void;
   blip(): void;
@@ -64,7 +65,7 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 export function buildHeader(actions: ViewActions): ViewHost {
   const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
   const tabChat = h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
-  const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.gear, 14));
+  const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
 
   function go(v: IslandViewName) {
@@ -86,8 +87,6 @@ export function buildHeader(actions: ViewActions): ViewHost {
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");
       gearBtn.classList.toggle("on", v === "settings");
-      clear(gearBtn);
-      gearBtn.append(svg(v === "settings" ? ICONS.gearFill : ICONS.gear, 14));
       clear(soundBtn);
       soundBtn.append(svg(State.settings.soundEnabled ? ICONS.speakerOn : ICONS.speakerOff, 14));
     },
@@ -215,7 +214,7 @@ function buildApproval(actions: ViewActions): ViewHost {
       clear(row);
       row.append(
         btn("Deny", "secondary", () => actions.decide("deny"), "N"),
-        btn("Allow for a day", "secondary", () => actions.decide("allow_day")),
+        actions.canAllowForADay() ? btn("Allow for a day", "secondary", () => actions.decide("allow_day")) : "",
         btn("Allow", "primary", () => actions.decide("allow"), "Y"),
       );
     },

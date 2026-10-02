@@ -60,6 +60,7 @@ function belongsToSuite(name) {
       "native-input-client.test.js",
       "quiet-input.test.js",
       "pill-state.test.ts",
+      "pill-shells.test.ts",
       "presence-frame-lifecycle.test.js",
       "presence-target-highlight.test.js",
     ].includes(name);

@@ -693,6 +693,12 @@ input[type="range"]::-webkit-slider-thumb {
   padding: 12px 16px 14px 84px;
 }
 
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .chip-row:empty {
   display: none;
 }

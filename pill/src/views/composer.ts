@@ -50,7 +50,7 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     suggestKey = key;
     clear(suggest);
     for (const t of options.slice(0, 4)) {
-      const chip = h("button", { class: "chip", type: "button", text: `@${t.name}` });
+      const chip = h("button", { class: "chip settled", type: "button", text: `@${t.name}` });
       chip.addEventListener("mousedown", (e) => e.preventDefault()); // keep focus in the field
       chip.addEventListener("click", () => {
         const where = mentionAt(input.value, input.selectionStart ?? input.value.length);
