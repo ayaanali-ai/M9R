@@ -67,7 +67,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
       ]);
 
   return (
-    <div className={`${wfMono.variable} wf-root contents`} data-bs-mode="day" suppressHydrationWarning>
+    <div className={`${wfMono.variable} wf-root contents`} data-bs-mode="night" suppressHydrationWarning>
       {/* Pre-paint: restore the persisted Watchfloor mode before first render
           so Night Watch users never see a bone flash. Uses the supported
           pre-hydration InlineScript pattern; raw scripts warn on soft nav. */}

@@ -4,8 +4,9 @@ import Link from "next/link";
 import "./dashboard-renovation.css";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import M9RMark from "@/components/M9RMark";
-import { AgentMark } from "@/components/product/WorkspaceUI";
+import { dashboardFont } from "./dashboard-chrome/dashboard-font";
+import { DashboardContactContents, DashboardMenu, DashboardSearch, DashboardSidebarTop } from "./dashboard-chrome/Chrome";
+import { BookOpen, LogOut, MessageSquare, PanelLeftOpen, Plus, Puzzle, Settings, Users } from "lucide-react";
 import { createClient } from "@/lib/supabase/browser";
 import WorkspaceSwitcher from "@/components/product/WorkspaceSwitcher";
 import DashboardOnboarding from "@/components/product/DashboardOnboarding";
@@ -22,11 +23,8 @@ import {
   type DashboardMode,
 } from "@/lib/dashboard-mode";
 
-// Two-region navigation (Slack's rail + contextual sidebar). The rail holds the
-// destinations; the wide region holds whatever that destination navigates
-// *within*. Runs / Rules / Findings are no longer rail-level nouns — Rules and
-// Findings merge into Memory, and the run ledger stops being a user-facing
-// destination at all. Approvals stay inline in the chat feed, never a page.
+// One sidebar holds workspace destinations and their contextual navigation.
+// Approvals remain in the conversation and its existing review panel.
 type RailRegion = "chat" | "memory";
 const RAIL_ITEMS = [
   ["/dashboard/agents", "Chat", "agent", "chat"],
@@ -45,7 +43,7 @@ type AgentLink = { key: string; label: string; agentKind?: string; connectionId?
 function agentLinksForStatus(status: AgentStatusSummary): AgentLink[] {
   return [
     { key: "all", label: "All agents" },
-    ...status.agents.filter((agent) => agent.agentKind !== "codex").map((agent: ConnectedAgentNavItem) => ({
+    ...status.agents.map((agent: ConnectedAgentNavItem) => ({
       key: agent.key,
       label: agent.label,
       agentKind: agent.agentKind,
@@ -85,6 +83,7 @@ export default function ProductShell({
   const [peek, setPeek] = useState(false);
   const [mode, setMode] = useState<DashboardMode>("night");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sidebarQuery, setSidebarQuery] = useState("");
   const agentLinks = agentLinksForStatus(agentStatus);
 
   useEffect(() => {
@@ -117,9 +116,9 @@ export default function ProductShell({
     // Restore the collapse preference off the synchronous effect body.
     queueMicrotask(() => {
       try {
-        // Hidden is the default (Claude-style); an explicit "0" pins it open.
+        // Open on desktop by default; preserve an explicit user preference.
         const stored = window.localStorage.getItem("oathlock_sidebar_collapsed");
-        setCollapsed(stored === null ? true : stored === "1");
+        setCollapsed(stored === null ? window.innerWidth < 768 : stored === "1");
       } catch {
         /* no persistence available */
       }
@@ -152,7 +151,7 @@ export default function ProductShell({
   }
 
   return (
-    <div className={`product-shell m9r-workspace min-h-screen text-[color:var(--ol-text-primary)] ${collapsed ? "product-shell--collapsed" : ""}`.trim()}>
+    <div className={`${dashboardFont.variable} product-shell m9r-workspace min-h-screen text-[color:var(--ol-text-primary)] ${collapsed ? "product-shell--collapsed" : ""}`.trim()}>
       <a href="#workspace-content" className="product-skip-link">
         Skip to workspace
       </a>
@@ -170,7 +169,7 @@ export default function ProductShell({
           aria-expanded={peek}
           title="Open sidebar"
         >
-          <M9RMark animated={false} className="h-[21px] w-[21px] shrink-0" />
+          <PanelLeftOpen size={21} aria-hidden="true" />
         </button>
       )}
 
@@ -178,154 +177,40 @@ export default function ProductShell({
         className={`product-sidebar ${collapsed && peek ? "product-sidebar--peek" : ""}`.trim()}
         onMouseLeave={collapsed ? () => setPeek(false) : undefined}
       >
-        {/* Region 1: the icon rail. Workspace identity pinned top, destinations
-            in the middle, Settings pinned bottom — Settings is a full page of
-            its own, so it navigates instead of opening a wide region. */}
-        <div className="product-rail">
-          {reviewerDemo ? (
-            <span className="product-rail-demo-mark" title="YC demo workspace · seeded, read-only data" aria-label="YC demo workspace">
-              YC
-            </span>
-          ) : (
-            <div className="product-workspace-switcher">
-              <WorkspaceSwitcher
-                projects={projects}
-                activeProjectId={activeProjectId}
-                workspaceUsage={workspaceUsage}
-              />
-            </div>
-          )}
-
-          <nav className="product-rail-nav" aria-label="Workspace destinations">
-            {railItems.map(([href, label, icon]) => {
-              const active = isActiveHref(href);
-              return (
-                <Link
-                  key={href}
-                  href={href}
-                  aria-current={active ? "page" : undefined}
-                  className={active ? "product-rail-btn product-nav-active" : "product-rail-btn"}
-                  data-tip={label}
-                  aria-label={label}
-                  prefetch={false}
-                >
-                  <NavIcon name={icon} />
-                </Link>
-              );
-            })}
-          </nav>
-
-          {!reviewerDemo && (
-            <div className="product-rail-foot">
-              <Link
-                href="/rooms/new"
-                aria-current={isActiveHref("/rooms") ? "page" : undefined}
-                className={isActiveHref("/rooms") ? "product-rail-btn product-nav-active" : "product-rail-btn"}
-                data-tip="Rooms"
-                aria-label="Rooms — get a shareable link guests can join with no account"
-                prefetch={false}
-              >
-                <NavIcon name="room" />
-              </Link>
-              <Link
-                href="/dashboard/settings"
-                aria-current={isActiveHref("/dashboard/settings") ? "page" : undefined}
-                className={isActiveHref("/dashboard/settings") ? "product-rail-btn product-nav-active" : "product-rail-btn"}
-                data-tip="Settings"
-                aria-label="Settings"
-                prefetch={false}
-              >
-                <NavIcon name="settings" />
-              </Link>
-            </div>
-          )}
-        </div>
-
-        {/* Region 2: the contextual sidebar. Its content is a pure function of
-            the selected rail destination. */}
         <div className="product-sidebar-wide">
-        <div className="flex items-center">
-          <Link href="/dashboard" className="product-brand min-w-0 flex-1">
-            <M9RMark animated={false} className="h-[23px] w-[23px] shrink-0" />
-            <span>M9R</span>
-          </Link>
-          <button
-            type="button"
-            className="product-collapse-btn"
-            onClick={toggleCollapsed}
-            aria-label={collapsed ? "Pin sidebar open" : "Hide sidebar"}
-            aria-expanded={!collapsed}
-            title={collapsed ? "Pin sidebar open" : "Hide sidebar"}
-          >
-            <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5" aria-hidden>
-              {collapsed ? (
-                <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-              ) : (
-                <path d="M10 4L6 8l4 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-              )}
-            </svg>
-          </button>
-        </div>
-
+        <DashboardSidebarTop onCollapse={toggleCollapsed} onAttention={() => router.push("/dashboard/agents?activity=1")} actions={[
+          { label: "New channel", icon: <Plus size={16} />, onSelect: () => router.push("/dashboard/agents?newChannel=1") },
+          { label: "Connect agent", icon: <Puzzle size={16} />, onSelect: () => router.push("/dashboard/settings") },
+          { label: "New room", icon: <Users size={16} />, onSelect: () => router.push("/rooms/new") },
+        ]} />
+        <DashboardSearch value={sidebarQuery} onChange={setSidebarQuery} label="Search channels and agents" />
         <nav className="product-nav" aria-label={region === "memory" ? "Memory navigation" : "Chat navigation"}>
           {region === "memory" ? (
             <MemorySidebarRegion />
           ) : (
             <>
-              <SidebarChannelList chatActive={isActiveHref("/dashboard/agents")} agents={agentStatus.agents} />
-              <SidebarAgentPicker chatActive={isActiveHref("/dashboard/agents")} agentStatus={agentStatus} />
+              <SidebarChannelList chatActive={isActiveHref("/dashboard/agents")} agents={agentStatus.agents} query={sidebarQuery} />
+              <SidebarAgentPicker chatActive={isActiveHref("/dashboard/agents")} agentStatus={agentStatus} query={sidebarQuery} />
             </>
           )}
         </nav>
 
-        <div className="product-sidebar-footer">
-          {/* Upload now lives in the primary nav above; the footer stays focused
-              on the account row. The theme toggle used to live in the removed
-              top bar -- it's the only reason that bar existed once the account
-              avatar/sign-out and page identity are already covered here and by
-              the nav itself, so it moved in next to the account row instead of
-              floating at the top of every page. */}
-          <MachineConnectionBanner
-            hasLiveConnection={agentStatus.agents.some((agent) => agent.live)}
-            hasRegisteredConnection={agentStatus.agents.some((agent) => agent.registered)}
-            reviewerDemo={reviewerDemo}
-          />
-          <div className="product-account">
-            <span className="product-avatar">{initial}</span>
-            <span className="product-account-email min-w-0 flex-1 truncate text-[11px] text-[color:var(--ol-text-muted)]">{displayName}</span>
-            <button
-              type="button"
-              className="product-theme-toggle"
-              onClick={toggleMode}
-              aria-pressed={mode === "night"}
-              aria-label={mode === "day" ? "Switch to Night Watch" : "Switch to Day mode"}
-              title={mode === "day" ? "Switch to Night Watch" : "Switch to Day mode"}
-            >
-              {mode === "day" ? (
-                <svg viewBox="0 0 16 16" fill="none" aria-hidden>
-                  <path d="M13.5 9.1A5.5 5.5 0 0 1 6.9 2.5 5.5 5.5 0 1 0 13.5 9.1Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-                </svg>
-              ) : (
-                <svg viewBox="0 0 16 16" fill="none" aria-hidden>
-                  <circle cx="8" cy="8" r="3.1" stroke="currentColor" strokeWidth="1.3" />
-                  <path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.5 3.5l1.15 1.15M11.35 11.35 12.5 12.5M12.5 3.5l-1.15 1.15M4.65 11.35 3.5 12.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-                </svg>
-              )}
-            </button>
-            <button
-              type="button"
-              className="product-signout"
-              onClick={signOut}
-              disabled={signingOut}
-              aria-label="Sign out"
-              title="Sign out"
-            >
-              {signingOut ? <span className="product-mini-loader" /> : (
-                <svg viewBox="0 0 18 18" fill="none" aria-hidden>
-                  <path d="M7.25 3.25H4.5v11.5h2.75M10.25 5.5 13.75 9l-3.5 3.5M13.25 9H7" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              )}
-            </button>
+        <div className="product-sidebar-footer m9r-dash-sidebar-footer">
+          <nav aria-label="Workspace tools" className="m9r-dash-footer-nav">
+            <Link href="/dashboard/agents" prefetch={false}><MessageSquare size={20} /><span>All conversations</span></Link>
+            {!reviewerDemo && <><Link href="/dashboard/memory" prefetch={false}><BookOpen size={20} /><span>Memory</span></Link><Link href="/dashboard/settings" prefetch={false}><Puzzle size={20} /><span>Connected agents</span></Link></>}
+          </nav>
+          <div className="m9r-dash-profile-row">
+            <DashboardMenu label="Profile and workspace" align="left" className="m9r-dash-profile-menu" trigger={<><span className="m9r-dash-profile-avatar">{initial}</span><span>{displayName}</span></>}>
+              {close => <>
+                {!reviewerDemo && <WorkspaceSwitcher projects={projects} activeProjectId={activeProjectId} workspaceUsage={workspaceUsage} />}
+                <button type="button" onClick={() => { close(); toggleMode(); }}>Switch to {mode === "night" ? "light" : "dark"} appearance</button>
+                <button type="button" onClick={() => { close(); setPaletteOpen(true); }}>Quick actions <kbd>Ctrl K</kbd></button>
+                <MachineConnectionBanner hasLiveConnection={agentStatus.agents.some(agent => agent.live)} hasRegisteredConnection={agentStatus.agents.some(agent => agent.registered)} reviewerDemo={reviewerDemo} />
+                <button type="button" disabled={signingOut} onClick={() => { close(); void signOut(); }}><LogOut size={16} />Sign out</button>
+              </>}
+            </DashboardMenu>
+            {!reviewerDemo && <Link href="/dashboard/settings" aria-label="Settings" title="Settings"><Settings size={18} /></Link>}
           </div>
         </div>
         </div>
@@ -619,9 +504,11 @@ function MemoryNavLink({ href, label, count }: { href: string; label: string; co
 function SidebarAgentPicker({
   chatActive,
   agentStatus,
+  query = "",
 }: {
   chatActive: boolean;
   agentStatus: AgentStatusSummary;
+  query?: string;
 }) {
   const searchParams = useSearchParams();
   const selectedAgent = searchParams.get("agent") ?? "all";
@@ -629,30 +516,11 @@ function SidebarAgentPicker({
   return (
     <div className={`wf-agent-picker ${chatActive ? "" : "opacity-70"}`.trim()} aria-label="Agent filter">
       <div className="wf-micro mb-1 mt-1 text-[color:var(--ol-text-faint)]">Agents</div>
-      {agentLinksForStatus(agentStatus).map(({ key, label, agentKind }) => {
-        const selected = selectedAgent === key;
-        const status = key === "all" ? null : agentStatus.byKey[agentKind ?? ""];
-        return (
-          <div key={key} className="wf-agent-picker-row">
-            <Link
-              href={key === "all" ? "/dashboard/agents" : `/dashboard/agents?agent=${key}`}
-              aria-current={selected ? "true" : undefined}
-              data-tip={label}
-            >
-              <AgentMark agentKey={agentKind ?? "other"} size={17} />
-              <span className="wf-agent-picker-label min-w-0 truncate">{label}</span>
-              {status && (
-                <span
-                  className="wf-agent-dot"
-                  data-registered={status.registered}
-                  data-connected={status.connected}
-                  data-live={status.live}
-                  aria-hidden
-                />
-              )}
-            </Link>
-          </div>
-        );
+      {agentLinksForStatus(agentStatus).filter(({ key, label }) => key !== "all" && label.toLowerCase().includes(query.trim().toLowerCase())).map(({ key, label, agentKind }) => {
+        const status = agentStatus.agents.find(agent => agent.key === key);
+        return <Link key={key} className="m9r-dash-contact" href={`/dashboard/agents?agent=${encodeURIComponent(key)}`} aria-current={selectedAgent === key ? "page" : undefined}>
+          <DashboardContactContents name={label} agent={agentKind} preview={status?.live ? "Connected · ready for your message" : "Offline"} />
+        </Link>;
       })}
     </div>
   );

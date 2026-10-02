@@ -6,11 +6,13 @@ import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, Inbox as InboxIcon, LogOut } from "lucide-react";
 import { ChannelWelcome } from "./ChannelWelcome";
+import { DashboardChatHeader, DashboardPicker } from "./dashboard-chrome/Chrome";
+import { DashboardModels } from "./dashboard-chrome/DashboardModels";
+import { Bug, Monitor, Plus, ArrowUp } from "lucide-react";
 import { useComposerAutosize } from "./useComposerAutosize";
-import { BorderBeam } from "border-beam";
 import { TerminalWorkspace, type PtyRoomSession } from "./TerminalWorkspace";
 import { TERMINAL_ENABLED } from "@/lib/terminal-config";
-import { AttachIcon, MentionIcon, SendIcon } from "@/components/product/wf-icons";
+import { AttachIcon, MentionIcon } from "@/components/product/wf-icons";
 import { AgentMark, AGENT_BRAND_COLOR } from "@/components/product/WorkspaceUI";
 import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import { type AgentView } from "@/lib/agent-workspace-data";
@@ -803,6 +805,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   const sidePanelResize = usePanelResizer("ol-side-panel-width", 320, 220, 480);
   const filePanelResize = usePanelResizer("ol-file-panel-width", 640, 360, 1000);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [transcriptSearch, setTranscriptSearch] = useState("");
   const [draft, setDraft] = useState("");
   const [routeSuggestionDismissed, setRouteSuggestionDismissed] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -995,6 +998,17 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   const mentionHighlightRef = useRef<HTMLDivElement | null>(null);
   const messagesListRef = useRef<HTMLOListElement | null>(null);
   const searchParams = useSearchParams();
+  const router = useRouter();
+  useEffect(() => {
+    if (searchParams.get("activity") !== "1") return;
+    const timer = window.setTimeout(() => {
+      setShowInbox(true);
+      const params = new URLSearchParams(searchParams.toString());
+      params.delete("activity");
+      router.replace(`${window.location.pathname}${params.size ? `?${params}` : ""}`, { scroll: false });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [searchParams, router]);
   // Read reactively (not captured once at mount): a deep link's ?message=
   // must re-arm on a client-side navigation too -- e.g. clicking "Join" on
   // a Live Sessions row while already inside the app changes the URL via
@@ -1008,7 +1022,6 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // same link doesn't re-scroll/re-highlight on every render, while a *new*
   // one (different conversation+message pair) still fires.
   const consumedDeepLinkKeyRef = useRef<string | null>(null);
-  const router = useRouter();
   // Which channel is open is URL state (?conversation=), because the list that
   // switches it now lives in the primary nav (ProductShell) rather than in
   // this component -- same reason agent selection travels as ?agent=.
@@ -2365,49 +2378,20 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 sidePanelMode) -- both used to be buried in a "more actions"
                 dropdown or a full-screen modal; this is the one consistent
                 mechanism for both. */}
-            <header className="m9r-channel-header">
-              <div className="min-w-0 m9r-channel-heading">
-                <h2>{channelDisplayName(selected)}</h2>
-                {selected.description && <p>{selected.description}</p>}
-              </div>
-            </header>
-            <nav className="m9r-channel-dock" aria-label="Channel panels">
-              {onOpenReview && (
-                <button type="button" className="m9r-channel-dock__item" data-active={reviewActive} onClick={onOpenReview} aria-pressed={reviewActive} aria-label={pendingReviewCount ? `Ready for Review, ${pendingReviewCount} pending` : "Ready for Review"}>
-                  Review{Boolean(pendingReviewCount) && <b aria-hidden>{pendingReviewCount! > 99 ? "99+" : pendingReviewCount}</b>}
-                </button>
-              )}
-              {onOpenWhispers && (
-                <button type="button" className="m9r-channel-dock__item" data-active={whispersActive} onClick={onOpenWhispers} aria-pressed={whispersActive} aria-label="Agent Whispers">
-                  Whispers
-                </button>
-              )}
-              {onOpenDrafts && (
-                <button type="button" className="m9r-channel-dock__item" data-active={draftsActive} onClick={onOpenDrafts} aria-pressed={draftsActive} aria-label="Shared Drafts">
-                  Drafts
-                </button>
-              )}
-              {onOpenPeople && (
-                <button type="button" className="m9r-channel-dock__item" data-active={peopleActive} onClick={onOpenPeople} aria-pressed={peopleActive} aria-label="People">
-                  People
-                </button>
-              )}
-              {onOpenLive && (
-                <button type="button" className="m9r-channel-dock__item" data-active={liveActive} onClick={onOpenLive} aria-pressed={liveActive} aria-label="Live Sessions">
-                  Live
-                </button>
-              )}
-              {onOpenHandoffs && (
-                <button type="button" className="m9r-channel-dock__item" data-active={handoffsActive} onClick={onOpenHandoffs} aria-pressed={handoffsActive} aria-label="Goal Handoffs">
-                  Handoffs
-                </button>
-              )}
-              {TERMINAL_ENABLED && (
-                <button type="button" className="m9r-channel-dock__item" data-active={terminalActive} onClick={() => setTerminalActive(true)} aria-pressed={terminalActive} aria-label="Terminal">
-                  Terminal
-                </button>
-              )}
-            </nav>
+            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"}
+              threads={<DashboardPicker label="Choose conversation" value="Thread" icon={<Plus size={12} />} options={conversations.map(conversation => ({ id: conversation.id, label: channelDisplayName(conversation) }))} onSelect={selectConversation} />}
+              model={<DashboardModels agents={agents} />}
+              actions={<>{onOpenLive && <button type="button" aria-label="Live sessions" title="Live sessions" onClick={onOpenLive} data-active={liveActive}><Monitor size={18} /></button>}{onOpenReview && <button type="button" aria-label="Ready for Review" title="Ready for Review" onClick={onOpenReview} data-active={reviewActive}><Bug size={18} />{Boolean(pendingReviewCount) && <i className="m9r-dash-notification-dot" />}</button>}</>}
+              search={transcriptSearch} onSearch={setTranscriptSearch}
+              menuActions={[
+                ...(onOpenPeople ? [{ label: "People", onSelect: onOpenPeople, active: peopleActive }] : []),
+                ...(onOpenDrafts ? [{ label: "Shared drafts", onSelect: onOpenDrafts, active: draftsActive }] : []),
+                ...(onOpenWhispers ? [{ label: "Agent whispers", onSelect: onOpenWhispers, active: whispersActive }] : []),
+                ...(onOpenHandoffs ? [{ label: "Goal handoffs", onSelect: onOpenHandoffs, active: handoffsActive }] : []),
+                { label: "Inbox", onSelect: () => setShowInbox(true) },
+                ...(TERMINAL_ENABLED ? [{ label: "Terminal", onSelect: () => setTerminalActive(true) }] : []),
+              ]}
+            />
             <ol ref={messagesListRef} className="wf-chat-messages scrollbar-thin" data-verbosity={verbosity}>
               {/* Step groups now render inline, per-message, right where
                   MessageTodoList already does -- see stepGroupByMessageId
@@ -2445,7 +2429,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 const pills = reactionPills(message);
                 const resolvedCard = resolvedCards[message.id];
                 return (
-                <li key={message.id} id={`message-${message.id}`}>
+                <li key={message.id} id={`message-${message.id}`} hidden={Boolean(transcriptSearch.trim()) && !message.body.toLowerCase().includes(transcriptSearch.trim().toLowerCase())}>
                   {isNewDay && <div className="wf-chat-day-divider" role="separator"><span>{dayLabel(message.created_at, now)}</span></div>}
                   {showUnreadDivider && <div className="wf-chat-unread-divider" role="separator"><span>New</span></div>}
                   {/* D1 identity rule: humans get sans, machines get mono --
@@ -2829,7 +2813,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
               })()}
             </ol>
             {threadRoot && <aside className="wf-chat-thread" aria-label="Message thread"><header><strong>Thread</strong><button type="button" onClick={() => setReplyTargetId(null)}>Close</button></header><p>{threadRoot.body}</p><small>{threadReplies.length} repl{threadReplies.length === 1 ? "y" : "ies"}</small>{threadReplies.map((reply) => { const replyIsViewer = Boolean(viewerUserId) && reply.sender_user_id === viewerUserId; return <div key={reply.id}><strong>{replyIsViewer ? "Me" : reply.sender_user_id ? reply.sender_display_name ?? "Teammate" : reply.sender_display_name ?? labelFor(reply.sender_connection_id)}</strong><span>{reply.body}</span></div>; })}</aside>}
-            <BorderBeam className="m9r-composer-beam" size="md" colorVariant="mono" strength={0.65} active theme="auto">
+            <div className="m9r-composer-frame">
             <form className="wf-chat-composer" onSubmit={submit}>
               {replyTargetId && <div className="wf-chat-reply-context">Replying in thread <button type="button" onClick={() => setReplyTargetId(null)}>Cancel</button></div>}
               {interjectFor && (
@@ -3010,7 +2994,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                     </button>
                   ) : (
                     <button className="wf-chat-send-button" type="submit" disabled={!draft.trim()} aria-label="Send message">
-                      <SendIcon size={16} />
+                      <ArrowUp size={17} />
                     </button>
                   )}
                 </div>
@@ -3035,7 +3019,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 <p className="wf-chat-typing">{typingParticipantIds.map((id) => labelFor(id)).join(", ")} {typingParticipantIds.length === 1 ? "is" : "are"} typing…</p>
               )}
             </form>
-            </BorderBeam>
+            </div>
             {notice && (
               <div className="wf-chat-toast" role="alert">
                 <span>{notice}</span>

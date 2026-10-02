@@ -3,11 +3,12 @@
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Hash, Lock, Plus, Check } from "lucide-react";
+import { Plus, Check } from "lucide-react";
 import { channelDisplayName, channelGroupForConversation } from "@/lib/workspace-channel-groups";
 import { channelHref } from "@/lib/run-navigation";
 import type { ConnectedAgentNavItem } from "@/lib/agent-status-summary";
 import { Button, AgentMark } from "@/components/product/WorkspaceUI";
+import { DashboardContactContents } from "./dashboard-chrome/Chrome";
 
 interface SwitcherConversation {
   id: string;
@@ -17,6 +18,7 @@ interface SwitcherConversation {
   description: string | null;
   is_private: boolean;
   unread_count: number;
+  messages?: Array<{ body: string; created_at: string }>;
 }
 
 interface WorkspaceMemberOption {
@@ -38,15 +40,28 @@ interface WorkspaceMemberOption {
 export default function SidebarChannelList({
   chatActive,
   agents,
+  query = "",
 }: {
   chatActive: boolean;
   agents: ConnectedAgentNavItem[];
+  query?: string;
 }) {
   const [conversations, setConversations] = useState<SwitcherConversation[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const searchParams = useSearchParams();
   const selectedId = searchParams.get("conversation");
   const router = useRouter();
+
+  useEffect(() => {
+    if (searchParams.get("newChannel") !== "1") return;
+    const timer = window.setTimeout(() => {
+      setShowCreate(true);
+      const params = new URLSearchParams(searchParams.toString());
+      params.delete("newChannel");
+      router.replace(`${window.location.pathname}${params.size ? `?${params}` : ""}`, { scroll: false });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [searchParams, router]);
 
   async function refresh() {
     try {
@@ -61,6 +76,12 @@ export default function SidebarChannelList({
   }
 
   useEffect(() => {
+    const open = () => setShowCreate(true);
+    window.addEventListener("m9r:new-channel", open);
+    return () => window.removeEventListener("m9r:new-channel", open);
+  }, []);
+
+  useEffect(() => {
     // The async refresh synchronizes the navigation list with the server.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
@@ -72,14 +93,13 @@ export default function SidebarChannelList({
     <div className={`wf-channel-nav ${chatActive ? "" : "opacity-70"}`.trim()} aria-label="Channels">
       <div className="wf-micro mb-1 mt-1 text-[color:var(--ol-text-faint)]">Channels</div>
       <ul className="wf-channel-nav-list">
-        {channels.map((channel) => {
+        {channels.filter((channel) => channelDisplayName(channel).toLowerCase().includes(query.trim().toLowerCase())).map((channel) => {
           const isCore = channelGroupForConversation({ channelSlug: channel.channel_slug, channelKind: channel.channel_kind, topic: channel.topic }) === "core";
           const active = channel.id === selectedId;
           return (
             <li key={channel.id} className="wf-channel-nav-row">
-              <Link href={channelHref(channel.id)} className="wf-channel-nav-item" aria-current={active ? "true" : undefined}>
-                {channel.is_private ? <Lock size={12} aria-hidden /> : <Hash size={12} aria-hidden />}
-                <span className="truncate">{channelDisplayName(channel)}</span>
+              <Link href={channelHref(channel.id)} className="m9r-dash-contact" aria-current={active ? "page" : undefined}>
+                <DashboardContactContents name={channelDisplayName(channel)} agent="other" preview={channel.messages?.at(-1)?.body ?? channel.description ?? "Start a conversation"} />
                 {channel.unread_count > 0 && <b className="wf-channel-nav-unread">{channel.unread_count > 99 ? "99+" : channel.unread_count}</b>}
               </Link>
               {!isCore && (
