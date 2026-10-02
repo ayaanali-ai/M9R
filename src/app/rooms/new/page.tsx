@@ -1,44 +1,98 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/browser";
-import { ensureGuestSession } from "@/lib/rooms/ensure-guest-session";
+import styles from "../room-url.module.css";
 
-/**
- * Functional only, no design pass yet. No signup wall: creating a room mints the
- * same silent anonymous session a guest gets when opening a room link (matches the
- * product's zero-friction stance -- signup only becomes real once hosting moves to a
- * persistent/paid cloud room, a later step, not this one).
- */
+type AccessState = "checking" | "ready" | "signed-out" | "guest" | "unavailable";
+
 export default function NewRoomPage() {
   const router = useRouter();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [signInBusy, setSignInBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [ready, setReady] = useState(false);
+  const [access, setAccess] = useState<AccessState>("checking");
+  const supabaseRef = useRef<ReturnType<typeof createClient>>(null);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const supabase = createClient();
-      if (!supabase) { setError("Supabase is not configured."); return; }
-      const guest = await ensureGuestSession(supabase);
-      if (!guest.ok) { setError(`Could not start a session: ${guest.error}`); return; }
-      setReady(true);
+      try {
+        const supabase = createClient();
+        if (!supabase) {
+          setError("Supabase is not configured.");
+          setAccess("unavailable");
+          return;
+        }
+        supabaseRef.current = supabase;
+        const { data, error: sessionError } = await supabase.auth.getUser();
+        if (cancelled) return;
+        if (sessionError) {
+          setError("Could not verify your sign-in. Reload the page and try again.");
+          setAccess("unavailable");
+          return;
+        }
+        if (!data.user) {
+          setAccess("signed-out");
+          return;
+        }
+        setAccess(data.user.is_anonymous ? "guest" : "ready");
+      } catch {
+        if (!cancelled) {
+          setError("Could not verify your sign-in. Reload the page and try again.");
+          setAccess("unavailable");
+        }
+      }
     })();
+    return () => { cancelled = true; };
   }, []);
 
-  async function createRoom() {
-    if (!name.trim() || busy) return;
+  async function continueToSignIn() {
+    if (signInBusy) return;
+    setSignInBusy(true);
+    setError(null);
+    try {
+      if (access === "guest") {
+        const supabase = supabaseRef.current;
+        if (!supabase) {
+          setError("Could not open sign-in. Reload the page and try again.");
+          return;
+        }
+        const { error: signOutError } = await supabase.auth.signOut({ scope: "local" });
+        if (signOutError) {
+          setError("Could not end this guest session. Reload the page and try again.");
+          return;
+        }
+      }
+      window.location.assign(`/auth?next=${encodeURIComponent("/rooms/new")}`);
+    } catch {
+      setError("Could not open sign-in. Check your connection and try again.");
+    } finally {
+      setSignInBusy(false);
+    }
+  }
+
+  async function createRoom(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const roomName = name.trim();
+    if (!roomName || busy || access !== "ready") return;
+
     setBusy(true);
     setError(null);
     try {
       const response = await fetch("/api/rooms", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: name.trim() }),
+        body: JSON.stringify({ name: roomName }),
       });
       const data = await response.json().catch(() => ({})) as { room?: { id: string }; error?: string };
+      if (response.status === 401) {
+        setError("Your sign-in session expired. Sign in again to create a room.");
+        setAccess("signed-out");
+        return;
+      }
       if (!response.ok || !data.room) { setError(data.error ?? "Could not create the room."); return; }
       router.push(`/rooms/${data.room.id}`);
     } catch {
@@ -48,26 +102,74 @@ export default function NewRoomPage() {
     }
   }
 
-  if (!ready && !error) return <p style={{ padding: 24 }}>Loading…</p>;
-
   return (
-    <div style={{ maxWidth: 480, margin: "48px auto", padding: 24 }}>
-      <h1>Create a room</h1>
-      <p>Anyone with the link can ask to join with no account. You admit them.</p>
-      <input
-        type="text"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="Room name"
-        maxLength={80}
-        disabled={busy || !ready}
-        style={{ width: "100%", padding: 8, marginTop: 12 }}
-        onKeyDown={(e) => { if (e.key === "Enter") void createRoom(); }}
-      />
-      {error && <p style={{ color: "crimson" }}>{error}</p>}
-      <button onClick={() => void createRoom()} disabled={busy || !ready || !name.trim()} style={{ marginTop: 12, padding: "8px 16px" }}>
-        {busy ? "Creating…" : "Create a room"}
-      </button>
+    <div className={styles.page}>
+      <main className={styles.createShell}>
+        <section className={styles.createContent} aria-labelledby="create-room-title">
+          <p className={styles.eyebrow}>M9R · ROOM NETWORK</p>
+          <h1 className={styles.createTitle} id="create-room-title">Create a room</h1>
+          <p className={styles.createLede}>Create a room from your M9R workspace. Guests can ask to join without an account; you decide who gets in.</p>
+
+          {access === "checking" && <p className={styles.loadingMessage} role="status">Checking your workspace access…</p>}
+
+          {access === "ready" && (
+            <>
+              <form className={styles.createForm} onSubmit={(event) => void createRoom(event)}>
+                <label className={styles.fieldLabel} htmlFor="room-name">
+                  Room name
+                  <input
+                    className={styles.createInput}
+                    id="room-name"
+                    name="name"
+                    type="text"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="Give this room a name"
+                    maxLength={80}
+                    autoComplete="off"
+                    disabled={busy}
+                    required
+                  />
+                </label>
+
+                <div className={styles.agentShelf} aria-label="Agents that can join this room">
+                  <p className={styles.agentShelfTitle}>Bring your agents</p>
+                  <p className={styles.agentShelfCopy}>Create the room, then share its link with the people and agents you want to coordinate with.</p>
+                  <div className={styles.agentList} aria-label="Example agent providers">
+                    <span className={styles.agentPill}>Claude</span>
+                    <span className={styles.agentPill}>Codex</span>
+                    <span className={styles.agentPill}>OpenCode</span>
+                  </div>
+                </div>
+
+                {error && <p className={styles.inlineError} role="alert">{error}</p>}
+
+                <button className={styles.primaryButton} type="submit" disabled={busy || !name.trim()}>
+                  {busy ? "Creating…" : "Create a room"}
+                </button>
+              </form>
+
+              <p className={styles.createFootnote}>Guests can request access from the link. You decide who gets in.</p>
+            </>
+          )}
+
+          {(access === "signed-out" || access === "guest") && (
+            <div className={styles.createForm}>
+              <p className={styles.agentShelfCopy}>
+                {access === "guest"
+                  ? "This browser is using a guest room session. Signing in here ends that session; you may need to reopen rooms you joined as a guest."
+                  : "Room hosts need an M9R workspace account. People you invite can still request to join without an account."}
+              </p>
+              {error && <p className={styles.inlineError} role="alert">{error}</p>}
+              <button className={styles.primaryButton} type="button" onClick={() => void continueToSignIn()} disabled={signInBusy}>
+                {signInBusy ? "Opening sign-in…" : "Sign in to create a room"}
+              </button>
+            </div>
+          )}
+
+          {access === "unavailable" && error && <p className={styles.inlineError} role="alert">{error}</p>}
+        </section>
+      </main>
     </div>
   );
 }

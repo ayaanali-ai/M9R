@@ -154,14 +154,22 @@ test("room artifacts are versioned shared documents, not arbitrary generic paylo
   assert.match(migration, /p_payload->>'baseEventId'[\s\S]*?p_causal_event_ids/);
 });
 
-test("room creation is session and workspace-member scoped; room invitations require room authority and store only a token digest", () => {
+test("room creation requires a workspace host session while room links keep anonymous guest joining", () => {
   const create = read("src/app/api/rooms/route.ts");
+  const createPage = read("src/app/rooms/new/page.tsx");
+  const roomPage = read("src/app/rooms/[roomId]/page.tsx");
   const invite = read("src/app/api/rooms/[roomId]/invites/route.ts");
   const migration = read("supabase/migrations/20260926010000_cross_machine_rooms.sql");
   assert.match(create, /auth\.getUser\(\)/);
   assert.match(create, /from\("workspace_members"\)/);
   assert.match(create, /from\("m9r_rooms"\)/);
   assert.match(create, /parseRoomName/);
+  assert.doesNotMatch(createPage, /ensureGuestSession/);
+  assert.match(createPage, /data\.user\.is_anonymous \? "guest" : "ready"/);
+  assert.match(createPage, /signOut\(\{ scope: "local" \}\)/);
+  assert.match(createPage, /Room hosts need an M9R workspace account/);
+  assert.match(roomPage, /ensureGuestSession\(supabase\)/);
+  assert.match(roomPage, /\/api\/rooms\/\$\{roomId\}\/join/);
   assert.match(invite, /auth\.getUser\(\)/);
   assert.match(migration, /room_owner_id = caller_id/);
   assert.match(migration, /wm\.role in \('owner', 'admin'\)/);

@@ -1,9 +1,10 @@
 "use client";
 
-import { use, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { createClient } from "@/lib/supabase/browser";
 import { ensureGuestSession } from "@/lib/rooms/ensure-guest-session";
 import { projectRoomArtifacts } from "@/lib/rooms/room-artifacts";
+import styles from "../room-url.module.css";
 
 type RoomView = { room: { id: string; name: string; status: string }; membership: { status: string } };
 type PendingMember = { memberId: string; userId: string; requestedAt: string };
@@ -51,6 +52,18 @@ type RoomHandoff = {
   sequence: number;
 };
 type PresenceEntry = { participantId?: string; displayName?: string; activity?: string };
+
+function subscribeToLocationOrigin() {
+  return () => {};
+}
+
+function getLocationOrigin() {
+  return window.location.origin;
+}
+
+function getServerLocationOrigin() {
+  return "";
+}
 
 function mergeRoomEvents(current: RoomEvent[], incoming: RoomEvent[]): RoomEvent[] {
   const byId = new Map(current.map((event) => [event.id, event]));
@@ -131,11 +144,10 @@ function actorLabel(actorId: string, members: RoomMember[]): string {
 }
 
 /**
- * Functional only, no design pass yet (per the owner). A guest opens this link with
- * no account: a silent anonymous session is minted, a join is requested, and this
- * page polls status until the host admits them. The room's creator sees the same
- * page plus a pending-requests list to admit from. Requires "Allow anonymous
- * sign-ins" enabled on the Supabase project -- see ensure-guest-session.ts.
+ * A guest opens this link without creating a visible account: a silent anonymous
+ * session is minted, a join is requested, and this page polls until the host admits
+ * them. The room's creator sees the same page plus requests they can admit. The
+ * flow requires "Allow anonymous sign-ins" in Supabase; see ensure-guest-session.ts.
  */
 export default function RoomPage({ params }: { params: Promise<{ roomId: string }> }) {
   const { roomId } = use(params);
@@ -143,6 +155,9 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const [pending, setPending] = useState<PendingMember[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const origin = useSyncExternalStore(subscribeToLocationOrigin, getLocationOrigin, getServerLocationOrigin);
+  const shareUrl = origin ? new URL(`/rooms/${encodeURIComponent(roomId)}`, origin).toString() : "";
   const [events, setEvents] = useState<RoomEvent[]>([]);
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [leases, setLeases] = useState<RoomLease[]>([]);
@@ -172,6 +187,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const currentMember = members.find((member) => member.isYou);
   const currentActorId = selectedSeatId ? `seat:${selectedSeatId}` : currentMember?.actorId ?? "";
   const isRoomOwner = currentMember?.role === "owner";
+  const agentCount = members.reduce((count, member) => count + member.agents.length, 0);
 
   const loadRoomEvents = useCallback(async () => {
     const response = await fetch(`/api/rooms/${roomId}/events?limit=100`, { cache: "no-store" });
@@ -479,31 +495,84 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     if (response.ok) void refresh();
   }
 
-  function copyLink() {
-    void navigator.clipboard.writeText(window.location.href);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+  async function copyLink() {
+    if (!shareUrl) return;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable.");
+      await navigator.clipboard.writeText(shareUrl);
+      setCopyError(null);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopied(false);
+      setCopyError("Clipboard access was blocked. Select the room URL above to copy it manually.");
+    }
   }
 
-  if (error) return <div style={{ padding: 24 }}><p style={{ color: "crimson" }}>{error}</p></div>;
-  if (!view) return <div style={{ padding: 24 }}><p>Loading…</p></div>;
+  if (error) return <div className={styles.page}><main className={styles.roomShell}><p className={styles.inlineError} role="alert">{error}</p></main></div>;
+  if (!view) return <div className={styles.page}><main className={styles.roomShell}><p className={styles.loadingMessage} role="status">Loading room…</p></main></div>;
 
   const status = view.membership.status;
+  const roomIsLive = view.room.status === "active";
+  const pageTitle = status === "active" ? `“${view.room.name}” is ready.` : view.room.name;
+  const pageDescription = status === "requested"
+    ? "Your request is with the host. This room will open here if you are admitted."
+    : status === "denied"
+      ? "The host denied this request. You can still copy the room link to keep it handy."
+      : "Share this link with people and agents you want to coordinate with. They can ask to join; the room host reviews every request.";
 
   return (
-    <div style={{ maxWidth: 560, margin: "48px auto", padding: 24 }}>
-      <h1>{view.room.name}</h1>
-      <p>
-        <button onClick={copyLink} style={{ padding: "4px 10px" }}>{copied ? "Copied" : "Copy room link"}</button>
-      </p>
+    <div className={styles.page}>
+      <main className={styles.roomShell}>
+        <header className={styles.shareHero}>
+          <p className={styles.shareEyebrow}>
+            {status === "active" && roomIsLive && <span className={styles.liveDot} aria-hidden="true" />}
+            {status === "active" ? roomIsLive ? "Room is live" : "Room link ready" : status === "requested" ? "Request sent" : status === "denied" ? "Request denied" : "Room link"}
+          </p>
+          <h1 className={styles.shareTitle}>{pageTitle}</h1>
+          <p className={styles.shareLede}>{pageDescription}</p>
 
-      {status === "requested" && <p>Waiting for the host to let you in…</p>}
-      {status === "denied" && <p style={{ color: "crimson" }}>The host denied this request.</p>}
+          <div className={styles.shareUrlRow}>
+            <input
+              className={styles.shareUrlInput}
+              aria-label="Shareable room URL"
+              readOnly
+              value={shareUrl}
+              placeholder="Preparing room link…"
+            />
+            <button className={`${styles.primaryButton} ${styles.copyButton}`} onClick={() => void copyLink()} disabled={!shareUrl}>
+              {copied ? "Copied" : "Copy link"}
+            </button>
+          </div>
+          <p className={`${styles.copyFeedback} ${copyError ? styles.copyFeedbackError : ""}`} role="status" aria-live="polite">
+            {copyError ?? (copied ? "Room link copied." : "")}
+          </p>
+
+          <dl className={styles.roomSummary} aria-label="Room summary">
+            <div className={styles.summaryItem}>
+              <dt className={styles.summaryLabel}>MEMBERS</dt>
+              <dd className={styles.summaryValue}>{members.length ? members.length : "—"}</dd>
+            </div>
+            <div className={styles.summaryItem}>
+              <dt className={styles.summaryLabel}>AGENTS</dt>
+              <dd className={styles.summaryValue}>{members.length ? agentCount : "—"}</dd>
+            </div>
+            <div className={styles.summaryItem}>
+              <dt className={styles.summaryLabel}>REQUESTS WAITING</dt>
+              <dd className={styles.summaryValue}>{pending === null ? "—" : pending.length}</dd>
+            </div>
+          </dl>
+
+          {status === "active" && <a className={styles.workspaceLink} href="#room-workspace">Continue to the room workspace ↓</a>}
+        </header>
+
+      {status === "requested" && <p className={styles.statusBanner} role="status">Waiting for the host to let you in…</p>}
+      {status === "denied" && <p className={`${styles.statusBanner} ${styles.statusBannerError}`} role="status">The host denied this request.</p>}
       {status === "active" && (
-        <section aria-label="Shared room" style={{ marginTop: 24, display: "grid", gap: 24 }}>
-          <div style={{ border: "1px solid #d0d7de", borderRadius: 12, padding: 16 }}>
+        <section id="room-workspace" className={styles.collaboration} aria-label="Shared room">
+          <div className={styles.panel}>
             <h2 style={{ marginTop: 0 }}>Room presence <span aria-live="polite" style={{ fontSize: 13, fontWeight: 400 }}>· {realtimeStatus}</span></h2>
-            {eventError && <p role="alert" style={{ color: "crimson" }}>{eventError}</p>}
+            {eventError && <p className={styles.inlineError} role="alert">{eventError}</p>}
             {onlineMembers.length === 0 ? <p>No other members are currently here.</p> : (
               <ul aria-label="Members currently in the room">
                 {onlineMembers.map((member) => <li key={member.participantId}>{member.displayName ?? "Room member"} — {member.activity ?? "present"}</li>)}
@@ -523,12 +592,12 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
                 </select>
               </label>
             )}
-            <p style={{ fontSize: 13, color: "#57606a" }}>Presence is live-only. Page data, browser cursors, and local credentials are not included.</p>
+            <p className={styles.muted}>Presence is live-only. Page data, browser cursors, and local credentials are not included.</p>
           </div>
 
-          <div style={{ border: "1px solid #d0d7de", borderRadius: 12, padding: 16 }}>
+          <div className={styles.panel}>
             <h2 style={{ marginTop: 0 }}>Shared artifacts</h2>
-            <p style={{ fontSize: 13, color: "#57606a" }}>Room documents are durable snapshots. Edits are serialized and based on the exact version you opened; a competing edit is rejected instead of silently overwritten. Only include material intended for every admitted room member.</p>
+            <p className={styles.muted}>Room documents are durable snapshots. Edits are serialized and based on the exact version you opened; a competing edit is rejected instead of silently overwritten. Only include material intended for every admitted room member.</p>
             <form onSubmit={(event) => void saveArtifact(event)} style={{ display: "grid", gap: 8 }}>
               <label>Artifact title<input value={artifactTitle} onChange={(event) => setArtifactTitle(event.target.value)} maxLength={160} required style={{ display: "block", width: "100%", marginTop: 4 }} /></label>
               <label>Shared content<textarea value={artifactContent} onChange={(event) => setArtifactContent(event.target.value)} maxLength={8000} rows={8} style={{ display: "block", width: "100%", marginTop: 4, fontFamily: "ui-monospace, monospace" }} /></label>
@@ -541,13 +610,13 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
               <ul aria-label="Shared room artifacts" style={{ paddingLeft: 22 }}>
                 {artifacts.map((artifact) => <li key={artifact.id} style={{ marginTop: 16 }}>
                   <strong>{artifact.title}</strong> <button type="button" disabled={sending} onClick={() => editArtifact(artifact)}>Edit latest version</button>
-                  <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "ui-monospace, monospace", background: "#f6f8fa", padding: 12, borderRadius: 8 }}>{artifact.content || "(empty artifact)"}</pre>
+                  <pre className={styles.artifactBody}>{artifact.content || "(empty artifact)"}</pre>
                 </li>)}
               </ul>
             )}
           </div>
 
-          <div style={{ border: "1px solid #d0d7de", borderRadius: 12, padding: 16 }}>
+          <div className={styles.panel}>
             <h2 style={{ marginTop: 0 }}>Shared goals</h2>
             <form onSubmit={(event) => void createTask(event)} style={{ display: "grid", gap: 8 }}>
               <label>Task title<input value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} maxLength={160} required style={{ display: "block", width: "100%", marginTop: 4 }} /></label>
@@ -639,9 +708,9 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             )}
           </div>
 
-          <div style={{ border: "1px solid #d0d7de", borderRadius: 12, padding: 16 }}>
+          <div className={styles.panel}>
             <h2 style={{ marginTop: 0 }}>Activity</h2>
-            <p style={{ fontSize: 13, color: "#57606a" }}>Messages and goals persist for admitted room members. Do not send passwords, tokens, private page contents, or local file contents.</p>
+            <p className={styles.muted}>Messages and goals persist for admitted room members. Do not send passwords, tokens, private page contents, or local file contents.</p>
             <ol aria-live="polite" aria-relevant="additions" style={{ maxHeight: 360, overflow: "auto", paddingLeft: 24 }}>
               {events.filter((event) => ["post", "ask", "reply", "task", "handoff", "artifact"].includes(event.kind)).map((event) => {
                 const actor = event.actor_seat_id ? `Agent ${event.actor_seat_id.slice(0, 6)}`
@@ -651,7 +720,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
                 const taskLabel = event.kind === "task" ? `${String(payload.type ?? "updated")} goal: ${String(payload.title ?? payload.taskId ?? "room task")}` : null;
                 const handoffLabel = event.kind === "handoff" ? `${String(payload.type ?? "handoff")} handoff${typeof payload.context === "string" ? `: ${payload.context}` : ""}` : null;
                 const artifactLabel = event.kind === "artifact" ? `${String(payload.type ?? "updated")} artifact: ${String(payload.title ?? payload.artifactId ?? "shared document")}` : null;
-                return <li key={event.id} style={{ marginBottom: 10 }}><strong>{actor}</strong>{eventText ? `: ${eventText}` : taskLabel ? ` — ${taskLabel}` : handoffLabel ? ` — ${handoffLabel}` : artifactLabel ? ` — ${artifactLabel}` : ` — ${event.kind}`}<time style={{ display: "block", color: "#6e7781", fontSize: 12 }} dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString()}</time></li>;
+                return <li key={event.id} style={{ marginBottom: 10 }}><strong>{actor}</strong>{eventText ? `: ${eventText}` : taskLabel ? ` — ${taskLabel}` : handoffLabel ? ` — ${handoffLabel}` : artifactLabel ? ` — ${artifactLabel}` : ` — ${event.kind}`}<time className={styles.muted} style={{ display: "block" }} dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString()}</time></li>;
               })}
               {events.length === 0 && <li>No shared activity yet.</li>}
             </ol>
@@ -665,12 +734,12 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       )}
 
       {pending !== null && (
-        <div style={{ marginTop: 24 }}>
+        <div className={`${styles.panel} ${styles.pendingPanel}`}>
           <h2>Pending requests</h2>
           {pending.length === 0 ? (
             <p>Nobody is waiting.</p>
           ) : (
-            <ul>
+            <ul className={styles.pendingList}>
               {pending.map((m) => (
                 <li key={m.memberId} style={{ marginBottom: 8 }}>
                   Guest {m.userId.slice(0, 8)} — requested {new Date(m.requestedAt).toLocaleTimeString()}{" "}
@@ -681,6 +750,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
           )}
         </div>
       )}
+      </main>
     </div>
   );
 }
