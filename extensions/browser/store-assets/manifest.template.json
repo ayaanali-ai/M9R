@@ -32,9 +32,6 @@
   "background": {
     "service_worker": "src/background.js"
   },
-  "chrome_url_overrides": {
-    "newtab": "newtab.html"
-  },
   "action": {
     "default_popup": "permission.html",
     "default_icon": {

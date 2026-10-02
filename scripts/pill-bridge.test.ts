@@ -86,11 +86,12 @@ test("only the top frame of a web page may register a nonce", async () => {
   assert.equal((await onRuntimeMessage(msg, scriptSender())).ok, true);
 });
 
-test("extension-owned New Tab can register a nonce, but other extension pages cannot", async () => {
+test("only a top-frame content script on an ordinary page can register a nonce; extension pages cannot", async () => {
   const { bridge } = load();
   const msg = { type: "m9r-pill-register", nonce: NONCE };
-  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}newtab.html` }))).ok, true);
-  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}newtab.html`, frameId: 1 }))).ok, false);
+  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: "https://example.com/" }))).ok, true);
+  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: "https://example.com/", frameId: 1 }))).ok, false);
+  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}newtab.html` }))).ok, false);
   assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}permission.html` }))).ok, false);
 });
 

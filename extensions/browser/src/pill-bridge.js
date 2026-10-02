@@ -92,10 +92,10 @@
     return (noncesByTab.get(tabId) || []).includes(nonce);
   }
 
-  /** Only a top-frame content script or M9R's own New Tab page may register a nonce. */
+  /** Only a top-frame content script on an ordinary page may register a nonce. */
   function isOwnContentScript(sender) {
     if (!sender || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return false;
-    return typeof sender.url === "string" && (/^https?:\/\//.test(sender.url) || sender.url === chrome.runtime.getURL("newtab.html"));
+    return typeof sender.url === "string" && /^https?:\/\//.test(sender.url);
   }
 
   async function registerNonce(sender, nonce) {
