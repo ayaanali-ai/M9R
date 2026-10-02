@@ -58,6 +58,7 @@ function belongsToSuite(name) {
       "page-notes-store.test.ts",
       "browser-extension-store-package.test.mjs",
       "native-input-client.test.js",
+      "quiet-input.test.js",
       "presence-frame-lifecycle.test.js",
       "presence-target-highlight.test.js",
     ].includes(name);

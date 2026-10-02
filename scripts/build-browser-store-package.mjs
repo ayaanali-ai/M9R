@@ -102,6 +102,7 @@ export function validateStoreManifest(manifest) {
   if (JSON.stringify(manifest.permissions) !== JSON.stringify(["tabs", "scripting", "alarms", "storage", "nativeMessaging", "search"])) fail("permissions must remain the reviewed minimum set");
   if (JSON.stringify(manifest.host_permissions) !== JSON.stringify(["http://*/*", "https://*/*"])) fail("required host access must remain limited to HTTP/HTTPS sites");
   if (manifest.optional_host_permissions !== undefined) fail("site access must not require per-site prompts");
+  if (manifest.optional_permissions !== undefined && JSON.stringify(manifest.optional_permissions) !== JSON.stringify(["debugger"])) fail("the only optional permission is debugger, for opt-in quiet mode");
   if (manifest.chrome_url_overrides !== undefined) fail("the store build must not override Chrome's New Tab page");
   // The overlay embeds the thread pill and the message bar as extension frames inside pages (so a page's scripts cannot read what the
   // owner types), which requires exactly those two pages, plus the static provider badges, to be web-accessible. Nothing else may be.

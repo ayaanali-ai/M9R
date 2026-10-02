@@ -12,6 +12,9 @@
     "nativeMessaging",
     "search"
   ],
+  "optional_permissions": [
+    "debugger"
+  ],
   "host_permissions": [
     "http://*/*",
     "https://*/*"

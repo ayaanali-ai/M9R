@@ -11,4 +11,6 @@
 | `web_accessible_resources`: `pill.html`, `composer.html`, `assets/providers/*.svg` (http/https pages) | The thread pill and the message bar are extension pages shown in a frame on the page, so a website's own scripts cannot read what the owner types. The provider badges are the small agent icons on cursors. | Only these three resources are exposed; no scripts, no other pages. The frames accept commands only with a per-tab secret that the extension's own content script registers. |
 | Microphone (web API, not a manifest permission) | Push-to-talk while Alt+M is held, in the message bar's frame; turned on once from an extension page. | Speech is recognised by Chrome's speech service; the extension never receives or stores audio. |
 
-Not requested: cookies, history, debugger, downloads, or `activeTab`. No remote code is loaded. Recheck this table against the packed manifest and the code immediately before every submission.
+| Optional `debugger` (requested only when the owner turns on quiet mode) | Lets agent clicks reach a page without moving the owner's mouse or taking their window. Only a fixed set of input commands is ever sent; Chrome shows its own "started debugging this browser" banner while attached. | Never granted at install; the owner opts in from the extension popup and can turn it off, which removes the permission. |
+
+Not requested at install: cookies, history, downloads, or `activeTab`. No remote code is loaded. Recheck this table against the packed manifest and the code immediately before every submission.
