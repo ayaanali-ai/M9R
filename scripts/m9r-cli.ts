@@ -1848,6 +1848,7 @@ async function runWebSetup(args: string[]): Promise<number> {
       executable: brokerRuntime.executable,
       args: brokerRuntime.args,
       workingDirectory: projectRoot,
+      hideConsole: true,
     };
     const desiredBrokerTask = buildLocalBrokerScheduledTaskAction(brokerTaskInput);
     const desiredBrokerTaskHash = hashLocalBrokerScheduledTaskAction(desiredBrokerTask);
@@ -2489,6 +2490,7 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
     executable: spec.nodeExecutable,
     args: [...spec.nodeArgs, spec.cliEntryPath, ...spec.args],
     workingDirectory: spec.workingDirectory,
+    hideConsole: true,
   };
   const desiredTaskAction = buildLocalBrokerScheduledTaskAction(brokerTaskInput);
   const desiredTaskHash = hashLocalBrokerScheduledTaskAction(desiredTaskAction);

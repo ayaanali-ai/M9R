@@ -58,6 +58,10 @@ interface SessionState {
   itemPaths: Map<string, string | null>;
   lastError: string | null;
   lastUsage: { inputTokens: number; outputTokens: number; totalTokens: number } | null;
+  model?: string | null;
+  effort?: string | null;
+  defaultModel?: string | null;
+  modelCatalog?: Record<string, unknown>[];
 }
 
 interface ServerState {
@@ -314,19 +318,45 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
     const thread = record(response?.thread);
     const threadId = typeof thread?.id === "string" ? thread.id : null;
     if (!threadId) throw new Error("Codex did not return a thread id.");
-    return this.registerSession(state, threadId, input.executionId ?? threadId, input.assignment.missionId);
+    const handle = this.registerSession(state, threadId, input.executionId ?? threadId, input.assignment.missionId);
+    this.session(handle).session.defaultModel = typeof response?.model === "string" ? response.model : null;
+    await this.configureSession({ session: handle, model: input.assignment.model ?? null, effort: input.assignment.effort ?? null });
+    return handle;
   }
 
   async resumeSession(input: { server: AgentServerHandle; providerSessionRef: string; assignment: ProviderAssignment; executionId?: string }): Promise<AgentSessionHandle> {
     const state = this.server(input.server);
-    await state.client.request("thread/resume", {
+    const response = record(await state.client.request("thread/resume", {
       threadId: input.providerSessionRef,
       cwd: state.workingDirectory,
       approvalPolicy: this.options.approvalPolicy ?? "on-request",
       sandbox: this.options.sandbox ?? "workspace-write",
       ...(input.assignment.model ? { model: input.assignment.model } : {}),
-    });
-    return this.registerSession(state, input.providerSessionRef, input.executionId ?? input.providerSessionRef, input.assignment.missionId);
+    }));
+    const handle = this.registerSession(state, input.providerSessionRef, input.executionId ?? input.providerSessionRef, input.assignment.missionId);
+    this.session(handle).session.defaultModel = typeof response?.model === "string" ? response.model : null;
+    await this.configureSession({ session: handle, model: input.assignment.model ?? null, effort: input.assignment.effort ?? null });
+    return handle;
+  }
+
+  async configureSession(input: { session: AgentSessionHandle; model: string | null; effort: string | null }): Promise<void> {
+    const { state, session } = this.session(input.session);
+    if (session.queue) throw new Error("Run settings can only change between turns.");
+    if (!session.modelCatalog) {
+      const catalog = record(await state.client.request("model/list", {}).catch(() => null));
+      const models = Array.isArray(catalog?.data) ? catalog.data.map(record).filter((value): value is Record<string, unknown> => Boolean(value)) : [];
+      session.modelCatalog = models;
+      session.handle.availableModels = models.flatMap(model => typeof model.model === "string" ? [{ id: model.model, label: typeof model.displayName === "string" ? model.displayName : model.model }] : []);
+    }
+    if (!input.model && session.model && !session.defaultModel) throw new Error("Provider default model is unavailable; cannot reset this session safely.");
+    const selectedModel = input.model ?? session.defaultModel;
+    const selected = session.modelCatalog.find(model => model.model === selectedModel);
+    if (input.model && !selected) throw new Error("Model is not reported by this Codex connection.");
+    const choices = Array.isArray(selected?.supportedReasoningEfforts) ? selected.supportedReasoningEfforts.map(record).filter((option): option is Record<string,unknown> => Boolean(option)) : [];
+    session.handle.availableEfforts = choices.flatMap(option => typeof option.reasoningEffort === "string" ? [{id:option.reasoningEffort,label:option.reasoningEffort}] : []);
+    if (input.effort && !session.handle.availableEfforts.some(option => option.id === input.effort)) throw new Error("Effort is not supported by the selected Codex model.");
+    session.model = selectedModel;
+    session.effort = input.effort;
   }
 
   async *prompt(input: { session: AgentSessionHandle; text: string }): AsyncIterable<InteractiveProviderEvent> {
@@ -346,7 +376,7 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
       if (session.activeTurnId) void state.client.request("turn/interrupt", { threadId: session.threadId, turnId: session.activeTurnId }).catch(() => undefined);
     }, timeoutMs);
     timeoutHandle.unref?.();
-    state.client.request("turn/start", { threadId: session.threadId, input: [{ type: "text", text: input.text.slice(0, MAX_PROMPT_CHARS), text_elements: [] }] })
+    state.client.request("turn/start", { threadId: session.threadId, ...(session.model ? { model: session.model } : {}), effort: session.effort ?? null, input: [{ type: "text", text: input.text.slice(0, MAX_PROMPT_CHARS), text_elements: [] }] })
       .then((response) => {
         const turnId = record(record(response)?.turn)?.id;
         if (typeof turnId === "string") session.activeTurnId = turnId;

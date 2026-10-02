@@ -1,39 +1,76 @@
 "use client";
-
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check, ChevronDown } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import type { AgentView } from "@/lib/agent-workspace-data";
+import type { AgentRunSettings } from "@/lib/agent-run-settings";
+import type { AvailableModelOption } from "@/lib/available-model-options";
 import { AgentMark } from "../WorkspaceUI";
-import { DashboardMenu, DashboardSearch } from "./Chrome";
+import { DashboardMenu } from "./Chrome";
 
-/** Grouped model menu backed by M9R's connection-owned model API. */
-export function DashboardModels({ agents }: { agents: AgentView[] }) {
+interface SettingsRead {
+  defaults: AgentRunSettings;
+  override: AgentRunSettings | null;
+  effective: AgentRunSettings;
+  models: AvailableModelOption[] | null;
+  efforts: AvailableModelOption[] | null;
+}
+function AgentSettings({ agent, conversationId }: { agent: AgentView; conversationId?: string }) {
   const router = useRouter();
-  const [query, setQuery] = useState("");
+  const [data, setData] = useState<SettingsRead | null>(null);
+  const [scope, setScope] = useState("connection");
+  const [model, setModel] = useState("");
+  const [effort, setEffort] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const connected = agents.filter(agent => agent.connectionId && agent.connected);
-  const single = connected.length === 1 ? connected[0] : null;
-  async function choose(agent: AgentView, model: string | null) {
-    if (busy || !agent.connectionId) return;
-    setBusy(true);
-    setError(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    const abort = new AbortController();
+    const query = new URLSearchParams({ connectionId: agent.connectionId! });
+    if (conversationId) query.set("conversationId", conversationId);
+    void fetch(`/api/agent/connection-settings?${query}`, { signal: abort.signal }).then(async response => {
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error ?? "Settings unavailable.");
+      setData(body); setModel(body.defaults.model ?? ""); setEffort(body.defaults.effort ?? "");
+    }).catch(error => { if (!abort.signal.aborted) setNotice(error.message); });
+    return () => abort.abort();
+  }, [agent.connectionId, conversationId]);
+  function changeScope(value: string) {
+    setScope(value);
+    const settings = value === "channel" ? data?.effective : data?.defaults;
+    setModel(settings?.model ?? ""); setEffort(settings?.effort ?? "");
+  }
+  async function save(inherit = false) {
+    setBusy(true); setNotice(null);
     try {
-      const response = await fetch(`/api/agent/connections/${encodeURIComponent(agent.connectionId)}/model`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) });
-      const result = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(result.error ?? "Could not change the model.");
+      const response = await fetch("/api/agent/connection-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ connectionId: agent.connectionId, model: inherit ? null : model || null, effort: inherit ? null : effort || null, ...(scope === "channel" ? { conversationId, inherit } : {}) }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Could not save settings.");
+      setNotice(inherit ? "Channel now inherits this agent's defaults." : "Saved. Applies before the next turn; the current turn keeps its settings.");
+      setData(previous => {
+        if (!previous) return previous;
+        const saved = { model: model || null, effort: effort || null };
+        const defaults = scope === "connection" ? saved : previous.defaults;
+        const override = scope === "channel" ? (inherit ? null : saved) : previous.override;
+        return { ...previous, defaults, override, effective: override ?? defaults };
+      });
       router.refresh();
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not change the model."); }
+    } catch (error) { setNotice(error instanceof Error ? error.message : "Could not save settings."); }
     finally { setBusy(false); }
   }
-  return <DashboardMenu label="Choose model" className="m9r-dash-chip m9r-dash-model-chip" trigger={<><AgentMark agentKey={single?.key ?? "other"} size={14} /><span>{single?.availableModels?.find(model => model.id === single.model)?.label ?? single?.model ?? (single ? "Provider default" : "Models")}</span><ChevronDown size={12} /></>}>
-    {() => <><DashboardSearch value={query} onChange={setQuery} label="Search models" /><div className="m9r-dash-picker-options">
-      {connected.length === 0 && <p>Connect an agent to choose its model.</p>}
-      {connected.map(agent => <section key={agent.id}><h3><AgentMark agentKey={agent.key} size={16} />{agent.label}</h3>
-        {[{ id: "", label: "Provider default" }, ...(agent.availableModels ?? [])].filter(model => model.label.toLowerCase().includes(query.toLowerCase())).map(model => <button type="button" key={model.id} disabled={busy} onClick={() => void choose(agent, model.id || null)}><span>{model.label}</span>{(agent.model ?? "") === model.id && <Check size={14} />}</button>)}
-        {!agent.availableModels?.length && <p>This agent has not reported its model list yet.</p>}
-      </section>)}
-    </div>{error && <p role="alert" className="m9r-dash-error">{error}</p>}</>}
+  return <section className="p-3"><h3><AgentMark agentKey={agent.key} size={16} />{agent.label}</h3>
+    {data && <fieldset disabled={busy} className="grid gap-2"><label className="text-xs">Apply to<select className="product-input" value={scope} onChange={event => changeScope(event.target.value)}><option value="connection">Agent defaults</option>{conversationId && <option value="channel">This channel only</option>}</select></label>
+      <label className="text-xs">Model<select className="product-input" value={model} onChange={event => { setModel(event.target.value); setEffort(""); }}><option value="">Provider default</option>{data.models?.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
+      <label className="text-xs">Reasoning effort<select className="product-input" value={effort} onChange={event => setEffort(event.target.value)}><option value="">Provider default</option>{data.efforts?.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
+      {!data.efforts?.length && <p className="text-xs">This provider has not reported effort choices.</p>}
+      <button type="button" disabled={busy} onClick={() => void save()}>Save settings</button>
+      {scope === "channel" && <button type="button" disabled={busy} onClick={() => void save(true)}>Inherit agent defaults</button>}
+    </fieldset>}
+    {notice && <p role="status" className="text-xs mt-2">{notice}</p>}
+  </section>;
+}
+export function DashboardModels({ agents, conversationId }: { agents: AgentView[]; conversationId?: string }) {
+  const connected = agents.filter(agent => agent.connectionId && agent.connected);
+  return <DashboardMenu label="Agent model and effort settings" className="m9r-dash-chip m9r-dash-model-chip" trigger={<><span>Agent settings</span><ChevronDown size={12} /></>}>
+    {() => <div className="m9r-dash-picker-options">{connected.length === 0 && <p>Connect an agent to choose its model and effort.</p>}{connected.map(agent => <AgentSettings key={`${agent.connectionId}:${conversationId ?? "default"}`} agent={agent} conversationId={conversationId} />)}</div>}
   </DashboardMenu>;
 }

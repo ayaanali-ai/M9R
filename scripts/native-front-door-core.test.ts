@@ -56,6 +56,8 @@ test("aliases that would collide with real top-level files are flagged", () => {
   assert.equal(aliasCollidesWithPath("codex", (n) => n === "src"), false);
 });
 
+// These fixtures use a fixed 2026-09-20 timestamp; the inbox age limit (tested separately) would otherwise hide them.
+process.env.M9R_INBOX_MAX_AGE_MINUTES = "100000000";
 const t0 = "2026-09-20T00:00:00.000Z";
 const mk = (over: Partial<Parameters<typeof newTask>[0]> = {}, seq = 1, id = `T${seq}`) =>
   newTask({ from: "claude", to: "codex", goal: "investigate the relay reconnect bug", origin: "human_typed", idempotencyKey: `k${seq}`, ...over }, { id, seq }, t0);

@@ -18,7 +18,7 @@ function setup(options: { allowRule?: boolean; web?: WebBrokerClient; roomStarte
   const root = mkdtempSync(join(tmpdir(), "m9r-inbox-"));
   const store = createLocalStore(root, { now: options.now });
   if (options.allowRule !== false) store.addRule({ from: "claude", to: "codex", ttlMs: 3_600_000 });
-  const server = createM9rMcpServer({ store, web: options.web, roomStartedAt: options.roomStartedAt });
+  const server = createM9rMcpServer({ store, web: options.web, roomStartedAt: options.roomStartedAt, now: options.now });
   const call = async (name: string, args: unknown) => (await (server as unknown as ToolServer)._registeredTools[name].handler(args)).content[0].text;
   return {
     store,

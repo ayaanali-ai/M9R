@@ -22,6 +22,7 @@ export interface AgentSessionHandle {
   providerSessionRef: string | null;
   /** Best-effort: this provider's real, live model choices from its own newSession response, when it exposes a "model" config option. Null when the provider doesn't expose one -- never a guessed/hardcoded list. */
   availableModels?: { id: string; label: string }[] | null;
+  availableEfforts?: { id: string; label: string }[] | null;
 }
 
 export interface InteractiveProviderEvent {
@@ -42,6 +43,7 @@ export interface InteractiveProviderAdapter {
   createSession(input: { server: AgentServerHandle; assignment: ProviderAssignment; executionId?: string }): Promise<AgentSessionHandle>;
   resumeSession(input: { server: AgentServerHandle; providerSessionRef: string; assignment: ProviderAssignment }): Promise<AgentSessionHandle>;
   prompt(input: { session: AgentSessionHandle; text: string }): AsyncIterable<InteractiveProviderEvent>;
+  configureSession?(input: { session: AgentSessionHandle; model: string | null; effort: string | null }): Promise<void>;
   steer?(input: { session: AgentSessionHandle; text: string }): Promise<void>;
   cancelTurn(input: { session: AgentSessionHandle }): Promise<void>;
   respondToPermission(input: { session: AgentSessionHandle; requestId: string; approved: boolean }): Promise<void>;

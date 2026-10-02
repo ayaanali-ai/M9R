@@ -308,17 +308,19 @@ function TeamSection({ viewerUserId }: { viewerUserId: string }) {
   const [leaving, setLeaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
+  const [confirmTeamAction, setConfirmTeamAction] = useState<string | null>(null);
+
   function reload() {
     setLoading(true);
     Promise.all([
-      fetch("/api/workspace/members").then((res) => (res.ok ? res.json() : { members: [] })),
-      fetch("/api/workspace/invites").then((res) => (res.ok ? res.json() : { invites: [] })),
+      fetch("/api/workspace/members").then(async res => { const body = await res.json(); if (!res.ok) throw new Error(body.error ?? "Could not load the team."); return body; }),
+      fetch("/api/workspace/invites").then(async res => { if (res.status === 403) return { invites: [] }; const body = await res.json(); if (!res.ok) throw new Error(body.error ?? "Could not load invites."); return body; }),
     ])
       .then(([membersBody, invitesBody]: [{ members?: TeamMemberRow[] }, { invites?: TeamInviteRow[] }]) => {
         setMembers(membersBody.members ?? []);
         setInvites(invitesBody.invites ?? []);
       })
-      .catch(() => {})
+      .catch(error => setNotice(error instanceof Error ? error.message : "Could not load the team."))
       .finally(() => setLoading(false));
   }
 
@@ -367,6 +369,8 @@ function TeamSection({ viewerUserId }: { viewerUserId: string }) {
       const json = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) { setNotice(json.error || "Could not change role."); return; }
       reload();
+    } catch {
+      setNotice("Could not reach the server. Try again.");
     } finally {
       setBusyUserId(null);
     }
@@ -380,6 +384,8 @@ function TeamSection({ viewerUserId }: { viewerUserId: string }) {
       const json = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) { setNotice(json.error || "Could not remove that member."); return; }
       reload();
+    } catch {
+      setNotice("Could not reach the server. Try again.");
     } finally {
       setBusyUserId(null);
     }
@@ -388,8 +394,12 @@ function TeamSection({ viewerUserId }: { viewerUserId: string }) {
   async function revokeInvite(inviteId: string) {
     setBusyInviteId(inviteId);
     try {
-      await fetch(`/api/workspace/invites/${inviteId}`, { method: "DELETE" });
+      const res = await fetch(`/api/workspace/invites/${inviteId}`, { method: "DELETE" });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) { setNotice(json.error ?? "Could not revoke invite."); return; }
       reload();
+    } catch {
+      setNotice("Could not reach the server. Try again.");
     } finally {
       setBusyInviteId(null);
     }
@@ -403,6 +413,8 @@ function TeamSection({ viewerUserId }: { viewerUserId: string }) {
       const json = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) { setNotice(json.error || "Could not leave the workspace."); return; }
       router.refresh();
+    } catch {
+      setNotice("Could not reach the server. Try again.");
     } finally {
       setLeaving(false);
     }
@@ -435,7 +447,7 @@ function TeamSection({ viewerUserId }: { viewerUserId: string }) {
                         Remove admin
                       </Button>
                     )}
-                    <Button type="button" size="sm" variant="danger" disabled={busyUserId === member.userId} onClick={() => void removeMember(member.userId)}>
+                    <Button type="button" size="sm" variant="danger" disabled={busyUserId === member.userId} onClick={() => setConfirmTeamAction(member.userId)}>
                       Remove
                     </Button>
                   </div>
@@ -491,7 +503,7 @@ function TeamSection({ viewerUserId }: { viewerUserId: string }) {
           {canLeave && (
             <>
               <div className="my-4 border-t border-[color:var(--ol-border-subtle)]" />
-              <Button type="button" size="sm" variant="danger" disabled={leaving} onClick={() => void leaveWorkspace()}>
+              <Button type="button" size="sm" variant="danger" disabled={leaving} onClick={() => setConfirmTeamAction("leave")}>
                 {leaving ? "Leaving…" : "Leave this workspace"}
               </Button>
             </>
@@ -500,6 +512,7 @@ function TeamSection({ viewerUserId }: { viewerUserId: string }) {
           {notice && <p className="mt-3 text-[12px] text-[color:var(--ol-text-muted)]" role="status">{notice}</p>}
         </>
       )}
+      <ProductConfirmDialog open={confirmTeamAction !== null} title={confirmTeamAction === "leave" ? "Leave workspace?" : "Remove team member?"} description="Workspace access and connected agents belonging to this person will be revoked. Saved shared memory remains available to the team." confirmLabel={confirmTeamAction === "leave" ? "Leave workspace" : "Remove member"} busy={leaving || busyUserId !== null} onCancel={() => setConfirmTeamAction(null)} onConfirm={() => { const action = confirmTeamAction; setConfirmTeamAction(null); if (action === "leave") void leaveWorkspace(); else if (action) void removeMember(action); }} />
     </Section>
   );
 }

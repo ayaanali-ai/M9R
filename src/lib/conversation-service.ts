@@ -33,7 +33,7 @@ import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
 import { requestCancelTurn, latestCancelTurnStatus } from "@/lib/bridge/bridge-cancel-turn-service";
 import { listMessageTodosForConversations, normalizeMessageTodoEntries, upsertMessageTodos, type MessageTodoState } from "@/lib/bridge/message-todo-service";
 import { listDraftsForConversation, upsertDraftSection, setDraftStatus, type Draft, type DraftStatus } from "@/lib/bridge/conversation-draft-service";
-import type { WorkspaceRole } from "@/lib/workspace-membership-service";
+import { requireApproverRole, type WorkspaceRole } from "@/lib/workspace-membership-service";
 import { idempotencyIdentityMatches } from "@/lib/conversation-idempotency";
 import { publishInternalRelayFrame } from "@/lib/mission/mission-relay-internal-publish";
 import { loadDashboardMessageWindows, loadDashboardUnreadCounts } from "@/lib/dashboard-list-batching";
@@ -887,6 +887,11 @@ async function ownedConversation(context: DashboardUserContext, conversationId: 
   };
 }
 
+/** Read access is not authorization to reconfigure or delete a shared channel. */
+async function requireChannelManager(context: DashboardUserContext): Promise<void> {
+  await requireApproverRole(context.workspaceId, context.user.id);
+}
+
 function channelSlug(raw: string): string {
   return raw.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 }
@@ -1162,49 +1167,20 @@ export async function createDashboardChannel(input: {
  * for every member. */
 export async function leaveDashboardConversation(conversationId: string): Promise<void> {
   const context = await dashboardUserContext();
+
   const conversation = await ownedConversation(context, conversationId);
-  if (channelGroupForConversation({ channelSlug: conversation.channel_slug, channelKind: conversation.channel_kind, topic: conversation.topic }) === "core") {
-    throw new AgentJoinError("This channel can't be left -- it's part of every workspace member's baseline access.", "CORE_CHANNEL_LEAVE_FORBIDDEN", 400);
-  }
-  const db = requireService();
 
-  // A channel whose human_membership_managed flag is still false (created
-  // before this existed) is visible to every workspace member -- deleting
-  // just this user's row would leave the roster at zero either way, and
-  // zero rows means nothing without the flag (see
-  // listConversationsForDashboard's own comment on why row count alone was
-  // a real bug here). Seeding the full current roster (everyone but the
-  // leaver) and setting the flag turns this into a real, explicit
-  // membership list going forward, in the same write.
-  const { data: managedRow } = await db.from("agent_conversations").select("human_membership_managed").eq("id", conversationId).eq("workspace_id", context.workspaceId).maybeSingle();
-  if (!managedRow?.human_membership_managed) {
-    const { data: allMembers } = await db.from("workspace_members").select("user_id").eq("workspace_id", context.workspaceId);
-    const seedIds = (allMembers ?? []).map((row) => row.user_id as string).filter((userId) => userId !== context.user.id);
-    if (seedIds.length > 0) {
-      await db.from("conversation_human_members").insert(
-        seedIds.map((userId) => ({ workspace_id: context.workspaceId, conversation_id: conversationId, user_id: userId })),
-      );
-    }
-    await db.from("agent_conversations").update({ human_membership_managed: true }).eq("id", conversationId).eq("workspace_id", context.workspaceId);
-    return;
-  }
-
-  const { error } = await db.from("conversation_human_members").delete()
-    .eq("workspace_id", context.workspaceId).eq("conversation_id", conversationId).eq("user_id", context.user.id);
-  if (error) throw new AgentJoinError("Could not leave the channel.", "CHANNEL_LEAVE_FAILED", 500);
+  if (channelGroupForConversation({channelSlug: conversation.channel_slug, channelKind: conversation.channel_kind, topic: conversation.topic}) === "core") throw new AgentJoinError("Built-in channel membership cannot be removed.", "CORE_CHANNEL_MEMBER_REMOVE_FORBIDDEN", 400);
+  const {error} = await requireService().rpc("m9r_change_channel_human", {p_workspace: context.workspaceId, p_channel: conversationId, p_user: context.user.id, p_add: false});
+  if(error) throw new AgentJoinError("Could not update channel membership.", "CHANNEL_MEMBERSHIP_FAILED", 503);
 }
 
-/**
- * #19 session-sharing: the roster a channel's "Add people" UI reads --
- * every workspace member, each flagged with whether they're already in
- * this specific channel. Same grandfather rule as listConversationsForDashboard:
- * a channel that has never had its human_membership_managed flag set reads
- * as "everyone already in it" (matching the visibility it actually has),
- * not "nobody in it."
- */
-export async function listConversationHumanRoster(conversationId: string): Promise<Array<{ userId: string; email: string | null; name: string | null; role: WorkspaceRole; inChannel: boolean }>> {
+export async function listConversationHumanRoster(conversationId: string): Promise<Array<{ userId: string; email: string | null; name: string | null; role: WorkspaceRole; inChannel: boolean; canManage: boolean; canRemove: boolean }>> {
   const context = await dashboardUserContext();
-  await ownedConversation(context, conversationId);
+  const conversation = await ownedConversation(context, conversationId);
+  let canManage = false;
+  try { await requireChannelManager(context); canManage = true; } catch (error) { if (!(error instanceof AgentJoinError) || error.status !== 403) throw error; }
+  const canRemove = conversation.channel_kind !== "dm" && channelGroupForConversation({channelSlug:conversation.channel_slug,channelKind:conversation.channel_kind,topic:conversation.topic}) !== "core";
   const db = requireService();
 
   const { data: allMembers, error: membersError } = await db
@@ -1246,6 +1222,8 @@ export async function listConversationHumanRoster(conversationId: string): Promi
       name: nameByUserId.get(userId) ?? (email ? email.split("@")[0] : null),
       role: row.role as WorkspaceRole,
       inChannel: managed ? inChannelIds.has(userId) : true,
+      canManage: canManage && conversation.channel_kind !== "dm",
+      canRemove,
     };
   });
 }
@@ -1260,61 +1238,27 @@ export async function listConversationHumanRoster(conversationId: string): Promi
  */
 export async function addHumanToConversation(conversationId: string, targetUserId: string): Promise<void> {
   const context = await dashboardUserContext();
+  await requireChannelManager(context);
   const conversation = await ownedConversation(context, conversationId);
-  const db = requireService();
+  if (conversation.channel_kind === "dm") throw new AgentJoinError("Direct-message membership cannot change.", "DM_MEMBERSHIP_FORBIDDEN", 400);
 
-  const { data: target } = await db.from("workspace_members").select("user_id").eq("workspace_id", context.workspaceId).eq("user_id", targetUserId).maybeSingle();
-  if (!target) throw new AgentJoinError("That person is not a member of this workspace.", "NOT_A_WORKSPACE_MEMBER", 400);
-
-  const { data: managedRow } = await db.from("agent_conversations").select("human_membership_managed").eq("id", conversationId).eq("workspace_id", context.workspaceId).maybeSingle();
-  if (!managedRow?.human_membership_managed) {
-    const { data: allMembers } = await db.from("workspace_members").select("user_id").eq("workspace_id", context.workspaceId);
-    const seedIds = new Set((allMembers ?? []).map((row) => row.user_id as string));
-    seedIds.add(targetUserId);
-    const { error: seedError } = await db.from("conversation_human_members").insert(
-      [...seedIds].map((userId) => ({ workspace_id: context.workspaceId, conversation_id: conversation.id, user_id: userId })),
-    );
-    if (seedError) throw new AgentJoinError("Could not add that person to the channel.", "CHANNEL_MEMBER_ADD_FAILED", 500);
-    await db.from("agent_conversations").update({ human_membership_managed: true }).eq("id", conversationId).eq("workspace_id", context.workspaceId);
-    return;
-  }
-
-  const { error } = await db.from("conversation_human_members").upsert(
-    { workspace_id: context.workspaceId, conversation_id: conversation.id, user_id: targetUserId },
-    { onConflict: "conversation_id,user_id" },
-  );
-  if (error) throw new AgentJoinError("Could not add that person to the channel.", "CHANNEL_MEMBER_ADD_FAILED", 500);
+  const {error} = await requireService().rpc("m9r_change_channel_human", {p_workspace: context.workspaceId, p_channel: conversationId, p_user: targetUserId, p_add: true});
+  if(error) throw new AgentJoinError("Could not update channel membership.", "CHANNEL_MEMBERSHIP_FAILED", 503);
 }
 
-/** #19: remove a human from a channel -- an admin-initiated version of
- * leaveDashboardConversation's self-serve path. Same core-channel guard: the
- * workspace's baseline rooms always include every member. */
 export async function removeHumanFromConversation(conversationId: string, targetUserId: string): Promise<void> {
   const context = await dashboardUserContext();
+  await requireChannelManager(context);
   const conversation = await ownedConversation(context, conversationId);
-  if (channelGroupForConversation({ channelSlug: conversation.channel_slug, channelKind: conversation.channel_kind, topic: conversation.topic }) === "core") {
-    throw new AgentJoinError("This channel can't have members removed -- it's part of every workspace member's baseline access.", "CORE_CHANNEL_MEMBER_REMOVE_FORBIDDEN", 400);
-  }
-  const db = requireService();
-  const { data: managedRow } = await db.from("agent_conversations").select("human_membership_managed").eq("id", conversationId).eq("workspace_id", context.workspaceId).maybeSingle();
-  if (!managedRow?.human_membership_managed) {
-    const { data: allMembers } = await db.from("workspace_members").select("user_id").eq("workspace_id", context.workspaceId);
-    const seedIds = (allMembers ?? []).map((row) => row.user_id as string).filter((userId) => userId !== targetUserId);
-    if (seedIds.length > 0) {
-      await db.from("conversation_human_members").insert(
-        seedIds.map((userId) => ({ workspace_id: context.workspaceId, conversation_id: conversationId, user_id: userId })),
-      );
-    }
-    await db.from("agent_conversations").update({ human_membership_managed: true }).eq("id", conversationId).eq("workspace_id", context.workspaceId);
-    return;
-  }
-  const { error } = await db.from("conversation_human_members").delete()
-    .eq("workspace_id", context.workspaceId).eq("conversation_id", conversationId).eq("user_id", targetUserId);
-  if (error) throw new AgentJoinError("Could not remove that person from the channel.", "CHANNEL_MEMBER_REMOVE_FAILED", 500);
+  if (conversation.channel_kind === "dm") throw new AgentJoinError("Direct-message membership cannot change.", "DM_MEMBERSHIP_FORBIDDEN", 400);
+  if (channelGroupForConversation({channelSlug: conversation.channel_slug, channelKind: conversation.channel_kind, topic: conversation.topic}) === "core") throw new AgentJoinError("Built-in channel membership cannot be removed.", "CORE_CHANNEL_MEMBER_REMOVE_FORBIDDEN", 400);
+  const {error} = await requireService().rpc("m9r_change_channel_human", {p_workspace: context.workspaceId, p_channel: conversationId, p_user: targetUserId, p_add: false});
+  if(error) throw new AgentJoinError("Could not update channel membership.", "CHANNEL_MEMBERSHIP_FAILED", 503);
 }
 
 export async function updateDashboardConversation(input: { conversationId: string; action: "archive" | "restore" | "update" | "pause_agents" | "resume_agents"; description?: string; isPrivate?: boolean }): Promise<void> {
   const context = await dashboardUserContext();
+  await requireChannelManager(context);
   const conversation = await ownedConversation(context, input.conversationId);
   if (conversation.channel_kind === "dm" && input.action === "update") throw new AgentJoinError("Direct messages cannot be reconfigured.", "CONVERSATION_UPDATE_FORBIDDEN", 400);
   if (input.action === "archive" && channelGroupForConversation({ channelSlug: conversation.channel_slug, channelKind: conversation.channel_kind, topic: conversation.topic }) === "core") {
@@ -1410,6 +1354,7 @@ export async function cancelTurnStatusForConversation(input: { conversationId: s
  */
 export async function deleteDashboardConversation(conversationId: string): Promise<void> {
   const context = await dashboardUserContext();
+  await requireChannelManager(context);
   const conversation = await ownedConversation(context, conversationId);
   if (channelGroupForConversation({ channelSlug: conversation.channel_slug, channelKind: conversation.channel_kind, topic: conversation.topic }) === "core") {
     throw new AgentJoinError("Built-in workspace channels cannot be deleted.", "BUILT_IN_CHANNEL_DELETE_FORBIDDEN", 400);
@@ -2359,4 +2304,29 @@ export async function searchDashboardWorkspace(query: string): Promise<Array<{ m
   const bodyIds = new Set((bodyMessages ?? []).map((row) => String(row.id)));
   const ordered = [...(bodyMessages ?? []), ...(latestMessages ?? []).filter((row) => !bodyIds.has(String(row.id)))];
   return ordered.slice(0, 100).map((row) => ({ message_id: row.id as string, conversation_id: row.conversation_id as string, topic: topicBy.get(String(row.conversation_id)) ?? "Channel", body: row.body as string, created_at: row.created_at as string }));
+}
+
+/** Channel membership is independent of a connection's workspace lifetime. */
+export async function listChannelAgentRoster(conversationId: string) {
+  const context = await dashboardUserContext();
+  const conversation = await ownedConversation(context, conversationId);
+  const db = requireService();
+  const [connections, participants] = await Promise.all([
+    db.from("agent_connections").select("id, agent_kind, created_by").eq("workspace_id", context.workspaceId).eq("status", "active"),
+    db.from("conversation_participants").select("connection_id").eq("workspace_id", context.workspaceId).eq("conversation_id", conversationId),
+  ]);
+  if (connections.error || participants.error) throw new AgentJoinError("Could not load channel agents.", "ROSTER_UNAVAILABLE", 503);
+  let canManage = false;
+  try { await requireChannelManager(context); canManage = true; } catch (error) { if (!(error instanceof Error) || !("status" in error) || error.status !== 403) throw error; }
+  const ids = new Set((participants.data ?? []).map(row => row.connection_id));
+  return { canManage, canRemove: conversation.channel_kind !== "dm" && channelGroupForConversation({channelSlug:conversation.channel_slug, channelKind:conversation.channel_kind, topic:conversation.topic}) !== "core", agents: (connections.data ?? []).map(row => ({connectionId:row.id, provider:row.agent_kind, label:row.agent_kind, ownerUserId:row.created_by, inChannel:ids.has(row.id)})) };
+}
+export async function changeChannelAgent(conversationId: string, connectionId: string, add: boolean) {
+  const context = await dashboardUserContext();
+  await requireChannelManager(context);
+  const conversation = await ownedConversation(context, conversationId);
+  if (conversation.channel_kind === "dm") throw new AgentJoinError("Direct-message membership cannot change.", "DM_MEMBERSHIP_FORBIDDEN", 400);
+  if (!add && channelGroupForConversation({channelSlug:conversation.channel_slug,channelKind:conversation.channel_kind,topic:conversation.topic}) === "core") throw new AgentJoinError("Built-in channel agents cannot be removed.", "CORE_CHANNEL_MEMBER_REMOVE_FORBIDDEN", 400);
+  const {error} = await requireService().rpc("m9r_change_channel_agent", {p_workspace:context.workspaceId,p_channel:conversationId,p_connection:connectionId,p_add:add});
+  if (error) throw new AgentJoinError("Could not update channel agents. Check the connection and apply the channel-controls migration.", "CHANNEL_MEMBERSHIP_FAILED", 503);
 }

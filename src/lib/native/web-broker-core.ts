@@ -375,14 +375,19 @@ export function createWebBroker(deps: WebBrokerDeps) {
   const openedBy = new Map<string, string>();
   const tabLastActivity = new Map<string, number>();
   // Shared-room awareness: what each agent did, so every agent's next reply can carry what its teammates did meanwhile.
-  const roomLog: Array<{ seq: number; agent: string; text: string }> = [];
+  const roomLog: Array<{ seq: number; agent: string; actorKey: string; tab: string; action: string; text: string }> = [];
   let roomSeq = 0;
   const roomCursor = new Map<string, number>();
   const tabLastBy = new Map<string, string>();
-  function roomEventsFor(actor: string): string[] | undefined {
-    const since = roomCursor.get(actor) ?? 0;
-    const events = roomLog.filter((event) => event.seq > since && event.agent !== actor).slice(-5).map((event) => event.text);
-    roomCursor.set(actor, roomSeq);
+  function roomEventsFor(actor: string, actorKey: string): string[] | undefined {
+    const since = roomCursor.get(actorKey) ?? 0;
+    const actorTabs = tabsByActor.get(actorKey) ?? new Set<string>();
+    const changes = roomLog.filter(event => event.seq > since && event.actorKey !== actorKey && actorTabs.has(event.tab) && !["read", "snapshot", "screenshot", "tabs"].includes(event.action));
+    // Keep the newest change per teammate/tab, bounded to three short facts.
+    const latest = new Map<string, typeof roomLog[number]>();
+    for (const event of changes) latest.set(`${event.agent}:${event.tab}`, event);
+    const events = [...latest.values()].sort((a, b) => a.seq - b.seq).slice(-3).map(event => event.text.slice(0, 240));
+    roomCursor.set(actorKey, roomSeq);
     return events.length ? events : undefined;
   }
   const presenceByTab = new Map<string, Map<string, Record<string, unknown>>>();
@@ -820,7 +825,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
 
     if (request.action === "tabs") {
       // The room list is answered here, from what every agent has done, so it never depends on the extension.
-      const room = roomEventsFor(actor);
+      const room = roomEventsFor(actor, actorKey);
       return Promise.resolve({ ok: true, data: powerFields.tabs ?? [], ...(room ? { room } : {}) });
     }
 
@@ -1157,11 +1162,11 @@ export function createWebBroker(deps: WebBrokerDeps) {
       if (response.ok && entry.action !== "tabs") {
         const who = String(entry.presence.agent);
         tabLastBy.set(entry.tab, who);
-        roomLog.push({ seq: ++roomSeq, agent: who, text: `@${who}: ${step} [tab ${entry.tab}]` });
+        roomLog.push({ seq: ++roomSeq, agent: who, actorKey: entry.actorTabsKey, tab: entry.tab, action: entry.action, text: `@${who}: ${step} [tab ${entry.tab}]` });
         if (roomLog.length > 100) roomLog.splice(0, roomLog.length - 100);
       }
       if (response.ok) {
-        const room = roomEventsFor(String(entry.presence.agent));
+        const room = roomEventsFor(String(entry.presence.agent), entry.actorTabsKey);
         if (room) (response as WebResponse).room = room;
       }
     }

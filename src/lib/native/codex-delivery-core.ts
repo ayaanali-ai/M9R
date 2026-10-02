@@ -17,8 +17,17 @@ export function canQueue(task: Pick<Task, "origin" | "approval">): boolean {
 /** Marker Codex sees in the queued prompt; the result reader finds the turn by it. */
 export const queueMarker = (taskId: string) => `[M9R ${taskId}]`;
 
+/**
+ * The prompt the broker builds for a web-room agent (webAgentPrompt) lists its teammates as @handles and carries its session token.
+ * It is machine-written, never something the owner typed, so a hook or watcher that sees it must not turn those mentions into tasks.
+ */
+export const isBrokerAgentPrompt = (prompt: string) => /You are @[a-z0-9-]+, an agent working for the owner in their own web browser through M9R/.test(prompt)
+  // The shorter prompt a resumed web worker gets: it only refreshes the session token and restates the room rules.
+  || /^\s*Your current M9R session token is \S+\. Use it only on M9R tools/.test(prompt)
+  || prompt.includes("M9R tools may only be reachable as deferred tools through your exec/code gateway");
+
 /** True for a prompt M9R itself pushed into a session. Its @mentions are the sender's name, not a new request to route. */
-export const isM9rPushedPrompt = (prompt: string) => /^\s*\[M9R T\d+\]/.test(prompt);
+export const isM9rPushedPrompt = (prompt: string) => /^\s*\[M9R T\d+\]/.test(prompt) || isBrokerAgentPrompt(prompt);
 
 export function buildQueueMessage(task: Pick<Task, "id" | "from" | "goal">, sessionToken?: string): string {
   // The marker is transport metadata used to correlate the answer. The body is only the task text; never forward the
@@ -31,7 +40,7 @@ export function buildQueueMessage(task: Pick<Task, "id" | "from" | "goal">, sess
  * cannot run other scripts), so use the `node` on PATH, which a Codex installed through npm always has.
  */
 export function nodeForCodex(execPath: string, pathDirs: string[], exists: (p: string) => boolean): string {
-  if (!/^m9r-engine(\.exe)?$/i.test(win32.basename(execPath))) return execPath;
+  if (!/^m9r-(engine|web-broker)(\.exe)?$/i.test(win32.basename(execPath))) return execPath;
   for (const dir of pathDirs) for (const name of ["node.exe", "node"]) { const p = win32.join(dir, name); if (exists(p)) return p; }
   return "node";
 }

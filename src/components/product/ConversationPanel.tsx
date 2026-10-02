@@ -2380,7 +2380,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 mechanism for both. */}
             <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"}
               threads={<DashboardPicker label="Choose conversation" value="Thread" icon={<Plus size={12} />} options={conversations.map(conversation => ({ id: conversation.id, label: channelDisplayName(conversation) }))} onSelect={selectConversation} />}
-              model={<DashboardModels agents={agents} />}
+              model={<DashboardModels agents={agents.filter(agent => selected.participant_connection_ids.includes(agent.connectionId ?? ""))} conversationId={selected.id} />}
               actions={<>{onOpenLive && <button type="button" aria-label="Live sessions" title="Live sessions" onClick={onOpenLive} data-active={liveActive}><Monitor size={18} /></button>}{onOpenReview && <button type="button" aria-label="Ready for Review" title="Ready for Review" onClick={onOpenReview} data-active={reviewActive}><Bug size={18} />{Boolean(pendingReviewCount) && <i className="m9r-dash-notification-dot" />}</button>}</>}
               search={transcriptSearch} onSearch={setTranscriptSearch}
               menuActions={[

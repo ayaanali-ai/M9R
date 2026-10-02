@@ -135,8 +135,8 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: input.cwd });
       const others = ctx.store.listEndpoints().filter((e) => e.handle !== self && now.getTime() - Date.parse(e.lastSeenAt) < activeWindow).map((e) => ({ handle: e.handle }));
       const pending = input.session_id
-        ? renderInboxInjection(ctx.store.tasksForSession(self, input.session_id), ctx.store.cursorFor(self, input.session_id, input.cwd)).includedIds.length
-        : renderInboxInjection(ctx.store.tasksFor(self), ctx.store.cursorFor(self, input.session_id, input.cwd)).includedIds.length;
+        ? renderInboxInjection(ctx.store.tasksForSession(self, input.session_id), ctx.store.cursorFor(self, input.session_id, input.cwd), { now: now.getTime() }).includedIds.length
+        : renderInboxInjection(ctx.store.tasksFor(self), ctx.store.cursorFor(self, input.session_id, input.cwd), { now: now.getTime() }).includedIds.length;
       // Only mention memory if the index file really exists here (the earlier card pointed at a file that did not).
       const memoryDir = ctx.memoryDir ?? (input.cwd && (ctx.pathExists ?? existsSync)(join(input.cwd, ".m9r", "memory", "index.md")) ? ".m9r/memory" : undefined);
       ctx.store.sweepExpired();
@@ -165,7 +165,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
     // through a live session's user-turn input (live-session-core.ts). Registering it would add a hook run to every tool call.
     if (event === "PostToolUse") {
       const cursor = ctx.store.cursorFor(self, input.session_id, input.cwd);
-      const injection = renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor);
+      const injection = renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { now: now.getTime() });
       if (!injection.text) return null;
       ctx.store.setCursor(self, input.session_id, injection.newCursor, input.cwd);
       ctx.store.markDelivered(injection.includedIds, input.session_id);
@@ -190,7 +190,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
 
       // 2b. Anything new in our own inbox, delta-only.
       const cursor = ctx.store.cursorFor(self, input.session_id, cwd);
-      const injection = renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor);
+      const injection = renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { now: now.getTime() });
       if (injection.text) {
         const codexHasIdentity = self !== "codex" || Boolean(input.session_id && ctx.store.identityTokenFor(self, input.session_id));
         if (!codexHasIdentity) {

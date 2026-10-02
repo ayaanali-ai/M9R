@@ -3,6 +3,7 @@ import { AgentJoinError } from "@/lib/agent-join-service";
 import { PlanLimitError } from "@/lib/plan-limits-service";
 import { ChatEvidenceError } from "@/lib/bridge/chat-evidence-service";
 import { GoalApiError } from "@/lib/goal/goal-service";
+import { WorkspaceMembershipError } from "@/lib/workspace-membership-service";
 
 /**
  * Shared helpers for the /api/agent/* routes: base-URL resolution for claim
@@ -36,6 +37,7 @@ export function resolveBaseUrl(req: NextRequest): string {
 
 /** Map any error to a JSON response. Logs only the message, never request body. */
 export function handleAgentError(err: unknown): NextResponse {
+  if (err instanceof WorkspaceMembershipError) return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
   if (err instanceof AgentJoinError) {
     return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
   }

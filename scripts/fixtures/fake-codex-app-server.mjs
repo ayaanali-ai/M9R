@@ -60,6 +60,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const { id, method, params } = message;
   const reply = (result) => send({ id, result });
   if (method === "initialize") return reply({ userAgent: "fake-codex/0.0.0", codexHome: "/tmp/codex", platformFamily: "unix", platformOs: "linux" });
+  if (method === "model/list") return reply({data:[{model:"fake-model",displayName:"Fake model",isDefault:true,supportedReasoningEfforts:[{reasoningEffort:"low",description:"Low"},{reasoningEffort:"high",description:"High"}]}]});
   if (method === "thread/start") {
     const threadId = "thread-" + (threads.size + 1);
     threads.set(threadId, { cwd: params.cwd, params });

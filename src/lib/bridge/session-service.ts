@@ -16,6 +16,7 @@
  * touched again by this sync -- once archived, only an explicit action
  * changes them.
  */
+import {memoryDatabaseError} from "@/lib/shared-memory-service";
 import { supabase } from "@/lib/supabase";
 import { createClient } from "@/lib/supabase/server";
 import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
@@ -541,12 +542,14 @@ export async function sweepIdleSessionArchiveProposals(): Promise<{ flagged: num
 export async function confirmArchiveSession(sessionId: string): Promise<void> {
   const context = await dashboardUserContext();
   const db = requireService();
+  const {data:target,error:targetError} = await db.from("conversation_sessions").select("conversation_id").eq("id",sessionId).eq("workspace_id",context.workspaceId).maybeSingle();
+  if(targetError || !target || !(await visibleConversationIdsFor(db,context.workspaceId,context.user.id,[target.conversation_id])).has(target.conversation_id)) throw new Error("Session not found.");
   const { error } = await db.from("conversation_sessions").update({
     status: "archived",
     archived_at: new Date().toISOString(),
     archived_by_user_id: context.user.id,
   }).eq("id", sessionId).eq("workspace_id", context.workspaceId);
-  if (error) throw new Error("Could not archive this session.");
+  if (error) memoryDatabaseError(error);
 }
 
 export async function dismissArchiveProposal(sessionId: string): Promise<void> {
@@ -669,34 +672,42 @@ export interface PastSessionMatch {
 const MEMORY_SEARCH_TRANSCRIPT_MESSAGES = 8;
 const MEMORY_SEARCH_MESSAGE_MAX_CHARS = 600;
 
-export async function searchArchivedSessionsForAgent(workspaceId: string, rawQuery: string, limit = 8): Promise<PastSessionMatch[]> {
+export async function searchArchivedSessionsForAgent(workspaceId: string, rawQuery: string, limit = 8, connectionId?: string): Promise<PastSessionMatch[]> {
   const db = requireService();
   // Same sanitize-then-bound pattern as searchDashboardWorkspace (conversation-service.ts) --
   // strips ILIKE wildcard metacharacters out of user/agent-supplied text so a query can't turn
   // into an unbounded/forged pattern, then bounds length so a pathological query can't blow the request up.
   const q = rawQuery.replace(/[%_]/g, "").trim().slice(0, 160);
-  const boundedLimit = Math.max(1, Math.min(limit, 25));
+  const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 25)) : 8;
+  let permittedChannels: string[] | null = null;
+  if (connectionId) {
+    const { data: members, error } = await db.from("conversation_participants").select("conversation_id").eq("workspace_id", workspaceId).eq("connection_id", connectionId);
+    if (error) throw new Error("Could not verify memory channel membership.");
+    permittedChannels = (members ?? []).map(row => row.conversation_id as string);
+    if (!permittedChannels.length) return [];
+  }
+  const sessionQuery = () => {
+    const query = db.from("conversation_sessions").select("id, conversation_id, connection_id, owner_user_id, title, message_ids, archived_at").eq("workspace_id", workspaceId).eq("status", "archived");
+    return permittedChannels ? query.in("conversation_id", permittedChannels) : query;
+  };
 
   let sessionRows: Array<Record<string, unknown>> = [];
   if (!q) {
     // No query: "what have we worked on" -- most recently archived first.
-    const { data } = await db.from("conversation_sessions").select("id, conversation_id, connection_id, owner_user_id, title, message_ids, archived_at")
-      .eq("workspace_id", workspaceId).eq("status", "archived").order("archived_at", { ascending: false }).limit(boundedLimit);
+    const { data } = await sessionQuery().order("archived_at", { ascending: false }).limit(boundedLimit);
     sessionRows = data ?? [];
   } else {
     const [{ data: byTitle }, { data: matchingMessages }] = await Promise.all([
-      db.from("conversation_sessions").select("id, conversation_id, connection_id, owner_user_id, title, message_ids, archived_at")
-        .eq("workspace_id", workspaceId).eq("status", "archived").ilike("title", `%${q}%`).order("archived_at", { ascending: false }).limit(boundedLimit),
+      sessionQuery().ilike("title", `%${q}%`).order("archived_at", { ascending: false }).limit(boundedLimit),
       // A session's title is a short summary of what STARTED it -- it won't mention
       // every topic discussed inside, so also catch a session by the actual body text
       // of any message it contains, the same way a real search would.
-      db.from("conversation_messages").select("id").eq("workspace_id", workspaceId).ilike("body", `%${q}%`).limit(200),
+      (permittedChannels ? db.from("conversation_messages").select("id").eq("workspace_id", workspaceId).in("conversation_id", permittedChannels) : db.from("conversation_messages").select("id").eq("workspace_id", workspaceId)).ilike("body", `%${q}%`).limit(200),
     ]);
     const byId = new Map((byTitle ?? []).map((row) => [row.id as string, row]));
     const matchingMessageIds = (matchingMessages ?? []).map((row) => row.id as string);
     if (matchingMessageIds.length > 0 && byId.size < boundedLimit) {
-      const { data: byBody } = await db.from("conversation_sessions").select("id, conversation_id, connection_id, owner_user_id, title, message_ids, archived_at")
-        .eq("workspace_id", workspaceId).eq("status", "archived").overlaps("message_ids", matchingMessageIds).order("archived_at", { ascending: false }).limit(boundedLimit);
+      const { data: byBody } = await sessionQuery().overlaps("message_ids", matchingMessageIds).order("archived_at", { ascending: false }).limit(boundedLimit);
       for (const row of byBody ?? []) if (!byId.has(row.id as string)) byId.set(row.id as string, row);
     }
     sessionRows = [...byId.values()].slice(0, boundedLimit);
@@ -762,11 +773,18 @@ const MEMORY_EXPORT_MESSAGE_MAX_CHARS = 20_000;
  * this is meant to be the durable record on disk, so it keeps the whole
  * thing.
  */
-export async function listArchivedSessionsForExport(workspaceId: string, sinceIso: string | null): Promise<ExportableSession[]> {
+export async function listArchivedSessionsForExport(workspaceId: string, sinceIso: string | null, connectionId?: string): Promise<ExportableSession[]> {
   const db = requireService();
   let query = db.from("conversation_sessions").select("id, conversation_id, connection_id, owner_user_id, title, message_ids, archived_at")
     .eq("workspace_id", workspaceId).eq("status", "archived").order("archived_at", { ascending: true }).limit(MEMORY_EXPORT_PAGE_SIZE);
   if (sinceIso) query = query.gt("archived_at", sinceIso);
+  if (connectionId) {
+    const { data: participants, error } = await db.from("conversation_participants").select("conversation_id").eq("workspace_id", workspaceId).eq("connection_id", connectionId);
+    if (error) throw new Error("Could not verify memory export access.");
+    const ids = (participants ?? []).map(row => row.conversation_id as string);
+    if (!ids.length) return [];
+    query = query.in("conversation_id", ids);
+  }
   const { data: sessionRows } = await query;
   if (!sessionRows || sessionRows.length === 0) return [];
 

@@ -34,6 +34,10 @@ export class WorkspaceRulesError extends Error {
   }
 }
 
+function checkMemoryQuota(error: {message?:string} | null) {
+  if(error?.message?.includes("WORKSPACE_MEMORY_LIMIT_REACHED")) throw new WorkspaceRulesError("Workspace memory is full. Delete saved memory to free space in the shared 10 MiB allowance.","WORKSPACE_MEMORY_LIMIT_REACHED",413);
+}
+
 type Db = NonNullable<Awaited<ReturnType<typeof createClient>>>;
 
 const COLUMNS =
@@ -282,6 +286,7 @@ export async function createManualWorkspaceRule(input: ManualWorkspaceRuleInput)
     .select(COLUMNS)
     .single();
 
+  checkMemoryQuota(error);
   if (error) throw new WorkspaceRulesError("Failed to create manual rule draft.", "CREATE_FAILED", 500);
   return { rule: mapRow(data as unknown as Row), redaction: bodyRedaction.redaction };
 }
@@ -357,6 +362,7 @@ export async function createRuleFromFinding(finding: FindingRuleSource): Promise
     .select(COLUMNS)
     .single();
 
+  checkMemoryQuota(error);
   if (error) throw new WorkspaceRulesError("Failed to draft a rule from this finding.", "CREATE_FAILED", 500);
   return mapRow(data as unknown as Row);
 }
@@ -400,6 +406,7 @@ export async function importWorkspaceRuleDrafts(input: ImportWorkspaceRulesInput
   }));
 
   const { data, error } = await db.from("workspace_rules").insert(inserts).select(COLUMNS);
+  checkMemoryQuota(error);
   if (error) throw new WorkspaceRulesError("Failed to import rule drafts.", "IMPORT_FAILED", 500);
   const rules = ((data ?? []) as unknown as Row[]).map(mapRow);
 
@@ -446,6 +453,7 @@ export async function listWorkspaceRules(workspaceId?: string): Promise<Workspac
     .order("created_at", { ascending: false })
     .limit(500);
 
+  checkMemoryQuota(error);
   if (error) {
     console.error("listWorkspaceRules failed:", error.message, error.code);
     throw new WorkspaceRulesError("Failed to list workspace rules.", "LIST_FAILED", 500);
@@ -535,7 +543,8 @@ export async function promoteGeneratedRules(
 
   if (inserts.length > 0) {
     const { error } = await db.from("workspace_rules").insert(inserts);
-    if (error) {
+    checkMemoryQuota(error);
+  if (error) {
       console.error("promoteGeneratedRules insert failed:", error.message, error.code);
       throw new WorkspaceRulesError("Failed to promote rules to the workspace.", "PROMOTE_FAILED", 500);
     }
@@ -554,6 +563,7 @@ async function listWorkspaceRulesFor(db: Db, wsId: string): Promise<WorkspaceRul
     .is("deleted_at", null)
     .order("created_at", { ascending: false })
     .limit(500);
+  checkMemoryQuota(error);
   if (error) {
     console.error("listWorkspaceRulesFor failed:", error.message, error.code);
     throw new WorkspaceRulesError("Failed to read workspace rules.", "LIST_FAILED", 500);
@@ -573,6 +583,7 @@ async function readWorkspaceRuleForMutation(db: Db, ruleId: string): Promise<Row
     .is("deleted_at", null)
     .maybeSingle();
 
+  checkMemoryQuota(error);
   if (error) throw new WorkspaceRulesError("Failed to read the rule.", "RULE_LOOKUP_FAILED", 500);
   if (!data) throw new WorkspaceRulesError("Rule not found.", "NOT_FOUND", 404);
   return data as unknown as Row;
@@ -596,6 +607,7 @@ export async function updateWorkspaceRuleStatus(ruleId: string, status: RuleStat
     .select(COLUMNS)
     .maybeSingle();
 
+  checkMemoryQuota(error);
   if (error) throw new WorkspaceRulesError("Failed to update rule status.", "UPDATE_FAILED", 500);
   if (!data) throw new WorkspaceRulesError("Rule not found.", "NOT_FOUND", 404);
   return mapRow(data as unknown as Row);
@@ -618,6 +630,7 @@ export async function softDeleteWorkspaceRule(ruleId: string): Promise<{ id: str
     .select("id, deleted_at")
     .maybeSingle();
 
+  checkMemoryQuota(error);
   if (error) throw new WorkspaceRulesError("Failed to delete the rule.", "DELETE_FAILED", 500);
   if (!data) throw new WorkspaceRulesError("Rule was not available to delete.", "DELETE_NOT_ALLOWED", 409);
   return { id: data.id as string, deletedAt: (data.deleted_at as string | null) ?? now };
@@ -640,6 +653,7 @@ export async function archiveWorkspaceRule(ruleId: string): Promise<WorkspaceRul
     .select(COLUMNS)
     .maybeSingle();
 
+  checkMemoryQuota(error);
   if (error) throw new WorkspaceRulesError("Failed to archive the rule.", "ARCHIVE_FAILED", 500);
   if (!data) throw new WorkspaceRulesError("Rule was not available to archive.", "ARCHIVE_NOT_ALLOWED", 409);
   return mapRow(data as unknown as Row);
@@ -666,6 +680,7 @@ export async function restoreArchivedWorkspaceRule(ruleId: string): Promise<Work
     .select(COLUMNS)
     .maybeSingle();
 
+  checkMemoryQuota(error);
   if (error) throw new WorkspaceRulesError("Failed to restore the archived rule.", "RESTORE_FAILED", 500);
   if (!data) throw new WorkspaceRulesError("Rule was not available to restore.", "RESTORE_NOT_ALLOWED", 409);
   return mapRow(data as unknown as Row);
@@ -710,6 +725,7 @@ export async function promoteWorkspaceRule(ruleId: string): Promise<WorkspaceRul
     .select(COLUMNS)
     .maybeSingle();
 
+  checkMemoryQuota(error);
   if (error) throw new WorkspaceRulesError("Failed to promote rule.", "PROMOTE_FAILED", 500);
   if (!data) throw new WorkspaceRulesError("Rule was not available to promote.", "PROMOTE_NOT_ALLOWED", 409);
   const rule = mapRow(data as unknown as Row);
@@ -773,7 +789,8 @@ export async function promoteWorkspaceRuleForAgentConnection(
       .is("deleted_at", null)
       .select(COLUMNS)
       .maybeSingle();
-    if (error) throw new WorkspaceRulesError("Failed to promote rule for this agent workspace.", "PROMOTE_FAILED", 500);
+    checkMemoryQuota(error);
+  if (error) throw new WorkspaceRulesError("Failed to promote rule for this agent workspace.", "PROMOTE_FAILED", 500);
     if (!data) throw new WorkspaceRulesError("Rule not found.", "NOT_FOUND", 404);
     const rule = mapRow(data as unknown as Row);
     await auditRulePromotion(rule.workspaceId, rule.id, rule.title, user.id, targetConnectionId);
@@ -810,7 +827,8 @@ export async function promoteWorkspaceRuleForAgentConnection(
       .eq("id", existingRule.id)
       .select(COLUMNS)
       .maybeSingle();
-    if (error) throw new WorkspaceRulesError("Failed to update target workspace rule.", "PROMOTE_FAILED", 500);
+    checkMemoryQuota(error);
+  if (error) throw new WorkspaceRulesError("Failed to update target workspace rule.", "PROMOTE_FAILED", 500);
     if (!data) throw new WorkspaceRulesError("Rule not found.", "NOT_FOUND", 404);
     const rule = mapRow(data as unknown as Row);
     await auditRulePromotion(rule.workspaceId, rule.id, rule.title, user.id, targetConnectionId);
@@ -840,6 +858,7 @@ export async function promoteWorkspaceRuleForAgentConnection(
     .select(COLUMNS)
     .single();
 
+  checkMemoryQuota(insertError);
   if (insertError) throw new WorkspaceRulesError("Failed to promote rule into the selected agent workspace.", "PROMOTE_FAILED", 500);
   const rule = mapRow(inserted as unknown as Row);
   await auditRulePromotion(rule.workspaceId, rule.id, rule.title, user.id, targetConnectionId);
@@ -887,6 +906,7 @@ export async function updateWorkspaceRuleText(
     .is("deleted_at", null)
     .select(COLUMNS)
     .maybeSingle();
+  checkMemoryQuota(error);
   if (error) throw new WorkspaceRulesError("Failed to update the rule.", "UPDATE_FAILED", 500);
   if (!data) throw new WorkspaceRulesError("Rule not found.", "NOT_FOUND", 404);
   return mapRow(data as unknown as Row);

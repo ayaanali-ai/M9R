@@ -96,6 +96,7 @@ export interface ProviderAssignment {
    * silently, never fail the session over it.
    */
   model?: string | null;
+  effort?: string | null;
   /**
    * This workspace's active rules (title + body, from GET /api/agent/rules),
    * fetched once by the bridge at session start instead of leaving delivery

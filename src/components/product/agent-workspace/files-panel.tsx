@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { ChannelAgentControls } from "./ChannelAgentControls";
 import { AgentMark } from "@/components/product/WorkspaceUI";
 import type { AgentView } from "@/lib/agent-workspace-data";
 import type { WorkspaceStep } from "@/components/product/ConversationPanel";
@@ -660,6 +661,8 @@ interface ChannelRosterRow {
   name: string | null;
   role: "owner" | "admin" | "member";
   inChannel: boolean;
+  canManage: boolean;
+  canRemove: boolean;
 }
 
 /**
@@ -688,7 +691,7 @@ export function ChannelPeoplePanel({ conversationId, onClose }: { conversationId
   const load = useCallback(() => {
     if (!conversationId) { setRoster([]); return; }
     fetch(`/api/dashboard/conversations/${encodeURIComponent(conversationId)}/members`, { cache: "no-store" })
-      .then((res) => res.json())
+      .then(async res => { const body = await res.json(); if (!res.ok) throw new Error(body.error ?? "Could not load members."); return body; })
       .then((data: { roster?: ChannelRosterRow[] }) => setRoster(data.roster ?? []))
       .catch(() => setError("Could not load this channel's members."));
   }, [conversationId]);
@@ -789,6 +792,7 @@ export function ChannelPeoplePanel({ conversationId, onClose }: { conversationId
         </div>
       )}
       {inviteNotice && <p className="wf-people-invite-notice">{inviteNotice}</p>}
+      {conversationId && <ChannelAgentControls key={conversationId} conversationId={conversationId} />}
       <div className="wf-activity-feed scrollbar-thin">
         {!conversationId ? (
           <p className="text-[length:var(--ol-text-sm)] text-[color:var(--ol-text-muted)]">Select a channel to manage who can see it.</p>
@@ -810,7 +814,7 @@ export function ChannelPeoplePanel({ conversationId, onClose }: { conversationId
                   <div className="truncate">{row.name ?? row.email ?? row.userId}</div>
                   <div className="wf-activity-row-meta"><span className="wf-activity-row-badge">{row.role}</span></div>
                 </div>
-                <button type="button" className="wf-btn-ghost-sm" disabled={busyUserId === row.userId} onClick={() => toggle(row)}>
+                <button type="button" className="wf-btn-ghost-sm" disabled={!row.canManage || (row.inChannel && !row.canRemove) || busyUserId === row.userId} onClick={() => toggle(row)}>
                   {busyUserId === row.userId ? "…" : row.inChannel ? "Remove" : "Add"}
                 </button>
               </li>

@@ -33,6 +33,18 @@ async function collect(adapter: CodexAppServerAdapter, session: AgentSessionHand
 
 const replyText = (events: InteractiveProviderEvent[]) => events.filter((event) => event.type === "provider.reply_text").map((event) => String(event.payload.text)).join("");
 
+test("live run settings validate the session's model and reasoning catalog", async () => {
+  const { adapter, session, stop } = await start();
+  try {
+    assert.deepEqual(session.availableEfforts?.map(option => option.id), ["low", "high"]);
+    await adapter.configureSession({ session, model: "fake-model", effort: "high" });
+    await assert.rejects(adapter.configureSession({ session, model: "foreign-model", effort: null }), /not reported/);
+    await assert.rejects(adapter.configureSession({ session, model: "fake-model", effort: "invalid" }), /not supported/);
+    await adapter.configureSession({ session, model: null, effort: null });
+    assert.equal(replyText(await collect(adapter, session, "hello")), "ok");
+  } finally { await stop(); }
+});
+
 test("a normal turn streams reply text, reports usage, and completes; the thread id is the provider session ref", async () => {
   const { adapter, session, stop } = await start();
   try {

@@ -182,7 +182,21 @@ function approvalLabel(t: Task): string {
  * only ones it may see (denied and expired are hidden), at most CAPS.inboxItems, each at most CAPS.inboxItemTokens.
  * Returns an empty string when there is nothing new, so an idle inbox costs zero tokens.
  */
+/**
+ * How long an unanswered task stays eligible for injection. A session that starts days after a task was sent (or a new session
+ * for the same handle) must never be handed the whole backlog as if it were fresh work; `M9R_INBOX_MAX_AGE_MINUTES` overrides.
+ */
+export const INBOX_MAX_AGE_MS = 30 * 60_000;
+export function inboxMaxAgeMs(env: Record<string, string | undefined> = process.env): number {
+  const minutes = Number(env.M9R_INBOX_MAX_AGE_MINUTES);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : INBOX_MAX_AGE_MS;
+}
+
 export interface InjectionOptions {
+  /** Clock for the age limit; defaults to Date.now(). */
+  now?: number;
+  /** Oldest task still injected; defaults to INBOX_MAX_AGE_MS. Pass Infinity to disable (tests only). */
+  maxAgeMs?: number;
   /** Most items to show; defaults to CAPS.inboxItems. An explicit inbox check may ask for more than the automatic hook. */
   items?: number;
   /** Longest goal shown per item; defaults to ENVELOPE_GOAL_CHARS. */
@@ -192,9 +206,13 @@ export interface InjectionOptions {
 export function renderInboxInjection(tasks: readonly Task[], cursor: number, options: InjectionOptions = {}): InjectionResult {
   const maxItems = options.items ?? CAPS.inboxItems;
   const goalChars = options.itemChars ?? ENVELOPE_GOAL_CHARS;
+  const now = options.now ?? Date.now();
+  const maxAge = options.maxAgeMs ?? inboxMaxAgeMs();
   const visible = tasks
     // A task already pushed into the session as a real prompt must not be injected a second time from the inbox.
-    .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired" && t.delivery?.state !== "queued" && t.delivery?.state !== "done")
+    // A task that already has a result is finished, and one older than the age limit is history, not work to hand a new session.
+    .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired" && t.delivery?.state !== "queued" && t.delivery?.state !== "done"
+      && !t.resultSummary && !(now - Date.parse(t.createdAt) > maxAge))
     .sort((a, b) => a.seq - b.seq);
   const shown = visible.slice(0, maxItems);
   if (shown.length === 0) return { text: "", includedIds: [], newCursor: cursor, omitted: 0 };

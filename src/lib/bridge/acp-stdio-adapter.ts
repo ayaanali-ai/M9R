@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
-import { isAbsolute, relative, resolve, sep, dirname } from "node:path";
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { Readable, Writable } from "node:stream";
@@ -137,6 +137,8 @@ interface SessionState {
   /** The CONTROLLER-level session id (AcpSessionController.respondToPermission's own key), NOT this adapter's own internal handle.sessionId -- requestPermission needs this to report a pending permission the same way bridge-runtime.ts's poll loop will later look it up. Also carries missionId for the same report. */
   executionId: string;
   missionId: string;
+  configOptions: NonNullable<acp.NewSessionResponse["configOptions"]>;
+  configDefaults: Map<string, string>;
 }
 
 interface ServerState {
@@ -505,18 +507,33 @@ export function responseForPermission(params: acp.RequestPermissionRequest, appr
  * what makes send_message (dev-mcp-server.ts) work at all -- without it,
  * the tool exists but always refuses with "no channel connection."
  */
+export function resolveDevMcpServerLaunch(moduleUrl: string, nodeExecutable: string, workingDirectory: string): { command: string; args: string[] } {
+  const modulePath = fileURLToPath(moduleUrl);
+  const moduleDirectory = dirname(modulePath);
+  const moduleName = basename(modulePath).toLowerCase();
+
+  // The standalone broker is a Node SEA executable, so process.execPath is
+  // the broker itself, not a Node runtime that can execute a JS/TS filename.
+  // Route the child MCP server through the already-installed engine's explicit
+  // subcommand; both executables are installed together in .m9r/bin.
+  if (moduleName === "m9r-web-broker" || moduleName === "m9r-web-broker.exe") {
+    const engineName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
+    return { command: resolve(moduleDirectory, engineName), args: ["dev-mcp-server", workingDirectory] };
+  }
+
+  // The source bridge uses tsx. Both the published .js modules and the
+  // bundled .cjs broker run under Node and ship dev-mcp-server.js beside them.
+  const extension = extname(modulePath).toLowerCase();
+  const isCompiled = extension === ".js" || extension === ".cjs" || extension === ".mjs";
+  const entryPoint = resolve(moduleDirectory, isCompiled ? "dev-mcp-server.js" : "dev-mcp-server.ts");
+  return isCompiled
+    ? { command: nodeExecutable, args: [entryPoint, workingDirectory] }
+    : { command: nodeExecutable, args: [require.resolve("tsx/cli"), entryPoint, workingDirectory] };
+}
+
 export function devMcpServerDescriptor(workingDirectory: string, missionId: string): acp.McpServer[] {
   if (!isMissionFeatureEnabled("devMcpTools")) return [];
-  // Two contexts, same relative-sibling layout, different launch: the
-  // monorepo runs this file as .ts source via tsx, with dev-mcp-server.ts
-  // sitting right next to it in src/lib/bridge/ -- tsx/cli is a real
-  // dependency there. The published CLI (build-cli.mjs) flattens both files
-  // into cli/dist/*.js, already-compiled plain JS with no tsx in the
-  // package at all, so it must invoke dev-mcp-server.js directly with node.
-  // import.meta.url's own extension tells us which context this is,
-  // without needing a separate build-time flag threaded through.
-  const isCompiled = import.meta.url.endsWith(".js");
-  const entryPoint = resolve(dirname(fileURLToPath(import.meta.url)), isCompiled ? "dev-mcp-server.js" : "dev-mcp-server.ts");
+  const launch = resolveDevMcpServerLaunch(import.meta.url, process.execPath, workingDirectory);
   const appUrl = process.env.M9R_APP_URL?.trim();
   const agentToken = process.env.M9R_AGENT_TOKEN?.trim();
   const env: acp.EnvVariable[] = [];
@@ -525,8 +542,8 @@ export function devMcpServerDescriptor(workingDirectory: string, missionId: stri
   if (missionId) env.push({ name: "M9R_MISSION_ID", value: missionId });
   return [{
     name: "oathlock-dev-tools",
-    command: process.execPath,
-    args: isCompiled ? [entryPoint, workingDirectory] : [require.resolve("tsx/cli"), entryPoint, workingDirectory],
+    command: launch.command,
+    args: launch.args,
     env,
   }];
 }
@@ -872,9 +889,10 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
       mcpServers: devMcpServerDescriptor(state.workingDirectory, input.assignment.missionId),
       ...(meta ? { _meta: meta } : {}),
     });
-    await this.applyModelOverride(connection, created, input.assignment.model);
     await this.enforceGovernedPermissionMode(connection, created.sessionId, created);
-    return this.registerSession(state, created.sessionId, input.executionId ?? created.sessionId, input.assignment.missionId, this.discoveredModelOptions(created));
+    const handle = this.registerSession(state, created.sessionId, input.executionId ?? created.sessionId, input.assignment.missionId, this.discoveredModelOptions(created), created.configOptions ?? []);
+    await this.configureSession({ session: handle, model: input.assignment.model ?? null, effort: input.assignment.effort ?? null });
+    return handle;
   }
 
   /**
@@ -909,13 +927,13 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
    * The real, live model choices this session's own ACP server just
    * reported -- surfaced so the dashboard can render a real dropdown
    * (agent_connections.available_models) instead of a hardcoded, partially-
-   * empty catalog or free text. Reuses the same flatten logic
-   * applyModelOverride already needed (options is either a flat list, or
+   * empty catalog or free text. Uses the flatten logic
+   * for options (either a flat list, or
    * grouped "group" entries each carrying their own flat list -- never
    * mixed). Best-effort: an ACP server with no "model" config option
    * (or an empty one) yields null, never an invented list.
    */
-  private discoveredModelOptions(created: acp.NewSessionResponse): { id: string; label: string }[] | null {
+  private discoveredModelOptions(created: Pick<acp.NewSessionResponse, "configOptions">): { id: string; label: string }[] | null {
     const modelOption = created.configOptions?.find((option) => option.category === "model" && option.type === "select");
     if (!modelOption || modelOption.type !== "select") return null;
     const flatOptions = modelOption.options.flatMap((entry) => "group" in entry ? entry.options : [entry]);
@@ -923,29 +941,24 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
     return flatOptions.map((choice) => ({ id: choice.value, label: choice.name || choice.value }));
   }
 
-  private async applyModelOverride(connection: acp.ClientSideConnection, created: acp.NewSessionResponse, model: string | null | undefined): Promise<void> {
-    const wanted = model?.trim();
-    if (!wanted) return;
-    const modelOption = created.configOptions?.find((option) => option.category === "model" && option.type === "select");
-    if (!modelOption || modelOption.type !== "select") {
-      console.warn(`[model-override] session ${created.sessionId} has no "model" config option; ignoring requested model "${wanted}".`);
-      return;
+  async configureSession(input: { session: AgentSessionHandle; model: string | null; effort: string | null }): Promise<void> {
+    const { state, session } = this.session(input.session);
+    if (session.queue) throw new Error("Run settings can only change between turns.");
+    for (const [category, requested] of [["model", input.model], ["thought_level", input.effort]] as const) {
+      const option = session.configOptions.find(item => item.type === "select" && item.category === category);
+      if (!option || option.type !== "select") {
+        if (requested) throw new Error(`Provider does not expose ${category} selection.`);
+        continue;
+      }
+      const wanted = requested ?? session.configDefaults.get(option.id);
+      if (!wanted || option.currentValue === wanted) continue;
+      const choices = option.options.flatMap(entry => "group" in entry ? entry.options : [entry]);
+      if (!choices.some(choice => choice.value === wanted)) throw new Error(`Provider does not support ${category} "${wanted}" for the selected model.`);
+      const result = await this.connection(state).setSessionConfigOption({ sessionId: session.rawSessionId, configId: option.id, value: wanted });
+      session.configOptions = result.configOptions;
     }
-    // `options` is either a flat list, or grouped ("group" entries each
-    // carrying their own flat option list) -- never mixed. Flatten both
-    // shapes into one list before searching.
-    const flatOptions = modelOption.options.flatMap((entry) => "group" in entry ? entry.options : [entry]);
-    const match = flatOptions.find((choice) => choice.value === wanted || choice.name === wanted);
-    if (!match) {
-      console.warn(`[model-override] session ${created.sessionId}: requested model "${wanted}" is not in this agent's available options (${flatOptions.map((choice) => choice.value).join(", ")}); ignoring.`);
-      return;
-    }
-    try {
-      await connection.setSessionConfigOption({ sessionId: created.sessionId, configId: modelOption.id, value: match.value });
-      console.log(`[model-override] session ${created.sessionId}: set model to "${match.value}".`);
-    } catch (error) {
-      console.warn(`[model-override] session ${created.sessionId}: setSessionConfigOption failed, continuing without the override:`, error instanceof Error ? error.message : error);
-    }
+    const efforts = session.configOptions.find(item => item.type === "select" && item.category === "thought_level");
+    session.handle.availableEfforts = efforts?.type === "select" ? efforts.options.flatMap(entry => "group" in entry ? entry.options : [entry]).map(choice => ({ id: choice.value, label: choice.name || choice.value })) : null;
   }
 
   async resumeSession(input: { server: AgentServerHandle; providerSessionRef: string; assignment: ProviderAssignment; executionId?: string }): Promise<AgentSessionHandle> {
@@ -961,7 +974,9 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
       : {};
     const resumed = await connection.resumeSession({ sessionId: input.providerSessionRef, cwd: state.workingDirectory, mcpServers: devMcpServerDescriptor(state.workingDirectory, input.assignment.missionId), ...meta });
     await this.enforceGovernedPermissionMode(connection, input.providerSessionRef, resumed);
-    return this.registerSession(state, input.providerSessionRef, input.executionId ?? input.providerSessionRef, input.assignment.missionId);
+    const handle = this.registerSession(state, input.providerSessionRef, input.executionId ?? input.providerSessionRef, input.assignment.missionId, this.discoveredModelOptions(resumed), resumed.configOptions ?? []);
+    await this.configureSession({ session: handle, model: input.assignment.model ?? null, effort: input.assignment.effort ?? null });
+    return handle;
   }
 
   async *prompt(input: { session: AgentSessionHandle; text: string }): AsyncIterable<InteractiveProviderEvent> {
@@ -1142,9 +1157,10 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
     };
   }
 
-  private registerSession(state: ServerState, rawSessionId: string, executionId: string, missionId: string, availableModels: { id: string; label: string }[] | null = null): AgentSessionHandle {
+  private registerSession(state: ServerState, rawSessionId: string, executionId: string, missionId: string, availableModels: { id: string; label: string }[] | null = null, configOptions: NonNullable<acp.NewSessionResponse["configOptions"]> = []): AgentSessionHandle {
     const handle: AgentSessionHandle = { sessionId: `acp-session-${randomUUID()}`, providerSessionRef: rawSessionId, availableModels };
-    state.sessions.set(handle.sessionId, { handle, rawSessionId, queue: null, permissions: new Map(), executionId, missionId });
+    const configDefaults = new Map(configOptions.filter(option => option.type === "select").map(option => [option.id, option.currentValue]));
+    state.sessions.set(handle.sessionId, { handle, rawSessionId, queue: null, permissions: new Map(), executionId, missionId, configOptions, configDefaults });
     return handle;
   }
 
@@ -1158,7 +1174,12 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
 
   private async sessionUpdate(state: ServerState, params: acp.SessionNotification): Promise<void> {
     const session = [...state.sessions.values()].find((candidate) => candidate.rawSessionId === params.sessionId);
-    if (!session || !session.queue) return;
+    if (!session) return;
+    if (params.update.sessionUpdate === "config_option_update") {
+      session.configOptions = params.update.configOptions;
+      session.handle.availableModels = this.discoveredModelOptions({configOptions:session.configOptions});
+    }
+    if (!session.queue) return;
     const occurredAt = this.now();
     const update = record(params.update);
     // Root cause of "Turn completed, but no channel result was posted": the

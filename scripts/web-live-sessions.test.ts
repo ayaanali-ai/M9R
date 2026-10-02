@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createOpenCodeAcpRuntime } from "@/lib/native/web-opencode-acp";
 import { createPageNotesStore } from "@/lib/native/page-notes-store";
-import { codexWorkerArgs, createWebLiveSessions, loadAgentsConfig, opencodeExePath, parseCodexLine, projectRoomId, webAgentPrompt, writeWebMcpConfig, type WorkerProcess } from "@/lib/native/web-live-sessions";
+import { codexWorkerArgs, createWebLiveSessions, webMcpServerCommand, loadAgentsConfig, opencodeExePath, parseCodexLine, projectRoomId, webAgentPrompt, writeWebMcpConfig, type WorkerProcess } from "@/lib/native/web-live-sessions";
 import type { SessionEvent } from "@/lib/native/web-ui-bridge";
 
 interface TestRoomTask {
@@ -306,6 +306,16 @@ test("web MCP config carries the broker-room start time used to suppress stale i
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a packaged broker starts agents' M9R tools through the engine beside it, never by re-running itself", () => {
+  const always = () => true;
+  const packaged = webMcpServerCommand("C:/m9r/launch.cjs", "C:/Users/k/.m9r/bin/m9r-web-broker.exe", always);
+  assert.match(packaged.command.replaceAll("\\", "/"), /\/m9r-engine\.exe$/);
+  assert.deepEqual(packaged.args, ["mcp"]);
+  assert.deepEqual(webMcpServerCommand("L.cjs", "/usr/bin/node", always), { command: "/usr/bin/node", args: ["L.cjs"] });
+  assert.deepEqual(webMcpServerCommand("L.cjs", "C:/Program Files/nodejs/node.exe", always), { command: "C:/Program Files/nodejs/node.exe", args: ["L.cjs"] });
+  assert.throws(() => webMcpServerCommand("L.cjs", "C:/x/m9r-web-broker.exe", () => false), /engine is missing/);
+});
+
 test("the broker bridge does not replay tasks from before startup, including the old two-second grace and missing timestamps", async () => {
   const tasks: TestRoomTask[] = [
     { id: "T-old-window", from: "claude", to: "opencode", goal: "stale task inside old grace window", origin: "agent_initiated", approval: "pending", createdAt: new Date(Date.now() - 1_500).toISOString() },
@@ -372,6 +382,43 @@ test("web agent prompt closes the loop on announced checks instead of leaving th
   assert.match(prompt, /start the first useful action immediately/i);
   assert.match(prompt, /do not send a standalone update that only announces a planned action/i);
   assert.match(prompt, /if you mention a check, complete it in the same turn or explain the blocker/i);
+});
+
+test("OpenCode replaces a provider process that died while idle and resumes the same session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-opencode-dead-"));
+  const made: Array<{ resumeId?: string; dead: boolean; closed: boolean }> = [];
+  const openCodeRuntime = ({ resumeId }: { resumeId?: string }) => {
+    const record = { resumeId, dead: false, closed: false };
+    made.push(record);
+    return {
+      ready: async () => ({ sessionId: resumeId ?? "ses_alive_1" }),
+      alive: () => !record.dead && !record.closed,
+      prompt: async function* () { yield { type: "provider.reply_text", sessionId: "a", occurredAt: "now", payload: { text: "ok" } }; yield { type: "provider.completed", sessionId: "a", occurredAt: "now", payload: {} }; },
+      cancelTurn: async () => undefined,
+      close: () => { record.closed = true; },
+    };
+  };
+  const sessions = createWebLiveSessions({
+    agents: [{ handle: "opencode", provider: "opencode", folder: process.cwd() }],
+    storeRoot: root, repoRoot: process.cwd(), brokerPort: 47124, env: {},
+    store: { issueIdentity: (_h, _p, sessionId) => ({ token: `token-${sessionId}` }), revokeIdentity: () => undefined },
+    opencodeExe: () => "opencode.exe",
+    openCodeRuntime: openCodeRuntime as never,
+  });
+  try {
+    assert.equal(sessions.deliver("opencode", "first").ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(made.length, 1);
+    made[0].dead = true; // the ACP process exits while the agent is idle
+    assert.equal(sessions.deliver("opencode", "second").ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(made.length, 2, "a new runtime replaces the dead one");
+    assert.equal(made[0].closed, true, "the dead runtime is released");
+    assert.equal(made[1].resumeId, "ses_alive_1", "the replacement resumes the same provider session");
+  } finally {
+    sessions.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("OpenCode resumes its durable provider session after the broker session manager restarts", async () => {

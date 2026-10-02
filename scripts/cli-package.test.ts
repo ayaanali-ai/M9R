@@ -141,8 +141,8 @@ test("built entry has the correct shebang and a relative core import", () => {
   assert.ok(!readFileSync(resolve(distDir, "oathlock-resident-core.js"), "utf8").includes("@/lib/"));
 });
 
-test("built MCP package includes the web broker, powers, and page-notes runtime dependencies", () => {
-  for (const name of ["web-broker-client.js", "web-broker-core.js", "web-broker-server.js", "web-ui-bridge.js", "web-powers-core.js", "page-notes-core.js", "page-notes-store.js"]) {
+test("built MCP package includes the web broker, turn scheduler, powers, and page-notes runtime dependencies", () => {
+  for (const name of ["web-broker-client.js", "web-broker-core.js", "turn-scheduler-core.js", "web-broker-server.js", "web-ui-bridge.js", "web-powers-core.js", "page-notes-core.js", "page-notes-store.js"]) {
     assert.ok(existsSync(resolve(distDir, name)), `missing packaged MCP dependency ${name}`);
   }
   const mcpEntry = readFileSync(resolve(distDir, "m9r-mcp.js"), "utf8");

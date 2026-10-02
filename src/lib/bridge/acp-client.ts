@@ -82,7 +82,7 @@ export class AcpSessionController {
         return { ok: false, reason: "interactive_session_unsupported" };
       }
       const providerSession = await input.adapter.createSession({ server, assignment: input.assignment, executionId: input.executionId ?? input.session.sessionId });
-      let session = this.registry.register({ ...input.session, providerSessionRef: providerSession.providerSessionRef, capabilities: initialized.capabilities, availableModels: providerSession.availableModels ?? null });
+      let session = this.registry.register({ ...input.session, providerSessionRef: providerSession.providerSessionRef, capabilities: initialized.capabilities, availableModels: providerSession.availableModels ?? null, availableEfforts: providerSession.availableEfforts ?? null });
       const launching = this.registry.transition(session.sessionId, "launching");
       if (!launching.ok) return launching;
       session = launching.session;
@@ -146,6 +146,29 @@ export class AcpSessionController {
       const finalState = this.registry.get(sessionId);
       if (finalState?.state === "working" || finalState?.state === "waiting") this.registry.transition(sessionId, "ready");
     }
+  }
+
+  /** Apply a fresh, authorized snapshot between turns, preserving provider history. */
+  async configure(sessionId: string, settings: { model: string | null; effort: string | null }): Promise<void> {
+    let controller = this.sessions.get(sessionId);
+    if (!controller) throw new Error("Bridge session is not active.");
+    const state = this.registry.get(sessionId)?.state;
+    if (state !== "ready" && state !== "waiting") throw new Error("Run settings can only change between turns.");
+    await this.ensureHealthy(sessionId, controller);
+    controller = this.sessions.get(sessionId) ?? controller;
+    if (!controller.adapter.configureSession) {
+      if (settings.model || settings.effort) throw new Error("This provider cannot apply live run settings.");
+      return;
+    }
+    await controller.adapter.configureSession({ session: controller.providerSession, ...settings });
+    const record = this.registry.get(sessionId);
+    if (record) {
+      record.availableModels = controller.providerSession.availableModels ?? null;
+      record.availableEfforts = controller.providerSession.availableEfforts ?? null;
+    }
+    controller.assignment.model = settings.model;
+    controller.assignment.effort = settings.effort;
+    this.publishRuntimeEvent(sessionId, controller, {type:"provider.configuration",sessionId,occurredAt:new Date().toISOString(),payload:{...settings,applies:"next_turn"}});
   }
 
   /** Delivers a human's decision to the exact session that's actually waiting on it -- the one call that turns a stored bridge_permission_requests decision (bridge-permission-service.ts) into the adapter's own requestPermission promise resolving, instead of that promise just sitting until its 15-minute timeout. */

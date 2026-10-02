@@ -120,6 +120,9 @@ test("m9r_web_do sends one ordered batch request and returns the broker result",
   assert.match(content[0]?.text ?? "", /\"topControls\"/);
 });
 
+// This test is about cursors, not age: its fixtures are dated 2026-09-27, so lift the inbox age limit for the file.
+process.env.M9R_INBOX_MAX_AGE_MINUTES = "100000000";
+
 test("a web-room agent's inbox cursor survives a fresh respawn (a new session ID every message must not re-show its whole delivered history)", async (t) => {
   const cursors: Record<string, number> = {};
   const tasks = [

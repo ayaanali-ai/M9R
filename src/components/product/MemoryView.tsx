@@ -23,6 +23,7 @@ import { useSearchParams } from "next/navigation";
 import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import RuleDraftTools from "@/components/product/RuleDraftTools";
 import { SessionCatalog } from "@/components/product/memory/SessionCatalog";
+import { SharedNotes } from "@/components/product/memory/SharedNotes";
 import { Meta, Surface } from "@/components/product/WorkspaceUI";
 import type { WorkspaceRule } from "@/lib/workspace-rule-matching";
 import {
@@ -122,8 +123,8 @@ export default function MemoryView() {
    */
   const memorySearchParams = useSearchParams();
   const deepLinkedSessionId = memorySearchParams.get("session");
-  const [viewTab, setViewTab] = useState<"rules" | "sessions">(
-    memorySearchParams.get("tab") === "sessions" || deepLinkedSessionId ? "sessions" : "rules",
+  const [viewTab, setViewTab] = useState<"rules" | "sessions" | "notes">(
+    memorySearchParams.get("tab") === "sessions" || deepLinkedSessionId ? "sessions" : memorySearchParams.get("tab") === "rules" ? "rules" : "notes",
   );
 
   const load = useCallback(async () => {
@@ -268,6 +269,7 @@ export default function MemoryView() {
 
   const tabBar = (
     <div className="wf-memory-tabs">
+      <button type="button" className="wf-memory-tab" data-active={viewTab === "notes" || undefined} onClick={() => setViewTab("notes")}>Shared notes</button>
       <button type="button" className="wf-memory-tab" data-active={viewTab === "rules" || undefined} onClick={() => setViewTab("rules")}>
         Rules
       </button>
@@ -276,6 +278,8 @@ export default function MemoryView() {
       </button>
     </div>
   );
+
+  if (viewTab === "notes") return <div className="space-y-4">{tabBar}<SharedNotes conversationId={memorySearchParams.get("channel") ?? undefined} /></div>;
 
   if (viewTab === "sessions") {
     return (

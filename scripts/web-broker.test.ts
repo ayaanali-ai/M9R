@@ -714,7 +714,7 @@ test("the loop guard enforces an action budget per window", async () => {
   assert.equal((await later).ok, true);
 });
 
-test("every reply carries what teammates did since the agent's last action, and tabs lists the whole room", async () => {
+test("awareness omits unrelated tabs while tabs still lists the whole room", async () => {
   const { broker, sent } = harness();
   const a = broker.submit(req("claude", "open", { url: "https://example.com/", tab: "a" }));
   broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "https://example.com", url: "https://example.com/" });
@@ -723,10 +723,10 @@ test("every reply carries what teammates did since the agent's last action, and 
   broker.onExtensionMessage({ type: "result", id: "c2", ok: true, origin: "https://example.org", url: "https://example.org/" });
   const codexReply = await b;
   assert.equal(codexReply.ok, true);
-  assert.match((codexReply.room ?? []).join(" "), /@claude: .*\[tab a\]/);
+  assert.equal(codexReply.room, undefined);
   const read = broker.submit(req("claude", "read", { tab: "a", selector: "h1" }));
   broker.onExtensionMessage({ type: "result", id: "c3", ok: true, data: "Example" });
-  assert.match(((await read).room ?? []).join(" "), /@codex: .*\[tab b\]/);
+  assert.equal((await read).room, undefined);
   const list = await broker.submit(req("claude", "tabs"));
   assert.equal(list.ok, true);
   const tabsData = list.data as Array<{ tab: string; lastBy?: string; mine: boolean }>;
@@ -889,4 +889,21 @@ test("m9r_web_do parses the structured snapshot returned by the browser extensio
     url: "https://example.test/product/P-34", title: "Product P-34",
     topControls: [{ ref: "e0123456789abcdef01234567_1", role: "link", name: "Back to products", position: 1 }],
   });
+});
+
+
+test("shared-tab awareness reports changes once and omits passive reads", async () => {
+ const {broker,sent}=harness();
+ const first=broker.submit(req("claude","open",{url:"https://example.com/",tab:"shared"}));
+ broker.onExtensionMessage({type:"result",id:"c1",ok:true,url:"https://example.com/",origin:"https://example.com"}); await first;
+ await broker.submit(req("codex","open",{url:"https://example.com/",tab:"shared"}));
+ const change=broker.submit(req("claude","scroll",{tab:"shared",args:{by:200}}));
+ broker.onExtensionMessage({type:"result",id:String(sent.at(-1)!.id),ok:true});await change;
+ const read=broker.submit(req("codex","read",{tab:"shared",selector:"h1"}));
+ broker.onExtensionMessage({type:"result",id:String(sent.at(-1)!.id),ok:true,data:"Title"});
+ assert.match(((await read).room??[]).join(" "),/@claude: .*Scrolled/);
+ const again=await broker.submit(req("codex","tabs"));assert.equal(again.room,undefined);
+ const passive=broker.submit(req("claude","read",{tab:"shared",selector:"h1"}));
+ broker.onExtensionMessage({type:"result",id:String(sent.at(-1)!.id),ok:true,data:"Title"});await passive;
+ assert.equal((await broker.submit(req("codex","tabs"))).room,undefined);
 });

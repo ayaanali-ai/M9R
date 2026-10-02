@@ -89,8 +89,12 @@ function requireAdminRole(role: WorkspaceRole) {
  */
 export async function requireApproverRole(workspaceId: string, userId: string): Promise<void> {
   const svc = requireAdmin();
+  const { data: project, error: projectError } = await svc.from("projects").select("owner_id").eq("id", workspaceId).maybeSingle();
+  if (projectError) throw new WorkspaceMembershipError("Could not verify workspace ownership.", "READ_FAILED", 503);
+  if (project?.owner_id === userId) return;
   const { data, error } = await svc.from("workspace_members").select("role").eq("workspace_id", workspaceId).eq("user_id", userId).maybeSingle();
-  if (error || !data) return;
+  if (error) throw new WorkspaceMembershipError("Could not verify workspace membership.", "READ_FAILED", 503);
+  if (!data) throw new WorkspaceMembershipError("You are not a member of this workspace.", "NOT_A_MEMBER", 403);
   requireAdminRole(data.role as WorkspaceRole);
 }
 
@@ -199,7 +203,7 @@ export async function leaveWorkspace(workspaceId: string): Promise<void> {
 
 export async function listWorkspaceInvites(workspaceId: string): Promise<WorkspaceInvite[]> {
   const { db, userId } = await requireUser();
-  await requireRole(db, workspaceId, userId);
+  requireAdminRole(await requireRole(db, workspaceId, userId));
   const { data, error } = await db
     .from("workspace_invites")
     .select("id, workspace_id, email, role, token, created_at, expires_at, accepted_at, revoked_at")

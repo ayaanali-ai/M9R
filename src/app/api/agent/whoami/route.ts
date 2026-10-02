@@ -25,10 +25,17 @@ export async function GET(req: NextRequest) {
   if (!agent) return NextResponse.json({ error: "Invalid or expired agent token." }, { status: 401 });
 
   let model: string | null = null;
+  let effort: string | null = null;
   let ownerUserId: string | null = null;
   if (supabase) {
-    const { data } = await supabase.from("agent_connections").select("model, created_by").eq("id", agent.connectionId).maybeSingle();
+    let { data, error } = await supabase.from("agent_connections").select("model, effort, created_by").eq("id", agent.connectionId).eq("workspace_id",agent.workspaceId).maybeSingle();
+    if (error && ["42703","PGRST204"].includes(error.code)) {
+      const legacy = await supabase.from("agent_connections").select("model, created_by").eq("id",agent.connectionId).eq("workspace_id",agent.workspaceId).maybeSingle();
+      data = legacy.data ? {...legacy.data,effort:null} : null; error=legacy.error;
+    }
+    if(error) return NextResponse.json({error:"Connection settings unavailable."},{status:503});
     model = (data as { model?: string | null } | null)?.model ?? null;
+    effort = data?.effort ?? null;
     // Item #28 Part A: the owner-pty-runtime (one real shell per human, not
     // per provider connection) authenticates using whichever provider token
     // happens to be available -- it still needs to know the actual HUMAN it
@@ -39,5 +46,5 @@ export async function GET(req: NextRequest) {
     ownerUserId = (data as { created_by?: string | null } | null)?.created_by ?? null;
   }
 
-  return NextResponse.json({ workspaceId: agent.workspaceId, connectionId: agent.connectionId, agentKind: agent.agentKind, model, ownerUserId });
+  return NextResponse.json({ workspaceId: agent.workspaceId, connectionId: agent.connectionId, agentKind: agent.agentKind, model, effort, ownerUserId });
 }

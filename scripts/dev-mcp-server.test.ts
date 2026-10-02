@@ -165,7 +165,7 @@ test("git_read completes a bounded read-only repository inspection", async () =>
   const root = process.cwd();
   await withClient(root, async (client) => {
     const result = await client.callTool({ name: "git_read", arguments: { operation: "log", limit: 1 } }) as any;
-    assert.equal(isSuccess(result), true);
+    assert.equal(isSuccess(result), true, textOf(result));
     assert.match(textOf(result), /^git log -1 --oneline\n[\s\S]+/);
   });
 });
@@ -215,7 +215,7 @@ test("server exposes exactly the governed tool set (no unrestricted shell or vie
       // handoff_to_terminal is registered only while the terminal multiplayer
       // view is enabled (NEXT_PUBLIC_M9R_TERMINAL_ENABLED), which is off by
       // default -- so the governed set shrinks by exactly that one tool.
-      const expected = ["create_file", "draft_section", "git_read", "list_my_task_items", "read_file", "request_assignment_change", "request_evidence_review", "rg", "search_memory", "send_message", "str_replace", "submit_evidence", "submit_task_split", "todo", "tree", "update_task_item_status"];
+      const expected = ["create_file", "draft_section", "git_read", "list_my_task_items", "read_file", "remember_shared", "request_assignment_change", "request_evidence_review", "rg", "search_memory", "send_message", "str_replace", "submit_evidence", "submit_task_split", "todo", "tree", "update_task_item_status"];
       if (TERMINAL_ENABLED) expected.push("handoff_to_terminal");
       assert.deepEqual(names, expected.sort());
     });

@@ -757,6 +757,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
   let ownConnectionId: string | null = null;
   /** Human-set model override for this connection, from agent_connections.model via /api/agent/whoami. Refreshed on the same cadence/paths as ownConnectionId. Null means "no override -- use the provider's own default." */
   let ownModel: string | null = null;
+  let ownEffort: string | null = null;
   /** This workspace's active rules, formatted as plain text, from GET /api/agent/rules. Refreshed alongside ownConnectionId/ownModel. Null means no active rules (or the fetch failed) -- never invented text. */
   let ownActiveRulesText: string | null = null;
   /** Item #16 Part A: this connection's assigned persona prompt text, from GET /api/agent/persona. Refreshed on the same cadence as ownActiveRulesText, same "leave prior value on a failed fetch" posture. Null means no persona assigned (or the fetch failed) -- never invented text. */
@@ -1354,6 +1355,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       participantId: sessionConfig.participantId,
       assignmentId: sessionConfig.assignmentId ?? null,
       model: ownModel,
+      effort: ownEffort,
       activeRulesText: ownActiveRulesText,
       personaText: ownPersonaText,
       deniedFilePatterns: ownDeniedFilePatterns,
@@ -1403,7 +1405,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
         method: "POST",
         signal: AbortSignal.timeout(10_000),
         headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json" },
-        body: JSON.stringify({ available_models: result.session.availableModels }),
+        body: JSON.stringify({ available_models: result.session.availableModels, available_efforts: result.session.availableEfforts ?? null }),
       }).catch((error) => {
         console.warn(`[model-discovery] could not report available models for session ${sessionConfig.sessionId}:`, error instanceof Error ? error.message : error);
       });
@@ -1477,6 +1479,26 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     if (!response.ok) throw new Error(`Agent presence heartbeat failed with HTTP ${response.status}.`);
   }
 
+  const reportedCatalogs = new Map<string, string>();
+  async function applyChannelRunSettings(sessionId: string, conversationId?: string): Promise<void> {
+    const query = conversationId ? '?conversationId=' + encodeURIComponent(conversationId) : '';
+    const response = await fetch(appUrl + '/api/agent/run-settings' + query, {
+      headers: { authorization: 'Bearer ' + agentToken }, signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error('Could not resolve authorized run settings.');
+    await controller.configure(sessionId, await response.json() as { model: string | null; effort: string | null });
+    const session = controller.listSessions().find(item => item.sessionId === sessionId);
+    if (!session) return;
+    const body = JSON.stringify({ available_models: session.availableModels ?? null, available_efforts: session.availableEfforts ?? null });
+    if (reportedCatalogs.get(sessionId) === body) return;
+    try {
+      const reported = await fetch(appUrl + '/api/agent/available-models', {
+        method: 'POST', headers: { authorization: 'Bearer ' + agentToken, 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(10_000),
+      });
+      if (reported.ok) reportedCatalogs.set(sessionId, body);
+    } catch { /* Catalog reporting is retried next turn; settings application already succeeded. */ }
+  }
+
   function handleRelayFrame(frame: { type: string; missionId?: string; payload: unknown }): void {
     if (frame.type !== "mission.event" || !frame.missionId || !frame.payload || typeof frame.payload !== "object") return;
     const payload = frame.payload as { message?: { id?: unknown; senderParticipantId?: unknown; body?: unknown }; deliveries?: unknown };
@@ -1494,6 +1516,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       void (async () => {
         await relayClient.setParticipantPresence({ missionId: session.missionId, participantId: session.participantId, state: "working" });
         try {
+          await applyChannelRunSettings(session.sessionId);
           for await (const event of withStallTimeout(controller.prompt(session.sessionId, messageBody), PROVIDER_TURN_STALL_MS, () => { void controller.cancelTurn(session.sessionId).catch(() => undefined); })) void event;
         } finally {
           await relayClient.setParticipantPresence({ missionId: session.missionId, participantId: session.participantId, state: "online" });
@@ -2337,6 +2360,9 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       let replyTextAccum = "";
       let sawFirstEvent = false;
       let stepSeq = 0;
+      // Fetch a fresh channel/connection snapshot before the next paid turn.
+      // A settings or membership failure must not run under guessed defaults.
+      await applyChannelRunSettings(sessionId, conversationId);
       for await (const event of withStallTimeout(controller.prompt(sessionId, combinedText), PROVIDER_TURN_STALL_MS, () => { void controller.cancelTurn(sessionId).catch(() => undefined); })) {
         if (!sawFirstEvent) {
           sawFirstEvent = true;
@@ -2469,6 +2495,7 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
       if (!reportObserved && !providerFailureReason && !initialReplyText && isMissionFeatureEnabled("devMcpTools")) {
         const recoveryStartedAt = new Date();
         console.warn(`[timing] session ${sessionId} completed without a channel report; requesting one report-only recovery turn.`);
+        await applyChannelRunSettings(sessionId, conversationId);
         for await (const event of withStallTimeout(controller.prompt(sessionId, buildWorkspaceReportRecoveryPrompt({
           provider: providerLabel,
           conversationId,
@@ -3205,10 +3232,11 @@ export async function startMissionBridge(config: MissionBridgeConfig): Promise<M
     // Also on the single-flight scan path (ensureDynamicSessionForConversation
     // awaits this before deferring), so it must be bounded for the same reason.
     const body = await fetch(`${appUrl}/api/agent/whoami`, { headers: { authorization: `Bearer ${agentToken}` }, cache: "no-store", signal: AbortSignal.timeout(10_000) })
-      .then((response) => response.ok ? response.json() as Promise<{ connectionId?: string; model?: string | null }> : null)
+      .then((response) => response.ok ? response.json() as Promise<{ connectionId?: string; model?: string | null; effort?: string | null }> : null)
       .catch(() => null);
     if (typeof body?.connectionId === "string") ownConnectionId = body.connectionId;
     if (body && "model" in body) ownModel = typeof body.model === "string" && body.model.trim() ? body.model.trim() : null;
+    if (body && "effort" in body) ownEffort = typeof body.effort === "string" && body.effort.trim() ? body.effort.trim() : null;
     await refreshOwnActiveRules();
     await refreshOwnPersonaText();
     await refreshOwnDeniedFilePatterns();

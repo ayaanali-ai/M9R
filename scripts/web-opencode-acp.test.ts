@@ -108,3 +108,28 @@ test("failed OpenCode ACP initialization shuts down the failed provider process"
   runtime.close();
   assert.deepEqual(calls, ["launch", "initialize", "shutdown"], "failed startup must not leak or shut down twice");
 });
+
+test("OpenCode ACP falls back to a fresh session when the saved one cannot be resumed, and reports liveness", async () => {
+  let health: "alive" | "dead" = "alive";
+  const runtime = createOpenCodeAcpRuntime({
+    exe: "opencode.exe", cwd: "C:/Work", env: {}, handle: "opencode", missionId: "room", model: "opencode/big-pickle", resumeId: "ses_gone_123",
+    adapterFactory: () => ({
+      launchServer: async () => ({ serverId: "s", adapterId: "opencode-acp" }),
+      initialize: async () => ({}),
+      resumeSession: async () => { throw new Error("session not found"); },
+      createSession: async () => ({ sessionId: "x", providerSessionRef: "ses_fresh_456" }),
+      prompt: async function* () { /* unused */ },
+      cancelTurn: async () => undefined,
+      shutdown: async () => undefined,
+      getServerHealth: () => ({ state: health, detail: "" }),
+    }) as never,
+  });
+  assert.equal(runtime.alive?.(), true, "alive before launch");
+  assert.deepEqual(await runtime.ready(), { sessionId: "ses_fresh_456", restored: false });
+  assert.equal(runtime.alive?.(), true);
+  health = "dead";
+  assert.equal(runtime.alive?.(), false, "a provider process that exited is reported dead");
+  health = "alive";
+  runtime.close();
+  assert.equal(runtime.alive?.(), false, "a closed runtime is dead");
+});

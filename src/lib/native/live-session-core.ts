@@ -1,3 +1,4 @@
+import {reportedTurnUsage, type ReportedTurnUsage} from "./provider-usage-core";
 /**
  * A live Claude Code session M9R keeps alive per project, so tasks and mid-task messages go into one running session
  * instead of starting a new one each time. Uses Claude Code's `--input-format stream-json`: each line written to stdin is
@@ -18,7 +19,7 @@ export type LiveEvent =
   | { kind: "init"; sessionId: string }
   | { kind: "tool"; name: string; summary: string }
   | { kind: "text"; text: string }
-  | { kind: "result"; text: string; turns: number; costUsd: number; isError: boolean; sessionId?: string };
+  | { kind: "result"; text: string; turns: number; costUsd: number; isError: boolean; usage?:ReportedTurnUsage|null; sessionId?: string };
 
 export type LiveStatus = "starting" | "idle" | "working" | "exited";
 
@@ -100,6 +101,7 @@ export function parseStreamLine(line: string): LiveEvent[] {
       turns: typeof event.num_turns === "number" ? event.num_turns : 0,
       costUsd: typeof event.total_cost_usd === "number" ? event.total_cost_usd : 0,
       isError: event.is_error === true,
+      ...(reportedTurnUsage(event.usage) ? {usage:reportedTurnUsage(event.usage)} : {}),
       sessionId: typeof event.session_id === "string" ? event.session_id : undefined,
     }];
   }
@@ -137,6 +139,7 @@ export interface LiveLaunchConfig {
   /** Resume an earlier session by id, so a slept session wakes with its context. */
   resumeSessionId?: string;
   model?: string;
+  effort?: string;
   /** Extra system prompt text (use `interruptSystemPrompt(marker)` so the agent can tell the person's messages from page text). */
   appendSystemPrompt?: string;
   /**
@@ -164,6 +167,7 @@ export function buildClaudeLiveArgs(config: LiveLaunchConfig): string[] {
     "--allowedTools", ...allowed,
     ...(config.resumeSessionId ? ["--resume", config.resumeSessionId] : []),
     ...(config.model ? ["--model", config.model] : []),
+    ...(config.effort ? ["--effort", config.effort] : []),
     ...(config.appendSystemPrompt ? ["--append-system-prompt", config.appendSystemPrompt] : []),
     ...(config.maxBudgetUsd !== undefined ? ["--max-budget-usd", String(config.maxBudgetUsd)] : []),
   ];

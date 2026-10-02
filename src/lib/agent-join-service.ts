@@ -671,7 +671,7 @@ export async function disconnectAgentConnection(rawConnectionId: string): Promis
 
   const { data: connection, error: lookupError } = await cookieDb
     .from("agent_connections")
-    .select("id, workspace_id, status")
+    .select("id, workspace_id, status, created_by")
     .eq("id", connectionId)
     .maybeSingle();
 
@@ -683,6 +683,10 @@ export async function disconnectAgentConnection(rawConnectionId: string): Promis
     throw new AgentJoinError("Agent connection was not found.", "NOT_FOUND", 404);
   }
 
+  if (connection.created_by !== user.id) {
+    const { data: project } = await cookieDb.from("projects").select("owner_id").eq("id", connection.workspace_id).maybeSingle();
+    if (project?.owner_id !== user.id) throw new AgentJoinError("Only this agent's owner or the workspace owner can disconnect it.", "FORBIDDEN", 403);
+  }
   return revokeAgentConnection(connectionId, connection.status === "revoked");
 }
 
@@ -752,7 +756,7 @@ export async function setAgentConnectionModel(rawConnectionId: string, rawModel:
 
   const { data: connection, error: lookupError } = await cookieDb
     .from("agent_connections")
-    .select("id, agent_kind")
+    .select("id, agent_kind, workspace_id, created_by, available_models")
     .eq("id", connectionId)
     .maybeSingle();
   if (lookupError) {
@@ -760,6 +764,14 @@ export async function setAgentConnectionModel(rawConnectionId: string, rawModel:
     throw new AgentJoinError("Could not resolve agent connection.", "CONNECTION_LOOKUP_FAILED", 500);
   }
   if (!connection) throw new AgentJoinError("Agent connection was not found.", "NOT_FOUND", 404);
+
+  if (connection.created_by !== user.id) {
+    const { data: project } = await cookieDb.from("projects").select("owner_id").eq("id", connection.workspace_id).maybeSingle();
+    if (project?.owner_id !== user.id) throw new AgentJoinError("Only this agent's owner or the workspace owner can change its model.", "FORBIDDEN", 403);
+  }
+  if (model && !(connection.available_models as Array<{ id: string }> | null)?.some(option => option.id === model)) {
+    throw new AgentJoinError("This agent has not reported support for that model.", "INVALID_MODEL", 400);
+  }
 
   const db = requireService();
   const { error: updateError } = await db.from("agent_connections").update({ model }).eq("id", connectionId);

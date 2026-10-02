@@ -28,6 +28,8 @@ export interface McpServerDeps {
   pageNotes?: PageNotesStore;
   /** Tasks created before this web-room lifetime are historical and must not be replayed into its agents. */
   roomStartedAt?: number;
+  /** Clock for the inbox age limit; defaults to the real time (tests inject the store's fake clock). */
+  now?: () => Date;
 }
 
 const TOKEN_FIELD = { token: z.string().min(1).describe("Your M9R session token, from the line the SessionStart card gave you (\"M9R session token: ...\"). Required on every call.") };
@@ -218,7 +220,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
               return authorized ? task : undefined;
             }))).filter((task): task is Task => task !== undefined)
           : queuedTasks;
-        const injection = renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000 });
+        const injection = renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000, now: (deps.now ?? (() => new Date()))().getTime() });
         if (injection.text) {
           deps.store.setCursor(handle, cursorSession, injection.newCursor);
           return { content: [{ type: "text" as const, text: injection.text }] };

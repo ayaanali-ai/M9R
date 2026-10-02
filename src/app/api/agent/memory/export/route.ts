@@ -17,8 +17,9 @@ export async function GET(req: NextRequest) {
   try {
     const agent = await authenticateAgent(bearerFrom(req.headers.get("authorization")));
     if (!agent) return NextResponse.json({ error: "Invalid or missing agent token." }, { status: 401 });
+    if (!agent.scopes.includes("rules:read")) return NextResponse.json({ error: "Token lacks rules:read scope." }, { status: 403 });
     const since = new URL(req.url).searchParams.get("since");
-    const sessions = await listArchivedSessionsForExport(agent.workspaceId, since);
+    const sessions = await listArchivedSessionsForExport(agent.workspaceId, since, agent.connectionId);
     return NextResponse.json({ sessions });
   } catch (err) {
     return handleAgentError(err);

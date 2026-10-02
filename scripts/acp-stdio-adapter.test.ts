@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   mapAcpSessionUpdate,
   mapAcpUsageEvent,
   workspaceRelativeAcpPath,
   devMcpServerDescriptor,
+  resolveDevMcpServerLaunch,
   codexAcpServerEnv,
   openCodeConfigContent,
   matchesDenyPattern,
@@ -88,6 +91,24 @@ test("devMcpServerDescriptor omits an env entry rather than sending an empty val
     assert.equal(names.includes("M9R_AGENT_TOKEN"), false);
     assert.equal(names.includes("M9R_MISSION_ID"), true);
   });
+});
+
+test("standalone SEA broker launches the dev MCP server through the sibling engine subcommand", () => {
+  const brokerPath = join(process.cwd(), "m9r-runtime-test", "bin", "m9r-web-broker.exe");
+  const launch = resolveDevMcpServerLaunch(pathToFileURL(brokerPath).href, brokerPath, "C:/workspace");
+  const engineName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
+
+  assert.equal(launch.command, join(dirname(brokerPath), engineName));
+  assert.deepEqual(launch.args, ["dev-mcp-server", "C:/workspace"]);
+  assert.doesNotMatch(launch.args.join(" "), /tsx\/cli/);
+});
+
+test("bundled CJS broker launches its compiled sibling dev MCP server with Node", () => {
+  const brokerPath = join(process.cwd(), "cli", "dist", "m9r-web-broker.cjs");
+  const launch = resolveDevMcpServerLaunch(pathToFileURL(brokerPath).href, "node-runtime", "C:/workspace");
+
+  assert.equal(launch.command, "node-runtime");
+  assert.deepEqual(launch.args, [join(dirname(brokerPath), "dev-mcp-server.js"), "C:/workspace"]);
 });
 
 test("OpenCode receives the governed MCP server through inline config without embedding the bearer token", () => {

@@ -13,17 +13,19 @@
  */
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeHandle, type Approval, type Task } from "./inbox-core";
+import { nodeForCodex } from "./codex-delivery-core";
 import { createWebBrokerClient } from "./web-broker-client";
 import { brokerKeyPath } from "./web-broker-paths";
 import { apiKeyLaunchBlock } from "./vendor-launch-core";
 import { startLiveSession, type LiveEvent, type LiveProcess, type LiveSession } from "./live-session-core";
 import { createOpenCodeAcpRuntime, type OpenCodeLiveRuntime } from "./web-opencode-acp";
 import { createPageNotesStore } from "./page-notes-store";
+import {reportedTurnUsage, type ReportedTurnUsage} from "./provider-usage-core";
 import { redactSession } from "../session-redaction";
 import type { SessionEvent, SessionStatus, SessionsPort } from "./web-ui-bridge";
 
@@ -35,6 +37,7 @@ export interface WebAgentConfig {
   /** web-only (default): only M9R's tools. hands: also shell and file tools in the folder (Claude Code only). */
   profile?: "web-only" | "hands";
   model?: string;
+  effort?: string;
   allowedTools?: string[];
 }
 
@@ -120,6 +123,7 @@ export function loadAgentsConfig(storeRoot: string, options: { env?: Record<stri
     agents.push({
       handle, provider, folder, profile,
       ...(typeof entry.model === "string" && entry.model ? { model: entry.model } : {}),
+      ...(typeof entry.effort === "string" && /^[a-z][a-z0-9_-]{0,39}$/.test(entry.effort) ? { effort: entry.effort } : {}),
       ...(Array.isArray(entry.allowedTools) ? { allowedTools: entry.allowedTools.filter((t): t is string => typeof t === "string") } : {}),
     });
   }
@@ -219,6 +223,18 @@ function packagedMcpEntry(): string | null {
 }
 
 /**
+ * What an agent runs to start M9R's MCP server. The packaged broker is a Node SEA executable, so its process.execPath is the broker
+ * itself: handing it a launcher script starts a second broker, which dies on the address already in use and leaves the agent without
+ * any M9R tool. A packaged broker therefore uses the engine installed beside it (`m9r-engine mcp`); every other run is plain Node.
+ */
+export function webMcpServerCommand(launcher: string, execPath: string = process.execPath, exists: (path: string) => boolean = existsSync): { command: string; args: string[] } {
+  if (!/^m9r-web-broker(\.exe)?$/i.test(basename(execPath))) return { command: execPath, args: [launcher] };
+  const engine = join(dirname(execPath), /\.exe$/i.test(execPath) ? "m9r-engine.exe" : "m9r-engine");
+  if (!exists(engine)) throw new Error(`the M9R engine is missing beside the broker at ${engine}; reinstall the complete package so agents can start their M9R tools`);
+  return { command: engine, args: ["mcp"] };
+}
+
+/**
  * A launcher for M9R's MCP server, and the config pointing at it. An installed CLI runs its compiled server; a development checkout
  * runs the source from the repo root (it needs the path alias loader). The broker's own working folder must never decide this:
  * started at login it runs from the M9R folder, and an agent whose MCP server cannot start silently loses every M9R tool.
@@ -236,8 +252,7 @@ child.on("exit", (code) => process.exit(code ?? 0));
   writeFileSync(configPath, JSON.stringify({
     mcpServers: {
       m9r: {
-        command: process.execPath,
-        args: [launcher],
+        ...webMcpServerCommand(launcher),
         env: {
           M9R_HOME: options.storeRoot,
           M9R_WEB_BROKER_PORT: String(options.brokerPort),
@@ -251,23 +266,24 @@ child.on("exit", (code) => process.exit(code ?? 0));
 
 const toml = (value: string) => JSON.stringify(value);
 
-export function codexWorkerArgs(options: { prompt: string; folder: string; launcher: string; storeRoot: string; brokerPort: number; roomStartedAt: number; threadId?: string; model?: string }): string[] {
-  const mcp = `mcp_servers={m9r={command=${toml(process.execPath)},args=[${toml(options.launcher)}],env={M9R_HOME=${toml(options.storeRoot)},M9R_WEB_BROKER_PORT=${toml(String(options.brokerPort))},M9R_ROOM_STARTED_AT=${toml(String(options.roomStartedAt))}},default_tools_approval_mode="approve"}}`;
+export function codexWorkerArgs(options: { prompt: string; folder: string; launcher: string; storeRoot: string; brokerPort: number; roomStartedAt: number; threadId?: string; model?: string; effort?: string }): string[] {
+  const server = webMcpServerCommand(options.launcher);
+  const mcp = `mcp_servers={m9r={command=${toml(server.command)},args=[${server.args.map(toml).join(",")}],env={M9R_HOME=${toml(options.storeRoot)},M9R_WEB_BROKER_PORT=${toml(String(options.brokerPort))},M9R_ROOM_STARTED_AT=${toml(String(options.roomStartedAt))}},default_tools_approval_mode="approve"}}`;
   // A browser worker must only ever touch the browser through M9R. Codex ships its own computer-use, browser, app and plugin
   // tools (on by default); a worker that reaches for them takes over the owner's real screen, so they are all switched off.
   const noOwnControl = ["computer_use", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser", "in_app_local_automation", "apps", "plugins", "remote_plugin", "multi_agent", "image_generation", "view_image", "tool_suggest", "skill_search"].flatMap((feature) => ["-c", `features.${feature}=false`]);
-  const common = ["--skip-git-repo-check", "--ignore-user-config", "--json", "-c", mcp, "-c", 'web_search="disabled"', "-c", 'sandbox_mode="read-only"', ...noOwnControl, ...(options.model ? ["--model", options.model] : [])];
+  const common = ["--skip-git-repo-check", "--ignore-user-config", "--json", "-c", mcp, "-c", 'web_search="disabled"', "-c", 'sandbox_mode="read-only"', ...noOwnControl, ...(options.model ? ["--model", options.model] : []), ...(options.effort ? ["-c", `model_reasoning_effort=${toml(options.effort)}`] : [])];
   return options.threadId ? ["exec", "resume", options.threadId, options.prompt, ...common] : ["exec", options.prompt, "--cd", options.folder, ...common];
 }
 
 export const CODEX_WEB_PREFACE = "M9R tools may only be reachable as deferred tools through your exec/code gateway (the `tools` object, named like mcp__m9r__m9r_web_open): use it only to call M9R tools. Do not run shell commands, read or write files, or reach the network any other way. If the M9R tools are absent, report that blocker once and stop; do not claim to have acted, ask a teammate to wait, or keep probing for missing tools.";
 
 /** Codex JSONL to session events: the thread id (for resume), its messages, and which M9R tool it is calling. */
-export function parseCodexLine(line: string): Array<{ kind: "thread"; id: string } | { kind: "say"; text: string } | { kind: "tool"; name: string } | { kind: "done" }> {
-  let event: { type?: string; thread_id?: string; item?: Record<string, unknown> };
+export function parseCodexLine(line: string): Array<{ kind: "thread"; id: string } | { kind: "say"; text: string } | { kind: "tool"; name: string } | { kind: "done"; usage?:ReportedTurnUsage|null }> {
+  let event: { type?: string; thread_id?: string; usage?:unknown; item?: Record<string, unknown> };
   try { event = JSON.parse(line); } catch { return []; }
   if (event.type === "thread.started" && typeof event.thread_id === "string") return [{ kind: "thread", id: event.thread_id }];
-  if (event.type === "turn.completed") return [{ kind: "done" }];
+  if (event.type === "turn.completed") return [{ kind: "done", ...(reportedTurnUsage(event.usage) ? {usage:reportedTurnUsage(event.usage)} : {}) }];
   const item = event.item ?? {};
   if (event.type === "item.completed" && item.type === "agent_message" && typeof item.text === "string") return [{ kind: "say", text: item.text }];
   if (event.type === "item.started") {
@@ -312,7 +328,7 @@ export interface WebLiveSessionsDeps {
   codexCli?: () => string | null;
   opencodeExe?: () => string | null;
   /** Injected in tests; production keeps one OpenCode ACP process/session per web agent. */
-  openCodeRuntime?: (input: { exe: string; cwd: string; env: Record<string, string | undefined>; handle: string; missionId: string; model: string; resumeId?: string }) => OpenCodeLiveRuntime;
+  openCodeRuntime?: (input: { exe: string; cwd: string; env: Record<string, string | undefined>; handle: string; missionId: string; model?: string; effort?: string; resumeId?: string }) => OpenCodeLiveRuntime;
 }
 
 interface Slot {
@@ -383,6 +399,14 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
 
   const promptFor = (slot: Slot) => `${webAgentPrompt(slot.config.handle, slot.token!, teammates(slot), roomId)}\n\n${sharedProjectMemory(deps.storeRoot, roomId)}`;
 
+  function recordUsage(slot:Slot,usage:ReportedTurnUsage|null|undefined,source:string) {
+    if(!usage)return;
+    try {
+      const directory=join(deps.storeRoot,"web-sessions");mkdirSync(directory,{recursive:true});
+      appendFileSync(join(directory,"provider-usage.jsonl"),JSON.stringify({at:new Date().toISOString(),handle:slot.config.handle,provider:slot.config.provider,model:slot.config.model??null,effort:slot.config.effort??null,source,usageBasis:"prompt_turn",...usage})+"\n",{mode:0o600});
+    }catch{say(slot,"system","Provider usage was reported, but M9R could not save its usage receipt.");}
+  }
+
   function rememberResumeId(slot: Slot, resumeId: string | undefined): void {
     if (!resumeId || !RESUME_ID.test(resumeId) || resumeId === slot.resumeId) return;
     slot.resumeId = resumeId;
@@ -422,7 +446,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
     slot.live = startLiveSession({
       config: {
         cwd: slot.config.folder, profile: slot.config.profile ?? "web-only", mcpConfigPath: configPath,
-        resumeSessionId: slot.resumeId, model: slot.config.model, allowedTools: slot.config.allowedTools,
+        resumeSessionId: slot.resumeId, model: slot.config.model, effort: slot.config.effort, allowedTools: slot.config.allowedTools,
         appendSystemPrompt: promptFor(slot),
       },
       env, allowApiKey: deps.allowApiKey,
@@ -448,6 +472,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
         else if (event.kind === "tool") { emit({ ...base, kind: "tool", name: event.name }); if (slot.status !== "working") state(slot, "working", "Working"); }
         else if (event.kind === "result") {
           rememberResumeId(slot, event.sessionId);
+          recordUsage(slot,event.usage,"claude-result");
           if (slot.abortedResults > 0) { slot.abortedResults -= 1; return state(slot, "working", "Working on your new message"); }
           emit({ ...base, kind: "result", text: event.text, isError: event.isError });
           const finished = live.status === "idle";
@@ -464,12 +489,14 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
     const generation = ++slot.generation;
     slot.stopping = false;
     const { launcher } = mcpFor(slot);
-    const prompt = `${promptFor(slot)}\n\nThe owner says:\n${text}`;
+    const prompt = slot.resumeId
+      ? `Your current M9R session token is ${slot.token}. Use it only on M9R tools and never disclose it. Prior browser permissions and room instructions still apply.\n\nThe owner says:\n${text}`
+      : `${CODEX_WEB_PREFACE}\n\n${promptFor(slot)}\n\nThe owner says:\n${text}`;
     const spawnWorker = deps.spawnWorker ?? defaultSpawnWorker;
     const cli = (deps.codexCli ?? (() => codexCliPath(env)))();
     if (!cli) throw new Error("the Codex CLI was not found (set M9R_CODEX_CLI_JS)");
-    const command = process.execPath;
-    const args = [cli, ...codexWorkerArgs({ prompt: `${CODEX_WEB_PREFACE}\n\n${prompt}`, folder: slot.config.folder, launcher, storeRoot: deps.storeRoot, brokerPort: deps.brokerPort, roomStartedAt: bridgeStartedAt, threadId: slot.resumeId, model: slot.config.model })];
+    const command = nodeForCodex(process.execPath, (env.PATH ?? env.Path ?? "").split(delimiter).filter(Boolean), existsSync);
+    const args = [cli, ...codexWorkerArgs({ prompt, folder: slot.config.folder, launcher, storeRoot: deps.storeRoot, brokerPort: deps.brokerPort, roomStartedAt: bridgeStartedAt, threadId: slot.resumeId, model: slot.config.model, effort: slot.config.effort })];
     const workerEnv = env;
     const child = spawnWorker(command, args, { cwd: slot.config.folder, env: workerEnv });
     slot.worker = child;
@@ -484,7 +511,8 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
         const line = buffer.slice(0, at);
         buffer = buffer.slice(at + 1);
         for (const e of parseCodexLine(line)) {
-          if (e.kind === "thread") rememberResumeId(slot, e.id);
+          if (e.kind === "done") recordUsage(slot,e.usage,"codex-turn-completed");
+          else if (e.kind === "thread") rememberResumeId(slot, e.id);
           else if (e.kind === "say") { lastSay = e.text; emit({ ...base, kind: "say", text: e.text }); }
           else if (e.kind === "tool") emit({ ...base, kind: "tool", name: e.name });
         }
@@ -520,10 +548,11 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   function openCodeWorkerEnv(slot: Slot, launcher: string): Record<string, string | undefined> {
     const xdg = join(deps.storeRoot, "web-sessions", slot.config.handle, "xdg");
     mkdirSync(join(xdg, "opencode"), { recursive: true });
+    const server = webMcpServerCommand(launcher);
     const off = Object.fromEntries(["bash", "edit", "write", "read", "grep", "glob", "list", "webfetch", "websearch", "task", "todowrite", "todoread", "patch", "codesearch", "skill"].map((tool) => [tool, false]));
     writeFileSync(join(xdg, "opencode", "opencode.json"), JSON.stringify({
       $schema: "https://opencode.ai/config.json",
-      mcp: { m9r: { type: "local", command: [process.execPath, launcher], environment: { M9R_HOME: deps.storeRoot, M9R_WEB_BROKER_PORT: String(deps.brokerPort), M9R_ROOM_STARTED_AT: String(bridgeStartedAt) }, enabled: true } },
+      mcp: { m9r: { type: "local", command: [server.command, ...server.args], environment: { M9R_HOME: deps.storeRoot, M9R_WEB_BROKER_PORT: String(deps.brokerPort), M9R_ROOM_STARTED_AT: String(bridgeStartedAt) }, enabled: true } },
       tools: off,
     }));
     // Bun/OpenCode also writes logs and cache below XDG_DATA_HOME/XDG_CACHE_HOME.
@@ -534,6 +563,14 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   async function drainOpenCode(slot: Slot, generation: number): Promise<void> {
     try {
       let runtime = slot.openCodeRuntime;
+      // The provider process can die while idle (crash, killed by the owner, machine sleep). Prompting a dead runtime hangs or
+      // fails, so replace it here and resume the same provider session instead of leaving the agent wedged.
+      if (runtime && runtime.alive?.() === false) {
+        runtime.close();
+        slot.openCodeRuntime = undefined;
+        runtime = undefined;
+        say(slot, "system", `@${slot.config.handle}'s provider process had exited; restarting it${slot.resumeId ? " with its memory" : ""}.`);
+      }
       if (!runtime) {
         const exe = (deps.opencodeExe ?? (() => opencodeExePath(env)))();
         if (!exe) throw new Error("OpenCode was not found (set M9R_OPENCODE_EXE)");
@@ -545,7 +582,8 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
           env: openCodeWorkerEnv(slot, launcher),
           handle: slot.config.handle,
           missionId: projectRoomId(slot.config.folder),
-          model: slot.config.model ?? env.M9R_OPENCODE_MODEL ?? "opencode/big-pickle",
+          model: slot.config.model ?? env.M9R_OPENCODE_MODEL,
+          effort: slot.config.effort,
           ...(slot.resumeId ? { resumeId: slot.resumeId } : {}),
         });
         slot.openCodeRuntime = runtime;
@@ -554,6 +592,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
         const resumed = await runtime.ready();
         if (generation !== slot.generation || slot.stopping) { runtime.close(); return; }
         rememberResumeId(slot, resumed.sessionId);
+        if (resumed.restored === false) say(slot, "system", `@${slot.config.handle} could not restore its earlier conversation and started a fresh one.`);
       }
 
       while (slot.openCodePendingText !== undefined && generation === slot.generation && !slot.stopping) {
@@ -570,7 +609,8 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
           for await (const event of runtime.prompt(prompt)) {
             if (generation !== slot.generation) return;
             if (requestVersion !== slot.openCodeRequestVersion) continue;
-            if (event.type === "provider.reply_text" && typeof event.payload.text === "string") {
+            if (event.type === "provider.usage_updated" && event.payload.usageBasis === "prompt_turn") recordUsage(slot,reportedTurnUsage(event.payload),"acp-prompt-response");
+            else if (event.type === "provider.reply_text" && typeof event.payload.text === "string") {
               answer += event.payload.text;
               emit({ handle: slot.config.handle, provider: slot.config.provider, kind: "say", text: event.payload.text });
             } else if (event.type === "provider.activity") {
@@ -617,7 +657,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   function startOpenCode(slot: Slot, text: string): "sent" | "interrupted" | "started" {
     const wasBusy = slot.openCodeBusy;
     const wasPrompting = slot.openCodePrompting;
-    const wasStarted = Boolean(slot.openCodeRuntime);
+    const wasStarted = Boolean(slot.openCodeRuntime) && slot.openCodeRuntime?.alive?.() !== false;
     slot.openCodePendingText = text;
     slot.openCodeRequestVersion += 1;
     if (wasBusy) {

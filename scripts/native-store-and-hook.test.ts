@@ -6,6 +6,8 @@ import test from "node:test";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "@/lib/native/local-store";
 import { handleHookEvent } from "@/lib/native/hook-handler";
 import { normalizeHandle, renderInboxInjection } from "@/lib/native/inbox-core";
+import { CODEX_WEB_PREFACE, webAgentPrompt } from "@/lib/native/web-live-sessions";
+import { isBrokerAgentPrompt } from "@/lib/native/codex-delivery-core";
 
 function tempStore(now?: () => Date) {
   const root = mkdtempSync(join(tmpdir(), "m9r-store-"));
@@ -172,6 +174,51 @@ test("a typed mention creates a task for the target and tells the sender not to 
   assert.equal(t[0].origin, "human_typed");
   assert.match(ctxOf(out)!, /sent your message to @codex as task T1/);
   assert.match(ctxOf(out)!, /do not do that work yourself/i);
+  done();
+});
+
+test("the prompt the broker builds for a web-room agent never becomes tasks for its teammates", () => {
+  const { store, done } = tempStore();
+  store.registerEndpoint({ provider: "claude-code" });
+  store.registerEndpoint({ provider: "opencode" });
+  const prompt = `${CODEX_WEB_PREFACE}
+
+${webAgentPrompt("codex", "tok_test", ["claude", "opencode"], "project-x")}
+
+The owner says:
+read the page`;
+  const out = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "w1", cwd: "/repo", prompt }, ctx(store, "codex"));
+  assert.equal(store.tasksFor("claude").length, 0, "no task for @claude");
+  assert.equal(store.tasksFor("opencode").length, 0, "no task for @opencode");
+  assert.equal(ctxOf(out) ?? "", "", "nothing is injected into a machine-written prompt");
+  const resumePrompt = "Your current M9R session token is tok_test_2. Use it only on M9R tools and never disclose it. Prior browser permissions and room instructions still apply.\n\nThe owner says:\n@claude messaged you (T9): hello @opencode";
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "w1b", cwd: "/repo", prompt: resumePrompt }, ctx(store, "codex"));
+  assert.equal(store.tasksFor("claude").length, 0, "a resumed worker's short prompt is machine-written too");
+  assert.equal(store.tasksFor("opencode").length, 0);
+  assert.equal(isBrokerAgentPrompt(webAgentPrompt("claude", "tok", ["codex"])), true, "the bare agent prompt (no Codex preface) is recognised by its header");
+  assert.equal(isBrokerAgentPrompt("@claude please look at the relay bug"), false, "a person's message is not");
+  // A person typing the same handles still routes normally.
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "w2", cwd: "/repo", prompt: "@claude and @opencode please compare notes" }, ctx(store, "codex"));
+  assert.equal(store.tasksFor("claude").length, 1);
+  assert.equal(store.tasksFor("opencode").length, 1);
+  done();
+});
+
+test("a new session is not handed old, already-answered, or other-session backlog; fresh work still arrives", () => {
+  const { store, done } = tempStore(() => new Date("2026-09-20T00:00:00Z"));
+  store.registerEndpoint({ provider: "claude-code" });
+  const old = store.addTask({ from: "codex", to: "claude", goal: "ancient typed task", origin: "human_typed", idempotencyKey: "old" }).task;
+  const answered = store.addTask({ from: "codex", to: "claude", goal: "already answered", origin: "human_typed", idempotencyKey: "ans" }).task;
+  store.setResult(answered.id, "done");
+  const later = new Date("2026-09-20T00:20:00Z");
+  const fresh = createLocalStore(store.root, { now: () => later });
+  fresh.addTask({ from: "codex", to: "claude", goal: "recent task", origin: "human_typed", idempotencyKey: "new" });
+  const at = (iso: string) => renderInboxInjection(fresh.tasksFor("claude"), 0, { now: Date.parse(iso) }).text;
+  assert.match(at("2026-09-20T00:25:00Z"), /recent task/);
+  assert.doesNotMatch(at("2026-09-20T00:25:00Z"), /already answered/, "a task with a result is finished");
+  assert.match(at("2026-09-20T00:25:00Z"), /ancient typed task/, "within the 30-minute window it is still recent");
+  assert.doesNotMatch(at("2026-09-20T03:00:00Z"), /ancient typed task|recent task/, "hours later none of it is replayed to a new session");
+  assert.equal(old.id !== answered.id, true);
   done();
 });
 
