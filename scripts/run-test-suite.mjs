@@ -59,6 +59,7 @@ function belongsToSuite(name) {
       "browser-extension-store-package.test.mjs",
       "native-input-client.test.js",
       "quiet-input.test.js",
+      "pill-state.test.ts",
       "presence-frame-lifecycle.test.js",
       "presence-target-highlight.test.js",
     ].includes(name);
