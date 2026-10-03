@@ -237,7 +237,13 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       const supabase = createClient();
       if (!supabase) { setError("Supabase is not configured."); return; }
       const guest = await ensureGuestSession(supabase);
-      if (!guest.ok) { setError(`Could not join: ${guest.error}`); return; }
+      if (!guest.ok) {
+        // Never show the provider's wording. Guest access depends on a project setting, so say what the person can do instead.
+        setError(/anonymous/i.test(guest.error)
+          ? `Guest access is not available yet. Sign in at /auth?next=/rooms/${roomId} to ask to join this room.`
+          : "Could not join this room right now. Please try again.");
+        return;
+      }
       const { data: userData } = await supabase.auth.getUser();
       if (!userData.user) { setError("Your room session could not be verified."); return; }
       clientRef.current = supabase;
