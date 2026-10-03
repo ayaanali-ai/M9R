@@ -799,7 +799,7 @@ function PanelResizeHandle({ label, handleProps }: { label: string; handleProps:
  * read in it (B1: a promoted file diff). The panel stays mounted underneath
  * on purpose -- it owns the relay subscription that feeds live steps and the
  * unsent draft, and unmounting it to show a diff would drop both. */
-export default function ConversationPanel({ agents, workspaceId, viewerUserId, onFileStep, sidePanel, mainOverlay, filePanel, onOpenReview, reviewActive, pendingReviewCount, onOpenDrafts, draftsActive, onOpenPeople, peopleActive }: { agents: AgentView[]; workspaceId: string | null; viewerUserId: string | null; onFileStep?: (step: WorkspaceStep) => void; sidePanel?: ReactNode; mainOverlay?: ReactNode; filePanel?: ReactNode; onOpenReview?: () => void; reviewActive?: boolean; pendingReviewCount?: number; onOpenDrafts?: () => void; draftsActive?: boolean; onOpenPeople?: () => void; peopleActive?: boolean; }) {
+export default function ConversationPanel({ agents, workspaceId, viewerUserId, onFileStep, sidePanel, mainOverlay, filePanel, onOpenReview, reviewActive, pendingReviewCount, onOpenDrafts, draftsActive, onOpenPeople, peopleActive, onOpenActivity, activityActive }: { agents: AgentView[]; workspaceId: string | null; viewerUserId: string | null; onFileStep?: (step: WorkspaceStep) => void; sidePanel?: ReactNode; mainOverlay?: ReactNode; filePanel?: ReactNode; onOpenReview?: () => void; reviewActive?: boolean; pendingReviewCount?: number; onOpenDrafts?: () => void; draftsActive?: boolean; onOpenPeople?: () => void; peopleActive?: boolean; onOpenActivity?: () => void; activityActive?: boolean; }) {
   // Drag-to-resize widths for the two right-hand panel slots -- one storage
   // key per slot, shared across whichever content currently occupies it
   // (Files vs. Ready for Review both use the side slot, so they share one
@@ -1656,6 +1656,29 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     }
     return out;
   }, [draft, agentMentionKeys, agents]);
+  /** Agents a piece of text is addressed to, in first-mention order. Shared by the header, sent messages and send. */
+  const agentsMentionedIn = useCallback((text: string): AgentView[] => {
+    const seen = new Set<string>();
+    const out: AgentView[] = [];
+    for (const match of text.matchAll(/(?:^|\s)@([a-z][a-z0-9-]*)/gi)) {
+      const key = match[1].toLowerCase();
+      if (seen.has(key)) continue;
+      const agent = agents.find((candidate) => candidate.key.toLowerCase() === key);
+      if (!agent) continue;
+      seen.add(key);
+      out.push(agent);
+    }
+    return out;
+  }, [agents]);
+  const addressedAgents = useMemo(() => {
+    const typed = agentsMentionedIn(draft);
+    if (typed.length > 0) return typed;
+    const conversation = conversations.find((item) => item.id === selectedId);
+    if (!conversation) return [];
+    const lastMine = [...conversation.messages].reverse().find((message) => Boolean(viewerUserId) && message.sender_user_id === viewerUserId && agentsMentionedIn(message.body).length > 0);
+    if (lastMine) return agentsMentionedIn(lastMine.body);
+    return agents.filter((agent) => agent.connectionId && conversation.participant_connection_ids.includes(agent.connectionId));
+  }, [draft, conversations, selectedId, agents, viewerUserId, agentsMentionedIn]);
   const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
 
   // Nothing selected yet (a bare /dashboard/agents, or a ?conversation= that
@@ -2134,14 +2157,18 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     // removes it again. Same slug match already used for @mention
     // autocomplete, so "mentioned" means the same thing here as everywhere
     // else in this composer.
-    // agent.key, not agent.label -- see the mentionSuggestions note above.
-    const mentioned = agents.find((agent) => agent.connected && agent.connectionId
+    const mentionedNow = agents.filter((agent) => agent.connected && agent.connectionId
       && new RegExp(`(^|\\s)@${agent.key.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[^a-z0-9-])`, "i").test(body));
-    if (mentioned?.connectionId) {
-      const connectionId = mentioned.connectionId;
-      setAgentTurns((current) => current[connectionId] && !current[connectionId].ended
-        ? current
-        : { ...current, [connectionId]: { connectionId, startedAtMs: Date.now(), confirmed: false, messageId: null, action: null, ended: null } });
+    if (mentionedNow.length > 0) {
+      setAgentTurns((current) => {
+        const next = { ...current };
+        for (const agent of mentionedNow) {
+          const connectionId = agent.connectionId as string;
+          if (next[connectionId] && !next[connectionId].ended) continue;
+          next[connectionId] = { connectionId, startedAtMs: Date.now(), confirmed: false, messageId: null, action: null, ended: null };
+        }
+        return next;
+      });
     }
     void deliverMessage(conversationId, body, parentMessageId, clientRequestId);
   }
@@ -2345,13 +2372,14 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 sidePanelMode) -- both used to be buried in a "more actions"
                 dropdown or a full-screen modal; this is the one consistent
                 mechanism for both. */}
-            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"} color={channelColors[selected.id]}
+            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"} color={channelColors[selected.id]} addressed={addressedAgents.length > 0 ? <span className="m9r-addressed" aria-label={`Talking to ${addressedAgents.map((agent) => agent.label).join(", ")}`}>{addressedAgents.map((agent) => <span key={agent.id} title={agent.label}><AgentMark agentKey={agent.key} size={22} /></span>)}</span> : undefined}
               threads={<DashboardPicker label="Choose conversation" value="Thread" icon={<Plus size={12} />} options={conversations.map(conversation => ({ id: conversation.id, label: channelDisplayName(conversation) }))} onSelect={selectConversation} />}
               model={<DashboardModels agents={agents.filter(agent => selected.participant_connection_ids.includes(agent.connectionId ?? ""))} conversationId={selected.id} />}
               actions={<>{onOpenReview && <button type="button" aria-label="Ready for review" title="Ready for review" onClick={onOpenReview} data-active={reviewActive}><ClipboardCheck size={18} />{Boolean(pendingReviewCount) && <i className="m9r-dash-notification-dot" />}</button>}</>}
               search={transcriptSearch} onSearch={setTranscriptSearch}
               menuActions={[
                 ...(onOpenPeople ? [{ label: "Members", onSelect: onOpenPeople, active: peopleActive }] : []),
+                ...(onOpenActivity ? [{ label: "Activity", onSelect: onOpenActivity, active: activityActive }] : []),
                 ...(onOpenDrafts ? [{ label: "Docs", onSelect: onOpenDrafts, active: draftsActive }] : []),
                 { label: selected.channel_kind === "dm" ? "Edit conversation" : "Edit channel", onSelect: () => setEditingChannel(true) },
                 ...(TERMINAL_ENABLED ? [{ label: "Terminal", onSelect: () => setTerminalActive(true) }] : []),
@@ -2429,6 +2457,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                       {isGroupStart && (
                         <div className="wf-chat-message-meta">
                           <strong>{senderName}</strong>
+                          {isViewer && (() => { const to = agentsMentionedIn(message.body); return to.length > 0 ? <span className="m9r-sent-to" aria-label={`To ${to.map((agent) => agent.label).join(", ")}`}>to {to.map((agent) => <span key={agent.id} title={agent.label}><AgentMark agentKey={agent.key} size={14} /></span>)}</span> : null; })()}
                           {/* The rebranded display label ("Claude"), never the raw
                               provider key ("claude-code") -- the key still backs
                               real @mention matching elsewhere, this is display-only. */}

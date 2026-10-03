@@ -1033,3 +1033,68 @@ export function LiveSessionsPanel({ onClose }: { agents: AgentView[]; onClose: (
     </>
   );
 }
+
+type ActivityEvent = {
+  id: string; at: string; kind: "native" | "file" | "permission" | "interrupt";
+  connectionId?: string | null; eventKind?: string; handle?: string | null;
+  filePath?: string; activityKind?: string; status?: string; summary?: string;
+};
+
+const NATIVE_VERB: Record<string, string> = {
+  agent_connected: "connected",
+  task_created: "was given a task",
+  task_delivered: "received a task",
+  task_approved: "had a task approved",
+  task_result: "finished a task",
+};
+const FILE_VERB: Record<string, string> = { read: "read", changed: "changed", create: "created", delete: "deleted" };
+
+function activityLine(event: ActivityEvent): string {
+  if (event.kind === "native") return NATIVE_VERB[event.eventKind ?? ""] ?? "did something";
+  if (event.kind === "file") return `${FILE_VERB[event.activityKind ?? ""] ?? "touched"} ${event.filePath ?? "a file"}${event.status === "failed" ? " (failed)" : ""}`;
+  if (event.kind === "permission") return `asked permission: ${event.summary ?? "an action"} (${event.status})`;
+  return "was stopped by a person";
+}
+
+/** What the agents in this workspace have been doing, newest first. Read-only; the feed is composed from existing durable tables. */
+export function ActivityPanel({ agents, onClose }: { agents: AgentView[]; onClose: () => void }) {
+  const [events, setEvents] = useState<ActivityEvent[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    fetch("/api/dashboard/workspace-activity", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data: { events?: ActivityEvent[] }) => { setEvents(data.events ?? []); setError(null); })
+      .catch(() => setError("Could not load activity."));
+  }, []);
+  useEffect(() => {
+    // Initial fetch plus a gentle refresh while the panel is open.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+    const timer = window.setInterval(load, 15_000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+  const byConnection = useMemo(() => new Map(agents.filter((agent) => agent.connectionId).map((agent) => [agent.connectionId as string, agent])), [agents]);
+  const rows = useMemo(() => [...(events ?? [])].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 120), [events]);
+  return (
+    <section className="m9r-dash-panel" aria-label="Activity">
+      <header><h2>Activity</h2><button type="button" onClick={onClose} aria-label="Close Activity">×</button></header>
+      <div className="m9r-dash-panel-content">
+        {error && <p role="alert">{error}</p>}
+        {!events && !error && <p>Loading…</p>}
+        {events && rows.length === 0 && <p>No agent activity yet.</p>}
+        <ol className="m9r-activity-list">
+          {rows.map((event) => {
+            const agent = event.connectionId ? byConnection.get(event.connectionId) : undefined;
+            return (
+              <li key={`${event.kind}-${event.id}`}>
+                {agent ? <AgentMark agentKey={agent.key} size={16} /> : <span aria-hidden className="m9r-activity-dot" />}
+                <span><strong>{agent?.label ?? "An agent"}</strong> {activityLine(event)}</span>
+                <time className="ol-mono" dateTime={event.at}>{relAt(event.at, Date.now())}</time>
+              </li>
+            );
+          })}
+        </ol>
+      </div>
+    </section>
+  );
+}

@@ -75,11 +75,11 @@ export function DashboardContactContents({ name, preview, time, agent, working, 
   return <><span className="m9r-dash-contact-avatar"><DashboardAvatar agent={agent} working={working} size={40} color={color} />{working && <i aria-label="Working" />}</span><span className="m9r-dash-contact-copy"><span className="m9r-dash-contact-heading"><strong>{name}</strong>{time && <time>{time}</time>}</span><span className="m9r-dash-contact-preview">{preview}</span></span></>;
 }
 
-export function DashboardChatHeader({ name, agent, color, model, threads, actions, menuActions = [], search, onSearch }: {
-  name: string; agent?: string; color?: ChannelColorKey; model?: ReactNode; threads?: ReactNode; actions?: ReactNode; menuActions?: DashboardAction[]; search?: string; onSearch?: (value: string) => void;
+export function DashboardChatHeader({ name, agent, color, addressed, model, threads, actions, menuActions = [], search, onSearch }: {
+  name: string; agent?: string; color?: ChannelColorKey; addressed?: ReactNode; model?: ReactNode; threads?: ReactNode; actions?: ReactNode; menuActions?: DashboardAction[]; search?: string; onSearch?: (value: string) => void;
 }) {
   return <header className="m9r-dash-chat-header">
-    <div className="m9r-dash-chat-header-row"><div className="m9r-dash-chat-identity"><DashboardAvatar agent={agent} size={28} color={color} /><h2>{name}</h2></div>
+    <div className="m9r-dash-chat-header-row"><div className="m9r-dash-chat-identity"><DashboardAvatar agent={agent} size={28} color={color} /><h2>{name}</h2>{addressed}</div>
       <div className="m9r-dash-chat-controls">{threads}{model}{actions}{(menuActions.length > 0 || onSearch) && <DashboardMenu label="Conversation actions" trigger={<MoreHorizontal size={18} />}>
         {close => <>{onSearch && <DashboardSearch value={search ?? ""} onChange={onSearch} label="Find in conversation" />}{menuActions.map(action => <button type="button" key={action.label} disabled={action.disabled} onClick={() => { close(); action.onSelect(); }}>{action.icon}<span>{action.label}</span>{action.active && <Check size={14} />}</button>)}</>}
       </DashboardMenu>}</div>

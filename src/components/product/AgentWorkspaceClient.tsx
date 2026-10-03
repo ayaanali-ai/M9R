@@ -16,7 +16,7 @@ import { MobileAgentRail, ConnectCeremony, ControlStrip } from "@/components/pro
 import { WorkspaceDrawer, ApprovalCenter } from "@/components/product/agent-workspace/approval-center";
 import { HeroRun } from "@/components/product/agent-workspace/run-panels";
 import { AssignmentPanel } from "@/components/product/agent-workspace/preflight";
-import { LiveFileView, DraftsPanel, ChannelPeoplePanel } from "@/components/product/agent-workspace/files-panel";
+import { LiveFileView, DraftsPanel, ChannelPeoplePanel, ActivityPanel } from "@/components/product/agent-workspace/files-panel";
 import { KeyMap, byLastSeen, agentForRun, type Selected, type RunZone } from "@/components/product/agent-workspace/shared";
 
 /**
@@ -83,18 +83,18 @@ export default function AgentWorkspaceClient({
   // surface, opened via ?file=, is untouched and still reachable by direct
   // link even without the rail); Activity just dumped raw events with no
   // synthesis.
-  type SidePanelMode = "review" | "drafts" | "people" | null;
+  type SidePanelMode = "review" | "drafts" | "people" | "activity" | null;
   const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode>(null);
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem("ol-side-panel-mode");
       // This effect hydrates browser-only panel preference state after SSR.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (stored === "review" || stored === "drafts" || stored === "people") setSidePanelMode(stored);
+      if (stored === "review" || stored === "drafts" || stored === "people" || stored === "activity") setSidePanelMode(stored);
       else if (stored === "") setSidePanelMode(null);
     } catch { /* localStorage can throw in a private/locked-down browser -- default stays closed */ }
   }, []);
-  function toggleSidePanel(mode: "review" | "drafts" | "people") {
+  function toggleSidePanel(mode: "review" | "drafts" | "people" | "activity") {
     setSidePanelMode((current) => {
       const next = current === mode ? null : mode;
       try { window.localStorage.setItem("ol-side-panel-mode", next ?? ""); } catch { /* best-effort */ }
