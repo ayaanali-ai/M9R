@@ -58,6 +58,7 @@
       const s = session(tabId);
       if (s.cancelled) throw refusal("debugger_cancelled", "The owner cancelled the browser's debugging banner on this tab; quiet input is off for it until re-enabled");
       if (s.attached) return s;
+      listen();
       try {
         await api.debugger.attach({ tabId }, PROTOCOL);
       } catch (error) {
@@ -126,15 +127,22 @@
       });
     }
 
-    api.debugger.onDetach.addListener((source, reason) => {
-      const tabId = source && source.tabId;
-      const s = sessions.get(tabId);
-      if (!s) return;
-      if (s.timer !== null) { clearTimer(s.timer); s.timer = null; }
-      s.attached = false;
-      if (reason === "canceled_by_user") s.cancelled = true;
-      if (reason === "target_closed") sessions.delete(tabId);
-    });
+    // chrome.debugger only exists once the optional permission is granted, so the worker must start without it and listen later.
+    let listening = false;
+    function listen() {
+      if (listening || !api.debugger || !api.debugger.onDetach) return;
+      listening = true;
+      api.debugger.onDetach.addListener((source, reason) => {
+        const tabId = source && source.tabId;
+        const s = sessions.get(tabId);
+        if (!s) return;
+        if (s.timer !== null) { clearTimer(s.timer); s.timer = null; }
+        s.attached = false;
+        if (reason === "canceled_by_user") s.cancelled = true;
+        if (reason === "target_closed") sessions.delete(tabId);
+      });
+    }
+    listen();
 
     if (api.tabs && api.tabs.onRemoved) api.tabs.onRemoved.addListener((tabId) => { sessions.delete(tabId); });
 
@@ -158,4 +166,4 @@
   }
 
   root.M9RQuietInput = { create, IDLE_DETACH_MS, ALLOWED_METHODS: [...ALLOWED] };
-})(typeof window !== "undefined" ? window : globalThis);
+})(globalThis);

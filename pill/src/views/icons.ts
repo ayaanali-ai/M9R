@@ -24,6 +24,7 @@ export const ICONS = {
   // checkmark
   check: "M5 12.5 9.5 17 19 7.5",
   // arrow.up (send)
+  mic: "M12 14.5a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5.5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5.5a6.5 6.5 0 0 0 5.75 6.45V21h1.5v-3.05A6.5 6.5 0 0 0 18.5 11.5H17z",
   arrowUp: "M12 4.5 5.5 11l1.5 1.5 4-4V19.5h2V8.5l4 4L18.5 11 12 4.5z",
   // exclamationmark
   bang: "M11 4h2v10h-2V4zm0 12.2h2v2.2h-2v-2.2z",

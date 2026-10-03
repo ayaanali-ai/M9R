@@ -10,6 +10,7 @@ import { writeWebActivity } from "@/lib/native/feed-writer";
 import { apiKeyLaunchBlock } from "@/lib/native/vendor-launch-core";
 import { createWebLiveSessions, loadAgentsConfig } from "@/lib/native/web-live-sessions";
 import { createWebUiBridge } from "@/lib/native/web-ui-bridge";
+import { readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
 import { DEFAULT_BROKER_PORT, brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
@@ -59,11 +60,13 @@ async function main(): Promise<void> {
     lastWeb = body;
     try { writeWebActivity(root, ui.recentWeb()); } catch { /* the pill feed is optional */ }
   }, 1000);
+  // One pill at a time: the desktop pill beats a heartbeat file; while it is running the in-page pill steps aside.
+  const presenceTimer = setInterval(() => ui.setDesktopPill(readDesktopPillRunning(root)), 2000);
   let stopping = false;
   const stop = () => {
     if (stopping) return;
     stopping = true;
-    clearInterval(webTimer); sessions.close(); ui.close(); void broker.close().then(() => process.exit(0));
+    clearInterval(webTimer); clearInterval(presenceTimer); sessions.close(); ui.close(); void broker.close().then(() => process.exit(0));
   };
   requestShutdown = stop;
   process.on("SIGINT", stop);

@@ -165,3 +165,16 @@ test("a veto from beforePress is surfaced as is and is not retried", async () =>
   assert.equal(runs, 1);
   assert.equal(names(calls).filter((n) => n === "attach").length, 1);
 });
+
+test("the worker starts without the optional debugger permission and begins listening once Chrome grants it", async () => {
+  const ctx = { setTimeout, clearTimeout };
+  runInNewContext(source, ctx);
+  const api = { runtime: { id: "ext-me" }, tabs: { onRemoved: slot() } };
+  const quiet = ctx.M9RQuietInput.create(api);
+  assert.equal(await quiet.adoptAndRelease(), 0, "no debugger API: nothing to release, and no throw");
+  const onDetach = slot();
+  api.debugger = { onDetach, attach: async () => {}, detach: async () => {}, sendCommand: async () => ({}), getTargets: async () => [] };
+  await quiet.click(7, { x: 10, y: 10 }).catch(() => {});
+  onDetach.emit({ tabId: 7 }, "canceled_by_user");
+  await assert.rejects(quiet.click(7, { x: 10, y: 10 }), (e) => e && e.code === "debugger_cancelled");
+});

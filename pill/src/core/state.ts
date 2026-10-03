@@ -12,7 +12,17 @@ export interface PillSnapshot {
   agents: Array<{ handle: string; provider: Provider; state: AgentRunState; activity: string[] }>;
   approvals: Array<{ id: string; agent: string; title: string; detail: string }>;
   /** Replies and notices from agents, newest last. */
-  thread: Array<{ id: string; from: string; text: string }>;
+  thread: Array<{ id: string; from: string; text: string; link?: LinkOffer }>;
+  /** Browser shell only: the desktop pill is running, so this in-page pill should step aside. */
+  desktopPill?: boolean;
+}
+
+/** A message that could not be delivered, with the details needed to pick a session to link and try again. */
+export interface LinkOffer {
+  taskId: string;
+  from: string;
+  fromSession?: string;
+  to: string;
 }
 
 export interface AgentTask {
@@ -37,6 +47,7 @@ export interface ChatMessage {
   id: number;
   role: "user" | "assistant";
   content: string;
+  link?: LinkOffer;
 }
 
 export interface Settings {

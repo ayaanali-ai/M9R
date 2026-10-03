@@ -5,7 +5,9 @@ import { ICONS } from "./icons";
 import { Ticker } from "./ticker";
 import { providerLogo } from "./provider";
 import { buildPrompt } from "./composer";
-import { State, type AgentTask } from "../core/state";
+import { State, type AgentTask, type LinkOffer } from "../core/state";
+import type { SessionRow } from "../core/transport";
+import type { SpeechEnv } from "../core/speech";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 
 export interface ViewActions {
@@ -13,8 +15,15 @@ export interface ViewActions {
   collapse(): void;
   setFocus(id: string): void;
   decide(d: "allow" | "deny" | "allow_day"): void;
-  send(text: string): Promise<void>;
+  send(text: string): Promise<string | void>;
   canAllowForADay(): boolean;
+  /** Present only when the host has speech recognition (the page frame); hold the mic to talk. */
+  dictation?: () => SpeechEnv;
+  /** Present only when the host can link sessions (the desktop shell). */
+  linking?: {
+    list(handle: string): Promise<SessionRow[]>;
+    link(offer: LinkOffer, toSession: string): Promise<void>;
+  };
   toggleSound(): void;
   setAutoClose(seconds: number): void;
   blip(): void;
@@ -25,6 +34,8 @@ export interface ViewHost {
   sync(): void;
   /** Called when the view becomes active, for views with a text field. */
   focus?(): void;
+  /** Push-to-talk from the keyboard (the message view only). */
+  talk?(active: boolean): void;
   /** Called every frame while the view is on screen. */
   tick?(nowMs: number): void;
 }

@@ -8,7 +8,7 @@
 (function (global) {
   "use strict";
 
-  const FRAME_PAGES = ["pill.html", "composer.html"];
+  const FRAME_PAGES = ["pill.html", "composer.html", "pill-next/index.html"];
   const NONCE_KEY = "m9rPillNonces";
   const SITE_SCRIPT_ID = "m9r-granted-sites";
   const CONTENT_JS = ["src/presence-logic.js", "src/dock-logic.js", "src/presence-overlay.js", "src/content.js"];
@@ -49,7 +49,7 @@
       for (const key of ["site", "url", "action", "at"]) if (typeof p[key] === "string" && p[key]) item[key] = str(p[key], 400);
       return [item];
     });
-    return { type: "ui-state", agents, thread, approvals };
+    return { type: "ui-state", agents, thread, approvals, ...(message.desktopPill === true ? { desktopPill: true } : {}) };
   }
 
   function framePage(url) {

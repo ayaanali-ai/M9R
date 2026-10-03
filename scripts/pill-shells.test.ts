@@ -3,6 +3,7 @@ import test from "node:test";
 import { fromFeed, fromUiState, providerOf } from "../pill/src/shells/convert";
 import { createExtensionTransport } from "../pill/src/shells/extension";
 import { createDesktopTransport } from "../pill/src/shells/desktop";
+import { createFrameHost } from "../pill/src/shells/frame-host";
 
 test("provider detection covers handles, provider ids and unknown agents", () => {
   assert.equal(providerOf("claude"), "claude");
@@ -100,10 +101,10 @@ test("extension transport delivers only ui-state messages from the port, convert
   assert.equal((got[0] as { agents: unknown[] }).agents.length, 1);
 });
 
-test("desktop transport maps decisions onto the overlay's existing commands and refuses to fake sending", async () => {
+test("desktop transport maps decisions and typed messages onto the overlay's commands", async () => {
   const calls: Array<[string, Record<string, unknown> | undefined]> = [];
   const feed = JSON.stringify({ agents: [], needsYou: [{ kind: "approval", taskId: "T6", from: "claude", to: "codex", goal: "g" }] });
-  const transport = createDesktopTransport(async (command, args) => { calls.push([command, args]); return command === "read_feed" ? feed : ""; });
+  const transport = createDesktopTransport(async (command, args) => { calls.push([command, args]); return command === "read_feed" ? feed : command === "send_message" ? "ok-reply" : ""; });
   const stop = transport.subscribe(() => {});
   await new Promise((r) => setTimeout(r, 20));
   await transport.decide("T6", "allow_day");
@@ -115,7 +116,90 @@ test("desktop transport maps decisions onto the overlay's existing commands and 
     { taskId: "T6", action: "approve", from: "claude", to: "codex" },
     { taskId: "T6", action: "deny", from: "claude", to: "codex" },
   ]);
-  await assert.rejects(transport.send("hello"), /not connected yet/);
+  assert.equal(await transport.send("@claude look at x"), "ok-reply");
+  const sent = calls.find(([c]) => c === "send_message");
+  assert.deepEqual(sent?.[1], { text: "@claude look at x" });
   assert.equal(transport.capabilities?.allowForADay, true);
   if (typeof stop === "function") stop();
+});
+
+test("an undeliverable message offers a session link only when the feed says it is linkable, and the desktop transport links through the overlay commands", async () => {
+  const snap = fromFeed({
+    needsYou: [
+      { kind: "push_failed", taskId: "T8", from: "claude", fromSession: "s-1", to: "codex", reason: "no live session", linkable: true },
+      { kind: "push_failed", taskId: "T9", from: "claude", to: "codex", reason: "off" },
+    ],
+  });
+  assert.deepEqual(snap.thread[0].link, { taskId: "T8", from: "claude", fromSession: "s-1", to: "codex" });
+  assert.equal(snap.thread[1].link, undefined);
+
+  const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+  const transport = createDesktopTransport(async (command, args) => {
+    calls.push([command, args]);
+    return command === "list_sessions" ? JSON.stringify([{ sessionId: "abc", cwd: "C:/x", lastSeenAt: "2026-10-02T19:00:00Z" }, { nope: 1 }]) : "";
+  });
+  assert.equal(transport.capabilities?.linkSessions, true);
+  assert.deepEqual(await transport.listSessions!("codex"), [{ sessionId: "abc", cwd: "C:/x", lastSeenAt: "2026-10-02T19:00:00Z" }]);
+  await transport.linkSession!({ taskId: "T8", from: "claude", fromSession: "s-1", to: "codex" }, "abc");
+  assert.deepEqual(calls.at(-1), ["link_sessions", { fromHandle: "claude", fromSession: "s-1", toHandle: "codex", toSession: "abc" }]);
+  await assert.rejects(transport.linkSession!({ taskId: "T9", from: "claude", to: "codex" }, "abc"), /no session to link/);
+});
+
+test("the page frame answers the host's hello, then reports exactly the island's size and folds to the wake strip", () => {
+  const nonce = "a".repeat(32);
+  const sent: unknown[] = [];
+  const handlers: Array<(e: unknown) => void> = [];
+  const parent = { postMessage: (m: unknown) => sent.push(m) };
+  const win = { location: { href: `chrome-extension://x/pill-next/index.html?n=${nonce}` }, parent, addEventListener: (_t: string, fn: (e: unknown) => void) => handlers.push(fn) } as unknown as Window;
+  const frame = createFrameHost({ subscribe() {}, async send() {}, async decide() {} }, win);
+  const commands: string[] = [];
+  frame.onHostCommand((k) => commands.push(k));
+  const deliver = (data: unknown, source: unknown = parent, ports: unknown[] = []) => handlers.forEach((fn) => fn({ data, source, ports }));
+
+  deliver({ m9r: "host-hello", nonce: "b".repeat(32) });
+  assert.deepEqual(sent, [], "a hello with the wrong nonce is ignored");
+  deliver({ m9r: "host-hello", nonce }, {});
+  assert.deepEqual(sent, [], "a hello from another window is ignored");
+  deliver({ m9r: "host-hello", nonce });
+  assert.deepEqual(sent.map((m) => (m as { kind: string }).kind), ["ready", "size"]);
+
+  sent.length = 0;
+  frame.transport.setIslandRect!(0, 0, 288, 32);
+  frame.transport.setIslandRect!(0, 0, 288, 32);
+  assert.deepEqual(sent, [{ m9r: "frame", nonce, kind: "size", w: 288 + 32, h: 32 + 16 }], "unchanged sizes are not re-sent");
+  sent.length = 0;
+  frame.transport.setCollapsed!(true);
+  assert.deepEqual(sent, [{ m9r: "frame", nonce, kind: "size", w: 240, h: 6 }]);
+
+  let onmessage: ((m: unknown) => void) | null = null;
+  const port = { start() {}, close() {}, set onmessage(fn: (m: unknown) => void) { onmessage = fn; } };
+  deliver({ m9r: "host-port", nonce }, parent, [port]);
+  onmessage!({ data: { m9r: "host", nonce, kind: "open-message" } });
+  onmessage!({ data: { m9r: "host", nonce: "c".repeat(32), kind: "open-message" } });
+  assert.deepEqual(commands, ["open-message"], "only commands carrying this frame's nonce are honoured");
+});
+
+test("the desktop transport forwards the island's window hooks to the overlay commands", async () => {
+  const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+  const transport = createDesktopTransport(async (command, args) => { calls.push([command, args]); if (command === "pill_set_rect") throw new Error("rejected"); return ""; });
+  transport.setIslandRect!(216, 0, 288, 32);
+  transport.setCollapsed!(true);
+  transport.focusWindow!(true);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(calls, [
+    ["pill_set_rect", { x: 216, y: 0, width: 288, height: 32 }],
+    ["pill_set_collapsed", { collapsed: true }],
+    ["pill_set_focus", { focused: true }],
+  ], "a rejected rectangle does not throw into the UI");
+});
+
+test("the browser shell carries the desktop-pill flag, and the frame asks its page to step aside only when it changes", () => {
+  assert.equal(fromUiState({ agents: [], desktopPill: true }).desktopPill, true);
+  assert.equal("desktopPill" in fromUiState({ agents: [] }), false);
+  const sent: unknown[] = [];
+  const parent = { postMessage: (m: unknown) => sent.push(m) };
+  const win = { location: { href: "chrome-extension://x/pill-next/index.html?n=" + "a".repeat(32) }, parent, addEventListener() {} } as unknown as Window;
+  const frame = createFrameHost({ subscribe() {}, async send() {}, async decide() {} }, win);
+  frame.transport.setSuppressed!(true);
+  assert.deepEqual(sent, [{ m9r: "frame", nonce: "a".repeat(32), kind: "suppress", on: true }]);
 });

@@ -104,10 +104,10 @@ export function validateStoreManifest(manifest) {
   if (manifest.optional_host_permissions !== undefined) fail("site access must not require per-site prompts");
   if (manifest.optional_permissions !== undefined && JSON.stringify(manifest.optional_permissions) !== JSON.stringify(["debugger"])) fail("the only optional permission is debugger, for opt-in quiet mode");
   if (manifest.chrome_url_overrides !== undefined) fail("the store build must not override Chrome's New Tab page");
-  // The overlay embeds the thread pill and the message bar as extension frames inside pages (so a page's scripts cannot read what the
-  // owner types), which requires exactly those two pages, plus the static provider badges, to be web-accessible. Nothing else may be.
+  // The overlay embeds the pill (and the older thread pill and message bar) as extension frames inside pages, so a page's scripts cannot read what the
+  // owner types. That requires exactly those pages, the one-pill bundle folder, and the static provider badges to be web-accessible. Nothing else may be.
   const war = manifest.web_accessible_resources;
-  const expectedResources = ["assets/providers/*.svg", "composer.html", "pill.html"];
+  const expectedResources = ["assets/providers/*.svg", "composer.html", "pill-next/*", "pill.html"];
   if (!Array.isArray(war) || war.length !== 1
     || JSON.stringify([...(war[0].resources ?? [])].sort()) !== JSON.stringify(expectedResources)
     || JSON.stringify(war[0].matches) !== JSON.stringify(["http://*/*", "https://*/*"])
@@ -186,6 +186,12 @@ export async function buildStorePackage(outputPath) {
     // The pages and styles the overlay embeds as frames, and the M9R mark their styles mask onto.
     for (const name of ["permission.html", "pill.html", "composer.html", "frame.css"]) {
       await copyFile(path.join(browserRoot, name), path.join(stage, name));
+    }
+    // The one-pill bundle (built from pill/ with `npm run build:ext`); a package without it would silently ship no pill.
+    for (const entry of await walkFiles(path.join(browserRoot, "pill-next"))) {
+      const destination = path.join(stage, "pill-next", entry.name);
+      await mkdir(path.dirname(destination), { recursive: true });
+      await writeFile(destination, entry.data, { flag: "wx" });
     }
     await mkdir(path.join(stage, "assets"), { recursive: true });
     await copyFile(path.join(browserRoot, "assets", "m9r-mark.png"), path.join(stage, "assets", "m9r-mark.png"));

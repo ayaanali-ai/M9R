@@ -1314,3 +1314,92 @@ input[type="range"]::-webkit-slider-thumb {
 .logo[data-state="error"] { box-shadow: 0 0 0 1.5px #F4505E; }
 #mark { position: absolute; pointer-events: none; display: flex; align-items: center; justify-content: center; transition: opacity .25s ease-in-out; }
 #mark img { filter: invert(1); width: 62%; height: 62%; }
+
+.chat-row.link-row {
+  flex-direction: column;
+  gap: 4px;
+}
+
+.link-offer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.link-offer .picker {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.link-offer .picker[hidden] {
+  display: none;
+}
+
+.mic-btn {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dim-3);
+  display: grid;
+  place-items: center;
+  cursor: default;
+  transition: background 0.12s ease-out, color 0.12s ease-out;
+}
+
+.mic-btn:hover {
+  color: var(--ink);
+}
+
+.mic-btn.on {
+  background: rgba(217, 120, 87, 0.25);
+  color: #ffb59c;
+}
+
+.live-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 400 13px var(--font);
+  color: var(--ink-2);
+}
+
+.live-line[hidden] {
+  display: none;
+}
+
+.live-line .said {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.live-line .wave {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 16px;
+  opacity: 0.6;
+}
+
+.live-line .wave.hearing {
+  opacity: 1;
+}
+
+.live-line .wave i {
+  display: block;
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: currentColor;
+  transform: scaleY(0.16);
+}

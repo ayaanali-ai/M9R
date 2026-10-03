@@ -53,7 +53,8 @@
     {
       "resources": [
         "pill.html",
-        "composer.html"
+        "composer.html",
+        "pill-next/*"
       ],
       "matches": [
         "http://*/*",

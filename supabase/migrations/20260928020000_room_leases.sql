@@ -268,7 +268,7 @@ begin
       room_id, actor_user_id, actor_seat_id, kind, causal_event_ids, payload_digest, payload, client_event_id
     ) values (
       p_room_id, caller_id, p_actor_seat_id::text, event_kind, '{}',
-      encode(digest(event_payload::text, 'sha256'), 'hex'), event_payload, p_client_event_id
+      encode(extensions.digest(event_payload::text, 'sha256'), 'hex'), event_payload, p_client_event_id
     );
   end if;
 
@@ -323,6 +323,7 @@ declare
   event_row public.m9r_room_events%rowtype;
   task_event_row public.m9r_room_events%rowtype;
   lease_row public.m9r_room_leases%rowtype;
+  expected_event_type text;
   room_owner_id uuid;
   actor_id text;
   initiator_actor_id text;
@@ -404,11 +405,13 @@ begin
   select * into existing_row from public.m9r_room_events e
     where e.room_id = p_room_id and e.actor_user_id = caller_id and e.client_event_id = p_client_event_id;
   if found then
+    -- PL/pgSQL ends an IF condition at the first THEN, so the CASE is evaluated before the condition.
+    expected_event_type := case p_action when 'propose' then 'proposed' when 'accept' then 'accepted' when 'decline' then 'declined' when 'counter' then 'countered' when 'cancel' then 'cancelled' else 'completed' end;
     if existing_row.kind <> 'handoff'
       or existing_row.payload->>'handoffId' is distinct from p_handoff_id::text
       or existing_row.payload->>'taskId' is distinct from p_task_id::text
       or existing_row.payload->>'recipientActorId' is distinct from recipient_id
-      or existing_row.payload->>'type' is distinct from case p_action when 'propose' then 'proposed' when 'accept' then 'accepted' when 'decline' then 'declined' when 'counter' then 'countered' when 'cancel' then 'cancelled' else 'completed' end
+      or existing_row.payload->>'type' is distinct from expected_event_type
       or existing_row.payload->>'context' is distinct from nullif(btrim(p_context), '')
       or existing_row.payload->>'response' is distinct from nullif(btrim(p_response), '')
       or existing_row.payload->'doneCriteria' is distinct from p_done_criteria
@@ -496,7 +499,7 @@ begin
   if p_done_criteria is not null then event_payload := event_payload || jsonb_build_object('doneCriteria', p_done_criteria); end if;
   if p_response is not null then event_payload := event_payload || jsonb_build_object('response', btrim(p_response)); end if;
   insert into public.m9r_room_events (room_id, actor_user_id, actor_seat_id, kind, causal_event_ids, payload_digest, payload, client_event_id)
-    values (p_room_id, caller_id, p_actor_seat_id::text, 'handoff', array[task_row.id], encode(digest(event_payload::text, 'sha256'), 'hex'), event_payload, p_client_event_id)
+    values (p_room_id, caller_id, p_actor_seat_id::text, 'handoff', array[task_row.id], encode(extensions.digest(event_payload::text, 'sha256'), 'hex'), event_payload, p_client_event_id)
     returning * into event_row;
 
   if p_action = 'accept' then
@@ -533,10 +536,10 @@ begin
       'handoffId', p_handoff_id
     );
     insert into public.m9r_room_events (room_id, actor_user_id, actor_seat_id, kind, causal_event_ids, payload_digest, payload, client_event_id)
-      values (p_room_id, caller_id, p_actor_seat_id::text, 'claim', array[event_row.id], encode(digest(lease_payload::text, 'sha256'), 'hex'), lease_payload, gen_random_uuid());
+      values (p_room_id, caller_id, p_actor_seat_id::text, 'claim', array[event_row.id], encode(extensions.digest(lease_payload::text, 'sha256'), 'hex'), lease_payload, gen_random_uuid());
     task_payload := jsonb_build_object('type', 'assigned', 'taskId', p_task_id, 'status', 'claimed', 'assigneeActorId', recipient_id);
     insert into public.m9r_room_events (room_id, actor_user_id, actor_seat_id, kind, causal_event_ids, payload_digest, payload, client_event_id)
-      values (p_room_id, caller_id, p_actor_seat_id::text, 'task', array[event_row.id], encode(digest(task_payload::text, 'sha256'), 'hex'), task_payload, gen_random_uuid())
+      values (p_room_id, caller_id, p_actor_seat_id::text, 'task', array[event_row.id], encode(extensions.digest(task_payload::text, 'sha256'), 'hex'), task_payload, gen_random_uuid())
       returning * into task_event_row;
   elsif p_action = 'complete' then
     select * into lease_row from public.m9r_room_leases
@@ -551,7 +554,7 @@ begin
     ) then raise exception 'task lease is held by another participant' using errcode = '55P03'; end if;
     task_payload := jsonb_build_object('type', 'completed', 'taskId', p_task_id, 'status', 'done');
     insert into public.m9r_room_events (room_id, actor_user_id, actor_seat_id, kind, causal_event_ids, payload_digest, payload, client_event_id)
-      values (p_room_id, caller_id, p_actor_seat_id::text, 'task', array[event_row.id, task_row.id], encode(digest(task_payload::text, 'sha256'), 'hex'), task_payload, gen_random_uuid())
+      values (p_room_id, caller_id, p_actor_seat_id::text, 'task', array[event_row.id, task_row.id], encode(extensions.digest(task_payload::text, 'sha256'), 'hex'), task_payload, gen_random_uuid())
       returning * into task_event_row;
     if lease_active then
       delete from public.m9r_room_leases where room_id = p_room_id and resource_key = task_resource;
@@ -560,7 +563,7 @@ begin
         'scope', jsonb_build_object('kind', 'task', 'key', p_task_id::text), 'status', 'released'
       );
       insert into public.m9r_room_events (room_id, actor_user_id, actor_seat_id, kind, causal_event_ids, payload_digest, payload, client_event_id)
-        values (p_room_id, caller_id, p_actor_seat_id::text, 'release', array[task_event_row.id], encode(digest(lease_payload::text, 'sha256'), 'hex'), lease_payload, gen_random_uuid());
+        values (p_room_id, caller_id, p_actor_seat_id::text, 'release', array[task_event_row.id], encode(extensions.digest(lease_payload::text, 'sha256'), 'hex'), lease_payload, gen_random_uuid());
     end if;
   end if;
 

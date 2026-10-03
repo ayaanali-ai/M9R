@@ -17,7 +17,7 @@ const clip = (text: unknown, n: number) => (typeof text === "string" ? text.repl
 interface UiAgent { id: string; provider?: string; state?: string; doing?: string }
 interface UiThread { id: string; kind: string; agent?: string; text: string; phase?: string }
 interface UiApproval { id: string; agent?: string; provider?: string; text: string; site?: string; url?: string; action?: string }
-export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[] }
+export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; desktopPill?: boolean }
 
 const RUN_STATES = new Set<AgentRunState>(["idle", "starting", "working", "waiting", "blocked", "stopped", "failed"]);
 
@@ -50,7 +50,7 @@ export function fromUiState(message: UiState): PillSnapshot {
     .filter((t) => t.kind === "say" || t.kind === "system" || t.kind === "block")
     .slice(-30)
     .map((t) => ({ id: String(t.id), from: String(t.agent ?? "").replace(/^@/, "") || "m9r", text: clip(t.text, 600) }));
-  return { agents, approvals, thread: replies };
+  return { agents, approvals, thread: replies, ...(message.desktopPill === true ? { desktopPill: true } : {}) };
 }
 
 // ── Desktop shell: the engine's feed.json merged with web-activity.json ────────────────────────────
@@ -58,7 +58,7 @@ export function fromUiState(message: UiState): PillSnapshot {
 interface FeedAgent { handle: string; state?: string }
 type FeedNeeds =
   | { kind: "approval"; taskId: string; from: string; to: string; goal: string; protected?: boolean }
-  | { kind: "push_failed"; taskId: string; from: string; to: string; reason: string; fix?: string }
+  | { kind: "push_failed"; taskId: string; from: string; fromSession?: string; to: string; reason: string; fix?: string; linkable?: boolean }
   | { kind: "answer"; taskId: string; from: string; summary: string };
 interface FeedInProgress { taskId: string; from: string; to: string; goal: string; state?: string }
 interface FeedWeb { at: string; agent: string; kind: string; text: string }
@@ -99,7 +99,10 @@ export function fromFeed(feed: Feed): PillSnapshot {
     ...needs.flatMap((n) => n.kind === "answer"
       ? [{ id: `answer-${n.taskId}`, from: n.from, text: clip(n.summary, 600) }]
       : n.kind === "push_failed"
-        ? [{ id: `failed-${n.taskId}`, from: n.to, text: clip(`Could not deliver ${n.taskId}: ${n.reason}`, 300) }]
+        ? [{
+          id: `failed-${n.taskId}`, from: n.to, text: clip(`Could not deliver ${n.taskId}: ${n.reason}`, 300),
+          ...(n.linkable === true ? { link: { taskId: n.taskId, from: n.from, ...(n.fromSession ? { fromSession: n.fromSession } : {}), to: n.to } } : {}),
+        }]
         : []),
   ];
   return { agents, approvals, thread };

@@ -34,7 +34,8 @@ export function createExtensionTransport(runtime: ChromeRuntime): PillTransport 
 
   return {
     // The bridge has no "allow for a day" for in-page approvals; the button is hidden rather than silently meaning "once".
-    capabilities: { allowForADay: false },
+    capabilities: { allowForADay: false, dictation: true },
+    openMicSetup() { void runtime.sendMessage({ type: "m9r-pill-open-mic-setup" }).catch(() => {}); },
     subscribe(listener) {
       const connect = () => {
         let port: ReturnType<ChromeRuntime["connect"]>;

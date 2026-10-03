@@ -7,6 +7,7 @@ import {
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
+import { browserSpeechEnv } from "../core/speech";
 import { State, type PillSnapshot } from "../core/state";
 import type { Decision, PillTransport } from "../core/transport";
 import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
@@ -49,6 +50,7 @@ export class Island {
   private dirty = true;
 
   private collapsed = false;
+  private suppressed = false;
   private collapseTimer: number | null = null;
   private wasInIsland = false;
   private pushedRect = { x: -1, y: -1, w: -1, h: -1 };
@@ -81,6 +83,10 @@ export class Island {
       decide: (d) => this.decide(d),
       send: (text) => this.transport.send(text),
       canAllowForADay: () => this.transport.capabilities?.allowForADay === true,
+      dictation: this.transport.capabilities?.dictation ? () => browserSpeechEnv(() => this.transport.openMicSetup?.()) : undefined,
+      linking: this.transport.capabilities?.linkSessions && this.transport.listSessions && this.transport.linkSession
+        ? { list: (handle) => this.transport.listSessions!(handle), link: (offer, session) => this.transport.linkSession!(offer, session) }
+        : undefined,
       toggleSound: () => {
         State.settings.soundEnabled = !State.settings.soundEnabled;
         Sound.setEnabled(State.settings.soundEnabled);
@@ -134,8 +140,13 @@ export class Island {
 
   /** Feed from the host. Opens on a new approval (pinned until answered) and shows a quiet reveal for replies. */
   applySnapshot(snapshot: PillSnapshot) {
+    const suppressed = snapshot.desktopPill === true;
+    if (suppressed !== this.suppressed) {
+      this.suppressed = suppressed;
+      this.transport.setSuppressed?.(suppressed);
+    }
     const { newApprovals, newReplies } = State.apply(snapshot);
-    for (const m of newReplies) State.chatHistory.push({ id: Date.now() + State.chatHistory.length, role: "assistant", content: `${m.from}: ${m.text}` });
+    for (const m of newReplies) State.chatHistory.push({ id: Date.now() + State.chatHistory.length, role: "assistant", content: `${m.from}: ${m.text}`, link: m.link });
     if (newApprovals.length > 0) {
       const asking = State.approvals.find((a) => a.id === newApprovals[0]);
       if (asking) State.setFocus(asking.agent);
@@ -225,6 +236,17 @@ export class Island {
     State.lastActivity = performance.now();
     this.animateGeometry(!grew);
     State.notify();
+  }
+
+  /** Opens the message view (the keyboard shortcut in a page frame). */
+  openMessage() {
+    this.setView("prompt");
+  }
+
+  /** Push-to-talk from the keyboard: holding opens the message view and listens; letting go ends it. */
+  talk(active: boolean) {
+    if (active) this.setView("prompt");
+    this.views.get("prompt")?.talk?.(active);
   }
 
   collapse() {

@@ -1,21 +1,36 @@
 // The pill talks to its host only through this interface. The desktop shell and the browser shell each provide an adapter;
 // in a plain browser tab (npm run dev) the mock below stands in so the UI can be developed and inspected alone.
 
-import type { PillSnapshot, Settings } from "./state";
+import type { LinkOffer, PillSnapshot, Settings } from "./state";
 
 export type Decision = "allow" | "deny" | "allow_day";
 
+export interface SessionRow {
+  sessionId: string;
+  cwd?: string;
+  lastSeenAt: string;
+}
+
 export interface PillTransport {
   /** What this host can actually do; the UI hides controls a host cannot honour instead of faking them. */
-  capabilities?: { allowForADay?: boolean };
+  capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean };
+  /** Opens the one-time microphone setup. Only with `capabilities.dictation`. */
+  openMicSetup?(): void;
+  /** Sessions the engine knows for one agent, for the link picker. Only with `capabilities.linkSessions`. */
+  listSessions?(handle: string): Promise<SessionRow[]>;
+  /** Always route future messages from `offer.from` to this session of `offer.to`. Rejects with a sentence the owner can read. */
+  linkSession?(offer: LinkOffer, toSession: string): Promise<void>;
   /** Starts delivering snapshots. The first call should arrive promptly with the current state. */
   subscribe(listener: (snapshot: PillSnapshot) => void): void | (() => void);
   /** Owner typed a message; `@handle` mentions inside it address agents. */
-  send(text: string): Promise<void>;
+  /** May resolve to a short confirmation to show in the thread. Rejects with a sentence the owner can read. */
+  send(text: string): Promise<string | void>;
   decide(approvalId: string, decision: Decision): Promise<void>;
   /** Window-level hooks; no-ops in the browser shell. */
   setIslandRect?(x: number, y: number, width: number, height: number): void;
   setCollapsed?(collapsed: boolean): void;
+  /** The other pill is showing; hide this one (browser shell). Called only when the answer changes. */
+  setSuppressed?(suppressed: boolean): void;
   focusWindow?(focused: boolean): void;
   saveSettings?(settings: Settings): void;
 }

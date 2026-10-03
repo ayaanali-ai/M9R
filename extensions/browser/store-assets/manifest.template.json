@@ -24,6 +24,7 @@
       "resources": [
         "assets/providers/*.svg",
         "composer.html",
+        "pill-next/*",
         "pill.html"
       ],
       "matches": [

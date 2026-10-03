@@ -117,7 +117,7 @@ test("store manifest grants ordinary-site access at install and leaves Chrome's 
   assert.equal("chrome_url_overrides" in manifest, false);
   assert.equal("content_scripts" in manifest, false);
   assert.deepEqual(manifest.permissions, ["tabs", "scripting", "alarms", "storage", "nativeMessaging", "search"]);
-  assert.deepEqual(manifest.web_accessible_resources, [{ resources: ["assets/providers/*.svg", "composer.html", "pill.html"], matches: ["http://*/*", "https://*/*"] }]);
+  assert.deepEqual(manifest.web_accessible_resources, [{ resources: ["assets/providers/*.svg", "composer.html", "pill-next/*", "pill.html"], matches: ["http://*/*", "https://*/*"] }]);
   assert.ok(manifest.description.length <= 132);
 });
 
@@ -167,7 +167,7 @@ test("the store package ships the pill, the message bar, their styles and the M9
   try {
     await buildStorePackage(path.join(temp, "candidate.zip"));
     const files = zipFiles(await readFile(path.join(temp, "candidate.zip")));
-    for (const name of ["pill.html", "composer.html", "frame.css", "permission.html", "assets/m9r-mark.png", "src/composer.js", "src/pill.js", "src/frame-common.js", "src/mention-logic.js", "src/dock-logic.js"]) {
+    for (const name of ["pill-next/index.html", "pill.html", "composer.html", "frame.css", "permission.html", "assets/m9r-mark.png", "src/composer.js", "src/pill.js", "src/frame-common.js", "src/mention-logic.js", "src/dock-logic.js"]) {
       assert.ok(files.has(name), `${name} is in the package`);
     }
     assert.equal(verifyPackageComplete(files), true);

@@ -159,6 +159,8 @@
   if (chrome.runtime && typeof chrome.runtime.getURL === "function") {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
     const nonce = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    const WAKE_W = 240;
+    const WAKE_H = 6;
     const setRegistrationStage = (stage) => {
       try {
         const host = document.getElementById(window.M9RPresence.ROOT_ID);
@@ -167,10 +169,19 @@
     };
     setRegistrationStage("pending");
     try {
-      Promise.resolve(chrome.runtime.sendMessage({ type: "m9r-pill-register", nonce })).then((reply) => {
+      Promise.resolve(chrome.runtime.sendMessage({ type: "m9r-pill-register", nonce })).then(async (reply) => {
         if (!current()) return;
         if (!reply || reply.ok !== true) {
           setRegistrationStage("rejected");
+          return;
+        }
+        // The one-pill UI replaces the thread pill and the message bar. Set chrome.storage.local m9rPillNext = false to get the old pair back.
+        let next = false;
+        try { const stored = await chrome.storage.local.get("m9rPillNext"); next = !stored || stored.m9rPillNext !== false; } catch { /* no storage: the current pill */ }
+        if (!current()) return;
+        if (next) {
+          const pill = overlay.mountFrame("pill", chrome.runtime.getURL(`pill-next/index.html?n=${nonce}`), { w: WAKE_W, h: WAKE_H, top: 0 });
+          setRegistrationStage(pill ? "accepted" : "mount-failed");
           return;
         }
         const pill = overlay.mountFrame("pill", chrome.runtime.getURL(`pill.html?n=${nonce}`), { w: 372, h: 76, bottom: 76 });
