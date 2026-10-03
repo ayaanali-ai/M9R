@@ -3405,6 +3405,8 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "setup":
     case "uninstall":
     case "send":
+    case "note":
+    case "cloud":
     case "tasks":
     case "feed":
     case "dismiss":

@@ -11,6 +11,7 @@ import { apiKeyLaunchBlock } from "@/lib/native/vendor-launch-core";
 import { createWebLiveSessions, loadAgentsConfig, projectRoomId } from "@/lib/native/web-live-sessions";
 import { createWebUiBridge } from "@/lib/native/web-ui-bridge";
 import { createPageNotesStore } from "@/lib/native/page-notes-store";
+import { pullCloudNotes, pushCloudNote } from "@/lib/native/cloud-memory";
 import { readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
 import { DEFAULT_BROKER_PORT, brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
@@ -41,9 +42,13 @@ async function main(): Promise<void> {
   const ui = createWebUiBridge({
     saveNote: (text) => {
       const result = pageNotes.append({ room: projectRoomId(projectRoot), agent: "you", text, source: "agent" });
+      if (result.ok) void pushCloudNote(root, text); // best effort: also appears in the team's dashboard when this machine is connected
       return result.ok ? { ok: true } : { ok: false, error: result.error };
     },
   });
+  // Keep a local copy of the team's saved notes fresh for the agents' session prompts (no-op until `m9r cloud connect`).
+  void pullCloudNotes(root);
+  setInterval(() => void pullCloudNotes(root), 5 * 60_000).unref();
   // A real POST /web/shutdown (m9r web restart, or any owner-triggered restart) must stop this whole process, not just
   // close the HTTP socket, or the unref'd-less feed timer below keeps Node running forever with nothing left listening.
   let requestShutdown = () => {};

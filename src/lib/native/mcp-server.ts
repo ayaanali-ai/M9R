@@ -20,6 +20,7 @@ import type { VerifiedIdentity } from "./identity-core";
 import type { WebBatchRequest, WebRequest } from "./web-broker-core";
 import type { WebBrokerClient } from "./web-broker-client";
 import { createPageNotesStore, type PageNotesStore } from "./page-notes-store";
+import { pushCloudNote } from "./cloud-memory";
 import { gitRead, readGovernedFile } from "../bridge/governed-agent-tools";
 
 export interface McpServerDeps {
@@ -273,6 +274,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         }
         const result = pageNotes.append({ room, agent: identity.handle, text, source, ...(sourceUrl ? { sourceUrl } : {}), ...(selector ? { selector } : {}) });
         if (!result.ok) return { content: [{ type: "text" as const, text: result.error }], isError: true };
+        // An agent's own note goes to the dashboard as a suggestion; the person answers Save or No there.
+        if (source === "agent" && !result.value.deduplicated && !result.value.note.sourceUrl) void pushCloudNote(deps.store.root, text, { propose: true });
         const scope = result.value.note.sourceUrl ? `for ${result.value.note.sourceUrl}` : "as room-wide memory";
         return { content: [{ type: "text" as const, text: result.value.deduplicated ? `That note already exists as ${result.value.note.id}; no duplicate was added.` : `Saved ${result.value.note.id} to project room "${result.value.note.room}" ${scope}${result.value.note.untrusted ? " (page-derived, untrusted)" : ""}.` }] };
       }

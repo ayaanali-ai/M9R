@@ -4,6 +4,7 @@ import { dashboardWorkspaceContext } from "@/lib/dashboard-workspace-context";
 import { AgentJoinError, type AuthedAgent } from "@/lib/agent-join-service";
 import { requireApproverRole } from "@/lib/workspace-membership-service";
 import { memoryAllowance, normalizeMemoryNote } from "@/lib/shared-memory-core";
+import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
 
 function service() {
   if (!supabase) throw new AgentJoinError("Memory is not configured.", "DB_NOT_CONFIGURED", 503);
@@ -111,4 +112,28 @@ export async function mutateSharedMemory(id: string, action: "approve" | "delete
   const {error} = await service().rpc("m9r_review_memory_note", {p_workspace:context.workspaceId,p_note:id,p_actor:context.userId,p_delete:action === "delete"});
   if (error) memoryDatabaseError(error);
   return { ok: true };
+}
+
+/**
+ * Sync for a person's own M9R install, authenticated by a personal API token (Settings > API tokens) that the route has
+ * already resolved to `userId`. Only workspace-level notes travel: a private channel's memory never leaves the dashboard.
+ */
+async function workspaceForUser(userId: string): Promise<string> {
+  return resolveActiveOrDefaultProjectId(service(), { id: userId, email: null, name: null });
+}
+export async function listSyncedNotesForUser(userId: string) {
+  const workspaceId = await workspaceForUser(userId);
+  const { data, error } = await service().from("workspace_memory_notes").select("id, title, body, created_at").eq("workspace_id", workspaceId).is("conversation_id", null).eq("reviewed", true).order("created_at", { ascending: false }).limit(50);
+  if (error) memoryDatabaseError(error);
+  return (data ?? []).map((note) => ({ id: note.id as string, title: note.title as string, body: String(note.body).slice(0, 1_200), createdAt: note.created_at as string }));
+}
+/** A note the person saved is shared at once; `propose` is for notes an agent wrote, which wait in the dashboard for Save or No. */
+export async function saveSyncedNoteForUser(userId: string, raw: unknown, propose: boolean) {
+  const workspaceId = await workspaceForUser(userId);
+  let note: ReturnType<typeof normalizeMemoryNote>;
+  try { note = normalizeMemoryNote(raw); } catch (error) { throw new AgentJoinError(error instanceof Error ? error.message : "Invalid memory.", "INVALID_MEMORY", 400); }
+  const { error } = await service().from("workspace_memory_notes").insert({ workspace_id: workspaceId, conversation_id: null, title: note.title, body: note.body, content_hash: note.contentHash, source: propose ? "agent" : "human", author_connection_id: null, author_user_id: userId, reviewed: !propose });
+  if (error?.code === "23505") return { ok: true, duplicate: true };
+  if (error) memoryDatabaseError(error);
+  return { ok: true, proposed: propose };
 }

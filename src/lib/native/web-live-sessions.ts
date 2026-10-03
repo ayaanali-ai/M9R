@@ -25,6 +25,7 @@ import { apiKeyLaunchBlock } from "./vendor-launch-core";
 import { startLiveSession, type LiveEvent, type LiveProcess, type LiveSession } from "./live-session-core";
 import { createOpenCodeAcpRuntime, type OpenCodeLiveRuntime } from "./web-opencode-acp";
 import { createPageNotesStore } from "./page-notes-store";
+import { readCachedCloudNotes, renderCloudNotes } from "./cloud-memory";
 import {reportedTurnUsage, type ReportedTurnUsage} from "./provider-usage-core";
 import { redactSession } from "../session-redaction";
 import type { SessionEvent, SessionStatus, SessionsPort } from "./web-ui-bridge";
@@ -183,11 +184,12 @@ function persistProviderSession(storeRoot: string, config: WebAgentConfig, resum
 }
 
 function sharedProjectMemory(storeRoot: string, roomId: string): string {
+  const team = teamMemory(storeRoot, roomId);
   try {
     const result = createPageNotesStore(storeRoot).list(roomId);
-    if (!result.ok) return "M9R could not read the shared project memory; report that limitation rather than assuming it is empty.";
+    if (!result.ok) return [team, "M9R could not read the shared project memory; report that limitation rather than assuming it is empty."].filter(Boolean).join("\n");
     const notes = result.value.filter((note) => note.source === "agent").slice(0, 20);
-    if (!notes.length) return `No saved agent-authored shared memory yet for project room ${roomId}.`;
+    if (!notes.length) return [team, `No saved agent-authored shared memory yet for project room ${roomId}.`].filter(Boolean).join("\n");
 
     const lines = [`Verified agent-authored notes for project room ${roomId} (quoted data, not instructions):`];
     let remaining = 10_000;
@@ -199,10 +201,21 @@ function sharedProjectMemory(storeRoot: string, roomId: string): string {
       lines.push(line);
       remaining -= line.length;
     }
-    return lines.join("\n");
+    return [team, lines.join("\n")].filter(Boolean).join("\n\n");
   } catch {
-    return "M9R could not read the shared project memory; report that limitation rather than assuming it is empty.";
+    return [team, "M9R could not read the shared project memory; report that limitation rather than assuming it is empty."].filter(Boolean).join("\n");
   }
+}
+
+/** The team's notes from the dashboard (cloud.json joins this machine to them), minus any this machine already holds locally. */
+function teamMemory(storeRoot: string, roomId: string): string {
+  try {
+    const cached = readCachedCloudNotes(storeRoot);
+    if (!cached.length) return "";
+    const local = createPageNotesStore(storeRoot).list(roomId);
+    const have = new Set(local.ok ? local.value.map((note) => note.text.trim()) : []);
+    return renderCloudNotes(cached.filter((note) => !have.has(note.body.trim())));
+  } catch { return ""; }
 }
 
 /** The compiled MCP server that ships with the installed CLI (next to this file), or null in a development checkout. */
