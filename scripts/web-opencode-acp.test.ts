@@ -16,6 +16,7 @@ test("OpenCode ACP launches once, resumes the same provider session, streams tur
     handle: "opencode",
     missionId: "project-room",
     model: "opencode/big-pickle",
+    effort: undefined,
     resumeId: "ses_previous_123",
     adapterFactory: (options) => {
       capturedOptions = options;
