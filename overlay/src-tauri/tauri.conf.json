@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run ui",
-    "beforeBuildCommand": "npx vite build"
+    "beforeBuildCommand": "npx vite build && npm --prefix ../pill run build:desktop"
   },
   "app": {
     "withGlobalTauri": false,

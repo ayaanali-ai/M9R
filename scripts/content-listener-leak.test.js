@@ -118,14 +118,14 @@ function harness(registration) {
   };
 }
 
-test("pill registration reports accepted status and mounts both frames", async () => {
+test("pill registration reports accepted status and mounts the one pill frame", async () => {
   const { context, getRoot, mountedFrames } = harness({ reply: { ok: true } });
   inject(context);
   const root = getRoot();
   assert.equal(root.dataset.m9rRegistration, "pending");
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(root.dataset.m9rRegistration, "accepted");
-  assert.equal(mountedFrames.length, 2);
+  assert.equal(mountedFrames.length, 1);
   assert.ok(mountedFrames.every(([, src]) => !src.includes("fixture") && src.includes("?n=")));
 });
 

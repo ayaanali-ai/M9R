@@ -64,12 +64,12 @@ begin
        and receipt.owner_id = auth.uid()
        and receipt.decision = 'approved'
        and receipt.audience in ('room', 'members')
-       and receipt.payload_digest = encode(digest(p_payload::text, 'sha256'), 'hex')
+       and receipt.payload_digest = encode(extensions.digest(p_payload::text, 'sha256'), 'hex')
        and request.room_id = p_room_id
        and request.owner_id = auth.uid()
        and request.agent_seat_id = p_actor_seat_id::text
        and request.state = 'approved'
-       and request.proposed_text_digest = encode(digest(p_payload::text, 'sha256'), 'hex')
+       and request.proposed_text_digest = encode(extensions.digest(p_payload::text, 'sha256'), 'hex')
        and request.expires_at > now()
   ) then
     raise exception 'approved disclosure receipt required for agent room event' using errcode = '42501';
@@ -107,7 +107,7 @@ begin
   end if;
   return query select * from public.create_m9r_disclosure_request(
     p_room_id, p_agent_seat_id, p_asked_by, p_subject, p_data_class,
-    p_audience, encode(digest(p_proposed_payload::text, 'sha256'), 'hex'), p_expires_at
+    p_audience, encode(extensions.digest(p_proposed_payload::text, 'sha256'), 'hex'), p_expires_at
   );
 end;
 $$;

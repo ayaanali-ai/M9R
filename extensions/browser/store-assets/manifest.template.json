@@ -12,6 +12,9 @@
     "nativeMessaging",
     "search"
   ],
+  "optional_permissions": [
+    "debugger"
+  ],
   "host_permissions": [
     "http://*/*",
     "https://*/*"
@@ -20,8 +23,7 @@
     {
       "resources": [
         "assets/providers/*.svg",
-        "composer.html",
-        "pill.html"
+        "pill-next/*"
       ],
       "matches": [
         "http://*/*",
@@ -31,9 +33,6 @@
   ],
   "background": {
     "service_worker": "src/background.js"
-  },
-  "chrome_url_overrides": {
-    "newtab": "newtab.html"
   },
   "action": {
     "default_popup": "permission.html",

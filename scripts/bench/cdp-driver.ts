@@ -193,7 +193,7 @@ export async function startCdpDriver(options: { brokerPort: number; chromePath?:
   const tabs = new Map<string, string>();
 
   async function evaluate(sessionId: string, expression: string): Promise<unknown> {
-    const out = await cdp.send<CdpResult>("Runtime.evaluate", { expression, returnByValue: true }, sessionId);
+    const out = await cdp.send<CdpResult>("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, sessionId);
     if (out.exceptionDetails) throw new Error(out.exceptionDetails.exception?.description ?? out.exceptionDetails.text ?? "page script failed");
     return out.result?.value;
   }

@@ -33,10 +33,10 @@ test("authoritative append requires an exact approved disclosure receipt for eve
   assert.match(guardMigration, /p_actor_seat_id is not null and p_kind <> 'action'/i);
   assert.match(guardMigration, /receipt\.decision = 'approved'/i);
   assert.match(guardMigration, /receipt\.audience in \('room', 'members'\)/i);
-  assert.match(guardMigration, /receipt\.payload_digest = encode\(digest\(p_payload::text, 'sha256'\), 'hex'\)/i);
+  assert.match(guardMigration, /receipt\.payload_digest = encode\(extensions\.digest\(p_payload::text, 'sha256'\), 'hex'\)/i);
   assert.match(guardMigration, /request\.agent_seat_id = p_actor_seat_id::text/i);
   assert.match(guardMigration, /request\.state = 'approved'/i);
-  assert.match(guardMigration, /request\.proposed_text_digest = encode\(digest\(p_payload::text, 'sha256'\), 'hex'\)/i);
+  assert.match(guardMigration, /request\.proposed_text_digest = encode\(extensions\.digest\(p_payload::text, 'sha256'\), 'hex'\)/i);
   assert.match(guardMigration, /request\.expires_at > now\(\)/i);
   assert.match(guardMigration, /approved disclosure receipt required for agent room event/i);
 });
@@ -46,7 +46,7 @@ test("event approval hashes PostgreSQL's full JSONB payload and scoped auto-allo
   const roomsMigration = read("supabase/migrations/20260926010000_cross_machine_rooms.sql");
   const route = read("src/app/api/rooms/[roomId]/disclosures/route.ts");
   assert.match(guardMigration, /create function public\.request_m9r_room_event_disclosure/i);
-  assert.match(guardMigration, /digest\(p_proposed_payload::text, 'sha256'\)/i);
+  assert.match(guardMigration, /extensions\.digest\(p_proposed_payload::text, 'sha256'\)/i);
   assert.match(guardMigration, /grant execute on function public\.request_m9r_room_event_disclosure[\s\S]*?to authenticated/i);
   assert.match(route, /normalizeRoomEvent\(value\.proposedEvent\)/);
   assert.match(route, /event\.value\.actorSeatId !== agentSeatId/);

@@ -766,7 +766,7 @@
       state.trace = trace;
       setFrameStage("mounted");
       // The thread pill rides the dock track when the dock module is loaded; otherwise it keeps its old free position.
-      state.dock = kind === "pill" && !!global.M9RDock;
+      state.dock = kind === "pill" && !!global.M9RDock && !Number.isFinite(defaults.top);
       frames.set(kind, state);
       // Only a fixed reason code reaches the host DOM. It lets the owner diagnose a
       // missing pill without exposing the frame nonce or extension URL to the page.
@@ -817,7 +817,7 @@
           if (Number.isFinite(saved) && saved >= 0 && saved <= 1) state.u = saved;
           layout(state);
         }).catch(() => { if (!destroyed && frames.get(kind) === state) layout(state); });
-      } else if (storage) {
+      } else if (storage && !Number.isFinite(defaults.top)) {
         storage.get(POSITION_KEYS[kind]).then((stored) => {
           if (destroyed || frames.get(kind) !== state) return;
           const saved = stored && stored[POSITION_KEYS[kind]];
@@ -894,6 +894,16 @@
       const vh = view.innerHeight;
       const w = Math.min(state.size.w * zoomK, vw - 8);
       const h = Math.min(state.size.h * zoomK, vh - 8);
+      if (Number.isFinite(state.defaults.top)) {
+        // Hangs from the top edge of the window, centred, like a notch; it is exactly as big as what it draws.
+        const top = state.defaults.top;
+        const left = Math.max(0, (vw - w) / 2);
+        state.box.style.cssText = `left:${left}px;top:${top}px;width:${w / zoomK}px;height:${h / zoomK}px;transform:scale(${zoomK});transform-origin:50% 0`;
+        state.box.classList.add("ready");
+        state.box.classList.toggle("hidden", !state.shown || !state.ready || state.suppressed === true);
+        state.shownAt = { left, bottom: vh - top - h, w, h };
+        return;
+      }
       let left = state.pos ? state.pos.left : (vw - w) / 2;
       let bottom = state.pos ? state.pos.bottom : state.defaults.bottom;
       left = Math.min(Math.max(left, 4), Math.max(4, vw - w - 4));
@@ -1072,7 +1082,8 @@
       if (data.kind === "size" && Number.isFinite(data.w) && Number.isFinite(data.h)) {
         const before = state.shownAt;
         const grew = before && data.h !== state.size.h;
-        state.size = { w: Math.max(40, Math.min(data.w, 900)), h: Math.max(40, Math.min(data.h, 2000)) };
+        const minH = Number.isFinite(state.defaults.top) ? 4 : 40;
+        state.size = { w: Math.max(40, Math.min(data.w, 900)), h: Math.max(minH, Math.min(data.h, 2000)) };
         if (Number.isFinite(data.barTop) && Number.isFinite(data.barH)) state.bar = { top: data.barTop, h: data.barH };
         // Growing keeps the bottom edge where it is (the pill opens upward); if it would run off the top, it slides down.
         if (grew && state.pos) state.pos = { left: state.pos.left, bottom: state.pos.bottom };
@@ -1093,6 +1104,10 @@
         if (storage && state.shownAt) void storage.set({ [POSITION_KEYS[state.kind]]: { left: state.shownAt.left, bottom: state.shownAt.bottom } }).catch(() => {});
       } else if (data.kind === "hotkey") {
         if (options && typeof options.onHotkey === "function" && (data.key === "m" || data.key === "n")) options.onHotkey(data.key, data.down === true);
+      } else if (data.kind === "suppress" && Number.isFinite(state.defaults.top)) {
+        // The desktop pill started or stopped. Only a change arrives, so a shortcut that brought this pill back stays.
+        state.suppressed = data.on === true;
+        layout(state);
       } else if (data.kind === "focus-composer") {
         showComposer(true);
       } else if (data.kind === "reset-position") {
@@ -1103,9 +1118,21 @@
       }
     }
 
+    // The new pill carries its own message view, so it is mounted without a separate message bar and the shortcuts open that view.
+    function openPillMessage() {
+      const pill = frames.get("pill");
+      if (!pill || !Number.isFinite(pill.defaults.top)) return false;
+      pill.shown = true;
+      pill.suppressed = false;
+      layout(pill);
+      try { pill.frame.focus(); } catch {}
+      postToFrame(pill, { kind: "open-message" });
+      return true;
+    }
+
     function showComposer(focus) {
       const state = frames.get("composer");
-      if (!state) return;
+      if (!state) { openPillMessage(); return; }
       state.shown = true;
       layout(state);
       if (focus) {
@@ -1116,7 +1143,7 @@
 
     function toggleComposer() {
       const state = frames.get("composer");
-      if (!state) return;
+      if (!state) { openPillMessage(); return; }
       if (state.shown) {
         state.shown = false;
         layout(state);
@@ -1127,7 +1154,14 @@
     /** Start or stop push-to-talk in the message bar; starting also brings the bar up, whatever state a tap left it in. */
     function talk(active) {
       const state = frames.get("composer");
-      if (!state) return;
+      if (!state) {
+        // The new pill listens in its own message view.
+        const pill = frames.get("pill");
+        if (!pill || !Number.isFinite(pill.defaults.top)) return;
+        if (active) { pill.shown = true; pill.suppressed = false; layout(pill); }
+        postToFrame(pill, { kind: "talk", active: !!active });
+        return;
+      }
       if (active) { state.shown = true; layout(state); }
       postToFrame(state, { kind: "talk", active: !!active });
     }

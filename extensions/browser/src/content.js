@@ -159,6 +159,8 @@
   if (chrome.runtime && typeof chrome.runtime.getURL === "function") {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
     const nonce = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    const WAKE_W = 240;
+    const WAKE_H = 6;
     const setRegistrationStage = (stage) => {
       try {
         const host = document.getElementById(window.M9RPresence.ROOT_ID);
@@ -173,9 +175,9 @@
           setRegistrationStage("rejected");
           return;
         }
-        const pill = overlay.mountFrame("pill", chrome.runtime.getURL(`pill.html?n=${nonce}`), { w: 372, h: 76, bottom: 76 });
-        const composer = overlay.mountFrame("composer", chrome.runtime.getURL(`composer.html?n=${nonce}`), { w: 448, h: 72, bottom: 6 });
-        setRegistrationStage(pill && composer ? "accepted" : "mount-failed");
+        // One pill: the agents, approvals and message box are a single extension frame, so a page's scripts cannot read what the owner types.
+        const pill = overlay.mountFrame("pill", chrome.runtime.getURL(`pill-next/index.html?n=${nonce}`), { w: WAKE_W, h: WAKE_H, top: 0 });
+        setRegistrationStage(pill ? "accepted" : "mount-failed");
       }).catch(() => setRegistrationStage("error"));
     } catch {
       setRegistrationStage("error");

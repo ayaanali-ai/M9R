@@ -52,6 +52,7 @@ declare
   task_resource text;
   latest_artifact_event_id uuid;
   string_key text;
+  max_len integer;
   allowed_keys text[] := array[
     'type', 'text', 'recipientActorId', 'replyTo', 'taskId', 'title', 'goal', 'doneCriteria',
     'status', 'assigneeActorId', 'handoffId', 'context', 'response', 'intentId', 'decision',
@@ -66,7 +67,7 @@ begin
   if p_payload is null or jsonb_typeof(p_payload) is distinct from 'object' or pg_column_size(p_payload) > 12288 then
     raise exception 'room event payload is invalid or too large' using errcode = '22023';
   end if;
-  computed_payload_digest := encode(digest(p_payload::text, 'sha256'), 'hex');
+  computed_payload_digest := encode(extensions.digest(p_payload::text, 'sha256'), 'hex');
 
   -- Serialize writes for this room so the server-assigned sequence is also the
   -- committed operation order. The lock is released with the transaction.
@@ -115,7 +116,9 @@ begin
       and jsonb_typeof(p_payload->key) <> 'string'
   ) then raise exception 'room event fields must be strings' using errcode = '22023'; end if;
   foreach string_key in array array['type', 'text', 'recipientActorId', 'replyTo', 'taskId', 'title', 'goal', 'status', 'assigneeActorId', 'handoffId', 'context', 'response', 'intentId', 'decision', 'summary', 'action', 'pageGroupId', 'origin', 'path', 'tabRef', 'claimId', 'artifactRef', 'label', 'resourceKey', 'holderActorId', 'expiresAt', 'artifactId', 'baseEventId', 'content'] loop
-    if p_payload ? string_key and char_length(p_payload->>string_key) > case string_key when 'text' then 4000 when 'goal' then 4000 when 'context' then 4000 when 'summary' then 1000 when 'title' then 160 when 'response' then 2000 when 'resourceKey' then 180 when 'content' then 8000 else 512 end then
+    -- PL/pgSQL ends an IF condition at the first THEN, so the CASE cannot sit inside the condition.
+    max_len := case string_key when 'text' then 4000 when 'goal' then 4000 when 'context' then 4000 when 'summary' then 1000 when 'title' then 160 when 'response' then 2000 when 'resourceKey' then 180 when 'content' then 8000 else 512 end;
+    if p_payload ? string_key and char_length(p_payload->>string_key) > max_len then
       raise exception 'room event field is too long' using errcode = '22023';
     end if;
   end loop;
@@ -261,7 +264,7 @@ begin
         'status', 'released'
       );
       insert into public.m9r_room_events (room_id, actor_user_id, actor_seat_id, kind, causal_event_ids, payload_digest, payload, client_event_id)
-        values (p_room_id, caller_id, p_actor_seat_id::text, 'release', array[event_row.id], encode(digest(release_payload::text, 'sha256'), 'hex'), release_payload, gen_random_uuid());
+        values (p_room_id, caller_id, p_actor_seat_id::text, 'release', array[event_row.id], encode(extensions.digest(release_payload::text, 'sha256'), 'hex'), release_payload, gen_random_uuid());
     end if;
   end if;
 

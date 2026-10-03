@@ -48,6 +48,34 @@
     site.textContent = granted ? "Ordinary websites available" : "Chrome has withheld all-site access";
     status.textContent = granted ? "Agent actions still obey M9R scopes and consequential-action approvals." : "Enable site access in Chrome's extension settings to use M9R on websites.";
   }).catch(() => { site.textContent = "Site access status unavailable"; });
+  const quietToggle = document.getElementById("quiet-toggle");
+  const quietStatus = document.getElementById("quiet-status");
+  const paintQuiet = async () => {
+    const stored = await chrome.storage.local.get("m9rQuietMode").catch(() => ({}));
+    const on = stored.m9rQuietMode === true && await chrome.permissions.contains({ permissions: ["debugger"] }).catch(() => false);
+    quietToggle.textContent = on ? "Turn off quiet mode" : "Turn on quiet mode";
+    quietStatus.textContent = on ? "Quiet mode is on." : "Quiet mode is off. Agents use the standard click.";
+    return on;
+  };
+  void paintQuiet();
+  quietToggle.addEventListener("click", async () => {
+    quietToggle.disabled = true;
+    try {
+      if (await paintQuiet()) {
+        await chrome.storage.local.set({ m9rQuietMode: false });
+        await chrome.permissions.remove({ permissions: ["debugger"] }).catch(() => false);
+      } else {
+        const granted = await chrome.permissions.request({ permissions: ["debugger"] });
+        await chrome.storage.local.set({ m9rQuietMode: granted === true });
+        if (!granted) quietStatus.textContent = "Chrome did not grant the permission, so quiet mode stays off.";
+      }
+    } finally {
+      quietToggle.disabled = false;
+      const text = quietStatus.textContent;
+      await paintQuiet();
+      if (/did not grant/.test(text)) quietStatus.textContent = text;
+    }
+  });
   stopAll.addEventListener("click", async () => {
     stopAll.disabled = true;
     status.textContent = "Sending stop signal to the local broker…";

@@ -71,6 +71,162 @@ const PILL: &str = "pill";
 const COLLAPSED_W: f64 = 220.0;
 const TOP_MARGIN: f64 = 8.0;
 
+// ── One-pill window (default; M9R_PILL_NEXT=0 for the older overlay UI) ───────────────────────────────────────────────────────────────
+// The new pill UI draws its own island inside a fixed, transparent, top-centre window and tells this side three things:
+// where the island is (so everything around it stays click-through), when it has folded away (the window shrinks to a
+// wake strip), and when it needs the keyboard (the message field). The old overlay UI does not use any of this.
+
+/// The new UI's panel width (its `PANEL_W`); the island is centred in it, and tall enough for its largest view.
+const NEXT_W: f64 = 720.0;
+const NEXT_H: f64 = 320.0;
+/// The strip the folded-away island leaves behind so the pointer can wake it (the UI draws the same 240 x 6 strip).
+const WAKE_W: f64 = 240.0;
+const WAKE_H: f64 = 6.0;
+/// Margin around the island that still counts as over it, matching the UI.
+const HIT_MARGIN: f64 = 14.0;
+
+fn next_mode() -> bool {
+    // The one pill is the default; M9R_PILL_NEXT=0 starts the older overlay UI instead.
+    std::env::var("M9R_PILL_NEXT").as_deref() != Ok("0")
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct IslandRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl IslandRect {
+    /// A rectangle the UI reports must be finite, non-negative, and inside the window; anything else is ignored.
+    fn checked(x: f64, y: f64, w: f64, h: f64) -> Option<IslandRect> {
+        let sane = [x, y, w, h].iter().all(|v| v.is_finite()) && w >= 0.0 && h >= 0.0 && x >= -1.0 && y >= -1.0 && x + w <= NEXT_W + 1.0 && y + h <= NEXT_H + 1.0;
+        sane.then_some(IslandRect { x, y, w, h })
+    }
+
+    /// Whether a point (logical pixels from the window's top-left) is over the island or its margin. An empty rectangle
+    /// (the island is retracted) is never hit.
+    fn hit(&self, margin: f64, px: f64, py: f64) -> bool {
+        if self.w <= 0.0 || self.h <= 0.0 {
+            return false;
+        }
+        px >= self.x - margin && px <= self.x + self.w + margin && py >= self.y - margin && py <= self.y + self.h + margin
+    }
+}
+
+#[derive(Default)]
+struct NextPill {
+    rect: IslandRect,
+    collapsed: bool,
+}
+
+static NEXT: Mutex<NextPill> = Mutex::new(NextPill { rect: IslandRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, collapsed: false });
+
+/// The size the window should have: the whole panel, or just the wake strip while the island is folded away.
+fn next_window_size(collapsed: bool) -> (f64, f64) {
+    if collapsed { (WAKE_W, WAKE_H) } else { (NEXT_W, NEXT_H) }
+}
+
+// ── One pill at a time ──────────────────────────────────────────────────────────────────────────────────────────
+// While this pill is running and visible it writes a heartbeat beside the feed; the web broker reads it and the in-page
+// pill steps aside. Three missed beats (6 s) and the in-page pill comes back, so a crash never leaves you with none.
+
+const HEARTBEAT_FILE: &str = "pill-desktop.json";
+const HEARTBEAT_EVERY: Duration = Duration::from_secs(2);
+
+fn heartbeat_path() -> PathBuf {
+    feed_path().parent().unwrap_or_else(|| Path::new(".")).join(HEARTBEAT_FILE)
+}
+
+fn heartbeat_json(at_ms: u128, visible: bool, pid: u32) -> String {
+    format!("{{\"pid\":{pid},\"at\":{at_ms},\"visible\":{visible}}}")
+}
+
+fn spawn_heartbeat(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        if let Some(window) = app.get_webview_window(PILL) {
+            let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+            let visible = window.is_visible().unwrap_or(false);
+            let path = heartbeat_path();
+            // Write beside, then rename, so the broker never reads half a file.
+            let tmp = path.with_extension("json.tmp");
+            if fs::write(&tmp, heartbeat_json(at, visible, std::process::id())).is_ok() {
+                let _ = fs::rename(&tmp, &path);
+            }
+        }
+        std::thread::sleep(HEARTBEAT_EVERY);
+    });
+}
+
+/// The island reports where it is drawn, in logical pixels from the window's top-left.
+#[tauri::command]
+fn pill_set_rect(x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
+    let rect = IslandRect::checked(x, y, width, height).ok_or("island rectangle is outside the window")?;
+    NEXT.lock().unwrap().rect = rect;
+    Ok(())
+}
+
+/// The island folded away (the window becomes the wake strip) or came back. Keeps the window's centre and top edge.
+#[tauri::command]
+fn pill_set_collapsed(window: WebviewWindow, collapsed: bool) -> Result<(), String> {
+    {
+        let mut state = NEXT.lock().unwrap();
+        if state.collapsed == collapsed {
+            return Ok(());
+        }
+        state.collapsed = collapsed;
+    }
+    let (w, h) = next_window_size(collapsed);
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let cx = pos.x + size.width as i32 / 2;
+    window.set_size(LogicalSize::new(w, h)).map_err(|e| e.to_string())?;
+    window.set_position(PhysicalPosition::new(cx - (w * scale).round() as i32 / 2, pos.y)).map_err(|e| e.to_string())?;
+    // The wake strip must receive the pointer; everything else about click-through is decided by the watcher below.
+    if collapsed {
+        let _ = window.set_ignore_cursor_events(false);
+    }
+    Ok(())
+}
+
+/// Only the message field needs the keyboard. Everywhere else the pill must never pull focus from what you are typing in.
+#[tauri::command]
+fn pill_set_focus(window: WebviewWindow, focused: bool) -> Result<(), String> {
+    window.set_focusable(focused).map_err(|e| e.to_string())?;
+    if focused {
+        window.set_focus().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Makes the transparent area around the island click-through, so the pill never blocks the page or app underneath. The
+/// window turns solid only while the pointer is over the island (plus its margin).
+fn spawn_click_through_watcher(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut ignoring: Option<bool> = None;
+        loop {
+            std::thread::sleep(Duration::from_millis(16));
+            let Some(window) = app.get_webview_window(PILL) else { continue };
+            let (rect, collapsed) = {
+                let state = NEXT.lock().unwrap();
+                (state.rect, state.collapsed)
+            };
+            if collapsed {
+                ignoring = None; // pill_set_collapsed made the strip solid; re-evaluate when it expands
+                continue;
+            }
+            let (Ok(cursor), Ok(pos), Ok(scale)) = (window.cursor_position(), window.outer_position(), window.scale_factor()) else { continue };
+            let inside = rect.hit(HIT_MARGIN, (cursor.x - pos.x as f64) / scale, (cursor.y - pos.y as f64) / scale);
+            if ignoring != Some(!inside) {
+                ignoring = Some(!inside);
+                let _ = window.set_ignore_cursor_events(!inside);
+            }
+        }
+    });
+}
+
 /// Where the feed lives: `M9R_FEED` (tests and the mock), else `<M9R_HOME or ~/.m9r>/feed.json`.
 fn feed_path() -> PathBuf {
     if let Ok(p) = std::env::var("M9R_FEED") {
@@ -120,8 +276,12 @@ fn save_position(app: &AppHandle, cx: i32, y: i32) {
 
 /// Puts the pill at the top centre of the primary monitor, or where the user last left it if that spot is still on a screen.
 fn place(window: &WebviewWindow, saved: &Saved) {
+    place_with(window, saved, COLLAPSED_W);
+}
+
+fn place_with(window: &WebviewWindow, saved: &Saved, width: f64) {
     let scale = window.scale_factor().unwrap_or(1.0);
-    let w = (COLLAPSED_W * scale).round() as i32;
+    let w = (width * scale).round() as i32;
     let monitors = window.available_monitors().unwrap_or_default();
     if let (Some(cx), Some(y)) = (saved.cx, saved.y) {
         let on_screen = monitors.iter().any(|m| {
@@ -372,6 +532,57 @@ async fn decide(task_id: String, action: String, from: Option<String>, to: Optio
     .map_err(|e| e.to_string())?
 }
 
+/// The agents a typed message addresses and the text to send them: every distinct `@handle` that starts a word is a
+/// recipient, and the handles are removed from what they receive (the same rule the terminal hook applies).
+fn parse_mentions(text: &str) -> (Vec<String>, String) {
+    let mut handles: Vec<String> = Vec::new();
+    let mut kept: Vec<&str> = Vec::new();
+    for word in text.split_whitespace() {
+        let trimmed = word.trim_end_matches(|c: char| ",.:;!?)".contains(c));
+        if let Some(h) = trimmed.strip_prefix('@') {
+            let h = h.to_lowercase();
+            if !h.is_empty() && h.len() <= 39 && h.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                if !handles.contains(&h) {
+                    handles.push(h);
+                }
+                continue;
+            }
+        }
+        kept.push(word);
+    }
+    (handles, kept.join(" "))
+}
+
+/// Sends what the owner typed to the agents it names, through the engine's own `send` (the same human-typed path the
+/// terminal hook uses), so routing, approval rules and delivery stay in one place.
+#[tauri::command]
+async fn send_message(text: String) -> Result<String, String> {
+    if text.len() > 4000 {
+        return Err("That message is too long.".into());
+    }
+    let (handles, goal) = parse_mentions(&text);
+    if handles.is_empty() {
+        return Err("Start with who it is for, like @claude or @codex.".into());
+    }
+    if goal.trim().is_empty() {
+        return Err("Add what you want them to do after the @name.".into());
+    }
+    if handles.iter().any(|h| !plain_id(h)) {
+        return Err("Bad agent name".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut replies = Vec::new();
+        for h in handles {
+            replies.push(engine_call(&engine, &["send", &format!("@{h}"), &goal])?);
+        }
+        Ok(replies.join("
+"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Clears one item from the pill's own lists (an old answer, a stale failed push, an approval you don't want to act
 /// on right now) without acting on it -- the task itself is untouched, this only stops the overlay from showing it.
 /// Confirmed real complaint 2026-09-22: items with no natural close action (answers shown for up to 10 minutes,
@@ -545,13 +756,25 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, list_sessions, link_sessions, dismiss_task])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, list_sessions, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus])
         .setup(move |app| {
             let window = app.get_webview_window(PILL).expect("pill window");
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
             let _ = window.set_focusable(false);
             let _ = window.set_always_on_top(true);
-            place(&window, &load_saved(app.handle()));
+            if next_mode() {
+                // The one-pill UI ships inside the overlay's bundle under /pill-next; the window is its fixed panel.
+                let _ = window.set_size(LogicalSize::new(NEXT_W, NEXT_H));
+                let _ = window.set_ignore_cursor_events(true);
+                match "http://tauri.localhost/pill-next/index.html".parse() {
+                    Ok(url) => { let _ = window.navigate(url); }
+                    Err(e) => eprintln!("M9R: could not open the one-pill UI ({e})"),
+                }
+                place_with(&window, &load_saved(app.handle()), NEXT_W);
+                spawn_click_through_watcher(app.handle().clone());
+            } else {
+                place(&window, &load_saved(app.handle()));
+            }
             let _ = window.show();
             // Debug aid for a live "the pill shows the wrong thing" report: M9R_DEBUG=1 opens DevTools on the
             // pill's own webview so the actual console/network error is visible instead of guessing from a
@@ -574,6 +797,7 @@ fn main() {
                     let _ = app.emit("dnd", dnd.is_checked().unwrap_or(false));
                 }
                 "quit" => {
+                    let _ = fs::remove_file(heartbeat_path());
                     stop_engine();
                     app.exit(0)
                 }
@@ -581,6 +805,7 @@ fn main() {
             })
             .build(app)?;
 
+            spawn_heartbeat(app.handle().clone());
             spawn_feed_watcher(app.handle().clone());
             spawn_engine_supervisor();
             spawn_fullscreen_watcher(app.handle().clone());
@@ -608,8 +833,64 @@ fn main() {
 }
 
 #[cfg(test)]
+mod one_pill_window_tests {
+    use super::{heartbeat_json, next_window_size, IslandRect, HIT_MARGIN, NEXT_H, NEXT_W, WAKE_H, WAKE_W};
+
+    #[test]
+    fn the_heartbeat_is_the_json_the_broker_reads() {
+        let v: serde_json::Value = serde_json::from_str(&heartbeat_json(1_700_000_000_123, true, 42)).unwrap();
+        assert_eq!(v["at"], 1_700_000_000_123u64);
+        assert_eq!(v["visible"], true);
+        assert_eq!(v["pid"], 42);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&heartbeat_json(1, false, 1)).unwrap()["visible"], false);
+    }
+
+    #[test]
+    fn only_a_sane_rectangle_inside_the_window_is_accepted() {
+        assert!(IslandRect::checked(216.0, 0.0, 288.0, 32.0).is_some());
+        assert!(IslandRect::checked(0.0, 0.0, NEXT_W, NEXT_H).is_some());
+        assert!(IslandRect::checked(f64::NAN, 0.0, 10.0, 10.0).is_none());
+        assert!(IslandRect::checked(0.0, 0.0, -1.0, 10.0).is_none());
+        assert!(IslandRect::checked(100.0, 0.0, NEXT_W, 10.0).is_none(), "wider than the window allows");
+        assert!(IslandRect::checked(0.0, 0.0, 10.0, NEXT_H + 50.0).is_none());
+    }
+
+    #[test]
+    fn the_island_and_its_margin_are_solid_and_everything_else_is_click_through() {
+        let r = IslandRect::checked(216.0, 0.0, 288.0, 32.0).unwrap();
+        assert!(r.hit(HIT_MARGIN, 300.0, 10.0));
+        assert!(r.hit(HIT_MARGIN, 216.0 - HIT_MARGIN, 0.0), "the margin counts");
+        assert!(!r.hit(HIT_MARGIN, 216.0 - HIT_MARGIN - 1.0, 10.0));
+        assert!(!r.hit(HIT_MARGIN, 300.0, 32.0 + HIT_MARGIN + 1.0));
+    }
+
+    #[test]
+    fn a_retracted_island_is_never_hit_even_at_its_old_position() {
+        let r = IslandRect::checked(268.0, 0.0, 184.0, 0.0).unwrap();
+        assert!(!r.hit(HIT_MARGIN, 300.0, 0.0));
+        assert!(!IslandRect::default().hit(HIT_MARGIN, 0.0, 0.0));
+    }
+
+    #[test]
+    fn the_window_is_the_panel_or_just_the_wake_strip() {
+        assert_eq!(next_window_size(false), (NEXT_W, NEXT_H));
+        assert_eq!(next_window_size(true), (WAKE_W, WAKE_H));
+    }
+}
+
+#[cfg(test)]
 mod hold_to_talk_tests {
-    use super::{HoldToTalkEvent, HoldToTalkState};
+    use super::{parse_mentions, HoldToTalkEvent, HoldToTalkState};
+
+    #[test]
+    fn mentions_pick_recipients_and_leave_the_message() {
+        assert_eq!(parse_mentions("@claude check the pricing page"), (vec!["claude".to_string()], "check the pricing page".to_string()));
+        assert_eq!(parse_mentions("@Claude and @codex, compare notes @claude"), (vec!["claude".to_string(), "codex".to_string()], "and compare notes".to_string()));
+        assert_eq!(parse_mentions("mail me@example.com about it").0, Vec::<String>::new());
+        assert_eq!(parse_mentions("just words").0.len(), 0);
+        assert_eq!(parse_mentions("@claude").1, "");
+        assert_eq!(parse_mentions("@bad_name hi").0.len(), 0, "underscores are not part of a handle");
+    }
 
     #[test]
     fn emits_one_press_and_release_for_a_hold() {

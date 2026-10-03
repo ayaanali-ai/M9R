@@ -8,7 +8,7 @@
 (function (global) {
   "use strict";
 
-  const FRAME_PAGES = ["pill.html", "composer.html"];
+  const FRAME_PAGES = ["pill-next/index.html"];
   const NONCE_KEY = "m9rPillNonces";
   const SITE_SCRIPT_ID = "m9r-granted-sites";
   const CONTENT_JS = ["src/presence-logic.js", "src/dock-logic.js", "src/presence-overlay.js", "src/content.js"];
@@ -49,7 +49,7 @@
       for (const key of ["site", "url", "action", "at"]) if (typeof p[key] === "string" && p[key]) item[key] = str(p[key], 400);
       return [item];
     });
-    return { type: "ui-state", agents, thread, approvals };
+    return { type: "ui-state", agents, thread, approvals, ...(message.desktopPill === true ? { desktopPill: true } : {}) };
   }
 
   function framePage(url) {
@@ -92,10 +92,10 @@
     return (noncesByTab.get(tabId) || []).includes(nonce);
   }
 
-  /** Only a top-frame content script or M9R's own New Tab page may register a nonce. */
+  /** Only a top-frame content script on an ordinary page may register a nonce. */
   function isOwnContentScript(sender) {
     if (!sender || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return false;
-    return typeof sender.url === "string" && (/^https?:\/\//.test(sender.url) || sender.url === chrome.runtime.getURL("newtab.html"));
+    return typeof sender.url === "string" && /^https?:\/\//.test(sender.url);
   }
 
   async function registerNonce(sender, nonce) {

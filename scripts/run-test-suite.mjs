@@ -45,7 +45,6 @@ function belongsToSuite(name) {
       "engine-mcp-smoke.test.ts",
       "engine-update-core.test.ts",
       "export-aware-spec.test.mjs",
-      "frame-common-ring.test.js",
       "finding-ledger-core.test.ts",
       "live-session-core.test.ts",
       "mcp-inbox.test.ts",
@@ -58,7 +57,11 @@ function belongsToSuite(name) {
       "page-notes-store.test.ts",
       "browser-extension-store-package.test.mjs",
       "native-input-client.test.js",
-      "newtab-page.test.mjs",
+      "quiet-input.test.js",
+      "pill-state.test.ts",
+      "pill-shells.test.ts",
+      "pill-speech.test.ts",
+      "desktop-pill-presence.test.ts",
       "presence-frame-lifecycle.test.js",
       "presence-target-highlight.test.js",
     ].includes(name);
@@ -89,7 +92,7 @@ for (const file of files) {
     "./scripts/register-alias.mjs",
     "--test",
     `./scripts/${file}`,
-  ], { cwd: repoRoot, encoding: "utf8", timeout: 180_000, maxBuffer: 16 * 1024 * 1024 });
+  ], { cwd: repoRoot, encoding: "utf8", timeout: file === "bench-strategies.test.ts" ? 600_000 : 180_000, maxBuffer: 16 * 1024 * 1024 });
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
 

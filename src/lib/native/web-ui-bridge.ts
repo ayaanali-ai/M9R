@@ -163,7 +163,8 @@ export interface UiAgent { id: string; provider: string; folder: string; state: 
 export type UiThreadKind = "say" | "do" | "block" | "approval" | "system";
 export interface UiThreadEntry { id: string; at: string; kind: UiThreadKind; agent: string; provider: string; to?: string; text: string; phase?: "start" | "done"; ok?: boolean }
 export interface UiApproval { id: string; agent: string; provider: string; text: string }
-export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThreadEntry[]; approvals: UiApproval[] }
+/** `desktopPill` is present (true) only while the desktop pill is running, so the in-page pill can step aside. */
+export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThreadEntry[]; approvals: UiApproval[]; desktopPill?: true }
 
 export interface UiPageContext { url?: string; title?: string; selection?: string }
 export type UiInbound =
@@ -354,6 +355,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   const actionEntries = new Map<string, UiThreadEntry>();
   const typedValues = new Map<string, Array<{ value: string; expiresAt: number }>>();
   let lastSay: { agent: string; at: number; entry: UiThreadEntry } | null = null;
+  let desktopPill = false;
 
   function redact(text: string): string {
     let safe = redactSecrets(text);
@@ -420,7 +422,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       const text = known?.text ?? narrateStep({ action: p.action, selector: p.selector, targetLabel: p.targetLabel }, "start");
       return { id: p.id, agent: p.actor, provider: known?.provider ?? providerOf(p.actor), text: redact(`${text}${p.origin ? ` on ${hostOf(p.origin) ?? p.origin}` : ""}`) };
     });
-    return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals };
+    return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals, ...(desktopPill ? { desktopPill: true as const } : {}) };
   }
 
   function onActivity(activity: WebActivity): void {
@@ -626,6 +628,12 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     /** The socket that subscribed went away. */
     unsubscribe(reply?: (message: UiState) => boolean) { if (!reply || sink === reply) sink = null; },
     snapshot,
+    /** The desktop pill started or stopped; subscribers get the new state at once, and only when it actually changed. */
+    setDesktopPill(running: boolean) {
+      if (desktopPill === running) return;
+      desktopPill = running;
+      changed();
+    },
     /** Newest first, up to 30, already redacted; persisted separately as surface=web. */
     recentWeb: (): FeedWebItem[] => web.map((w) => ({ ...w, surface: "web" })),
     close() { if (timer) clearTimeout(timer); timer = null; sink = null; },

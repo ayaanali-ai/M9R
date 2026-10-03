@@ -5,6 +5,7 @@ import test from "node:test";
 
 const background = readFileSync(new URL("../extensions/browser/src/background.js", import.meta.url), "utf8");
 const nativeInputClient = readFileSync(new URL("../extensions/browser/src/native-input-client.js", import.meta.url), "utf8");
+const quietInput = readFileSync(new URL("../extensions/browser/src/quiet-input.js", import.meta.url), "utf8");
 
 function createHarness(settings: { completeOnCreate?: boolean; autoNativeProgress?: boolean } = {}) {
   const session: Record<string, unknown> = {};
@@ -192,6 +193,7 @@ function createHarness(settings: { completeOnCreate?: boolean; autoNativeProgres
     // background.js imports this helper in the real MV3 worker before using it.
     // The other imported dependencies are purpose-built harness fakes below.
     runInNewContext(nativeInputClient, context);
+    runInNewContext(quietInput, context);
     runInNewContext(background, context);
     return context as typeof context & { handle(command: Record<string, unknown>): Promise<void> };
   }
