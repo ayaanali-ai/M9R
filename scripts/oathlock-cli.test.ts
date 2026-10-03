@@ -1961,6 +1961,58 @@ test("connect auto-detects via probeVersion when --agents is omitted", async () 
   assert.match(out.join("\n"), /found OpenCode \(opencode\)/);
 });
 
+// Confirmed live (audit 1.3): `init` run from a normal terminal with OpenCode installed, no --agent-kind, failed with
+// "Could not determine agent kind" -- resolveAgentKind only recognizes Codex/Claude Code/Grok from env vars those
+// tools set themselves, and OpenCode sets none of them. `init` now falls back to the same PATH probe `connect` uses.
+test("init falls back to a PATH probe when no env var or --agent-kind identifies the runtime, and connects the one agent found", async () => {
+  const { deps, files } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    probeVersion: async (binary) => (binary === "opencode" ? "opencode, 1.2.3" : null),
+    router: (url) => {
+      if (url.includes("/api/agent/register")) {
+        return jsonResponse(201, { claim_id: "oc", claim_url: "http://localhost:3000/claim/oc", setup_code: "oc-code", expires_at: "2030-01-01T00:00:00Z" });
+      }
+      if (url.includes("/api/agent/claim-status")) {
+        return jsonResponse(200, { status: "approved", token: "oak_oc_token", scopes: ["rules:read"] });
+      }
+      return jsonResponse(404, { error: "nope" });
+    },
+  });
+
+  const code = await run(["init"], deps);
+
+  assert.equal(code, 0);
+  assert.ok(files.has(agentLocalPath(CWD, "opencode")));
+});
+
+test("init's PATH fallback asks for --agent-kind or connect when more than one agent is found, and never guesses", async () => {
+  const { deps, err } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    probeVersion: async (binary) => (binary === "opencode" || binary === "codex" ? `${binary}, 1.0.0` : null),
+  });
+
+  const code = await run(["init"], deps);
+
+  assert.equal(code, 1);
+  assert.match(err.join("\n"), /more than one agent CLI/);
+  assert.match(err.join("\n"), /npx m9r-cli connect/);
+});
+
+test("init's PATH fallback never fires when a kind was asked for explicitly", async () => {
+  let probeCalls = 0;
+  const { deps } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    probeVersion: async () => { probeCalls += 1; return "1.0.0"; },
+    router: (url) => url.includes("/api/agent/register")
+      ? jsonResponse(201, { claim_id: "c", claim_url: "http://localhost:3000/claim/c", setup_code: "code", expires_at: "2030-01-01T00:00:00Z" })
+      : jsonResponse(200, { status: "pending" }),
+  });
+
+  await run(["init", "--agent-kind", "claude-code"], deps);
+
+  assert.equal(probeCalls, 0, "an explicit --agent-kind must never trigger the PATH probe");
+});
+
 // ---------------------------------------------------------------------------
 // connect / init: cross-agent memory-capture wiring (item #35)
 // ---------------------------------------------------------------------------

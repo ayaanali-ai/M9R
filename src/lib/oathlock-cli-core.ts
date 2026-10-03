@@ -1122,11 +1122,24 @@ async function cmdBootstrap(deps: CliDeps, parsed: ParsedArgs): Promise<number> 
 
 async function cmdInit(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
   const identity = resolveAgentKind(parsed.agentKind, deps.env);
-  if (!identity.kind) {
-    deps.err(`init failed: ${identity.error}`);
-    return 1;
+  if (identity.kind) return connectOneAgent(deps, identity.kind, parsed);
+
+  // Confirmed live: `resolveAgentKind` only recognizes Codex, Claude Code and Grok from environment variables set by
+  // those tools' own processes -- OpenCode (and anything else) sets none of them, so `init` run from a normal terminal
+  // always failed for it with "Could not determine agent kind," even when OpenCode was the only agent installed.
+  // Nobody asked for a specific kind here (no --agent-kind, no M9R_AGENT_KIND), so fall back to the same PATH probe
+  // `connect` already uses instead of making the human guess which flag to pass.
+  const askedForSomething = Boolean(parsed.agentKind) || Boolean(m9rEnvironmentValue(deps.env, "M9R_AGENT_KIND"));
+  if (!askedForSomething && deps.probeVersion) {
+    const found = await detectInstalledAgents(deps.probeVersion);
+    if (found.length === 1) return connectOneAgent(deps, found[0].kind, parsed);
+    if (found.length > 1) {
+      deps.err(`init failed: found more than one agent CLI on this machine (${found.map((a) => a.kind).join(", ")}). Connect them all at once: npx m9r-cli connect. Or connect just one: npx m9r-cli init --agent-kind <name>.`);
+      return 1;
+    }
   }
-  return connectOneAgent(deps, identity.kind, parsed);
+  deps.err(`init failed: ${identity.error}`);
+  return 1;
 }
 
 /**
