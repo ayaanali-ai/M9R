@@ -14,8 +14,20 @@ const missionRelayConnectSources = configuredMissionRelaySource ? ` ${configured
 
 const isCloudflareBuild = process.env.CLOUDFLARE_BUILD === "true";
 
+// Public values inlined into the browser bundle at build time. Cloudflare Workers Builds has no .env file, so these
+// defaults (the same public values as wrangler.jsonc) keep that build from shipping an app with an empty Supabase URL.
+// A value set in the build environment still wins.
+const publicBuildDefaults = {
+  NEXT_PUBLIC_SITE_URL: "https://m9r.dev",
+  NEXT_PUBLIC_SUPABASE_URL: "https://eymtshaxpkmojsggdtkh.supabase.co",
+  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_XGgzhm1N8caXP8Aj11SjQw_gmeRZOP0",
+  NEXT_PUBLIC_M9R_BILLING_ENABLED: "false",
+  NEXT_PUBLIC_M9R_TERMINAL_ENABLED: "true",
+};
+
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  env: Object.fromEntries(Object.entries(publicBuildDefaults).map(([key, value]) => [key, process.env[key] || value])),
   // Next 16 uses Turbopack for dev and the default production build; keep the
   // Monaco alias there instead of making the default path depend on webpack.
   turbopack: {

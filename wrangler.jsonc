@@ -2,6 +2,8 @@
   "$schema": "https://schemas.cloudflare.com/wrangler.json",
   "name": "m9r-web",
   "main": ".open-next/worker.js",
+  // Cloudflare Workers Builds runs `npm run build` first; this packages that output for Workers before upload.
+  "build": { "command": "npx opennextjs-cloudflare build --skipNextBuild" },
   "compatibility_date": "2024-12-01",
   "compatibility_flags": ["nodejs_compat"],
   "services": [{ "binding": "WAITLIST", "service": "m9r-launch" }],
