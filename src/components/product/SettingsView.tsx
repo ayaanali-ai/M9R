@@ -9,6 +9,7 @@
  * than faking buttons.
  */
 
+import ConnectComputerSection from "@/components/product/ConnectComputerSection";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import ResidentAuthorizationPanel from "@/components/product/ResidentAuthorizationPanel";
@@ -75,6 +76,7 @@ export default function SettingsView({ email, userId, username, billingEnabled }
         {pane === "agents" && (
           <>
             <ConnectedAgentsSection />
+            <ConnectComputerSection />
             <details className="m9r-advanced">
               <summary>Advanced: standing agent access</summary>
               <AgentAccessSection />
@@ -88,8 +90,8 @@ export default function SettingsView({ email, userId, username, billingEnabled }
   );
 }
 
-/* API tokens (#15) parked for later -- see user-api-token-service.ts and
-   api/mcp/memory/route.ts, both left in place, unwired from the UI. */
+/* Personal API tokens are created in ConnectComputerSection (Agents pane) to join a computer to team memory.
+   api/mcp/memory/route.ts still serves findings and rules and stays unwired from the UI. */
 
 /* -------------------------------------------------------------------------- */
 /* Agent access (resident authorization)                                      */
