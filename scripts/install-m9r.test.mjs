@@ -98,7 +98,7 @@ function listFiles(directory) {
   });
 }
 
-test("installer contains no Node/npm dependency and does not bypass PowerShell policy", () => {
+test("installer contains no Node/npm dependency and changes no saved PowerShell policy", () => {
   const source = readFileSync(installer, "utf8");
   assert.doesNotMatch(source, /(?:&\s*|Get-Command\s+)(?:npm|node)(?:\.exe)?\b/i);
   assert.doesNotMatch(source, /ExecutionPolicy\s+Bypass|Invoke-Expression|\biex\b/i);
@@ -108,7 +108,8 @@ test("installer contains no Node/npm dependency and does not bypass PowerShell p
   assert.match(source, /maintenanceExe uninstall/);
   const clickEntry = readFileSync(resolve("scripts/install-m9r.cmd"), "utf8");
   assert.match(clickEntry, /powershell\.exe/i);
-  assert.doesNotMatch(clickEntry, /ExecutionPolicy\s+Bypass/i);
+  assert.match(clickEntry, /powershell\.exe[^\r\n]*-ExecutionPolicy\s+Bypass[^\r\n]*-File/i);
+  assert.doesNotMatch(clickEntry, /Set-ExecutionPolicy/i);
 });
 
 test("standalone release packages the web broker beside the engine", () => {

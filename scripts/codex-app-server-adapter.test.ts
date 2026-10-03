@@ -37,6 +37,7 @@ test("live run settings validate the session's model and reasoning catalog", asy
   const { adapter, session, stop } = await start();
   try {
     assert.deepEqual(session.availableEfforts?.map(option => option.id), ["low", "high"]);
+    assert.deepEqual(session.availableModels?.find(option => option.id === "fake-model")?.efforts?.map(option => option.id), ["low", "high"]);
     await adapter.configureSession({ session, model: "fake-model", effort: "high" });
     await assert.rejects(adapter.configureSession({ session, model: "foreign-model", effort: null }), /not reported/);
     await assert.rejects(adapter.configureSession({ session, model: "fake-model", effort: "invalid" }), /not supported/);
