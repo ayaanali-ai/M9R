@@ -1030,13 +1030,13 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     let cancelled = false;
     fetch(`/api/dashboard/conversations/${encodeURIComponent(selectedId)}/members`, { cache: "no-store" })
       .then((res) => res.json())
-      .then((data: { roster?: Array<{ userId: string; email: string | null }> }) => {
+      .then((data: { roster?: Array<{ userId: string; name: string | null }> }) => {
         if (cancelled) return;
-        setChannelRoster(new Map((data.roster ?? []).map((row) => [row.userId, row.email ?? row.userId])));
+        setChannelRoster(new Map((data.roster ?? []).map((row) => [row.userId, row.userId === viewerUserId ? "You" : row.name ?? "Teammate"])));
       })
       .catch(() => { /* best-effort label lookup -- presence still shows a generic label without it */ });
     return () => { cancelled = true; };
-  }, [selectedId]);
+  }, [selectedId, viewerUserId]);
 
   // Extracted so the channel switcher/create-channel dialog can trigger an
   // immediate refresh after creating or leaving a channel, instead of

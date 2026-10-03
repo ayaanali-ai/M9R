@@ -15,13 +15,12 @@ type RateLimitRow = {
 };
 
 function clientAddress(request: NextRequest): string {
-  const vercel = request.headers.get("x-vercel-forwarded-for");
-  const forwarded = request.headers.get("x-forwarded-for");
-  const direct = request.headers.get("x-real-ip");
-  return (vercel || forwarded || direct || "unidentified")
-    .split(",", 1)[0]
-    .trim()
-    .slice(0, 128);
+  // `cf-connecting-ip` is set by Cloudflare's own edge on every request and overwritten on the way in, so a client cannot
+  // forge it. `x-vercel-forwarded-for` and `x-forwarded-for` are ordinary request headers a caller can set to anything,
+  // which let every request mint a fresh rate-limit key. This app runs on Cloudflare Workers, not Vercel, so the Vercel
+  // header was never set by the platform here in the first place.
+  const cf = request.headers.get("cf-connecting-ip");
+  return (cf || "unidentified").split(",", 1)[0].trim().slice(0, 128);
 }
 
 function pseudonymousKey(request: NextRequest): string {

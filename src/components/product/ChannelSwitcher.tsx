@@ -25,7 +25,7 @@ interface SwitcherConversation {
 
 interface WorkspaceMemberOption {
   userId: string;
-  email: string | null;
+  name: string;
   role: string;
 }
 
@@ -203,7 +203,7 @@ function NewChannelForm({
     let active = true;
     fetch("/api/workspace/members")
       .then((res) => (res.ok ? res.json() : { members: [] }))
-      .then((body: { members?: Array<{ userId: string; email: string | null; role: string }> }) => {
+      .then((body: { members?: Array<{ userId: string; name: string; role: string }> }) => {
         if (!active) return;
         const rows = body.members ?? [];
         setMembers(rows);
@@ -290,7 +290,7 @@ function NewChannelForm({
           <ul className="wf-channel-switcher-picker">
             {members.map((member) => {
               const checked = selectedHumanIds.has(member.userId);
-              const label = member.email ?? member.userId;
+              const label = member.name;
               return (
                 <li key={member.userId}>
                   <button type="button" className="wf-channel-switcher-picker-row" data-checked={checked} onClick={() => toggleHuman(member.userId)}>

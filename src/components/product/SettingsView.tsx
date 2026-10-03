@@ -309,6 +309,7 @@ interface TeamMemberRow {
   id: string;
   userId: string;
   role: "owner" | "admin" | "member";
+  name: string;
   email: string | null;
   createdAt: string;
 }
@@ -457,10 +458,12 @@ function TeamSection({ viewerUserId }: { viewerUserId: string }) {
               <li key={member.id} className="flex flex-wrap items-center gap-3 py-2.5 first:pt-0 last:pb-0">
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[13px] font-medium text-[color:var(--ol-text-primary)]">
-                    {member.email ?? member.userId}
-                    {member.userId === viewerUserId && <span className="ml-1.5 text-[11px] text-[color:var(--ol-text-muted)]">(you)</span>}
+                    {member.userId === viewerUserId ? "You" : member.name}
                   </div>
-                  <div className="text-[11px] text-[color:var(--ol-text-muted)] capitalize">{member.role}</div>
+                  <div className="text-[11px] text-[color:var(--ol-text-muted)] capitalize">
+                    {member.role}
+                    {canManage && member.email && member.userId !== viewerUserId && <span className="normal-case"> · {member.email}</span>}
+                  </div>
                 </div>
                 {canManage && member.role !== "owner" && member.userId !== viewerUserId && (
                   <div className="flex items-center gap-1.5">

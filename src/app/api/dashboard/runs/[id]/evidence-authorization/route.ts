@@ -9,6 +9,7 @@ import {
 } from "@/lib/approval-requests";
 import { createInstructionForDashboard } from "@/lib/agent-instruction-channel-service";
 import { requireApproverRole, WorkspaceMembershipError } from "@/lib/workspace-membership-service";
+import { logInternalError, publicErrorMessage } from "@/lib/public-error";
 
 /**
  * Run Detail's explicit first-stage evidence decision. This authorizes the
@@ -29,7 +30,10 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
   try {
     await requireApproverRole(workspaceId, user.id);
   } catch (roleError) {
-    if (roleError instanceof WorkspaceMembershipError) return NextResponse.json({ error: roleError.message }, { status: roleError.status });
+    if (roleError instanceof WorkspaceMembershipError) {
+      logInternalError("Evidence authorization route error", roleError.message, roleError.status);
+      return NextResponse.json({ error: publicErrorMessage(roleError.message, roleError.status) }, { status: roleError.status });
+    }
     throw roleError;
   }
 
