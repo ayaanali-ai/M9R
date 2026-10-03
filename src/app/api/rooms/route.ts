@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
 import { createClient } from "@/lib/supabase/server";
@@ -23,12 +24,20 @@ export async function POST(request: NextRequest) {
     if (membershipError) return NextResponse.json({ error: "Could not verify workspace membership." }, { status: 500 });
     if (!membership) return NextResponse.json({ error: "You are not a member of the active workspace." }, { status: 403 });
 
-    const { data: room, error } = await db.from("m9r_rooms")
-      .insert({ workspace_id: workspaceId, created_by: user.id, name: name.value })
+    // The creator becomes a member in an AFTER INSERT trigger, and rooms can only be read by members. Asking for the row back
+    // in the same statement is therefore refused by row-level security, so insert first and read the room in a second step.
+    const roomId = randomUUID();
+    const { error } = await db.from("m9r_rooms").insert({ id: roomId, workspace_id: workspaceId, created_by: user.id, name: name.value });
+    if (error) {
+      console.error("Create room failed:", error.message);
+      return NextResponse.json({ error: "Could not create the room." }, { status: 500 });
+    }
+    const { data: room, error: readError } = await db.from("m9r_rooms")
       .select("id, workspace_id, created_by, name, status, policy_version, created_at")
+      .eq("id", roomId)
       .single();
-    if (error || !room) {
-      console.error("Create room failed:", error?.message);
+    if (readError || !room) {
+      console.error("Read new room failed:", readError?.message);
       return NextResponse.json({ error: "Could not create the room." }, { status: 500 });
     }
     return NextResponse.json({ room }, { status: 201, headers: { "cache-control": "no-store" } });
