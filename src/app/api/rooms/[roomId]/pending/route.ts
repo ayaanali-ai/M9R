@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { personNames } from "@/lib/rooms/person-names";
 
 export const runtime = "nodejs";
 type RouteContext = { params: Promise<{ roomId: string }> };
@@ -24,9 +25,13 @@ export async function GET(_request: NextRequest, context: RouteContext) {
     if (status === 500) console.error("List pending room members failed:", error.message);
     return NextResponse.json({ error: status === 403 ? "You cannot view this room's pending requests." : "Could not list pending requests." }, { status });
   }
-  const pending = (Array.isArray(data) ? data : []).map((row: { member_id: string; user_id: string; requested_at: string }) => ({
+  const rows = (Array.isArray(data) ? data : []) as Array<{ member_id: string; user_id: string; requested_at: string }>;
+  // The host decides who comes in, so each request shows who is asking.
+  const names = await personNames(rows.map((row) => row.user_id));
+  const pending = rows.map((row) => ({
     memberId: row.member_id,
     userId: row.user_id,
+    displayName: names.get(row.user_id) ?? null,
     requestedAt: row.requested_at,
   }));
   return NextResponse.json({ pending }, { headers: { "cache-control": "no-store" } });

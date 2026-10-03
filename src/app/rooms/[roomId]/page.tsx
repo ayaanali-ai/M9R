@@ -7,7 +7,7 @@ import { projectRoomArtifacts } from "@/lib/rooms/room-artifacts";
 import styles from "../room-url.module.css";
 
 type RoomView = { room: { id: string; name: string; status: string }; membership: { status: string } };
-type PendingMember = { memberId: string; userId: string; requestedAt: string };
+type PendingMember = { memberId: string; userId: string; displayName?: string | null; requestedAt: string };
 type RoomEvent = {
   id: string;
   sequence: number | string;
@@ -21,6 +21,7 @@ type RoomEvent = {
 };
 type RoomMember = {
   actorId: string;
+  userId?: string;
   displayName: string;
   role: string;
   isYou: boolean;
@@ -131,6 +132,12 @@ function leaseActorId(lease: RoomLease): string {
 
 function leaseIsActive(lease: RoomLease | undefined): lease is RoomLease {
   return Boolean(lease && Date.parse(lease.expires_at) > Date.now());
+}
+
+/** A person's name from the admitted-members list, never a fragment of their id. */
+function personName(userId: string | null, members: RoomMember[]): string {
+  const member = userId ? members.find((candidate) => candidate.userId === userId) : undefined;
+  return member?.displayName ?? "Room member";
 }
 
 function actorLabel(actorId: string, members: RoomMember[]): string {
@@ -588,7 +595,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             {eventError && <p className={styles.inlineError} role="alert">{eventError}</p>}
             {onlineMembers.length === 0 ? <p>No other members are currently here.</p> : (
               <ul aria-label="Members currently in the room">
-                {onlineMembers.map((member) => <li key={member.participantId}>{member.displayName ?? "Room member"} — {member.activity ?? "present"}</li>)}
+                {onlineMembers.map((member) => <li key={member.participantId}>{(member.participantId === currentUserId ? "You" : personName(member.participantId ?? null, members))} — {member.activity ?? "present"}</li>)}
               </ul>
             )}
             <h3>Admitted participants</h3>
@@ -726,8 +733,8 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             <p className={styles.muted}>Messages and goals persist for admitted room members. Do not send passwords, tokens, private page contents, or local file contents.</p>
             <ol aria-live="polite" aria-relevant="additions" style={{ maxHeight: 360, overflow: "auto", paddingLeft: 24 }}>
               {events.filter((event) => ["post", "ask", "reply", "task", "handoff", "artifact"].includes(event.kind)).map((event) => {
-                const actor = event.actor_seat_id ? `Agent ${event.actor_seat_id.slice(0, 6)}`
-                  : event.actor_user_id === currentUserId ? "You" : `Member ${String(event.actor_user_id ?? "unknown").slice(0, 6)}`;
+                const actor = event.actor_seat_id ? actorLabel(`seat:${event.actor_seat_id}`, members)
+                  : event.actor_user_id === currentUserId ? "You" : personName(event.actor_user_id, members);
                 const payload = event.payload ?? {};
                 const eventText = typeof payload.text === "string" ? payload.text : null;
                 const taskLabel = event.kind === "task" ? `${String(payload.type ?? "updated")} goal: ${String(payload.title ?? payload.taskId ?? "room task")}` : null;
@@ -755,7 +762,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             <ul className={styles.pendingList}>
               {pending.map((m) => (
                 <li key={m.memberId} style={{ marginBottom: 8 }}>
-                  Guest {m.userId.slice(0, 8)} — requested {new Date(m.requestedAt).toLocaleTimeString()}{" "}
+                  {m.displayName ?? "Someone"} — requested {new Date(m.requestedAt).toLocaleTimeString()}{" "}
                   <button onClick={() => void admit(m.memberId)} style={{ padding: "2px 8px" }}>Admit</button>
                 </li>
               ))}
