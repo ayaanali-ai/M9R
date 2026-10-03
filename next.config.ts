@@ -67,7 +67,7 @@ const nextConfig: NextConfig = {
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data: blob:",
               "font-src 'self'",
-              `connect-src 'self' https://eymtshaxpkmojsggdtkh.supabase.co${missionRelayConnectSources}${localRuntimeConnectSources}`,
+              `connect-src 'self' https://eymtshaxpkmojsggdtkh.supabase.co wss://eymtshaxpkmojsggdtkh.supabase.co${missionRelayConnectSources}${localRuntimeConnectSources}`,
               `frame-src 'self'${localRuntimeFrameSources}${m9rExtensionFrameSources}`,
               "worker-src 'self' blob:",
               "manifest-src 'self'",
