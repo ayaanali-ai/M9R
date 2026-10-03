@@ -41,16 +41,8 @@ export interface WebAgentConfig {
   allowedTools?: string[];
 }
 
-function normalizedProjectPath(folder: string): string {
-  const path = resolve(folder).replace(/[\\/]+/g, "/");
-  return process.platform === "win32" ? path.toLocaleLowerCase("en-US") : path;
-}
-
-/** Stable opaque local room key shared by all provider sessions working in this project. */
-export function projectRoomId(folder: string): string {
-  const digest = createHash("sha256").update(normalizedProjectPath(folder)).digest("hex").slice(0, 32);
-  return `project-${digest}`;
-}
+import { projectRoomId } from "./project-room";
+export { projectRoomId };
 
 const HANDLE = /^[a-z][a-z0-9_-]{0,39}$/;
 const PROVIDERS: readonly WebAgentProvider[] = ["claude-code", "codex", "opencode"];

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { HOOK_RUNTIME_FILES, nativeStatus, nativePaths, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
 import { createLocalStore } from "@/lib/native/local-store";
+import { createPageNotesStore } from "@/lib/native/page-notes-store";
+import { projectRoomId } from "@/lib/native/project-room";
 import { ONBOARDING_STEPS, renderStepsMarkdown } from "@/lib/native/onboarding-steps";
 
 const autostartCalls: string[] = [];
@@ -415,4 +417,22 @@ test("starting with Windows is optional: only with --autostart (or a yes to its 
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(autostartCalls.at(-1), "disable");
   s.done();
+});
+
+test("m9r note saves to the project room's shared memory where agents read it, and refuses empty or oversized notes", async () => {
+  const s = sandbox();
+  const project = join(s.home, "proj");
+  mkdirSync(project, { recursive: true });
+  s.io.env.M9R_PROJECT_ROOT = project;
+  assert.equal(await s.run("note", ["Staging", "is", "at", "staging.example.com"]), 0);
+  const listed = createPageNotesStore(s.p.m9r).list(projectRoomId(project));
+  assert.ok(listed.ok && listed.value.some((n) => n.text === "Staging is at staging.example.com" && n.source === "agent"));
+  assert.equal(await s.run("note", []), 1);
+  assert.equal(await s.run("note", ["x".repeat(2_001)]), 1);
+  assert.equal(createPageNotesStore(s.p.m9r).list(projectRoomId(project)).ok, true);
+  s.done();
+});
+
+test("the project room id ignores which slash style a path uses", () => {
+  assert.equal(projectRoomId("C:\\Users\\someone\\proj"), projectRoomId("C:/Users/someone/proj"));
 });

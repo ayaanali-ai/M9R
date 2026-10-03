@@ -23,7 +23,7 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
   let feed: Feed | null = null;
 
   return {
-    capabilities: { allowForADay: true, linkSessions: true },
+    capabilities: { allowForADay: true, linkSessions: true, saveMemory: true },
     async listSessions(handle) {
       const raw = await invoke("list_sessions", { handle });
       const rows = typeof raw === "string" ? JSON.parse(raw) : [];
@@ -52,6 +52,9 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
     async send(text) {
       const reply = await invoke("send_message", { text });
       return typeof reply === "string" ? reply.trim().slice(0, 300) : undefined;
+    },
+    async saveMemory(text) {
+      await invoke("save_memory", { text });
     },
     setIslandRect(x, y, width, height) {
       void invoke("pill_set_rect", { x, y, width, height }).catch(() => { /* a rejected rectangle keeps the last good one */ });

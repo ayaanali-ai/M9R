@@ -583,6 +583,19 @@ async fn send_message(text: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Saves a fact or decision to the shared project memory agents read at session start (`m9r note`).
+#[tauri::command]
+async fn save_memory(text: String) -> Result<String, String> {
+    let text = text.trim().to_string();
+    if text.is_empty() || text.chars().count() > 2000 {
+        return Err("That note is empty or too long.".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["note", &text]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Clears one item from the pill's own lists (an old answer, a stale failed push, an approval you don't want to act
 /// on right now) without acting on it -- the task itself is untouched, this only stops the overlay from showing it.
 /// Confirmed real complaint 2026-09-22: items with no natural close action (answers shown for up to 10 minutes,
@@ -756,7 +769,7 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, list_sessions, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, save_memory, list_sessions, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus])
         .setup(move |app| {
             let window = app.get_webview_window(PILL).expect("pill window");
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
