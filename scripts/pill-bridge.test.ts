@@ -67,11 +67,11 @@ test("commands from content scripts and web pages are rejected, from the pill th
   assert.equal(sent[0].type, "ui-command");
   assert.equal(sent[0].text, "@claude hi");
   assert.equal(sent[0].context.url, "https://example.com/");
-  for (const command of [{ type: "ui-approve", id: "a1" }, { type: "ui-deny", id: "a1" }, { type: "ui-stop", agent: "claude" }, { type: "ui-stop-all" }]) {
+  for (const command of [{ type: "ui-approve", id: "a1" }, { type: "ui-deny", id: "a1" }, { type: "ui-stop", agent: "claude" }, { type: "ui-stop-all" }, { type: "ui-save-note", text: "Use the staging URL" }]) {
     assert.equal((await onRuntimeMessage({ type: "m9r-pill-cmd", command }, pillSender())).ok, true);
     assert.equal((await onRuntimeMessage({ type: "m9r-pill-cmd", command }, scriptSender())).ok, false);
   }
-  assert.deepEqual(sent.slice(1).map((m: any) => m.type), ["ui-approve", "ui-deny", "ui-stop", "ui-stop-all"]);
+  assert.deepEqual(sent.slice(1).map((m: any) => m.type), ["ui-approve", "ui-deny", "ui-stop", "ui-stop-all", "ui-save-note"]);
   assert.equal((await onRuntimeMessage({ type: "m9r-pill-cmd", command: { type: "ui-eval", text: "x" } }, pillSender())).ok, false);
 });
 

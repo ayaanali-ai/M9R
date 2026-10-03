@@ -16,6 +16,8 @@ export interface ViewActions {
   setFocus(id: string): void;
   decide(d: "allow" | "deny" | "allow_day"): void;
   send(text: string): Promise<string | void>;
+  /** Present only when the host can save to shared memory (the in-page pill). */
+  saveMemory?(text: string): Promise<void>;
   canAllowForADay(): boolean;
   /** Present only when the host has speech recognition (the page frame); hold the mic to talk. */
   dictation?: () => SpeechEnv;

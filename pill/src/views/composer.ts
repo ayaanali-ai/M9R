@@ -55,6 +55,18 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
     return h("div", { class: "chat-row user" }, h("div", { class: "bubble", text: message.content }));
   }
   const reply = h("div", { class: "reply", text: message.content });
+  if (actions.saveMemory && message.content.trim().length >= 8 && !message.link) {
+    const save = h("button", { class: "save-note", type: "button", text: "Save to memory", title: "Share this with your team's agents" });
+    save.addEventListener("click", () => {
+      save.setAttribute("disabled", "true");
+      save.textContent = "Saving…";
+      actions.saveMemory!(message.content).then(
+        () => { save.textContent = "Saved"; },
+        () => { save.textContent = "Couldn't save"; save.removeAttribute("disabled"); },
+      );
+    });
+    return h("div", { class: "chat-row reply-row" }, reply, save);
+  }
   if (message.link && actions.linking) return h("div", { class: "chat-row link-row" }, reply, linkPicker(message.link, actions.linking, onHeightChange));
   return h("div", { class: "chat-row" }, reply);
 }

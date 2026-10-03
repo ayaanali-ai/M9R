@@ -34,7 +34,7 @@ export function createExtensionTransport(runtime: ChromeRuntime): PillTransport 
 
   return {
     // The bridge has no "allow for a day" for in-page approvals; the button is hidden rather than silently meaning "once".
-    capabilities: { allowForADay: false, dictation: true },
+    capabilities: { allowForADay: false, dictation: true, saveMemory: true },
     openMicSetup() { void runtime.sendMessage({ type: "m9r-pill-open-mic-setup" }).catch(() => {}); },
     subscribe(listener) {
       const connect = () => {
@@ -54,6 +54,7 @@ export function createExtensionTransport(runtime: ChromeRuntime): PillTransport 
       connect();
     },
     send: (text) => command({ type: "ui-command", text }),
+    saveMemory: (text) => command({ type: "ui-save-note", text }),
     decide: (approvalId: string, decision: Decision) =>
       command({ type: decision === "deny" ? "ui-deny" : "ui-approve", id: approvalId }),
   };

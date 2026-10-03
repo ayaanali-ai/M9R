@@ -13,7 +13,7 @@ export interface SessionRow {
 
 export interface PillTransport {
   /** What this host can actually do; the UI hides controls a host cannot honour instead of faking them. */
-  capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean };
+  capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean; saveMemory?: boolean };
   /** Opens the one-time microphone setup. Only with `capabilities.dictation`. */
   openMicSetup?(): void;
   /** Sessions the engine knows for one agent, for the link picker. Only with `capabilities.linkSessions`. */
@@ -26,6 +26,8 @@ export interface PillTransport {
   /** May resolve to a short confirmation to show in the thread. Rejects with a sentence the owner can read. */
   send(text: string): Promise<string | void>;
   decide(approvalId: string, decision: Decision): Promise<void>;
+  /** Saves a reply to the team's shared memory. Only with `capabilities.saveMemory`. */
+  saveMemory?(text: string): Promise<void>;
   /** Window-level hooks; no-ops in the browser shell. */
   setIslandRect?(x: number, y: number, width: number, height: number): void;
   setCollapsed?(collapsed: boolean): void;

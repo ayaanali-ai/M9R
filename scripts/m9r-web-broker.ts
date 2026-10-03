@@ -8,8 +8,9 @@ import { join, resolve } from "node:path";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { writeWebActivity } from "@/lib/native/feed-writer";
 import { apiKeyLaunchBlock } from "@/lib/native/vendor-launch-core";
-import { createWebLiveSessions, loadAgentsConfig } from "@/lib/native/web-live-sessions";
+import { createWebLiveSessions, loadAgentsConfig, projectRoomId } from "@/lib/native/web-live-sessions";
 import { createWebUiBridge } from "@/lib/native/web-ui-bridge";
+import { createPageNotesStore } from "@/lib/native/page-notes-store";
 import { readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
 import { DEFAULT_BROKER_PORT, brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
@@ -35,7 +36,14 @@ async function main(): Promise<void> {
   authority.restore(authorityStore.load());
   const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
   // The in-page pill: agents the owner types to, one live session per agent and folder (web-live-sessions.ts).
-  const ui = createWebUiBridge();
+  const pageNotes = createPageNotesStore(root);
+  // A note saved from the pill lands in the same project-room memory agents read at session start.
+  const ui = createWebUiBridge({
+    saveNote: (text) => {
+      const result = pageNotes.append({ room: projectRoomId(projectRoot), agent: "you", text, source: "agent" });
+      return result.ok ? { ok: true } : { ok: false, error: result.error };
+    },
+  });
   // A real POST /web/shutdown (m9r web restart, or any owner-triggered restart) must stop this whole process, not just
   // close the HTTP socket, or the unref'd-less feed timer below keeps Node running forever with nothing left listening.
   let requestShutdown = () => {};

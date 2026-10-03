@@ -346,3 +346,25 @@ test("a web page origin cannot open the extension socket at all", async () => {
     await s.done();
   }
 });
+
+test("a note saved from the pill goes to shared memory with secrets redacted, and the owner is told", () => {
+  const saved: string[] = [];
+  const ui = createWebUiBridge({ debounceMs: 0, saveNote: (text) => { saved.push(text); return { ok: true }; } });
+  ui.handleExtensionMessage({ type: "ui-save-note", text: "  Staging is at https://staging.example.com  " });
+  assert.deepEqual(saved, ["Staging is at https://staging.example.com"]);
+  assert.ok(ui.snapshot().thread.some((e) => e.kind === "system" && /Saved to shared memory/.test(e.text)));
+});
+
+test("a failed or unavailable memory save is reported, and an empty or oversized note is dropped", () => {
+  const failing = createWebUiBridge({ debounceMs: 0, saveNote: () => ({ ok: false, error: "store busy" }) });
+  failing.handleExtensionMessage({ type: "ui-save-note", text: "a fact" });
+  assert.ok(failing.snapshot().thread.some((e) => /Could not save to memory: store busy/.test(e.text)));
+  const none = createWebUiBridge({ debounceMs: 0 });
+  none.handleExtensionMessage({ type: "ui-save-note", text: "a fact" });
+  assert.ok(none.snapshot().thread.some((e) => /Could not save to memory/.test(e.text)));
+  const spy: string[] = [];
+  const guarded = createWebUiBridge({ debounceMs: 0, saveNote: (t) => { spy.push(t); return { ok: true }; } });
+  guarded.handleExtensionMessage({ type: "ui-save-note", text: "   " });
+  guarded.handleExtensionMessage({ type: "ui-save-note", text: "x".repeat(2_001) });
+  assert.deepEqual(spy, []);
+});

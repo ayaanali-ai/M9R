@@ -84,6 +84,7 @@ export class Island {
       send: (text) => this.transport.send(text),
       canAllowForADay: () => this.transport.capabilities?.allowForADay === true,
       dictation: this.transport.capabilities?.dictation ? () => browserSpeechEnv(() => this.transport.openMicSetup?.()) : undefined,
+      saveMemory: this.transport.capabilities?.saveMemory && this.transport.saveMemory ? (text) => this.transport.saveMemory!(text) : undefined,
       linking: this.transport.capabilities?.linkSessions && this.transport.listSessions && this.transport.linkSession
         ? { list: (handle) => this.transport.listSessions!(handle), link: (offer, session) => this.transport.linkSession!(offer, session) }
         : undefined,

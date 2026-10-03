@@ -172,10 +172,13 @@ export type UiInbound =
   | { type: "ui-approve" | "ui-deny"; id: string }
   | { type: "ui-stop"; agent: string }
   | { type: "ui-stop-all" }
+  | { type: "ui-save-note"; text: string }
   | { type: "ui-subscribe" };
 
-export const UI_MESSAGE_TYPES: ReadonlySet<string> = new Set(["ui-command", "ui-approve", "ui-deny", "ui-stop", "ui-stop-all", "ui-subscribe"]);
+export const UI_MESSAGE_TYPES: ReadonlySet<string> = new Set(["ui-command", "ui-approve", "ui-deny", "ui-stop", "ui-stop-all", "ui-save-note", "ui-subscribe"]);
 export const MAX_COMMAND_CHARS = 4_000;
+/** Same cap as the m9r_note tool, so a note saved from the pill is one an agent could have written. */
+export const MAX_NOTE_CHARS = 2_000;
 export const MAX_SELECTION_CHARS = 2_000;
 export const THREAD_LIMIT = 200;
 const SAY_CHARS = 4_000;
@@ -198,6 +201,8 @@ export function parseUiMessage(raw: unknown): UiInbound | null {
     case "ui-approve":
     case "ui-deny":
       return typeof m.id === "string" && m.id.length > 0 && m.id.length <= 128 ? { type: m.type, id: m.id } : null;
+    case "ui-save-note":
+      return typeof m.text === "string" && m.text.trim() && m.text.length <= MAX_NOTE_CHARS ? { type: "ui-save-note", text: m.text.trim() } : null;
     case "ui-command": {
       if (typeof m.text !== "string" || !m.text.trim() || m.text.length > MAX_COMMAND_CHARS) return null;
       const ctx = (m.context && typeof m.context === "object" ? m.context : {}) as Record<string, unknown>;
@@ -337,7 +342,7 @@ const TOOL_WORDS: Record<string, string> = {
   m9r_result: "Reporting back",
 };
 
-export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void } = {}) {
+export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void; saveNote?: (text: string) => { ok: boolean; error?: string } } = {}) {
   const now = options.now ?? Date.now;
   const debounceMs = options.debounceMs ?? 100;
   const newId = options.newId ?? (() => randomUUID());
@@ -607,6 +612,11 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
         blocked.delete(message.agent);
         system(`Stopped @${message.agent}. Its next message starts it again with its memory.`, message.agent);
         return true;
+      case "ui-save-note": {
+        const saved = options.saveNote ? options.saveNote(redactSecrets(message.text)) : { ok: false, error: "memory is not available here" };
+        system(saved.ok ? "Saved to shared memory." : `Could not save to memory: ${saved.error ?? "unknown error"}`);
+        return true;
+      }
       case "ui-stop-all":
         for (const p of broker?.pendingApprovals() ?? []) broker?.decideApproval(p.id, "deny");
         sessions?.stopAll();

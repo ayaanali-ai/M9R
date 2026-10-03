@@ -137,6 +137,11 @@
       if (typeof command.agent !== "string" || !command.agent || command.agent.length > 64) return { error: "bad agent" };
       return { message: { type: "ui-stop", agent: command.agent } };
     }
+    if (command.type === "ui-save-note") {
+      const text = typeof command.text === "string" ? command.text.trim() : "";
+      if (!text || text.length > 2000) return { error: "note is empty or too long" };
+      return { message: { type: "ui-save-note", text } };
+    }
     if (command.type === "ui-stop-all") return { message: { type: "ui-stop-all" } };
     return { error: "unknown command" };
   }
