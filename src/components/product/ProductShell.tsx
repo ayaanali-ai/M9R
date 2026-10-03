@@ -415,65 +415,14 @@ function CommandPalette({
   );
 }
 
-/**
- * Memory's contextual sidebar — navigation, not a second copy of the page.
- * Same job the channel list does for Chat: say what is waiting and get you
- * into it. Counts come from the two GETs Memory itself reads (both
- * cookie/RLS-scoped), so this never shows a number the page disagrees with.
- */
+/** Memory's sidebar is just a pointer to the one page: saved facts and decisions. */
 function MemorySidebarRegion() {
-  const [counts, setCounts] = useState<{ review: number; remembered: number; archived: number } | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    queueMicrotask(async () => {
-      try {
-        const [rulesRes, flagsRes] = await Promise.all([
-          fetch("/api/workspace-rules"),
-          fetch("/api/agent/findings"),
-        ]);
-        if (!rulesRes.ok) return;
-        const rules = ((await rulesRes.json()) as { rules?: Array<{ status: string }> }).rules ?? [];
-        const flags = flagsRes.ok
-          ? ((await flagsRes.json()) as { findings?: Array<{ reviewState: string }> }).findings ?? []
-          : [];
-        if (cancelled) return;
-        setCounts({
-          review:
-            rules.filter((r) => r.status === "needs_review").length +
-            flags.filter((f) => f.reviewState === "observed").length,
-          remembered: rules.filter((r) => r.status === "active").length,
-          archived:
-            rules.filter((r) => r.status === "retired").length +
-            flags.filter((f) => f.reviewState !== "observed").length,
-        });
-      } catch {
-        /* the page itself reports load failures -- the sidebar just stays quiet */
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   return (
     <div className="product-channels">
       <div className="product-channels-heading">
         <span className="product-nav-label">Memory</span>
       </div>
-      {counts === null ? (
-        <p className="product-channels-empty">Loading…</p>
-      ) : (
-        <>
-          <MemoryNavLink href="/dashboard/memory#memory-review" label="Needs your review" count={counts.review} />
-          <MemoryNavLink href="/dashboard/memory#memory-remembered" label="What your agents remember" count={counts.remembered} />
-          <MemoryNavLink href="/dashboard/memory#memory-notes" label="Shared notes" count={0} />
-          <MemoryNavLink href="/dashboard/memory#memory-history" label="Earlier" count={counts.archived} />
-          {counts.review + counts.remembered + counts.archived === 0 && (
-            <p className="product-channels-empty">Nothing remembered yet</p>
-          )}
-        </>
-      )}
+      <MemoryNavLink href="/dashboard/memory#memory-notes" label="Saved facts and decisions" count={0} />
     </div>
   );
 }

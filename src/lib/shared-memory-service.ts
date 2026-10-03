@@ -96,10 +96,10 @@ export async function saveSharedMemory(raw: unknown, agent?: AuthedAgent) {
   const channel = (raw as { conversationId?: unknown }).conversationId;
   if (channel !== undefined && channel !== null && typeof channel !== "string") throw new AgentJoinError("Invalid memory channel.", "INVALID_MEMORY", 400);
   if (channel) await assertChannel(actor.workspaceId, channel, actor);
-  const { data, error } = await service().from("workspace_memory_notes").insert({ workspace_id: actor.workspaceId, conversation_id: channel || null, title: note.title, body: note.body, content_hash: note.contentHash, source: agent ? "agent" : "human", author_connection_id: agent?.connectionId ?? null, author_user_id: "userId" in actor ? actor.userId : null, reviewed: false }).select(NOTE_COLUMNS).single();
+  const { data, error } = await service().from("workspace_memory_notes").insert({ workspace_id: actor.workspaceId, conversation_id: channel || null, title: note.title, body: note.body, content_hash: note.contentHash, source: agent ? "agent" : "human", author_connection_id: agent?.connectionId ?? null, author_user_id: "userId" in actor ? actor.userId : null, reviewed: !agent }).select(NOTE_COLUMNS).single();
   if (error?.code === "23505") return { ok: true, duplicate: true };
   if (error) memoryDatabaseError(error);
-  return { ok: true, note: data, reviewRequired: true };
+  return { ok: true, note: data, reviewRequired: Boolean(agent) };
 }
 export async function mutateSharedMemory(id: string, action: "approve" | "delete") {
   const context = await human();

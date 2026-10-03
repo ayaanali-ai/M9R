@@ -364,83 +364,6 @@ test("workspace exports carry no banned legacy language", () => {
   }
 });
 
-test("memory UI carries no banned legacy language", () => {
-  const ui = readFileSync(resolve(process.cwd(), "src/components/product/MemoryView.tsx"), "utf8");
-  const banned = [/chain of custody/i, /cryptograph/i, /\bMTM\b/, /model-to-model/i, /real-time supervision/i, /guaranteed/i];
-  for (const re of banned) assert.ok(!re.test(ui), `memory UI must not contain ${re}`);
-  // And it must carry the positioning: confirmed memory is what travels.
-  assert.match(ui, /Every agent reads these before it works/i);
-});
-
-test("memory UI shows a discard path for drafts and archived items, never remembered ones", () => {
-  const ui = readFileSync(resolve(process.cwd(), "src/components/product/MemoryView.tsx"), "utf8");
-  const draftBlock = ui.slice(ui.indexOf('rule.status === "needs_review"'), ui.indexOf('rule.status === "active"'));
-  const activeBlock = ui.slice(ui.indexOf('rule.status === "active"'), ui.indexOf('rule.status === "retired"'));
-  const archivedBlock = ui.slice(ui.indexOf('rule.status === "retired"'), ui.indexOf('rule.status === "low_confidence"'));
-  assert.match(draftBlock, /Discard/);
-  assert.ok(!/Delete|Discard/.test(activeBlock), "remembered items must not show a delete action");
-  assert.match(archivedBlock, /Delete/);
-});
-
-test("memory UI shows the stop-remembering action only for remembered items", () => {
-  const ui = readFileSync(resolve(process.cwd(), "src/components/product/MemoryView.tsx"), "utf8");
-  const draftBlock = ui.slice(ui.indexOf('rule.status === "needs_review"'), ui.indexOf('rule.status === "active"'));
-  const activeBlock = ui.slice(ui.indexOf('rule.status === "active"'), ui.indexOf('rule.status === "retired"'));
-  const archivedBlock = ui.slice(ui.indexOf('rule.status === "retired"'), ui.indexOf('rule.status === "low_confidence"'));
-  assert.match(activeBlock, /Stop remembering/);
-  assert.ok(!/Stop remembering/.test(draftBlock), "draft UI must not show the stop-remembering action");
-  assert.ok(!/onArchive\(rule\.id/.test(archivedBlock), "archived items must not show the stop-remembering action");
-});
-
-test("memory UI shows Restore only for archived items", () => {
-  const ui = readFileSync(resolve(process.cwd(), "src/components/product/MemoryView.tsx"), "utf8");
-  const draftBlock = ui.slice(ui.indexOf('rule.status === "needs_review"'), ui.indexOf('rule.status === "active"'));
-  const activeBlock = ui.slice(ui.indexOf('rule.status === "active"'), ui.indexOf('rule.status === "retired"'));
-  const archivedBlock = ui.slice(ui.indexOf('rule.status === "retired"'), ui.indexOf('rule.status === "low_confidence"'));
-  assert.match(archivedBlock, /Restore/);
-  assert.ok(!/Restore/.test(activeBlock), "remembered items must not show Restore");
-  assert.ok(!/Restore/.test(draftBlock), "draft UI must not show Restore");
-  assert.ok(!/Activate/.test(ui), "archived items must not get a direct activate action");
-});
-
-test("memory destructive actions use the product confirmation dialog and preserve copy", () => {
-  const ui = readFileSync(resolve(process.cwd(), "src/components/product/MemoryView.tsx"), "utf8");
-  const dialog = readFileSync(resolve(process.cwd(), "src/components/product/ProductConfirmDialog.tsx"), "utf8");
-  assert.match(ui, /ProductConfirmDialog/);
-  assert.ok(!/window\.confirm\(|\bconfirm\(/.test(ui));
-  assert.match(dialog, /role="dialog"/);
-  assert.match(dialog, /aria-modal="true"/);
-  assert.match(ui, /It will not become part of what the team remembers\./);
-  assert.match(ui, /Agents will no longer load it before a run\./);
-  assert.match(ui, /It returns to review and must be confirmed again before agents load it\./);
-  assert.match(ui, /It will be removed from product views\. Its audit history remains stored\./);
-});
-
-test("workspace lifecycle copy avoids banned overclaiming words", () => {
-  const ui = readFileSync(resolve(process.cwd(), "src/components/product/MemoryView.tsx"), "utf8");
-  const lifecycleCopy = [
-    "DELETE_DRAFT_CONFIRM",
-    "ARCHIVE_RULE_CONFIRM",
-    "RESTORE_RULE_CONFIRM",
-    "Discard",
-    "Stop remembering",
-    "Restore",
-    "Remember this",
-  ]
-    .filter((needle) => ui.includes(needle))
-    .join("\n");
-  assert.ok(!/\b(proved|guaranteed|caused|fixed|prevented|worked)\b/i.test(lifecycleCopy));
-});
-
-test("memory offers each supported export format", () => {
-  const workspaceUi = readFileSync(resolve(process.cwd(), "src/components/product/MemoryView.tsx"), "utf8");
-  assert.match(workspaceUi, /label="AGENTS\.md"/);
-  assert.match(workspaceUi, /label="CLAUDE\.md"/);
-  assert.match(workspaceUi, /label="Cursor rule"/);
-  assert.match(workspaceUi, /label="Copy block"/);
-  assert.match(workspaceUi, /Every agent reads these before it works/i);
-});
-
 test("migration guidance doc exists and references supabase-workspace-rules.sql", () => {
   const doc = readFileSync(resolve(process.cwd(), "docs/migrations/workspace-rules-v5.1.md"), "utf8");
   assert.match(doc, /supabase-workspace-rules\.sql/);
@@ -493,4 +416,10 @@ test("before-after proof template keeps claims conservative", () => {
     assert.match(doc, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
   }
   assert.match(doc, /Do not claim causation unless the evidence directly proves it/i);
+});
+
+test("memory UI is shared notes only: no rule review queue, no rule exports", () => {
+  const ui = readFileSync(resolve(process.cwd(), "src/components/product/MemoryView.tsx"), "utf8");
+  assert.match(ui, /SharedNotes/);
+  for (const gone of [/Needs your review/, /What your agents remember/, /workspace-rules/, /AGENTS\.md/]) assert.ok(!gone.test(ui), `${gone} must stay out of memory`);
 });

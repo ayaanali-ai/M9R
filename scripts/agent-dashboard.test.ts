@@ -376,8 +376,8 @@ test("rule lifecycle lives entirely on the Rules page, not on the Watchfloor", (
   // used; what must not come back is the activeRules rule-list prop itself.
   assert.ok(!/\bactiveRules\b(?!Count)/.test(workspace), "Watchfloor must not receive the activeRules prop");
   const memoryView = read(MEMORY_VIEW);
-  assert.match(memoryView, /What your agents remember/);
-  assert.match(memoryView, /Needs your review/);
+  assert.match(memoryView, /SharedNotes/);
+  assert.ok(!/Needs your review/.test(memoryView));
 });
 
 test("Rules maintenance includes manual creation and import as review draft paths", () => {
@@ -389,7 +389,7 @@ test("Rules maintenance includes manual creation and import as review draft path
   assert.match(tools, /Paste AGENTS\.md, CLAUDE\.md, Cursor rules, or repo instructions\./);
   assert.match(tools, /Imports create review drafts only\./);
   // Authoring is reachable from the Memory page, not the Watchfloor.
-  assert.match(read(MEMORY_VIEW), /RuleDraftTools/);
+  assert.ok(!/RuleDraftTools/.test(read(MEMORY_VIEW)), "rule authoring is not part of Memory any more");
   assert.ok(!/RuleDraftTools/.test(read(WORKSPACE)), "rule authoring must not live on the Watchfloor");
 });
 
@@ -444,10 +444,7 @@ test("the drawer promotes rules only when a connected target agent exists", () =
 test("memory lifecycle CRUD stays off the Watchfloor and on the Memory page", () => {
   const workspace = read(WORKSPACE);
   assert.ok(!/ActiveRuleCard|ArchivedRuleCard|ReviewRuleCard|Delete archived rule|Archive this active rule/.test(workspace));
-  const memoryView = read(MEMORY_VIEW);
-  assert.match(memoryView, /Stop remembering this\? Agents will no longer load it before a run\./);
-  assert.match(memoryView, /It returns to review and must be confirmed again before agents load it\./);
-  assert.match(memoryView, /It will be removed from product views\. Its audit history remains stored\./);
+  assert.match(read("src/components/product/memory/SharedNotes.tsx"), /ProductConfirmDialog/);
 });
 
 test("Watchfloor destructive actions use the product confirmation dialog with the same copy", () => {
