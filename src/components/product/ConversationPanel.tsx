@@ -2001,7 +2001,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // missing connectionId means the sender has no known identity at all.
   function labelFor(connectionId: string | null): string {
     const agent = connectionId ? byConnectionId.get(connectionId) : undefined;
-    if (!agent) return "Someone";
+    if (!agent) return "An agent";
     // AgentView.label already has the "Owner's Provider" format when disambiguated,
     // or just "Provider" when unique. This matches getAgentDisplayName's output.
     return agent.label;

@@ -8,6 +8,7 @@
  * secret-shaped content" discipline as a Dispatch summary (dispatch.ts).
  */
 
+import { agentLabelFor } from "@/lib/agent-label";
 import { supabase } from "@/lib/supabase";
 import { createClient } from "@/lib/supabase/server";
 import { AgentJoinError, type AuthedAgent } from "@/lib/agent-join-service";
@@ -1870,20 +1871,29 @@ function parseStructuredMessagePrefix(body: string): { messageType: import("./mi
   return { messageType: "information", body, intent: null };
 }
 
-function agentLabelFor(agentKind: string): string {
-  return agentKind === "claude-code" ? "Claude"
-    : agentKind === "codex" ? "Codex"
-      : agentKind === "grok-build" ? "Grok Build"
-        : agentKind === "opencode" ? "OpenCode"
-          : agentKind;
-}
-
 // Superseded by src/lib/bridge/session-service.ts (Shared Live Sessions v2)
 // -- listActiveTurnsForDashboard used to list raw turns here, with a
 // terminal-stage set that was missing report.observed/fallback_report.posted
 // (both fire AFTER turn.completed), which left every finished turn showing
 // as permanently "active". session-service.ts fixes that and replaces the
 // flat turn list with a bounded, lifecycled Session object.
+
+/** Display names for message senders that were stored without one: people by their profile name, agents by their provider. */
+async function senderNamesFor(rows: Array<{ sender_user_id?: unknown; sender_connection_id?: unknown; sender_display_name?: unknown }>): Promise<{ users: Map<string, string>; agents: Map<string, string> }> {
+  const userIds = [...new Set(rows.filter((row) => typeof row.sender_user_id === "string" && !row.sender_display_name).map((row) => row.sender_user_id as string))];
+  const connectionIds = [...new Set(rows.filter((row) => typeof row.sender_connection_id === "string" && !row.sender_user_id && !row.sender_display_name).map((row) => row.sender_connection_id as string))];
+  const users = new Map<string, string>();
+  const agents = new Map<string, string>();
+  if (userIds.length === 0 && connectionIds.length === 0) return { users, agents };
+  const db = requireService();
+  const [people, connections] = await Promise.all([
+    userIds.length ? db.from("users").select("id, name").in("id", userIds.slice(0, 200)) : Promise.resolve({ data: [] as Array<{ id: string; name: string | null }> }),
+    connectionIds.length ? db.from("agent_connections").select("id, agent_kind").in("id", connectionIds.slice(0, 200)) : Promise.resolve({ data: [] as Array<{ id: string; agent_kind: string }> }),
+  ]);
+  for (const person of people.data ?? []) if (person.name?.trim()) users.set(person.id, person.name.trim());
+  for (const connection of connections.data ?? []) if (connection.agent_kind) agents.set(connection.id, agentLabelFor(connection.agent_kind));
+  return { users, agents };
+}
 
 export async function listConversationsForDashboard(selectedConversationId?: string | null): Promise<DashboardConversation[]> {
   const context = await dashboardUserContext();
@@ -1981,10 +1991,14 @@ export async function listConversationsForDashboard(selectedConversationId?: str
   // listMessageTodosForConversations swallows its own read error so an
   // unapplied additive migration cannot take the channel list down.
   const todosBy = await listMessageTodosForConversations(ids);
+  // Older messages and every agent message are stored without a sender name, so the screen had to guess ("Someone"). Fill
+  // the names in from the people and agent connections the messages came from, in two small batched reads.
+  const nameFor = await senderNamesFor(rawMessages ?? []);
   const messagesBy = new Map<string, DashboardConversationMessage[]>();
   for (const row of rawMessages ?? []) {
     if (typeof row.id !== "string" || typeof row.conversation_id !== "string") continue;
-    const message = { ...row, reactions: reactionsBy.get(row.id) ?? [], attachments: attachmentsBy.get(row.id) ?? [], todos: todosBy.get(row.id) ?? [] } as unknown as DashboardConversationMessage & { conversation_id: string };
+    const sender = typeof row.sender_user_id === "string" ? nameFor.users.get(row.sender_user_id) : typeof row.sender_connection_id === "string" ? nameFor.agents.get(row.sender_connection_id) : undefined;
+    const message = { ...row, sender_display_name: row.sender_display_name ?? sender ?? null, reactions: reactionsBy.get(row.id) ?? [], attachments: attachmentsBy.get(row.id) ?? [], todos: todosBy.get(row.id) ?? [] } as unknown as DashboardConversationMessage & { conversation_id: string };
     messagesBy.set(row.conversation_id, [...(messagesBy.get(row.conversation_id) ?? []), message]);
   }
   // Unread counts for non-selected channels can no longer be derived from
