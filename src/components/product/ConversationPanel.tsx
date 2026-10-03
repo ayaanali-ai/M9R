@@ -4,7 +4,7 @@ import MessageDeliveryDetails from "@/components/product/MessageDeliveryDetails"
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, LogOut } from "lucide-react";
+import { Bookmark, Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, LogOut } from "lucide-react";
 import { ChannelWelcome } from "./ChannelWelcome";
 import { DashboardChatHeader, DashboardPicker } from "./dashboard-chrome/Chrome";
 import { DashboardModels } from "./dashboard-chrome/DashboardModels";
@@ -15,6 +15,7 @@ import { useComposerAutosize } from "./useComposerAutosize";
 import { TerminalWorkspace, type PtyRoomSession } from "./TerminalWorkspace";
 import { TERMINAL_ENABLED } from "@/lib/terminal-config";
 import { AttachIcon, MentionIcon } from "@/components/product/wf-icons";
+import { MemoryProposals } from "@/components/product/memory/MemoryProposals";
 import { AgentMark, AGENT_BRAND_COLOR } from "@/components/product/WorkspaceUI";
 import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import { type AgentView } from "@/lib/agent-workspace-data";
@@ -2173,6 +2174,19 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     void deliverMessage(conversationId, body, parentMessageId, clientRequestId);
   }
 
+  /** Save any message as a fact or decision the whole team (and its agents) can use. */
+  async function saveToMemory(message: ConversationMessage) {
+    if (!selected) return;
+    const text = message.body.trim();
+    if (!text) return;
+    const title = text.split(/\r?\n/, 1)[0].slice(0, 160);
+    try {
+      const response = await fetch("/api/shared-memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, body: text.slice(0, 65_000), conversationId: selected.id }) });
+      const data = await response.json().catch(() => ({})) as { error?: string };
+      setNotice(response.ok ? "Saved to memory." : data.error ?? "Could not save to memory.");
+    } catch { setNotice("Could not save to memory."); }
+  }
+
   async function attachFile(file: File) {
     if (!selected || uploadingAttachment) return;
     setUploadingAttachment(true);
@@ -2791,6 +2805,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                       <div className="wf-chat-message-tools">
                         <button type="button" onClick={() => void toggleReaction(message, "👍")} title="React 👍" aria-label="React with thumbs up">👍</button>
                         <button type="button" onClick={() => void toggleReaction(message, "✅")} title="React ✅" aria-label="React with checkmark">✅</button>
+                        <button type="button" onClick={() => void saveToMemory(message)} title="Save to memory" aria-label="Save to memory"><Bookmark size={13} aria-hidden /></button>
                         <button type="button" onClick={() => setReplyTargetId(message.id)} title={message.parent_message_id ? "Reply" : "Thread"} aria-label={message.parent_message_id ? "Reply" : "Start thread"}><Reply size={13} aria-hidden /></button>
                         {message.sender_user_id && (
                           <>
@@ -2809,6 +2824,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
             {threadRoot && <aside className="wf-chat-thread" aria-label="Message thread"><header><strong>Thread</strong><button type="button" onClick={() => setReplyTargetId(null)}>Close</button></header><p>{threadRoot.body}</p><small>{threadReplies.length} repl{threadReplies.length === 1 ? "y" : "ies"}</small>{threadReplies.map((reply) => { const replyIsViewer = Boolean(viewerUserId) && reply.sender_user_id === viewerUserId; return <div key={reply.id}><strong>{replyIsViewer ? "Me" : reply.sender_user_id ? reply.sender_display_name ?? "Teammate" : reply.sender_display_name ?? labelFor(reply.sender_connection_id)}</strong><span>{reply.body}</span></div>; })}</aside>}
             <div className="m9r-composer-frame">
             <form className="wf-chat-composer" onSubmit={submit}>
+              <MemoryProposals conversationId={selected.id} />
               {replyTargetId && <div className="wf-chat-reply-context">Replying in thread <button type="button" onClick={() => setReplyTargetId(null)}>Cancel</button></div>}
               {interjectFor && (
                 <div className="wf-chat-interject-context" role="status">

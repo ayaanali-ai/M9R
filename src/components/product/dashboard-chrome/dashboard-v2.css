@@ -207,3 +207,9 @@
 .m9r-workspace .m9r-activity-list li strong { font-style: normal; font-weight: 400; color: var(--v2-gold, #f3dd9d); }
 .m9r-workspace .m9r-activity-list time { font-size: 11px; color: var(--v2-muted); }
 .m9r-workspace .m9r-activity-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--v2-muted); align-self: center; justify-self: center; }
+.m9r-workspace .m9r-memory-proposals { display: grid; gap: 6px; margin-bottom: 8px; }
+.m9r-workspace .m9r-memory-proposal { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border: 1px solid rgba(243, 221, 157, .28); border-radius: 8px; background: rgba(243, 221, 157, .06); font: italic 400 15px/1.35 var(--v2-italic); }
+.m9r-workspace .m9r-memory-proposal strong { font-style: normal; font-weight: 400; color: var(--v2-gold, #f3dd9d); }
+.m9r-workspace .m9r-memory-proposal-actions { display: inline-flex; gap: 6px; flex: none; }
+.m9r-workspace .m9r-memory-proposal-actions button { font: 400 11px/1 var(--v2-label); letter-spacing: .08em; text-transform: uppercase; padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(244, 239, 233, .25); background: transparent; color: inherit; cursor: pointer; }
+.m9r-workspace .m9r-memory-proposal-actions button:first-child { background: var(--v2-gold, #f3dd9d); color: #141414; border-color: transparent; }
