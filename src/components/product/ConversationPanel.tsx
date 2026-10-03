@@ -1999,6 +1999,11 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // "You" is never correct here: labelFor only resolves *other* participants
   // (viewer's own messages/typing are excluded before this is called). A
   // missing connectionId means the sender has no known identity at all.
+  /** A stored "You" or "Me" is a leftover placeholder from an older version, not the sender's name. */
+  function realName(name: string | null | undefined): string | null {
+    return name && name.trim() && !/^(you|me)$/i.test(name.trim()) ? name : null;
+  }
+
   function labelFor(connectionId: string | null): string {
     const agent = connectionId ? byConnectionId.get(connectionId) : undefined;
     if (!agent) return "An agent";
@@ -2421,7 +2426,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 const showUnreadDivider = dividerIndex !== -1 && index === dividerIndex;
                 const isHuman = Boolean(message.sender_user_id);
                 const isViewer = isHuman && Boolean(viewerUserId) && message.sender_user_id === viewerUserId;
-                const senderName = isViewer ? "Me" : isHuman ? message.sender_display_name ?? "Teammate" : message.sender_display_name ?? labelFor(message.sender_connection_id);
+                const senderName = isViewer ? "Me" : isHuman ? realName(message.sender_display_name) ?? "Teammate" : realName(message.sender_display_name) ?? labelFor(message.sender_connection_id);
                 /* Sender labels are viewer-relative: only the authenticated
                    author's own rows say "Me". Other humans keep their stored
                    display name, even when the message mentions the viewer. */
@@ -2492,7 +2497,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                         const parentMessage = messagesById.get(message.parent_message_id!);
                         if (!parentMessage) return null;
                         const parentIsViewer = Boolean(parentMessage.sender_user_id) && Boolean(viewerUserId) && parentMessage.sender_user_id === viewerUserId;
-                        const parentSenderName = parentIsViewer ? "You" : parentMessage.sender_user_id ? parentMessage.sender_display_name ?? "Teammate" : parentMessage.sender_display_name ?? labelFor(parentMessage.sender_connection_id);
+                        const parentSenderName = parentIsViewer ? "You" : parentMessage.sender_user_id ? realName(parentMessage.sender_display_name) ?? "Teammate" : realName(parentMessage.sender_display_name) ?? labelFor(parentMessage.sender_connection_id);
                         const snippet = parentMessage.body.length > 120 ? `${parentMessage.body.slice(0, 120)}…` : parentMessage.body;
                         return (
                           <button type="button" className="wf-chat-reply-quote" onClick={() => scrollToMessage(parentMessage.id)}>
@@ -2821,7 +2826,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 });
               })()}
             </ol>
-            {threadRoot && <aside className="wf-chat-thread" aria-label="Message thread"><header><strong>Thread</strong><button type="button" onClick={() => setReplyTargetId(null)}>Close</button></header><p>{threadRoot.body}</p><small>{threadReplies.length} repl{threadReplies.length === 1 ? "y" : "ies"}</small>{threadReplies.map((reply) => { const replyIsViewer = Boolean(viewerUserId) && reply.sender_user_id === viewerUserId; return <div key={reply.id}><strong>{replyIsViewer ? "Me" : reply.sender_user_id ? reply.sender_display_name ?? "Teammate" : reply.sender_display_name ?? labelFor(reply.sender_connection_id)}</strong><span>{reply.body}</span></div>; })}</aside>}
+            {threadRoot && <aside className="wf-chat-thread" aria-label="Message thread"><header><strong>Thread</strong><button type="button" onClick={() => setReplyTargetId(null)}>Close</button></header><p>{threadRoot.body}</p><small>{threadReplies.length} repl{threadReplies.length === 1 ? "y" : "ies"}</small>{threadReplies.map((reply) => { const replyIsViewer = Boolean(viewerUserId) && reply.sender_user_id === viewerUserId; return <div key={reply.id}><strong>{replyIsViewer ? "Me" : reply.sender_user_id ? realName(reply.sender_display_name) ?? "Teammate" : realName(reply.sender_display_name) ?? labelFor(reply.sender_connection_id)}</strong><span>{reply.body}</span></div>; })}</aside>}
             <div className="m9r-composer-frame">
             <form className="wf-chat-composer" onSubmit={submit}>
               <MemoryProposals conversationId={selected.id} />
