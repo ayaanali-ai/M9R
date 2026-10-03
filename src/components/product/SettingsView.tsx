@@ -3,11 +3,10 @@
 /**
  * SettingsView — the full, built-out settings surface.
  * ----------------------------------------------------------------------------
- * Four sections, Linear-style: Account, Subscription, Data & privacy, and
- * Preferences — plus a danger zone. Everything that can be real is real
- * (copy id, export download, clear data, local preferences); sections that
- * depend on systems we haven't shipped say so honestly with a roadmap chip,
- * rather than faking buttons.
+ * Five panes: Account, Workspace, Agents, Plan & billing, Privacy & data.
+ * Everything that can be real is real (copy id, export download, clear data);
+ * sections that depend on systems we haven't shipped say so honestly rather
+ * than faking buttons.
  */
 
 import { useEffect, useState } from "react";
@@ -17,48 +16,73 @@ import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import { AgentMark, Button } from "@/components/product/WorkspaceUI";
 import { relAt } from "@/components/product/agent-workspace/shared";
 import { providerLabel } from "@/lib/provider-adapter-config";
-import { formatChannelName } from "@/lib/workspace-channel-groups";
 
-// Connected agents sits right after Account -- this is the product's whole
-// subject, and revoke/disconnect (the single most consequential control in
-// Settings) lives here. It used to render 4th, below Subscription and Agent
-// access, which buried it under things a user touches far less often.
+// Five panes. The old page was nine stacked sections; people look for one of
+// these five things, so each is a pane of its own (Workspace and Agents each
+// gather what used to be three and two separate sections).
 const SECTIONS = [
   ["account", "Account"],
-  ["workspace-name", "Workspace name"],
-  ["identity", "Workspace identity"],
-  ["team", "Team"],
-  ["connections", "Connected agents"],
-  ["subscription", "Subscription"],
-  ["access", "Agent access"],
-  ["git", "Git events"],
-  ["data", "Data & privacy"],
+  ["workspace", "Workspace"],
+  ["agents", "Agents"],
+  ["billing", "Plan & billing"],
+  ["privacy", "Privacy & data"],
 ] as const;
+type PaneId = (typeof SECTIONS)[number][0];
+
+function paneFromHash(): PaneId {
+  if (typeof window === "undefined") return "account";
+  const id = window.location.hash.replace(/^#/, "");
+  const legacy: Record<string, PaneId> = { "workspace-name": "workspace", identity: "workspace", team: "workspace", connections: "agents", access: "agents", subscription: "billing", data: "privacy", git: "account" };
+  const mapped = legacy[id] ?? id;
+  return SECTIONS.some(([key]) => key === mapped) ? (mapped as PaneId) : "account";
+}
 
 export default function SettingsView({ email, userId, username, billingEnabled }: { email: string; userId: string; username: string | null; billingEnabled: boolean }) {
   const initial = (username ?? email).trim().charAt(0).toUpperCase() || "O";
+  const [pane, setPane] = useState<PaneId>("account");
+
+  useEffect(() => {
+    const sync = () => setPane(paneFromHash());
+    queueMicrotask(sync);
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
+
+  function choose(id: PaneId) {
+    setPane(id);
+    window.history.replaceState(null, "", `#${id}`);
+  }
 
   return (
-    <div className="settings-layout">
-      {/* Sticky in-page section nav (desktop). */}
-      <nav className="settings-nav" aria-label="Settings sections">
+    <div className="m9r-settings">
+      <nav className="m9r-settings-rail" aria-label="Settings sections">
         {SECTIONS.map(([id, label]) => (
-          <a key={id} href={`#${id}`} className="settings-nav-link">
+          <button key={id} type="button" className="m9r-settings-rail-item" data-active={pane === id || undefined} aria-current={pane === id ? "page" : undefined} onClick={() => choose(id)}>
             {label}
-          </a>
+          </button>
         ))}
       </nav>
 
-      <div className="min-w-0 space-y-4">
-        <AccountSection email={email} userId={userId} username={username} initial={initial} />
-        <WorkspaceNameSection />
-        <WorkspaceIdentitySection />
-        <TeamSection viewerUserId={userId} />
-        <ConnectedAgentsSection />
-        <SubscriptionSection billingEnabled={billingEnabled} />
-        <AgentAccessSection />
-        <GitEventsSection />
-        <DataPrivacySection />
+      <div className="m9r-settings-pane">
+        {pane === "account" && <AccountSection email={email} userId={userId} username={username} initial={initial} />}
+        {pane === "workspace" && (
+          <>
+            <WorkspaceNameSection />
+            <WorkspaceIdentitySection />
+            <TeamSection viewerUserId={userId} />
+          </>
+        )}
+        {pane === "agents" && (
+          <>
+            <ConnectedAgentsSection />
+            <details className="m9r-advanced">
+              <summary>Advanced: standing agent access</summary>
+              <AgentAccessSection />
+            </details>
+          </>
+        )}
+        {pane === "billing" && <SubscriptionSection billingEnabled={billingEnabled} />}
+        {pane === "privacy" && <DataPrivacySection />}
       </div>
     </div>
   );
@@ -622,126 +646,6 @@ function ConnectedAgentsSection() {
         onCancel={() => setDisconnectTarget(null)}
         onConfirm={() => void disconnect()}
       />
-    </Section>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Git events (repo -> channel bindings)                                      */
-/* -------------------------------------------------------------------------- */
-
-interface GithubBindingRow {
-  id: string;
-  repoFullName: string;
-  conversationId: string;
-  conversationTopic: string;
-}
-
-function GitEventsSection() {
-  const [bindings, setBindings] = useState<GithubBindingRow[]>([]);
-  const [channels, setChannels] = useState<Array<{ id: string; topic: string }>>([]);
-  const [loading, setLoading] = useState(true);
-  const [repoFullName, setRepoFullName] = useState("");
-  const [conversationId, setConversationId] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-
-  function reload() {
-    setLoading(true);
-    Promise.all([
-      fetch("/api/dashboard/github-bindings").then((res) => (res.ok ? res.json() : { bindings: [] })),
-      fetch("/api/dashboard/conversations").then((res) => (res.ok ? res.json() : { conversations: [] })),
-    ])
-      .then(([bindingsBody, conversationsBody]: [{ bindings?: GithubBindingRow[] }, { conversations?: Array<{ id: string; topic: string }> }]) => {
-        setBindings(bindingsBody.bindings ?? []);
-        setChannels(conversationsBody.conversations ?? []);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }
-
-  useEffect(() => {
-    const timer = window.setTimeout(reload, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
-
-  async function addBinding() {
-    setSaving(true);
-    setNotice(null);
-    try {
-      const res = await fetch("/api/dashboard/github-bindings", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ repoFullName, conversationId }),
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setNotice(json.error || "Could not bind that repo.");
-        return;
-      }
-      setRepoFullName("");
-      setConversationId("");
-      reload();
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function removeBinding(id: string) {
-    await fetch(`/api/dashboard/github-bindings?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-    reload();
-  }
-
-  return (
-    <Section
-      id="git"
-      title="Git events"
-      description="Bind a repo the M9R Bridge GitHub App is installed on to a channel. Pushes, PR opens/merges, and reviews post there automatically, including when no agent self-reports a commit."
-    >
-      {loading ? (
-        <p className="p-4 text-[12px] text-[color:var(--ol-text-muted)]">Loading…</p>
-      ) : (
-        <>
-          {bindings.length === 0 ? (
-            <p className="text-[12px] text-[color:var(--ol-text-muted)]">No repo is bound to a channel yet.</p>
-          ) : (
-            <ul className="space-y-2">
-              {bindings.map((binding) => (
-                <li key={binding.id} className="flex items-center justify-between gap-3 rounded-md border border-[color:var(--ol-border-subtle)] px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="ol-mono text-[12px] text-[color:var(--ol-text-primary)]">{binding.repoFullName}</div>
-                    <div className="text-[11px] text-[color:var(--ol-text-muted)]">→ #{binding.conversationTopic}</div>
-                  </div>
-                  <button onClick={() => removeBinding(binding.id)} className="ol-btn ol-btn--ghost ol-btn--sm">
-                    Remove
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <input
-              value={repoFullName}
-              onChange={(e) => setRepoFullName(e.target.value)}
-              placeholder="owner/repo"
-              className="product-input w-48"
-            />
-            <select value={conversationId} onChange={(e) => setConversationId(e.target.value)} className="product-input w-48">
-              <option value="">Choose a channel…</option>
-              {channels.map((channel) => (
-                <option key={channel.id} value={channel.id}>
-                  #{formatChannelName(channel.topic)}
-                </option>
-              ))}
-            </select>
-            <button onClick={addBinding} disabled={saving || !repoFullName || !conversationId} className="ol-btn ol-btn--secondary">
-              {saving ? "Binding…" : "Bind repo"}
-            </button>
-          </div>
-          {notice && <p className="mt-2 text-[12px] text-[color:var(--ol-text-secondary)]" role="status">{notice}</p>}
-        </>
-      )}
     </Section>
   );
 }

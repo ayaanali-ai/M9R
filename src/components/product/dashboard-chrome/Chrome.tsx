@@ -57,7 +57,7 @@ export function DashboardMenu({ label, trigger, children, className = "", align 
 
 export function DashboardSidebarTop({ onCollapse, onAttention, actions }: { onCollapse: () => void; onAttention: () => void; actions: DashboardAction[] }) {
   return <div className="m9r-dash-sidebar-top">
-    <span className="m9r-dash-window-dots" aria-hidden="true"><i /><i /><i /></span>
+    <span className="m9r-dash-wordmark">M9R</span>
     <div className="m9r-dash-sidebar-top-actions">
       <button type="button" onClick={onCollapse} aria-label="Collapse sidebar" title="Collapse sidebar"><PanelLeftClose size={20} /></button>
       <button type="button" onClick={onAttention} aria-label="Activity" title="Activity"><Activity size={20} /></button>
@@ -71,7 +71,7 @@ export function DashboardSearch({ value, onChange, label = "Search" }: { value: 
 }
 
 export function DashboardContactContents({ name, preview, time, agent, working }: { name: string; preview: string; time?: string; agent?: string; working?: boolean }) {
-  return <><span className="m9r-dash-contact-avatar"><DashboardAvatar agent={agent} working={working} />{working && <i aria-label="Working" />}</span><span className="m9r-dash-contact-copy"><span className="m9r-dash-contact-heading"><strong>{name}</strong>{time && <time>{time}</time>}</span><span className="m9r-dash-contact-preview">{preview}</span></span></>;
+  return <><span className="m9r-dash-contact-avatar"><DashboardAvatar agent={agent} working={working} size={40} />{working && <i aria-label="Working" />}</span><span className="m9r-dash-contact-copy"><span className="m9r-dash-contact-heading"><strong>{name}</strong>{time && <time>{time}</time>}</span><span className="m9r-dash-contact-preview">{preview}</span></span></>;
 }
 
 export function DashboardChatHeader({ name, agent, model, threads, actions, menuActions = [], search, onSearch }: {

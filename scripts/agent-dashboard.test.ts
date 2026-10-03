@@ -208,7 +208,7 @@ test("agent selection is URL state shared by the sidebar picker and the floor", 
   // The sidebar picker links to the same URLs and marks the current agent.
   assert.match(shell, /function SidebarAgentPicker/);
   assert.match(shell, /\/dashboard\/agents\?agent=\$\{key\}/);
-  assert.match(shell, /aria-current=\{selected \? "true" : undefined\}/);
+  assert.match(shell, /aria-current=\{selectedAgent === key \? "page" : undefined\}/);
   // A compact mobile rail keeps selection reachable off-desktop.
   assert.match(workspace, /function MobileAgentRail/);
   assert.match(workspace, /aria-label="Agent filters"/);
@@ -376,7 +376,7 @@ test("rule lifecycle lives entirely on the Rules page, not on the Watchfloor", (
   // used; what must not come back is the activeRules rule-list prop itself.
   assert.ok(!/\bactiveRules\b(?!Count)/.test(workspace), "Watchfloor must not receive the activeRules prop");
   const memoryView = read(MEMORY_VIEW);
-  assert.match(memoryView, /What the team remembers/);
+  assert.match(memoryView, /What your agents remember/);
   assert.match(memoryView, /Needs your review/);
 });
 
@@ -1431,7 +1431,7 @@ test("disconnect route revokes a coding agent server-side without deleting audit
   assert.match(svc, /export async function disconnectAgentConnection/);
   assert.match(svc, /createClient\(\)/, "human dashboard path must authenticate through the cookie client");
   assert.match(svc, /auth\.getUser\(\)/);
-  assert.match(svc, /\.from\("agent_connections"\)[\s\S]*\.select\("id, workspace_id, status"\)[\s\S]*\.eq\("id", connectionId\)/);
+  assert.match(svc, /\.from\("agent_connections"\)[\s\S]*\.select\("id, workspace_id, status, created_by"\)[\s\S]*\.eq\("id", connectionId\)/);
   assert.match(svc, /\.from\("agent_connections"\)[\s\S]*\.update\(\{ status: "revoked", revoked_at: now \}\)[\s\S]*\.eq\("id", connectionId\)/);
   assert.match(svc, /\.from\("agent_tokens"\)[\s\S]*\.update\(\{ revoked_at: now \}\)[\s\S]*\.eq\("connection_id", connectionId\)/);
   assert.ok(!/from\("agent_runs"\)[\s\S]*\.delete\(/.test(svc), "disconnect must preserve historical runs");

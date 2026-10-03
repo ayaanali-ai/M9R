@@ -16,8 +16,7 @@ import { MobileAgentRail, ConnectCeremony, ControlStrip } from "@/components/pro
 import { WorkspaceDrawer, ApprovalCenter } from "@/components/product/agent-workspace/approval-center";
 import { HeroRun } from "@/components/product/agent-workspace/run-panels";
 import { AssignmentPanel } from "@/components/product/agent-workspace/preflight";
-import { LiveFileView, WhispersPanel, DraftsPanel, ChannelPeoplePanel, LiveSessionsPanel } from "@/components/product/agent-workspace/files-panel";
-import { GoalHandoffPanel } from "@/components/product/agent-workspace/goal-handoff-panel";
+import { LiveFileView, DraftsPanel, ChannelPeoplePanel } from "@/components/product/agent-workspace/files-panel";
 import { KeyMap, byLastSeen, agentForRun, type Selected, type RunZone } from "@/components/product/agent-workspace/shared";
 
 /**
@@ -37,8 +36,6 @@ import { KeyMap, byLastSeen, agentForRun, type Selected, type RunZone } from "@/
 const LIVE_REFRESH_INTERVAL_MS = 2_000;
 const IDLE_REFRESH_INTERVAL_MS = 10_000;
 
-const WHISPER_PRESENCE_POLL_INTERVAL_MS = 60_000;
-
 export default function AgentWorkspaceClient({
   agents,
   viewerUserId,
@@ -46,7 +43,6 @@ export default function AgentWorkspaceClient({
   approvalRules,
   approvalCenter,
   passports,
-  initialHasWhispers,
 }: {
   agents: AgentView[];
   viewerUserId?: string | null;
@@ -54,28 +50,7 @@ export default function AgentWorkspaceClient({
   approvalRules: WsRule[];
   approvalCenter: AgentApprovalCenter;
   passports: RunPassport[];
-  initialHasWhispers?: boolean;
 }) {
-  // Whispers is real but usually empty -- the toggle only shows when there's
-  // something to show. Server-seeded (see page.tsx) so it's correct on first
-  // paint, then refreshed on a light 60s poll against the cheap
-  // whisper-activity endpoint -- not the conversations firehose the panel's
-  // own message list used to use.
-  const [hasWhispers, setHasWhispers] = useState(Boolean(initialHasWhispers));
-  useEffect(() => {
-    let cancelled = false;
-    function poll() {
-      fetch("/api/dashboard/whisper-activity", { cache: "no-store" })
-        .then((res) => res.json())
-        .then((data: { totalCount30d?: number }) => {
-          if (!cancelled) setHasWhispers((data.totalCount30d ?? 0) > 0);
-        })
-        .catch(() => { /* keep the last known value on a transient failure */ });
-    }
-    const id = window.setInterval(poll, WHISPER_PRESENCE_POLL_INTERVAL_MS);
-    return () => { cancelled = true; window.clearInterval(id); };
-  }, []);
-
   // Agent selection is URL state (?agent=) so the sidebar picker, the floor
   // dock, and shared links are one system (see DESIGN.md).
   const searchParams = useSearchParams();
@@ -108,18 +83,18 @@ export default function AgentWorkspaceClient({
   // surface, opened via ?file=, is untouched and still reachable by direct
   // link even without the rail); Activity just dumped raw events with no
   // synthesis.
-  type SidePanelMode = "review" | "whispers" | "drafts" | "people" | "live" | "handoffs" | null;
+  type SidePanelMode = "review" | "drafts" | "people" | null;
   const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode>(null);
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem("ol-side-panel-mode");
       // This effect hydrates browser-only panel preference state after SSR.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (stored === "review" || stored === "whispers" || stored === "drafts" || stored === "people" || stored === "live" || stored === "handoffs") setSidePanelMode(stored);
+      if (stored === "review" || stored === "drafts" || stored === "people") setSidePanelMode(stored);
       else if (stored === "") setSidePanelMode(null);
     } catch { /* localStorage can throw in a private/locked-down browser -- default stays closed */ }
   }, []);
-  function toggleSidePanel(mode: "review" | "whispers" | "drafts" | "people" | "live" | "handoffs") {
+  function toggleSidePanel(mode: "review" | "drafts" | "people") {
     setSidePanelMode((current) => {
       const next = current === mode ? null : mode;
       try { window.localStorage.setItem("ol-side-panel-mode", next ?? ""); } catch { /* best-effort */ }
@@ -367,7 +342,7 @@ export default function AgentWorkspaceClient({
 
       <div className="wf-layout">
       <div className="wf-main min-w-0">
-        <ControlStrip agent={selectedAgent} />
+        {selectedAgent && <ControlStrip agent={selectedAgent} />}
 
         <WatchfloorOps />
 
@@ -423,30 +398,18 @@ export default function AgentWorkspaceClient({
                 />
               </div>
             </>
-          ) : sidePanelMode === "whispers" ? (
-            <WhispersPanel agents={agents} onClose={() => toggleSidePanel("whispers")} />
           ) : sidePanelMode === "drafts" ? (
             <DraftsPanel conversationId={searchParams.get("conversation")} agents={agents} onClose={() => toggleSidePanel("drafts")} />
           ) : sidePanelMode === "people" ? (
             <ChannelPeoplePanel conversationId={searchParams.get("conversation")} onClose={() => toggleSidePanel("people")} />
-          ) : sidePanelMode === "live" ? (
-            <LiveSessionsPanel agents={agents} onClose={() => toggleSidePanel("live")} />
-          ) : sidePanelMode === "handoffs" ? (
-            <GoalHandoffPanel onClose={() => toggleSidePanel("handoffs")} />
           ) : null}
           onOpenReview={() => toggleSidePanel("review")}
           reviewActive={sidePanelMode === "review"}
           pendingReviewCount={approvalCenter.counts.total}
-          onOpenWhispers={hasWhispers ? () => toggleSidePanel("whispers") : undefined}
-          whispersActive={sidePanelMode === "whispers"}
           onOpenDrafts={() => toggleSidePanel("drafts")}
           draftsActive={sidePanelMode === "drafts"}
           onOpenPeople={() => toggleSidePanel("people")}
           peopleActive={sidePanelMode === "people"}
-          onOpenLive={() => toggleSidePanel("live")}
-          onOpenHandoffs={() => toggleSidePanel("handoffs")}
-          handoffsActive={sidePanelMode === "handoffs"}
-          liveActive={sidePanelMode === "live"}
           filePanel={openFilePath ? (
             <LiveFileView
               agents={agents}
