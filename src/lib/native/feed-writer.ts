@@ -4,8 +4,10 @@
  * turn running) on a timer, off the UI path. Writes are atomic (temp file, then rename) and happen only when the content
  * changed, so the overlay never sees a half file and is not woken for nothing.
  */
-import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { claudeTranscriptPath, lastClaudeActivity, lastCodexActivity } from "./session-activity-core";
 import { buildFeed, feedBody, lastTurnState, sanitizeWebActivity, type Feed, type FeedWebActivityInput, type SessionProbe } from "./feed-core";
 import { readRolloutTailFor, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { PENDING_TTL_MS } from "./approval-core";
@@ -20,6 +22,8 @@ export interface FeedDeps {
   /** Injected for tests; production asks the machine which Codex sessions are open. */
   liveness?: DeliveryDeps["sessionLiveness"];
   readRolloutTail?: (threadId: string) => string | null;
+  /** Tail of a Claude Code transcript; tests inject text, production reads the session's own file. */
+  readClaudeTail?: (cwd: string | undefined, sessionId: string) => string | null;
   /** Open Claude Code sessions; production reads Claude's own session registry. */
   claudeSessions?: () => ClaudeSession[];
 }
@@ -63,6 +67,23 @@ export function writeWebActivity(root: string, items: readonly FeedWebActivityIn
   writeAtomic(join(root, WEB_ACTIVITY_FILE), JSON.stringify({ version: 1, surface: "web", items: sanitizeWebActivity(items) }) + "\n");
 }
 
+const TAIL_BYTES = 96 * 1024;
+
+function readClaudeTail(cwd: string | undefined, sessionId: string): string | null {
+  if (!cwd) return null;
+  try {
+    const path = claudeTranscriptPath(homedir(), cwd, sessionId);
+    const size = statSync(path).size;
+    const fd = openSync(path, "r");
+    try {
+      const length = Math.min(size, TAIL_BYTES);
+      const buffer = Buffer.alloc(length);
+      readSync(fd, buffer, 0, length, size - length);
+      return buffer.toString("utf8");
+    } finally { closeSync(fd); }
+  } catch { return null; }
+}
+
 const PROBE_RECENT_MS = 6 * 3_600_000;
 const PROBE_MAX = 12;
 
@@ -72,7 +93,9 @@ async function probe(store: ReturnType<typeof createLocalStore>, deps: FeedDeps)
   // Claude Code: its own registry says which sessions are open and whether each is busy. No hook needed.
   for (const c of (deps.claudeSessions ?? (() => readClaudeSessions()))()) {
     if (!store.sessionsFor("claude").some((s) => s.sessionId === c.sessionId)) store.registerEndpoint({ provider: "claude-code", sessionId: c.sessionId, cwd: c.cwd, seenAt: c.updatedAt ? new Date(c.updatedAt).toISOString() : undefined });
-    out[c.sessionId] = { live: "live", turn: c.status === "busy" ? "working" : c.status === "idle" ? "idle" : "unknown" };
+    const turn = c.status === "busy" ? "working" : c.status === "idle" ? "idle" : "unknown";
+    const text = turn === "working" ? (deps.readClaudeTail ?? readClaudeTail)(c.cwd, c.sessionId) : null;
+    out[c.sessionId] = { live: "live", turn, doing: text ? lastClaudeActivity(text) : null };
   }
 
   // Codex: ask the machine which recently active sessions hold their file open. Dozens of old sessions are not asked about every pass.
@@ -86,7 +109,8 @@ async function probe(store: ReturnType<typeof createLocalStore>, deps: FeedDeps)
   for (const id of ids) {
     const l = live?.[id] ?? "unknown";
     const t = l === "live" ? tail(id) : null;
-    out[id] = { live: l, turn: t ? lastTurnState(t) : "unknown" };
+    const turn = t ? lastTurnState(t) : "unknown";
+    out[id] = { live: l, turn, doing: t && turn === "working" ? lastCodexActivity(t) : null };
   }
   return out;
 }

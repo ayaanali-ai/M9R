@@ -55,7 +55,7 @@ export function fromUiState(message: UiState): PillSnapshot {
 
 // ── Desktop shell: the engine's feed.json merged with web-activity.json ────────────────────────────
 
-interface FeedAgent { handle: string; state?: string }
+interface FeedAgent { handle: string; state?: string; doing?: string | null }
 type FeedNeeds =
   | { kind: "approval"; taskId: string; from: string; to: string; goal: string; protected?: boolean }
   | { kind: "push_failed"; taskId: string; from: string; fromSession?: string; to: string; reason: string; fix?: string; linkable?: boolean }
@@ -89,7 +89,12 @@ export function fromFeed(feed: Feed): PillSnapshot {
     const acted = web.filter((w) => w.agent === handle && (w.kind === "action" || w.kind === "message")).slice(0, 8).reverse().map((w) => clip(w.text, 140));
     let state: AgentRunState = FEED_STATES[String(a.state)] ?? "idle";
     if (state === "idle" && progress.some((p) => p.to === handle && p.state === "working")) state = "working";
-    return { handle, provider: providerOf(handle), state, activity: [...acted, ...mine].slice(-12) };
+    // What the agent is doing right now, read from its own transcript. Last, so it is the line the ticker highlights.
+    const doing = typeof (a as FeedAgent).doing === "string" ? clip((a as FeedAgent).doing as string, 140) : "";
+    const steps = [...acted, ...mine];
+    if (doing && steps.at(-1) !== doing) steps.push(doing);
+    if (state === "working" && steps.length === 0) steps.push("Working on a turn");
+    return { handle, provider: providerOf(handle), state, activity: steps.slice(-12) };
   });
   const needs = Array.isArray(feed.needsYou) ? feed.needsYou : [];
   const approvals = needs.flatMap((n) => n.kind === "approval"

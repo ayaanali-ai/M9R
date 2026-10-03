@@ -203,3 +203,12 @@ test("the browser shell carries the desktop-pill flag, and the frame asks its pa
   frame.transport.setSuppressed!(true);
   assert.deepEqual(sent, [{ m9r: "frame", nonce: "a".repeat(32), kind: "suppress", on: true }]);
 });
+
+test("the desktop pill shows what a working terminal agent is doing, and never an empty ticker while it works", () => {
+  const snap = fromFeed({
+    agents: [{ handle: "claude", state: "open_working", doing: "Reading feed-core.ts" }, { handle: "codex", state: "open_working" }, { handle: "opencode", state: "open_idle" }],
+  });
+  assert.deepEqual(snap.agents.find((a) => a.handle === "claude")?.activity, ["Reading feed-core.ts"]);
+  assert.deepEqual(snap.agents.find((a) => a.handle === "codex")?.activity, ["Working on a turn"]);
+  assert.deepEqual(snap.agents.find((a) => a.handle === "opencode")?.activity, []);
+});
