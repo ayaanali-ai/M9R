@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-const DEFAULT_COMMAND = "npx m9r-cli init";
+const DEFAULT_COMMAND = "npx m9r-cli connect";
 
 /**
  * A real, click-to-copy command, matching the pattern the closest direct

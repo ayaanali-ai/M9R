@@ -25,7 +25,7 @@ test("W1a the endpoint strip is gone; connection state lives in the sidebar and 
   // card reappeared ~90s after a genuine `m9r-cli connect` approval because nothing kept the heartbeat fresh.
   assert.match(agentsPage, /agents\.some\(\(agent\) => agent\.registered\)/);
   assert.match(agentsPage, /<FirstRunCard \/>/);
-  assert.match(card, /npx m9r-cli init/);
+  assert.match(card, /npx m9r-cli connect/);
   assert.match(shell, /agents? connected/);
   assert.match(shell, /m9r-dash-conn/);
 });
