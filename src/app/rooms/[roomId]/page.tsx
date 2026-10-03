@@ -250,7 +250,12 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       userIdRef.current = userData.user.id;
       setCurrentUserId(userData.user.id);
       // First contact requests a join (idempotent -- a returning active member stays active).
-      await fetch(`/api/rooms/${roomId}/join`, { method: "POST" });
+      const joinResponse = await fetch(`/api/rooms/${roomId}/join`, { method: "POST" }).catch(() => null);
+      if (!joinResponse?.ok) {
+        const joinData = await joinResponse?.json().catch(() => ({})) as { error?: string } | undefined;
+        setError(joinData?.error ?? "Could not send your request to join. Reload the page to try again.");
+        return;
+      }
       if (cancelled) return;
       await refresh();
       poll = setInterval(() => { void refresh(); }, 4000);
@@ -497,8 +502,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   }
 
   async function admit(memberId: string) {
-    const response = await fetch(`/api/rooms/${roomId}/members/${memberId}/admit`, { method: "POST" });
-    if (response.ok) void refresh();
+    const response = await fetch(`/api/rooms/${roomId}/members/${memberId}/admit`, { method: "POST" }).catch(() => null);
+    if (response?.ok) { setEventError(null); void refresh(); return; }
+    const data = await response?.json().catch(() => ({})) as { error?: string } | undefined;
+    setEventError(data?.error ?? "Could not admit this person. Please try again.");
   }
 
   async function copyLink() {
