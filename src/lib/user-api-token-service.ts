@@ -50,7 +50,7 @@ export async function listUserApiTokens(): Promise<UserApiToken[]> {
   const { userId } = await requireUser();
   const db = requireAdmin();
   const { data, error } = await db.from("user_api_tokens").select("id, label, created_at, last_used_at").eq("user_id", userId).order("created_at", { ascending: false });
-  if (error) throw new UserApiTokenError(`Could not list tokens: ${error.message}`, "READ_FAILED", 500);
+  if (error) { console.error("User API token store error:", error.message); throw new UserApiTokenError("Could not list tokens. Please try again.", "READ_FAILED", 500); }
   return (data ?? []).map((row) => ({ id: row.id, label: row.label, createdAt: row.created_at, lastUsedAt: row.last_used_at }));
 }
 
@@ -61,7 +61,7 @@ export async function createUserApiToken(label: string): Promise<{ id: string; t
   const raw = `${TOKEN_PREFIX}${randomBytes(24).toString("hex")}`;
   const db = requireAdmin();
   const { data, error } = await db.from("user_api_tokens").insert({ user_id: userId, label: trimmedLabel, token_hash: hashToken(raw) }).select("id").single();
-  if (error) throw new UserApiTokenError(`Could not create token: ${error.message}`, "WRITE_FAILED", 500);
+  if (error) { console.error("User API token store error:", error.message); throw new UserApiTokenError("Could not create token. Please try again.", "WRITE_FAILED", 500); }
   return { id: data.id, token: raw, label: trimmedLabel };
 }
 
@@ -69,7 +69,7 @@ export async function revokeUserApiToken(tokenId: string): Promise<void> {
   const { userId } = await requireUser();
   const db = requireAdmin();
   const { error } = await db.from("user_api_tokens").delete().eq("id", tokenId).eq("user_id", userId);
-  if (error) throw new UserApiTokenError(`Could not revoke token: ${error.message}`, "WRITE_FAILED", 500);
+  if (error) { console.error("User API token store error:", error.message); throw new UserApiTokenError("Could not revoke token. Please try again.", "WRITE_FAILED", 500); }
 }
 
 /**

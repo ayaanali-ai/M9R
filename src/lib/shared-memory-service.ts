@@ -12,7 +12,7 @@ function service() {
 }
 export function memoryDatabaseError(error: { message?: string; code?: string }) {
   if (error.message?.includes("WORKSPACE_MEMORY_LIMIT_REACHED")) throw new AgentJoinError("Workspace memory is full. Delete saved memory to make space in the shared 10 MiB allowance.", "WORKSPACE_MEMORY_LIMIT_REACHED", 413);
-  throw new AgentJoinError("Shared memory is unavailable. Apply the workspace memory migration.", "MEMORY_UNAVAILABLE", 503);
+  throw new AgentJoinError("Shared memory is temporarily unavailable. Please try again in a moment.", "MEMORY_UNAVAILABLE", 503);
 }
 async function human() {
   const context = await dashboardWorkspaceContext();

@@ -66,7 +66,7 @@ export async function setAvailableModels(agent: AuthedAgent, raw: unknown): Prom
   const db = requireService();
   const { error } = await db.from("agent_connections").update({ available_models: result.normalized }).eq("id", agent.connectionId);
   if (error) {
-    if (isMissingColumnError(error)) return { ok: false, availableModels: null, errors: ["Apply the provider-options migration before saving models."] };
+    if (isMissingColumnError(error)) return { ok: false, availableModels: null, errors: ["Saving models is not available right now. Please try again later."] };
     console.error("setAvailableModels failed:", error.message, error.code);
     return { ok: false, availableModels: null, errors: [error.message] };
   }

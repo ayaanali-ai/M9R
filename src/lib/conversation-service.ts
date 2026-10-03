@@ -2345,5 +2345,5 @@ export async function changeChannelAgent(conversationId: string, connectionId: s
   if (conversation.channel_kind === "dm") throw new AgentJoinError("Direct-message membership cannot change.", "DM_MEMBERSHIP_FORBIDDEN", 400);
   if (!add && channelGroupForConversation({channelSlug:conversation.channel_slug,channelKind:conversation.channel_kind,topic:conversation.topic}) === "core") throw new AgentJoinError("Built-in channel agents cannot be removed.", "CORE_CHANNEL_MEMBER_REMOVE_FORBIDDEN", 400);
   const {error} = await requireService().rpc("m9r_change_channel_agent", {p_workspace:context.workspaceId,p_channel:conversationId,p_connection:connectionId,p_add:add});
-  if (error) throw new AgentJoinError("Could not update channel agents. Check the connection and apply the channel-controls migration.", "CHANNEL_MEMBERSHIP_FAILED", 503);
+  if (error) throw new AgentJoinError("Could not update the channel's agents right now. Please try again.", "CHANNEL_MEMBERSHIP_FAILED", 503);
 }

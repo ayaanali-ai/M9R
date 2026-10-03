@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
     const result = await setAvailableModels(agent, raw.available_models ?? null);
     if (!result.ok) return jsonError(result.errors.join(" ") || "Could not set available models.", 400);
     const { error } = await supabase!.from("agent_connections").update({ available_efforts: efforts.normalized }).eq("id", agent.connectionId).eq("workspace_id", agent.workspaceId);
-    if (error) return jsonError("Could not save provider effort options. Apply the run-settings migration.", 503);
+    if (error) return jsonError("Could not save provider effort options right now. Please try again.", 503);
     return NextResponse.json({ available_models: result.availableModels, available_efforts: efforts.normalized });
   } catch (err) {
     return handleAgentError(err);

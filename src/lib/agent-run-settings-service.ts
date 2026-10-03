@@ -14,7 +14,7 @@ async function humanConnection(connectionId: string, manage: boolean) {
   const { data: { user } } = await db.auth.getUser();
   if (!user) throw new AgentJoinError("Sign in to manage agent settings.", "UNAUTHENTICATED", 401);
   const { data, error } = await db.from("agent_connections").select("id, workspace_id, created_by, model, effort, available_models, available_efforts").eq("id", connectionId).eq("status", "active").maybeSingle();
-  if (error) throw new AgentJoinError("Could not load agent settings. Apply the run-settings migration.", "SETTINGS_UNAVAILABLE", 503);
+  if (error) throw new AgentJoinError("Could not load agent settings right now. Please try again.", "SETTINGS_UNAVAILABLE", 503);
   if (!data) throw new AgentJoinError("Agent connection not found.", "NOT_FOUND", 404);
   if (manage && data.created_by !== user.id) {
     const { data: project } = await db.from("projects").select("owner_id").eq("id", data.workspace_id).maybeSingle();
