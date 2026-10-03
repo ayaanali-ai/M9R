@@ -15,9 +15,8 @@ export default function MemoryPage() {
   return (
     <div className="product-page-shell">
       <PageHeader
-        eyebrow="Workspace"
         title="Memory"
-        description="What this workspace has learned and asks every agent to remember."
+        description="What your agents have learned about your work. Keep it, fix it, or forget it."
       />
       <div className="mt-7">
         <MemoryView />

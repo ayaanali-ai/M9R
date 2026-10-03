@@ -8,7 +8,7 @@ import ProductShell from "@/components/product/ProductShell";
 export default function DashboardRuntimeBench() {
   if (process.env.NODE_ENV !== "development") notFound();
   return <div className="wf-root" data-bs-mode="day"><Suspense>
-    <ProductShell displayName="Local test" onboardingCompleted>
+    <ProductShell displayName="Local test">
       <div className="wf-atmosphere"><div><div className="wf-board"><div className="wf-layout"><div className="wf-main">
         <ConversationPanel agents={[]} workspaceId={null} viewerUserId="preview-user" />
       </div></div></div></div></div>

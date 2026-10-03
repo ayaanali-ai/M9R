@@ -22,7 +22,6 @@ import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import RuleDraftTools from "@/components/product/RuleDraftTools";
-import { SessionCatalog } from "@/components/product/memory/SessionCatalog";
 import { SharedNotes } from "@/components/product/memory/SharedNotes";
 import { Meta, Surface } from "@/components/product/WorkspaceUI";
 import type { WorkspaceRule } from "@/lib/workspace-rule-matching";
@@ -114,18 +113,8 @@ export default function MemoryView() {
   const [pendingAction, setPendingAction] = useState<PendingLifecycleAction>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [showDraftTools, setShowDraftTools] = useState(false);
-  /**
-   * `?tab=sessions&session=<id>` is a real deep link, not decoration: the Live
-   * Sessions Archived tab links here because an archived session's messages are
-   * deliberately filtered out of channel scroll-back (conversation-service.ts's
-   * archivedMessageIdsFor choke point), so this transcript view is the only
-   * place that content is actually readable.
-   */
   const memorySearchParams = useSearchParams();
-  const deepLinkedSessionId = memorySearchParams.get("session");
-  const [viewTab, setViewTab] = useState<"rules" | "sessions" | "notes">(
-    memorySearchParams.get("tab") === "sessions" || deepLinkedSessionId ? "sessions" : memorySearchParams.get("tab") === "rules" ? "rules" : "notes",
-  );
+  const [search, setSearch] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -267,33 +256,9 @@ export default function MemoryView() {
     }
   }
 
-  const tabBar = (
-    <div className="wf-memory-tabs">
-      <button type="button" className="wf-memory-tab" data-active={viewTab === "notes" || undefined} onClick={() => setViewTab("notes")}>Shared notes</button>
-      <button type="button" className="wf-memory-tab" data-active={viewTab === "rules" || undefined} onClick={() => setViewTab("rules")}>
-        Rules
-      </button>
-      <button type="button" className="wf-memory-tab" data-active={viewTab === "sessions" || undefined} onClick={() => setViewTab("sessions")}>
-        Sessions
-      </button>
-    </div>
-  );
-
-  if (viewTab === "notes") return <div className="space-y-4">{tabBar}<SharedNotes conversationId={memorySearchParams.get("channel") ?? undefined} /></div>;
-
-  if (viewTab === "sessions") {
-    return (
-      <div className="space-y-4">
-        {tabBar}
-        <SessionCatalog initialSessionId={deepLinkedSessionId} />
-      </div>
-    );
-  }
-
   if (state.kind === "loading") {
     return (
       <div className="space-y-4">
-        {tabBar}
         <div className="ol-panel h-40 animate-pulse" />
       </div>
     );
@@ -301,7 +266,6 @@ export default function MemoryView() {
   if (state.kind === "unavailable") {
     return (
       <div className="space-y-4">
-        {tabBar}
         <div className="ol-panel p-6">
           <h2 className="text-base font-semibold text-[color:var(--ol-text-primary)]">Memory</h2>
           <p className="mt-1.5 text-[13px] text-[color:var(--ol-text-muted)]">{state.message}</p>
@@ -310,7 +274,10 @@ export default function MemoryView() {
     );
   }
 
-  const { rules, flags } = state;
+  const needle = search.trim().toLowerCase();
+  const matches = (item: unknown) => !needle || JSON.stringify(item).toLowerCase().includes(needle);
+  const rules = state.rules.filter(matches);
+  const flags = state.flags.filter(matches);
   const remembered = rules.filter((r) => r.status === "active");
   const draftRules = rules.filter((r) => r.status === "needs_review");
   const lowConfidence = rules.filter((r) => r.status === "low_confidence");
@@ -318,20 +285,14 @@ export default function MemoryView() {
   const openFlags = flags.filter((f) => f.reviewState === "observed");
   const reviewedFlags = flags.filter((f) => f.reviewState !== "observed");
   const reviewCount = openFlags.length + draftRules.length;
-  const nothingYet = rules.length === 0 && flags.length === 0;
+  const nothingYet = state.rules.length === 0 && state.flags.length === 0;
 
   return (
     <div className="space-y-4">
-      {tabBar}
-      {/* Header + export bar: only confirmed memory travels into a run by
-          default, the same rule the ruleset export always applied. */}
-      <section className="ol-panel wf-glass-panel p-5">
-        <h2 className="text-base font-semibold tracking-[-0.01em] text-[color:var(--ol-text-primary)]">Memory</h2>
-        <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-[color:var(--ol-text-muted)]">
-          An agent flags something, you confirm it, and every agent carries it into the next run.
-          Archived memory is kept for history but never loaded or exported.
-        </p>
-
+      <section className="m9r-memory-top">
+        <label className="m9r-memory-search">
+          <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search everything your agents remember…" aria-label="Search memory" />
+        </label>
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <span className="mr-1 text-[11px] text-[color:var(--ol-text-muted)]">
             Export {remembered.length} remembered item{remembered.length === 1 ? "" : "s"}:
@@ -350,10 +311,6 @@ export default function MemoryView() {
             Include items still awaiting review
           </label>
         </div>
-        <p className="mt-2 text-[10px] leading-relaxed text-[color:var(--ol-text-faint)]">
-          AGENTS.md: agent-compatible project instructions. CLAUDE.md: Claude project memory.
-          Cursor rule: Cursor project rules. Copy block: paste directly into the next session.
-        </p>
         {note && <p className="mt-2 text-[11px] text-[color:var(--ol-text-secondary)]">{note}</p>}
 
         <div className="mt-4 border-t border-[color:var(--ol-border-subtle)] pt-3">
@@ -391,7 +348,7 @@ export default function MemoryView() {
           id="memory-review"
           title="Needs your review"
           count={reviewCount}
-          blurb="Flagged by an agent. Nothing here is loaded into a run until you confirm it."
+          blurb="An agent wants to remember these. Nothing is shared with the other agents until you keep it."
           tone="warn"
         >
           <div className="space-y-2.5">
@@ -423,9 +380,9 @@ export default function MemoryView() {
       {remembered.length > 0 && (
         <MemorySection
           id="memory-remembered"
-          title="What the team remembers"
+          title="What your agents remember"
           count={remembered.length}
-          blurb="Loaded by every agent before it works, and included in exports."
+          blurb="Every agent reads these before it works, and they are included when you export."
         >
           <div className="space-y-2.5">
             {remembered.map((rule) => (
@@ -447,9 +404,9 @@ export default function MemoryView() {
       {lowConfidence.length > 0 && (
         <MemorySection
           id="memory-lower-confidence"
-          title="Lower confidence"
+          title="Maybe"
           count={lowConfidence.length}
-          blurb="Drawn from weaker evidence. Real, but not exported until you move it into review."
+          blurb="Weaker evidence. Not shared or exported until you move it into review."
         >
           <div className="space-y-2.5">
             {lowConfidence.map((rule) => (
@@ -474,9 +431,9 @@ export default function MemoryView() {
         <details className="group" id="memory-history">
           <summary className="flex cursor-pointer select-none items-center gap-2 text-sm text-[color:var(--ol-text-muted)] hover:text-[color:var(--ol-text-secondary)]">
             <span className="ol-mono" style={{ fontSize: "var(--ol-text-2xs)" }}>
-              HISTORY · {archivedRules.length + reviewedFlags.length}
+              EARLIER · {archivedRules.length + reviewedFlags.length}
             </span>
-            <span className="text-[11px]">already decided, preserved for audit</span>
+            <span className="text-[11px]">already decided, kept for the record</span>
           </summary>
           <div className="mt-3 space-y-3">
             {archivedRules.length > 0 && (
@@ -505,6 +462,11 @@ export default function MemoryView() {
           </div>
         </details>
       )}
+
+      <section id="memory-notes" className="m9r-memory-notes">
+        <h3>Shared notes</h3>
+        <SharedNotes conversationId={memorySearchParams.get("channel") ?? undefined} />
+      </section>
 
       <ProductConfirmDialog
         open={pendingAction !== null}

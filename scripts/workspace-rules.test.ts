@@ -369,7 +369,7 @@ test("memory UI carries no banned legacy language", () => {
   const banned = [/chain of custody/i, /cryptograph/i, /\bMTM\b/, /model-to-model/i, /real-time supervision/i, /guaranteed/i];
   for (const re of banned) assert.ok(!re.test(ui), `memory UI must not contain ${re}`);
   // And it must carry the positioning: confirmed memory is what travels.
-  assert.match(ui, /every agent carries it into the next run/i);
+  assert.match(ui, /Every agent reads these before it works/i);
 });
 
 test("memory UI shows a discard path for drafts and archived items, never remembered ones", () => {
@@ -432,13 +432,13 @@ test("workspace lifecycle copy avoids banned overclaiming words", () => {
   assert.ok(!/\b(proved|guaranteed|caused|fixed|prevented|worked)\b/i.test(lifecycleCopy));
 });
 
-test("export setup copy explains each supported rules artifact", () => {
+test("memory offers each supported export format", () => {
   const workspaceUi = readFileSync(resolve(process.cwd(), "src/components/product/MemoryView.tsx"), "utf8");
-  assert.match(workspaceUi, /AGENTS\.md.*agent-compatible project instructions/i);
-  assert.match(workspaceUi, /CLAUDE\.md.*Claude project memory/i);
-  assert.match(workspaceUi, /Cursor rule.*Cursor project rules/i);
-  assert.match(workspaceUi, /Copy (instruction )?block.*past(e|ing) directly/i);
-  assert.match(workspaceUi, /every agent carries it into the next run/i);
+  assert.match(workspaceUi, /label="AGENTS\.md"/);
+  assert.match(workspaceUi, /label="CLAUDE\.md"/);
+  assert.match(workspaceUi, /label="Cursor rule"/);
+  assert.match(workspaceUi, /label="Copy block"/);
+  assert.match(workspaceUi, /Every agent reads these before it works/i);
 });
 
 test("migration guidance doc exists and references supabase-workspace-rules.sql", () => {

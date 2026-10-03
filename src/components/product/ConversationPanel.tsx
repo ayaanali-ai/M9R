@@ -4,11 +4,13 @@ import MessageDeliveryDetails from "@/components/product/MessageDeliveryDetails"
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, Inbox as InboxIcon, LogOut } from "lucide-react";
+import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, LogOut } from "lucide-react";
 import { ChannelWelcome } from "./ChannelWelcome";
 import { DashboardChatHeader, DashboardPicker } from "./dashboard-chrome/Chrome";
 import { DashboardModels } from "./dashboard-chrome/DashboardModels";
-import { Bug, Monitor, Plus, ArrowUp } from "lucide-react";
+import ChannelEditDialog from "./ChannelEditDialog";
+import { useChannelColors } from "@/lib/channel-prefs";
+import { ClipboardCheck, Plus, ArrowUp } from "lucide-react";
 import { useComposerAutosize } from "./useComposerAutosize";
 import { TerminalWorkspace, type PtyRoomSession } from "./TerminalWorkspace";
 import { TERMINAL_ENABLED } from "@/lib/terminal-config";
@@ -797,7 +799,7 @@ function PanelResizeHandle({ label, handleProps }: { label: string; handleProps:
  * read in it (B1: a promoted file diff). The panel stays mounted underneath
  * on purpose -- it owns the relay subscription that feeds live steps and the
  * unsent draft, and unmounting it to show a diff would drop both. */
-export default function ConversationPanel({ agents, workspaceId, viewerUserId, onFileStep, sidePanel, mainOverlay, filePanel, onOpenReview, reviewActive, pendingReviewCount, onOpenWhispers, whispersActive, onOpenDrafts, draftsActive, onOpenPeople, peopleActive, onOpenLive, liveActive, onOpenHandoffs, handoffsActive }: { agents: AgentView[]; workspaceId: string | null; viewerUserId: string | null; onFileStep?: (step: WorkspaceStep) => void; sidePanel?: ReactNode; mainOverlay?: ReactNode; filePanel?: ReactNode; onOpenReview?: () => void; reviewActive?: boolean; pendingReviewCount?: number; onOpenWhispers?: () => void; whispersActive?: boolean; onOpenDrafts?: () => void; draftsActive?: boolean; onOpenPeople?: () => void; peopleActive?: boolean; onOpenLive?: () => void; liveActive?: boolean; onOpenHandoffs?: () => void; handoffsActive?: boolean }) {
+export default function ConversationPanel({ agents, workspaceId, viewerUserId, onFileStep, sidePanel, mainOverlay, filePanel, onOpenReview, reviewActive, pendingReviewCount, onOpenDrafts, draftsActive, onOpenPeople, peopleActive }: { agents: AgentView[]; workspaceId: string | null; viewerUserId: string | null; onFileStep?: (step: WorkspaceStep) => void; sidePanel?: ReactNode; mainOverlay?: ReactNode; filePanel?: ReactNode; onOpenReview?: () => void; reviewActive?: boolean; pendingReviewCount?: number; onOpenDrafts?: () => void; draftsActive?: boolean; onOpenPeople?: () => void; peopleActive?: boolean; }) {
   // Drag-to-resize widths for the two right-hand panel slots -- one storage
   // key per slot, shared across whichever content currently occupies it
   // (Files vs. Ready for Review both use the side slot, so they share one
@@ -815,11 +817,8 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     return () => clearTimeout(timer);
   }, [notice]);
   const [replyTargetId, setReplyTargetId] = useState<string | null>(null);
-  const [showInbox, setShowInbox] = useState(false);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  // Server-side count, not notifications.filter(!read_at) -- `notifications`
-  // is only the most recent 100 rows, so counting it undercounts the badge.
-  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
+  const [editingChannel, setEditingChannel] = useState(false);
+  const channelColors = useChannelColors();
   const [pendingTaskContracts, setPendingTaskContracts] = useState<TaskCardContract[]>([]);
   const [pendingEvidenceRequests, setPendingEvidenceRequests] = useState<PendingEvidenceRequest[]>([]);
   const [evidenceDecisionBusyId, setEvidenceDecisionBusyId] = useState<string | null>(null);
@@ -999,16 +998,6 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   const messagesListRef = useRef<HTMLOListElement | null>(null);
   const searchParams = useSearchParams();
   const router = useRouter();
-  useEffect(() => {
-    if (searchParams.get("activity") !== "1") return;
-    const timer = window.setTimeout(() => {
-      setShowInbox(true);
-      const params = new URLSearchParams(searchParams.toString());
-      params.delete("activity");
-      router.replace(`${window.location.pathname}${params.size ? `?${params}` : ""}`, { scroll: false });
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [searchParams, router]);
   // Read reactively (not captured once at mount): a deep link's ?message=
   // must re-arm on a client-side navigation too -- e.g. clicking "Join" on
   // a Live Sessions row while already inside the app changes the URL via
@@ -1026,7 +1015,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // switches it now lives in the primary nav (ProductShell) rather than in
   // this component -- same reason agent selection travels as ?agent=.
   const selectedId = searchParams.get("conversation");
-  useComposerAutosize(textareaRef, draft, `${selectedId}:${showInbox}:${terminalActive}:${Boolean(mainOverlay)}`);
+  useComposerAutosize(textareaRef, draft, `${selectedId}:${terminalActive}:${Boolean(mainOverlay)}`);
   function selectConversation(conversationId: string) {
     router.replace(channelHref(conversationId), { scroll: false });
   }
@@ -1429,8 +1418,6 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
         };
         if (cancelled) return;
         setPendingTaskContracts(data.taskContracts ?? []);
-        setNotifications(data.notifications ?? []);
-        setUnreadNotificationCount(typeof data.unreadNotificationCount === "number" ? data.unreadNotificationCount : 0);
         setPendingEvidenceRequests((data.requests ?? [])
           .filter((row) => !decidedEvidenceRequestIds.has(row.id))
           .map((row) => ({ id: row.id, conversationId: row.conversationId, agentConnectionId: row.agentConnectionId, provider: row.provider, requestSummary: row.requestSummary, requestMessageId: row.requestMessageId, createdAt: row.createdAt })));
@@ -2328,26 +2315,6 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     }
   }
 
-  /** markAll is resolved server-side by predicate, so this clears every
-   *  unread row for the user -- including the ones past the 100-row page
-   *  this client holds. The optimistic update can only touch what is
-   *  loaded; the next 5s poll reconciles the rest. */
-  async function markAllNotificationsRead() {
-    setNotifications((current) => current.map((item) => item.read_at ? item : { ...item, read_at: new Date().toISOString() }));
-    setUnreadNotificationCount(0);
-    await fetch("/api/dashboard/notifications", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ markAll: true }) }).catch(() => undefined);
-  }
-
-  async function openNotification(notification: NotificationItem) {
-    if (!notification.read_at) {
-      await fetch("/api/dashboard/notifications", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ notificationIds: [notification.id] }) }).catch(() => undefined);
-      setNotifications((current) => current.map((item) => item.id === notification.id ? { ...item, read_at: new Date().toISOString() } : item));
-      setUnreadNotificationCount((current) => Math.max(0, current - 1));
-    }
-    if (notification.conversation_id) selectConversation(notification.conversation_id);
-    setShowInbox(false);
-  }
-
   return (
     <section
       className="wf-chat-shell"
@@ -2355,7 +2322,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
       style={{ "--wf-side-w": `${sidePanelResize.width}px`, "--wf-file-w": `${filePanelResize.width}px` } as CSSProperties}
     >
       <div className="wf-chat-main">
-        {mainOverlay ?? (showInbox ? <section className="wf-chat-inbox"><header className="wf-chat-header"><div><h2>Inbox</h2><p>Mentions, replies, and agent activity</p></div><div className="wf-chat-actions">{unreadNotificationCount > 0 && <button type="button" onClick={() => void markAllNotificationsRead()}>Mark all read</button>}<button type="button" onClick={() => setShowInbox(false)}>Back to channel</button></div></header>{notifications.length === 0 && <p className="wf-chat-empty">Nothing needs your attention.</p>}{notifications.map((notification) => <button type="button" key={notification.id} className={`wf-chat-notification ${notification.read_at ? "is-read" : ""}`} onClick={() => void openNotification(notification)}><strong>{notification.title}</strong><span>{notification.body}</span><time>{relativeTime(notification.created_at, now)}</time></button>)}</section> : terminalActive && selected ? (
+        {mainOverlay ?? (terminalActive && selected ? (
           <TerminalWorkspace
             channelLabel={selected.channel_kind === "dm" ? channelDisplayName(selected) : `#${channelDisplayName(selected)}`}
             sessions={ptyRoomSessions}
@@ -2378,17 +2345,15 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 sidePanelMode) -- both used to be buried in a "more actions"
                 dropdown or a full-screen modal; this is the one consistent
                 mechanism for both. */}
-            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"}
+            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"} color={channelColors[selected.id]}
               threads={<DashboardPicker label="Choose conversation" value="Thread" icon={<Plus size={12} />} options={conversations.map(conversation => ({ id: conversation.id, label: channelDisplayName(conversation) }))} onSelect={selectConversation} />}
               model={<DashboardModels agents={agents.filter(agent => selected.participant_connection_ids.includes(agent.connectionId ?? ""))} conversationId={selected.id} />}
-              actions={<>{onOpenLive && <button type="button" aria-label="Live sessions" title="Live sessions" onClick={onOpenLive} data-active={liveActive}><Monitor size={18} /></button>}{onOpenReview && <button type="button" aria-label="Ready for Review" title="Ready for Review" onClick={onOpenReview} data-active={reviewActive}><Bug size={18} />{Boolean(pendingReviewCount) && <i className="m9r-dash-notification-dot" />}</button>}</>}
+              actions={<>{onOpenReview && <button type="button" aria-label="Ready for review" title="Ready for review" onClick={onOpenReview} data-active={reviewActive}><ClipboardCheck size={18} />{Boolean(pendingReviewCount) && <i className="m9r-dash-notification-dot" />}</button>}</>}
               search={transcriptSearch} onSearch={setTranscriptSearch}
               menuActions={[
-                ...(onOpenPeople ? [{ label: "People", onSelect: onOpenPeople, active: peopleActive }] : []),
-                ...(onOpenDrafts ? [{ label: "Shared drafts", onSelect: onOpenDrafts, active: draftsActive }] : []),
-                ...(onOpenWhispers ? [{ label: "Agent whispers", onSelect: onOpenWhispers, active: whispersActive }] : []),
-                ...(onOpenHandoffs ? [{ label: "Goal handoffs", onSelect: onOpenHandoffs, active: handoffsActive }] : []),
-                { label: "Inbox", onSelect: () => setShowInbox(true) },
+                ...(onOpenPeople ? [{ label: "Members", onSelect: onOpenPeople, active: peopleActive }] : []),
+                ...(onOpenDrafts ? [{ label: "Docs", onSelect: onOpenDrafts, active: draftsActive }] : []),
+                { label: selected.channel_kind === "dm" ? "Edit conversation" : "Edit channel", onSelect: () => setEditingChannel(true) },
                 ...(TERMINAL_ENABLED ? [{ label: "Terminal", onSelect: () => setTerminalActive(true) }] : []),
               ]}
             />
@@ -2952,14 +2917,6 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                       </div>
                     )}
                   </div>
-                  {/* Deprioritized out of the chat header (Files and Ready
-                      for Review took that spot), not deleted -- kept
-                      reachable here for later, same idiom as the other
-                      composer toolbar icons. */}
-                  <button type="button" className="wf-chat-toolbar-icon" onClick={() => setShowInbox(true)} aria-label={unreadNotificationCount > 0 ? `Inbox, ${unreadNotificationCount} unread` : "Inbox"} title="Inbox">
-                    <InboxIcon size={15} />
-                    {unreadNotificationCount > 0 && <b aria-hidden>{unreadNotificationCount > 99 ? "99+" : unreadNotificationCount}</b>}
-                  </button>
                 </div>
                 <div className="wf-chat-composer-status">
                   {draft.length > 1_800 && <span className="wf-chat-char-count" data-warn={draft.length > 1_950}>{draft.length}/2000</span>}
@@ -3051,6 +3008,18 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
         onConfirm={() => void confirmDeleteMessage()}
         onCancel={() => setConfirmDeleteMessageTarget(null)}
       />
+      {editingChannel && selected && (
+        <ChannelEditDialog
+          channel={{
+            id: selected.id,
+            topic: selected.topic,
+            description: selected.description ?? null,
+            kind: selected.channel_kind === "dm" ? "dm" : "channel",
+            builtIn: channelGroupForConversation({ channelSlug: selected.channel_slug, channelKind: selected.channel_kind, topic: selected.topic }) === "core",
+          }}
+          onClose={() => setEditingChannel(false)}
+        />
+      )}
     </section>
   );
 }

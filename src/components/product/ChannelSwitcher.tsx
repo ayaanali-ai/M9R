@@ -9,6 +9,8 @@ import { channelHref } from "@/lib/run-navigation";
 import type { ConnectedAgentNavItem } from "@/lib/agent-status-summary";
 import { Button, AgentMark } from "@/components/product/WorkspaceUI";
 import { DashboardContactContents } from "./dashboard-chrome/Chrome";
+import { CHANNELS_CHANGED_EVENT } from "@/components/product/ChannelEditDialog";
+import { showAllHiddenChannels, useChannelColors, useHiddenChannels } from "@/lib/channel-prefs";
 
 interface SwitcherConversation {
   id: string;
@@ -48,6 +50,8 @@ export default function SidebarChannelList({
 }) {
   const [conversations, setConversations] = useState<SwitcherConversation[]>([]);
   const [showCreate, setShowCreate] = useState(false);
+  const channelColors = useChannelColors();
+  const hiddenChannels = useHiddenChannels();
   const searchParams = useSearchParams();
   const selectedId = searchParams.get("conversation");
   const router = useRouter();
@@ -76,6 +80,12 @@ export default function SidebarChannelList({
   }
 
   useEffect(() => {
+    const reload = () => void refresh();
+    window.addEventListener(CHANNELS_CHANGED_EVENT, reload);
+    return () => window.removeEventListener(CHANNELS_CHANGED_EVENT, reload);
+  }, []);
+
+  useEffect(() => {
     const open = () => setShowCreate(true);
     window.addEventListener("m9r:new-channel", open);
     return () => window.removeEventListener("m9r:new-channel", open);
@@ -88,18 +98,19 @@ export default function SidebarChannelList({
   }, []);
 
   const channels = conversations.filter((c) => c.channel_kind === "channel");
+  const hiddenCount = channels.filter((c) => hiddenChannels.includes(c.id)).length;
 
   return (
     <div className={`wf-channel-nav ${chatActive ? "" : "opacity-70"}`.trim()} aria-label="Channels">
       <div className="wf-micro mb-1 mt-1 text-[color:var(--ol-text-faint)]">Channels</div>
       <ul className="wf-channel-nav-list">
-        {channels.filter((channel) => channelDisplayName(channel).toLowerCase().includes(query.trim().toLowerCase())).map((channel) => {
+        {channels.filter((channel) => !hiddenChannels.includes(channel.id) && channelDisplayName(channel).toLowerCase().includes(query.trim().toLowerCase())).map((channel) => {
           const isCore = channelGroupForConversation({ channelSlug: channel.channel_slug, channelKind: channel.channel_kind, topic: channel.topic }) === "core";
           const active = channel.id === selectedId;
           return (
             <li key={channel.id} className="wf-channel-nav-row">
               <Link href={channelHref(channel.id)} className="m9r-dash-contact" aria-current={active ? "page" : undefined}>
-                <DashboardContactContents name={channelDisplayName(channel)} agent="other" preview={channel.messages?.at(-1)?.body ?? channel.description ?? "Start a conversation"} />
+                <DashboardContactContents name={channelDisplayName(channel)} agent="other" color={channelColors[channel.id]} preview={channel.messages?.at(-1)?.body ?? channel.description ?? "Start a conversation"} />
                 {channel.unread_count > 0 && <b className="wf-channel-nav-unread">{channel.unread_count > 99 ? "99+" : channel.unread_count}</b>}
               </Link>
               {!isCore && (
@@ -118,6 +129,11 @@ export default function SidebarChannelList({
       <button type="button" className="wf-channel-nav-new" onClick={() => setShowCreate(true)}>
         <Plus size={13} aria-hidden /> New channel
       </button>
+      {hiddenCount > 0 && (
+        <button type="button" className="wf-channel-nav-new" onClick={showAllHiddenChannels}>
+          Show {hiddenCount} hidden
+        </button>
+      )}
 
       {showCreate && (
         <div className="ol-dialog-overlay" role="dialog" aria-modal="true" aria-label="New channel" onClick={(e) => { if (e.target === e.currentTarget) setShowCreate(false); }}>

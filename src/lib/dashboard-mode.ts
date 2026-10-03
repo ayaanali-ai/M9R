@@ -1,7 +1,7 @@
 export type DashboardMode = "day" | "night";
 
 export const DASHBOARD_MODE_EVENT = "m9r:dashboard-mode-change";
-export const DASHBOARD_MODE_STORAGE_KEY = "m9r_mode";
+export const DASHBOARD_MODE_STORAGE_KEY = "m9r_mode_v2";
 
 export function normalizeDashboardMode(value: unknown): DashboardMode {
   return value === "night" ? "night" : "day";

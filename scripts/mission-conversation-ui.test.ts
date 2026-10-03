@@ -4,7 +4,6 @@ import test from "node:test";
 
 const service = readFileSync("src/lib/mission/mission-application-service.ts", "utf8");
 const route = readFileSync("src/app/api/missions/[missionId]/conversation/route.ts", "utf8");
-const commandCenter = readFileSync("src/components/product/MissionCommandCenter.tsx", "utf8");
 const workspace = readFileSync("src/components/product/MissionConversationWorkspace.tsx", "utf8");
 const productConversation = readFileSync("src/components/product/ConversationPanel.tsx", "utf8");
 
@@ -27,10 +26,7 @@ test("conversation route uses the established Mission principal boundary", () =>
   assert.match(route, /NextResponse\.json\(\{ conversation \}\)/);
 });
 
-test("Mission detail exposes a real lazy-loaded Conversation tab", () => {
-  assert.match(commandCenter, /\{ id: "conversation", label: "Conversation" \}/);
-  assert.match(commandCenter, /<MissionConversationWorkspace missionId=\{missionId\} workspaceId=\{mission\.workspaceId\} mission=\{mission\} viewerUserId=\{viewerUserId\} \/>/);
-  assert.match(commandCenter, /\{ id: "workspace", label: "Mission Workspace" \}/);
+test("the mission conversation workspace loads the conversation and deliveries", () => {
   assert.match(workspace, /\/conversation\?limit=200/);
   assert.match(workspace, /\/deliveries\?limit=500/);
   assert.match(workspace, /buildMissionThreads/);

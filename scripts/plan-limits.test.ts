@@ -81,13 +81,7 @@ test("workspace creation is server-enforced before inserts", () => {
 });
 
 test("dashboard create UI shows usage and disables creation at the free cap", () => {
-  const projects = read("src/components/product/ProjectsView.tsx");
   const switcher = read("src/components/product/WorkspaceSwitcher.tsx");
-  assert.match(projects, /workspaceUsage/);
-  assert.match(projects, /createLimitReached/);
-  assert.match(projects, /workspaceUsage\.workspaceCount/);
-  assert.match(projects, /workspaceUsage\.maxWorkspaces/);
-  assert.match(projects, /workspaceUsage\?\.message/);
   assert.match(switcher, /workspaceUsage/);
   assert.match(switcher, /createLimitReached/);
   assert.match(switcher, /workspaceUsage\?\.message/);

@@ -60,9 +60,7 @@ test("the Watchfloor stays opinionated: no layout preferences, no bulk review", 
   assert.ok(!/watchfloor_preferences/.test(read("supabase-schema.sql")));
 });
 
-test("the broken Watchfloor drill is replaced by the shell onboarding", () => {
-  assert.ok(existsSync(resolve(root, "src/components/product/DashboardOnboarding.tsx")));
-  assert.match(read("src/components/product/ProductShell.tsx"), /DashboardOnboarding/);
+test("the broken Watchfloor drill is gone", () => {
   assert.doesNotMatch(read("src/components/product/AgentWorkspaceClient.tsx"), /WatchfloorDrill|Run the drill/);
 });
 
@@ -145,9 +143,8 @@ test("the Watchfloor is live: self-refresh, tab badge, ticking clocks, opt-in no
 });
 
 
-test("sidebar sign out is an accessible symbol rather than text chrome", () => {
+test("sign out lives in the profile menu, with its icon", () => {
   const shell = read("src/components/product/ProductShell.tsx");
-  assert.match(shell, /aria-label="Sign out"/);
-  assert.match(shell, /<svg[^>]*viewBox="0 0 18 18"/);
-  assert.doesNotMatch(shell, />Sign out<|\? "Sign out"/);
+  assert.match(shell, /<LogOut size=\{16\} \/>Sign out/);
+  assert.match(shell, /label="Profile and workspace"/);
 });
