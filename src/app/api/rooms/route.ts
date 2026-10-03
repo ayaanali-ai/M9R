@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
 import { createClient } from "@/lib/supabase/server";
@@ -17,6 +16,8 @@ export async function POST(request: NextRequest) {
   const name = parseRoomName(body && typeof body === "object" && !Array.isArray(body) ? (body as { name?: unknown }).name : undefined);
   if (!name.ok) return NextResponse.json({ error: name.error }, { status: 400 });
 
+  // `stage` names the step that failed so a failure can be traced without putting database text in the response.
+  let stage = "workspace";
   try {
     const workspaceId = await resolveActiveOrDefaultProjectId(db, { id: user.id, email: user.email });
     const { data: membership, error: membershipError } = await db.from("workspace_members").select("role")
@@ -26,23 +27,25 @@ export async function POST(request: NextRequest) {
 
     // The creator becomes a member in an AFTER INSERT trigger, and rooms can only be read by members. Asking for the row back
     // in the same statement is therefore refused by row-level security, so insert first and read the room in a second step.
-    const roomId = randomUUID();
+    stage = "insert";
+    const roomId = globalThis.crypto.randomUUID();
     const { error } = await db.from("m9r_rooms").insert({ id: roomId, workspace_id: workspaceId, created_by: user.id, name: name.value });
     if (error) {
       console.error("Create room failed:", error.message);
-      return NextResponse.json({ error: "Could not create the room." }, { status: 500 });
+      return NextResponse.json({ error: "Could not create the room.", code: "ROOM_INSERT_FAILED" }, { status: 500 });
     }
+    stage = "read";
     const { data: room, error: readError } = await db.from("m9r_rooms")
       .select("id, workspace_id, created_by, name, status, policy_version, created_at")
       .eq("id", roomId)
       .single();
     if (readError || !room) {
       console.error("Read new room failed:", readError?.message);
-      return NextResponse.json({ error: "Could not create the room." }, { status: 500 });
+      return NextResponse.json({ error: "Could not create the room.", code: "ROOM_READ_FAILED" }, { status: 500 });
     }
     return NextResponse.json({ room }, { status: 201, headers: { "cache-control": "no-store" } });
   } catch (error) {
     console.error("Create room failed:", error instanceof Error ? error.message : error);
-    return NextResponse.json({ error: "Could not create the room." }, { status: 500 });
+    return NextResponse.json({ error: "Could not create the room.", code: `ROOM_${stage.toUpperCase()}_${error instanceof Error ? error.name.toUpperCase() : "ERROR"}` }, { status: 500 });
   }
 }
