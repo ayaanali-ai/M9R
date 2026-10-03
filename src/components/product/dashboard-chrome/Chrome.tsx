@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Activity, Check, ChevronDown, MoreHorizontal, PanelLeftClose, Plus, Search, X } from "lucide-react";
 import CursorAvatar from "./CursorAvatar";
+import { CHANNEL_COLORS, type ChannelColorKey } from "@/lib/channel-prefs";
 
 const GRADIENTS: Record<string, [string, string, string]> = {
   codex: ["#9FE6B5", "#3FAE6E", "#1C7A4C"],
@@ -16,7 +17,7 @@ const GRADIENTS: Record<string, [string, string, string]> = {
   other: ["#A4DAF5", "#4B9BCE", "#245D98"],
 };
 
-export function DashboardAvatar({ agent = "codex", size = 56, working = false }: { agent?: string; size?: number; working?: boolean }) {
+export function DashboardAvatar({ agent = "codex", size = 56, working = false, color }: { agent?: string; size?: number; working?: boolean; color?: ChannelColorKey }) {
   const [reduced, setReduced] = useState(true);
   useEffect(() => {
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -25,7 +26,7 @@ export function DashboardAvatar({ agent = "codex", size = 56, working = false }:
     media.addEventListener("change", update);
     return () => media.removeEventListener("change", update);
   }, []);
-  return <CursorAvatar size={size} gradient={GRADIENTS[agent] ?? GRADIENTS.other} state={working ? "thinking" : "idle"} paused={reduced || !working} effects={false} title={null} />;
+  return <CursorAvatar size={size} gradient={color ? CHANNEL_COLORS[color].gradient : (GRADIENTS[agent] ?? GRADIENTS.other)} state={working ? "thinking" : "idle"} paused={reduced || !working} effects={false} title={null} />;
 }
 
 export interface DashboardAction { label: string; icon?: ReactNode; onSelect: () => void; active?: boolean; disabled?: boolean }
@@ -70,15 +71,15 @@ export function DashboardSearch({ value, onChange, label = "Search" }: { value: 
   return <div className="m9r-dash-search-wrap"><label className="m9r-dash-search"><Search size={14} /><input type="search" aria-label={label} placeholder="Search" value={value} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (event.key === "Escape") onChange(""); }} /></label></div>;
 }
 
-export function DashboardContactContents({ name, preview, time, agent, working }: { name: string; preview: string; time?: string; agent?: string; working?: boolean }) {
-  return <><span className="m9r-dash-contact-avatar"><DashboardAvatar agent={agent} working={working} size={40} />{working && <i aria-label="Working" />}</span><span className="m9r-dash-contact-copy"><span className="m9r-dash-contact-heading"><strong>{name}</strong>{time && <time>{time}</time>}</span><span className="m9r-dash-contact-preview">{preview}</span></span></>;
+export function DashboardContactContents({ name, preview, time, agent, working, color }: { name: string; preview: string; time?: string; agent?: string; working?: boolean; color?: ChannelColorKey }) {
+  return <><span className="m9r-dash-contact-avatar"><DashboardAvatar agent={agent} working={working} size={40} color={color} />{working && <i aria-label="Working" />}</span><span className="m9r-dash-contact-copy"><span className="m9r-dash-contact-heading"><strong>{name}</strong>{time && <time>{time}</time>}</span><span className="m9r-dash-contact-preview">{preview}</span></span></>;
 }
 
-export function DashboardChatHeader({ name, agent, model, threads, actions, menuActions = [], search, onSearch }: {
-  name: string; agent?: string; model?: ReactNode; threads?: ReactNode; actions?: ReactNode; menuActions?: DashboardAction[]; search?: string; onSearch?: (value: string) => void;
+export function DashboardChatHeader({ name, agent, color, model, threads, actions, menuActions = [], search, onSearch }: {
+  name: string; agent?: string; color?: ChannelColorKey; model?: ReactNode; threads?: ReactNode; actions?: ReactNode; menuActions?: DashboardAction[]; search?: string; onSearch?: (value: string) => void;
 }) {
   return <header className="m9r-dash-chat-header">
-    <div className="m9r-dash-chat-header-row"><div className="m9r-dash-chat-identity"><DashboardAvatar agent={agent} size={28} /><h2>{name}</h2></div>
+    <div className="m9r-dash-chat-header-row"><div className="m9r-dash-chat-identity"><DashboardAvatar agent={agent} size={28} color={color} /><h2>{name}</h2></div>
       <div className="m9r-dash-chat-controls">{threads}{model}{actions}{(menuActions.length > 0 || onSearch) && <DashboardMenu label="Conversation actions" trigger={<MoreHorizontal size={18} />}>
         {close => <>{onSearch && <DashboardSearch value={search ?? ""} onChange={onSearch} label="Find in conversation" />}{menuActions.map(action => <button type="button" key={action.label} disabled={action.disabled} onClick={() => { close(); action.onSelect(); }}>{action.icon}<span>{action.label}</span>{action.active && <Check size={14} />}</button>)}</>}
       </DashboardMenu>}</div>

@@ -1845,3 +1845,18 @@ test("linkSessionToRun returns a structured result and never silently swallows a
   assert.match(svc, /isMissingColumnError\(snapshotError\)/);
   assert.match(svc, /migration required: apply supabase-agent-runs\.sql/);
 });
+
+test("channels can be edited and deleted from the conversation menu; built-in channels keep their name and cannot be deleted", () => {
+  const panel = read("src/components/product/ConversationPanel.tsx");
+  const dialog = read("src/components/product/ChannelEditDialog.tsx");
+  const service = read("src/lib/conversation-service.ts");
+  const route = read("src/app/api/dashboard/conversations/[id]/route.ts");
+  assert.match(panel, /label: selected\.channel_kind === "dm" \? "Edit conversation" : "Edit channel"/);
+  assert.match(dialog, /method: "DELETE"/);
+  assert.match(dialog, /disabled=\{channel\.builtIn \|\| busy\}/, "built-in channels cannot be renamed");
+  assert.match(dialog, /\{!channel\.builtIn \? \(/, "the delete button is absent for built-in channels");
+  assert.match(dialog, /ProductConfirmDialog/, "deleting asks first");
+  assert.match(service, /Built-in workspace channels cannot be renamed\./);
+  assert.match(service, /Built-in workspace channels cannot be deleted\./);
+  assert.match(route, /name: typeof body\?\.name === "string"/);
+});

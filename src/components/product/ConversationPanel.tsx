@@ -8,6 +8,8 @@ import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, Slid
 import { ChannelWelcome } from "./ChannelWelcome";
 import { DashboardChatHeader, DashboardPicker } from "./dashboard-chrome/Chrome";
 import { DashboardModels } from "./dashboard-chrome/DashboardModels";
+import ChannelEditDialog from "./ChannelEditDialog";
+import { useChannelColors } from "@/lib/channel-prefs";
 import { ClipboardCheck, Plus, ArrowUp } from "lucide-react";
 import { useComposerAutosize } from "./useComposerAutosize";
 import { TerminalWorkspace, type PtyRoomSession } from "./TerminalWorkspace";
@@ -815,6 +817,8 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     return () => clearTimeout(timer);
   }, [notice]);
   const [replyTargetId, setReplyTargetId] = useState<string | null>(null);
+  const [editingChannel, setEditingChannel] = useState(false);
+  const channelColors = useChannelColors();
   const [pendingTaskContracts, setPendingTaskContracts] = useState<TaskCardContract[]>([]);
   const [pendingEvidenceRequests, setPendingEvidenceRequests] = useState<PendingEvidenceRequest[]>([]);
   const [evidenceDecisionBusyId, setEvidenceDecisionBusyId] = useState<string | null>(null);
@@ -2341,7 +2345,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 sidePanelMode) -- both used to be buried in a "more actions"
                 dropdown or a full-screen modal; this is the one consistent
                 mechanism for both. */}
-            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"}
+            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"} color={channelColors[selected.id]}
               threads={<DashboardPicker label="Choose conversation" value="Thread" icon={<Plus size={12} />} options={conversations.map(conversation => ({ id: conversation.id, label: channelDisplayName(conversation) }))} onSelect={selectConversation} />}
               model={<DashboardModels agents={agents.filter(agent => selected.participant_connection_ids.includes(agent.connectionId ?? ""))} conversationId={selected.id} />}
               actions={<>{onOpenReview && <button type="button" aria-label="Ready for review" title="Ready for review" onClick={onOpenReview} data-active={reviewActive}><ClipboardCheck size={18} />{Boolean(pendingReviewCount) && <i className="m9r-dash-notification-dot" />}</button>}</>}
@@ -2349,6 +2353,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
               menuActions={[
                 ...(onOpenPeople ? [{ label: "Members", onSelect: onOpenPeople, active: peopleActive }] : []),
                 ...(onOpenDrafts ? [{ label: "Docs", onSelect: onOpenDrafts, active: draftsActive }] : []),
+                { label: selected.channel_kind === "dm" ? "Edit conversation" : "Edit channel", onSelect: () => setEditingChannel(true) },
                 ...(TERMINAL_ENABLED ? [{ label: "Terminal", onSelect: () => setTerminalActive(true) }] : []),
               ]}
             />
@@ -3003,6 +3008,18 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
         onConfirm={() => void confirmDeleteMessage()}
         onCancel={() => setConfirmDeleteMessageTarget(null)}
       />
+      {editingChannel && selected && (
+        <ChannelEditDialog
+          channel={{
+            id: selected.id,
+            topic: selected.topic,
+            description: selected.description ?? null,
+            kind: selected.channel_kind === "dm" ? "dm" : "channel",
+            builtIn: channelGroupForConversation({ channelSlug: selected.channel_slug, channelKind: selected.channel_kind, topic: selected.topic }) === "core",
+          }}
+          onClose={() => setEditingChannel(false)}
+        />
+      )}
     </section>
   );
 }

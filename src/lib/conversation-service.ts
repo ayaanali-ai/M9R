@@ -1256,7 +1256,7 @@ export async function removeHumanFromConversation(conversationId: string, target
   if(error) throw new AgentJoinError("Could not update channel membership.", "CHANNEL_MEMBERSHIP_FAILED", 503);
 }
 
-export async function updateDashboardConversation(input: { conversationId: string; action: "archive" | "restore" | "update" | "pause_agents" | "resume_agents"; description?: string; isPrivate?: boolean }): Promise<void> {
+export async function updateDashboardConversation(input: { conversationId: string; action: "archive" | "restore" | "update" | "pause_agents" | "resume_agents"; description?: string; isPrivate?: boolean; name?: string }): Promise<void> {
   const context = await dashboardUserContext();
   await requireChannelManager(context);
   const conversation = await ownedConversation(context, input.conversationId);
@@ -1276,10 +1276,27 @@ export async function updateDashboardConversation(input: { conversationId: strin
   if (input.action === "update") {
     if (typeof input.description === "string") update.description = input.description.replace(/\s+/g, " ").trim().slice(0, 240) || null;
     if (typeof input.isPrivate === "boolean") update.is_private = input.isPrivate;
+    if (typeof input.name === "string") {
+      // Built-in channels are recognised by their name, so renaming one would turn it into an ordinary channel (or an ordinary one into a built-in).
+      if (channelGroupForConversation({ channelSlug: conversation.channel_slug, channelKind: conversation.channel_kind, topic: conversation.topic }) === "core") {
+        throw new AgentJoinError("Built-in workspace channels cannot be renamed.", "BUILT_IN_CHANNEL_RENAME_FORBIDDEN", 400);
+      }
+      const topic = input.name.replace(/\s+/g, " ").trim();
+      const slug = channelSlug(topic);
+      if (!slug || topic.length > 80) throw new AgentJoinError("Channel name is invalid.", "INVALID_CHANNEL", 400);
+      if (channelGroupForConversation({ channelSlug: slug, channelKind: "channel", topic }) === "core") {
+        throw new AgentJoinError("That name is reserved for a built-in channel.", "RESERVED_CHANNEL_NAME", 400);
+      }
+      update.topic = topic;
+      update.channel_slug = slug;
+    }
   }
   if (Object.keys(update).length === 0) throw new AgentJoinError("No channel changes were supplied.", "INVALID_CHANNEL_UPDATE", 400);
   const { error } = await requireService().from("agent_conversations").update(update).eq("id", conversation.id).eq("workspace_id", context.workspaceId);
-  if (error) throw new AgentJoinError("Could not update the channel.", "CHANNEL_UPDATE_FAILED", 500);
+  if (error) {
+    if (typeof update.channel_slug === "string") throw new AgentJoinError("A channel with that name may already exist.", "CHANNEL_UPDATE_FAILED", 409);
+    throw new AgentJoinError("Could not update the channel.", "CHANNEL_UPDATE_FAILED", 500);
+  }
 }
 
 /**
