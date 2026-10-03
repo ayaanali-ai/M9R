@@ -155,7 +155,7 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   }
 
   let dictation: Dictation | null = null;
-  let noticeTimer = 0;
+  const noticeTimer = 0;
   const showNotice = (text: string, bad: boolean) => {
     State.chatHistory.push({ id: nextId++, role: "assistant", content: bad ? text : `(${text})` });
     State.notify();
