@@ -1,6 +1,12 @@
 (function () {
   "use strict";
   if (window.top !== window) return;
+  // The dashboard already has its own in-page chat, composer and @mention menu. The floating presence overlay (the pill,
+  // the dock) is for agents working on OTHER pages; on M9R's own dashboard it has nothing to show and only sits on top of
+  // the app, at a higher z-index than the app's own @mention menu, catching its clicks. The dashboard marks its own pages
+  // with data-m9r-app-shell (src/app/dashboard/layout.tsx) specifically so this check never depends on guessing a
+  // hostname or port, which would be wrong for a dev server or a future domain.
+  if (typeof document.querySelector === "function" && document.querySelector("[data-m9r-app-shell]")) return;
   // The document can outlive an MV3 service worker. The previous content script must release its
   // listeners, timers and overlay before another injection claims the same document.
   if (typeof window.__m9rContentDispose === "function") window.__m9rContentDispose();

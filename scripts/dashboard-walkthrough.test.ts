@@ -19,7 +19,7 @@ test("the product tour is retired: no overlay, no auto-start, no help page", () 
 test("the first-run card replaces the setup checklist and never shows for a connected workspace", () => {
   const page = read("src/app/dashboard/agents/page.tsx");
   const card = read("src/components/product/FirstRunCard.tsx");
-  assert.match(page, /!agents\.some\(\(agent\) => agent\.connected\) && <FirstRunCard \/>/);
+  assert.match(page, /!agents\.some\(\(agent\) => agent\.registered\) && <FirstRunCard \/>/);
   assert.match(card, /Connect your first agent/);
   assert.doesNotMatch(card, /create run|seed|synthetic/i);
 });

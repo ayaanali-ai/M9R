@@ -21,7 +21,9 @@ test("W1a the endpoint strip is gone; connection state lives in the sidebar and 
   const shell = read("src/components/product/ProductShell.tsx");
   const card = read("src/components/product/FirstRunCard.tsx");
   assert.doesNotMatch(agentsPage, /WorkspaceEndpointCard/);
-  assert.match(agentsPage, /agents\.some\(\(agent\) => agent\.connected\)/);
+  // Gated on `registered` (a real connection), not `connected` (a live heartbeat within 90s) -- confirmed live, the
+  // card reappeared ~90s after a genuine `m9r-cli connect` approval because nothing kept the heartbeat fresh.
+  assert.match(agentsPage, /agents\.some\(\(agent\) => agent\.registered\)/);
   assert.match(agentsPage, /<FirstRunCard \/>/);
   assert.match(card, /npx m9r-cli init/);
   assert.match(shell, /agents? connected/);

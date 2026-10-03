@@ -309,7 +309,11 @@ export default async function AgentsDashboardPage() {
   return (
     <div className="wf-atmosphere">
       <div className="mx-auto w-full max-w-[1400px]">
-        {!agents.some((agent) => agent.connected) && <FirstRunCard />}
+        {/* Gated on `registered` (a real connection exists), not `connected` (a heartbeat within the last 90 seconds).
+            `connected` briefly goes false right after `m9r-cli connect` approves, before anything keeps the heartbeat
+            fresh, which made this card reappear on an agent that was genuinely connected. The offline banner already
+            covers the "registered but not currently live" state. */}
+        {!agents.some((agent) => agent.registered) && <FirstRunCard />}
         <AgentWorkspaceClient
           agents={agents}
           viewerUserId={user?.id ?? null}
