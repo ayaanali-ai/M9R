@@ -45,7 +45,6 @@ function belongsToSuite(name) {
       "engine-mcp-smoke.test.ts",
       "engine-update-core.test.ts",
       "export-aware-spec.test.mjs",
-      "frame-common-ring.test.js",
       "finding-ledger-core.test.ts",
       "live-session-core.test.ts",
       "mcp-inbox.test.ts",

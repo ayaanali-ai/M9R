@@ -104,16 +104,16 @@ export function validateStoreManifest(manifest) {
   if (manifest.optional_host_permissions !== undefined) fail("site access must not require per-site prompts");
   if (manifest.optional_permissions !== undefined && JSON.stringify(manifest.optional_permissions) !== JSON.stringify(["debugger"])) fail("the only optional permission is debugger, for opt-in quiet mode");
   if (manifest.chrome_url_overrides !== undefined) fail("the store build must not override Chrome's New Tab page");
-  // The overlay embeds the pill (and the older thread pill and message bar) as extension frames inside pages, so a page's scripts cannot read what the
-  // owner types. That requires exactly those pages, the one-pill bundle folder, and the static provider badges to be web-accessible. Nothing else may be.
+  // The overlay embeds the pill as an extension frame inside pages, so a page's scripts cannot read what the owner types. That requires exactly
+  // the one-pill bundle folder and the static provider badges to be web-accessible. Nothing else may be.
   const war = manifest.web_accessible_resources;
-  const expectedResources = ["assets/providers/*.svg", "composer.html", "pill-next/*", "pill.html"];
+  const expectedResources = ["assets/providers/*.svg", "pill-next/*"];
   if (!Array.isArray(war) || war.length !== 1
     || JSON.stringify([...(war[0].resources ?? [])].sort()) !== JSON.stringify(expectedResources)
     || JSON.stringify(war[0].matches) !== JSON.stringify(["http://*/*", "https://*/*"])
     || Object.keys(war[0]).some((key) => !["resources", "matches"].includes(key))) {
     // use_dynamic_url is deliberately not allowed: it changes the frames' origin, and the service worker's own-frame check would then refuse every owner command.
-    fail("only the pill and message-bar frames and the static provider badge SVGs may be web-accessible");
+    fail("only the pill frame bundle and the static provider badge SVGs may be web-accessible");
   }
   if (manifest.background?.service_worker !== "src/background.js") fail("unexpected service worker entry point");
   if (manifest.action?.default_popup !== "permission.html") fail("unexpected action popup");
@@ -184,7 +184,7 @@ export async function buildStorePackage(outputPath) {
     const stage = path.join(tempRoot, "package");
     await mkdir(stage, { recursive: true });
     // The pages and styles the overlay embeds as frames, and the M9R mark their styles mask onto.
-    for (const name of ["permission.html", "pill.html", "composer.html", "frame.css"]) {
+    for (const name of ["permission.html"]) {
       await copyFile(path.join(browserRoot, name), path.join(stage, name));
     }
     // The one-pill bundle (built from pill/ with `npm run build:ext`); a package without it would silently ship no pill.

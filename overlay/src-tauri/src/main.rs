@@ -71,7 +71,7 @@ const PILL: &str = "pill";
 const COLLAPSED_W: f64 = 220.0;
 const TOP_MARGIN: f64 = 8.0;
 
-// ── One-pill window (opt-in with M9R_PILL_NEXT=1) ───────────────────────────────────────────────────────────────
+// ── One-pill window (default; M9R_PILL_NEXT=0 for the older overlay UI) ───────────────────────────────────────────────────────────────
 // The new pill UI draws its own island inside a fixed, transparent, top-centre window and tells this side three things:
 // where the island is (so everything around it stays click-through), when it has folded away (the window shrinks to a
 // wake strip), and when it needs the keyboard (the message field). The old overlay UI does not use any of this.
@@ -86,7 +86,8 @@ const WAKE_H: f64 = 6.0;
 const HIT_MARGIN: f64 = 14.0;
 
 fn next_mode() -> bool {
-    std::env::var("M9R_PILL_NEXT").as_deref() == Ok("1")
+    // The one pill is the default; M9R_PILL_NEXT=0 starts the older overlay UI instead.
+    std::env::var("M9R_PILL_NEXT").as_deref() != Ok("0")
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

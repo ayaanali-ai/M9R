@@ -52,8 +52,6 @@
     },
     {
       "resources": [
-        "pill.html",
-        "composer.html",
         "pill-next/*"
       ],
       "matches": [

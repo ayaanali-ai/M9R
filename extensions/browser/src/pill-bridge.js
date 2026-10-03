@@ -8,7 +8,7 @@
 (function (global) {
   "use strict";
 
-  const FRAME_PAGES = ["pill.html", "composer.html", "pill-next/index.html"];
+  const FRAME_PAGES = ["pill-next/index.html"];
   const NONCE_KEY = "m9rPillNonces";
   const SITE_SCRIPT_ID = "m9r-granted-sites";
   const CONTENT_JS = ["src/presence-logic.js", "src/dock-logic.js", "src/presence-overlay.js", "src/content.js"];

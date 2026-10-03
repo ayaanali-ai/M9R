@@ -117,7 +117,7 @@ test("store manifest grants ordinary-site access at install and leaves Chrome's 
   assert.equal("chrome_url_overrides" in manifest, false);
   assert.equal("content_scripts" in manifest, false);
   assert.deepEqual(manifest.permissions, ["tabs", "scripting", "alarms", "storage", "nativeMessaging", "search"]);
-  assert.deepEqual(manifest.web_accessible_resources, [{ resources: ["assets/providers/*.svg", "composer.html", "pill-next/*", "pill.html"], matches: ["http://*/*", "https://*/*"] }]);
+  assert.deepEqual(manifest.web_accessible_resources, [{ resources: ["assets/providers/*.svg", "pill-next/*"], matches: ["http://*/*", "https://*/*"] }]);
   assert.ok(manifest.description.length <= 132);
 });
 
@@ -146,7 +146,7 @@ test("store manifest guard rejects unreviewed permissions, extra APIs, and page-
     (manifest) => { manifest.web_accessible_resources[0].resources.push("permission.html"); },
     (manifest) => { manifest.web_accessible_resources[0].matches = ["<all_urls>"]; },
     (manifest) => { manifest.web_accessible_resources[0].use_dynamic_url = true; },
-    (manifest) => { manifest.web_accessible_resources[0].resources = manifest.web_accessible_resources[0].resources.filter((r) => r !== "pill.html"); },
+    (manifest) => { manifest.web_accessible_resources[0].resources = manifest.web_accessible_resources[0].resources.filter((r) => r !== "pill-next/*"); },
     (manifest) => { manifest.externally_connectable = { matches: ["<all_urls>"] }; },
   ]) {
     const changed = structuredClone(baseline);
@@ -162,24 +162,20 @@ test("the owner grant UI prominently discloses what may be sent before site cons
   assert.match(page, /No page data is sent merely by granting browser permission/i);
 });
 
-test("the store package ships the pill, the message bar, their styles and the M9R mark, and everything it refers to is inside it", async () => {
+test("the store package ships the one pill bundle and the M9R mark, and everything it refers to is inside it", async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), "m9r-store-complete-"));
   try {
     await buildStorePackage(path.join(temp, "candidate.zip"));
     const files = zipFiles(await readFile(path.join(temp, "candidate.zip")));
-    for (const name of ["pill-next/index.html", "pill.html", "composer.html", "frame.css", "permission.html", "assets/m9r-mark.png", "src/composer.js", "src/pill.js", "src/frame-common.js", "src/mention-logic.js", "src/dock-logic.js"]) {
+    for (const name of ["pill-next/index.html", "permission.html", "assets/m9r-mark.png", "src/dock-logic.js"]) {
       assert.ok(files.has(name), `${name} is in the package`);
     }
     assert.equal(verifyPackageComplete(files), true);
     const broken = new Map(files);
-    broken.delete("frame.css");
-    assert.throws(() => verifyPackageComplete(broken), /missing files it refers to[\s\S]*frame\.css/);
-    const noMark = new Map(files);
-    noMark.delete("assets/m9r-mark.png");
-    assert.throws(() => verifyPackageComplete(noMark), /assets\/m9r-mark\.png/);
-    const noScript = new Map(files);
-    noScript.delete("src/composer.js");
-    assert.throws(() => verifyPackageComplete(noScript), /src\/composer\.js/);
+    broken.delete([...files.keys()].find((name) => /^pill-next\/assets\/.*\.js$/.test(name)));
+    assert.throws(() => verifyPackageComplete(broken), /missing files it refers to[\s\S]*pill-next\/assets/);
+    const noAssets = new Map([...files].filter(([name]) => !name.startsWith("pill-next/assets/")));
+    assert.throws(() => verifyPackageComplete(noAssets), /pill-next\/assets/);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }

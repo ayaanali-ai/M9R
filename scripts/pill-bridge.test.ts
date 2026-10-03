@@ -34,7 +34,7 @@ function load(opts: { origins?: string[] } = {}) {
   return { bridge, sent, registered };
 }
 
-const pillSender = (over: any = {}) => ({ id: ID, url: `${BASE}pill.html?n=${NONCE}`, tab: { id: 7, url: "https://example.com/", title: "Example" }, frameId: 0, ...over });
+const pillSender = (over: any = {}) => ({ id: ID, url: `${BASE}pill-next/index.html?n=${NONCE}`, tab: { id: 7, url: "https://example.com/", title: "Example" }, frameId: 0, ...over });
 const scriptSender = (over: any = {}) => ({ id: ID, url: "https://example.com/page", tab: { id: 7 }, frameId: 0, ...over });
 
 async function registerNonce(bridge: any) {
@@ -48,11 +48,11 @@ test("only this extension's pill frame with a registered nonce is accepted", asy
   assert.equal((await registerNonce(bridge)).ok, true);
   assert.equal(await isOwnFrame(pillSender()), true);
   assert.equal(await isOwnFrame(pillSender({ id: "someoneelse" })), false, "other extension");
-  assert.equal(await isOwnFrame(pillSender({ url: "https://evil.example/pill.html?n=" + NONCE })), false, "web page origin");
+  assert.equal(await isOwnFrame(pillSender({ url: "https://evil.example/pill-next/index.html?n=" + NONCE })), false, "web page origin");
   assert.equal(await isOwnFrame(pillSender({ url: `${BASE}permission.html?n=${NONCE}` })), false, "other extension page");
   assert.equal(await isOwnFrame(scriptSender()), false, "content script");
   assert.equal(await isOwnFrame(pillSender({ tab: { id: 8 } })), false, "nonce belongs to another tab");
-  assert.equal(await isOwnFrame(pillSender({ url: `${BASE}pill.html?n=ffffffffffffffffffffffffffffffff` })), false, "unknown nonce");
+  assert.equal(await isOwnFrame(pillSender({ url: `${BASE}pill-next/index.html?n=ffffffffffffffffffffffffffffffff` })), false, "unknown nonce");
 });
 
 test("commands from content scripts and web pages are rejected, from the pill they reach the broker", async () => {
