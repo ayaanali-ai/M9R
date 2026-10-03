@@ -1060,7 +1060,9 @@ function activityLine(event: ActivityEvent): string {
 export function ActivityPanel({ agents, onClose }: { agents: AgentView[]; onClose: () => void }) {
   const [events, setEvents] = useState<ActivityEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [clock, setClock] = useState(() => Date.now());
   const load = useCallback(() => {
+    setClock(Date.now());
     fetch("/api/dashboard/workspace-activity", { cache: "no-store" })
       .then((res) => res.json())
       .then((data: { events?: ActivityEvent[] }) => { setEvents(data.events ?? []); setError(null); })
@@ -1089,7 +1091,7 @@ export function ActivityPanel({ agents, onClose }: { agents: AgentView[]; onClos
               <li key={`${event.kind}-${event.id}`}>
                 {agent ? <AgentMark agentKey={agent.key} size={16} /> : <span aria-hidden className="m9r-activity-dot" />}
                 <span><strong>{agent?.label ?? "An agent"}</strong> {activityLine(event)}</span>
-                <time className="ol-mono" dateTime={event.at}>{relAt(event.at, Date.now())}</time>
+                <time className="ol-mono" dateTime={event.at}>{relAt(event.at, clock)}</time>
               </li>
             );
           })}
