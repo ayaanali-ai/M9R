@@ -11,6 +11,7 @@ test("the last Claude Code step becomes a plain phrase with only a verb and a sh
   assert.equal(lastClaudeActivity(tail([{ type: "tool_use", name: "Read", input: { file_path: "C:\\RunLeak\\runleak\\src\\lib\\native\\feed-core.ts" } }])), "Reading feed-core.ts");
   assert.equal(lastClaudeActivity(tail([{ type: "tool_use", name: "Edit", input: { file_path: "/a/b/page.tsx", old_string: "SECRET BODY", new_string: "x" } }])), "Editing page.tsx");
   assert.equal(lastClaudeActivity(tail([{ type: "tool_use", name: "Bash", input: { command: "npm run build" } }])), "Running npm run build");
+  assert.equal(lastClaudeActivity(tail([{ type: "tool_use", name: "PowerShell", input: { command: "$bin = \"$env:USERPROFILE\\.m9r\\bin\"; Rename-Item ...", description: "Swap the broker program" } }])), "Swap the broker program", "the tool's own short description wins over raw command text");
   assert.equal(lastClaudeActivity(tail([{ type: "tool_use", name: "Grep", input: { pattern: "projectRoomId" } }])), "Searching for projectRoomId");
   assert.equal(lastClaudeActivity(tail([{ type: "tool_use", name: "mcp__m9r__m9r_web_open", input: {} }])), "Using m9r_web_open");
   assert.equal(lastClaudeActivity(tail([{ type: "text", text: "Here is the answer" }])), "Writing a reply");

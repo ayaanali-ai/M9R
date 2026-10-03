@@ -17,7 +17,11 @@ function describeClaudeTool(name: string, input: Record<string, unknown>): strin
   switch (name) {
     case "Read": return `Reading ${base(input.file_path) || "a file"}`;
     case "Edit": case "MultiEdit": case "Write": case "NotebookEdit": return `Editing ${base(input.file_path ?? input.notebook_path) || "a file"}`;
-    case "Bash": case "PowerShell": return `Running ${clip(String(input.command ?? input.description ?? "a command"), 60)}`;
+    case "Bash": case "PowerShell": {
+      // The tool call carries a short human description of what the command is for; use it before the raw command text.
+      const description = typeof input.description === "string" ? clip(input.description, 70) : "";
+      return description || `Running ${clip(String(input.command ?? "a command"), 60)}`;
+    }
     case "Grep": return `Searching for ${clip(String(input.pattern ?? "text"), 40)}`;
     case "Glob": return "Looking for files";
     case "WebFetch": case "WebSearch": return "Searching the web";
