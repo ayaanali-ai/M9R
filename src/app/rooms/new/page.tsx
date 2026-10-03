@@ -108,7 +108,7 @@ export default function NewRoomPage() {
         <section className={styles.createContent} aria-labelledby="create-room-title">
           <p className={styles.eyebrow}>M9R · ROOM NETWORK</p>
           <h1 className={styles.createTitle} id="create-room-title">Create a room</h1>
-          <p className={styles.createLede}>Create a room from your M9R workspace. Guests can ask to join without an account; you decide who gets in.</p>
+          <p className={styles.createLede}>Create a room from your M9R workspace. People you invite sign in to ask to join; you decide who gets in.</p>
 
           {access === "checking" && <p className={styles.loadingMessage} role="status">Checking your workspace access…</p>}
 
@@ -149,7 +149,7 @@ export default function NewRoomPage() {
                 </button>
               </form>
 
-              <p className={styles.createFootnote}>Guests can request access from the link. You decide who gets in.</p>
+              <p className={styles.createFootnote}>People you invite can request access from the link once they sign in. You decide who gets in.</p>
             </>
           )}
 
@@ -158,7 +158,7 @@ export default function NewRoomPage() {
               <p className={styles.agentShelfCopy}>
                 {access === "guest"
                   ? "This browser is using a guest room session. Signing in here ends that session; you may need to reopen rooms you joined as a guest."
-                  : "Room hosts need an M9R workspace account. People you invite can still request to join without an account."}
+                  : "Room hosts need an M9R workspace account. People you invite need to sign in to request to join."}
               </p>
               {error && <p className={styles.inlineError} role="alert">{error}</p>}
               <button className={styles.primaryButton} type="button" onClick={() => void continueToSignIn()} disabled={signInBusy}>
