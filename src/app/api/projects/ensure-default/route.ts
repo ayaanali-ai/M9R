@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { ensureDefaultWorkspace, ProjectsServiceError } from "@/lib/projects-service";
 import { PlanLimitError } from "@/lib/plan-limits-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // POST /api/projects/ensure-default — one-time repair for the signed-in user.
@@ -17,10 +18,10 @@ export async function POST() {
     return NextResponse.json({ ok: true, project });
   } catch (err) {
     if (err instanceof PlanLimitError) {
-      return NextResponse.json({ error: err.message, code: err.code, usage: err.usage }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code, usage: err.usage }, { status: err.status });
     }
     if (err instanceof ProjectsServiceError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Ensure default workspace error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

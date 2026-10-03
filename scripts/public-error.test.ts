@@ -32,3 +32,29 @@ test("no source file tells a person to apply a migration", () => {
   walk(join(process.cwd(), "src"));
   assert.deepEqual(offenders, []);
 });
+
+test("API routes never return a raw error message unless it is on the reviewed list of person-facing ones", () => {
+  // Reviewed: these messages are written for people (validation, plan limits, role checks) or the route is development-only.
+  const reviewed = [
+    "api/auth/debug/route.ts",
+    "api/agent/_shared.ts",
+    "api/agent/endpoints/resolve/route.ts",
+    "api/dashboard/_shared.ts",
+    "api/dashboard/runs/[id]/evidence-authorization/route.ts",
+  ];
+  const offenders: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) { walk(path); continue; }
+      if (name !== "route.ts" && name !== "_shared.ts") continue;
+      const rel = path.split("\\").join("/").split("src/app/")[1];
+      if (reviewed.includes(rel)) continue;
+      readFileSync(path, "utf8").split(/\r?\n/).forEach((line, index) => {
+        if (/(?:error|detail): *[^,}]*\.message/.test(line) && !line.includes("publicErrorMessage") && !/^\s*(\/\/|\*)/.test(line)) offenders.push(`${rel}:${index + 1}`);
+      });
+    }
+  };
+  walk(join(process.cwd(), "src/app/api"));
+  assert.deepEqual(offenders, []);
+});

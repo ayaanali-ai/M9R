@@ -9,6 +9,7 @@ import {
   WorkspaceRulesError,
 } from "@/lib/workspace-rules-service";
 import type { RuleStatus } from "@/lib/generated-rules";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // PATCH  /api/workspace-rules/[id] — edit rule text or limited review status.
@@ -54,7 +55,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ error: "Nothing to update." }, { status: 400 });
   } catch (err) {
     if (err instanceof WorkspaceRulesError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Update workspace rule error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });
@@ -68,7 +69,7 @@ export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: str
     return NextResponse.json({ ok: true, deleted });
   } catch (err) {
     if (err instanceof WorkspaceRulesError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Delete workspace rule error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

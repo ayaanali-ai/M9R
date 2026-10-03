@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { userOwnsProject, ProjectsServiceError } from "@/lib/projects-service";
 import { ACTIVE_PROJECT_COOKIE, ACTIVE_PROJECT_COOKIE_OPTIONS } from "@/lib/active-project";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // POST /api/projects/active — switch the active workspace. Body: { projectId }
@@ -31,7 +32,7 @@ export async function POST(req: NextRequest) {
     return res;
   } catch (err) {
     if (err instanceof ProjectsServiceError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Switch project error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

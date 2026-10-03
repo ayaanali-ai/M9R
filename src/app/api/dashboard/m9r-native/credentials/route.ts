@@ -6,6 +6,7 @@ import {
   listProviderCredentialMetadata,
   deleteProviderCredential,
 } from "@/lib/mission/m9r-native-credential-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 /**
  * Item #32: dashboard-facing CRUD for a workspace's own model-provider
@@ -31,7 +32,7 @@ export async function GET() {
     const credentials = await listProviderCredentialMetadata(workspaceId);
     return NextResponse.json({ credentials });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Could not list credentials." }, { status: 401 });
+    return NextResponse.json({ error: publicErrorMessage(err instanceof Error ? err.message : "Could not list credentials.", 401) }, { status: 401 });
   }
 }
 
@@ -50,7 +51,7 @@ export async function POST(req: NextRequest) {
     await storeProviderCredential({ workspaceId, providerEnvVar, secret, createdByUserId: userId });
     return NextResponse.json({ ok: true });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Could not store the credential." }, { status: 400 });
+    return NextResponse.json({ error: publicErrorMessage(err instanceof Error ? err.message : "Could not store the credential.", 400) }, { status: 400 });
   }
 }
 
@@ -64,6 +65,6 @@ export async function DELETE(req: NextRequest) {
     await deleteProviderCredential(workspaceId, providerEnvVar);
     return NextResponse.json({ ok: true });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Could not delete the credential." }, { status: 400 });
+    return NextResponse.json({ error: publicErrorMessage(err instanceof Error ? err.message : "Could not delete the credential.", 400) }, { status: 400 });
   }
 }

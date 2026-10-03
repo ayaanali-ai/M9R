@@ -5,6 +5,7 @@ import {
   WorkspaceRulesError,
 } from "@/lib/workspace-rules-service";
 import { PlanLimitError } from "@/lib/plan-limits-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // POST /api/agent/rules/promote — promote a recommended rule to active.
@@ -38,10 +39,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, rule });
   } catch (err) {
     if (err instanceof WorkspaceRulesError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     if (err instanceof PlanLimitError) {
-      return NextResponse.json({ error: err.message, code: err.code, usage: err.usage }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code, usage: err.usage }, { status: err.status });
     }
     console.error("promote route error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

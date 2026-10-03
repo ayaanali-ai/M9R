@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { renameActiveWorkspace, activeWorkspaceName, ProjectsServiceError } from "@/lib/projects-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // GET /api/workspace/rename — the active workspace's current name.
 // PUT /api/workspace/rename — rename the active workspace. Body: { name: string }
@@ -11,7 +12,7 @@ export async function GET() {
     return NextResponse.json({ ok: true, name });
   } catch (err) {
     if (err instanceof ProjectsServiceError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Workspace name read error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });
@@ -33,7 +34,7 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ ok: true, project });
   } catch (err) {
     if (err instanceof ProjectsServiceError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Workspace rename error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

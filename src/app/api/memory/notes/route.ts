@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { AgentJoinError } from "@/lib/agent-join-service";
 import { listSyncedNotesForUser, saveSyncedNoteForUser } from "@/lib/shared-memory-service";
 import { resolveUserApiToken } from "@/lib/user-api-token-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,7 @@ async function userFrom(req: NextRequest): Promise<{ userId: string } | NextResp
 }
 
 function failure(error: unknown) {
-  if (error instanceof AgentJoinError) return NextResponse.json({ error: error.message }, { status: error.status });
+  if (error instanceof AgentJoinError) return NextResponse.json({ error: publicErrorMessage(error.message, error.status) }, { status: error.status });
   return NextResponse.json({ error: "Something went wrong." }, { status: 500 });
 }
 

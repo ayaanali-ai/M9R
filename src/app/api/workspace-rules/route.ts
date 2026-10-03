@@ -5,6 +5,7 @@ import {
   WorkspaceRulesError,
 } from "@/lib/workspace-rules-service";
 import type { GeneratedRule } from "@/lib/generated-rules";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // GET  /api/workspace-rules            — list the active workspace's rules.
@@ -44,7 +45,7 @@ export async function POST(req: NextRequest) {
 
 function handle(err: unknown) {
   if (err instanceof WorkspaceRulesError) {
-    return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+    return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
   }
   console.error("Workspace rules error:", err instanceof Error ? err.message : err);
   return NextResponse.json({ error: "Internal server error." }, { status: 500 });

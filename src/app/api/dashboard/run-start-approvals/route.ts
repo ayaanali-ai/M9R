@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { decideApprovalRequest } from "@/lib/approval-requests";
 import { isMissingOptionalTableError } from "@/lib/dashboard-optional-fallback";
 import { requireApproverRole, WorkspaceMembershipError } from "@/lib/workspace-membership-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 async function currentUserAndWorkspace(): Promise<{ userId: string; workspaceId: string } | null> {
   const db = await createClient();
@@ -83,7 +84,7 @@ export async function POST(req: NextRequest) {
     if (!result.ok) return NextResponse.json({ error: result.reason === "already_decided" ? "This request was already decided." : result.reason === "expired" ? "This request has expired." : "Could not record the decision." }, { status: 409 });
     return NextResponse.json({ ok: true });
   } catch (error) {
-    if (error instanceof WorkspaceMembershipError) return NextResponse.json({ error: error.message }, { status: error.status });
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not record the decision." }, { status: 409 });
+    if (error instanceof WorkspaceMembershipError) return NextResponse.json({ error: publicErrorMessage(error.message, error.status) }, { status: error.status });
+    return NextResponse.json({ error: publicErrorMessage(error instanceof Error ? error.message : "Could not record the decision.", 409) }, { status: 409 });
   }
 }

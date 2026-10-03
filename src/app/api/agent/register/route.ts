@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { validateRegisterInput } from "@/lib/agent-join";
 import { registerClaim, AgentJoinError } from "@/lib/agent-join-service";
 import { resolveBaseUrl, handleAgentError } from "../_shared";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // POST /api/agent/register — an agent requests a pending workspace connection.
@@ -40,7 +41,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(result, { status: 201 });
   } catch (err) {
     if (err instanceof AgentJoinError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     return handleAgentError(err);
   }

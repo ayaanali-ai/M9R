@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { MissionApiError } from "@/lib/mission/mission-application-errors";
 import { resolveMissionPrincipal, type MissionPrincipal, type ResolvePrincipalOptions } from "@/lib/mission/mission-principal";
+import { publicErrorMessage } from "@/lib/public-error";
 
 /** Shared helpers for /api/missions/* routes — one principal resolver, one error mapper, matching the /api/agent/* convention (see ../agent/_shared.ts) but keyed to Mission's own typed error taxonomy. */
 
@@ -11,7 +12,7 @@ export async function withMissionPrincipal(req: NextRequest, options: ResolvePri
 export function handleMissionApiError(err: unknown): NextResponse {
   if (err instanceof MissionApiError) {
     return NextResponse.json(
-      { error: err.message, code: err.code, correlationId: err.correlationId, detail: err.detail },
+      { error: publicErrorMessage(err.message, err.status), code: err.code, correlationId: err.correlationId, ...(err.status < 500 ? { detail: err.detail } : {}) },
       { status: err.status },
     );
   }

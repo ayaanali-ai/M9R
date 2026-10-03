@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { acceptWorkspaceInvite, WorkspaceMembershipError } from "@/lib/workspace-membership-service";
 import { ACTIVE_PROJECT_COOKIE, ACTIVE_PROJECT_COOKIE_OPTIONS } from "@/lib/active-project";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // POST /api/workspace/invites/accept — accept an invite. Body: { token }
@@ -28,7 +29,7 @@ export async function POST(req: NextRequest) {
     return res;
   } catch (err) {
     if (err instanceof WorkspaceMembershipError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Workspace invite accept error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

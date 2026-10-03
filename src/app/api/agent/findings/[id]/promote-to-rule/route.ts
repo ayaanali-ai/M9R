@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { reviewFinding } from "@/lib/finding-service";
 import { createRuleFromFinding, WorkspaceRulesError } from "@/lib/workspace-rules-service";
 import { handleAgentError } from "../../../_shared";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // POST /api/agent/findings/[id]/promote-to-rule — approve a Finding's evidence
@@ -82,7 +83,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json({ ok: true, review_state: "available", rule });
   } catch (err) {
     if (err instanceof WorkspaceRulesError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     return handleAgentError(err);
   }

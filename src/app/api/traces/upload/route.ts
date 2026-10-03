@@ -7,6 +7,7 @@ import {
 } from "@/lib/trace-upload";
 import { createClient } from "@/lib/supabase/server";
 import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // POST /api/traces/upload — upload a raw agent trace for forensic analysis.
@@ -189,7 +190,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     // Typed pipeline errors carry their own HTTP status and a safe message.
     if (err instanceof TraceUploadError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     // Anything else: log the message only (never the trace content) and 500.
     const message = err instanceof Error ? err.message : "Unknown error";

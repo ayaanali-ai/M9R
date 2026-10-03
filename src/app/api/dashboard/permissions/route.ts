@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
 import { listPendingPermissionsForWorkspace, decidePendingPermission } from "@/lib/bridge/bridge-permission-service";
 import { requireApproverRole, WorkspaceMembershipError } from "@/lib/workspace-membership-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 async function currentUserAndWorkspace(): Promise<{ userId: string; workspaceId: string } | null> {
   const db = await createClient();
@@ -38,7 +39,7 @@ export async function POST(req: NextRequest) {
     await decidePendingPermission({ id, workspaceId: ctx.workspaceId, approved, decidedByUserId: ctx.userId });
     return NextResponse.json({ ok: true });
   } catch (error) {
-    if (error instanceof WorkspaceMembershipError) return NextResponse.json({ error: error.message }, { status: error.status });
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not record the decision." }, { status: 409 });
+    if (error instanceof WorkspaceMembershipError) return NextResponse.json({ error: publicErrorMessage(error.message, error.status) }, { status: error.status });
+    return NextResponse.json({ error: publicErrorMessage(error instanceof Error ? error.message : "Could not record the decision.", 409) }, { status: 409 });
   }
 }

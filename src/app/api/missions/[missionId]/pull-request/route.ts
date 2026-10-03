@@ -3,6 +3,7 @@ import { MissionApiError } from "@/lib/mission/mission-application-errors";
 import { getMission } from "@/lib/mission/mission-application-service";
 import { proposePullRequest, listPullRequests } from "@/lib/mission/mission-pull-request-store";
 import { handleMissionApiError, queryWorkspaceId, withMissionPrincipal } from "../../_shared";
+import { publicErrorMessage } from "@/lib/public-error";
 
 export const dynamic = "force-dynamic";
 
@@ -53,7 +54,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ mis
     return NextResponse.json({ pullRequest: record }, { status: 201 });
   } catch (error) {
     if (error instanceof Error && !(error instanceof MissionApiError)) {
-      return NextResponse.json({ error: error.message, code: "validation_error" }, { status: 400 });
+      return NextResponse.json({ error: publicErrorMessage(error.message, 400), code: "validation_error" }, { status: 400 });
     }
     return handleMissionApiError(error);
   }
