@@ -6,7 +6,7 @@
   "description": "M9R web app: the multiplayer workspace and evidence layer for AI coding agents.",
   "scripts": {
     "dev": "next dev",
-    "build": "next build --turbopack",
+    "build": "node scripts/build.mjs",
     "build:webpack": "next build --webpack",
     "build:cloudflare": "node scripts/build-cloudflare.mjs",
     "preview:cloudflare": "opennextjs-cloudflare build && wrangler dev",
