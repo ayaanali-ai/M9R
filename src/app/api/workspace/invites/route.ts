@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
 import { createClient } from "@/lib/supabase/server";
 import { listWorkspaceInvites, WorkspaceMembershipError } from "@/lib/workspace-membership-service";
-import { publicErrorMessage } from "@/lib/public-error";
+import { logInternalError, publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // GET /api/workspace/invites — the active workspace's pending invites.
@@ -21,6 +21,7 @@ export async function GET() {
     return NextResponse.json({ ok: true, invites });
   } catch (err) {
     if (err instanceof WorkspaceMembershipError) {
+      logInternalError("Workspace invites error", err.message, err.status);
       return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Workspace invites error:", err instanceof Error ? err.message : err);

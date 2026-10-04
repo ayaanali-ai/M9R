@@ -6,7 +6,7 @@ import {
   inviteToWorkspace,
   WorkspaceMembershipError,
 } from "@/lib/workspace-membership-service";
-import { publicErrorMessage } from "@/lib/public-error";
+import { logInternalError, publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // GET  /api/workspace/members — the active workspace's roster.
@@ -56,6 +56,7 @@ export async function POST(req: NextRequest) {
 
 function handle(err: unknown) {
   if (err instanceof WorkspaceMembershipError) {
+    logInternalError("Workspace members error", err.message, err.status);
     return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
   }
   console.error("Workspace members error:", err instanceof Error ? err.message : err);

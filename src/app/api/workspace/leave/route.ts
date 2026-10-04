@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
 import { createClient } from "@/lib/supabase/server";
 import { leaveWorkspace, WorkspaceMembershipError } from "@/lib/workspace-membership-service";
-import { publicErrorMessage } from "@/lib/public-error";
+import { logInternalError, publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // POST /api/workspace/leave — the signed-in user leaves the active workspace.
@@ -22,6 +22,7 @@ export async function POST() {
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof WorkspaceMembershipError) {
+      logInternalError("Workspace leave error", err.message, err.status);
       return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Workspace leave error:", err instanceof Error ? err.message : err);

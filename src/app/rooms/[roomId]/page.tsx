@@ -52,7 +52,7 @@ type RoomHandoff = {
   eventId: string;
   sequence: number;
 };
-type PresenceEntry = { participantId?: string; displayName?: string; activity?: string };
+type PresenceEntry = { participantId?: string; activity?: string };
 
 function subscribeToLocationOrigin() {
   return () => {};
@@ -324,9 +324,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
         if (disposed) return;
         if (status === "SUBSCRIBED") {
           setRealtimeStatus("Live");
+          // No displayName here: the UI already resolves names from `members` via personName() (below), never
+          // from presence. Broadcasting one anyway just risks leaking an id fragment to any future presence reader.
           void presenceChannel.track({
             participantId: userId,
-            displayName: `Member ${userId.slice(0, 6)}`,
             activity: "viewing room",
           });
         } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
