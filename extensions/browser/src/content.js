@@ -182,7 +182,10 @@
           return;
         }
         // One pill: the agents, approvals and message box are a single extension frame, so a page's scripts cannot read what the owner types.
-        const pill = overlay.mountFrame("pill", chrome.runtime.getURL(`pill-next/index.html?n=${nonce}`), { w: WAKE_W, h: WAKE_H, top: 0 });
+        // No `top` here (unlike the old fixed-notch pill): mountFrame's own dock condition (kind === "pill" && M9RDock loaded && no
+        // fixed `top`) only turns on when `top` is absent, which is what lets the owner drag this pill to any edge of the page --
+        // dock-logic.js's track, spring physics and corner-turning were already built and unit-tested, just never engaged here.
+        const pill = overlay.mountFrame("pill", chrome.runtime.getURL(`pill-next/index.html?n=${nonce}`), { w: WAKE_W, h: WAKE_H });
         setRegistrationStage(pill ? "accepted" : "mount-failed");
       }).catch(() => setRegistrationStage("error"));
     } catch {
