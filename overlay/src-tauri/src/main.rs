@@ -145,9 +145,15 @@ fn heartbeat_json(at_ms: u128, visible: bool, pid: u32) -> String {
 
 fn spawn_heartbeat(app: AppHandle) {
     std::thread::spawn(move || loop {
-        if let Some(window) = app.get_webview_window(PILL) {
+        if let Some(_window) = app.get_webview_window(PILL) {
             let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-            let visible = window.is_visible().unwrap_or(false);
+            // `window.is_visible()` reflects whether the OS window exists at all, which is true almost
+            // constantly now that the overlay autostarts in the background -- even collapsed to its tiny
+            // wake strip, which the owner cannot actually see. That permanently told the broker "I'm
+            // showing," suppressing the in-page pill on every website, all the time. "Visible" for this
+            // one-pill-at-a-time handoff has to mean the island is actually expanded, not that its window
+            // happens to exist.
+            let visible = !NEXT.lock().map(|n| n.collapsed).unwrap_or(false);
             let path = heartbeat_path();
             // Write beside, then rename, so the broker never reads half a file.
             let tmp = path.with_extension("json.tmp");

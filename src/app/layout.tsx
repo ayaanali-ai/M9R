@@ -14,7 +14,7 @@ const description =
 // text). A generated (next/og ImageResponse) version was tried first but couldn't
 // reproduce the real page's serif headline rendering or the WebGL shader mark, so a
 // real capture is the actual right call here over a re-drawn one.
-const ogImage = `${siteUrl}/og-v2.jpg`;
+const ogImage = `${siteUrl}/og-v2.png`;
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -117,8 +117,8 @@ export const metadata: Metadata = {
     images: [
       {
         url: ogImage,
-        width: 800,
-        height: 362,
+        width: 1896,
+        height: 862,
         alt: "M9R — Your agents work together now",
       },
     ],
