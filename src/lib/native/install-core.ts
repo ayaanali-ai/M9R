@@ -165,10 +165,19 @@ function codexBlock(name: string, spec: McpServerSpec): string {
 
 /** Finds our marker comment and the table(s) it owns: everything up to (not including) the next `[` at line start that is not one of our own sub-tables, or EOF. */
 function codexBlockBounds(text: string, name: string): { start: number; end: number } | null {
-  const markerLine = `# ${MCP_MARKER} `;
-  const start = text.indexOf(markerLine);
-  if (start < 0) return null;
   const ownTable = new RegExp(`^\\[mcp_servers\\.${name}(\\.|\\])`);
+  const markerLine = `# ${MCP_MARKER} `;
+  let start = text.indexOf(markerLine);
+  if (start < 0) {
+    // No marker comment: either a fresh file, or a table this same name wrote before the marker existed. A bare
+    // `[mcp_servers.<name>]` header (ours, not merely a prefix match on another server's name) must still be found and
+    // replaced -- TOML forbids a duplicate table, so falling through to "append a new one" below would otherwise write
+    // an invalid file whenever someone reinstalls over an install that predates this comment. Confirmed live: this
+    // produced a `config.toml` Codex refused to parse at all ("duplicate key") on exactly that reinstall.
+    const bareMatch = text.match(new RegExp(`^\\[mcp_servers\\.${name}\\]`, "m"));
+    if (!bareMatch || bareMatch.index === undefined) return null;
+    start = bareMatch.index;
+  }
   const rest = text.slice(start);
   const lines = rest.split("\n");
   let end = start;
