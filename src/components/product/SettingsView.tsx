@@ -75,6 +75,12 @@ export default function SettingsView({ email, userId, username, billingEnabled }
         )}
         {pane === "agents" && (
           <>
+            <section className="ol-panel p-4" aria-labelledby="connect-agent-title">
+              <h2 id="connect-agent-title" className="text-base font-semibold">Connect an agent</h2>
+              <p className="mt-1 text-sm">Run this in your project terminal with Node.js and npm installed, then approve the connection in your browser.</p>
+              <code className="ol-mono mt-2 block rounded border p-2">npx m9r-cli connect</code>
+              <p className="mt-2 text-sm">For browser actions, run <code>npx m9r-cli web setup</code> afterward and follow the extension installation instructions.</p>
+            </section>
             <ConnectedAgentsSection />
             <ConnectComputerSection />
             <details className="m9r-advanced">
@@ -557,6 +563,8 @@ interface ConnectedAgentRow {
   agentKind: string;
   repoHint: string | null;
   lastSeenAt: string | null;
+  live: boolean;
+  canDisconnect: boolean;
 }
 
 function ConnectedAgentsSection() {
@@ -576,12 +584,12 @@ function ConnectedAgentsSection() {
   useEffect(() => {
     let active = true;
     fetch("/api/dashboard/connections")
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => { if (!res.ok) throw new Error("Could not load registered agents."); return res.json(); })
       .then((body: { connections?: ConnectedAgentRow[] } | null) => {
         if (!active || !body) return;
         setConnections(body.connections ?? []);
       })
-      .catch(() => {})
+      .catch((cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "Could not load registered agents."); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, []);
@@ -609,13 +617,13 @@ function ConnectedAgentsSection() {
   return (
     <Section
       id="connections"
-      title="Connected agents"
+      title="Registered agents"
       description="Revoke a coding agent's access. Historical runs, evidence, Run Passports, and review decisions are preserved. Only its ability to connect again is revoked."
     >
       {loading ? (
         <p className="p-4 text-[12px] text-[color:var(--ol-text-muted)]">Loading…</p>
       ) : connections.length === 0 ? (
-        <p className="p-4 text-[12px] text-[color:var(--ol-text-muted)]">No agents are currently connected.</p>
+        <p className="p-4 text-[12px] text-[color:var(--ol-text-muted)]">No agents are registered in this workspace.</p>
       ) : (
         <ul className="divide-y divide-[color:var(--ol-border-subtle)]">
           {connections.map((row) => (
@@ -624,7 +632,7 @@ function ConnectedAgentsSection() {
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px] font-medium text-[color:var(--ol-text-primary)]">{providerLabel(row.agentKind)}</div>
                 <div className="ol-mono text-[11px] text-[color:var(--ol-text-muted)]">
-                  {row.repoHint || "workspace"} · seen {relAt(row.lastSeenAt, clock)}
+                  {row.live ? "Live" : "Registered · offline"} · {row.repoHint || "workspace"} · seen {relAt(row.lastSeenAt, clock)}
                 </div>
               </div>
               {/* This was `variant="ghost"` -- quieter than the "Copy ID"
@@ -634,7 +642,7 @@ function ConnectedAgentsSection() {
                   that's a single-prominent-action pattern; a per-row list
                   action doesn't fit a bordered zone box, so this uses the
                   variant directly. */}
-              <Button type="button" variant="danger" size="sm" onClick={() => setDisconnectTarget(row)}>
+              <Button type="button" variant="danger" size="sm" disabled={!row.canDisconnect} onClick={() => setDisconnectTarget(row)}>
                 Disconnect / revoke
               </Button>
             </li>

@@ -98,15 +98,11 @@ function listFiles(directory) {
   });
 }
 
-// The plain JS `realpathSync` only resolves "." / ".." segments; it does not ask Windows to normalize
-// an 8.3 short-name alias (e.g. "RUNNER~1") back to its long form. `.native` calls the OS directly, so
-// two different-looking paths to the same file come back identical. Strip the `\\?\` extended-length
-// prefix Windows' native call can add, so a mismatch (a real bug) still prints a readable path.
 function canonicalPath(path) {
   return realpathSync.native(path).replace(/^\\\\\?\\/, "").toLowerCase();
 }
 
-test("installer contains no Node/npm dependency and does not bypass PowerShell policy", () => {
+test("installer contains no Node/npm dependency and changes no saved PowerShell policy", () => {
   const source = readFileSync(installer, "utf8");
   assert.doesNotMatch(source, /(?:&\s*|Get-Command\s+)(?:npm|node)(?:\.exe)?\b/i);
   assert.doesNotMatch(source, /ExecutionPolicy\s+Bypass|Invoke-Expression|\biex\b/i);
@@ -116,7 +112,8 @@ test("installer contains no Node/npm dependency and does not bypass PowerShell p
   assert.match(source, /maintenanceExe uninstall/);
   const clickEntry = readFileSync(resolve("scripts/install-m9r.cmd"), "utf8");
   assert.match(clickEntry, /powershell\.exe/i);
-  assert.doesNotMatch(clickEntry, /ExecutionPolicy\s+Bypass/i);
+  assert.match(clickEntry, /powershell\.exe[^\r\n]*-ExecutionPolicy\s+Bypass[^\r\n]*-File/i);
+  assert.doesNotMatch(clickEntry, /Set-ExecutionPolicy/i);
 });
 
 test("standalone release packages the web broker beside the engine", () => {
@@ -177,10 +174,8 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
     assert.deepEqual(readFileSync(installedBroker), readFileSync(join(engineDist, "m9r-web-broker.exe")));
     const brokerOwnershipPath = join(profile.profile, ".m9r", "web-broker-install.json");
     const brokerOwnership = JSON.parse(readFileSync(brokerOwnershipPath, "utf8"));
-    // Compare canonical forms, not raw strings: on a runner whose Windows account name triggers an 8.3
-    // short alias (e.g. "RUNNER~1" for "runneradmin"), Node's tmpdir() and PowerShell's
-    // [IO.Path]::GetFullPath can each normalize that alias differently for the exact same file on disk.
-    // realpathSync.native (unlike the plain JS realpathSync) asks Windows itself to resolve the alias.
+    // Windows may spell the same file differently when it uses an 8.3 account alias.
+    // Resolve both paths through the OS before comparing their identities.
     assert.equal(canonicalPath(brokerOwnership.path), canonicalPath(installedBroker));
     assert.equal(brokerOwnership.sha256, createHash("sha256").update(readFileSync(installedBroker)).digest("hex"));
     assert.ok(listFiles(profile.claude).some((file) => /settings\.json$/i.test(file)));

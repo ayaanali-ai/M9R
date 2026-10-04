@@ -38,6 +38,7 @@ import {
   isExpired,
 } from "@/lib/agent-join";
 import type { RuleEffectivenessDecision } from "@/lib/rule-effectiveness";
+import { connectionLiveness } from "@/lib/agent-dashboard-presenter";
 
 export class AgentJoinError extends Error {
   readonly status: number;
@@ -695,14 +696,15 @@ export interface DashboardConnectionSummary {
   agentKind: string;
   repoHint: string | null;
   lastSeenAt: string | null;
+  registered: boolean;
+  live: boolean;
+  canDisconnect: boolean;
 }
 
 /**
- * List this human's active agent connections for Settings' "Connected
- * agents" section. Cookie-authenticated; RLS on `agent_connections` is the
- * ownership proof, same as disconnectAgentConnection above -- no explicit
- * workspace filter needed because the cookie client can only see rows RLS
- * already scopes to the signed-in user.
+ * List registrations in the active workspace, including offline teammates.
+ * Cookie authentication and RLS prove visibility; only the registering human
+ * can use the existing disconnect endpoint for a row.
  */
 export async function listConnectedAgentsForDashboard(): Promise<DashboardConnectionSummary[]> {
   const cookieDb = await createClient();
@@ -711,12 +713,14 @@ export async function listConnectedAgentsForDashboard(): Promise<DashboardConnec
     data: { user },
   } = await cookieDb.auth.getUser();
   if (!user) throw new AgentJoinError("Sign in to view connected agents.", "UNAUTHENTICATED", 401);
+  const workspaceId = await resolveActiveOrDefaultProjectId(cookieDb, { id: user.id, email: user.email, name: (user.user_metadata?.name as string | undefined) ?? null });
+  if (!workspaceId) return [];
 
   const { data, error } = await cookieDb
     .from("agent_connections")
-    .select("id, agent_kind, repo_hint, last_seen_at")
+    .select("id, agent_kind, repo_hint, last_seen_at, created_by")
     .eq("status", "active")
-    .eq("created_by", user.id)
+    .eq("workspace_id", workspaceId)
     .is("revoked_at", null)
     .order("last_seen_at", { ascending: false, nullsFirst: false });
   if (error) {
@@ -729,6 +733,9 @@ export async function listConnectedAgentsForDashboard(): Promise<DashboardConnec
     agentKind: row.agent_kind as string,
     repoHint: (row.repo_hint as string | null) ?? null,
     lastSeenAt: (row.last_seen_at as string | null) ?? null,
+    registered: true,
+    live: connectionLiveness(row.last_seen_at as string | null) === "active",
+    canDisconnect: row.created_by === user.id,
   }));
 }
 

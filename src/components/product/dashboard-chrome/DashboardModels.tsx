@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { ChevronDown } from "lucide-react";
 import type { AgentView } from "@/lib/agent-workspace-data";
 import type { AgentRunSettings } from "@/lib/agent-run-settings";
+import { effortsForModel } from "@/lib/agent-run-settings";
 import type { AvailableModelOption } from "@/lib/available-model-options";
 import { AgentMark } from "../WorkspaceUI";
 import { DashboardMenu } from "./Chrome";
@@ -23,6 +24,7 @@ function AgentSettings({ agent, conversationId }: { agent: AgentView; conversati
   const [effort, setEffort] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const efforts = data ? effortsForModel(data, model || null) : null;
   useEffect(() => {
     const abort = new AbortController();
     const query = new URLSearchParams({ connectionId: agent.connectionId! });
@@ -30,14 +32,16 @@ function AgentSettings({ agent, conversationId }: { agent: AgentView; conversati
     void fetch(`/api/agent/connection-settings?${query}`, { signal: abort.signal }).then(async response => {
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? "Settings unavailable.");
-      setData(body); setModel(body.defaults.model ?? ""); setEffort(body.defaults.effort ?? "");
+      setData(body); setModel(body.defaults.model ?? "");
+      setEffort(effortsForModel(body, body.defaults.model)?.some(option => option.id === body.defaults.effort) ? body.defaults.effort : "");
     }).catch(error => { if (!abort.signal.aborted) setNotice(error.message); });
     return () => abort.abort();
   }, [agent.connectionId, conversationId]);
   function changeScope(value: string) {
     setScope(value);
     const settings = value === "channel" ? data?.effective : data?.defaults;
-    setModel(settings?.model ?? ""); setEffort(settings?.effort ?? "");
+    setModel(settings?.model ?? "");
+    setEffort(data && settings && effortsForModel(data, settings.model)?.some(option => option.id === settings.effort) ? settings.effort ?? "" : "");
   }
   async function save(inherit = false) {
     setBusy(true); setNotice(null);
@@ -60,8 +64,8 @@ function AgentSettings({ agent, conversationId }: { agent: AgentView; conversati
   return <section className="p-3"><h3><AgentMark agentKey={agent.key} size={16} />{agent.label}</h3>
     {data && <fieldset disabled={busy} className="grid gap-2"><label className="text-xs">Apply to<select className="product-input" value={scope} onChange={event => changeScope(event.target.value)}><option value="connection">Agent defaults</option>{conversationId && <option value="channel">This channel only</option>}</select></label>
       <label className="text-xs">Model<select className="product-input" value={model} onChange={event => { setModel(event.target.value); setEffort(""); }}><option value="">Provider default</option>{data.models?.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
-      <label className="text-xs">Reasoning effort<select className="product-input" value={effort} onChange={event => setEffort(event.target.value)}><option value="">Provider default</option>{data.efforts?.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
-      {!data.efforts?.length && <p className="text-xs">This provider has not reported effort choices.</p>}
+      <label className="text-xs">Reasoning effort<select className="product-input" value={effort} onChange={event => setEffort(event.target.value)}><option value="">Provider default</option>{efforts?.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
+      {!efforts?.length && <p className="text-xs">This provider has not reported effort choices for this model.</p>}
       <button type="button" disabled={busy} onClick={() => void save()}>Save settings</button>
       {scope === "channel" && <button type="button" disabled={busy} onClick={() => void save(true)}>Inherit agent defaults</button>}
     </fieldset>}

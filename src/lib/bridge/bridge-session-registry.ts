@@ -13,7 +13,7 @@ export interface BridgeSessionRecord {
   providerAdapterId: string;
   providerSessionRef: string | null;
   /** Best-effort: this session's own ACP server's real, live model choices (see AgentSessionHandle). Null when the provider exposes none -- never a guessed/hardcoded list. */
-  availableModels?: { id: string; label: string }[] | null;
+  availableModels?: { id: string; label: string; efforts?: { id: string; label: string }[] | null }[] | null;
   availableEfforts?: { id: string; label: string }[] | null;
   state: BridgeSessionState;
   capabilities: Partial<ProviderCapabilities> & Partial<Record<InteractiveProviderCapability, boolean>>;

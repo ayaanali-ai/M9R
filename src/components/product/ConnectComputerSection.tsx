@@ -48,9 +48,7 @@ export default function ConnectComputerSection() {
     finally { setBusy(false); }
   }
 
-  // The installed program lives in the user's .m9r folder and is not on PATH, so the Windows command uses its full path.
-  const windowsCommand = fresh ? String.raw`& "$env:USERPROFILE\.m9r\bin\m9r-engine.exe" cloud connect ` + fresh : "";
-  const command = fresh ? `m9r cloud connect ${fresh}` : "";
+  const windowsCommand = fresh ? `npx m9r-cli cloud connect ${fresh}` : "";
   return (
     <section className="ol-panel p-4" aria-labelledby="connect-computer-title">
       <h2 id="connect-computer-title" className="text-base font-semibold">Connect a computer to team memory</h2>
@@ -59,11 +57,9 @@ export default function ConnectComputerSection() {
       {fresh && (
         <div className="mt-3">
           <p className="text-xs">Copy this now. It is shown only once.</p>
-          <p className="mt-2 text-xs">Windows (PowerShell):</p>
+          <p className="mt-2 text-xs">Run in a terminal with Node.js and npm installed:</p>
           <code className="ol-mono mt-1 block break-all rounded border border-[color:var(--ol-border-subtle)] p-2 text-[12px]">{windowsCommand}</code>
           <Button variant="secondary" size="sm" onClick={() => { void navigator.clipboard?.writeText(windowsCommand).then(() => setCopied(true), () => setError("Could not copy. Select the command and copy it.")); }}>{copied ? "Copied" : "Copy command"}</Button>
-          <p className="mt-3 text-xs">If <code>m9r</code> is on your PATH, this works too:</p>
-          <code className="ol-mono mt-1 block break-all rounded border border-[color:var(--ol-border-subtle)] p-2 text-[12px]">{command}</code>
         </div>
       )}
       <div className="mt-3"><Button variant="primary" size="sm" disabled={busy} onClick={() => void create()}>Create a token</Button></div>

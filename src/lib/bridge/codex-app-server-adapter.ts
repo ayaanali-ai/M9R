@@ -346,15 +346,23 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
       const catalog = record(await state.client.request("model/list", {}).catch(() => null));
       const models = Array.isArray(catalog?.data) ? catalog.data.map(record).filter((value): value is Record<string, unknown> => Boolean(value)) : [];
       session.modelCatalog = models;
-      session.handle.availableModels = models.flatMap(model => typeof model.model === "string" ? [{ id: model.model, label: typeof model.displayName === "string" ? model.displayName : model.model }] : []);
+      session.handle.availableModels = models.flatMap(model => typeof model.model === "string" ? [{
+        id: model.model,
+        label: typeof model.displayName === "string" ? model.displayName : model.model,
+        efforts: Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts.flatMap(value => {
+          const option = record(value);
+          return typeof option?.reasoningEffort === "string" ? [{ id: option.reasoningEffort, label: option.reasoningEffort }] : [];
+        }) : null,
+      }] : []);
     }
     if (!input.model && session.model && !session.defaultModel) throw new Error("Provider default model is unavailable; cannot reset this session safely.");
     const selectedModel = input.model ?? session.defaultModel;
     const selected = session.modelCatalog.find(model => model.model === selectedModel);
     if (input.model && !selected) throw new Error("Model is not reported by this Codex connection.");
     const choices = Array.isArray(selected?.supportedReasoningEfforts) ? selected.supportedReasoningEfforts.map(record).filter((option): option is Record<string,unknown> => Boolean(option)) : [];
-    session.handle.availableEfforts = choices.flatMap(option => typeof option.reasoningEffort === "string" ? [{id:option.reasoningEffort,label:option.reasoningEffort}] : []);
-    if (input.effort && !session.handle.availableEfforts.some(option => option.id === input.effort)) throw new Error("Effort is not supported by the selected Codex model.");
+    const selectedEfforts = choices.flatMap(option => typeof option.reasoningEffort === "string" ? [{id:option.reasoningEffort,label:option.reasoningEffort}] : []);
+    session.handle.availableEfforts = session.handle.availableModels?.find(option => option.id === session.defaultModel)?.efforts ?? null;
+    if (input.effort && !selectedEfforts.some(option => option.id === input.effort)) throw new Error("Effort is not supported by the selected Codex model.");
     session.model = selectedModel;
     session.effort = input.effort;
   }
