@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AgentJoinError, authenticateAgent, bearerFrom } from "@/lib/agent-join-service";
 import { sendConversationMessage, listConversationMessagesForAgent } from "@/lib/conversation-service";
+import { enforceAgentMessageRateLimit } from "@/lib/rate-limit";
 import { handleAgentError } from "../../../_shared";
 
 // ---------------------------------------------------------------------------
@@ -65,9 +66,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (rawOutcome !== undefined && rawOutcome !== null && (!MESSAGE_OUTCOMES.includes(rawOutcome as MessageOutcome))) {
       throw new AgentJoinError(`outcome must be one of: ${MESSAGE_OUTCOMES.join(", ")}.`, "INVALID_OUTCOME", 400);
     }
+    const recipientConnectionId = optionalMessageString(body, "recipient_connection_id", "recipient_connection_id");
+    // Identity-keyed, not IP-keyed (see enforceAgentMessageRateLimit): stops one agent flooding another through the
+    // pill/CLI without touching the generous per-IP budget ordinary dashboard traffic from the same machine needs.
+    const limited = await enforceAgentMessageRateLimit(agent.connectionId, recipientConnectionId);
+    if (limited) {
+      return NextResponse.json({ error: limited.error }, { status: 429, headers: { "Retry-After": String(limited.retryAfterSeconds) } });
+    }
     const message = await sendConversationMessage(agent, {
       conversationId,
-      recipientConnectionId: optionalMessageString(body, "recipient_connection_id", "recipient_connection_id"),
+      recipientConnectionId,
       kind: body.kind,
       body: body.body,
       parentMessageId: optionalMessageString(body, "parent_message_id", "parent_message_id"),
