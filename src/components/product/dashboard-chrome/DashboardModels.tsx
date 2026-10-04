@@ -30,8 +30,13 @@ function AgentSettings({ agent, conversationId }: { agent: AgentView; conversati
     const query = new URLSearchParams({ connectionId: agent.connectionId! });
     if (conversationId) query.set("conversationId", conversationId);
     void fetch(`/api/agent/connection-settings?${query}`, { signal: abort.signal }).then(async response => {
+      // Check .ok before parsing: a Cloudflare 5xx returns an HTML error page, and response.json() on that throws
+      // "Unexpected token '<'" -- a real error, just not the one the person sees without this.
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? "Settings unavailable.");
+      }
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error ?? "Settings unavailable.");
       setData(body); setModel(body.defaults.model ?? "");
       setEffort(effortsForModel(body, body.defaults.model)?.some(option => option.id === body.defaults.effort) ? body.defaults.effort : "");
     }).catch(error => { if (!abort.signal.aborted) setNotice(error.message); });
@@ -47,8 +52,10 @@ function AgentSettings({ agent, conversationId }: { agent: AgentView; conversati
     setBusy(true); setNotice(null);
     try {
       const response = await fetch("/api/agent/connection-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ connectionId: agent.connectionId, model: inherit ? null : model || null, effort: inherit ? null : effort || null, ...(scope === "channel" ? { conversationId, inherit } : {}) }) });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Could not save settings.");
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? "Could not save settings.");
+      }
       setNotice(inherit ? "Channel now inherits this agent's defaults." : "Saved. Applies before the next turn; the current turn keeps its settings.");
       setData(previous => {
         if (!previous) return previous;

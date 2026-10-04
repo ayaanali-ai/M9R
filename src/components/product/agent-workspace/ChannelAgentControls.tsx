@@ -7,11 +7,11 @@ interface Roster {canManage:boolean;canRemove:boolean;agents:{connectionId:strin
 export function ChannelAgentControls({conversationId}:{conversationId:string}) {
  const router=useRouter();const [roster,setRoster]=useState<Roster|null>(null);const [error,setError]=useState<string|null>(null);const [busy,setBusy]=useState(false);const [remove,setRemove]=useState<string|null>(null);
  const load=useCallback(async()=>{
-  const res=await fetch(`/api/dashboard/channel-agents?conversationId=${encodeURIComponent(conversationId)}`,{cache:"no-store"});const body=await res.json();if(!res.ok)throw new Error(body.error??"Could not load channel agents.");setRoster(body);
+  const res=await fetch(`/api/dashboard/channel-agents?conversationId=${encodeURIComponent(conversationId)}`,{cache:"no-store"});if(!res.ok){const body=await res.json().catch(()=>null) as {error?:string}|null;throw new Error(body?.error??"Could not load channel agents.");}setRoster(await res.json());
  },[conversationId]);
  useEffect(()=>{let active=true;void Promise.resolve().then(()=>{if(active)return load();}).catch(e=>{if(active)setError(e.message);});return()=>{active=false;};},[load]);
  async function change(connectionId:string,add:boolean){setBusy(true);setError(null);try{
-  const res=await fetch("/api/dashboard/channel-agents",{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({conversationId,connectionId,add})});const body=await res.json();if(!res.ok)throw new Error(body.error??"Could not change membership.");await load();router.refresh();
+  const res=await fetch("/api/dashboard/channel-agents",{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({conversationId,connectionId,add})});if(!res.ok){const body=await res.json().catch(()=>null) as {error?:string}|null;throw new Error(body?.error??"Could not change membership.");}await load();router.refresh();
  }catch(e){setError(e instanceof Error?e.message:"Could not change membership.");}finally{setBusy(false);setRemove(null);}}
  return <section className="p-3 border-b border-[color:var(--ol-border-subtle)]"><h3 className="text-sm font-medium">Channel agents</h3><p className="text-xs text-[color:var(--ol-text-muted)]">Channel removal restricts this channel&apos;s messages and memory. Disconnect in Settings to revoke workspace access.</p>
   {error&&<p role="alert">{error}</p>}{!roster&&!error&&<p>Loading agents…</p>}

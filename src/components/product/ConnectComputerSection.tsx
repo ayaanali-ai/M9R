@@ -19,8 +19,13 @@ export default function ConnectComputerSection() {
   const load = useCallback(async () => {
     try {
       const response = await fetch("/api/dashboard/settings/api-tokens", { cache: "no-store" });
+      // .ok first: an HTML error page (a Cloudflare 5xx) makes response.json() throw "Unexpected token '<'" instead of
+      // the real error, and that confusing message is what reaches the person.
+      if (!response.ok) {
+        const data = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(data?.error ?? "Could not load your computers.");
+      }
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? "Could not load your computers.");
       setTokens(data.tokens ?? []);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not load your computers."); }
   }, []);
@@ -30,8 +35,11 @@ export default function ConnectComputerSection() {
     setBusy(true); setError(null); setCopied(false);
     try {
       const response = await fetch("/api/dashboard/settings/api-tokens", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "A computer" }) });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(data?.error ?? "Could not create the token.");
+      }
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? "Could not create the token.");
       setFresh(data.token.token);
       await load();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create the token."); }
