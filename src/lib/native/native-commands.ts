@@ -146,7 +146,7 @@ const sameFile = (a: string, b: string): boolean => {
   try { return statSync(a).size === statSync(b).size && createHash("sha256").update(readFileSync(a)).digest("hex") === createHash("sha256").update(readFileSync(b)).digest("hex"); } catch { return false; }
 };
 
-function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; targetDir: string; missingSource: string[]; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string } } {
+function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; targetDir: string; missingSource: string[]; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; overlay?: { from: string; to: string } } {
   const targetDir = join(nativePaths(io).m9r, "bin");
   const engine = engineSource(io.env);
   if (engine && !io.env.M9R_HOOK_ENTRY?.trim()) {
@@ -157,7 +157,16 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
     const nativeInputHost = nativeInputSource && existsSync(nativeInputSource)
       ? { from: nativeInputSource, to: join(targetDir, "m9r-native-input-host.exe") }
       : undefined;
-    return { needed: !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)) || (!!nativeInputHost && !sameFile(nativeInputHost.from, nativeInputHost.to)), sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim, nativeInputHost };
+    // The pill overlay ships beside the engine in every release package, same as the native-input host. Before this,
+    // nothing ever copied or refreshed it: a stale build could sit in .m9r\bin indefinitely across every reinstall.
+    const overlaySource = process.platform === "win32" ? join(dirname(engine), "m9r-overlay.exe") : "";
+    const overlay = overlaySource && existsSync(overlaySource)
+      ? { from: overlaySource, to: join(targetDir, "m9r-overlay.exe") }
+      : undefined;
+    return {
+      needed: !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)) || (!!nativeInputHost && !sameFile(nativeInputHost.from, nativeInputHost.to)) || (!!overlay && !sameFile(overlay.from, overlay.to)),
+      sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim, nativeInputHost, overlay,
+    };
   }
   const sourceDir = hookSourceDir(io.env);
   if (io.env.M9R_HOOK_ENTRY?.trim()) return { needed: false, sourceDir, targetDir, missingSource: [] };
@@ -166,13 +175,14 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
   return { needed, sourceDir, targetDir, missingSource };
 }
 
-function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string } }): string[] {
+function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; overlay?: { from: string; to: string } }): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
   if (plan.engine) {
     const written = [plan.engine.to];
     copyFileSync(plan.engine.from, plan.engine.to);
     if (plan.shim) { copyFileSync(plan.shim.from, plan.shim.to); written.push(plan.shim.to); }
     if (plan.nativeInputHost) { copyFileSync(plan.nativeInputHost.from, plan.nativeInputHost.to); written.push(plan.nativeInputHost.to); }
+    if (plan.overlay) { copyFileSync(plan.overlay.from, plan.overlay.to); written.push(plan.overlay.to); }
     return written;
   }
   const written: string[] = [];

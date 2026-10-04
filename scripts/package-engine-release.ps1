@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root 'engine\dist'
-$assets = @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe')
+$assets = @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe')
 $extension = Join-Path $root 'cli\dist\extension'
 $destination = [IO.Path]::GetFullPath($OutputDirectory)
 

@@ -338,19 +338,29 @@ test("with the engine and the native hook side by side, the settings point at th
   writeFileSync(shim, "stand-in native hook", "utf8");
   const nativeInputHost = join(s.home, "m9r-native-input-host.exe");
   if (process.platform === "win32") writeFileSync(nativeInputHost, "stand-in trusted input host", "utf8");
+  const overlay = join(s.home, "m9r-overlay.exe");
+  if (process.platform === "win32") writeFileSync(overlay, "stand-in pill overlay", "utf8");
   delete s.io.env.M9R_HOOK_ENTRY;
   s.io.env.M9R_ENGINE = engine;
   assert.equal(await s.run("setup", ["--yes"]), 0);
   const bin = join(s.p.m9r, "bin");
   assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native"), "utf8"), "stand-in native hook");
   if (process.platform === "win32") assert.equal(readFileSync(join(bin, "m9r-native-input-host.exe"), "utf8"), "stand-in trusted input host");
+  if (process.platform === "win32") assert.equal(readFileSync(join(bin, "m9r-overlay.exe"), "utf8"), "stand-in pill overlay");
   assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine"), "utf8"), "stand-in engine");
   const settings = readFileSync(s.p.settings, "utf8");
   assert.match(settings, /m9r-hook(\.exe|-native)?.{1,2} UserPromptSubmit claude-code/);
   assert.doesNotMatch(settings, /m9r-engine/);
+  // A reinstall with a changed overlay binary must replace the stale copy, not leave it in place.
+  if (process.platform === "win32") {
+    writeFileSync(overlay, "stand-in pill overlay v2", "utf8");
+    assert.equal(await s.run("setup", ["--yes"]), 0);
+    assert.equal(readFileSync(join(bin, "m9r-overlay.exe"), "utf8"), "stand-in pill overlay v2");
+  }
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(existsSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native")), false);
   if (process.platform === "win32") assert.equal(existsSync(join(bin, "m9r-native-input-host.exe")), false);
+  if (process.platform === "win32") assert.equal(existsSync(join(bin, "m9r-overlay.exe")), false);
   s.done();
 });
 

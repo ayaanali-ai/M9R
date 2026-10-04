@@ -109,7 +109,7 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
         }
     } finally { $archive.Dispose() }
     [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
-    foreach ($name in @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'INSTALLATION.txt')) {
+    foreach ($name in @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'INSTALLATION.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Destination $name) -PathType Leaf)) {
             throw "The release package is incomplete; '$name' is missing."
         }

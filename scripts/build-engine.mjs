@@ -19,7 +19,7 @@ const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r
 
 if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle)) throw new Error("cli/dist is missing: run `npm run build:cli` first.");
 rmSync(work, { recursive: true, force: true });
-for (const name of [exeName, brokerExeName, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native", ...(process.platform === "win32" ? ["m9r-native-input-host.exe"] : [])]) {
+for (const name of [exeName, brokerExeName, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native", ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "m9r-overlay.exe"] : [])]) {
   rmSync(join(out, name), { force: true });
 }
 mkdirSync(work, { recursive: true });
@@ -85,6 +85,17 @@ if (process.platform === "win32") {
   r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "native-input-host"), env: cargoEnv, stdio: "inherit" });
   if (r.status !== 0) process.exit(r.status ?? 1);
   copyFileSync(join(root, "native-input-host", "target", "release", "m9r-native-input-host.exe"), join(out, "m9r-native-input-host.exe"));
+
+  // The pill overlay was never part of this pipeline before: a stale, manually-built copy could sit in
+  // %USERPROFILE%\.m9r\bin forever since no release or install step ever replaced it. Build and ship it
+  // like every other managed binary so a real install/reinstall actually updates what the user sees.
+  r = spawnSync("npm", ["run", "build"], { cwd: join(root, "overlay"), env: cargoEnv, stdio: "inherit", shell: true });
+  if (r.status !== 0) process.exit(r.status ?? 1);
+  copyFileSync(join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe"), join(out, "m9r-overlay.exe"));
 }
 console.log(`Built ${exe} (${Math.round(readFileSync(exe).length / 1e6)} MB)`);
 console.log(`Built ${brokerExe} (${Math.round(readFileSync(brokerExe).length / 1e6)} MB)`);
+if (process.platform === "win32") {
+  const overlayExe = join(out, "m9r-overlay.exe");
+  console.log(`Built ${overlayExe} (${Math.round(readFileSync(overlayExe).length / 1e6)} MB)`);
+}
