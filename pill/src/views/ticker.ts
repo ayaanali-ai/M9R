@@ -78,6 +78,10 @@ export class Ticker {
   private queue: string[] = [];
   private startMs: number | null = null;
   private displayIndex = -1;
+  /** Which agent's steps are currently shown. A focus switch must always re-seed the display text, even when the
+   * newly-focused agent's stepIndex happens to equal the previous agent's -- idle agents commonly sit at index 0,
+   * which otherwise fell through every branch below and left the previous agent's text on screen indefinitely. */
+  private displayTaskId: string | null = null;
 
   constructor() {
     this.el = h("div", { class: "ticker" }, this.a.el, this.b.el, this.c.el);
@@ -98,6 +102,8 @@ export class Ticker {
   sync(task: AgentTask | null) {
     const steps = task && task.steps.length > 0 ? task.steps : ["…"];
     const idx = task ? Math.min(task.stepIndex, steps.length - 1) : -1;
+    const taskChanged = (task?.id ?? null) !== this.displayTaskId;
+    this.displayTaskId = task?.id ?? null;
 
     // First render: drop straight into place, no animation.
     if (this.displayIndex < 0) {
@@ -108,8 +114,10 @@ export class Ticker {
       return;
     }
 
-    // The session restarted (steps were cleared): re-seed rather than scroll.
-    if (idx < this.displayIndex) {
+    // The focus moved to a different agent, or that agent's own session restarted (steps were cleared):
+    // re-seed rather than scroll. A plain `idx < this.displayIndex` check alone missed the case where the
+    // new agent's stepIndex happens to equal the old one -- very common when it is idle at index 0.
+    if (taskChanged || idx < this.displayIndex) {
       this.queue = [];
       this.startMs = null;
       this.displayIndex = idx;
