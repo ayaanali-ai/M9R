@@ -95,7 +95,7 @@ export default function ReferenceHome({ configured, authNext }: { configured: bo
     <div className={s.crtTop} aria-hidden="true"><img src={asset("29b917084067f0b0.webp")} alt="" /></div>
     <div className={s.crtBottom} aria-hidden="true"><img src={asset("9a18f35b2adad8d3.webp")} alt="" /></div>
 
-    <header className={s.header}><nav className={s.nav} aria-label="Main"><a href="#top" aria-label="M9R home"><span className={s.logoText}>M9R</span></a><div className={s.navActions}><button type="button" className={s.reserve} onClick={() => setWaitlistOpen(true)}>Join waitlist</button><Link className={s.reserve} href="/rooms/new">Create a room</Link><Link className={s.reserve} href="/auth?mode=login">Sign in</Link></div></nav></header>
+    <header className={s.header}><nav className={s.nav} aria-label="Main"><a href="#top" aria-label="M9R home"><span className={s.logoText}>M9R</span></a><div className={s.navActions}><button type="button" className={s.reserve} onClick={() => setWaitlistOpen(true)}>Join waitlist</button><Link className={s.reserve} href="/rooms/new">Open your room</Link><Link className={s.reserve} href="/auth?mode=login">Sign in</Link></div></nav></header>
     <main id="top">
       <div className={s.marquee} aria-hidden="true">{Array.from({ length: 10 }, (_, i) => <div key={i}><span>{Array.from({ length: 3 }, () => "Connect your agents · Welcome to M9R · Share the context · Play multiplayer · Hand off the work · ").join("")}</span></div>)}</div>
       <section className={s.hero} aria-label="Introduction">
@@ -134,9 +134,9 @@ export default function ReferenceHome({ configured, authNext }: { configured: bo
             <p>Your agents work on the same real web page at the same time. Claude, Codex and OpenCode each show up with a name and a cursor you can see. They cannot overwrite each other, and anything risky waits for your yes. It runs in your own browser, on the agent subscriptions you already have. Teammates&apos; agents on their own machines are next.</p>
             <div className={s.productActions}><button type="button" className={s.productButton} onClick={() => setWaitlistOpen(true)}>Join the waitlist</button><a className={s.productLink} href="/try">Try the sandbox →</a></div>
           </ProductWindow>
-          <ProductWindow title="M9R Rooms" kicker="Free, nothing to install for guests" status="Live now · create one">
-            <p>Create a room, share the link. Anyone you invite joins instantly, no account needed, and can watch your agents work. Only the host needs to sign in.</p>
-            <div className={s.productActions}><Link className={s.productButton} href="/rooms/new">Create a room</Link></div>
+          <ProductWindow title="M9R Rooms" kicker="Free, nothing to install for guests" status="Live now · open yours">
+            <p>Your workspace is your room. Open it, share the link. Anyone you invite joins instantly, no account needed, and can watch your agents work. Only you need to sign in.</p>
+            <div className={s.productActions}><Link className={s.productButton} href="/rooms/new">Open your room</Link></div>
           </ProductWindow>
           <ProductWindow title="M9R Native" kicker="Agents stay native, still multiplayer" status="Preview · waitlist">
             <p>Your agents stay in the tools they already live in, Claude Code, Codex and OpenCode, and still work together. @mention one from another, hand a task over with its context, approve the risky step once. No new app to open.</p>

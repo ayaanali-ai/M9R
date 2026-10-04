@@ -7,7 +7,7 @@ import { projectRoomArtifacts } from "@/lib/rooms/room-artifacts";
 import styles from "../room-url.module.css";
 
 type RoomView = { room: { id: string; name: string; status: string }; membership: { status: string } };
-type PendingMember = { memberId: string; userId: string; displayName?: string | null; requestedAt: string };
+type PendingMember = { memberId: string; userId: string; displayName?: string | null; guestEmail?: string | null; requestedAt: string };
 type RoomEvent = {
   id: string;
   sequence: number | string;
@@ -194,6 +194,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const clientRef = useRef<ReturnType<typeof createClient>>(null);
   const userIdRef = useRef<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [needsGuestIdentity, setNeedsGuestIdentity] = useState(false);
+  const [guestName, setGuestName] = useState("");
+  const [guestEmail, setGuestEmail] = useState("");
+  const [guestBusy, setGuestBusy] = useState(false);
   const tasks = useMemo(() => projectRoomTasks(events), [events]);
   const handoffs = useMemo(() => projectRoomHandoffs(events), [events]);
   const artifacts = useMemo(() => projectRoomArtifacts(events), [events]);
@@ -278,38 +282,71 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     }
   }, [roomId]);
 
+  const pollRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+
+  // Completes the join: mints/confirms a session, sends the join request (with guest
+  // name/email when this is a fresh anonymous visitor), then starts polling the room.
+  const completeJoin = useCallback(async (identity?: { displayName: string; email: string }) => {
+    const supabase = createClient();
+    if (!supabase) { setError("Supabase is not configured."); return; }
+    const guest = await ensureGuestSession(supabase);
+    if (!guest.ok) {
+      // Never show the provider's wording. Guest access depends on a project setting, so say what the person can do instead.
+      setError(/anonymous/i.test(guest.error)
+        ? `Guest access is not available yet. Sign in at /auth?next=/rooms/${roomId} to ask to join this room.`
+        : "Could not join this room right now. Please try again.");
+      return;
+    }
+    const { data: userData } = await supabase.auth.getUser();
+    if (!userData.user) { setError("Your room session could not be verified."); return; }
+    clientRef.current = supabase;
+    userIdRef.current = userData.user.id;
+    setCurrentUserId(userData.user.id);
+    // First contact requests a join (idempotent -- a returning active member stays active).
+    const joinResponse = await fetch(`/api/rooms/${roomId}/join`, {
+      method: "POST",
+      headers: identity ? { "content-type": "application/json" } : undefined,
+      body: identity ? JSON.stringify({ displayName: identity.displayName, email: identity.email }) : undefined,
+    }).catch(() => null);
+    if (!joinResponse?.ok) {
+      const joinData = await joinResponse?.json().catch(() => ({})) as { error?: string } | undefined;
+      setError(joinData?.error ?? "Could not send your request to join. Reload the page to try again.");
+      return;
+    }
+    setNeedsGuestIdentity(false);
+    await refresh();
+    pollRef.current = setInterval(() => { void refresh(); }, 4000);
+  }, [roomId, refresh]);
+
   useEffect(() => {
     let cancelled = false;
-    let poll: ReturnType<typeof setInterval> | undefined;
     (async () => {
       const supabase = createClient();
       if (!supabase) { setError("Supabase is not configured."); return; }
-      const guest = await ensureGuestSession(supabase);
-      if (!guest.ok) {
-        // Never show the provider's wording. Guest access depends on a project setting, so say what the person can do instead.
-        setError(/anonymous/i.test(guest.error)
-          ? `Guest access is not available yet. Sign in at /auth?next=/rooms/${roomId} to ask to join this room.`
-          : "Could not join this room right now. Please try again.");
-        return;
-      }
-      const { data: userData } = await supabase.auth.getUser();
-      if (!userData.user) { setError("Your room session could not be verified."); return; }
-      clientRef.current = supabase;
-      userIdRef.current = userData.user.id;
-      setCurrentUserId(userData.user.id);
-      // First contact requests a join (idempotent -- a returning active member stays active).
-      const joinResponse = await fetch(`/api/rooms/${roomId}/join`, { method: "POST" }).catch(() => null);
-      if (!joinResponse?.ok) {
-        const joinData = await joinResponse?.json().catch(() => ({})) as { error?: string } | undefined;
-        setError(joinData?.error ?? "Could not send your request to join. Reload the page to try again.");
-        return;
-      }
+      const { data: userData } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
       if (cancelled) return;
-      await refresh();
-      poll = setInterval(() => { void refresh(); }, 4000);
+      // An existing session -- signed-in member, or a guest who already typed their name on a
+      // prior visit to this room -- joins straight away. A brand-new visitor is asked their name
+      // and email first, so the host sees a real person, not a blank "Someone" in the request list.
+      if (userData.user) { void completeJoin(); return; }
+      setNeedsGuestIdentity(true);
     })();
-    return () => { cancelled = true; if (poll) clearInterval(poll); };
-  }, [roomId, refresh]);
+    return () => { cancelled = true; if (pollRef.current) clearInterval(pollRef.current); };
+  }, [completeJoin]);
+
+  async function submitGuestIdentity(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const displayName = guestName.trim();
+    const email = guestEmail.trim();
+    if (!displayName || !email || guestBusy) return;
+    setGuestBusy(true);
+    setError(null);
+    try {
+      await completeJoin({ displayName, email });
+    } finally {
+      setGuestBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (view?.membership.status !== "active") return;
@@ -573,6 +610,29 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   }
 
   if (error) return <div className={styles.page}><main className={styles.roomShell}><p className={styles.inlineError} role="alert">{error}</p></main></div>;
+  if (needsGuestIdentity && !view) {
+    return (
+      <div className={styles.page}>
+        <main className={styles.roomShell}>
+          <section className={styles.panel} aria-labelledby="guest-identity-title">
+            <h1 id="guest-identity-title" style={{ marginTop: 0 }}>Who should the host see?</h1>
+            <p className={styles.muted}>No account needed — just your name and email, so the room host knows who&apos;s asking to join.</p>
+            <form onSubmit={(event) => void submitGuestIdentity(event)} style={{ display: "grid", gap: 8, maxWidth: 360 }}>
+              <label>Your name
+                <input value={guestName} onChange={(event) => setGuestName(event.target.value)} maxLength={80} required autoComplete="name" style={{ display: "block", width: "100%", marginTop: 4 }} />
+              </label>
+              <label>Your email
+                <input type="email" value={guestEmail} onChange={(event) => setGuestEmail(event.target.value)} maxLength={320} required autoComplete="email" style={{ display: "block", width: "100%", marginTop: 4 }} />
+              </label>
+              <button className={styles.primaryButton} type="submit" disabled={guestBusy || !guestName.trim() || !guestEmail.trim()}>
+                {guestBusy ? "Joining…" : "Continue to the room"}
+              </button>
+            </form>
+          </section>
+        </main>
+      </div>
+    );
+  }
   if (!view) return <div className={styles.page}><main className={styles.roomShell}><p className={styles.loadingMessage} role="status">Loading room…</p></main></div>;
 
   const status = view.membership.status;
@@ -824,7 +884,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             <ul className={styles.pendingList}>
               {pending.map((m) => (
                 <li key={m.memberId} style={{ marginBottom: 8 }}>
-                  {m.displayName ?? "Someone"} — requested {new Date(m.requestedAt).toLocaleTimeString()}{" "}
+                  {m.displayName ?? "Someone"}{m.guestEmail ? ` (${m.guestEmail})` : ""} — requested {new Date(m.requestedAt).toLocaleTimeString()}{" "}
                   <button onClick={() => void admit(m.memberId)} style={{ padding: "2px 8px" }}>Admit</button>
                 </li>
               ))}

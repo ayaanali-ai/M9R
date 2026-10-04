@@ -177,10 +177,10 @@ export default function ProductShell({
         <DashboardSidebarTop onCollapse={toggleCollapsed} onAttention={() => router.push("/dashboard/agents?activity=1")} actions={[
           { label: "New channel", icon: <Plus size={16} />, onSelect: () => router.push("/dashboard/agents?newChannel=1") },
           { label: "Connect agent", icon: <Puzzle size={16} />, onSelect: () => router.push("/dashboard/settings#agents") },
-          { label: "New room", icon: <Users size={16} />, onSelect: () => router.push("/rooms/new") },
+          { label: "Open room", icon: <Users size={16} />, onSelect: () => router.push("/rooms/new") },
         ]} />
         <DashboardSearch value={sidebarQuery} onChange={setSidebarQuery} label="Search channels and agents" />
-        {!reviewerDemo && <Link href="/rooms/new" className="m9r-dash-newroom" prefetch={false}>New room</Link>}
+        {!reviewerDemo && <Link href="/rooms/new" className="m9r-dash-newroom" prefetch={false}>Your room</Link>}
         <nav className="product-nav" aria-label={region === "memory" ? "Memory navigation" : "Chat navigation"}>
           {region === "memory" ? (
             <MemorySidebarRegion />

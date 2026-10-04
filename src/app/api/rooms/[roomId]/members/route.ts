@@ -16,7 +16,7 @@ export async function GET(_request: NextRequest, context: RouteContext) {
   if (!UUID.test(roomId)) return NextResponse.json({ error: "Room not found." }, { status: 404 });
 
   const { data: memberRows, error: memberError } = await db.from("m9r_room_members")
-    .select("id, user_id, role, joined_at")
+    .select("id, user_id, role, joined_at, guest_display_name")
     .eq("room_id", roomId)
     .eq("status", "active")
     .order("joined_at", { ascending: true })
@@ -48,7 +48,7 @@ export async function GET(_request: NextRequest, context: RouteContext) {
     actorId: `member:${member.id}`,
     // Admitted members see each other by name; someone with no profile name at all falls back to a short, neutral label.
     userId: member.user_id as string,
-    displayName: member.user_id === user.id ? "You" : names.get(member.user_id as string) ?? "Room member",
+    displayName: member.user_id === user.id ? "You" : names.get(member.user_id as string) ?? member.guest_display_name ?? "Room member",
     role: member.role,
     isYou: member.user_id === user.id,
     joinedAt: member.joined_at,
