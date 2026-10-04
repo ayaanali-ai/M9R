@@ -72,6 +72,92 @@ function findChrome(): string {
   return executable;
 }
 
+/**
+ * Arguments for the owner-only sign-in pass.
+ *
+ * This intentionally launches the same isolated profile without a CDP
+ * endpoint, automation flags, or the background-throttling flags used by the
+ * agent channel. OAuth providers can reject a browser that is being debugged;
+ * the owner therefore signs in during this ordinary headed pass, then closes
+ * it. The agent later reopens this exact profile through launchAgentChrome.
+ */
+export function agentChromeOwnerSetupArgs(profile: string): string[] {
+  return [
+    `--user-data-dir=${profile}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--new-window",
+    "about:blank",
+  ];
+}
+
+export interface AgentChromeOwnerSetup {
+  profile: string;
+  pid: number;
+  done: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+}
+
+/**
+ * Open the agent-owned profile in ordinary Chrome for the human's one-time
+ * sign-in. No credentials are inspected or copied. The returned promise
+ * settles when the owner closes the window, and the profile lock is released
+ * automatically so the CDP channel can be started afterwards.
+ */
+export async function launchAgentChromeOwnerSetup(options: {
+  root: string;
+  chromeExecutable?: string;
+}): Promise<AgentChromeOwnerSetup> {
+  const paths = agentChromePaths(options.root);
+  try {
+    const lockedPid = Number(readFileSync(paths.lock, "utf8"));
+    if (!Number.isInteger(lockedPid) || lockedPid < 1) throw new Error("Invalid Chrome launch lock; inspect it before restarting.");
+    try {
+      process.kill(lockedPid, 0);
+      throw new Error("The agent Chrome channel is already running.");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+    rmSync(paths.lock);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  writeFileSync(paths.lock, String(process.pid), { flag: "wx", mode: 0o600 });
+  const child = spawn(options.chromeExecutable ?? findChrome(), agentChromeOwnerSetupArgs(paths.profile), {
+    stdio: "ignore",
+    windowsHide: false,
+  });
+  const releaseLock = () => {
+    try {
+      if (readFileSync(paths.lock, "utf8") === String(process.pid)) rmSync(paths.lock);
+    } catch { /* the owner setup may already have released it */ }
+  };
+  let resolveDone!: (result: { code: number | null; signal: NodeJS.Signals | null }) => void;
+  const done = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => { resolveDone = resolve; });
+  child.once("exit", (code, signal) => {
+    releaseLock();
+    resolveDone({ code, signal });
+  });
+  child.once("error", () => {
+    releaseLock();
+    resolveDone({ code: null, signal: null });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", () => resolve());
+      child.once("error", reject);
+    });
+  } catch (error) {
+    releaseLock();
+    throw error;
+  }
+  if (!child.pid) {
+    releaseLock();
+    throw new Error("Chrome did not report an owner-setup process id.");
+  }
+  return { profile: paths.profile, pid: child.pid, done };
+}
+
 class CdpConnection {
   private seq = 0;
   private events = new Set<(event: { method?: string; params?: Record<string, unknown>; sessionId?: string }) => void>();

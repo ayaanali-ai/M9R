@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { isAgentContext } from "./approval-core";
 import { defaultStoreRoot } from "./local-store";
-import { agentChromePaths, approvedSite, changeApprovedSite, launchAgentChrome, readApprovedSites } from "./agent-chrome";
+import { agentChromePaths, approvedSite, changeApprovedSite, launchAgentChrome, launchAgentChromeOwnerSetup, readApprovedSites } from "./agent-chrome";
 import { loadOrCreateBrokerKey, startWebBroker, tightenKeyFileAcl } from "./web-broker-server";
 import { brokerKeyPath } from "./web-broker-paths";
 
@@ -36,6 +36,21 @@ export async function runAgentChromeCli(args: string[]): Promise<number> {
     } finally { terminal.close(); }
   }
   if (action === "sites") { console.log(readApprovedSites(root).join("\n") || "No sites approved."); return 0; }
+  if (action === "setup") {
+    if (!process.stdin.isTTY || !process.stdout.isTTY || isAgentContext(process.env)) {
+      throw new Error("Owner Chrome setup requires a person at a terminal; agents cannot sign in or change the dedicated profile.");
+    }
+    const setup = await launchAgentChromeOwnerSetup({ root });
+    console.log(`Owner sign-in Chrome is open. Profile: ${setup.profile}`);
+    console.log("Sign in normally in that window, then close the window when the session is saved. M9R does not read or copy credentials.");
+    const result = await setup.done;
+    if (result.code !== 0) {
+      console.error(`Owner sign-in Chrome closed unexpectedly (exit ${result.code ?? "unknown"}).`);
+      return 1;
+    }
+    console.log("Owner sign-in profile saved. Next run: m9r web chrome start");
+    return 0;
+  }
   if (action === "start") {
     const key = loadOrCreateBrokerKey(brokerKeyPath(root));
     const browser = await launchAgentChrome({ root, pageActionsSource: agentChromePageSource() });
@@ -53,6 +68,6 @@ export async function runAgentChromeCli(args: string[]): Promise<number> {
     });
     return 0;
   }
-  console.log("m9r web chrome start | approve <site-url> | revoke <site-url> | sites");
+  console.log("m9r web chrome setup | start | approve <site-url> | revoke <site-url> | sites");
   return action ? 1 : 0;
 }

@@ -23,11 +23,18 @@ This is the active status list for C1–C15. It replaces older planning language
 
 | ID | Status | Evidence and remaining gates | Current framing |
 |---|---|---|---|
-| **C1** | **PARTIAL — not signed off** | Dedicated agent-owned Chrome path and synthetic live click/type/no-banner checks exist. The owner sign-in persistence check after profile restart is still open. See [C1 acceptance](M9R_C1_AGENT_CHROME_ACCEPTANCE.md). | Keep as written. It is under-verified, not complete. |
+| **C1** | **DONE — signed off** | Dedicated agent-owned Chrome path, synthetic live click/type/no-banner checks, and normal-browser owner setup are verified. A signed-in GitHub session survived stopping and restarting the M9R-controlled channel in the same isolated profile. See [C1 acceptance](M9R_C1_AGENT_CHROME_ACCEPTANCE.md). | Keep as written. The setup path separates provider sign-in from the debug-controlled agent channel. |
 | **C2** | **DONE — signed off** | Live quiet typing and drag, one-writer-per-tab scheduling, and public fixture evidence are recorded. Focused input tests pass 4/4. See [C2 acceptance](M9R_C2_QUIET_INPUT_ACCEPTANCE.md). | Keep as written. The scheduler is M9R-specific; Cua's quiet driving does not provide this room scheduler. |
-| **C3** | **PARTIAL — not signed off** | Room-member broadcast implementation, migration, local typecheck/build/smoke tests, and 11 focused room tests pass. The reviewed Cloudflare Linux build/preview deployment and two-machine changing-frame proof are still open. See [C3 acceptance](M9R_C3_LIVE_TAB_ACCEPTANCE.md). | Keep the build. Describe the differentiator as read-only, rate-limited, disclosure-gated relay behavior; Cua Spaces already streams video and cursors. |
+| **C3** | **PARTIAL — deferred by sequencing; not signed off** | Room-member broadcast implementation, migration, local typecheck/build/smoke tests, and 11 focused room tests pass. The reviewed Cloudflare Linux build/preview deployment and two-machine changing-frame proof are still open. The owner has explicitly deferred this acceptance until the OS-level stage work and its dependent desktop-stage work are complete. See [C3 acceptance](M9R_C3_LIVE_TAB_ACCEPTANCE.md). | Keep the build. Describe the differentiator as read-only, rate-limited, disclosure-gated relay behavior; Cua Spaces already streams video and cursors. |
 | **C4** | **REMAINING — not signed off** | No accepted M9R lease/handoff proof is recorded. | Build our own implementation for parity with Cua Spaces; do not present it as a Cua gap. |
-| **C5** | **PARTIAL — not signed off** | The newest observed official 0.33.2 SDK/native preflight passes. The native probe captures a screenshot, but background click was refused, typing was unverifiable, background scroll was unavailable, and drag was unverified. Chromium now produces a classified matrix with a screenshot/click pass and explicit background refusals for type/scroll/drag. Electron 44.5.1 still crashes before a visible window. See [C5 report](M9R_C5_CUA_DRIVER_WINDOWS_RETEST.md). | Keep the Windows re-test. This is a compatibility report, not proof that M9R has integrated Cua Driver. |
+| **C5** | **DONE — signed off** | Final owner-session run with official Driver 0.33.2 records screenshot, click, type, scroll, and drag outcomes for Chromium, Electron 44.5.1, and the native Notepad fixture. Background refusals and unverifiable deliveries are explicitly classified; no failed capability is presented as a pass. See [C5 report](M9R_C5_CUA_DRIVER_WINDOWS_RETEST.md). | Keep the Windows re-test. This is a compatibility report, not proof that M9R has integrated Cua Driver. |
+
+## Track A sequencing status
+
+| Step | Status | Evidence and boundary |
+|---|---|---|
+| **2 — room-agent adapter (master P1)** | **DONE — audited and accepted** | Existing authenticated room routes cover join, membership, events, leases, handoffs, and memory. Existing local MCP/bridge tools cover the equivalent agent surface with room namespacing, identity checks, inbox delivery, results, shared notes, and browser actions. Focused MCP, broker, and room-contract checks pass. No duplicate room system was introduced. Lease/handoff tool exposure remains Track A C4 by design. See [adapter acceptance](M9R_ROOM_AGENT_ADAPTER_ACCEPTANCE.md). |
+| **3 — OS-level stage groundwork (master P3)** | **IN PROGRESS — first local foundation slice** | Added an owner-only, machine-local stage registry and native Windows window-to-desktop inspection/move path using the public `IVirtualDesktopManager` interface. The native boundary verifies the supplied PID still owns the HWND and verifies the destination after a move. Desktop creation/activation, the Cua cursor adapter, room-joinable ownership and transition events, and the Jev-vs-CUA-S1 decision remain open. See [Windows stage acceptance](M9R_WINDOWS_DESKTOP_STAGE_ACCEPTANCE.md). |
 
 ## Wave 2 — product parity and depth
 
@@ -51,16 +58,21 @@ This is the active status list for C1–C15. It replaces older planning language
 
 ## Current count
 
-- **Done:** C2 (1)
-- **Partial:** C1, C3, C5, C6, C7, C8, C10, C11, C13, C15 (10)
+- **Done:** C1, C2, C5 (3)
+- **Partial:** C3, C6, C7, C8, C10, C11, C13, C15 (8)
 - **Remaining:** C4, C14 (2)
 - **Decision or scope blocker:** C9, C12 (2)
 
-Nothing in C1, C3, or C5 is signed off yet. C1 still needs owner-profile persistence evidence; C3 still needs the reviewed Cloudflare build/deploy and two-machine frame proof; C5 still needs Chromium and Electron runs plus a final action-by-action report.
+C3 still needs the reviewed Cloudflare build/deploy and two-machine frame proof, but that proof is intentionally deferred until the OS-level stage sequence below is complete. C1, C2, and C5 are signed off as recorded above.
+
+## Owner sequencing decision — 2026-10-04
+
+The owner explicitly moved C3 behind the OS-level Phase 3 work. C3 is not cancelled and is not signed off; it stays **PARTIAL** until its Cloudflare artifact and two-machine changing-frame proof are accepted.
 
 ## Sign-off order
 
-1. Finish the C1 owner-profile persistence gate.
-2. Finish the C3 reviewed Cloudflare artifact and two-machine relay proof.
-3. Finish C5 on a real interactive Windows desktop using a matching Cua Driver binary and the isolated Chromium/Electron/native fixtures.
-4. Only then start C4 or widen scope to C6–C15.
+1. **OS-level stage groundwork (master P3):** establish the Windows virtual-desktop stage, the native cursor/window control path, joinable app/window/desktop ownership, visible cross-desktop transitions, and the Jev-vs-CUA-S1 decision. C14's desktop-app Driver validation is part of this stage because C5 is already complete.
+2. **C4 takeover/hand-back:** prove the broker lease and clean agent pause/resume on the stage.
+3. **C15 window-pool/tiled stage:** prove the multi-window stage and lease handoff once the stage foundation exists.
+4. **C3 live-view acceptance:** run the reviewed Cloudflare Linux build/deployment and the two-machine changing-frame proof, with viewer controls absent.
+5. **C6–C13:** continue the remaining product-parity, recorder, scheduler, hosted-browser, approved-login, and benchmark work in the table above, respecting the C9 and C12 decisions first.

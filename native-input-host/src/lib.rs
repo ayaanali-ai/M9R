@@ -24,8 +24,12 @@ pub enum MouseButton {
 #[cfg(windows)]
 mod win32;
 
+mod virtual_desktop;
+
 #[cfg(windows)]
 pub use win32::click_visible_chrome_tab;
+
+pub use virtual_desktop::handle_desktop_stage_request;
 
 #[cfg(not(windows))]
 pub fn click_visible_chrome_tab<F: FnMut(f64, f64, bool) -> bool>(

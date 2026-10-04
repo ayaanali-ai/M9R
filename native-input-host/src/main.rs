@@ -4,6 +4,40 @@ use m9r_native_input_host::{
 use serde_json::{json, Value};
 use std::io::{stdin, stdout, Read, Write};
 
+const MAX_DESKTOP_STAGE_REQUEST_BYTES: u64 = 16 * 1024;
+
+fn has_agent_context(mut lookup: impl FnMut(&str) -> Option<std::ffi::OsString>) -> bool {
+    const MARKERS: &[&str] = &[
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_CI",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "OPENCODE",
+        "OPENCODE_SESSION_ID",
+    ];
+    MARKERS
+        .iter()
+        .any(|name| lookup(name).is_some_and(|value| !value.to_string_lossy().trim().is_empty()))
+}
+
+#[cfg(test)]
+mod stage_cli_tests {
+    use super::has_agent_context;
+    use std::ffi::OsString;
+
+    #[test]
+    fn desktop_stage_command_refuses_agent_context_markers() {
+        assert!(!has_agent_context(|_| None));
+        assert!(has_agent_context(|name| {
+            (name == "CODEX_THREAD_ID").then(|| OsString::from("thread-1"))
+        }));
+        assert!(!has_agent_context(|name| {
+            (name == "OPENCODE").then(|| OsString::from("  "))
+        }));
+    }
+}
+
 fn process_message<R: Read, W: Write>(raw: &[u8], input: &mut R, output: &mut W) -> Value {
     let parsed = match serde_json::from_slice::<Value>(raw) {
         Ok(value) => value,
@@ -48,6 +82,42 @@ fn process_message<R: Read, W: Write>(raw: &[u8], input: &mut R, output: &mut W)
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--desktop-stage-json") {
+        if has_agent_context(|name| std::env::var_os(name)) {
+            println!(
+                "{{\"ok\":false,\"error\":\"agent context cannot change owner desktop stages\"}}"
+            );
+            std::process::exit(1);
+        }
+        let mut request = Vec::new();
+        if stdin()
+            .lock()
+            .take(MAX_DESKTOP_STAGE_REQUEST_BYTES + 1)
+            .read_to_end(&mut request)
+            .is_err()
+            || request.len() as u64 > MAX_DESKTOP_STAGE_REQUEST_BYTES
+        {
+            println!(
+                "{{\"ok\":false,\"error\":\"desktop stage request is invalid or too large\"}}"
+            );
+            std::process::exit(2);
+        }
+        let parsed = match serde_json::from_slice::<Value>(&request) {
+            Ok(value) => value,
+            Err(_) => {
+                println!("{{\"ok\":false,\"error\":\"invalid desktop stage request JSON\"}}");
+                std::process::exit(2);
+            }
+        };
+        let response = m9r_native_input_host::handle_desktop_stage_request(&parsed);
+        let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        println!("{}", response);
+        if !ok {
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let mut input = stdin().lock();
     let mut output = stdout().lock();
     loop {

@@ -182,9 +182,9 @@ test("room creation requires a workspace host session while room links keep anon
   assert.match(create, /from\("m9r_rooms"\)/);
   assert.match(create, /parseRoomName/);
   assert.doesNotMatch(createPage, /ensureGuestSession/);
-  assert.match(createPage, /data\.user\.is_anonymous \? "guest" : "ready"/);
+  assert.match(createPage, /if \(data\.user\.is_anonymous\)/);
   assert.match(createPage, /signOut\(\{ scope: "local" \}\)/);
-  assert.match(createPage, /Room hosts need an M9R account/);
+  assert.match(createPage, /You need an M9R account to open your room/);
   // A brand-new visitor with no session at all gets AuthSessionMissingError from getUser() (it always round-trips to
   // the auth server, unlike getSession()) -- confirmed live on every first visit to this page -- and that must read
   // as the normal signed-out state, not an "unavailable"/reload-the-page failure shown to literally every new visitor.
