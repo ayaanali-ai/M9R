@@ -30,6 +30,15 @@ export default function NewRoomPage() {
         const { data, error: sessionError } = await supabase.auth.getUser();
         if (cancelled) return;
         if (sessionError) {
+          // getUser() (unlike getSession()) always round-trips to the auth server, and for a visitor with literally no
+          // session at all -- confirmed live: every brand-new visitor clicking "Create a room" from the homepage --
+          // Supabase returns this as an error (AuthSessionMissingError), not a null user. Treating that as a real
+          // failure showed "Could not verify your sign-in. Reload the page and try again." to every first-time visitor
+          // instead of the normal sign-in prompt. This is the expected shape of "not signed in," not a failure.
+          if (sessionError.name === "AuthSessionMissingError") {
+            setAccess("signed-out");
+            return;
+          }
           setError("Could not verify your sign-in. Reload the page and try again.");
           setAccess("unavailable");
           return;
