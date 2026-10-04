@@ -114,6 +114,35 @@ export async function mutateSharedMemory(id: string, action: "approve" | "delete
   return { ok: true };
 }
 
+const ROOM_NOTE_COLUMNS = "id, room_id, title, body, author_user_id, created_at";
+
+/**
+ * Room-scoped shared memory: reuses workspace_memory_notes and its existing per-workspace quota exactly as-is (see
+ * 20261003020000_room_shared_memory.sql) -- a room's notes are literally the host's own workspace memory, filtered to
+ * that room. A guest who was admitted to the room but never signed up for a workspace can still read and save them;
+ * authorization is active m9r_room_members membership, not workspace_members.
+ */
+export async function listRoomMemory(roomId: string) {
+  const db = await createClient();
+  if (!db) throw new AgentJoinError("Memory is not configured.", "DB_NOT_CONFIGURED", 503);
+  // RLS ("room members read their room's shared notes") does the authorization; a non-member sees an empty list, not an error.
+  const { data, error } = await db.from("workspace_memory_notes").select(ROOM_NOTE_COLUMNS).eq("room_id", roomId).order("created_at", { ascending: false }).limit(100);
+  if (error) memoryDatabaseError(error);
+  return (data ?? []) as Array<{ id: string; room_id: string; title: string; body: string; author_user_id: string | null; created_at: string }>;
+}
+
+export async function saveRoomMemory(roomId: string, userId: string, raw: unknown) {
+  let note: ReturnType<typeof normalizeMemoryNote>;
+  try { note = normalizeMemoryNote(raw); } catch (error) { throw new AgentJoinError(error instanceof Error ? error.message : "Invalid memory.", "INVALID_MEMORY", 400); }
+  const db = service();
+  const { data, error } = await db.rpc("m9r_save_room_memory", { p_room_id: roomId, p_actor: userId, p_title: note.title, p_body: note.body, p_content_hash: note.contentHash });
+  if (error?.code === "23505") return { ok: true, duplicate: true };
+  if (error?.code === "42501") throw new AgentJoinError("You are not an active member of this room.", "FORBIDDEN", 403);
+  if (error?.code === "P0002") throw new AgentJoinError("Room not found.", "NOT_FOUND", 404);
+  if (error) memoryDatabaseError(error);
+  return { ok: true, note: data };
+}
+
 /**
  * Sync for a person's own M9R install, authenticated by a personal API token (Settings > API tokens) that the route has
  * already resolved to `userId`. Only workspace-level notes travel: a private channel's memory never leaves the dashboard.

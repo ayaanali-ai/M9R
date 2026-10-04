@@ -53,6 +53,7 @@ type RoomHandoff = {
   sequence: number;
 };
 type PresenceEntry = { participantId?: string; activity?: string };
+type RoomMemoryNote = { id: string; room_id: string; title: string; body: string; author_user_id: string | null; created_at: string };
 
 function subscribeToLocationOrigin() {
   return () => {};
@@ -185,6 +186,11 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const [handoffRecipients, setHandoffRecipients] = useState<Record<string, string>>({});
   const [handoffContexts, setHandoffContexts] = useState<Record<string, string>>({});
   const [handoffResponses, setHandoffResponses] = useState<Record<string, string>>({});
+  const [memoryNotes, setMemoryNotes] = useState<RoomMemoryNote[]>([]);
+  const [memoryTitle, setMemoryTitle] = useState("");
+  const [memoryBody, setMemoryBody] = useState("");
+  const [memoryBusy, setMemoryBusy] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const clientRef = useRef<ReturnType<typeof createClient>>(null);
   const userIdRef = useRef<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -217,6 +223,41 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       if (Array.isArray(data.leases)) setLeases(data.leases);
     }
   }, [roomId]);
+
+  const loadRoomMemory = useCallback(async () => {
+    const response = await fetch(`/api/rooms/${roomId}/memory`, { cache: "no-store" });
+    if (!response.ok) return;
+    const data = await response.json().catch(() => ({})) as { notes?: RoomMemoryNote[] };
+    if (Array.isArray(data.notes)) setMemoryNotes(data.notes);
+  }, [roomId]);
+
+  async function saveMemoryNote(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const title = memoryTitle.trim();
+    const body = memoryBody.trim();
+    if (!title || !body || memoryBusy) return;
+    setMemoryBusy(true);
+    setMemoryError(null);
+    try {
+      const response = await fetch(`/api/rooms/${roomId}/memory`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title, body }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null) as { error?: string } | null;
+        setMemoryError(data?.error ?? "Could not save that note.");
+        return;
+      }
+      setMemoryTitle("");
+      setMemoryBody("");
+      await loadRoomMemory();
+    } catch {
+      setMemoryError("Could not reach the server. Try again.");
+    } finally {
+      setMemoryBusy(false);
+    }
+  }
 
   const refresh = useCallback(async () => {
     const response = await fetch(`/api/rooms/${roomId}`, { cache: "no-store" });
@@ -307,6 +348,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
         if (status === "SUBSCRIBED") {
           void loadRoomEvents();
           void loadCoordinationIfActive();
+          void loadRoomMemory();
         }
       });
     const coordinationPoll = setInterval(() => { void loadCoordinationIfActive(); }, 5_000);
@@ -342,7 +384,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       void supabase.removeChannel(presenceChannel);
       void supabase.removeChannel(eventChannel);
     };
-  }, [roomId, view?.membership.status, loadRoomEvents]);
+  }, [roomId, view?.membership.status, loadRoomEvents, loadRoomMemory]);
 
   async function appendEvent(kind: string, payload: Record<string, unknown>, causalEventIds: string[] = [], actorSeatId: string | null = selectedSeatId || null) {
     setSending(true);
@@ -614,6 +656,25 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
               </label>
             )}
             <p className={styles.muted}>Presence is live-only. Page data, browser cursors, and local credentials are not included.</p>
+          </div>
+
+          <div className={styles.panel}>
+            <h2 style={{ marginTop: 0 }}>Room memory</h2>
+            <p className={styles.muted}>Notes saved here are visible to every admitted member of this room, including guests who never signed up for a workspace. They count against the host&apos;s shared memory allowance.</p>
+            <form onSubmit={(event) => void saveMemoryNote(event)} style={{ display: "grid", gap: 8 }}>
+              <label>Note title<input value={memoryTitle} onChange={(event) => setMemoryTitle(event.target.value)} maxLength={160} required style={{ display: "block", width: "100%", marginTop: 4 }} /></label>
+              <label>Note text<textarea value={memoryBody} onChange={(event) => setMemoryBody(event.target.value)} maxLength={4000} rows={4} required style={{ display: "block", width: "100%", marginTop: 4 }} /></label>
+              {memoryError && <p className={styles.inlineError} role="alert">{memoryError}</p>}
+              <button disabled={memoryBusy || !memoryTitle.trim() || !memoryBody.trim()} type="submit" style={{ justifySelf: "start", padding: "6px 12px" }}>{memoryBusy ? "Saving…" : "Save to room memory"}</button>
+            </form>
+            {memoryNotes.length === 0 ? <p>No room memory saved yet.</p> : (
+              <ul aria-label="Room memory notes" style={{ paddingLeft: 22 }}>
+                {memoryNotes.map((note) => <li key={note.id} style={{ marginTop: 16 }}>
+                  <strong>{note.title}</strong>
+                  <p style={{ whiteSpace: "pre-wrap" }}>{note.body}</p>
+                </li>)}
+              </ul>
+            )}
           </div>
 
           <div className={styles.panel}>
