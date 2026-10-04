@@ -38,6 +38,7 @@
     "**/*.mts"
   ],
   "exclude": [
+    "services/network-core",
     "services/relay-do",
     "services/web-coordinator",
     "services/mission-bridge/src/worker-wrapper.ts",

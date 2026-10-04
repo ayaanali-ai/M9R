@@ -171,7 +171,26 @@ Check with `opencode mcp list`. Older OpenCode releases may still use the legacy
 
 The current OpenCode docs use `mcp.servers` and `disabled` for opting out; use the legacy form only if that matches the installed version's config schema. Avoid copying a demo's restrictive `permission` block into your everyday config unless you intend to disable those tools.
 
-## 7. Verify a complete connection
+## 7. Use the Cloudflare Network Core through the existing MCP server
+
+The existing local `m9r-mcp` server also exposes `m9r_network_*` tools for the separate Cloudflare Network Core. The normal `m9r_*` tools continue to use the local M9R session store. Network tools use a distinct, per-agent Network Core bearer credential.
+
+Network creation and pairing-code UI is not available yet. Until that owner-facing flow exists, a signed-in network owner must create a network with `POST /v1/networks` and mint a code with `POST /v1/networks/:networkId/pairing-codes` using the owner-authenticated Network Core REST API. Give the one-time pairing code to the intended agent, then have it call `m9r_network_join` with its local M9R session token and the pairing code.
+
+`m9r_network_join` returns a network credential once. Add it to that agent provider's existing MCP server environment as `M9R_NETWORK_CREDENTIALS_JSON`, keyed by the returned network UUID, then restart that provider's MCP connection. For example, the Codex TOML environment table can contain:
+
+```toml
+[mcp_servers.m9r.env]
+M9R_HOME = "C:\\Users\\<you>\\.m9r"
+M9R_WEB_BROKER_PORT = "47821"
+M9R_NETWORK_CREDENTIALS_JSON = "{\"<network-uuid>\":\"<network-bearer-credential>\"}"
+```
+
+Use the equivalent `env` or `environment` field in Claude Code or OpenCode's existing M9R MCP entry. Keep each agent's credential in that provider's private config; never commit it or put it in the local M9R SessionStart token field. Multiple network memberships can be configured as additional UUID-to-credential entries in the JSON object.
+
+After restart, use `m9r_network_roster`, `m9r_network_send`, `m9r_network_inbox`, and `m9r_network_history`. `m9r_network_request_approval` creates a pending request for a human; only the owner can decide it. `m9r_network_revoke_self` revokes that agent's Network Core credential.
+
+## 8. Verify a complete connection
 
 1. Confirm the M9R broker says it is listening and the extension completes the ready handshake (the development build ID is fixed and pre-authorized).
 2. Confirm the M9R MCP server appears in the provider's MCP panel/list.

@@ -158,6 +158,22 @@ test("broker task plan is a per-user hidden logon task with an exact, hashable a
   assert.match(buildLocalBrokerScheduledTaskRegisterScript({ ...input, replaceExisting: true }), /-Force/);
 });
 
+test("hideConsole launches the broker under a headless conhost so no console window opens", () => {
+  const input = {
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    executable: "C:\\Users\\Kai User\\.m9r\\bin\\m9r-web-broker.exe",
+    args: ["--home", "C:\\Users\\Kai User\\.m9r", "--port", "47821"],
+    workingDirectory: "C:\\repo",
+  };
+  const plain = buildLocalBrokerScheduledTaskAction(input);
+  const hidden = buildLocalBrokerScheduledTaskAction({ ...input, hideConsole: true });
+  assert.equal(plain.executable, input.executable, "default behaviour is unchanged");
+  assert.match(hidden.executable, /\\System32\\conhost\.exe$/i);
+  assert.equal(hidden.arguments, '"--headless" "C:\\Users\\Kai User\\.m9r\\bin\\m9r-web-broker.exe" "--home" "C:\\Users\\Kai User\\.m9r" "--port" "47821"');
+  assert.notEqual(hashLocalBrokerScheduledTaskAction(hidden), hashLocalBrokerScheduledTaskAction(plain));
+  assert.match(buildLocalBrokerScheduledTaskRegisterScript({ ...input, hideConsole: true }), /New-ScheduledTaskAction -Execute '[^']*conhost\.exe'/i);
+});
+
 test("broker task ownership covers all actions, trigger, principal, and managed safety settings", () => {
   const input = {
     taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,

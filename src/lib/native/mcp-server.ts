@@ -20,12 +20,16 @@ import type { VerifiedIdentity } from "./identity-core";
 import type { WebBatchRequest, WebRequest } from "./web-broker-core";
 import type { WebBrokerClient } from "./web-broker-client";
 import { createPageNotesStore, type PageNotesStore } from "./page-notes-store";
+import type { NetworkCoreClient } from "./network-core-client";
+import { registerNetworkCoreTools } from "./network-core-mcp-tools";
 import { gitRead, readGovernedFile } from "../bridge/governed-agent-tools";
 
 export interface McpServerDeps {
   store: LocalStore;
   web?: WebBrokerClient;
   pageNotes?: PageNotesStore;
+  /** Optional adapter to the separate, provider-neutral Cloudflare Network Core. */
+  networkCore?: NetworkCoreClient;
   /** Tasks created before this web-room lifetime are historical and must not be replayed into its agents. */
   roomStartedAt?: number;
   /** Clock for the inbox age limit; defaults to the real time (tests inject the store's fake clock). */
@@ -293,6 +297,10 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       return { content: [{ type: "text" as const, text: result.value }] };
     },
   );
+
+  if (deps.networkCore) {
+    registerNetworkCoreTools({ server, client: deps.networkCore, requireIdentity });
+  }
 
   async function runWeb(token: string, partial: Pick<WebRequest, "action"> & Partial<WebRequest>) {
     const identity = requireIdentity(token);

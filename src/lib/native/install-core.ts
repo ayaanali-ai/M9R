@@ -330,6 +330,11 @@ export interface LocalBrokerScheduledTaskInput {
   workingDirectory: string;
   /** Replace an existing task only after the caller has verified it is M9R-owned. */
   replaceExisting?: boolean;
+  /**
+   * The broker is a console-subsystem program, so Task Scheduler's own Hidden flag does not stop Windows from opening
+   * its window. Launch it under a headless conhost so the console exists (children inherit it) but has no window.
+   */
+  hideConsole?: boolean;
 }
 
 export interface LocalBrokerScheduledTaskAction {
@@ -385,10 +390,14 @@ export function buildLocalBrokerScheduledTaskAction(input: LocalBrokerScheduledT
   if (!Array.isArray(input.args) || input.args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) {
     throw new Error("scheduled-task arguments must be strings without NUL bytes");
   }
+  const systemRoot = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+  const launch = input.hideConsole
+    ? { executable: `${systemRoot}\\System32\\conhost.exe`, args: ["--headless", input.executable, ...input.args] }
+    : { executable: input.executable, args: input.args };
   return {
     taskName: input.taskName,
-    executable: input.executable,
-    arguments: input.args.map(quoteWindowsCommandLineArgument).join(" "),
+    executable: launch.executable,
+    arguments: launch.args.map(quoteWindowsCommandLineArgument).join(" "),
     workingDirectory: input.workingDirectory,
   };
 }

@@ -1,0 +1,2 @@
+# Copy to .dev.vars for local Wrangler development; use a different random value for production.
+PAIRING_CODE_PEPPER=replace-with-at-least-32-random-bytes

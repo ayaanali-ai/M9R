@@ -2555,6 +2555,7 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
 }
 
 async function runWebCli(args: string[]): Promise<number> {
+  if (args[0] === "chrome") return (await import("../src/lib/native/agent-chrome-cli")).runAgentChromeCli(args.slice(1));
   if (args[0] === "update-extension") return runWebExtensionUpdate(args.slice(1));
   if (args[0] === "setup") return runWebSetup(args.slice(1));
   if (args[0] === "uninstall") return runWebUninstall(args.slice(1));

@@ -162,6 +162,28 @@ test('same-pixel native targets get separately visible, agent-colored and named 
   assert.equal(h.hasPendingFrame(), false, 'destroy cancels the active overlay frame without rescheduling during roster cleanup');
 });
 
+test('native-pointer events for different targets keep each agent at its own page coordinate', async () => {
+  const h = createHarness();
+  h.overlay.update({ agent: 'codex-alpha', provider: 'codex', phase: 'start', action: 'clicking Save' });
+  h.overlay.update({ agent: 'opencode-beta', provider: 'opencode', phase: 'start', action: 'clicking Continue' });
+  const codexPainted = h.overlay.nativePointer('codex-alpha', 160, 100, true);
+  const opencodePainted = h.overlay.nativePointer('opencode-beta', 640, 360, true);
+
+  h.now = 3_000;
+  for (let frame = 0; frame < 8; frame += 1) h.flushFrame();
+  assert.deepEqual(await Promise.all([codexPainted, opencodePainted]), [true, true]);
+
+  const layer = h.doc.documentElement.children[0].shadowRoot.children[1];
+  const cursors = layer.children.filter((node) => node.classList.contains('agent'));
+  assert.deepEqual(cursors.map((node) => node.style.transform), [
+    'translate3d(160px, 100px, 0)',
+    'translate3d(640px, 360px, 0)',
+  ], 'each active native-pointer update follows its own viewport target instead of a shared/stale point');
+
+  h.overlay.destroy();
+  assert.equal(h.hasPendingFrame(), false);
+});
+
 test('native trusted-pointer updates hit-test and label the active page element', async () => {
   const h = createHarness();
   h.overlay.update({ agent: 'codex-worker', provider: 'codex', phase: 'start', action: 'clicking Save' });

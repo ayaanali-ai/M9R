@@ -1,0 +1,46 @@
+{
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	"name": "m9r-network-core",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-02",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"workers_dev": true,
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "NETWORKS",
+				"class_name": "NetworkActor"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"NetworkActor"
+			]
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "HISTORY",
+			"database_name": "m9r-network-core",
+			"database_id": "d441f782-7719-4fb9-8e45-042ba9c9b87f",
+			"migrations_dir": "migrations"
+		}
+	],
+	"vars": {
+		"SUPABASE_URL": "https://eymtshaxpkmojsggdtkh.supabase.co",
+		"SUPABASE_PUBLISHABLE_KEY": "sb_publishable_XGgzhm1N8caXP8Aj11SjQw_gmeRZOP0"
+	},
+	"triggers": {
+		"crons": [
+			"17 4 * * *"
+		]
+	},
+	"observability": {
+		"enabled": true
+	}
+}

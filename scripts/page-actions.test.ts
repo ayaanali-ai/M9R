@@ -24,10 +24,11 @@ class FakeElement {
   clicked = false;
   focused = false;
   scrolled = false;
+  scrollOptions: ScrollIntoViewOptions | undefined;
   dispatched: unknown[] = [];
   rect = { left: 10, top: 20, width: 100, height: 30 };
 
-  scrollIntoView() { this.scrolled = true; }
+  scrollIntoView(options?: ScrollIntoViewOptions) { this.scrolled = true; this.scrollOptions = options; }
   focus() { this.focused = true; }
   click() { this.clicked = true; }
   dispatchEvent(event: unknown) { this.dispatched.push(event); return true; }
@@ -261,6 +262,30 @@ test("click allows a visible, enabled control that owns its center point", () =>
   const page = createPage();
   assertPageResult(page.m9rPageClick("#target"), { ok: true, data: { clicked: true } });
   assert.equal(page.element.clicked, true);
+});
+
+test("native click planning uses an instant centered scroll before capturing coordinates", () => {
+  const element = new FakeElement();
+  const context = {
+    window: { innerWidth: 1280, innerHeight: 720 },
+    document: {
+      querySelector: (selector: string) => selector === "#target" ? element : null,
+      elementFromPoint: () => element,
+    },
+    location: { origin: "https://allowed.example", pathname: "/cart" },
+    getComputedStyle: (target: FakeElement) => ({ display: target.display, visibility: target.visibility }),
+  };
+  runInNewContext(pageActions, context);
+  const plan = (context as unknown as {
+    m9rPageClickPlan: (...args: unknown[]) => { ok: boolean };
+  }).m9rPageClickPlan("#target", null, null, null, null, "left", 1, "click");
+
+  assert.equal(plan.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(element.scrollOptions)), {
+    behavior: "instant",
+    block: "center",
+    inline: "center",
+  });
 });
 
 test("click allows a hit-tested descendant of the target", () => {

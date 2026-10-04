@@ -14,6 +14,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { dirname } from "node:path";
 import { platform } from "node:os";
 import { WebSocket, WebSocketServer } from "ws";
+import type { BrowserTransport } from "./agent-chrome";
 import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
 import { createWebBroker, ROOM_MODES, type RoomMode, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
@@ -114,6 +115,8 @@ function readBody(req: IncomingMessage): Promise<string | null> {
 }
 
 export interface WebBrokerServerOptions {
+  /** Dedicated browser transport. Extension connections are disabled on this broker. */
+  browserTransport?: BrowserTransport;
   key: string;
   port?: number;
   host?: string;
@@ -216,6 +219,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   }
 
   function waitForExtensionReady(timeoutMs: number): Promise<boolean> {
+    if (options.browserTransport) return Promise.resolve(options.browserTransport.ready());
     if (extension && extension === readyExtension && extension.readyState === WebSocket.OPEN) return Promise.resolve(true);
     return new Promise((resolve) => {
       const settle = (ready: boolean) => {
@@ -238,8 +242,10 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   let roomMode: RoomMode = "watch";
   try { if (options.modeFile) { const saved = readFileSync(options.modeFile, "utf8").trim() as RoomMode; if (ROOM_MODES.includes(saved)) roomMode = saved; } } catch { /* no saved mode yet */ }
   const broker = createWebBroker({
+    oneWriterPerTab: !!options.browserTransport,
     roomMode: () => roomMode,
     send: (message) => {
+      if (options.browserTransport) return options.browserTransport.send(message);
       if (!extension || extension !== readyExtension || extension.readyState !== WebSocket.OPEN) return false;
       extension.send(JSON.stringify(message));
       return true;
@@ -255,6 +261,9 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     onActivity: options.ui ? (activity) => options.ui!.onActivity(activity) : undefined,
   });
   options.ui?.attachBroker(broker);
+  const unsubscribeBrowser = options.browserTransport?.subscribe(
+    (message) => broker.onExtensionMessage(message), () => broker.onExtensionClosed(),
+  );
 
   const ownerOnlyPaths = new Set([
     "/web/mode", "/web/shutdown", "/web/approve", "/web/deny", "/web/revoke", "/web/revoke-all",
@@ -383,7 +392,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       if (req.headers.origin !== undefined) return reply(res, 403, { ok: false, error: "browser-originated requests are refused" });
       if (!sameSecret(req.headers["x-m9r-key"] as string | undefined, options.key)) return reply(res, 401, { ok: false, error: "missing or wrong key" });
       if (req.method === "GET" && requestUrl.pathname === "/web/status") {
-        return reply(res, 200, { ok: true, broker: "ready", extensionConnected: !!extension && extension.readyState === WebSocket.OPEN, extensionReady: !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN });
+        return reply(res, 200, { ok: true, broker: "ready", browserTransport: options.browserTransport ? "agent-chrome" : "extension", browserReady: options.browserTransport?.ready() ?? (!!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN), extensionConnected: !!extension && extension.readyState === WebSocket.OPEN, extensionReady: !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN });
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/agents") {
         return reply(res, 200, { ok: true, agents: options.ui?.roster?.() ?? [] });
@@ -598,7 +607,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     const origin = String(req.headers.origin ?? "");
     const candidateId = origin.startsWith("chrome-extension://") ? origin.slice("chrome-extension://".length).replace(/\/$/, "") : "";
     const id = candidateId && !/[/?#]/.test(candidateId) ? candidateId : "";
-    const permitted = req.url === "/ext" && id !== "" && (allowed.length > 0 ? allowed.includes(id) : allowAnyExtension);
+    const permitted = !options.browserTransport && req.url === "/ext" && id !== "" && (allowed.length > 0 ? allowed.includes(id) : allowAnyExtension);
     if (!permitted) {
       socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
       socket.destroy();
@@ -676,13 +685,14 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (closePromise) return closePromise;
     closePromise = new Promise<void>((resolve) => {
       settleReadyWaiters(false);
+      unsubscribeBrowser?.();
       extension?.close();
       sockets.close();
       const ownerClosed = ownerServer
         ? new Promise<void>((done) => ownerServer.close(() => done()))
         : Promise.resolve();
       const httpClosed = new Promise<void>((done) => server.close(() => done()));
-      void Promise.all([ownerClosed, httpClosed]).then(() => resolve());
+      void Promise.allSettled([ownerClosed, httpClosed, options.browserTransport?.close()]).then(() => resolve());
       (ownerServer as (typeof ownerServer) & { closeAllConnections?: () => void } | null)?.closeAllConnections?.();
       server.closeAllConnections();
     });

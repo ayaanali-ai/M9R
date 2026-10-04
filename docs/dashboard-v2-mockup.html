@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>M9R dashboard v2 (mockup)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+@font-face { font-family: RoomArray; src: url('../public/reference-innerwebs/929333b026c6a5c7.otf') format('opentype'); }
+@font-face { font-family: RoomGaramond; src: url('../public/reference-innerwebs/a288b9bbf88db8be.woff2') format('woff2'); }
+@font-face { font-family: RoomPixel; src: url('../public/reference-innerwebs/9f9a5ae37038c539.otf') format('opentype'); }
+@font-face { font-family: RoomInstrument; src: url('../public/reference-innerwebs/instrument-serif-italic-400.woff2') format('woff2'); font-style: italic; }
+:root {
+  --ink: #f4efe9; --body: #e2d9d0; --muted: #c9beb2; --faint: #91877f;
+  --line: rgb(196 185 179 / 25%); --panel: rgb(20 20 20 / 48%); --panel-2: rgb(20 20 20 / 72%);
+  --cream: #efe9e2; --gold: #f3dd9d; --err: #f18b87; --ok: #8fd6a8;
+  --claude: #d97757; --codex: #7aa2f7; --opencode: #34d399;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  color: var(--ink); font: 400 17px/1.5 RoomGaramond, Georgia, serif; background: #141414;
+  background-image: linear-gradient(180deg, rgb(7 7 16 / 78%), rgb(7 7 16 / 62%) 40%, rgb(7 7 16 / 88%)), url('../public/room-url-cloud-map.jpg');
+  background-size: cover; background-position: center; background-attachment: fixed;
+}
+.app { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
+.side { border-right: 1px solid var(--line); background: var(--panel-2); display: flex; flex-direction: column; padding: 16px 12px; gap: 14px; }
+.brand { font: 400 26px/1 RoomArray, Georgia, serif; letter-spacing: .02em; padding: 4px 8px; }
+.search { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; color: var(--faint); font-size: 15px; background: rgb(20 20 20 / 55%); }
+.newroom { border: 0; border-radius: 8px; padding: 10px 14px; background: var(--gold); color: #374151; font: 20px/1.2 RoomInstrument, Georgia, serif; text-align: left; box-shadow: 1.79px 2.68px 1.79px rgb(0 0 0 / 70%); cursor: pointer; }
+.label { font: 400 11px/1.4 RoomPixel, monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 0 8px; }
+.row { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px; color: var(--body); cursor: pointer; }
+.row:hover, .row.on { background: rgb(244 239 233 / 9%); }
+.row .name { flex: 1; font-size: 17px; }
+.row .sub { color: var(--faint); font-size: 13px; display: block; }
+.sysicon { width: 22px; height: 22px; border: 1px solid var(--line); border-radius: 6px; display: grid; place-items: center; font: 11px RoomPixel, monospace; color: var(--muted); }
+.stack { display: flex; }
+.cur { width: 22px; height: 22px; margin-left: -6px; position: relative; filter: drop-shadow(0 1px 1px rgb(0 0 0 / 60%)); }
+.cur:first-child { margin-left: 0; }
+.cur svg { width: 22px; height: 22px; }
+.foot { margin-top: auto; border-top: 1px solid var(--line); padding-top: 12px; display: flex; align-items: center; gap: 10px; }
+.chip { width: 30px; height: 30px; border-radius: 50%; background: var(--cream); color: #141414; display: grid; place-items: center; font: 600 14px sans-serif; position: relative; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); position: absolute; right: -1px; bottom: -1px; border: 2px solid #1b1b1d; }
+.main { display: flex; flex-direction: column; min-width: 0; }
+.head { display: flex; align-items: center; gap: 14px; padding: 14px 24px; border-bottom: 1px solid var(--line); }
+.head h1 { font: 400 28px/1 RoomArray, Georgia, serif; }
+.head .who { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 15px; font-style: italic; font-family: RoomInstrument, Georgia, serif; }
+.head .sp { flex: 1; }
+.btn { border: 1px solid var(--line); background: var(--panel); color: var(--body); border-radius: 8px; padding: 7px 14px; font: 16px/1 RoomGaramond, Georgia, serif; cursor: pointer; }
+.btn.gold { background: var(--gold); color: #374151; border-color: transparent; box-shadow: 1.79px 2.68px 1.79px rgb(0 0 0 / 70%); font: 18px/1 RoomInstrument, Georgia, serif; }
+.tabs { display: flex; gap: 6px; }
+.tabs a { color: var(--muted); text-decoration: none; padding: 6px 12px; border-radius: 8px; font: 400 12px RoomPixel, monospace; letter-spacing: .06em; text-transform: uppercase; }
+.tabs a.on { background: rgb(244 239 233 / 12%); color: var(--ink); }
+.view { display: none; padding: 24px; overflow: auto; flex: 1; }
+.view.on { display: block; }
+.msgs { max-width: 760px; display: grid; gap: 18px; }
+.msg { display: grid; grid-template-columns: 30px 1fr; gap: 12px; }
+.msg .meta { font: 400 11px RoomPixel, monospace; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; margin-bottom: 4px; }
+.msg p { color: var(--body); }
+.composer { margin: 0 24px 22px; max-width: 760px; border: 1px solid var(--line); background: var(--cream); color: #141414; border-radius: 12px; padding: 14px 16px; font: 20px RoomInstrument, Georgia, serif; font-style: italic; color: #736c66; }
+.pill { position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 288px; height: 32px; background: #000; border-radius: 0 0 14px 14px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; }
+.h2 { font: 400 32px/1.1 RoomArray, Georgia, serif; margin-bottom: 6px; }
+.desc { font: italic 24px/1.2 RoomInstrument, Georgia, serif; color: var(--body); margin-bottom: 20px; max-width: 640px; }
+.card { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 16px 18px; margin-bottom: 12px; max-width: 820px; }
+.card .t { font-size: 19px; }
+.card .m { color: var(--faint); font-size: 14px; }
+.card .acts { margin-top: 10px; display: flex; gap: 8px; }
+.grid2 { display: grid; grid-template-columns: 190px 1fr; gap: 28px; max-width: 980px; }
+.rail a { display: block; padding: 8px 12px; border-radius: 8px; color: var(--body); text-decoration: none; }
+.rail a.on { background: rgb(244 239 233 / 12%); color: var(--ink); }
+.field { display: grid; grid-template-columns: 160px 1fr auto; gap: 14px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.field .k { font: 400 11px RoomPixel, monospace; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+.input { background: var(--cream); color: #141414; border-radius: 8px; padding: 8px 12px; font: 18px RoomInstrument, Georgia, serif; }
+.status { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); }
+.status i { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; }
+.status i.warn { background: var(--gold); }
+.search-big { border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; background: var(--cream); color: #736c66; font: italic 20px RoomInstrument, Georgia, serif; max-width: 820px; margin-bottom: 22px; }
+.note { position: fixed; bottom: 10px; right: 14px; font: 11px RoomPixel, monospace; color: var(--faint); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="cursor" viewBox="0 0 24 24"><path d="M4 2.5 20 11l-7 2-2.2 7z" fill="currentColor" stroke="#0b0b0b" stroke-width="1.2" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+<div class="app">
+  <aside class="side">
+    <div class="brand">M9R</div>
+    <div class="search">Search</div>
+    <button class="newroom" onclick="show('chat')">New room</button>
+    <div class="label">Rooms</div>
+    <div class="row on" onclick="show('chat')"><span class="stack"><span class="cur" style="color:var(--claude)"><svg><use href="#cursor"/></svg></span><span class="cur" style="color:var(--codex)"><svg><use href="#cursor"/></svg></span></span><span class="name">Pricing research<span class="sub">Codex: sending you the table</span></span></div>
+    <div class="row" onclick="show('chat')"><span class="stack"><span class="cur" style="color:var(--opencode)"><svg><use href="#cursor"/></svg></span></span><span class="name">Launch checklist<span class="sub">OpenCode: done</span></span></div>
+    <div class="label">Workspace</div>
+    <div class="row"><span class="sysicon">A</span><span class="name">Activity</span></div>
+    <div class="row" onclick="show('memory')"><span class="sysicon">M</span><span class="name">Memory</span></div>
+    <div class="foot" onclick="show('settings')"><span class="chip">A<span class="dot"></span></span><span class="name" style="flex:1">@ayaan<span class="sub" style="display:block;color:var(--faint);font-size:13px">2 agents connected</span></span><span class="sysicon">⚙</span></div>
+  </aside>
+  <section class="main">
+    <header class="head">
+      <h1 id="title">Pricing research</h1>
+      <span class="who"><span class="stack"><span class="cur" style="color:var(--claude)"><svg><use href="#cursor"/></svg></span><span class="cur" style="color:var(--codex)"><svg><use href="#cursor"/></svg></span></span> Claude and Codex are here</span>
+      <span class="sp"></span>
+      <nav class="tabs"><a class="on" id="t-chat" href="#chat" onclick="show('chat')">Room</a><a id="t-docs" href="#docs" onclick="show('docs')">Docs</a><a id="t-members" href="#members" onclick="show('members')">Members</a></nav>
+      <button class="btn gold">Share link</button>
+    </header>
+
+    <div class="view on" id="v-chat">
+      <div class="msgs">
+        <div class="msg"><span class="chip">A</span><div><div class="meta">You · 7:02 PM</div><p>@claude find the three cheapest plans on that pricing page and ask @codex to check the annual discount.</p></div></div>
+        <div class="msg"><span class="cur" style="color:var(--claude);width:30px;height:30px"><svg style="width:30px;height:30px"><use href="#cursor"/></svg></span><div><div class="meta">Claude · 7:02 PM</div><p>On it. Reading the plans table. Basic is $9, Team is $24, Scale is $79 per month.</p></div></div>
+        <div class="msg"><span class="cur" style="color:var(--codex);width:30px;height:30px"><svg style="width:30px;height:30px"><use href="#cursor"/></svg></span><div><div class="meta">Codex · 7:03 PM</div><p>Annual billing takes 20% off Team and Scale. Basic has no annual option.</p></div></div>
+      </div>
+    </div>
+    <div class="composer" id="composer">Message your agents, e.g. @claude check the pricing page…</div>
+
+    <div class="view" id="v-docs"><div class="h2">Docs</div><p class="desc">Documents your agents and the people in this room edit together.</p>
+      <div class="card"><div class="t">Pricing comparison</div><div class="m">Edited by Claude and Codex · 2 minutes ago</div><div class="acts"><button class="btn">Open</button></div></div>
+      <div class="card"><div class="t">Launch notes</div><div class="m">Edited by you · yesterday</div><div class="acts"><button class="btn">Open</button></div></div>
+    </div>
+    <div class="view" id="v-members"><div class="h2">Members</div><p class="desc">Who is in this room, and who is waiting to be let in.</p>
+      <div class="card"><div class="t">Waiting to join: Maya</div><div class="m">Asked through the room link 1 minute ago</div><div class="acts"><button class="btn gold">Let in</button><button class="btn">Decline</button></div></div>
+      <div class="card"><div class="t">@ayaan (you)</div><div class="m">Owner · Claude, Codex</div></div>
+    </div>
+
+    <div class="view" id="v-memory"><div class="h2">Memory</div><p class="desc">What your agents have learned about your work. Keep it, fix it, or forget it.</p>
+      <div class="search-big">Search everything your agents remember…</div>
+      <div class="label" style="padding:0;margin-bottom:10px">Needs your review · 2</div>
+      <div class="card"><div class="t">The team prefers annual billing quotes</div><div class="m">Learned by Codex · pricing research · today</div><div class="acts"><button class="btn gold">Keep</button><button class="btn">Edit</button><button class="btn">Forget</button></div></div>
+      <div class="card"><div class="t">Always ask before posting to X</div><div class="m">Learned by Claude · launch checklist · yesterday</div><div class="acts"><button class="btn gold">Keep</button><button class="btn">Edit</button><button class="btn">Forget</button></div></div>
+      <div class="label" style="padding:0;margin:20px 0 10px">What your agents remember · 14</div>
+      <div class="card"><div class="t">The pricing page lives at /pricing and updates monthly</div><div class="m">Claude · pricing research · 3 days ago</div></div>
+      <div class="card"><div class="t">Screenshots go in the shared Docs, not in chat</div><div class="m">You · launch checklist · last week</div></div>
+    </div>
+
+    <div class="view" id="v-settings"><div class="h2">Settings</div><p class="desc">Your account, your workspace, and the agents connected to it.</p>
+      <div class="grid2">
+        <nav class="rail"><a class="on">Account</a><a>Workspace</a><a>Agents</a><a>Plan &amp; billing</a><a>Privacy &amp; data</a></nav>
+        <div>
+          <div class="field"><span class="k">Name</span><span class="input">ayaan</span><button class="btn">Change</button></div>
+          <div class="field"><span class="k">Email</span><span>tysonali989@gmail.com</span><span></span></div>
+          <div class="label" style="padding:0;margin:26px 0 10px">Agents</div>
+          <div class="card"><span class="status"><i></i> Connected</span><div class="t">Claude Code</div><div class="m">Opus 5.5 · seen just now</div></div>
+          <div class="card"><span class="status"><i></i> Connected</span><div class="t">Codex</div><div class="m">GPT-6.1 · seen just now</div></div>
+          <div class="card"><span class="status"><i class="warn"></i> Waiting for you to connect</span><div class="t">OpenCode</div><div class="m">Never seen</div><div class="acts"><button class="btn gold">Connect</button></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+<div class="note">mockup only: not the real app</div>
+<script>
+const titles = { chat: 'Pricing research', docs: 'Pricing research', members: 'Pricing research', memory: 'Memory', settings: 'Settings' };
+function show(v) {
+  for (const id of ['chat','docs','members','memory','settings']) document.getElementById('v-' + id).classList.toggle('on', id === v);
+  document.getElementById('composer').style.display = v === 'chat' ? '' : 'none';
+  for (const id of ['chat','docs','members']) { const t = document.getElementById('t-' + id); if (t) t.classList.toggle('on', id === v); }
+  document.getElementById('title').textContent = titles[v];
+}
+show((location.hash || '#chat').slice(1));
+</script>
+</body>
+</html>

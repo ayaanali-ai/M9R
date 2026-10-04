@@ -4,6 +4,7 @@ import { use, useCallback, useEffect, useMemo, useRef, useState, useSyncExternal
 import { createClient } from "@/lib/supabase/browser";
 import { ensureGuestSession } from "@/lib/rooms/ensure-guest-session";
 import { projectRoomArtifacts } from "@/lib/rooms/room-artifacts";
+import RoomLiveView from "./RoomLiveView";
 import styles from "../room-url.module.css";
 
 type RoomView = { room: { id: string; name: string; status: string }; membership: { status: string } };
@@ -592,8 +593,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
                 </select>
               </label>
             )}
-            <p className={styles.muted}>Presence is live-only. Page data, browser cursors, and local credentials are not included.</p>
+            <p className={styles.muted}>Presence is live-only. Room presence does not include page data, browser cursors, or local credentials.</p>
           </div>
+
+          <RoomLiveView roomId={roomId} displayName={currentMember?.displayName ?? "Room member"} />
 
           <div className={styles.panel}>
             <h2 style={{ marginTop: 0 }}>Shared artifacts</h2>

@@ -31,6 +31,8 @@ export interface WebRequest {
   tab?: string;
   url?: string;
   selector?: string;
+  /** Destination for drag gestures; validated by web-powers-core. */
+  endSelector?: string;
   /** Untrusted, optional visible-control label used only for risk classification and owner review. */
   targetLabel?: string;
   /** Optional stable parent-form selector used only to coordinate field claims. */
@@ -132,6 +134,8 @@ export function autoAllowedInMode(mode: RoomMode, request: { action: string; sel
 
 export interface WebBrokerDeps {
   send(message: unknown): boolean;
+  /** CDP input owns one pointer/focus per tab: serialize every writer through a tab lane. */
+  oneWriterPerTab?: boolean;
   /** Current room mode; absent means every risky action asks (the original behavior). */
   roomMode?(): RoomMode;
   ownerId?: string;
@@ -534,7 +538,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
     const id = turnParticipantId(actor, request);
     if (!lane.participants.has(id)) {
       lane.participants.set(id, turnParticipant(actor, request));
-      lane.scheduler.register(id, { burstSize: request.provider.toLowerCase().includes("codex") ? 4 : 1 });
+      lane.scheduler.register(id, { burstSize: (request.provider ?? "").toLowerCase().includes("codex") ? 4 : 1 });
     }
     return id;
   }
@@ -567,7 +571,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
       provider: claim.provider,
       sessionId: claim.sessionId,
     });
-    lane.scheduler.register(claim.participantId, { burstSize: claim.provider.toLowerCase().includes("codex") ? 4 : 1 });
+    lane.scheduler.register(claim.participantId, { burstSize: (claim.provider ?? "").toLowerCase().includes("codex") ? 4 : 1 });
     const inFlight = [...pending.entries()].filter(([, entry]) => entry.claimKey === key);
     lane.activeParticipantId = inFlight.length > 0 ? claim.participantId : null;
     lane.scheduler.setPending(claim.participantId, inFlight.length > 0);
@@ -852,12 +856,13 @@ export function createWebBroker(deps: WebBrokerDeps) {
     const siteJump = request.action === "open" && !crossOwner ? sameSiteJumpProblem(request.url) : null;
     if (siteJump) return Promise.resolve(fail(siteJump));
 
-    const requestedScope = scopeFor(request);
+    const scope = scopeFor(request);
+    const requestedScope: WebClaimScope | null = scope && deps.oneWriterPerTab ? { kind: "tab", key: "*" } : scope;
     if (requestedScope && !(request.action === "open" && !crossOwner)) {
       const activeLane = [...turnLanes.values()].find((lane) => lane.tab === tab && lane.key !== turnContext?.laneKey && turnLaneIsBusy(lane) && scopesOverlap(lane.scope, requestedScope));
       const activeLaneClaim = activeLane ? claims.get(activeLane.key) : undefined;
       const mayShareActiveClaim = activeLaneClaim?.agent !== actor && activeLaneClaim?.sharedWith.has(actor) === true;
-      if (activeLane && !mayShareActiveClaim) return queueTurnRequest(activeLane, request, actor);
+      if (activeLane && (deps.oneWriterPerTab || !mayShareActiveClaim)) return queueTurnRequest(activeLane, request, actor);
     }
     let claimHolder: Claim | undefined;
     let commandClaimKey: string | undefined;
@@ -911,6 +916,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
       url: request.url,
       selector: request.selector,
       text: request.text,
+      ...(request.endSelector ? { endSelector: request.endSelector } : {}),
       ...(request.args ? { args: request.args } : {}),
       ...powerFields,
       expectOrigin,
@@ -957,9 +963,12 @@ export function createWebBroker(deps: WebBrokerDeps) {
         participantId: turnContext?.participantId ?? participantId,
         ...(turnContext ? { turnLaneKey: turnContext.laneKey, turnToken: turnContext.token } : {}),
       });
+      if (deps.oneWriterPerTab && claimHolder && !turnContext) turnLaneForClaim(tab, claimHolder);
       if (!deps.send(message)) {
         clearTimeout(timer);
+        const entry = pending.get(id);
         pending.delete(id);
+        if (entry?.turnLaneKey && entry.turnToken) completeTurnLane(entry.turnLaneKey, entry.turnToken);
         if (addedOpenCandidate) forgetTab(actorKey, tab);
         resolve(fail("no browser extension is connected"));
       } else {
