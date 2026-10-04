@@ -23,8 +23,18 @@ if (process.env.M9R_BUILD_DRY === "1") {
 if (onCloudflare && !inner) {
   run("npx", ["opennextjs-cloudflare", "build"], {
     ...process.env,
+    CLOUDFLARE_BUILD: "true",
     M9R_OPENNEXT_INNER: "1",
     MISSION_RELAY_PUBLIC_URL: process.env.MISSION_RELAY_PUBLIC_URL || "wss://m9r-relay.m9r.workers.dev",
+  });
+} else if (onCloudflare) {
+  // Cloudflare's Linux Workers Builds image currently fails to resolve the
+  // generated `next/font/google` Turbopack module. Keep local builds on the
+  // default Turbopack path, but use Next's supported Webpack build for the
+  // Cloudflare/OpenNext production bundle.
+  run("npx", ["next", "build", "--webpack"], {
+    ...process.env,
+    CLOUDFLARE_BUILD: "true",
   });
 } else {
   run("npx", ["next", "build", "--turbopack"]);
