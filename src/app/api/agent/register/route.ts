@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { validateRegisterInput } from "@/lib/agent-join";
-import { registerClaim, AgentJoinError } from "@/lib/agent-join-service";
+import { registerClaim } from "@/lib/agent-join-service";
 import { resolveBaseUrl, handleAgentError } from "../_shared";
 
 // ---------------------------------------------------------------------------
@@ -39,9 +39,7 @@ export async function POST(req: NextRequest) {
     const result = await registerClaim(validation.value, resolveBaseUrl(req));
     return NextResponse.json(result, { status: 201 });
   } catch (err) {
-    if (err instanceof AgentJoinError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
-    }
+    // handleAgentError already covers AgentJoinError (with logging), so one branch handles every case here.
     return handleAgentError(err);
   }
 }

@@ -64,6 +64,8 @@ export interface SessionProbe {
   live: "live" | "free" | "unknown";
   /** From the tail of its rollout file: is a turn in progress? */
   turn: "working" | "idle" | "unknown";
+  /** While a turn is running: the last step in plain words, read from the transcript tail ("Reading feed-core.ts"). */
+  doing?: string | null;
 }
 
 export interface FeedInput {
@@ -134,8 +136,9 @@ function agentFor(handle: string, input: FeedInput): FeedAgent {
     if (open.length > 0) {
       const working = open.some((s) => input.probes[s.sessionId].turn === "working");
       const known = open.every((s) => input.probes[s.sessionId].turn !== "unknown");
+      const doing = open.map((s) => input.probes[s.sessionId]).find((p) => p.turn === "working" && p.doing)?.doing ?? null;
       return {
-        surface: "native", handle, sessions: rows, doing: null,
+        surface: "native", handle, sessions: rows, doing: doing ? safe(doing, 120) : null,
         state: working ? "open_working" : "open_idle",
         since: open[0].lastSeenAt,
         evidence: `${open.length} open session(s): its session file is held open${known ? `, ${working ? "a turn is in progress" : "no turn is running"}` : ""}.`,

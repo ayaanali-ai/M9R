@@ -52,6 +52,7 @@ test("OpenCode ACP launches once, resumes the same provider session, streams tur
     goal: "Work through the owner's shared M9R browser session using only its governed web tools.",
     executionConstraints: { profile: "web-only" },
     model: "opencode/big-pickle",
+    effort: undefined,
   });
   assert.equal((capturedOptions as { command: string }).command, "C:/Program Files/OpenCode/opencode.exe");
   assert.equal((capturedOptions as { shell: boolean }).shell, false, "resolved executable paths are launched without shell parsing");

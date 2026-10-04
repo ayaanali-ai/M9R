@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { resolveActiveOrDefaultProjectId } from "@/lib/projects-service";
 import { createClient } from "@/lib/supabase/server";
 import { revokeWorkspaceInvite, WorkspaceMembershipError } from "@/lib/workspace-membership-service";
+import { logInternalError, publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // DELETE /api/workspace/invites/[id] — revoke a pending invite.
@@ -21,7 +22,8 @@ export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof WorkspaceMembershipError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      logInternalError("Workspace invite revoke error", err.message, err.status);
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Workspace invite revoke error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

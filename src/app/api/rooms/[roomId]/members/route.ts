@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { personNames } from "@/lib/rooms/person-names";
 
 export const runtime = "nodejs";
 type RouteContext = { params: Promise<{ roomId: string }> };
@@ -15,7 +16,7 @@ export async function GET(_request: NextRequest, context: RouteContext) {
   if (!UUID.test(roomId)) return NextResponse.json({ error: "Room not found." }, { status: 404 });
 
   const { data: memberRows, error: memberError } = await db.from("m9r_room_members")
-    .select("id, user_id, role, joined_at")
+    .select("id, user_id, role, joined_at, guest_display_name")
     .eq("room_id", roomId)
     .eq("status", "active")
     .order("joined_at", { ascending: true })
@@ -42,9 +43,12 @@ export async function GET(_request: NextRequest, context: RouteContext) {
     seats = data ?? [];
   }
 
+  const names = await personNames(rows.map((member) => member.user_id as string));
   const members = rows.map((member) => ({
     actorId: `member:${member.id}`,
-    displayName: member.user_id === user.id ? "You" : `Member ${member.id.slice(0, 6)}`,
+    // Admitted members see each other by name; someone with no profile name at all falls back to a short, neutral label.
+    userId: member.user_id as string,
+    displayName: member.user_id === user.id ? "You" : names.get(member.user_id as string) ?? member.guest_display_name ?? "Room member",
     role: member.role,
     isYou: member.user_id === user.id,
     joinedAt: member.joined_at,

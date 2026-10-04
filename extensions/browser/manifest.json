@@ -13,6 +13,9 @@
     "nativeMessaging",
     "search"
   ],
+  "optional_permissions": [
+    "debugger"
+  ],
   "host_permissions": [
     "http://*/*",
     "https://*/*"
@@ -20,17 +23,14 @@
   "background": {
     "service_worker": "src/background.js"
   },
-  "chrome_url_overrides": {
-    "newtab": "newtab.html"
-  },
   "action": {
     "default_popup": "permission.html"
   },
   "content_scripts": [
     {
       "matches": [
-        "http://localhost/*",
-        "http://127.0.0.1/*"
+        "http://*/*",
+        "https://*/*"
       ],
       "js": [
         "src/presence-logic.js",
@@ -52,8 +52,7 @@
     },
     {
       "resources": [
-        "pill.html",
-        "composer.html"
+        "pill-next/*"
       ],
       "matches": [
         "http://*/*",

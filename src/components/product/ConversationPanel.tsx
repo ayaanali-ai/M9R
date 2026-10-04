@@ -4,15 +4,18 @@ import MessageDeliveryDetails from "@/components/product/MessageDeliveryDetails"
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, Inbox as InboxIcon, LogOut } from "lucide-react";
+import { Bookmark, Circle, Reply, X, Trash2, Pencil, Clock, AlertTriangle, RotateCcw, SlidersHorizontal, Square, LogOut } from "lucide-react";
 import { ChannelWelcome } from "./ChannelWelcome";
 import { DashboardChatHeader, DashboardPicker } from "./dashboard-chrome/Chrome";
 import { DashboardModels } from "./dashboard-chrome/DashboardModels";
-import { Bug, Monitor, Plus, ArrowUp } from "lucide-react";
+import ChannelEditDialog from "./ChannelEditDialog";
+import { useChannelColors } from "@/lib/channel-prefs";
+import { ClipboardCheck, Plus, ArrowUp } from "lucide-react";
 import { useComposerAutosize } from "./useComposerAutosize";
 import { TerminalWorkspace, type PtyRoomSession } from "./TerminalWorkspace";
 import { TERMINAL_ENABLED } from "@/lib/terminal-config";
 import { AttachIcon, MentionIcon } from "@/components/product/wf-icons";
+import { MemoryProposals } from "@/components/product/memory/MemoryProposals";
 import { AgentMark, AGENT_BRAND_COLOR } from "@/components/product/WorkspaceUI";
 import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import { type AgentView } from "@/lib/agent-workspace-data";
@@ -797,7 +800,7 @@ function PanelResizeHandle({ label, handleProps }: { label: string; handleProps:
  * read in it (B1: a promoted file diff). The panel stays mounted underneath
  * on purpose -- it owns the relay subscription that feeds live steps and the
  * unsent draft, and unmounting it to show a diff would drop both. */
-export default function ConversationPanel({ agents, workspaceId, viewerUserId, onFileStep, sidePanel, mainOverlay, filePanel, onOpenReview, reviewActive, pendingReviewCount, onOpenWhispers, whispersActive, onOpenDrafts, draftsActive, onOpenPeople, peopleActive, onOpenLive, liveActive, onOpenHandoffs, handoffsActive }: { agents: AgentView[]; workspaceId: string | null; viewerUserId: string | null; onFileStep?: (step: WorkspaceStep) => void; sidePanel?: ReactNode; mainOverlay?: ReactNode; filePanel?: ReactNode; onOpenReview?: () => void; reviewActive?: boolean; pendingReviewCount?: number; onOpenWhispers?: () => void; whispersActive?: boolean; onOpenDrafts?: () => void; draftsActive?: boolean; onOpenPeople?: () => void; peopleActive?: boolean; onOpenLive?: () => void; liveActive?: boolean; onOpenHandoffs?: () => void; handoffsActive?: boolean }) {
+export default function ConversationPanel({ agents, workspaceId, viewerUserId, onFileStep, sidePanel, mainOverlay, filePanel, onOpenReview, reviewActive, pendingReviewCount, onOpenDrafts, draftsActive, onOpenPeople, peopleActive, onOpenActivity, activityActive }: { agents: AgentView[]; workspaceId: string | null; viewerUserId: string | null; onFileStep?: (step: WorkspaceStep) => void; sidePanel?: ReactNode; mainOverlay?: ReactNode; filePanel?: ReactNode; onOpenReview?: () => void; reviewActive?: boolean; pendingReviewCount?: number; onOpenDrafts?: () => void; draftsActive?: boolean; onOpenPeople?: () => void; peopleActive?: boolean; onOpenActivity?: () => void; activityActive?: boolean; }) {
   // Drag-to-resize widths for the two right-hand panel slots -- one storage
   // key per slot, shared across whichever content currently occupies it
   // (Files vs. Ready for Review both use the side slot, so they share one
@@ -815,11 +818,8 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     return () => clearTimeout(timer);
   }, [notice]);
   const [replyTargetId, setReplyTargetId] = useState<string | null>(null);
-  const [showInbox, setShowInbox] = useState(false);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  // Server-side count, not notifications.filter(!read_at) -- `notifications`
-  // is only the most recent 100 rows, so counting it undercounts the badge.
-  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
+  const [editingChannel, setEditingChannel] = useState(false);
+  const channelColors = useChannelColors();
   const [pendingTaskContracts, setPendingTaskContracts] = useState<TaskCardContract[]>([]);
   const [pendingEvidenceRequests, setPendingEvidenceRequests] = useState<PendingEvidenceRequest[]>([]);
   const [evidenceDecisionBusyId, setEvidenceDecisionBusyId] = useState<string | null>(null);
@@ -999,16 +999,6 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   const messagesListRef = useRef<HTMLOListElement | null>(null);
   const searchParams = useSearchParams();
   const router = useRouter();
-  useEffect(() => {
-    if (searchParams.get("activity") !== "1") return;
-    const timer = window.setTimeout(() => {
-      setShowInbox(true);
-      const params = new URLSearchParams(searchParams.toString());
-      params.delete("activity");
-      router.replace(`${window.location.pathname}${params.size ? `?${params}` : ""}`, { scroll: false });
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [searchParams, router]);
   // Read reactively (not captured once at mount): a deep link's ?message=
   // must re-arm on a client-side navigation too -- e.g. clicking "Join" on
   // a Live Sessions row while already inside the app changes the URL via
@@ -1026,7 +1016,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // switches it now lives in the primary nav (ProductShell) rather than in
   // this component -- same reason agent selection travels as ?agent=.
   const selectedId = searchParams.get("conversation");
-  useComposerAutosize(textareaRef, draft, `${selectedId}:${showInbox}:${terminalActive}:${Boolean(mainOverlay)}`);
+  useComposerAutosize(textareaRef, draft, `${selectedId}:${terminalActive}:${Boolean(mainOverlay)}`);
   function selectConversation(conversationId: string) {
     router.replace(channelHref(conversationId), { scroll: false });
   }
@@ -1040,13 +1030,13 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     let cancelled = false;
     fetch(`/api/dashboard/conversations/${encodeURIComponent(selectedId)}/members`, { cache: "no-store" })
       .then((res) => res.json())
-      .then((data: { roster?: Array<{ userId: string; email: string | null }> }) => {
+      .then((data: { roster?: Array<{ userId: string; name: string | null }> }) => {
         if (cancelled) return;
-        setChannelRoster(new Map((data.roster ?? []).map((row) => [row.userId, row.email ?? row.userId])));
+        setChannelRoster(new Map((data.roster ?? []).map((row) => [row.userId, row.userId === viewerUserId ? "You" : row.name ?? "Teammate"])));
       })
       .catch(() => { /* best-effort label lookup -- presence still shows a generic label without it */ });
     return () => { cancelled = true; };
-  }, [selectedId]);
+  }, [selectedId, viewerUserId]);
 
   // Extracted so the channel switcher/create-channel dialog can trigger an
   // immediate refresh after creating or leaving a channel, instead of
@@ -1429,8 +1419,6 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
         };
         if (cancelled) return;
         setPendingTaskContracts(data.taskContracts ?? []);
-        setNotifications(data.notifications ?? []);
-        setUnreadNotificationCount(typeof data.unreadNotificationCount === "number" ? data.unreadNotificationCount : 0);
         setPendingEvidenceRequests((data.requests ?? [])
           .filter((row) => !decidedEvidenceRequestIds.has(row.id))
           .map((row) => ({ id: row.id, conversationId: row.conversationId, agentConnectionId: row.agentConnectionId, provider: row.provider, requestSummary: row.requestSummary, requestMessageId: row.requestMessageId, createdAt: row.createdAt })));
@@ -1669,6 +1657,29 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     }
     return out;
   }, [draft, agentMentionKeys, agents]);
+  /** Agents a piece of text is addressed to, in first-mention order. Shared by the header, sent messages and send. */
+  const agentsMentionedIn = useCallback((text: string): AgentView[] => {
+    const seen = new Set<string>();
+    const out: AgentView[] = [];
+    for (const match of text.matchAll(/(?:^|\s)@([a-z][a-z0-9-]*)/gi)) {
+      const key = match[1].toLowerCase();
+      if (seen.has(key)) continue;
+      const agent = agents.find((candidate) => candidate.key.toLowerCase() === key);
+      if (!agent) continue;
+      seen.add(key);
+      out.push(agent);
+    }
+    return out;
+  }, [agents]);
+  const addressedAgents = useMemo(() => {
+    const typed = agentsMentionedIn(draft);
+    if (typed.length > 0) return typed;
+    const conversation = conversations.find((item) => item.id === selectedId);
+    if (!conversation) return [];
+    const lastMine = [...conversation.messages].reverse().find((message) => Boolean(viewerUserId) && message.sender_user_id === viewerUserId && agentsMentionedIn(message.body).length > 0);
+    if (lastMine) return agentsMentionedIn(lastMine.body);
+    return agents.filter((agent) => agent.connectionId && conversation.participant_connection_ids.includes(agent.connectionId));
+  }, [draft, conversations, selectedId, agents, viewerUserId, agentsMentionedIn]);
   const selected = conversations.find((conversation) => conversation.id === selectedId) ?? null;
 
   // Nothing selected yet (a bare /dashboard/agents, or a ?conversation= that
@@ -1988,9 +1999,14 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
   // "You" is never correct here: labelFor only resolves *other* participants
   // (viewer's own messages/typing are excluded before this is called). A
   // missing connectionId means the sender has no known identity at all.
+  /** A stored "You" or "Me" is a leftover placeholder from an older version, not the sender's name. */
+  function realName(name: string | null | undefined): string | null {
+    return name && name.trim() && !/^(you|me)$/i.test(name.trim()) ? name : null;
+  }
+
   function labelFor(connectionId: string | null): string {
     const agent = connectionId ? byConnectionId.get(connectionId) : undefined;
-    if (!agent) return "Someone";
+    if (!agent) return "An agent";
     // AgentView.label already has the "Owner's Provider" format when disambiguated,
     // or just "Provider" when unique. This matches getAgentDisplayName's output.
     return agent.label;
@@ -2147,16 +2163,33 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     // removes it again. Same slug match already used for @mention
     // autocomplete, so "mentioned" means the same thing here as everywhere
     // else in this composer.
-    // agent.key, not agent.label -- see the mentionSuggestions note above.
-    const mentioned = agents.find((agent) => agent.connected && agent.connectionId
+    const mentionedNow = agents.filter((agent) => agent.connected && agent.connectionId
       && new RegExp(`(^|\\s)@${agent.key.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[^a-z0-9-])`, "i").test(body));
-    if (mentioned?.connectionId) {
-      const connectionId = mentioned.connectionId;
-      setAgentTurns((current) => current[connectionId] && !current[connectionId].ended
-        ? current
-        : { ...current, [connectionId]: { connectionId, startedAtMs: Date.now(), confirmed: false, messageId: null, action: null, ended: null } });
+    if (mentionedNow.length > 0) {
+      setAgentTurns((current) => {
+        const next = { ...current };
+        for (const agent of mentionedNow) {
+          const connectionId = agent.connectionId as string;
+          if (next[connectionId] && !next[connectionId].ended) continue;
+          next[connectionId] = { connectionId, startedAtMs: Date.now(), confirmed: false, messageId: null, action: null, ended: null };
+        }
+        return next;
+      });
     }
     void deliverMessage(conversationId, body, parentMessageId, clientRequestId);
+  }
+
+  /** Save any message as a fact or decision the whole team (and its agents) can use. */
+  async function saveToMemory(message: ConversationMessage) {
+    if (!selected) return;
+    const text = message.body.trim();
+    if (!text) return;
+    const title = text.split(/\r?\n/, 1)[0].slice(0, 160);
+    try {
+      const response = await fetch("/api/shared-memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, body: text.slice(0, 65_000), conversationId: selected.id }) });
+      const data = await response.json().catch(() => ({})) as { error?: string };
+      setNotice(response.ok ? "Saved to memory." : data.error ?? "Could not save to memory.");
+    } catch { setNotice("Could not save to memory."); }
   }
 
   async function attachFile(file: File) {
@@ -2328,26 +2361,6 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
     }
   }
 
-  /** markAll is resolved server-side by predicate, so this clears every
-   *  unread row for the user -- including the ones past the 100-row page
-   *  this client holds. The optimistic update can only touch what is
-   *  loaded; the next 5s poll reconciles the rest. */
-  async function markAllNotificationsRead() {
-    setNotifications((current) => current.map((item) => item.read_at ? item : { ...item, read_at: new Date().toISOString() }));
-    setUnreadNotificationCount(0);
-    await fetch("/api/dashboard/notifications", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ markAll: true }) }).catch(() => undefined);
-  }
-
-  async function openNotification(notification: NotificationItem) {
-    if (!notification.read_at) {
-      await fetch("/api/dashboard/notifications", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ notificationIds: [notification.id] }) }).catch(() => undefined);
-      setNotifications((current) => current.map((item) => item.id === notification.id ? { ...item, read_at: new Date().toISOString() } : item));
-      setUnreadNotificationCount((current) => Math.max(0, current - 1));
-    }
-    if (notification.conversation_id) selectConversation(notification.conversation_id);
-    setShowInbox(false);
-  }
-
   return (
     <section
       className="wf-chat-shell"
@@ -2355,7 +2368,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
       style={{ "--wf-side-w": `${sidePanelResize.width}px`, "--wf-file-w": `${filePanelResize.width}px` } as CSSProperties}
     >
       <div className="wf-chat-main">
-        {mainOverlay ?? (showInbox ? <section className="wf-chat-inbox"><header className="wf-chat-header"><div><h2>Inbox</h2><p>Mentions, replies, and agent activity</p></div><div className="wf-chat-actions">{unreadNotificationCount > 0 && <button type="button" onClick={() => void markAllNotificationsRead()}>Mark all read</button>}<button type="button" onClick={() => setShowInbox(false)}>Back to channel</button></div></header>{notifications.length === 0 && <p className="wf-chat-empty">Nothing needs your attention.</p>}{notifications.map((notification) => <button type="button" key={notification.id} className={`wf-chat-notification ${notification.read_at ? "is-read" : ""}`} onClick={() => void openNotification(notification)}><strong>{notification.title}</strong><span>{notification.body}</span><time>{relativeTime(notification.created_at, now)}</time></button>)}</section> : terminalActive && selected ? (
+        {mainOverlay ?? (terminalActive && selected ? (
           <TerminalWorkspace
             channelLabel={selected.channel_kind === "dm" ? channelDisplayName(selected) : `#${channelDisplayName(selected)}`}
             sessions={ptyRoomSessions}
@@ -2378,17 +2391,16 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 sidePanelMode) -- both used to be buried in a "more actions"
                 dropdown or a full-screen modal; this is the one consistent
                 mechanism for both. */}
-            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"}
+            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"} color={channelColors[selected.id]} addressed={addressedAgents.length > 0 ? <span className="m9r-addressed" aria-label={`Talking to ${addressedAgents.map((agent) => agent.label).join(", ")}`}>{addressedAgents.map((agent) => <span key={agent.id} title={agent.label}><AgentMark agentKey={agent.key} size={22} /></span>)}</span> : undefined}
               threads={<DashboardPicker label="Choose conversation" value="Thread" icon={<Plus size={12} />} options={conversations.map(conversation => ({ id: conversation.id, label: channelDisplayName(conversation) }))} onSelect={selectConversation} />}
               model={<DashboardModels agents={agents.filter(agent => selected.participant_connection_ids.includes(agent.connectionId ?? ""))} conversationId={selected.id} />}
-              actions={<>{onOpenLive && <button type="button" aria-label="Live sessions" title="Live sessions" onClick={onOpenLive} data-active={liveActive}><Monitor size={18} /></button>}{onOpenReview && <button type="button" aria-label="Ready for Review" title="Ready for Review" onClick={onOpenReview} data-active={reviewActive}><Bug size={18} />{Boolean(pendingReviewCount) && <i className="m9r-dash-notification-dot" />}</button>}</>}
+              actions={<>{onOpenReview && <button type="button" aria-label="Ready for review" title="Ready for review" onClick={onOpenReview} data-active={reviewActive}><ClipboardCheck size={18} />{Boolean(pendingReviewCount) && <i className="m9r-dash-notification-dot" />}</button>}</>}
               search={transcriptSearch} onSearch={setTranscriptSearch}
               menuActions={[
-                ...(onOpenPeople ? [{ label: "People", onSelect: onOpenPeople, active: peopleActive }] : []),
-                ...(onOpenDrafts ? [{ label: "Shared drafts", onSelect: onOpenDrafts, active: draftsActive }] : []),
-                ...(onOpenWhispers ? [{ label: "Agent whispers", onSelect: onOpenWhispers, active: whispersActive }] : []),
-                ...(onOpenHandoffs ? [{ label: "Goal handoffs", onSelect: onOpenHandoffs, active: handoffsActive }] : []),
-                { label: "Inbox", onSelect: () => setShowInbox(true) },
+                ...(onOpenPeople ? [{ label: "Members", onSelect: onOpenPeople, active: peopleActive }] : []),
+                ...(onOpenActivity ? [{ label: "Activity", onSelect: onOpenActivity, active: activityActive }] : []),
+                ...(onOpenDrafts ? [{ label: "Docs", onSelect: onOpenDrafts, active: draftsActive }] : []),
+                { label: selected.channel_kind === "dm" ? "Edit conversation" : "Edit channel", onSelect: () => setEditingChannel(true) },
                 ...(TERMINAL_ENABLED ? [{ label: "Terminal", onSelect: () => setTerminalActive(true) }] : []),
               ]}
             />
@@ -2414,7 +2426,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 const showUnreadDivider = dividerIndex !== -1 && index === dividerIndex;
                 const isHuman = Boolean(message.sender_user_id);
                 const isViewer = isHuman && Boolean(viewerUserId) && message.sender_user_id === viewerUserId;
-                const senderName = isViewer ? "Me" : isHuman ? message.sender_display_name ?? "Teammate" : message.sender_display_name ?? labelFor(message.sender_connection_id);
+                const senderName = isViewer ? "Me" : isHuman ? realName(message.sender_display_name) ?? "Teammate" : realName(message.sender_display_name) ?? labelFor(message.sender_connection_id);
                 /* Sender labels are viewer-relative: only the authenticated
                    author's own rows say "Me". Other humans keep their stored
                    display name, even when the message mentions the viewer. */
@@ -2464,6 +2476,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                       {isGroupStart && (
                         <div className="wf-chat-message-meta">
                           <strong>{senderName}</strong>
+                          {isViewer && (() => { const to = agentsMentionedIn(message.body); return to.length > 0 ? <span className="m9r-sent-to" aria-label={`To ${to.map((agent) => agent.label).join(", ")}`}>to {to.map((agent) => <span key={agent.id} title={agent.label}><AgentMark agentKey={agent.key} size={14} /></span>)}</span> : null; })()}
                           {/* The rebranded display label ("Claude"), never the raw
                               provider key ("claude-code") -- the key still backs
                               real @mention matching elsewhere, this is display-only. */}
@@ -2484,7 +2497,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                         const parentMessage = messagesById.get(message.parent_message_id!);
                         if (!parentMessage) return null;
                         const parentIsViewer = Boolean(parentMessage.sender_user_id) && Boolean(viewerUserId) && parentMessage.sender_user_id === viewerUserId;
-                        const parentSenderName = parentIsViewer ? "You" : parentMessage.sender_user_id ? parentMessage.sender_display_name ?? "Teammate" : parentMessage.sender_display_name ?? labelFor(parentMessage.sender_connection_id);
+                        const parentSenderName = parentIsViewer ? "You" : parentMessage.sender_user_id ? realName(parentMessage.sender_display_name) ?? "Teammate" : realName(parentMessage.sender_display_name) ?? labelFor(parentMessage.sender_connection_id);
                         const snippet = parentMessage.body.length > 120 ? `${parentMessage.body.slice(0, 120)}…` : parentMessage.body;
                         return (
                           <button type="button" className="wf-chat-reply-quote" onClick={() => scrollToMessage(parentMessage.id)}>
@@ -2797,6 +2810,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                       <div className="wf-chat-message-tools">
                         <button type="button" onClick={() => void toggleReaction(message, "👍")} title="React 👍" aria-label="React with thumbs up">👍</button>
                         <button type="button" onClick={() => void toggleReaction(message, "✅")} title="React ✅" aria-label="React with checkmark">✅</button>
+                        <button type="button" onClick={() => void saveToMemory(message)} title="Save to memory" aria-label="Save to memory"><Bookmark size={13} aria-hidden /></button>
                         <button type="button" onClick={() => setReplyTargetId(message.id)} title={message.parent_message_id ? "Reply" : "Thread"} aria-label={message.parent_message_id ? "Reply" : "Start thread"}><Reply size={13} aria-hidden /></button>
                         {message.sender_user_id && (
                           <>
@@ -2812,9 +2826,10 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 });
               })()}
             </ol>
-            {threadRoot && <aside className="wf-chat-thread" aria-label="Message thread"><header><strong>Thread</strong><button type="button" onClick={() => setReplyTargetId(null)}>Close</button></header><p>{threadRoot.body}</p><small>{threadReplies.length} repl{threadReplies.length === 1 ? "y" : "ies"}</small>{threadReplies.map((reply) => { const replyIsViewer = Boolean(viewerUserId) && reply.sender_user_id === viewerUserId; return <div key={reply.id}><strong>{replyIsViewer ? "Me" : reply.sender_user_id ? reply.sender_display_name ?? "Teammate" : reply.sender_display_name ?? labelFor(reply.sender_connection_id)}</strong><span>{reply.body}</span></div>; })}</aside>}
+            {threadRoot && <aside className="wf-chat-thread" aria-label="Message thread"><header><strong>Thread</strong><button type="button" onClick={() => setReplyTargetId(null)}>Close</button></header><p>{threadRoot.body}</p><small>{threadReplies.length} repl{threadReplies.length === 1 ? "y" : "ies"}</small>{threadReplies.map((reply) => { const replyIsViewer = Boolean(viewerUserId) && reply.sender_user_id === viewerUserId; return <div key={reply.id}><strong>{replyIsViewer ? "Me" : reply.sender_user_id ? realName(reply.sender_display_name) ?? "Teammate" : realName(reply.sender_display_name) ?? labelFor(reply.sender_connection_id)}</strong><span>{reply.body}</span></div>; })}</aside>}
             <div className="m9r-composer-frame">
             <form className="wf-chat-composer" onSubmit={submit}>
+              <MemoryProposals conversationId={selected.id} />
               {replyTargetId && <div className="wf-chat-reply-context">Replying in thread <button type="button" onClick={() => setReplyTargetId(null)}>Cancel</button></div>}
               {interjectFor && (
                 <div className="wf-chat-interject-context" role="status">
@@ -2952,14 +2967,6 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                       </div>
                     )}
                   </div>
-                  {/* Deprioritized out of the chat header (Files and Ready
-                      for Review took that spot), not deleted -- kept
-                      reachable here for later, same idiom as the other
-                      composer toolbar icons. */}
-                  <button type="button" className="wf-chat-toolbar-icon" onClick={() => setShowInbox(true)} aria-label={unreadNotificationCount > 0 ? `Inbox, ${unreadNotificationCount} unread` : "Inbox"} title="Inbox">
-                    <InboxIcon size={15} />
-                    {unreadNotificationCount > 0 && <b aria-hidden>{unreadNotificationCount > 99 ? "99+" : unreadNotificationCount}</b>}
-                  </button>
                 </div>
                 <div className="wf-chat-composer-status">
                   {draft.length > 1_800 && <span className="wf-chat-char-count" data-warn={draft.length > 1_950}>{draft.length}/2000</span>}
@@ -3051,6 +3058,18 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
         onConfirm={() => void confirmDeleteMessage()}
         onCancel={() => setConfirmDeleteMessageTarget(null)}
       />
+      {editingChannel && selected && (
+        <ChannelEditDialog
+          channel={{
+            id: selected.id,
+            topic: selected.topic,
+            description: selected.description ?? null,
+            kind: selected.channel_kind === "dm" ? "dm" : "channel",
+            builtIn: channelGroupForConversation({ channelSlug: selected.channel_slug, channelKind: selected.channel_kind, topic: selected.topic }) === "core",
+          }}
+          onClose={() => setEditingChannel(false)}
+        />
+      )}
     </section>
   );
 }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listDeniedFilePatternsForDashboard, addDeniedFilePatternForDashboard, removeDeniedFilePatternForDashboard, FilePermissionsError } from "@/lib/bridge/agent-file-permissions-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // #20: human-facing management of one connected agent's file-write DENY
 // list -- enforcement already exists at the real ACP tool-call boundary
@@ -7,7 +8,7 @@ import { listDeniedFilePatternsForDashboard, addDeniedFilePatternForDashboard, r
 // one" half. GET lists patterns, POST adds one, DELETE removes one (?id=).
 
 function handleError(error: unknown) {
-  if (error instanceof FilePermissionsError) return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });
+  if (error instanceof FilePermissionsError) return NextResponse.json({ error: publicErrorMessage(error.message, error.status), code: error.code }, { status: error.status });
   return NextResponse.json({ error: "Something went wrong." }, { status: 500 });
 }
 

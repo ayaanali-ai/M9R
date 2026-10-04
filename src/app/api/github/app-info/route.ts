@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getGithubAppSlug } from "@/lib/github-app-api";
+import { publicErrorMessage } from "@/lib/public-error";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,6 @@ export async function GET() {
     const slug = await getGithubAppSlug();
     return NextResponse.json({ slug });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not resolve the GitHub App." }, { status: 503 });
+    return NextResponse.json({ error: publicErrorMessage(error instanceof Error ? error.message : "Could not resolve the GitHub App.", 503) }, { status: 503 });
   }
 }

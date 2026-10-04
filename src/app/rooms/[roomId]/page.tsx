@@ -8,7 +8,7 @@ import RoomLiveView from "./RoomLiveView";
 import styles from "../room-url.module.css";
 
 type RoomView = { room: { id: string; name: string; status: string }; membership: { status: string } };
-type PendingMember = { memberId: string; userId: string; requestedAt: string };
+type PendingMember = { memberId: string; userId: string; displayName?: string | null; guestEmail?: string | null; requestedAt: string };
 type RoomEvent = {
   id: string;
   sequence: number | string;
@@ -22,6 +22,7 @@ type RoomEvent = {
 };
 type RoomMember = {
   actorId: string;
+  userId?: string;
   displayName: string;
   role: string;
   isYou: boolean;
@@ -52,7 +53,8 @@ type RoomHandoff = {
   eventId: string;
   sequence: number;
 };
-type PresenceEntry = { participantId?: string; displayName?: string; activity?: string };
+type PresenceEntry = { participantId?: string; activity?: string };
+type RoomMemoryNote = { id: string; room_id: string; title: string; body: string; author_user_id: string | null; created_at: string };
 
 function subscribeToLocationOrigin() {
   return () => {};
@@ -134,6 +136,12 @@ function leaseIsActive(lease: RoomLease | undefined): lease is RoomLease {
   return Boolean(lease && Date.parse(lease.expires_at) > Date.now());
 }
 
+/** A person's name from the admitted-members list, never a fragment of their id. */
+function personName(userId: string | null, members: RoomMember[]): string {
+  const member = userId ? members.find((candidate) => candidate.userId === userId) : undefined;
+  return member?.displayName ?? "Room member";
+}
+
 function actorLabel(actorId: string, members: RoomMember[]): string {
   const member = members.find((candidate) => candidate.actorId === actorId);
   if (member) return member.displayName;
@@ -179,9 +187,18 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const [handoffRecipients, setHandoffRecipients] = useState<Record<string, string>>({});
   const [handoffContexts, setHandoffContexts] = useState<Record<string, string>>({});
   const [handoffResponses, setHandoffResponses] = useState<Record<string, string>>({});
+  const [memoryNotes, setMemoryNotes] = useState<RoomMemoryNote[]>([]);
+  const [memoryTitle, setMemoryTitle] = useState("");
+  const [memoryBody, setMemoryBody] = useState("");
+  const [memoryBusy, setMemoryBusy] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const clientRef = useRef<ReturnType<typeof createClient>>(null);
   const userIdRef = useRef<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [needsGuestIdentity, setNeedsGuestIdentity] = useState(false);
+  const [guestName, setGuestName] = useState("");
+  const [guestEmail, setGuestEmail] = useState("");
+  const [guestBusy, setGuestBusy] = useState(false);
   const tasks = useMemo(() => projectRoomTasks(events), [events]);
   const handoffs = useMemo(() => projectRoomHandoffs(events), [events]);
   const artifacts = useMemo(() => projectRoomArtifacts(events), [events]);
@@ -212,6 +229,41 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     }
   }, [roomId]);
 
+  const loadRoomMemory = useCallback(async () => {
+    const response = await fetch(`/api/rooms/${roomId}/memory`, { cache: "no-store" });
+    if (!response.ok) return;
+    const data = await response.json().catch(() => ({})) as { notes?: RoomMemoryNote[] };
+    if (Array.isArray(data.notes)) setMemoryNotes(data.notes);
+  }, [roomId]);
+
+  async function saveMemoryNote(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const title = memoryTitle.trim();
+    const body = memoryBody.trim();
+    if (!title || !body || memoryBusy) return;
+    setMemoryBusy(true);
+    setMemoryError(null);
+    try {
+      const response = await fetch(`/api/rooms/${roomId}/memory`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title, body }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null) as { error?: string } | null;
+        setMemoryError(data?.error ?? "Could not save that note.");
+        return;
+      }
+      setMemoryTitle("");
+      setMemoryBody("");
+      await loadRoomMemory();
+    } catch {
+      setMemoryError("Could not reach the server. Try again.");
+    } finally {
+      setMemoryBusy(false);
+    }
+  }
+
   const refresh = useCallback(async () => {
     const response = await fetch(`/api/rooms/${roomId}`, { cache: "no-store" });
     const data = await response.json().catch(() => ({})) as RoomView & { error?: string };
@@ -231,27 +283,71 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     }
   }, [roomId]);
 
+  const pollRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+
+  // Completes the join: mints/confirms a session, sends the join request (with guest
+  // name/email when this is a fresh anonymous visitor), then starts polling the room.
+  const completeJoin = useCallback(async (identity?: { displayName: string; email: string }) => {
+    const supabase = createClient();
+    if (!supabase) { setError("Supabase is not configured."); return; }
+    const guest = await ensureGuestSession(supabase);
+    if (!guest.ok) {
+      // Never show the provider's wording. Guest access depends on a project setting, so say what the person can do instead.
+      setError(/anonymous/i.test(guest.error)
+        ? `Guest access is not available yet. Sign in at /auth?next=/rooms/${roomId} to ask to join this room.`
+        : "Could not join this room right now. Please try again.");
+      return;
+    }
+    const { data: userData } = await supabase.auth.getUser();
+    if (!userData.user) { setError("Your room session could not be verified."); return; }
+    clientRef.current = supabase;
+    userIdRef.current = userData.user.id;
+    setCurrentUserId(userData.user.id);
+    // First contact requests a join (idempotent -- a returning active member stays active).
+    const joinResponse = await fetch(`/api/rooms/${roomId}/join`, {
+      method: "POST",
+      headers: identity ? { "content-type": "application/json" } : undefined,
+      body: identity ? JSON.stringify({ displayName: identity.displayName, email: identity.email }) : undefined,
+    }).catch(() => null);
+    if (!joinResponse?.ok) {
+      const joinData = await joinResponse?.json().catch(() => ({})) as { error?: string } | undefined;
+      setError(joinData?.error ?? "Could not send your request to join. Reload the page to try again.");
+      return;
+    }
+    setNeedsGuestIdentity(false);
+    await refresh();
+    pollRef.current = setInterval(() => { void refresh(); }, 4000);
+  }, [roomId, refresh]);
+
   useEffect(() => {
     let cancelled = false;
-    let poll: ReturnType<typeof setInterval> | undefined;
     (async () => {
       const supabase = createClient();
       if (!supabase) { setError("Supabase is not configured."); return; }
-      const guest = await ensureGuestSession(supabase);
-      if (!guest.ok) { setError(`Could not join: ${guest.error}`); return; }
-      const { data: userData } = await supabase.auth.getUser();
-      if (!userData.user) { setError("Your room session could not be verified."); return; }
-      clientRef.current = supabase;
-      userIdRef.current = userData.user.id;
-      setCurrentUserId(userData.user.id);
-      // First contact requests a join (idempotent -- a returning active member stays active).
-      await fetch(`/api/rooms/${roomId}/join`, { method: "POST" });
+      const { data: userData } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
       if (cancelled) return;
-      await refresh();
-      poll = setInterval(() => { void refresh(); }, 4000);
+      // An existing session -- signed-in member, or a guest who already typed their name on a
+      // prior visit to this room -- joins straight away. A brand-new visitor is asked their name
+      // and email first, so the host sees a real person, not a blank "Someone" in the request list.
+      if (userData.user) { void completeJoin(); return; }
+      setNeedsGuestIdentity(true);
     })();
-    return () => { cancelled = true; if (poll) clearInterval(poll); };
-  }, [roomId, refresh]);
+    return () => { cancelled = true; if (pollRef.current) clearInterval(pollRef.current); };
+  }, [completeJoin]);
+
+  async function submitGuestIdentity(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const displayName = guestName.trim();
+    const email = guestEmail.trim();
+    if (!displayName || !email || guestBusy) return;
+    setGuestBusy(true);
+    setError(null);
+    try {
+      await completeJoin({ displayName, email });
+    } finally {
+      setGuestBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (view?.membership.status !== "active") return;
@@ -290,6 +386,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
         if (status === "SUBSCRIBED") {
           void loadRoomEvents();
           void loadCoordinationIfActive();
+          void loadRoomMemory();
         }
       });
     const coordinationPoll = setInterval(() => { void loadCoordinationIfActive(); }, 5_000);
@@ -307,9 +404,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
         if (disposed) return;
         if (status === "SUBSCRIBED") {
           setRealtimeStatus("Live");
+          // No displayName here: the UI already resolves names from `members` via personName() (below), never
+          // from presence. Broadcasting one anyway just risks leaking an id fragment to any future presence reader.
           void presenceChannel.track({
             participantId: userId,
-            displayName: `Member ${userId.slice(0, 6)}`,
             activity: "viewing room",
           });
         } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
@@ -324,7 +422,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       void supabase.removeChannel(presenceChannel);
       void supabase.removeChannel(eventChannel);
     };
-  }, [roomId, view?.membership.status, loadRoomEvents]);
+  }, [roomId, view?.membership.status, loadRoomEvents, loadRoomMemory]);
 
   async function appendEvent(kind: string, payload: Record<string, unknown>, causalEventIds: string[] = [], actorSeatId: string | null = selectedSeatId || null) {
     setSending(true);
@@ -492,8 +590,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   }
 
   async function admit(memberId: string) {
-    const response = await fetch(`/api/rooms/${roomId}/members/${memberId}/admit`, { method: "POST" });
-    if (response.ok) void refresh();
+    const response = await fetch(`/api/rooms/${roomId}/members/${memberId}/admit`, { method: "POST" }).catch(() => null);
+    if (response?.ok) { setEventError(null); void refresh(); return; }
+    const data = await response?.json().catch(() => ({})) as { error?: string } | undefined;
+    setEventError(data?.error ?? "Could not admit this person. Please try again.");
   }
 
   async function copyLink() {
@@ -511,6 +611,29 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   }
 
   if (error) return <div className={styles.page}><main className={styles.roomShell}><p className={styles.inlineError} role="alert">{error}</p></main></div>;
+  if (needsGuestIdentity && !view) {
+    return (
+      <div className={styles.page}>
+        <main className={styles.roomShell}>
+          <section className={styles.panel} aria-labelledby="guest-identity-title">
+            <h1 id="guest-identity-title" style={{ marginTop: 0 }}>Who should the host see?</h1>
+            <p className={styles.muted}>No account needed — just your name and email, so the room host knows who&apos;s asking to join.</p>
+            <form onSubmit={(event) => void submitGuestIdentity(event)} style={{ display: "grid", gap: 8, maxWidth: 360 }}>
+              <label>Your name
+                <input value={guestName} onChange={(event) => setGuestName(event.target.value)} maxLength={80} required autoComplete="name" style={{ display: "block", width: "100%", marginTop: 4 }} />
+              </label>
+              <label>Your email
+                <input type="email" value={guestEmail} onChange={(event) => setGuestEmail(event.target.value)} maxLength={320} required autoComplete="email" style={{ display: "block", width: "100%", marginTop: 4 }} />
+              </label>
+              <button className={styles.primaryButton} type="submit" disabled={guestBusy || !guestName.trim() || !guestEmail.trim()}>
+                {guestBusy ? "Joining…" : "Continue to the room"}
+              </button>
+            </form>
+          </section>
+        </main>
+      </div>
+    );
+  }
   if (!view) return <div className={styles.page}><main className={styles.roomShell}><p className={styles.loadingMessage} role="status">Loading room…</p></main></div>;
 
   const status = view.membership.status;
@@ -564,7 +687,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             </div>
           </dl>
 
-          {status === "active" && <a className={styles.workspaceLink} href="#room-workspace">Continue to the room workspace ↓</a>}
+          {status === "active" && <a className={styles.workspaceLink} href="#room-workspace">Continue to the room ↓</a>}
         </header>
 
       {status === "requested" && <p className={styles.statusBanner} role="status">Waiting for the host to let you in…</p>}
@@ -576,7 +699,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             {eventError && <p className={styles.inlineError} role="alert">{eventError}</p>}
             {onlineMembers.length === 0 ? <p>No other members are currently here.</p> : (
               <ul aria-label="Members currently in the room">
-                {onlineMembers.map((member) => <li key={member.participantId}>{member.displayName ?? "Room member"} — {member.activity ?? "present"}</li>)}
+                {onlineMembers.map((member) => <li key={member.participantId}>{(member.participantId === currentUserId ? "You" : personName(member.participantId ?? null, members))} — {member.activity ?? "present"}</li>)}
               </ul>
             )}
             <h3>Admitted participants</h3>
@@ -597,6 +720,25 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
           </div>
 
           <RoomLiveView roomId={roomId} displayName={currentMember?.displayName ?? "Room member"} />
+
+          <div className={styles.panel}>
+            <h2 style={{ marginTop: 0 }}>Room memory</h2>
+            <p className={styles.muted}>Notes saved here are visible to every admitted member of this room, including guests who never signed up for a workspace. They count against the host&apos;s shared memory allowance.</p>
+            <form onSubmit={(event) => void saveMemoryNote(event)} style={{ display: "grid", gap: 8 }}>
+              <label>Note title<input value={memoryTitle} onChange={(event) => setMemoryTitle(event.target.value)} maxLength={160} required style={{ display: "block", width: "100%", marginTop: 4 }} /></label>
+              <label>Note text<textarea value={memoryBody} onChange={(event) => setMemoryBody(event.target.value)} maxLength={4000} rows={4} required style={{ display: "block", width: "100%", marginTop: 4 }} /></label>
+              {memoryError && <p className={styles.inlineError} role="alert">{memoryError}</p>}
+              <button disabled={memoryBusy || !memoryTitle.trim() || !memoryBody.trim()} type="submit" style={{ justifySelf: "start", padding: "6px 12px" }}>{memoryBusy ? "Saving…" : "Save to room memory"}</button>
+            </form>
+            {memoryNotes.length === 0 ? <p>No room memory saved yet.</p> : (
+              <ul aria-label="Room memory notes" style={{ paddingLeft: 22 }}>
+                {memoryNotes.map((note) => <li key={note.id} style={{ marginTop: 16 }}>
+                  <strong>{note.title}</strong>
+                  <p style={{ whiteSpace: "pre-wrap" }}>{note.body}</p>
+                </li>)}
+              </ul>
+            )}
+          </div>
 
           <div className={styles.panel}>
             <h2 style={{ marginTop: 0 }}>Shared artifacts</h2>
@@ -716,8 +858,8 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             <p className={styles.muted}>Messages and goals persist for admitted room members. Do not send passwords, tokens, private page contents, or local file contents.</p>
             <ol aria-live="polite" aria-relevant="additions" style={{ maxHeight: 360, overflow: "auto", paddingLeft: 24 }}>
               {events.filter((event) => ["post", "ask", "reply", "task", "handoff", "artifact"].includes(event.kind)).map((event) => {
-                const actor = event.actor_seat_id ? `Agent ${event.actor_seat_id.slice(0, 6)}`
-                  : event.actor_user_id === currentUserId ? "You" : `Member ${String(event.actor_user_id ?? "unknown").slice(0, 6)}`;
+                const actor = event.actor_seat_id ? actorLabel(`seat:${event.actor_seat_id}`, members)
+                  : event.actor_user_id === currentUserId ? "You" : personName(event.actor_user_id, members);
                 const payload = event.payload ?? {};
                 const eventText = typeof payload.text === "string" ? payload.text : null;
                 const taskLabel = event.kind === "task" ? `${String(payload.type ?? "updated")} goal: ${String(payload.title ?? payload.taskId ?? "room task")}` : null;
@@ -745,7 +887,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             <ul className={styles.pendingList}>
               {pending.map((m) => (
                 <li key={m.memberId} style={{ marginBottom: 8 }}>
-                  Guest {m.userId.slice(0, 8)} — requested {new Date(m.requestedAt).toLocaleTimeString()}{" "}
+                  {m.displayName ?? "Someone"}{m.guestEmail ? ` (${m.guestEmail})` : ""} — requested {new Date(m.requestedAt).toLocaleTimeString()}{" "}
                   <button onClick={() => void admit(m.memberId)} style={{ padding: "2px 8px" }}>Admit</button>
                 </li>
               ))}

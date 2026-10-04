@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { importWorkspaceRuleDrafts, WorkspaceRulesError } from "@/lib/workspace-rules-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 export async function POST(req: Request) {
   try {
@@ -15,7 +16,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, created: result.created, rules: result.rules, redaction: result.redaction });
   } catch (err) {
     if (err instanceof WorkspaceRulesError) {
-      return NextResponse.json({ ok: false, error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ ok: false, error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("rule import failed:", err);
     return NextResponse.json({ ok: false, error: "Failed to import rule drafts." }, { status: 500 });

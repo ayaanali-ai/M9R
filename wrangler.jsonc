@@ -23,6 +23,20 @@
     "MISSION_RELAY_ENABLED": "1",
     "RESEND_FROM": "M9R <onboarding@resend.dev>"
   },
+  "previews": {
+    "vars": {
+      "NEXT_PUBLIC_SITE_URL": "https://m9r-preview.invalid",
+      "NEXT_PUBLIC_SUPABASE_URL": "https://m9r-preview.invalid",
+      "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY": "preview-only-not-a-real-key",
+      "MISSION_RELAY_PUBLIC_URL": "wss://m9r-preview.invalid",
+      "NEXT_PUBLIC_M9R_BILLING_ENABLED": "false",
+      "NEXT_PUBLIC_M9R_TERMINAL_ENABLED": "false",
+      "NEXT_PUBLIC_VAPID_PUBLIC_KEY": "",
+      "VAPID_SUBJECT": "mailto:preview@example.invalid",
+      "MISSION_RELAY_ENABLED": "0",
+      "RESEND_FROM": "M9R Preview <preview@example.invalid>"
+    }
+  },
   "observability": {
     "enabled": true
   },

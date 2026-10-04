@@ -6,6 +6,7 @@ import {
   ProjectsServiceError,
 } from "@/lib/projects-service";
 import { PlanLimitError } from "@/lib/plan-limits-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // GET  /api/projects — list the signed-in user's workspaces.
@@ -21,7 +22,7 @@ export async function GET() {
     return NextResponse.json({ ok: true, projects, usage });
   } catch (err) {
     if (err instanceof ProjectsServiceError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("List projects error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });
@@ -41,10 +42,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, project, usage }, { status: 201 });
   } catch (err) {
     if (err instanceof PlanLimitError) {
-      return NextResponse.json({ error: err.message, code: err.code, usage: err.usage }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code, usage: err.usage }, { status: err.status });
     }
     if (err instanceof ProjectsServiceError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Create project error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

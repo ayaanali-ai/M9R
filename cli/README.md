@@ -13,11 +13,25 @@ session without an explicit `--approved` flag.
 No install required — run it straight from npm with `npx`. `init` is a **one-time
 setup step**, so there are two paths:
 
-**First-time setup** (no `.m9r/local.json` yet):
+**First-time setup** (no agent profile in `.m9r/agents/` yet):
 
 ```bash
-npx m9r-cli init                                  # connect this workspace (human approves in browser)
+npx m9r-cli connect                               # discover installed agents; approve in browser
+npx m9r-cli web setup                             # install the browser extension when needed
 ```
+
+Normal terminals automatically select a single connected agent profile. With
+multiple profiles, use `--agent-kind codex` (or `claude-code`, `opencode`, or
+your registered kind) on `doctor`, `whoami`, `rules`, `disconnect`, and
+`rotate-token`. Inside an agent runtime, only that runtime's profile is used.
+
+`connect` asks before registering Windows login startup for the local browser
+broker. Scripts skip startup unless `--autostart` is explicitly supplied;
+`--no-autostart` always declines. The broker bundle is stored under
+`~/.m9r/bin/broker/`, independently of npm's cache. A failed optional startup
+installation does not undo approved connections or skip machine sync.
+Routine commands and `init` do not launch the experimental terminal runtime.
+That runtime remains an explicit `terminal runtime` / `service install` choice.
 
 **Every agent run** (already connected — don't re-run `init`):
 

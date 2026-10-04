@@ -17,9 +17,8 @@ export default async function SettingsPage() {
   return (
     <>
       <PageHeader
-        eyebrow="Registry"
         title="Settings"
-        description="Account, billing, data, and preferences."
+        description="Your account, your workspace, and the agents connected to it."
       />
       <div className="mt-7">
         <SettingsView

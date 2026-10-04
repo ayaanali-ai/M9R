@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { validateRegisterInput } from "@/lib/agent-join";
 import { MAX_BATCH_CLAIMS, registerClaimBatch, AgentJoinError } from "@/lib/agent-join-service";
 import { handleAgentError, resolveBaseUrl } from "../_shared";
+import { publicErrorMessage } from "@/lib/public-error";
 
 /**
  * POST /api/agent/register-batch
@@ -44,7 +45,7 @@ export async function POST(req: NextRequest) {
     const result = await registerClaimBatch(inputs, resolveBaseUrl(req));
     return NextResponse.json(result, { status: 201 });
   } catch (err) {
-    if (err instanceof AgentJoinError) return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+    if (err instanceof AgentJoinError) return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     return handleAgentError(err);
   }
 }

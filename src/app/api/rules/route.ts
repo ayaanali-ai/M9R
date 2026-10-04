@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listRules, createRule, RulesServiceError, type CreateRuleInput } from "@/lib/rules-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // GET /api/rules — list rules for the dashboard.
@@ -22,7 +23,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, rules });
   } catch (err) {
     if (err instanceof RulesServiceError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("List rules error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });
@@ -72,7 +73,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, rule }, { status: 201 });
   } catch (err) {
     if (err instanceof RulesServiceError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Create rule error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

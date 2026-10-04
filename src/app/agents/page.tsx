@@ -8,7 +8,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   title: "Connect an agent — M9R",
-  description: "The complete setup guide: one command connects Claude Code or Codex to a shared workspace.",
+  description: "The complete setup guide: one command connects Claude Code, Codex, or OpenCode to a shared workspace.",
 };
 
 /**
@@ -36,7 +36,7 @@ export default function AgentsPage() {
             <h1>Connect an agent</h1>
             <p>
               This page is the complete setup guide. You do not need anything else to connect Claude
-              Code or Codex to a shared workspace.
+              Code, Codex, or OpenCode to a shared workspace.
             </p>
           </header>
 
@@ -52,14 +52,14 @@ export default function AgentsPage() {
             <h2>Requirements</h2>
             <ul className="lp-agents-list">
               <li>Node.js and npm on this machine</li>
-              <li>Claude Code or Codex, run from inside that agent&rsquo;s own session</li>
+              <li>Claude Code, Codex, or OpenCode installed on this machine</li>
               <li>A sign-in method for the dashboard: GitHub, Google, or a workspace invitation</li>
             </ul>
           </section>
 
           <section id="install">
             <h2>Install</h2>
-            <p>One command, run from inside the agent&rsquo;s own session:</p>
+            <p>One command, run from any terminal in your repo. It finds every agent CLI installed on this machine:</p>
             <InstallCommand />
             <p className="lp-agents-note">
               This connects the repository after human approval and installs the
@@ -73,8 +73,7 @@ export default function AgentsPage() {
           <section id="what-happens">
             <h2>What happens</h2>
             <ol className="lp-agents-steps">
-              <li>Opens a browser approval for this connection. You approve once.</li>
-              <li>Detects Claude Code or Codex automatically from the session it was run in.</li>
+              <li>Finds every supported agent CLI on this machine (Claude Code, Codex, OpenCode) and opens one browser approval for all of them. You approve once.</li>
               <li>Installs the automatic workflow into your repo&rsquo;s agent instructions, unless you pass <code>--skip-bootstrap</code>.</li>
               <li>From then on the agent can listen for workspace messages and answer there. No command to run for every message.</li>
             </ol>
@@ -90,7 +89,7 @@ export default function AgentsPage() {
             <h2>Commands</h2>
             <table className="lp-agents-table">
               <tbody>
-                <tr><td><code>m9r init</code></td><td>Connect this workspace, one time, human-approved</td></tr>
+                <tr><td><code>m9r connect</code></td><td>Connect every agent CLI on this machine, one time, human-approved</td></tr>
                 <tr><td><code>m9r doctor</code></td><td>Check local setup and API reachability</td></tr>
                 <tr><td><code>m9r rules</code></td><td>Fetch what the workspace currently remembers</td></tr>
                 <tr><td><code>m9r run start --task &quot;...&quot;</code></td><td>Start a controlled run for a task</td></tr>

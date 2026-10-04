@@ -82,6 +82,7 @@ export interface CliDeps {
   removeFile?(path: string): Promise<void>;
   mkdir(path: string): Promise<void>;
   fileExists(path: string): Promise<boolean>;
+  listDirectory?(path: string): Promise<string[]>;
   out(line: string): void;
   err(line: string): void;
   /** Best-effort browser open (no-op in tests). */
@@ -262,12 +263,23 @@ async function resolvedLocalPath(deps: CliDeps, explicit?: string): Promise<stri
   // could authenticate with an OpenCode token and have every run attributed
   // to OpenCode on the server. Missing scoped profiles fail closed instead.
   if (kind) return agentLocalPath(deps.cwd, kind);
+  const directory = join(deps.cwd, M9R_DIR, "agents");
+  const names = deps.listDirectory ? await deps.listDirectory(directory).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }) : ["codex", "claude-code", "opencode", "grok-build"];
+  const profiles: string[] = [];
+  for (const name of names) {
+    if (/^[a-z0-9][a-z0-9-]*$/.test(name) && await deps.fileExists(agentLocalPath(deps.cwd, name))) profiles.push(name);
+  }
+  if (profiles.length > 1) throw new Error(`Multiple agent profiles are connected (${profiles.join(", ")}). Select one with --agent-kind <kind>.`);
+  if (profiles.length === 1) return agentLocalPath(deps.cwd, profiles[0]);
   return localPath(deps.cwd);
 }
 
 async function readLocal(deps: CliDeps, explicit?: string): Promise<LocalState | null> {
+  const path = await resolvedLocalPath(deps, explicit);
   try {
-    const path = await resolvedLocalPath(deps, explicit);
     if (!(await deps.fileExists(path))) return null;
     const raw = await deps.readFile(path);
     return parseLocalJson(raw) as LocalState | null;
@@ -555,6 +567,7 @@ function describeFailure(result: ApiResult, token?: string | null): string {
 // ---------------------------------------------------------------------------
 
 interface ParsedArgs {
+  autostart?: boolean;
   positionals: string[];
   approved: boolean;
   force: boolean;
@@ -1122,11 +1135,24 @@ async function cmdBootstrap(deps: CliDeps, parsed: ParsedArgs): Promise<number> 
 
 async function cmdInit(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
   const identity = resolveAgentKind(parsed.agentKind, deps.env);
-  if (!identity.kind) {
-    deps.err(`init failed: ${identity.error}`);
-    return 1;
+  if (identity.kind) return connectOneAgent(deps, identity.kind, parsed);
+
+  // Confirmed live: `resolveAgentKind` only recognizes Codex, Claude Code and Grok from environment variables set by
+  // those tools' own processes -- OpenCode (and anything else) sets none of them, so `init` run from a normal terminal
+  // always failed for it with "Could not determine agent kind," even when OpenCode was the only agent installed.
+  // Nobody asked for a specific kind here (no --agent-kind, no M9R_AGENT_KIND), so fall back to the same PATH probe
+  // `connect` already uses instead of making the human guess which flag to pass.
+  const askedForSomething = Boolean(parsed.agentKind) || Boolean(m9rEnvironmentValue(deps.env, "M9R_AGENT_KIND"));
+  if (!askedForSomething && deps.probeVersion) {
+    const found = await detectInstalledAgents(deps.probeVersion);
+    if (found.length === 1) return connectOneAgent(deps, found[0].kind, parsed);
+    if (found.length > 1) {
+      deps.err(`init failed: found more than one agent CLI on this machine (${found.map((a) => a.kind).join(", ")}). Connect them all at once: npx m9r-cli connect. Or connect just one: npx m9r-cli init --agent-kind <name>.`);
+      return 1;
+    }
   }
-  return connectOneAgent(deps, identity.kind, parsed);
+  deps.err(`init failed: ${identity.error}`);
+  return 1;
 }
 
 /**
@@ -1192,8 +1218,8 @@ async function connectOneAgent(
         deps.out("  (the local token exists; the server has not observed its first provider use)");
       }
       deps.out("No new claim was created. To use the existing connection:");
-      deps.out("  npx m9r-cli doctor   # verify setup + API reachability");
-      deps.out("  npx m9r-cli rules    # fetch active workspace rules");
+      deps.out(`  npx m9r-cli doctor --agent-kind ${agentKind}   # verify setup + API reachability`);
+      deps.out(`  npx m9r-cli rules --agent-kind ${agentKind}    # fetch active workspace rules`);
       deps.out(`To force a brand-new connection: npx m9r-cli init --force --agent-kind ${agentKind}`);
       return 0;
     }
@@ -1491,16 +1517,17 @@ async function cmdConnect(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
     deps.err(`${failures.length} of ${results.length} agent connection(s) failed. See output above for details.`);
     return 1;
   }
-  if (deps.installLocalBrokerAutostart) {
+  const startupApproved = parsed.autostart ?? (deps.installLocalBrokerAutostart && deps.confirm ? await deps.confirm("Install the local web broker and start it automatically at Windows login?") : false);
+  if (deps.installLocalBrokerAutostart && startupApproved) {
     try {
       const broker = await deps.installLocalBrokerAutostart();
       (broker.ok ? deps.out : deps.err)(broker.message);
-      if (!broker.ok) return 1;
     } catch (error) {
       deps.err(`Local web broker could not be installed: ${error instanceof Error ? error.message : "unknown error"}. The approved agent connections remain saved.`);
-      return 1;
     }
   }
+  if (!startupApproved) deps.out("Local broker login startup skipped. Browser actions require explicit web setup.");
+  deps.out("Browser extension next step: npx m9r-cli web setup. Follow its instructions to install the unpacked extension in Chrome.");
   // Only human-approved connections reach this point. Machine sync remains
   // disabled when secure local storage is unavailable or minting fails.
   if (deps.writeSecretFile) {
@@ -3396,6 +3423,21 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
   deps = { ...deps, env: compatibleEnv };
   const [command, ...rest] = argv;
   const parsed = parseArgs(rest);
+  parsed.autostart = rest.includes("--no-autostart") ? false : rest.includes("--autostart") ? true : undefined;
+  const profileCommands = new Set(["doctor", "whoami", "rules", "disconnect", "rotate-token", "inbox", "heartbeat", "run", "assignments", "assignment", "finding", "signal", "submit-session"]);
+  if (parsed.agentKind && profileCommands.has(command)) {
+    const selected = resolveAgentKind(parsed.agentKind, deps.env);
+    if (!selected.kind) { deps.err(selected.error ?? "Invalid agent kind."); return 1; }
+    deps.env.M9R_AGENT_KIND = selected.kind;
+  }
+  if (profileCommands.has(command)) {
+    try {
+      const profile = await resolvedLocalPath(deps);
+      if (!detectedAgentKind(deps.env) && profile !== localPath(deps.cwd)) {
+        deps.env.M9R_AGENT_KIND = profile.split(/[\\/]/).at(-2);
+      }
+    } catch (error) { deps.err(error instanceof Error ? error.message : "Could not select an agent profile."); return 1; }
+  }
 
   switch (command) {
     case "init":
@@ -3405,6 +3447,8 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "setup":
     case "uninstall":
     case "send":
+    case "note":
+    case "cloud":
     case "tasks":
     case "feed":
     case "dismiss":

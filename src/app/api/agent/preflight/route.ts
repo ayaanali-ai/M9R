@@ -12,6 +12,7 @@ import {
 } from "@/lib/agent-preflight-service";
 import { createClient } from "@/lib/supabase/server";
 import { listWorkspaceRules, WorkspaceRulesError } from "@/lib/workspace-rules-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 export const dynamic = "force-dynamic";
 
@@ -152,7 +153,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(decision);
   } catch (err) {
     if (err instanceof WorkspaceRulesError) {
-      return NextResponse.json({ ok: false, error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ ok: false, error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     return jsonError("Preflight check failed.", 500);
   }

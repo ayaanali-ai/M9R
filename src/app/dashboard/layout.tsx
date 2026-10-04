@@ -9,7 +9,6 @@ import { loadAgentStatusSummary } from "@/lib/agent-status-summary";
 import WatchfloorModeScript from "@/components/product/WatchfloorModeScript";
 
 export const dynamic = "force-dynamic";
-const ONBOARDING_ROLLOUT_AT = Date.parse("2026-07-15T00:00:00Z");
 
 /**
  * Watchfloor type system (design constitution — see DESIGN.md):
@@ -39,13 +38,10 @@ export default async function DashboardLayout({ children }: { children: React.Re
   // anything the other two produce. They used to run as three sequential
   // awaits; only activeProjectId (below) and the workspace-scoped pair
   // after it have a real dependency to wait on.
-  const [[{ data: identity }, { data: settings }], activeCookie, projects] = reviewerDemo
-    ? [[{ data: null }, { data: null }], null, []]
+  const [{ data: identity }, activeCookie, projects] = reviewerDemo
+    ? [{ data: null }, null, []]
     : await Promise.all([
-        Promise.all([
-          supabase.from("users").select("username").eq("id", user.id).maybeSingle(),
-          supabase.from("user_settings").select("walkthrough_completed").eq("user_id", user.id).maybeSingle(),
-        ]),
+        supabase.from("users").select("username").eq("id", user.id).maybeSingle(),
         getActiveProjectId(),
         listProjects().catch(() => []),
       ]);
@@ -67,7 +63,11 @@ export default async function DashboardLayout({ children }: { children: React.Re
       ]);
 
   return (
-    <div className={`${wfMono.variable} wf-root contents`} data-bs-mode="night" suppressHydrationWarning>
+    // data-m9r-app-shell: an explicit marker the browser extension checks before mounting its own floating presence
+    // overlay (the pill, the dock). The dashboard already has its own in-page chat, composer and @mention menu; the
+    // overlay has nothing to add here and was confirmed to sit above the @mention menu at a higher z-index, catching
+    // its clicks. See extensions/browser/src/content.js.
+    <div className={`${wfMono.variable} wf-root contents`} data-bs-mode="night" data-m9r-app-shell suppressHydrationWarning>
       {/* Pre-paint: restore the persisted Watchfloor mode before first render
           so Night Watch users never see a bone flash. Uses the supported
           pre-hydration InlineScript pattern; raw scripts warn on soft nav. */}
@@ -79,10 +79,6 @@ export default async function DashboardLayout({ children }: { children: React.Re
         workspaceUsage={workspaceUsage}
         agentStatus={agentStatus}
         reviewerDemo={reviewerDemo}
-        onboardingCompleted={Boolean(settings?.walkthrough_completed)}
-        onboardingAutoStart={
-          !settings?.walkthrough_completed && Date.parse(user.created_at) >= ONBOARDING_ROLLOUT_AT
-        }
       >
         {children}
       </ProductShell>

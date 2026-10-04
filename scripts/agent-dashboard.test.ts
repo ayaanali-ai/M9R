@@ -208,7 +208,7 @@ test("agent selection is URL state shared by the sidebar picker and the floor", 
   // The sidebar picker links to the same URLs and marks the current agent.
   assert.match(shell, /function SidebarAgentPicker/);
   assert.match(shell, /\/dashboard\/agents\?agent=\$\{key\}/);
-  assert.match(shell, /aria-current=\{selected \? "true" : undefined\}/);
+  assert.match(shell, /aria-current=\{selectedAgent === key \? "page" : undefined\}/);
   // A compact mobile rail keeps selection reachable off-desktop.
   assert.match(workspace, /function MobileAgentRail/);
   assert.match(workspace, /aria-label="Agent filters"/);
@@ -376,8 +376,8 @@ test("rule lifecycle lives entirely on the Rules page, not on the Watchfloor", (
   // used; what must not come back is the activeRules rule-list prop itself.
   assert.ok(!/\bactiveRules\b(?!Count)/.test(workspace), "Watchfloor must not receive the activeRules prop");
   const memoryView = read(MEMORY_VIEW);
-  assert.match(memoryView, /What the team remembers/);
-  assert.match(memoryView, /Needs your review/);
+  assert.match(memoryView, /SharedNotes/);
+  assert.ok(!/Needs your review/.test(memoryView));
 });
 
 test("Rules maintenance includes manual creation and import as review draft paths", () => {
@@ -389,7 +389,7 @@ test("Rules maintenance includes manual creation and import as review draft path
   assert.match(tools, /Paste AGENTS\.md, CLAUDE\.md, Cursor rules, or repo instructions\./);
   assert.match(tools, /Imports create review drafts only\./);
   // Authoring is reachable from the Memory page, not the Watchfloor.
-  assert.match(read(MEMORY_VIEW), /RuleDraftTools/);
+  assert.ok(!/RuleDraftTools/.test(read(MEMORY_VIEW)), "rule authoring is not part of Memory any more");
   assert.ok(!/RuleDraftTools/.test(read(WORKSPACE)), "rule authoring must not live on the Watchfloor");
 });
 
@@ -444,10 +444,7 @@ test("the drawer promotes rules only when a connected target agent exists", () =
 test("memory lifecycle CRUD stays off the Watchfloor and on the Memory page", () => {
   const workspace = read(WORKSPACE);
   assert.ok(!/ActiveRuleCard|ArchivedRuleCard|ReviewRuleCard|Delete archived rule|Archive this active rule/.test(workspace));
-  const memoryView = read(MEMORY_VIEW);
-  assert.match(memoryView, /Stop remembering this\? Agents will no longer load it before a run\./);
-  assert.match(memoryView, /It returns to review and must be confirmed again before agents load it\./);
-  assert.match(memoryView, /It will be removed from product views\. Its audit history remains stored\./);
+  assert.match(read("src/components/product/memory/SharedNotes.tsx"), /ProductConfirmDialog/);
 });
 
 test("Watchfloor destructive actions use the product confirmation dialog with the same copy", () => {
@@ -1431,7 +1428,7 @@ test("disconnect route revokes a coding agent server-side without deleting audit
   assert.match(svc, /export async function disconnectAgentConnection/);
   assert.match(svc, /createClient\(\)/, "human dashboard path must authenticate through the cookie client");
   assert.match(svc, /auth\.getUser\(\)/);
-  assert.match(svc, /\.from\("agent_connections"\)[\s\S]*\.select\("id, workspace_id, status"\)[\s\S]*\.eq\("id", connectionId\)/);
+  assert.match(svc, /\.from\("agent_connections"\)[\s\S]*\.select\("id, workspace_id, status, created_by"\)[\s\S]*\.eq\("id", connectionId\)/);
   assert.match(svc, /\.from\("agent_connections"\)[\s\S]*\.update\(\{ status: "revoked", revoked_at: now \}\)[\s\S]*\.eq\("id", connectionId\)/);
   assert.match(svc, /\.from\("agent_tokens"\)[\s\S]*\.update\(\{ revoked_at: now \}\)[\s\S]*\.eq\("connection_id", connectionId\)/);
   assert.ok(!/from\("agent_runs"\)[\s\S]*\.delete\(/.test(svc), "disconnect must preserve historical runs");
@@ -1844,4 +1841,19 @@ test("linkSessionToRun returns a structured result and never silently swallows a
   // Missing optional columns → explicit migration-required signal.
   assert.match(svc, /isMissingColumnError\(snapshotError\)/);
   assert.match(svc, /migration required: apply supabase-agent-runs\.sql/);
+});
+
+test("channels can be edited and deleted from the conversation menu; built-in channels keep their name and cannot be deleted", () => {
+  const panel = read("src/components/product/ConversationPanel.tsx");
+  const dialog = read("src/components/product/ChannelEditDialog.tsx");
+  const service = read("src/lib/conversation-service.ts");
+  const route = read("src/app/api/dashboard/conversations/[id]/route.ts");
+  assert.match(panel, /label: selected\.channel_kind === "dm" \? "Edit conversation" : "Edit channel"/);
+  assert.match(dialog, /method: "DELETE"/);
+  assert.match(dialog, /disabled=\{channel\.builtIn \|\| busy\}/, "built-in channels cannot be renamed");
+  assert.match(dialog, /\{!channel\.builtIn \? \(/, "the delete button is absent for built-in channels");
+  assert.match(dialog, /ProductConfirmDialog/, "deleting asks first");
+  assert.match(service, /Built-in workspace channels cannot be renamed\./);
+  assert.match(service, /Built-in workspace channels cannot be deleted\./);
+  assert.match(route, /name: typeof body\?\.name === "string"/);
 });

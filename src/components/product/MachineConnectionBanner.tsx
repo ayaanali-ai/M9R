@@ -34,7 +34,7 @@ export default function MachineConnectionBanner({ hasLiveConnection, hasRegister
         <strong>No agent runtime is currently reaching this workspace.</strong>
         <span>This usually means the M9R CLI hasn&apos;t been connected on any machine yet, or it stopped running. Run this once in the repository you control:</span>
       </div>
-      <code className="machine-connection-banner-command">npx m9r-cli init</code>
+      <code className="machine-connection-banner-command">npx m9r-cli connect</code>
     </div>
   );
 }

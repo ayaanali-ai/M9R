@@ -6,10 +6,9 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { dashboardFont } from "./dashboard-chrome/dashboard-font";
 import { DashboardContactContents, DashboardMenu, DashboardSearch, DashboardSidebarTop } from "./dashboard-chrome/Chrome";
-import { BookOpen, LogOut, MessageSquare, PanelLeftOpen, Plus, Puzzle, Settings, Users } from "lucide-react";
+import { BookOpen, LogOut, PanelLeftOpen, Plus, Puzzle, Settings, Users } from "lucide-react";
 import { createClient } from "@/lib/supabase/browser";
 import WorkspaceSwitcher from "@/components/product/WorkspaceSwitcher";
-import DashboardOnboarding from "@/components/product/DashboardOnboarding";
 import MachineConnectionBanner from "@/components/product/MachineConnectionBanner";
 import SidebarChannelList from "@/components/product/ChannelSwitcher";
 import type { ProjectItem } from "@/lib/projects-service";
@@ -59,8 +58,6 @@ export default function ProductShell({
   workspaceUsage = null,
   agentStatus = { byKey: {}, agents: [] },
   reviewerDemo = false,
-  onboardingCompleted = false,
-  onboardingAutoStart = false,
   children,
 }: {
   displayName: string;
@@ -69,8 +66,6 @@ export default function ProductShell({
   workspaceUsage?: WorkspacePlanUsage | null;
   agentStatus?: AgentStatusSummary;
   reviewerDemo?: boolean;
-  onboardingCompleted?: boolean;
-  onboardingAutoStart?: boolean;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
@@ -85,6 +80,7 @@ export default function ProductShell({
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidebarQuery, setSidebarQuery] = useState("");
   const agentLinks = agentLinksForStatus(agentStatus);
+  const liveAgents = agentStatus.agents.filter((agent) => agent.live).length;
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -180,10 +176,11 @@ export default function ProductShell({
         <div className="product-sidebar-wide">
         <DashboardSidebarTop onCollapse={toggleCollapsed} onAttention={() => router.push("/dashboard/agents?activity=1")} actions={[
           { label: "New channel", icon: <Plus size={16} />, onSelect: () => router.push("/dashboard/agents?newChannel=1") },
-          { label: "Connect agent", icon: <Puzzle size={16} />, onSelect: () => router.push("/dashboard/settings") },
-          { label: "New room", icon: <Users size={16} />, onSelect: () => router.push("/rooms/new") },
+          { label: "Connect agent", icon: <Puzzle size={16} />, onSelect: () => router.push("/dashboard/settings#agents") },
+          { label: "Open room", icon: <Users size={16} />, onSelect: () => router.push("/rooms/new") },
         ]} />
         <DashboardSearch value={sidebarQuery} onChange={setSidebarQuery} label="Search channels and agents" />
+        {!reviewerDemo && <Link href="/rooms/new" className="m9r-dash-newroom" prefetch={false}>Your room</Link>}
         <nav className="product-nav" aria-label={region === "memory" ? "Memory navigation" : "Chat navigation"}>
           {region === "memory" ? (
             <MemorySidebarRegion />
@@ -197,11 +194,10 @@ export default function ProductShell({
 
         <div className="product-sidebar-footer m9r-dash-sidebar-footer">
           <nav aria-label="Workspace tools" className="m9r-dash-footer-nav">
-            <Link href="/dashboard/agents" prefetch={false}><MessageSquare size={20} /><span>All conversations</span></Link>
-            {!reviewerDemo && <><Link href="/dashboard/memory" prefetch={false}><BookOpen size={20} /><span>Memory</span></Link><Link href="/dashboard/settings" prefetch={false}><Puzzle size={20} /><span>Connected agents</span></Link></>}
+            {!reviewerDemo && <Link href="/dashboard/memory" prefetch={false} aria-current={isActiveHref("/dashboard/memory") ? "page" : undefined}><BookOpen size={20} /><span>Memory</span></Link>}
           </nav>
           <div className="m9r-dash-profile-row">
-            <DashboardMenu label="Profile and workspace" align="left" className="m9r-dash-profile-menu" trigger={<><span className="m9r-dash-profile-avatar">{initial}</span><span>{displayName}</span></>}>
+            <DashboardMenu label="Profile and workspace" align="left" className="m9r-dash-profile-menu" trigger={<><span className="m9r-dash-profile-avatar">{initial}<i className="m9r-dash-conn" data-live={liveAgents > 0 ? "true" : "false"} aria-hidden="true" /></span><span className="m9r-dash-profile-text"><b>{displayName}</b><small>{liveAgents === 0 ? "No agents connected" : liveAgents === 1 ? "1 agent connected" : `${liveAgents} agents connected`}</small></span></>}>
               {close => <>
                 {!reviewerDemo && <WorkspaceSwitcher projects={projects} activeProjectId={activeProjectId} workspaceUsage={workspaceUsage} />}
                 <button type="button" onClick={() => { close(); toggleMode(); }}>Switch to {mode === "night" ? "light" : "dark"} appearance</button>
@@ -277,8 +273,6 @@ export default function ProductShell({
         </button>
       </nav>
 
-      <DashboardOnboarding completed={onboardingCompleted} autoStart={onboardingAutoStart} reviewerDemo={reviewerDemo} />
-
     </div>
   );
 }
@@ -335,14 +329,8 @@ function CommandPalette({
           // were deleted; both are Memory now, one entry.
           { id: "memory", label: "Go to Memory", hint: "Memory", run: () => go("/dashboard/memory") },
           { id: "settings", label: "Go to Settings", hint: "Registry", run: () => go("/dashboard/settings") },
-          // B-1: these had a real page but no nav home anywhere --
-          // findable only by typing the URL by hand. Missions has no
-          // top-level index (only /dashboard/missions/[missionId]), so
-          // there's nothing generic to link here without a specific run.
-          { id: "projects", label: "Go to Projects", hint: "Registry", run: () => go("/dashboard/projects") },
           { id: "approvals", label: "Go to Approvals", hint: "Registry", run: () => go("/dashboard/approvals") },
         ]),
-    { id: "help", label: "Go to Help", hint: "Registry", run: () => go("/dashboard/help") },
     {
       id: "mode",
       label: mode === "day" ? "Switch to Night Watch" : "Switch to Day mode",
@@ -427,64 +415,14 @@ function CommandPalette({
   );
 }
 
-/**
- * Memory's contextual sidebar — navigation, not a second copy of the page.
- * Same job the channel list does for Chat: say what is waiting and get you
- * into it. Counts come from the two GETs Memory itself reads (both
- * cookie/RLS-scoped), so this never shows a number the page disagrees with.
- */
+/** Memory's sidebar is just a pointer to the one page: saved facts and decisions. */
 function MemorySidebarRegion() {
-  const [counts, setCounts] = useState<{ review: number; remembered: number; archived: number } | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    queueMicrotask(async () => {
-      try {
-        const [rulesRes, flagsRes] = await Promise.all([
-          fetch("/api/workspace-rules"),
-          fetch("/api/agent/findings"),
-        ]);
-        if (!rulesRes.ok) return;
-        const rules = ((await rulesRes.json()) as { rules?: Array<{ status: string }> }).rules ?? [];
-        const flags = flagsRes.ok
-          ? ((await flagsRes.json()) as { findings?: Array<{ reviewState: string }> }).findings ?? []
-          : [];
-        if (cancelled) return;
-        setCounts({
-          review:
-            rules.filter((r) => r.status === "needs_review").length +
-            flags.filter((f) => f.reviewState === "observed").length,
-          remembered: rules.filter((r) => r.status === "active").length,
-          archived:
-            rules.filter((r) => r.status === "retired").length +
-            flags.filter((f) => f.reviewState !== "observed").length,
-        });
-      } catch {
-        /* the page itself reports load failures -- the sidebar just stays quiet */
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   return (
     <div className="product-channels">
       <div className="product-channels-heading">
         <span className="product-nav-label">Memory</span>
       </div>
-      {counts === null ? (
-        <p className="product-channels-empty">Loading…</p>
-      ) : (
-        <>
-          <MemoryNavLink href="/dashboard/memory#memory-review" label="Needs your review" count={counts.review} />
-          <MemoryNavLink href="/dashboard/memory#memory-remembered" label="What the team remembers" count={counts.remembered} />
-          <MemoryNavLink href="/dashboard/memory#memory-history" label="History" count={counts.archived} />
-          {counts.review + counts.remembered + counts.archived === 0 && (
-            <p className="product-channels-empty">Nothing remembered yet</p>
-          )}
-        </>
-      )}
+      <MemoryNavLink href="/dashboard/memory#memory-notes" label="Saved facts and decisions" count={0} />
     </div>
   );
 }

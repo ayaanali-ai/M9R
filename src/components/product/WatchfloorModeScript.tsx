@@ -19,7 +19,7 @@ import { useEffect } from "react";
  *    from an already-themed document, so there is no flash to prevent.
  */
 
-const STORAGE_KEY = "m9r_mode";
+const STORAGE_KEY = "m9r_mode_v2";
 
 const PRE_PAINT_SCRIPT =
   `try{var m=localStorage.getItem("${STORAGE_KEY}");` +

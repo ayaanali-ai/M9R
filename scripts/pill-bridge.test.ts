@@ -34,7 +34,7 @@ function load(opts: { origins?: string[] } = {}) {
   return { bridge, sent, registered };
 }
 
-const pillSender = (over: any = {}) => ({ id: ID, url: `${BASE}pill.html?n=${NONCE}`, tab: { id: 7, url: "https://example.com/", title: "Example" }, frameId: 0, ...over });
+const pillSender = (over: any = {}) => ({ id: ID, url: `${BASE}pill-next/index.html?n=${NONCE}`, tab: { id: 7, url: "https://example.com/", title: "Example" }, frameId: 0, ...over });
 const scriptSender = (over: any = {}) => ({ id: ID, url: "https://example.com/page", tab: { id: 7 }, frameId: 0, ...over });
 
 async function registerNonce(bridge: any) {
@@ -48,11 +48,11 @@ test("only this extension's pill frame with a registered nonce is accepted", asy
   assert.equal((await registerNonce(bridge)).ok, true);
   assert.equal(await isOwnFrame(pillSender()), true);
   assert.equal(await isOwnFrame(pillSender({ id: "someoneelse" })), false, "other extension");
-  assert.equal(await isOwnFrame(pillSender({ url: "https://evil.example/pill.html?n=" + NONCE })), false, "web page origin");
+  assert.equal(await isOwnFrame(pillSender({ url: "https://evil.example/pill-next/index.html?n=" + NONCE })), false, "web page origin");
   assert.equal(await isOwnFrame(pillSender({ url: `${BASE}permission.html?n=${NONCE}` })), false, "other extension page");
   assert.equal(await isOwnFrame(scriptSender()), false, "content script");
   assert.equal(await isOwnFrame(pillSender({ tab: { id: 8 } })), false, "nonce belongs to another tab");
-  assert.equal(await isOwnFrame(pillSender({ url: `${BASE}pill.html?n=ffffffffffffffffffffffffffffffff` })), false, "unknown nonce");
+  assert.equal(await isOwnFrame(pillSender({ url: `${BASE}pill-next/index.html?n=ffffffffffffffffffffffffffffffff` })), false, "unknown nonce");
 });
 
 test("commands from content scripts and web pages are rejected, from the pill they reach the broker", async () => {
@@ -67,11 +67,11 @@ test("commands from content scripts and web pages are rejected, from the pill th
   assert.equal(sent[0].type, "ui-command");
   assert.equal(sent[0].text, "@claude hi");
   assert.equal(sent[0].context.url, "https://example.com/");
-  for (const command of [{ type: "ui-approve", id: "a1" }, { type: "ui-deny", id: "a1" }, { type: "ui-stop", agent: "claude" }, { type: "ui-stop-all" }]) {
+  for (const command of [{ type: "ui-approve", id: "a1" }, { type: "ui-deny", id: "a1" }, { type: "ui-stop", agent: "claude" }, { type: "ui-stop-all" }, { type: "ui-save-note", text: "Use the staging URL" }]) {
     assert.equal((await onRuntimeMessage({ type: "m9r-pill-cmd", command }, pillSender())).ok, true);
     assert.equal((await onRuntimeMessage({ type: "m9r-pill-cmd", command }, scriptSender())).ok, false);
   }
-  assert.deepEqual(sent.slice(1).map((m: any) => m.type), ["ui-approve", "ui-deny", "ui-stop", "ui-stop-all"]);
+  assert.deepEqual(sent.slice(1).map((m: any) => m.type), ["ui-approve", "ui-deny", "ui-stop", "ui-stop-all", "ui-save-note"]);
   assert.equal((await onRuntimeMessage({ type: "m9r-pill-cmd", command: { type: "ui-eval", text: "x" } }, pillSender())).ok, false);
 });
 
@@ -86,11 +86,12 @@ test("only the top frame of a web page may register a nonce", async () => {
   assert.equal((await onRuntimeMessage(msg, scriptSender())).ok, true);
 });
 
-test("extension-owned New Tab can register a nonce, but other extension pages cannot", async () => {
+test("only a top-frame content script on an ordinary page can register a nonce; extension pages cannot", async () => {
   const { bridge } = load();
   const msg = { type: "m9r-pill-register", nonce: NONCE };
-  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}newtab.html` }))).ok, true);
-  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}newtab.html`, frameId: 1 }))).ok, false);
+  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: "https://example.com/" }))).ok, true);
+  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: "https://example.com/", frameId: 1 }))).ok, false);
+  assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}newtab.html` }))).ok, false);
   assert.equal((await bridge._internals.onRuntimeMessage(msg, scriptSender({ url: `${BASE}permission.html` }))).ok, false);
 });
 

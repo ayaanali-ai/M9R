@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exportWorkspaceRules, WorkspaceRulesError } from "@/lib/workspace-rules-service";
 import type { RulesFileFormat } from "@/lib/rules-file-generator";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // POST /api/workspace-rules/export — export the active workspace rules.
@@ -30,7 +31,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, filename: file.filename, content: file.content });
   } catch (err) {
     if (err instanceof WorkspaceRulesError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Export workspace rules error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

@@ -1,6 +1,6 @@
 import { PageHeader } from "@/components/product/WorkspaceUI";
+import FirstRunCard from "@/components/product/FirstRunCard";
 import AgentWorkspaceClient from "@/components/product/AgentWorkspaceClient";
-import WorkspaceEndpointCard from "@/components/product/WorkspaceEndpointCard";
 import { createClient } from "@/lib/supabase/server";
 import { supabase as adminDb } from "@/lib/supabase";
 import { listAgentRunsForUser, type DashboardRun } from "@/lib/agent-run-service";
@@ -22,7 +22,6 @@ import {
   type WsRule,
 } from "@/lib/agent-workspace-data";
 import { buildAgentApprovalCenter } from "@/lib/agent-approval-center";
-import { whisperActivitySummary } from "@/lib/bridge/whisper-activity-service";
 import { loadAgentApprovalData } from "@/lib/agent-approval-center-data";
 import ReviewerDemoWorkspace from "@/components/product/ReviewerDemoWorkspace";
 import { isReviewerDemoAppMetadata } from "@/lib/reviewer-demo-access";
@@ -122,11 +121,10 @@ export default async function AgentsDashboardPage() {
   // query failure (handled below via `?? []`) but the underlying fetch can
   // still reject outright on a real network drop/timeout -- same crash risk
   // as loadAgentApprovalData above, guarded the same way.
-  // Runs and the whisper summary depend on neither the connection rows nor each
+  // Runs depend on neither the connection rows nor each
   // other, so they start now and overlap with the queries above instead of
   // adding two more serial round trips before the page can render.
   const runsRequest = listAgentRunsForUser().catch(() => []);
-  const whisperRequest = whisperActivitySummary().catch(() => null);
   const [connResult, sessionResult] = await Promise.all([connectionRequest, sessionRequest]).catch(() => [{ data: [] }, { data: [] }]);
 
   const connections = ((connResult.data ?? []) as ConnectionRow[])
@@ -302,9 +300,6 @@ export default async function AgentsDashboardPage() {
   // Whispers is a real but usually-empty surface -- only show the toggle at
   // all when there's something to show, same as Review's badge count. Best
   // effort: a failure here should never block the page from rendering.
-  let hasWhispers = false;
-  const whisperActivity = await whisperRequest;
-  hasWhispers = Boolean(whisperActivity && whisperActivity.totalCount30d > 0);
   const agents = baseAgents.map((agent) => ({
     ...agent,
     approvalCount: approvalCenter.by_agent[agent.key],
@@ -314,7 +309,11 @@ export default async function AgentsDashboardPage() {
   return (
     <div className="wf-atmosphere">
       <div className="mx-auto w-full max-w-[1400px]">
-        <WorkspaceEndpointCard />
+        {/* Gated on `registered` (a real connection exists), not `connected` (a heartbeat within the last 90 seconds).
+            `connected` briefly goes false right after `m9r-cli connect` approves, before anything keeps the heartbeat
+            fresh, which made this card reappear on an agent that was genuinely connected. The offline banner already
+            covers the "registered but not currently live" state. */}
+        {!agents.some((agent) => agent.registered) && <FirstRunCard />}
         <AgentWorkspaceClient
           agents={agents}
           viewerUserId={user?.id ?? null}
@@ -322,7 +321,6 @@ export default async function AgentsDashboardPage() {
           approvalRules={[...reviewRules, ...legacyRules]}
           approvalCenter={approvalCenter}
           passports={approvalData.passports}
-          initialHasWhispers={hasWhispers}
         />
 
       </div>

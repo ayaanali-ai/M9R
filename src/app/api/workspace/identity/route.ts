@@ -4,6 +4,7 @@ import {
   setActiveWorkspaceIdentity,
   WorkspaceIdentityError,
 } from "@/lib/workspace-identity-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // GET  /api/workspace/identity — the active workspace's mission record.
@@ -40,7 +41,7 @@ export async function PUT(req: NextRequest) {
 
 function handle(err: unknown) {
   if (err instanceof WorkspaceIdentityError) {
-    return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+    return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
   }
   console.error("Workspace identity error:", err instanceof Error ? err.message : err);
   return NextResponse.json({ error: "Internal server error." }, { status: 500 });

@@ -6,6 +6,7 @@ import {
   removeWorkspaceMember,
   WorkspaceMembershipError,
 } from "@/lib/workspace-membership-service";
+import { logInternalError, publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // PATCH  /api/workspace/members/[userId] — change role. Body: { role }
@@ -57,7 +58,8 @@ export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ 
 
 function handle(err: unknown) {
   if (err instanceof WorkspaceMembershipError) {
-    return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+    logInternalError("Workspace member error", err.message, err.status);
+    return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
   }
   console.error("Workspace member error:", err instanceof Error ? err.message : err);
   return NextResponse.json({ error: "Internal server error." }, { status: 500 });

@@ -102,17 +102,18 @@ export function validateStoreManifest(manifest) {
   if (JSON.stringify(manifest.permissions) !== JSON.stringify(["tabs", "scripting", "alarms", "storage", "nativeMessaging", "search"])) fail("permissions must remain the reviewed minimum set");
   if (JSON.stringify(manifest.host_permissions) !== JSON.stringify(["http://*/*", "https://*/*"])) fail("required host access must remain limited to HTTP/HTTPS sites");
   if (manifest.optional_host_permissions !== undefined) fail("site access must not require per-site prompts");
-  if (JSON.stringify(manifest.chrome_url_overrides) !== JSON.stringify({ newtab: "newtab.html" })) fail("the New Tab override must be the reviewed M9R page");
-  // The overlay embeds the thread pill and the message bar as extension frames inside pages (so a page's scripts cannot read what the
-  // owner types), which requires exactly those two pages, plus the static provider badges, to be web-accessible. Nothing else may be.
+  if (manifest.optional_permissions !== undefined && JSON.stringify(manifest.optional_permissions) !== JSON.stringify(["debugger"])) fail("the only optional permission is debugger, for opt-in quiet mode");
+  if (manifest.chrome_url_overrides !== undefined) fail("the store build must not override Chrome's New Tab page");
+  // The overlay embeds the pill as an extension frame inside pages, so a page's scripts cannot read what the owner types. That requires exactly
+  // the one-pill bundle folder and the static provider badges to be web-accessible. Nothing else may be.
   const war = manifest.web_accessible_resources;
-  const expectedResources = ["assets/providers/*.svg", "composer.html", "pill.html"];
+  const expectedResources = ["assets/providers/*.svg", "pill-next/*"];
   if (!Array.isArray(war) || war.length !== 1
     || JSON.stringify([...(war[0].resources ?? [])].sort()) !== JSON.stringify(expectedResources)
     || JSON.stringify(war[0].matches) !== JSON.stringify(["http://*/*", "https://*/*"])
     || Object.keys(war[0]).some((key) => !["resources", "matches"].includes(key))) {
     // use_dynamic_url is deliberately not allowed: it changes the frames' origin, and the service worker's own-frame check would then refuse every owner command.
-    fail("only the pill and message-bar frames and the static provider badge SVGs may be web-accessible");
+    fail("only the pill frame bundle and the static provider badge SVGs may be web-accessible");
   }
   if (manifest.background?.service_worker !== "src/background.js") fail("unexpected service worker entry point");
   if (manifest.action?.default_popup !== "permission.html") fail("unexpected action popup");
@@ -152,7 +153,6 @@ export function verifyPackageComplete(files) {
   for (const ref of Object.values(manifest.action?.default_icon ?? {})) need("manifest.json", ref);
   need("manifest.json", manifest.background?.service_worker);
   need("manifest.json", manifest.action?.default_popup);
-  need("manifest.json", manifest.chrome_url_overrides?.newtab);
   for (const entry of manifest.web_accessible_resources ?? []) {
     for (const resource of entry.resources) {
       if (resource.includes("*")) {
@@ -184,12 +184,18 @@ export async function buildStorePackage(outputPath) {
     const stage = path.join(tempRoot, "package");
     await mkdir(stage, { recursive: true });
     // The pages and styles the overlay embeds as frames, and the M9R mark their styles mask onto.
-    for (const name of ["permission.html", "pill.html", "composer.html", "newtab.html", "newtab.css", "frame.css"]) {
+    for (const name of ["permission.html"]) {
       await copyFile(path.join(browserRoot, name), path.join(stage, name));
+    }
+    // The one-pill bundle (built from pill/ with `npm run build:ext`); a package without it would silently ship no pill.
+    for (const entry of await walkFiles(path.join(browserRoot, "pill-next"))) {
+      const destination = path.join(stage, "pill-next", entry.name);
+      await mkdir(path.dirname(destination), { recursive: true });
+      await writeFile(destination, entry.data, { flag: "wx" });
     }
     await mkdir(path.join(stage, "assets"), { recursive: true });
     await copyFile(path.join(browserRoot, "assets", "m9r-mark.png"), path.join(stage, "assets", "m9r-mark.png"));
-    for (const name of ["m9r-mark.jpg", "m9r-newtab-background.jpg"]) {
+    for (const name of ["m9r-mark.jpg"]) {
       await copyFile(path.join(browserRoot, "assets", name), path.join(stage, "assets", name));
     }
     await mkdir(path.join(stage, "src"), { recursive: true });

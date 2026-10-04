@@ -10,7 +10,7 @@ import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-s
 import { startBenchSite } from "./bench/bench-site";
 import { findChrome, startCdpDriver } from "./bench/cdp-driver";
 import { removeBenchTempDirectory } from "./bench/temp-cleanup";
-import { approveBenchmarkDisclosure, createBenchmarkWebBrokerClient, inviteBenchmarkAgent } from "./bench/web-client";
+import { createBenchmarkWebBrokerClient, inviteBenchmarkAgent } from "./bench/web-client";
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<ToolResult> }> };
@@ -40,13 +40,7 @@ test("an agent tool call drives a real headless browser end to end: open, read, 
     }
     assert.equal(opened.isError, undefined, opened.content[0].text);
 
-    const withheld = await call("m9r_web_read", { token, selector: "#code" });
-    assert.equal(withheld.isError, true, "page content stays withheld until the owner approves its disclosure");
-    const requestId = /request_id=([A-Za-z0-9-]+)/.exec(withheld.content[0]?.text ?? "")?.[1];
-    assert.ok(requestId, withheld.content[0]?.text);
-    assert.equal((withheld.content[0]?.text ?? "").includes(site.data.search.targetCode), false);
-    await approveBenchmarkDisclosure(key, broker.port, requestId);
-
+    // Page reads are returned directly: per-result disclosure approval was removed from the local broker on 2026-09-30.
     const spec = await call("m9r_web_read", { token, selector: "#code" });
     assert.equal(spec.isError, undefined, spec.content[0]?.text);
     assert.equal(spec.content[0].text, site.data.search.targetCode);

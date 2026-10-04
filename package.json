@@ -6,7 +6,7 @@
   "description": "M9R web app: the multiplayer workspace and evidence layer for AI coding agents.",
   "scripts": {
     "dev": "next dev",
-    "build": "next build --turbopack",
+    "build": "node scripts/build.mjs",
     "build:webpack": "next build --webpack",
     "build:cloudflare": "node scripts/build-cloudflare.mjs",
     "preview:cloudflare": "opennextjs-cloudflare build && wrangler dev",
@@ -146,8 +146,8 @@
     "@cloudflare/workers-types": "^5.20260918.1",
     "@opennextjs/cloudflare": "^1.20.6",
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
+    "@types/node": "20.19.43",
+    "@types/react": "19.3.0",
     "@types/react-dom": "^19",
     "@types/three": "^0.186.0",
     "@types/ws": "^8.18.1",
@@ -156,7 +156,7 @@
     "postject": "1.0.0-alpha.6",
     "tailwindcss": "^4",
     "tsx": "^4.23.1",
-    "typescript": "^5",
+    "typescript": "5.9.3",
     "wrangler": "^4.134.0"
   },
   "overrides": {

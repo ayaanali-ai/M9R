@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authorizedStaticBearer } from "@/lib/request-security";
 import { createProductionMissionRelayOptions } from "@/lib/mission/mission-relay-production";
 import type { MissionRelayServiceOptions } from "@/lib/mission/mission-relay-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -83,6 +84,6 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     // A failed op is a normal outcome (bad credential, forbidden channel...): the Relay turns the message
     // into the same relay.error the container Relay would have sent, so this is 200 with ok:false.
-    return NextResponse.json({ ok: false, error: { message: error instanceof Error ? error.message : "Relay request failed." } });
+    return NextResponse.json({ ok: false, error: { message: publicErrorMessage(error instanceof Error ? error.message : "Relay request failed.", 400) } });
   }
 }

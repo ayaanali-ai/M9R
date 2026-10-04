@@ -4,6 +4,7 @@ import { supabase } from "@/lib/supabase";
 import { setItemStatus, recomputeContractStatus } from "@/lib/bridge/task-contract-service";
 import { TaskItemConflictError } from "@/lib/bridge/task-item-cas";
 import { handleAgentError } from "@/app/api/agent/_shared";
+import { publicErrorMessage } from "@/lib/public-error";
 
 /**
  * PATCH /api/bridge/task-contracts/[itemId] — an agent reports its own
@@ -37,7 +38,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ it
     return NextResponse.json({ ok: true });
   } catch (err) {
     // A finished item cannot be moved again, and a lost race is retried a few times before it is reported: 409, not a server error.
-    if (err instanceof TaskItemConflictError) return NextResponse.json({ error: err.message, code: err.code, currentStatus: err.current }, { status: 409 });
+    if (err instanceof TaskItemConflictError) return NextResponse.json({ error: publicErrorMessage(err.message, 409), code: err.code, currentStatus: err.current }, { status: 409 });
     return handleAgentError(err);
   }
 }

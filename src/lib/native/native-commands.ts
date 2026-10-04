@@ -31,6 +31,9 @@ import {
   type McpServerSpec,
 } from "./install-core";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
+import { createPageNotesStore } from "./page-notes-store";
+import { projectRoomId } from "./project-room";
+import { DEFAULT_CLOUD_URL, clearCloudConfig, cloudUrlProblem, loadCloudConfig, pullCloudNotes, pushCloudNote, saveCloudConfig } from "./cloud-memory";
 import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type DeliveryDeps } from "./codex-delivery";
 import { codexNoteInEffect, createCodexWatcher } from "./codex-watch";
 import { hookPipePath, requestShutdown, startHookServer } from "./hook-server";
@@ -444,6 +447,53 @@ export function printNativeStatus(io: NativeIo): void {
   for (const s of USER_STEPS.filter((x) => x.id === "new-session" || x.id === "codex-trust")) io.out(`[YOU ] ${s.title}${s.fix ? `  ->  ${s.fix}` : ""}`);
 }
 
+/**
+ * Saves a fact or decision to the shared project memory that every agent reads at session start (the same store `m9r_note`
+ * writes). The room is the folder the broker was set up for, so a note saved from the desktop pill lands where the agents look.
+ */
+export async function runNote(io: NativeIo, text: string): Promise<number> {
+  const note = text.trim();
+  if (!note) { io.err("Say what to remember: m9r note \"the staging URL is ...\""); return 1; }
+  if (note.length > 2_000) { io.err("That note is too long (2000 characters at most)."); return 1; }
+  const root = nativePaths(io).m9r;
+  let folder = io.env.M9R_PROJECT_ROOT?.trim();
+  if (!folder) {
+    try { folder = (JSON.parse(readFileSync(join(root, "broker-autostart.json"), "utf8").replace(/^﻿/, "")) as { projectRoot?: string }).projectRoot; } catch { /* no marker: fall back to the folder the command ran in */ }
+  }
+  const result = createPageNotesStore(root).append({ room: projectRoomId(folder || io.cwd || process.cwd()), agent: "you", text: note, source: "agent" });
+  if (!result.ok) { io.err(result.error); return 1; }
+  const sent = await pushCloudNote(root, note);
+  io.out(sent.ok ? "Saved to shared memory and to your team's dashboard." : loadCloudConfig(root) ? `Saved here. The dashboard copy did not go through: ${sent.error}.` : "Saved to shared memory.");
+  return 0;
+}
+
+/** `m9r cloud connect <token> [--url ...]`, `m9r cloud status`, `m9r cloud sync`, `m9r cloud disconnect`. */
+export async function runCloud(io: NativeIo, positionals: string[], urlFlag?: string): Promise<number> {
+  const root = nativePaths(io).m9r;
+  const action = positionals[0] ?? "status";
+  if (action === "connect") {
+    const token = positionals[1]?.trim();
+    const url = (urlFlag ?? DEFAULT_CLOUD_URL).replace(/\/+$/, "");
+    if (!token) { io.err("Create a token in M9R under Settings > API tokens, then run: m9r cloud connect <token>"); return 1; }
+    const problem = cloudUrlProblem(url);
+    if (problem) { io.err(problem); return 1; }
+    saveCloudConfig(root, { url, token });
+    const pulled = await pullCloudNotes(root);
+    if (!pulled.ok) { clearCloudConfig(root); io.err(`Could not connect: ${pulled.error}. Nothing was saved.`); return 1; }
+    io.out(`Connected to ${url}. ${pulled.count} team note${pulled.count === 1 ? "" : "s"} will be shown to your agents.`);
+    return 0;
+  }
+  if (action === "sync") {
+    const pulled = await pullCloudNotes(root);
+    io.out(pulled.ok ? `Synced ${pulled.count} team note${pulled.count === 1 ? "" : "s"}.` : `Could not sync: ${pulled.error}.`);
+    return pulled.ok ? 0 : 1;
+  }
+  if (action === "disconnect") { clearCloudConfig(root); io.out("Disconnected. Local memory is unchanged."); return 0; }
+  const config = loadCloudConfig(root);
+  io.out(config ? `Connected to ${config.url}.` : "Not connected. Create a token in M9R under Settings > API tokens, then run: m9r cloud connect <token>");
+  return 0;
+}
+
 /** Argument handling for the four commands, kept here so the big CLI core only forwards `rest`. */
 export async function runNativeCommand(command: string, rest: string[], io: NativeIo): Promise<number> {
   const has = (...names: string[]) => rest.some((a) => names.includes(a));
@@ -461,6 +511,8 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
     });
   }
   if (command === "uninstall") return runUninstall(io, { yes: has("--yes", "-y"), purge: has("--purge") });
+  if (command === "note") return runNote(io, positionals.join(" "));
+  if (command === "cloud") return runCloud(io, positionals, value("--url"));
   if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key"), session: value("--session") });
   const root = nativePaths(io).m9r;
   if (command === "feed") {

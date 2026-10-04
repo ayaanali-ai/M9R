@@ -163,7 +163,8 @@ export interface UiAgent { id: string; provider: string; folder: string; state: 
 export type UiThreadKind = "say" | "do" | "block" | "approval" | "system";
 export interface UiThreadEntry { id: string; at: string; kind: UiThreadKind; agent: string; provider: string; to?: string; text: string; phase?: "start" | "done"; ok?: boolean }
 export interface UiApproval { id: string; agent: string; provider: string; text: string }
-export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThreadEntry[]; approvals: UiApproval[] }
+/** `desktopPill` is present (true) only while the desktop pill is running, so the in-page pill can step aside. */
+export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThreadEntry[]; approvals: UiApproval[]; desktopPill?: true }
 
 export interface UiPageContext { url?: string; title?: string; selection?: string }
 export type UiInbound =
@@ -171,10 +172,13 @@ export type UiInbound =
   | { type: "ui-approve" | "ui-deny"; id: string }
   | { type: "ui-stop"; agent: string }
   | { type: "ui-stop-all" }
+  | { type: "ui-save-note"; text: string }
   | { type: "ui-subscribe" };
 
-export const UI_MESSAGE_TYPES: ReadonlySet<string> = new Set(["ui-command", "ui-approve", "ui-deny", "ui-stop", "ui-stop-all", "ui-subscribe"]);
+export const UI_MESSAGE_TYPES: ReadonlySet<string> = new Set(["ui-command", "ui-approve", "ui-deny", "ui-stop", "ui-stop-all", "ui-save-note", "ui-subscribe"]);
 export const MAX_COMMAND_CHARS = 4_000;
+/** Same cap as the m9r_note tool, so a note saved from the pill is one an agent could have written. */
+export const MAX_NOTE_CHARS = 2_000;
 export const MAX_SELECTION_CHARS = 2_000;
 export const THREAD_LIMIT = 200;
 const SAY_CHARS = 4_000;
@@ -197,6 +201,8 @@ export function parseUiMessage(raw: unknown): UiInbound | null {
     case "ui-approve":
     case "ui-deny":
       return typeof m.id === "string" && m.id.length > 0 && m.id.length <= 128 ? { type: m.type, id: m.id } : null;
+    case "ui-save-note":
+      return typeof m.text === "string" && m.text.trim() && m.text.length <= MAX_NOTE_CHARS ? { type: "ui-save-note", text: m.text.trim() } : null;
     case "ui-command": {
       if (typeof m.text !== "string" || !m.text.trim() || m.text.length > MAX_COMMAND_CHARS) return null;
       const ctx = (m.context && typeof m.context === "object" ? m.context : {}) as Record<string, unknown>;
@@ -336,7 +342,7 @@ const TOOL_WORDS: Record<string, string> = {
   m9r_result: "Reporting back",
 };
 
-export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void } = {}) {
+export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void; saveNote?: (text: string) => { ok: boolean; error?: string } } = {}) {
   const now = options.now ?? Date.now;
   const debounceMs = options.debounceMs ?? 100;
   const newId = options.newId ?? (() => randomUUID());
@@ -354,6 +360,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   const actionEntries = new Map<string, UiThreadEntry>();
   const typedValues = new Map<string, Array<{ value: string; expiresAt: number }>>();
   let lastSay: { agent: string; at: number; entry: UiThreadEntry } | null = null;
+  let desktopPill = false;
 
   function redact(text: string): string {
     let safe = redactSecrets(text);
@@ -420,7 +427,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       const text = known?.text ?? narrateStep({ action: p.action, selector: p.selector, targetLabel: p.targetLabel }, "start");
       return { id: p.id, agent: p.actor, provider: known?.provider ?? providerOf(p.actor), text: redact(`${text}${p.origin ? ` on ${hostOf(p.origin) ?? p.origin}` : ""}`) };
     });
-    return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals };
+    return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals, ...(desktopPill ? { desktopPill: true as const } : {}) };
   }
 
   function onActivity(activity: WebActivity): void {
@@ -605,6 +612,11 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
         blocked.delete(message.agent);
         system(`Stopped @${message.agent}. Its next message starts it again with its memory.`, message.agent);
         return true;
+      case "ui-save-note": {
+        const saved = options.saveNote ? options.saveNote(redactSecrets(message.text)) : { ok: false, error: "memory is not available here" };
+        system(saved.ok ? "Saved to shared memory." : `Could not save to memory: ${saved.error ?? "unknown error"}`);
+        return true;
+      }
       case "ui-stop-all":
         for (const p of broker?.pendingApprovals() ?? []) broker?.decideApproval(p.id, "deny");
         sessions?.stopAll();
@@ -626,6 +638,12 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     /** The socket that subscribed went away. */
     unsubscribe(reply?: (message: UiState) => boolean) { if (!reply || sink === reply) sink = null; },
     snapshot,
+    /** The desktop pill started or stopped; subscribers get the new state at once, and only when it actually changed. */
+    setDesktopPill(running: boolean) {
+      if (desktopPill === running) return;
+      desktopPill = running;
+      changed();
+    },
     /** Newest first, up to 30, already redacted; persisted separately as surface=web. */
     recentWeb: (): FeedWebItem[] => web.map((w) => ({ ...w, surface: "web" })),
     close() { if (timer) clearTimeout(timer); timer = null; sink = null; },

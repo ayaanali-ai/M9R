@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listUserApiTokens, createUserApiToken, revokeUserApiToken, UserApiTokenError } from "@/lib/user-api-token-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 function handleError(error: unknown) {
-  if (error instanceof UserApiTokenError) return NextResponse.json({ error: error.message }, { status: error.status });
+  if (error instanceof UserApiTokenError) return NextResponse.json({ error: publicErrorMessage(error.message, error.status) }, { status: error.status });
   return NextResponse.json({ error: "Something went wrong." }, { status: 500 });
 }
 

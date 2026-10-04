@@ -8,6 +8,7 @@
  * secret-shaped content" discipline as a Dispatch summary (dispatch.ts).
  */
 
+import { agentLabelFor } from "@/lib/agent-label";
 import { supabase } from "@/lib/supabase";
 import { createClient } from "@/lib/supabase/server";
 import { AgentJoinError, type AuthedAgent } from "@/lib/agent-join-service";
@@ -901,7 +902,7 @@ function displayNameForUser(user: DashboardUserContext["user"]): string {
   return (typeof metadata.username === "string" ? metadata.username : null)
     || (typeof metadata.name === "string" ? metadata.name : null)
     || user.email?.split("@")[0]
-    || "You";
+    || "A teammate";
 }
 
 export function agentMentionNames(agentKind: string): string[] {
@@ -1256,7 +1257,7 @@ export async function removeHumanFromConversation(conversationId: string, target
   if(error) throw new AgentJoinError("Could not update channel membership.", "CHANNEL_MEMBERSHIP_FAILED", 503);
 }
 
-export async function updateDashboardConversation(input: { conversationId: string; action: "archive" | "restore" | "update" | "pause_agents" | "resume_agents"; description?: string; isPrivate?: boolean }): Promise<void> {
+export async function updateDashboardConversation(input: { conversationId: string; action: "archive" | "restore" | "update" | "pause_agents" | "resume_agents"; description?: string; isPrivate?: boolean; name?: string }): Promise<void> {
   const context = await dashboardUserContext();
   await requireChannelManager(context);
   const conversation = await ownedConversation(context, input.conversationId);
@@ -1276,10 +1277,27 @@ export async function updateDashboardConversation(input: { conversationId: strin
   if (input.action === "update") {
     if (typeof input.description === "string") update.description = input.description.replace(/\s+/g, " ").trim().slice(0, 240) || null;
     if (typeof input.isPrivate === "boolean") update.is_private = input.isPrivate;
+    if (typeof input.name === "string") {
+      // Built-in channels are recognised by their name, so renaming one would turn it into an ordinary channel (or an ordinary one into a built-in).
+      if (channelGroupForConversation({ channelSlug: conversation.channel_slug, channelKind: conversation.channel_kind, topic: conversation.topic }) === "core") {
+        throw new AgentJoinError("Built-in workspace channels cannot be renamed.", "BUILT_IN_CHANNEL_RENAME_FORBIDDEN", 400);
+      }
+      const topic = input.name.replace(/\s+/g, " ").trim();
+      const slug = channelSlug(topic);
+      if (!slug || topic.length > 80) throw new AgentJoinError("Channel name is invalid.", "INVALID_CHANNEL", 400);
+      if (channelGroupForConversation({ channelSlug: slug, channelKind: "channel", topic }) === "core") {
+        throw new AgentJoinError("That name is reserved for a built-in channel.", "RESERVED_CHANNEL_NAME", 400);
+      }
+      update.topic = topic;
+      update.channel_slug = slug;
+    }
   }
   if (Object.keys(update).length === 0) throw new AgentJoinError("No channel changes were supplied.", "INVALID_CHANNEL_UPDATE", 400);
   const { error } = await requireService().from("agent_conversations").update(update).eq("id", conversation.id).eq("workspace_id", context.workspaceId);
-  if (error) throw new AgentJoinError("Could not update the channel.", "CHANNEL_UPDATE_FAILED", 500);
+  if (error) {
+    if (typeof update.channel_slug === "string") throw new AgentJoinError("A channel with that name may already exist.", "CHANNEL_UPDATE_FAILED", 409);
+    throw new AgentJoinError("Could not update the channel.", "CHANNEL_UPDATE_FAILED", 500);
+  }
 }
 
 /**
@@ -1853,20 +1871,37 @@ function parseStructuredMessagePrefix(body: string): { messageType: import("./mi
   return { messageType: "information", body, intent: null };
 }
 
-function agentLabelFor(agentKind: string): string {
-  return agentKind === "claude-code" ? "Claude"
-    : agentKind === "codex" ? "Codex"
-      : agentKind === "grok-build" ? "Grok Build"
-        : agentKind === "opencode" ? "OpenCode"
-          : agentKind;
-}
-
 // Superseded by src/lib/bridge/session-service.ts (Shared Live Sessions v2)
 // -- listActiveTurnsForDashboard used to list raw turns here, with a
 // terminal-stage set that was missing report.observed/fallback_report.posted
 // (both fire AFTER turn.completed), which left every finished turn showing
 // as permanently "active". session-service.ts fixes that and replaces the
 // flat turn list with a bounded, lifecycled Session object.
+
+/** An older version stored the words "You" or "Me" as the sender's name, which reads wrongly to everyone except the sender. */
+export function isPlaceholderSenderName(name: unknown): boolean {
+  return typeof name !== "string" || !name.trim() || /^(you|me)$/i.test(name.trim());
+}
+
+/** Display names for message senders that were stored without a real one: people by profile name, agents by their provider. */
+async function senderNamesFor(rows: Array<{ sender_user_id?: unknown; sender_connection_id?: unknown; sender_display_name?: unknown }>): Promise<{ users: Map<string, string>; agents: Map<string, string> }> {
+  const userIds = [...new Set(rows.filter((row) => typeof row.sender_user_id === "string" && isPlaceholderSenderName(row.sender_display_name)).map((row) => row.sender_user_id as string))];
+  const connectionIds = [...new Set(rows.filter((row) => typeof row.sender_connection_id === "string" && !row.sender_user_id && isPlaceholderSenderName(row.sender_display_name)).map((row) => row.sender_connection_id as string))];
+  const users = new Map<string, string>();
+  const agents = new Map<string, string>();
+  if (userIds.length === 0 && connectionIds.length === 0) return { users, agents };
+  const db = requireService();
+  const [people, connections] = await Promise.all([
+    userIds.length ? db.from("users").select("id, name, username, email").in("id", userIds.slice(0, 200)) : Promise.resolve({ data: [] as Array<{ id: string; name: string | null; username: string | null; email: string | null }> }),
+    connectionIds.length ? db.from("agent_connections").select("id, agent_kind").in("id", connectionIds.slice(0, 200)) : Promise.resolve({ data: [] as Array<{ id: string; agent_kind: string }> }),
+  ]);
+  for (const person of people.data ?? []) {
+    const label = person.name?.trim() || person.username?.trim() || person.email?.split("@")[0]?.trim();
+    if (label) users.set(person.id, label);
+  }
+  for (const connection of connections.data ?? []) if (connection.agent_kind) agents.set(connection.id, agentLabelFor(connection.agent_kind));
+  return { users, agents };
+}
 
 export async function listConversationsForDashboard(selectedConversationId?: string | null): Promise<DashboardConversation[]> {
   const context = await dashboardUserContext();
@@ -1964,10 +1999,14 @@ export async function listConversationsForDashboard(selectedConversationId?: str
   // listMessageTodosForConversations swallows its own read error so an
   // unapplied additive migration cannot take the channel list down.
   const todosBy = await listMessageTodosForConversations(ids);
+  // Older messages and every agent message are stored without a sender name, so the screen had to guess ("Someone"). Fill
+  // the names in from the people and agent connections the messages came from, in two small batched reads.
+  const nameFor = await senderNamesFor(rawMessages ?? []);
   const messagesBy = new Map<string, DashboardConversationMessage[]>();
   for (const row of rawMessages ?? []) {
     if (typeof row.id !== "string" || typeof row.conversation_id !== "string") continue;
-    const message = { ...row, reactions: reactionsBy.get(row.id) ?? [], attachments: attachmentsBy.get(row.id) ?? [], todos: todosBy.get(row.id) ?? [] } as unknown as DashboardConversationMessage & { conversation_id: string };
+    const sender = typeof row.sender_user_id === "string" ? nameFor.users.get(row.sender_user_id) : typeof row.sender_connection_id === "string" ? nameFor.agents.get(row.sender_connection_id) : undefined;
+    const message = { ...row, sender_display_name: isPlaceholderSenderName(row.sender_display_name) ? sender ?? null : row.sender_display_name, reactions: reactionsBy.get(row.id) ?? [], attachments: attachmentsBy.get(row.id) ?? [], todos: todosBy.get(row.id) ?? [] } as unknown as DashboardConversationMessage & { conversation_id: string };
     messagesBy.set(row.conversation_id, [...(messagesBy.get(row.conversation_id) ?? []), message]);
   }
   // Unread counts for non-selected channels can no longer be derived from
@@ -2328,5 +2367,5 @@ export async function changeChannelAgent(conversationId: string, connectionId: s
   if (conversation.channel_kind === "dm") throw new AgentJoinError("Direct-message membership cannot change.", "DM_MEMBERSHIP_FORBIDDEN", 400);
   if (!add && channelGroupForConversation({channelSlug:conversation.channel_slug,channelKind:conversation.channel_kind,topic:conversation.topic}) === "core") throw new AgentJoinError("Built-in channel agents cannot be removed.", "CORE_CHANNEL_MEMBER_REMOVE_FORBIDDEN", 400);
   const {error} = await requireService().rpc("m9r_change_channel_agent", {p_workspace:context.workspaceId,p_channel:conversationId,p_connection:connectionId,p_add:add});
-  if (error) throw new AgentJoinError("Could not update channel agents. Check the connection and apply the channel-controls migration.", "CHANNEL_MEMBERSHIP_FAILED", 503);
+  if (error) throw new AgentJoinError("Could not update the channel's agents right now. Please try again.", "CHANNEL_MEMBERSHIP_FAILED", 503);
 }

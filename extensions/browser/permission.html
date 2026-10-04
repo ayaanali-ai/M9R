@@ -28,6 +28,12 @@
       <p>When you run an M9R browser task, requested page text, URLs, and action data (including text you ask an agent to type into ordinary fields) go to the M9R broker on this computer and may be sent to the selected agent/provider and authorized M9R collaborators. Password, hidden, payment-card, and one-time-code fields are blocked by targeted checks, but visible pages can still contain sensitive information. No page data is sent merely by granting browser permission.</p>
     </section>
     <div id="status" role="status" aria-live="polite"></div>
+    <section class="disclosure" aria-label="Quiet mode">
+      <strong>Quiet mode (optional)</strong>
+      <p>Lets agents click without moving your mouse or taking over your window. It uses Chrome's debugging interface, so Chrome shows "started debugging this browser" while an agent is acting and for a few seconds after. Chrome asks you once.</p>
+      <button id="quiet-toggle" type="button">Turn on quiet mode</button>
+      <div id="quiet-status" role="status" aria-live="polite"></div>
+    </section>
     <section class="stop-tools" aria-label="Agent browser controls">
       <h2>Agent browser controls</h2>
       <p>Stop new M9R browser actions on every tab. An action already sent to a page may still finish.</p>

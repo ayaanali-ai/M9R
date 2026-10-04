@@ -1,7 +1,7 @@
 import { supabase } from "@/lib/supabase";
 import { createClient } from "@/lib/supabase/server";
 import { AgentJoinError, type AuthedAgent } from "@/lib/agent-join-service";
-import { effectiveRunSettings, validateRunSettings, type AgentRunSettings } from "@/lib/agent-run-settings";
+import { effectiveRunSettings, effortsForModel, validateRunSettings, type AgentRunSettings } from "@/lib/agent-run-settings";
 
 function service() {
   if (!supabase) throw new AgentJoinError("M9R is not configured.", "DB_NOT_CONFIGURED", 503);
@@ -14,7 +14,7 @@ async function humanConnection(connectionId: string, manage: boolean) {
   const { data: { user } } = await db.auth.getUser();
   if (!user) throw new AgentJoinError("Sign in to manage agent settings.", "UNAUTHENTICATED", 401);
   const { data, error } = await db.from("agent_connections").select("id, workspace_id, created_by, model, effort, available_models, available_efforts").eq("id", connectionId).eq("status", "active").maybeSingle();
-  if (error) throw new AgentJoinError("Could not load agent settings. Apply the run-settings migration.", "SETTINGS_UNAVAILABLE", 503);
+  if (error) throw new AgentJoinError("Could not load agent settings right now. Please try again.", "SETTINGS_UNAVAILABLE", 503);
   if (!data) throw new AgentJoinError("Agent connection not found.", "NOT_FOUND", 404);
   if (manage && data.created_by !== user.id) {
     const { data: project } = await db.from("projects").select("owner_id").eq("id", data.workspace_id).maybeSingle();
@@ -65,12 +65,13 @@ export async function saveHumanRunSettings(connectionId: string, raw: unknown, c
 /** Token identity fixes workspace and connection; request input cannot widen either. */
 export async function readAgentRunSettings(agent: AuthedAgent, conversationId?: string | null) {
   const db = service();
-  const { data: connection, error } = await db.from("agent_connections").select("model, effort").eq("id", agent.connectionId).eq("workspace_id", agent.workspaceId).eq("status", "active").maybeSingle();
+  const { data: connection, error } = await db.from("agent_connections").select("model, effort, available_models, available_efforts").eq("id", agent.connectionId).eq("workspace_id", agent.workspaceId).eq("status", "active").maybeSingle();
   if (error || !connection) throw new AgentJoinError("Agent settings unavailable.", "SETTINGS_UNAVAILABLE", 503);
-  if (!conversationId) return connection as AgentRunSettings;
+  const supported = (settings: AgentRunSettings): AgentRunSettings => ({ model: settings.model, effort: effortsForModel({ models: connection.available_models, efforts: connection.available_efforts }, settings.model)?.some(option => option.id === settings.effort) ? settings.effort : null });
+  if (!conversationId) return supported(connection);
   const { data: member, error: memberError } = await db.from("conversation_participants").select("connection_id").eq("workspace_id", agent.workspaceId).eq("conversation_id", conversationId).eq("connection_id", agent.connectionId).maybeSingle();
   if (memberError || !member) throw new AgentJoinError("Agent is not a member of this channel.", "NOT_A_CHANNEL_MEMBER", 403);
   const { data: override, error: overrideError } = await db.from("channel_agent_settings").select("model, effort").eq("workspace_id", agent.workspaceId).eq("conversation_id", conversationId).eq("connection_id", agent.connectionId).maybeSingle();
   if (overrideError) throw new AgentJoinError("Channel settings unavailable.", "SETTINGS_UNAVAILABLE", 503);
-  return effectiveRunSettings(connection, override);
+  return supported(effectiveRunSettings(connection, override));
 }

@@ -11,6 +11,7 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { supabase as admin } from "@/lib/supabase";
+import { personLabel } from "@/lib/rooms/person-names";
 
 export class WorkspaceMembershipError extends Error {
   constructor(message: string, public code: string, public status: number) {
@@ -25,6 +26,8 @@ export interface WorkspaceMember {
   workspaceId: string;
   userId: string;
   role: WorkspaceRole;
+  /** Profile name, then username, then the start of the email -- never shown as a raw id. Build display labels from this. */
+  name: string;
   email: string | null;
   createdAt: string;
 }
@@ -114,21 +117,31 @@ export async function listWorkspaceMembers(workspaceId: string): Promise<Workspa
 
   const emailByUserId = new Map<string, string | null>();
   const svc = requireAdmin();
-  await Promise.all(
-    rows.map(async (row) => {
-      const { data: authUser } = await svc.auth.admin.getUserById(row.user_id);
-      emailByUserId.set(row.user_id, authUser?.user?.email ?? null);
-    }),
-  );
+  const userIds = rows.map((row) => row.user_id as string);
+  const [, profiles] = await Promise.all([
+    Promise.all(
+      rows.map(async (row) => {
+        const { data: authUser } = await svc.auth.admin.getUserById(row.user_id);
+        emailByUserId.set(row.user_id, authUser?.user?.email ?? null);
+      }),
+    ),
+    userIds.length ? svc.from("users").select("id, name, username").in("id", userIds) : Promise.resolve({ data: [] as Array<{ id: string; name: string | null; username: string | null }> }),
+  ]);
+  const nameByUserId = new Map((profiles.data ?? []).map((row) => [row.id as string, row as { name: string | null; username: string | null }]));
 
-  return rows.map((row) => ({
-    id: row.id,
-    workspaceId: row.workspace_id,
-    userId: row.user_id,
-    role: row.role as WorkspaceRole,
-    email: emailByUserId.get(row.user_id) ?? null,
-    createdAt: row.created_at,
-  }));
+  return rows.map((row) => {
+    const email = emailByUserId.get(row.user_id) ?? null;
+    const profile = nameByUserId.get(row.user_id);
+    return {
+      id: row.id,
+      workspaceId: row.workspace_id,
+      userId: row.user_id,
+      role: row.role as WorkspaceRole,
+      name: personLabel({ name: profile?.name ?? null, username: profile?.username ?? null, email }) ?? "Teammate",
+      email,
+      createdAt: row.created_at,
+    };
+  });
 }
 
 export async function setWorkspaceMemberRole(

@@ -1,6 +1,12 @@
 (function () {
   "use strict";
   if (window.top !== window) return;
+  // The dashboard already has its own in-page chat, composer and @mention menu. The floating presence overlay (the pill,
+  // the dock) is for agents working on OTHER pages; on M9R's own dashboard it has nothing to show and only sits on top of
+  // the app, at a higher z-index than the app's own @mention menu, catching its clicks. The dashboard marks its own pages
+  // with data-m9r-app-shell (src/app/dashboard/layout.tsx) specifically so this check never depends on guessing a
+  // hostname or port, which would be wrong for a dev server or a future domain.
+  if (typeof document.querySelector === "function" && document.querySelector("[data-m9r-app-shell]")) return;
   // The document can outlive an MV3 service worker. The previous content script must release its
   // listeners, timers and overlay before another injection claims the same document.
   if (typeof window.__m9rContentDispose === "function") window.__m9rContentDispose();
@@ -159,6 +165,8 @@
   if (chrome.runtime && typeof chrome.runtime.getURL === "function") {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
     const nonce = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    const WAKE_W = 240;
+    const WAKE_H = 6;
     const setRegistrationStage = (stage) => {
       try {
         const host = document.getElementById(window.M9RPresence.ROOT_ID);
@@ -173,9 +181,12 @@
           setRegistrationStage("rejected");
           return;
         }
-        const pill = overlay.mountFrame("pill", chrome.runtime.getURL(`pill.html?n=${nonce}`), { w: 372, h: 76, bottom: 76 });
-        const composer = overlay.mountFrame("composer", chrome.runtime.getURL(`composer.html?n=${nonce}`), { w: 448, h: 72, bottom: 6 });
-        setRegistrationStage(pill && composer ? "accepted" : "mount-failed");
+        // One pill: the agents, approvals and message box are a single extension frame, so a page's scripts cannot read what the owner types.
+        // No `top` here (unlike the old fixed-notch pill): mountFrame's own dock condition (kind === "pill" && M9RDock loaded && no
+        // fixed `top`) only turns on when `top` is absent, which is what lets the owner drag this pill to any edge of the page --
+        // dock-logic.js's track, spring physics and corner-turning were already built and unit-tested, just never engaged here.
+        const pill = overlay.mountFrame("pill", chrome.runtime.getURL(`pill-next/index.html?n=${nonce}`), { w: WAKE_W, h: WAKE_H });
+        setRegistrationStage(pill ? "accepted" : "mount-failed");
       }).catch(() => setRegistrationStage("error"));
     } catch {
       setRegistrationStage("error");

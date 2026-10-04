@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { updateRule, deleteRule, RulesServiceError, type RuleUpdate } from "@/lib/rules-service";
+import { publicErrorMessage } from "@/lib/public-error";
 
 // ---------------------------------------------------------------------------
 // PATCH /api/rules/[id] — edit a rule or toggle is_active (deactivate).
@@ -39,7 +40,7 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
     return NextResponse.json({ ok: true, rule });
   } catch (err) {
     if (err instanceof RulesServiceError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Update rule error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });
@@ -53,7 +54,7 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof RulesServiceError) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+      return NextResponse.json({ error: publicErrorMessage(err.message, err.status), code: err.code }, { status: err.status });
     }
     console.error("Delete rule error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Internal server error." }, { status: 500 });

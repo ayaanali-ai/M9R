@@ -97,6 +97,42 @@ function makeDeps(opts: {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
+test("a normal terminal discovers one scoped profile and never prints its secret", async () => {
+  const { deps, out, requests } = makeDeps({ files: { [agentLocalPath(CWD, "opencode")]: JSON.stringify({ token: "scoped-secret" }) }, router: () => jsonResponse(200, { agent_kind: "opencode" }) });
+  assert.equal(await run(["whoami"], deps), 0);
+  assert.equal(requests[0].init?.headers && (requests[0].init.headers as Record<string,string>).authorization, "Bearer scoped-secret");
+  assert.doesNotMatch(out.join("\n"), /scoped-secret/);
+});
+
+test("multiple scoped profiles require explicit selection even when a legacy token exists", async () => {
+  const { deps, err, requests } = makeDeps({ files: {
+    [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: "codex-secret" }),
+    [agentLocalPath(CWD, "opencode")]: JSON.stringify({ token: "opencode-secret" }),
+    [localPath(CWD)]: JSON.stringify({ token: "legacy-secret" }),
+  }, router: () => jsonResponse(200, { agent_kind: "opencode" }) });
+  assert.equal(await run(["whoami"], deps), 1);
+  assert.match(err.join("\n"), /--agent-kind/);
+  assert.equal(requests.length, 0);
+  assert.equal(await run(["whoami", "--agent-kind", "opencode"], deps), 0);
+});
+
+test("connect skips login startup without consent and still explains extension setup", async () => {
+  let installed = 0;
+  const { deps, out } = makeDeps({ files: { [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: "test-token" }) },
+    router: () => jsonResponse(200, { agentKind: "codex", authenticated: true, lastUsedAt: "2030-01-01T00:00:00Z" }),
+    installLocalBrokerAutostart: async () => { installed++; return { ok: true, message: "installed" }; },
+  });
+  assert.equal(await run(["connect", "--agents", "codex"], deps), 0);
+  assert.equal(installed, 0);
+  assert.match(out.join("\n"), /npx m9r-cli web setup/);
+  deps.confirm = async () => true;
+  assert.equal(await run(["connect", "--agents", "codex", "--no-autostart"], deps), 0);
+  assert.equal(installed, 0);
+  deps.installLocalBrokerAutostart = async () => { installed++; return { ok: false, message: "unsupported OS" }; };
+  assert.equal(await run(["connect", "--agents", "codex", "--autostart"], deps), 0);
+  assert.equal(installed, 1);
+});
+
 test("inferSessionFormat maps extensions to API formats", () => {
   assert.equal(inferSessionFormat("oathlock-session.md"), "markdown_export");
   assert.equal(inferSessionFormat("trace.json"), "json");
@@ -1882,7 +1918,7 @@ test("connect --agents registers every listed kind in one batch and uses one app
     },
   });
 
-  const code = await run(["connect", "--agents", "claude-code,codex"], deps);
+  const code = await run(["connect", "--agents", "claude-code,codex", "--autostart"], deps);
 
   assert.equal(code, 0);
   assert.ok(files.has(agentLocalPath(CWD, "claude-code")), "claude-code must be connected");
@@ -1959,6 +1995,58 @@ test("connect auto-detects via probeVersion when --agents is omitted", async () 
   assert.ok(files.has(agentLocalPath(CWD, "opencode")));
   assert.ok(!files.has(agentLocalPath(CWD, "codex")), "only the detected kind should be connected");
   assert.match(out.join("\n"), /found OpenCode \(opencode\)/);
+});
+
+// Confirmed live (audit 1.3): `init` run from a normal terminal with OpenCode installed, no --agent-kind, failed with
+// "Could not determine agent kind" -- resolveAgentKind only recognizes Codex/Claude Code/Grok from env vars those
+// tools set themselves, and OpenCode sets none of them. `init` now falls back to the same PATH probe `connect` uses.
+test("init falls back to a PATH probe when no env var or --agent-kind identifies the runtime, and connects the one agent found", async () => {
+  const { deps, files } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    probeVersion: async (binary) => (binary === "opencode" ? "opencode, 1.2.3" : null),
+    router: (url) => {
+      if (url.includes("/api/agent/register")) {
+        return jsonResponse(201, { claim_id: "oc", claim_url: "http://localhost:3000/claim/oc", setup_code: "oc-code", expires_at: "2030-01-01T00:00:00Z" });
+      }
+      if (url.includes("/api/agent/claim-status")) {
+        return jsonResponse(200, { status: "approved", token: "oak_oc_token", scopes: ["rules:read"] });
+      }
+      return jsonResponse(404, { error: "nope" });
+    },
+  });
+
+  const code = await run(["init"], deps);
+
+  assert.equal(code, 0);
+  assert.ok(files.has(agentLocalPath(CWD, "opencode")));
+});
+
+test("init's PATH fallback asks for --agent-kind or connect when more than one agent is found, and never guesses", async () => {
+  const { deps, err } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    probeVersion: async (binary) => (binary === "opencode" || binary === "codex" ? `${binary}, 1.0.0` : null),
+  });
+
+  const code = await run(["init"], deps);
+
+  assert.equal(code, 1);
+  assert.match(err.join("\n"), /more than one agent CLI/);
+  assert.match(err.join("\n"), /npx m9r-cli connect/);
+});
+
+test("init's PATH fallback never fires when a kind was asked for explicitly", async () => {
+  let probeCalls = 0;
+  const { deps } = makeDeps({
+    env: { OATHLOCK_API_URL: "http://localhost:3000" },
+    probeVersion: async () => { probeCalls += 1; return "1.0.0"; },
+    router: (url) => url.includes("/api/agent/register")
+      ? jsonResponse(201, { claim_id: "c", claim_url: "http://localhost:3000/claim/c", setup_code: "code", expires_at: "2030-01-01T00:00:00Z" })
+      : jsonResponse(200, { status: "pending" }),
+  });
+
+  await run(["init", "--agent-kind", "claude-code"], deps);
+
+  assert.equal(probeCalls, 0, "an explicit --agent-kind must never trigger the PATH probe");
 });
 
 // ---------------------------------------------------------------------------
