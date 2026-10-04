@@ -20,6 +20,15 @@ test("the last Claude Code step becomes a plain phrase with only a verb and a sh
   assert.ok(!(lastClaudeActivity(tail([{ type: "tool_use", name: "Edit", input: { file_path: "/a/page.tsx", old_string: "SECRET BODY" } }])) ?? "").includes("SECRET"), "file contents are never shown");
 });
 
+test("a new turn with no tool call yet shows nothing, never the previous turn's last step repeated", () => {
+  const priorTurn = claudeLine([{ type: "tool_use", name: "Bash", input: { command: "npm run build" } }]);
+  const newUserTurn = JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "do the next thing" }] } });
+  assert.equal(lastClaudeActivity([priorTurn, newUserTurn].join("\n")), null, "the old turn's Bash step must not bleed into the new, as-yet-toolless turn");
+  // Once the new turn itself uses a tool, that (not the old one) is what shows.
+  const newTool = claudeLine([{ type: "tool_use", name: "Read", input: { file_path: "/a/new.ts" } }]);
+  assert.equal(lastClaudeActivity([priorTurn, newUserTurn, newTool].join("\n")), "Reading new.ts");
+});
+
 test("the last Codex step is read from its rollout lines, shell wrappers are trimmed off", () => {
   assert.equal(lastCodexActivity(["{cut", codexLine({ type: "function_call", name: "shell", arguments: JSON.stringify({ command: ["powershell.exe", "-Command", "npm test"] }) })].join("\n")), "Running npm test");
   assert.equal(lastCodexActivity(codexLine({ type: "local_shell_call", action: { command: ["git", "status"] } })), "Running git status");
@@ -27,6 +36,14 @@ test("the last Codex step is read from its rollout lines, shell wrappers are tri
   assert.equal(lastCodexActivity(codexLine({ type: "reasoning" })), "Thinking");
   assert.equal(lastCodexActivity(codexLine({ type: "message", role: "assistant" })), "Writing a reply");
   assert.equal(lastCodexActivity(codexLine({ type: "message", role: "user" })), null);
+});
+
+test("a new Codex turn with no tool call yet shows nothing, never the previous turn's last step repeated", () => {
+  const priorTurn = codexLine({ type: "function_call", name: "shell", arguments: JSON.stringify({ command: ["npm", "run", "build"] }) });
+  const newUserTurn = codexLine({ type: "message", role: "user" });
+  assert.equal(lastCodexActivity([priorTurn, newUserTurn].join("\n")), null, "the old turn's shell step must not bleed into the new, as-yet-toolless turn");
+  const newTool = codexLine({ type: "local_shell_call", action: { command: ["git", "status"] } });
+  assert.equal(lastCodexActivity([priorTurn, newUserTurn, newTool].join("\n")), "Running git status");
 });
 
 test("Claude's transcript folder is the working folder with symbols turned into dashes", () => {

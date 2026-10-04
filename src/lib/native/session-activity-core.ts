@@ -36,6 +36,10 @@ export function lastClaudeActivity(tailText: string): string | null {
   const lines = tailText.split(/\r?\n/);
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = lines[i];
+    // A user line starts the current turn. Stop here instead of scanning into an earlier turn -- without this, a turn
+    // that hasn't used a tool yet (or is between tool calls) kept showing whatever the PREVIOUS turn did last, which is
+    // what "shows an old task repeating" was: a real step, just not the current one.
+    if (line.includes('"type":"user"')) return null;
     if (!line.includes('"assistant"')) continue;
     try {
       const event = JSON.parse(line) as { type?: string; message?: { content?: unknown } };
@@ -71,6 +75,9 @@ export function lastCodexActivity(tailText: string): string | null {
       const payload = (JSON.parse(line) as { type?: string; payload?: Record<string, unknown> }).payload;
       if (!payload) continue;
       const kind = payload.type;
+      // A user message starts the current turn; stop instead of scanning past it into an earlier turn's last tool
+      // call (see the matching comment in lastClaudeActivity -- same bug, same fix, different transcript format).
+      if (kind === "message" && payload.role === "user") return null;
       if (kind === "function_call" || kind === "custom_tool_call" || kind === "local_shell_call") return describeCodexCall(payload);
       if (kind === "reasoning") return "Thinking";
       if (kind === "message" && payload.role === "assistant") return "Writing a reply";
