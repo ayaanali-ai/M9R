@@ -584,7 +584,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             </div>
           </dl>
 
-          {status === "active" && <a className={styles.workspaceLink} href="#room-workspace">Continue to the room workspace ↓</a>}
+          {status === "active" && <a className={styles.workspaceLink} href="#room-workspace">Continue to the room ↓</a>}
         </header>
 
       {status === "requested" && <p className={styles.statusBanner} role="status">Waiting for the host to let you in…</p>}

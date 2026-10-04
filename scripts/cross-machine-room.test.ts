@@ -167,7 +167,7 @@ test("room creation requires a workspace host session while room links keep anon
   assert.doesNotMatch(createPage, /ensureGuestSession/);
   assert.match(createPage, /data\.user\.is_anonymous \? "guest" : "ready"/);
   assert.match(createPage, /signOut\(\{ scope: "local" \}\)/);
-  assert.match(createPage, /Room hosts need an M9R workspace account/);
+  assert.match(createPage, /Room hosts need an M9R account/);
   assert.match(roomPage, /ensureGuestSession\(supabase\)/);
   assert.match(roomPage, /\/api\/rooms\/\$\{roomId\}\/join/);
   assert.match(invite, /auth\.getUser\(\)/);
