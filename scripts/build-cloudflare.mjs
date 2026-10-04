@@ -2,10 +2,14 @@ import { spawnSync } from "child_process";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
-// Set MISSION_RELAY_PUBLIC_URL in process.env so both builds inherit it
+// Set MISSION_RELAY_PUBLIC_URL in process.env so both builds inherit it. This hard-failed the whole
+// deploy when Cloudflare's dashboard "Build variables" came back empty for a run -- confirmed live,
+// a run with every earlier build succeeding suddenly had none configured, with no code change of ours
+// involved. The same fallback already exists in wrangler.jsonc's runtime vars and in build.mjs; use it
+// here too instead of depending on CI-time dashboard state that can apparently reset on its own.
 if (!process.env.MISSION_RELAY_PUBLIC_URL) {
-  console.error("MISSION_RELAY_PUBLIC_URL must be set (wss:// URL of the Cloudflare Relay Worker).");
-  process.exit(1);
+  console.warn("MISSION_RELAY_PUBLIC_URL was not set by the build environment; falling back to wss://m9r-relay.m9r.workers.dev (matches wrangler.jsonc).");
+  process.env.MISSION_RELAY_PUBLIC_URL = "wss://m9r-relay.m9r.workers.dev";
 }
 process.env.CLOUDFLARE_BUILD = "true";
 
