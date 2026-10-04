@@ -84,6 +84,23 @@ test("room activity is durable and ordered while presence stays ephemeral and ro
   assert.match(migration, /quiet until admission/i);
 });
 
+test("live tab sharing is opt-in, read-only, bounded, and restricted to active room members", () => {
+  const liveView = read("src/app/rooms/[roomId]/RoomLiveView.tsx");
+  const migration = read("supabase/migrations/20261004042347_room_live_tab_broadcast.sql");
+  assert.match(liveView, /getDisplayMedia/);
+  assert.match(liveView, /surface !== "browser"/);
+  assert.match(liveView, /FRAME_INTERVAL_MS = 333/);
+  assert.match(liveView, /MAX_FRAME_BYTES = 30 \* 1024/);
+  assert.match(liveView, /MAX_STREAM_MS = 5 \* 60_000/);
+  assert.match(liveView, /event: "screen-frame"/);
+  assert.match(liveView, /visibilitychange/);
+  assert.match(liveView, /Frames are not saved in room history/);
+  assert.match(migration, /extension = 'broadcast'/);
+  assert.match(migration, /m9r-room-live:/);
+  assert.match(migration, /m\.user_id = \(select auth\.uid\(\)\) and m\.status = 'active'/);
+  assert.doesNotMatch(migration, /insert into public\.m9r_room_events/i);
+});
+
 test("room members, leases, and handoffs expose authenticated, state-checked APIs", () => {
   const members = read("src/app/api/rooms/[roomId]/members/route.ts");
   const leases = read("src/app/api/rooms/[roomId]/leases/route.ts");
