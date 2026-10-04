@@ -3,7 +3,8 @@
 Installs the self-contained M9R Windows engine and runs its consent-driven setup.
 
 .DESCRIPTION
-No Node.js, npm, administrator rights, or execution-policy bypass is required.
+No Node.js, npm, or administrator rights are required. The CMD launcher uses
+a process-only execution-policy bypass; it does not change any saved policy.
 The script downloads only a versioned GitHub release asset, verifies its SHA-256
 sidecar, previews the engine's exact setup plan, then asks once before writing.
 

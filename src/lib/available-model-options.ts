@@ -11,6 +11,7 @@
 export interface AvailableModelOption {
   id: string;
   label: string;
+  efforts?: AvailableModelOption[] | null;
 }
 
 const MAX_AVAILABLE_MODELS = 64;
@@ -25,7 +26,17 @@ export function validateAvailableModels(raw: unknown): { ok: true; normalized: A
     const { id, label } = entry as Record<string, unknown>;
     if (typeof id !== "string" || !id.trim() || id.length > 80) return { ok: false, errors: ["Each model entry needs a non-empty id (max 80 chars)."] };
     if (typeof label !== "string" || !label.trim() || label.length > 120) return { ok: false, errors: ["Each model entry needs a non-empty label (max 120 chars)."] };
-    normalized.push({ id: id.trim(), label: label.trim() });
+    if (/[\u0000-\u001f\u007f]/.test(id + label)) return { ok: false, errors: ["Model options cannot contain control characters."] };
+    if (normalized.some(option => option.id === id.trim())) return { ok: false, errors: ["Model ids must be unique."] };
+    const option: AvailableModelOption = { id: id.trim(), label: label.trim() };
+    if ("efforts" in entry) {
+      const efforts = (entry as Record<string, unknown>).efforts;
+      if (Array.isArray(efforts) && efforts.some(value => value && typeof value === "object" && "efforts" in value)) return { ok: false, errors: ["Effort options cannot contain nested catalogs."] };
+      const validated = validateAvailableModels(efforts);
+      if (!validated.ok) return validated;
+      option.efforts = validated.normalized;
+    }
+    normalized.push(option);
   }
   return { ok: true, normalized: normalized.length > 0 ? normalized : null };
 }

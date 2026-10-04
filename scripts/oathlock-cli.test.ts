@@ -97,6 +97,42 @@ function makeDeps(opts: {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
+test("a normal terminal discovers one scoped profile and never prints its secret", async () => {
+  const { deps, out, requests } = makeDeps({ files: { [agentLocalPath(CWD, "opencode")]: JSON.stringify({ token: "scoped-secret" }) }, router: () => jsonResponse(200, { agent_kind: "opencode" }) });
+  assert.equal(await run(["whoami"], deps), 0);
+  assert.equal(requests[0].init?.headers && (requests[0].init.headers as Record<string,string>).authorization, "Bearer scoped-secret");
+  assert.doesNotMatch(out.join("\n"), /scoped-secret/);
+});
+
+test("multiple scoped profiles require explicit selection even when a legacy token exists", async () => {
+  const { deps, err, requests } = makeDeps({ files: {
+    [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: "codex-secret" }),
+    [agentLocalPath(CWD, "opencode")]: JSON.stringify({ token: "opencode-secret" }),
+    [localPath(CWD)]: JSON.stringify({ token: "legacy-secret" }),
+  }, router: () => jsonResponse(200, { agent_kind: "opencode" }) });
+  assert.equal(await run(["whoami"], deps), 1);
+  assert.match(err.join("\n"), /--agent-kind/);
+  assert.equal(requests.length, 0);
+  assert.equal(await run(["whoami", "--agent-kind", "opencode"], deps), 0);
+});
+
+test("connect skips login startup without consent and still explains extension setup", async () => {
+  let installed = 0;
+  const { deps, out } = makeDeps({ files: { [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: "test-token" }) },
+    router: () => jsonResponse(200, { agentKind: "codex", authenticated: true, lastUsedAt: "2030-01-01T00:00:00Z" }),
+    installLocalBrokerAutostart: async () => { installed++; return { ok: true, message: "installed" }; },
+  });
+  assert.equal(await run(["connect", "--agents", "codex"], deps), 0);
+  assert.equal(installed, 0);
+  assert.match(out.join("\n"), /npx m9r-cli web setup/);
+  deps.confirm = async () => true;
+  assert.equal(await run(["connect", "--agents", "codex", "--no-autostart"], deps), 0);
+  assert.equal(installed, 0);
+  deps.installLocalBrokerAutostart = async () => { installed++; return { ok: false, message: "unsupported OS" }; };
+  assert.equal(await run(["connect", "--agents", "codex", "--autostart"], deps), 0);
+  assert.equal(installed, 1);
+});
+
 test("inferSessionFormat maps extensions to API formats", () => {
   assert.equal(inferSessionFormat("oathlock-session.md"), "markdown_export");
   assert.equal(inferSessionFormat("trace.json"), "json");
@@ -1882,7 +1918,7 @@ test("connect --agents registers every listed kind in one batch and uses one app
     },
   });
 
-  const code = await run(["connect", "--agents", "claude-code,codex"], deps);
+  const code = await run(["connect", "--agents", "claude-code,codex", "--autostart"], deps);
 
   assert.equal(code, 0);
   assert.ok(files.has(agentLocalPath(CWD, "claude-code")), "claude-code must be connected");

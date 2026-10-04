@@ -959,6 +959,12 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
     }
     const efforts = session.configOptions.find(item => item.type === "select" && item.category === "thought_level");
     session.handle.availableEfforts = efforts?.type === "select" ? efforts.options.flatMap(entry => "group" in entry ? entry.options : [entry]).map(choice => ({ id: choice.value, label: choice.name || choice.value })) : null;
+    const model = session.configOptions.find(item => item.type === "select" && item.category === "model");
+    if (model?.type === "select") {
+      session.handle.availableModels = session.handle.availableModels?.map(option => option.id === model.currentValue
+        ? { ...option, efforts: session.handle.availableEfforts } : option) ?? null;
+      session.handle.availableEfforts = session.handle.availableModels?.find(option => option.id === session.configDefaults.get(model.id))?.efforts ?? null;
+    }
   }
 
   async resumeSession(input: { server: AgentServerHandle; providerSessionRef: string; assignment: ProviderAssignment; executionId?: string }): Promise<AgentSessionHandle> {

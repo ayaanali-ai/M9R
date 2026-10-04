@@ -30,7 +30,7 @@ import { WebSocket } from "ws";
 import { run, type CliDeps } from "@/lib/oathlock-cli-core";
 import { runResidentCycle, validateResidentProfile, type ResidentProfile } from "@/lib/oathlock-resident-core";
 import { buildResidentServicePlan } from "@/lib/resident-service-plan";
-import { ensureLocalTerminalRuntime } from "@/lib/local-terminal-runtime-launcher";
+
 import { createResidentSupervisor, residentProfileNames, RESIDENT_STALE_BUILD_EXIT_CODE } from "@/lib/resident-supervisor";
 import { applyResidentCredential, refreshResidentProfile, residentCredentialPaths, isResidentAgentKind, type ResidentAgentKind } from "@/lib/resident-profile-source";
 import { parseProviderAdapterConfig, type ProviderAdapterConfig } from "@/lib/provider-adapter-config";
@@ -175,6 +175,7 @@ const deps: CliDeps = {
     repositoryRoot: process.cwd(),
     readTranscript: (path) => readFile(path, "utf8"),
   }),
+  listDirectory: (path) => readdir(path),
   installLocalBrokerAutostart: ensureLocalBrokerAutostart,
 };
 
@@ -2428,10 +2429,24 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
   const home = homeDirectory();
   const root = defaultStoreRoot(home, process.env);
   const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
-  const entry = process.argv[1] ? resolve(process.argv[1]) : "";
-  if (!entry || !awaitableExists(entry) || ![".js", ".cjs", ".mjs"].includes(extname(entry).toLowerCase())) {
+  const sourceEntry = process.argv[1] ? resolve(process.argv[1]) : "";
+  if (!sourceEntry || !awaitableExists(sourceEntry) || ![".js", ".cjs", ".mjs"].includes(extname(sourceEntry).toLowerCase())) {
     return { ok: false, message: "Could not identify the installed JavaScript CLI entry for broker autostart. Run connect from the packaged m9r-cli command; provider connections remain saved." };
   }
+  // Persist the self-contained broker, not the CLI in npm's disposable cache.
+  // Its argument parser accepts the same --home/--port/--project-root flags.
+  const bundledBroker = join(dirname(sourceEntry), "m9r-web-broker.cjs");
+  if (!await canRead(bundledBroker)) return { ok: false, message: "Packaged web broker is missing; rebuild the CLI before enabling login startup." };
+  const brokerBytes = await readFile(bundledBroker);
+  const digest = createHash("sha256").update(brokerBytes).digest("hex");
+  const managedDirectory = join(root, "bin", "broker", digest);
+  const entry = join(managedDirectory, "m9r-web-broker.cjs");
+  for (const path of [join(root, "bin"), join(root, "bin", "broker"), managedDirectory, entry]) {
+    const info = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+    if (info?.isSymbolicLink()) return { ok: false, message: "Managed broker path is a symbolic link; refusing to overwrite it." };
+  }
+  await mkdir(managedDirectory, { recursive: true });
+  await writeFile(entry, brokerBytes, { mode: 0o600 });
 
   const keyPath = brokerKeyPath(root);
   const healthUrl = `http://127.0.0.1:${port}/health`;
@@ -2625,99 +2640,8 @@ const execution = argv[0] === "setup" && argv.includes("--web")
         })
     : run(argv, deps);
 
-/** `--no-autostart` declines; an interactive terminal is asked (default yes); a script keeps the disclosed default. */
-async function autostartConsented(): Promise<boolean> {
-  if (argv.includes("--no-autostart")) return false;
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return true;
-  const { createInterface } = await import("node:readline/promises");
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = (await rl.question("Start the M9R runtime automatically at login? [Y/n] ")).trim().toLowerCase();
-    return answer === "" || answer === "y" || answer === "yes";
-  } finally {
-    rl.close();
-  }
-}
-
-async function ensureRuntimeAfterAgentCommand(): Promise<void> {
-  const result = await ensureLocalTerminalRuntime({
-    probe: async (url) => {
-      try {
-        const response = await fetch(url, { signal: AbortSignal.timeout(500) });
-        return response.ok;
-      } catch {
-        return false;
-      }
-    },
-    spawn: () => {
-      // process.execArgv carries whatever flags actually started THIS
-      // process (e.g. --import .../register-alias.mjs, --disable-warning=...
-      // from the `oathlock` npm script) -- a raw .ts entry needs those to
-      // resolve its own path-aliased imports. Without them the relaunched
-      // process throws on its first import and exits immediately;
-      // combined with stdio: "ignore" below, that crash was completely
-      // silent, so `doctor`/`inbox`/`rules`/`run start` looked like they
-      // relaunched the runtime when the child was actually dead on arrival.
-      // Same detached, console-free spawn the watchdog uses -- see
-      // spawnDetachedOathlockCommand for why `cmd /c start /b` is wrong here.
-      spawnDetachedOathlockCommand(["terminal", "runtime"]);
-    },
-    wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  });
-  if (argv[0] === "init") {
-    deps.out(result === "failed"
-      ? "Connection succeeded, but M9R Runtime could not start automatically. Run: m9r terminal runtime"
-      : `M9R Runtime ${result === "started" ? "started" : "already running"}; Watchfloor terminals can attach automatically.`);
-  }
-  // A persistent login launcher (Scheduled Task / LaunchAgent / systemd user
-  // unit / crontab) is a real, disclosed change to the machine -- it must only
-  // happen from `init`, the one command whose whole
-  // purpose is "set this connection up," never silently from commands that
-  // are documented (and used) as read-only checks (`doctor`) or routine
-  // agent-loop calls (`rules`/`inbox`/`run start`). It previously self-healed
-  // on every trigger, which meant `doctor` -- described in cli/README.md as
-  // checking things "without changing anything" -- could write a login-
-  // startup registry key with no message shown. If init's install failed or
-  // was skipped, the fix is the explicit, user-invoked `oathlock service
-  // install`, not a silent retry buried in unrelated commands.
-  if (argv[0] === "init") {
-    // Additive, never a gate: onboarding has already succeeded by this point,
-    // so a refused Scheduled Task / missing launchctl / no-systemd box gets a
-    // warning and the manual command, not a failed `init`.
-    try {
-      if (!(await autostartConsented())) {
-        deps.out("Login startup skipped. The runtime will not return after a reboot; run: m9r service install");
-        return;
-      }
-      const mechanism = await installLoginAutostart();
-      deps.out(`Login startup is installed (${mechanism}); the runtime will return automatically after a reboot. Remove it any time with: m9r disconnect`);
-    } catch (error) {
-      deps.err(`Login startup could not be installed automatically (${error instanceof Error ? error.message : "unknown error"}). Run: oathlock service install`);
-    }
-  } else if (platform() === "win32" && result !== "failed") {
-    // Either mechanism counts as installed: init prefers the Scheduled Task
-    // but falls back to the Run key, so checking only one produces a false
-    // "not set to start at login" nag on a perfectly configured machine.
-    const taskInstalled = await powerShell(buildScheduledTaskQueryScript())
-      .then(({ stdout }) => stdout.trim() === "installed")
-      .catch(() => false);
-    if (!taskInstalled) {
-      try {
-        await execFileAsync("reg", buildRegQueryArgs());
-      } catch {
-        deps.out("Note: M9R Runtime is not set to start at login. Run: m9r service install");
-      }
-    }
-  }
-}
-
 execution
   .then(async (code) => {
-    const runtimeTrigger = argv[0] === "init" || argv[0] === "rules" || argv[0] === "inbox"
-      || (argv[0] === "run" && argv[1] === "start");
-    if (code === 0 && runtimeTrigger) {
-      await ensureRuntimeAfterAgentCommand();
-    }
     // Disconnecting a workspace must not leave a login launcher pointed at a
     // connection that no longer exists. Best-effort by the same rule as
     // install: a failed cleanup warns, it does not fail `disconnect`.

@@ -3,7 +3,11 @@ import test from "node:test";
 import {effectiveRunSettings,validateRunSettings} from "../src/lib/agent-run-settings.ts";
 import {FREE_WORKSPACE_MEMORY_BYTES,memoryAllowance,normalizeMemoryNote} from "../src/lib/shared-memory-core.ts";
 import {reportedTurnUsage} from "../src/lib/native/provider-usage-core.ts";
-const options={models:[{id:"vendor/model",label:"Model"}],efforts:[{id:"low",label:"Low"}]};
+const options={models:[{id:"vendor/model",label:"Model",efforts:[{id:"low",label:"Low"}]}],efforts:[{id:"low",label:"Low"}]};
+test("effort support is selected per model, never borrowed from the default",()=>{
+ assert.throws(()=>validateRunSettings({model:"other",effort:"low"},{...options,models:[...options.models,{id:"other",label:"Other",efforts:[{id:"high",label:"High"}]}]}));
+ assert.throws(()=>validateRunSettings({model:"unknown-support",effort:"low"},{...options,models:[{id:"unknown-support",label:"Unknown"}]}));
+});
 test("usage records retain provider counters and never invent absent tokens",()=>{
  assert.equal(reportedTurnUsage({cost:0.1}),null);
  assert.equal(reportedTurnUsage({input_tokens:-1,output_tokens:1.1}),null);

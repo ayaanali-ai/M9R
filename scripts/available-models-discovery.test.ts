@@ -34,9 +34,17 @@ test("validateAvailableModels rejects malformed entries and an oversized list, a
 
 test("the ACP adapter discovers a session's real model options from configOptions, not a guessed list", () => {
   const source = readFileSync("src/lib/bridge/acp-stdio-adapter.ts", "utf8");
-  assert.match(source, /private discoveredModelOptions\(created: acp\.NewSessionResponse\): \{ id: string; label: string \}\[\] \| null/);
+  assert.match(source, /private discoveredModelOptions\(created: Pick<acp\.NewSessionResponse, "configOptions">\): \{ id: string; label: string \}\[\] \| null/);
   assert.match(source, /option\.category === "model" && option\.type === "select"/);
-  assert.match(source, /this\.registerSession\(state, created\.sessionId, input\.executionId \?\? created\.sessionId, input\.assignment\.missionId, this\.discoveredModelOptions\(created\)\)/);
+  assert.match(source, /this\.registerSession\(state, created\.sessionId, input\.executionId \?\? created\.sessionId, input\.assignment\.missionId, this\.discoveredModelOptions\(created\), created\.configOptions \?\? \[\]\)/);
+});
+
+test("model catalogs preserve validated per-model efforts and reject ambiguous catalogs", () => {
+  const catalog = [{ id: "model-a", label: "Model A", efforts: [{ id: "low", label: "Low" }] }, { id: "model-b", label: "Model B", efforts: null }];
+  assert.deepEqual(validateAvailableModels(catalog), { ok: true, normalized: catalog });
+  assert.equal(validateAvailableModels([catalog[0], catalog[0]]).ok, false);
+  assert.equal(validateAvailableModels([{ id: "model", label: "Model", efforts: [{ id: "low", label: "Low", efforts: [] }] }]).ok, false);
+  assert.equal(validateAvailableModels([{ id: "bad\u0000id", label: "Model" }]).ok, false);
 });
 
 test("the bridge reports discovered models to the app, best-effort, never blocking the session on a failed report", () => {
