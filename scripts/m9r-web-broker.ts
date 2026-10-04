@@ -12,7 +12,7 @@ import { createWebLiveSessions, loadAgentsConfig, projectRoomId } from "@/lib/na
 import { createWebUiBridge } from "@/lib/native/web-ui-bridge";
 import { createPageNotesStore } from "@/lib/native/page-notes-store";
 import { pullCloudNotes, pushCloudNote } from "@/lib/native/cloud-memory";
-import { readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
+import { launchDesktopOverlayIfNeeded, readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
 import { DEFAULT_BROKER_PORT, brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
@@ -53,6 +53,9 @@ async function main(): Promise<void> {
   // close the HTTP socket, or the unref'd-less feed timer below keeps Node running forever with nothing left listening.
   let requestShutdown = () => {};
   const broker = await startWebBroker({ key, port, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
+  // The broker already autostarts at login; piggyback the desktop pill's launch onto that same moment instead of
+  // requiring the owner to double-click it by hand after every reboot.
+  launchDesktopOverlayIfNeeded(root);
   const config = loadAgentsConfig(root, { cwd: projectRoot });
   const sessions = createWebLiveSessions({
     agents: config.agents, storeRoot: root, repoRoot: projectRoot, brokerPort: broker.port,
