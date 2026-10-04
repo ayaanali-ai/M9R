@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -97,6 +98,10 @@ function listFiles(directory) {
   });
 }
 
+function canonicalPath(path) {
+  return realpathSync.native(path).replace(/^\\\\\?\\/, "").toLowerCase();
+}
+
 test("installer contains no Node/npm dependency and changes no saved PowerShell policy", () => {
   const source = readFileSync(installer, "utf8");
   assert.doesNotMatch(source, /(?:&\s*|Get-Command\s+)(?:npm|node)(?:\.exe)?\b/i);
@@ -169,11 +174,9 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
     assert.deepEqual(readFileSync(installedBroker), readFileSync(join(engineDist, "m9r-web-broker.exe")));
     const brokerOwnershipPath = join(profile.profile, ".m9r", "web-broker-install.json");
     const brokerOwnership = JSON.parse(readFileSync(brokerOwnershipPath, "utf8"));
-    // Windows may resolve the same file through different long/8.3 path spellings depending on
-    // whether Node or PowerShell produced the path. Verify the recorded target exists and contains
-    // the expected broker bytes; uninstall below also proves the recorded ownership is actionable.
-    assert.ok(existsSync(brokerOwnership.path));
-    assert.deepEqual(readFileSync(brokerOwnership.path), readFileSync(installedBroker));
+    // Windows may spell the same file differently when it uses an 8.3 account alias.
+    // Resolve both paths through the OS before comparing their identities.
+    assert.equal(canonicalPath(brokerOwnership.path), canonicalPath(installedBroker));
     assert.equal(brokerOwnership.sha256, createHash("sha256").update(readFileSync(installedBroker)).digest("hex"));
     assert.ok(listFiles(profile.claude).some((file) => /settings\.json$/i.test(file)));
     assert.ok(listFiles(profile.codex).some((file) => /config\.toml$/i.test(file)));
