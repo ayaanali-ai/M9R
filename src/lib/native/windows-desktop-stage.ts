@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { isAgentContext } from "./approval-core";
 import { defaultStoreRoot } from "./local-store";
 
-const STAGE_REGISTRY_VERSION = 1;
+const STAGE_REGISTRY_VERSION = 2;
 const MAX_STAGES = 16;
 const MAX_NATIVE_RESPONSE_BYTES = 32 * 1024;
 const DESKTOP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -14,12 +14,15 @@ const WINDOW_ID_RE = /^(?:0[xX][0-9a-f]+|[0-9]+)$/;
 export interface WindowsStageRecord {
   name: string;
   desktopId: string;
-  anchor: { pid: number; windowId: string };
+  /** Desktop active before M9R created this stage; null for adopted stages. */
+  returnToDesktopId: string | null;
+  /** The stage is a real Windows desktop; an anchor is optional for a newly created stage. */
+  anchor: { pid: number; windowId: string } | null;
   registeredAt: string;
 }
 
 interface StageRegistry {
-  version: 1;
+  version: 2;
   stages: WindowsStageRecord[];
 }
 
@@ -34,6 +37,13 @@ interface NativeStageResponse {
   ok: boolean;
   error?: string;
   window?: NativeWindowStageInfo;
+  desktop?: NativeDesktopStageInfo;
+}
+
+interface NativeDesktopStageInfo {
+  desktopId: string;
+  isCurrent: boolean;
+  returnDesktopId?: string | null;
 }
 
 export interface WindowsStageDependencies {
@@ -57,7 +67,8 @@ function normalizedName(value: string): string {
 function parseRegistry(raw: string): StageRegistry {
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { throw new Error("The local Windows stage registry is corrupt; it was left unchanged."); }
-  if (!parsed || typeof parsed !== "object" || (parsed as { version?: unknown }).version !== STAGE_REGISTRY_VERSION || !Array.isArray((parsed as { stages?: unknown }).stages)) {
+  const version = parsed && typeof parsed === "object" ? (parsed as { version?: unknown }).version : undefined;
+  if (!parsed || typeof parsed !== "object" || (version !== 1 && version !== STAGE_REGISTRY_VERSION) || !Array.isArray((parsed as { stages?: unknown }).stages)) {
     throw new Error("The local Windows stage registry has an unsupported format; it was left unchanged.");
   }
   const stages = (parsed as { stages: unknown[] }).stages;
@@ -70,13 +81,23 @@ function parseRegistry(raw: string): StageRegistry {
     if (names.has(name)) throw new Error("The local Windows stage registry contains duplicate names; it was left unchanged.");
     names.add(name);
     if (typeof record.desktopId !== "string" || !DESKTOP_ID_RE.test(record.desktopId)) throw new Error("The local Windows stage registry contains an invalid desktop id; it was left unchanged.");
-    if (!record.anchor || !Number.isInteger(record.anchor.pid) || (record.anchor.pid ?? 0) < 1 || typeof record.anchor.windowId !== "string" || !WINDOW_ID_RE.test(record.anchor.windowId)) {
+    const returnToDesktopId = record.returnToDesktopId ?? null;
+    if (returnToDesktopId !== null && (typeof returnToDesktopId !== "string" || !DESKTOP_ID_RE.test(returnToDesktopId))) {
+      throw new Error("The local Windows stage registry contains an invalid return desktop id; it was left unchanged.");
+    }
+    let anchor: WindowsStageRecord["anchor"] = null;
+    if (record.anchor !== undefined && record.anchor !== null) {
+      if (!Number.isInteger(record.anchor.pid) || (record.anchor.pid ?? 0) < 1 || typeof record.anchor.windowId !== "string" || !WINDOW_ID_RE.test(record.anchor.windowId)) {
+        throw new Error("The local Windows stage registry contains an invalid anchor window; it was left unchanged.");
+      }
+      anchor = { pid: record.anchor.pid!, windowId: record.anchor.windowId };
+    } else if (version === 1) {
       throw new Error("The local Windows stage registry contains an invalid anchor window; it was left unchanged.");
     }
     if (typeof record.registeredAt !== "string" || !Number.isFinite(Date.parse(record.registeredAt))) throw new Error("The local Windows stage registry contains an invalid registration time; it was left unchanged.");
-    return { name, desktopId: record.desktopId.toLowerCase(), anchor: { pid: record.anchor.pid!, windowId: record.anchor.windowId }, registeredAt: record.registeredAt };
+    return { name, desktopId: record.desktopId.toLowerCase(), returnToDesktopId: returnToDesktopId?.toLowerCase() ?? null, anchor, registeredAt: record.registeredAt };
   });
-  return { version: 1, stages: records };
+  return { version: 2, stages: records };
 }
 
 function registryPath(root: string): string {
@@ -85,13 +106,13 @@ function registryPath(root: string): string {
 
 function readRegistry(root: string): StageRegistry {
   const path = registryPath(root);
-  if (!existsSync(path)) return { version: 1, stages: [] };
+  if (!existsSync(path)) return { version: 2, stages: [] };
   const raw = readFileSync(path, "utf8");
   if (Buffer.byteLength(raw, "utf8") > 16 * 1024) throw new Error("The local Windows stage registry is too large; it was left unchanged.");
   return parseRegistry(raw);
 }
 
-function writeRegistry(root: string, registry: StageRegistry): void {
+function acquireRegistryLock(root: string): () => void {
   mkdirSync(root, { recursive: true });
   const target = registryPath(root);
   const lock = `${target}.lock`;
@@ -101,6 +122,11 @@ function writeRegistry(root: string, registry: StageRegistry): void {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Another Windows stage registry update is already running; retry after it finishes.");
     throw error;
   }
+  return () => rmSync(lock, { recursive: true, force: true });
+}
+
+function writeRegistryWhileLocked(root: string, registry: StageRegistry): void {
+  const target = registryPath(root);
   const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
   try {
     writeFileSync(temporary, `${JSON.stringify(registry, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -108,8 +134,6 @@ function writeRegistry(root: string, registry: StageRegistry): void {
   } catch (error) {
     try { unlinkSync(temporary); } catch { /* preserve the original write error */ }
     throw error;
-  } finally {
-    rmSync(lock, { recursive: true, force: true });
   }
 }
 
@@ -137,7 +161,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
 
   function assertOwner(): void {
     if (!deps.terminal && !(process.stdin.isTTY && process.stdout.isTTY)) throw new Error("Windows stage changes require the owner at an interactive terminal.");
-    if (isAgentContext(deps.env ?? process.env)) throw new Error("Agents cannot register stages or move owner windows; ask the owner to run this command in a terminal.");
+    if (isAgentContext(deps.env ?? process.env)) throw new Error("Agents cannot create, activate, register, or move owner desktop stages; ask the owner to run this command in a terminal.");
   }
 
   async function inspectWindow(pidInput: string, windowId: string): Promise<NativeWindowStageInfo> {
@@ -155,38 +179,130 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertOwner();
     const name = normalizedName(nameInput);
     const info = await inspectWindow(pidInput, windowIdInput);
-    const registry = readRegistry(root);
-    const existing = registry.stages.find((stage) => stage.name === name);
-    if (existing && existing.desktopId !== info.desktopId) {
-      throw new Error(`Stage “${name}” already names a different desktop. Forget it first, then register the new desktop.`);
+    const release = acquireRegistryLock(root);
+    try {
+      const registry = readRegistry(root);
+      const existing = registry.stages.find((stage) => stage.name === name);
+      if (existing && existing.desktopId !== info.desktopId) {
+        throw new Error(`Stage “${name}” already names a different desktop. Forget it first, then register the new desktop.`);
+      }
+      const record: WindowsStageRecord = {
+        name,
+        desktopId: info.desktopId,
+        returnToDesktopId: existing?.returnToDesktopId ?? null,
+        anchor: { pid: info.pid, windowId: info.windowId },
+        registeredAt: existing?.registeredAt ?? now().toISOString(),
+      };
+      if (!existing && registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
+      writeRegistryWhileLocked(root, {
+        version: 2,
+        stages: existing
+          ? registry.stages.map((item) => item.name === name ? record : item)
+          : [...registry.stages, record],
+      });
+      return record;
+    } finally {
+      release();
     }
-    const record: WindowsStageRecord = {
-      name,
-      desktopId: info.desktopId,
-      anchor: { pid: info.pid, windowId: info.windowId },
-      registeredAt: existing?.registeredAt ?? now().toISOString(),
-    };
-    if (!existing && registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
-    writeRegistry(root, {
-      version: 1,
-      stages: existing
-        ? registry.stages.map((item) => item.name === name ? record : item)
-        : [...registry.stages, record],
-    });
-    return record;
   }
 
-  async function inspectStage(nameInput: string): Promise<{ stage: WindowsStageRecord; anchor: NativeWindowStageInfo }> {
+  async function create(nameInput: string): Promise<WindowsStageRecord> {
+    assertWindows();
+    assertOwner();
+    const name = normalizedName(nameInput);
+    const release = acquireRegistryLock(root);
+    try {
+      const registry = readRegistry(root);
+      if (registry.stages.some((stage) => stage.name === name)) throw new Error(`A local stage named “${name}” already exists.`);
+      if (registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
+
+      const result = await invokeNative({ op: "createDesktop" });
+      if (!result.ok) throw new Error(result.error ?? "Windows could not create a virtual desktop.");
+      const desktop = normalizeDesktopInfo(result.desktop);
+      if (desktop.isCurrent) throw new Error("Windows created the desktop but activated it unexpectedly; M9R did not register the stage.");
+      if (registry.stages.some((stage) => stage.desktopId === desktop.desktopId)) throw new Error("Windows returned a desktop already registered under another stage name; the new stage was not registered.");
+      if (!desktop.returnDesktopId) throw new Error("Windows created a stage but did not return the desktop that was active beforehand; M9R did not save the stage.");
+
+      const record: WindowsStageRecord = {
+        name,
+        desktopId: desktop.desktopId,
+        returnToDesktopId: desktop.returnDesktopId.toLowerCase(),
+        anchor: null,
+        registeredAt: now().toISOString(),
+      };
+      try {
+        writeRegistryWhileLocked(root, { version: 2, stages: [...registry.stages, record] });
+      } catch (error) {
+        throw new Error(`Windows created desktop ${desktop.desktopId}, but M9R could not save its local stage mapping. The desktop was left intact. ${error instanceof Error ? error.message : ""}`.trim());
+      }
+      return record;
+    } finally {
+      release();
+    }
+  }
+
+  function normalizeDesktopInfo(value: unknown): NativeDesktopStageInfo {
+    if (!value || typeof value !== "object") throw new Error("The native Windows stage helper returned no desktop result.");
+    const item = value as Partial<NativeDesktopStageInfo>;
+    if (typeof item.desktopId !== "string" || !DESKTOP_ID_RE.test(item.desktopId) || typeof item.isCurrent !== "boolean"
+        || (item.returnDesktopId !== undefined && item.returnDesktopId !== null
+          && (typeof item.returnDesktopId !== "string" || !DESKTOP_ID_RE.test(item.returnDesktopId)))) {
+      throw new Error("The native Windows stage helper returned an invalid desktop result.");
+    }
+    return {
+      desktopId: item.desktopId.toLowerCase(),
+      isCurrent: item.isCurrent,
+      ...(item.returnDesktopId ? { returnDesktopId: item.returnDesktopId.toLowerCase() } : {}),
+    };
+  }
+
+  async function inspectStage(nameInput: string): Promise<{ stage: WindowsStageRecord; desktop: NativeDesktopStageInfo; anchor?: NativeWindowStageInfo }> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
     const stage = readRegistry(root).stages.find((item) => item.name === name);
     if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
-    const result = await invokeNative({ op: "inspect", pid: stage.anchor.pid, windowId: stage.anchor.windowId });
-    if (!result.ok) throw new Error(`Stage “${name}” anchor is unavailable: ${result.error ?? "unknown window error"}. The desktop mapping was kept.`);
-    const anchor = normalizeWindowInfo(result.window);
-    if (anchor.desktopId !== stage.desktopId) throw new Error(`Stage “${name}” anchor moved to another desktop. The saved mapping was kept; re-register it only after owner review.`);
-    return { stage, anchor };
+    if (stage.anchor) {
+      const result = await invokeNative({ op: "inspect", pid: stage.anchor.pid, windowId: stage.anchor.windowId });
+      if (!result.ok) throw new Error(`Stage “${name}” anchor is unavailable: ${result.error ?? "unknown window error"}. The desktop mapping was kept.`);
+      const anchor = normalizeWindowInfo(result.window);
+      if (anchor.desktopId !== stage.desktopId) throw new Error(`Stage “${name}” anchor moved to another desktop. The saved mapping was kept; re-register it only after owner review.`);
+      return { stage, desktop: { desktopId: anchor.desktopId, isCurrent: anchor.onCurrentDesktop }, anchor };
+    }
+    const result = await invokeNative({ op: "inspectDesktop", desktopId: stage.desktopId });
+    if (!result.ok) throw new Error(`Stage “${name}” is unavailable: ${result.error ?? "unknown desktop error"}. The local mapping was kept.`);
+    const desktop = normalizeDesktopInfo(result.desktop);
+    if (desktop.desktopId !== stage.desktopId) throw new Error(`Stage “${name}” resolved to a different desktop. The saved mapping was kept.`);
+    return { stage, desktop };
+  }
+
+  async function activate(nameInput: string): Promise<{ stage: WindowsStageRecord; desktop: NativeDesktopStageInfo }> {
+    assertWindows();
+    assertOwner();
+    const name = normalizedName(nameInput);
+    const stage = readRegistry(root).stages.find((item) => item.name === name);
+    if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
+    const result = await invokeNative({ op: "activateDesktop", desktopId: stage.desktopId });
+    if (!result.ok) throw new Error(result.error ?? "Windows could not activate the stage.");
+    const desktop = normalizeDesktopInfo(result.desktop);
+    if (desktop.desktopId !== stage.desktopId || !desktop.isCurrent) throw new Error("Windows did not confirm that the requested stage is active.");
+    return { stage, desktop };
+  }
+
+  async function returnToOwnerDesktop(nameInput: string): Promise<{ stage: WindowsStageRecord; desktop: NativeDesktopStageInfo }> {
+    assertWindows();
+    assertOwner();
+    const name = normalizedName(nameInput);
+    const stage = readRegistry(root).stages.find((item) => item.name === name);
+    if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
+    if (!stage.returnToDesktopId) throw new Error(`Stage “${name}” was adopted from an existing desktop and has no saved return desktop.`);
+    const result = await invokeNative({ op: "activateDesktop", desktopId: stage.returnToDesktopId });
+    if (!result.ok) throw new Error(result.error ?? "Windows could not return to the desktop that was active before stage creation.");
+    const desktop = normalizeDesktopInfo(result.desktop);
+    if (desktop.desktopId !== stage.returnToDesktopId || !desktop.isCurrent) {
+      throw new Error("Windows did not confirm that the original desktop is active.");
+    }
+    return { stage, desktop };
   }
 
   async function moveWindow(nameInput: string, pidInput: string, windowIdInput: string): Promise<{ fromDesktopId: string; window: NativeWindowStageInfo; stage: WindowsStageRecord }> {
@@ -214,14 +330,19 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
-    const registry = readRegistry(root);
-    const stage = registry.stages.find((item) => item.name === name);
-    if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
-    writeRegistry(root, { version: 1, stages: registry.stages.filter((item) => item.name !== name) });
-    return stage;
+    const release = acquireRegistryLock(root);
+    try {
+      const registry = readRegistry(root);
+      const stage = registry.stages.find((item) => item.name === name);
+      if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
+      writeRegistryWhileLocked(root, { version: 2, stages: registry.stages.filter((item) => item.name !== name) });
+      return stage;
+    } finally {
+      release();
+    }
   }
 
-  return { inspectWindow, register, inspectStage, moveWindow, list, forget };
+  return { inspectWindow, register, create, inspectStage, activate, returnToOwnerDesktop, moveWindow, list, forget };
 }
 
 function parsePid(value: string): number {
@@ -289,12 +410,28 @@ export async function runWindowsDesktopStageCli(args: string[], deps: WindowsSta
     if (action === "register" && args.length === 4) {
       const stage = await manager.register(args[1]!, args[2]!, args[3]!);
       process.stdout.write(`Registered local stage “${stage.name}” on desktop ${stage.desktopId}.\n`);
-      process.stdout.write("The stage is machine-local. Create and switch virtual desktops with Windows (Win+Ctrl+D / Win+Ctrl+Arrow); M9R does not switch desktops automatically.\n");
+      process.stdout.write("The stage label is local to this machine. M9R did not create or switch a desktop.\n");
+      return 0;
+    }
+    if (action === "create" && args.length === 2) {
+      const stage = await manager.create(args[1]!);
+      process.stdout.write(`Created M9R stage “${stage.name}” on Windows desktop ${stage.desktopId}. It remains in the background; use “m9r web stage activate ${stage.name}” to switch to it.\n`);
       return 0;
     }
     if (action === "inspect" && args.length === 2) {
       const result = await manager.inspectStage(args[1]!);
-      process.stdout.write(`Stage ${result.stage.name}: desktop ${result.stage.desktopId}; anchor PID ${result.anchor.pid}, window ${result.anchor.windowId}; ${result.anchor.onCurrentDesktop ? "currently visible desktop" : "on another desktop"}.\n`);
+      const anchor = result.anchor ? `; anchor PID ${result.anchor.pid}, window ${result.anchor.windowId}` : "";
+      process.stdout.write(`Stage ${result.stage.name}: desktop ${result.desktop.desktopId}${anchor}; ${result.desktop.isCurrent ? "currently active" : "on another desktop"}.\n`);
+      return 0;
+    }
+    if (action === "activate" && args.length === 2) {
+      const result = await manager.activate(args[1]!);
+      process.stdout.write(`Activated stage “${result.stage.name}” (${result.desktop.desktopId}). The visible Windows desktop changed.\n`);
+      return 0;
+    }
+    if (action === "return" && args.length === 2) {
+      const result = await manager.returnToOwnerDesktop(args[1]!);
+      process.stdout.write(`Returned from stage “${result.stage.name}” to its original desktop (${result.desktop.desktopId}).\n`);
       return 0;
     }
     if (action === "move-window" && args.length === 4) {
@@ -311,11 +448,11 @@ export async function runWindowsDesktopStageCli(args: string[], deps: WindowsSta
     }
     if (action === "list" && args.length === 1) {
       const stages = manager.list();
-      process.stdout.write(stages.length ? stages.map((stage) => `${stage.name}\t${stage.desktopId}\tanchor PID ${stage.anchor.pid}, window ${stage.anchor.windowId}`).join("\n") + "\n" : "No local Windows stages registered.\n");
+      process.stdout.write(stages.length ? stages.map((stage) => `${stage.name}\t${stage.desktopId}${stage.anchor ? `\tanchor PID ${stage.anchor.pid}, window ${stage.anchor.windowId}` : "\tcreated by M9R"}`).join("\n") + "\n" : "No local Windows stages registered.\n");
       return 0;
     }
-    process.stderr.write("Usage: m9r web stage list | register <name> <pid> <window-id> | inspect <name> | move-window <name> <pid> <window-id> | forget <name>\n");
-    process.stderr.write("To register: create/switch to the Windows virtual desktop, open a window there, then register that window as its anchor.\n");
+    process.stderr.write("Usage: m9r web stage list | create <name> | register <name> <pid> <window-id> | inspect <name> | activate <name> | return <name> | move-window <name> <pid> <window-id> | forget <name>\n");
+    process.stderr.write("Create and activate require an interactive owner terminal; activate changes the visible Windows desktop. register adopts an existing desktop from one of its windows.\n");
     return action ? 1 : 0;
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : "Windows stage operation failed."}\n`);
