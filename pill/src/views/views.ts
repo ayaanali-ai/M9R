@@ -6,7 +6,7 @@ import { Ticker } from "./ticker";
 import { providerLogo } from "./provider";
 import { buildPrompt } from "./composer";
 import { State, type AgentTask, type LinkOffer } from "../core/state";
-import type { SessionRow } from "../core/transport";
+import type { DesktopStage, DesktopStageTransport, SessionRow } from "../core/transport";
 import type { SpeechEnv } from "../core/speech";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 
@@ -26,6 +26,7 @@ export interface ViewActions {
     list(handle: string): Promise<SessionRow[]>;
     link(offer: LinkOffer, toSession: string): Promise<void>;
   };
+  desktopStages?: DesktopStageTransport;
   toggleSound(): void;
   setAutoClose(seconds: number): void;
   blip(): void;
@@ -34,6 +35,8 @@ export interface ViewActions {
 export interface ViewHost {
   el: HTMLElement;
   sync(): void;
+  /** Called when the view becomes active; used for a lazy local-state refresh. */
+  activate?(): void;
   /** Called when the view becomes active, for views with a text field. */
   focus?(): void;
   /** Push-to-talk from the keyboard (the message view only). */
@@ -78,6 +81,9 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 export function buildHeader(actions: ViewActions): ViewHost {
   const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
   const tabChat = h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
+  const tabStage = actions.desktopStages
+    ? h("button", { class: "tab", title: "Desktop stage", onclick: () => go("stage") }, svg(ICONS.display, 14, { stroke: 1.7 }))
+    : null;
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
 
@@ -89,7 +95,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat),
+    h("div", { class: "tabs" }, tabHome, tabChat, tabStage),
     h("div", { class: "header-actions" }, gearBtn, soundBtn),
   );
 
@@ -99,6 +105,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
       const v = State.view;
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");
+      tabStage?.classList.toggle("on", v === "stage");
       gearBtn.classList.toggle("on", v === "settings");
       clear(soundBtn);
       soundBtn.append(svg(State.settings.soundEnabled ? ICONS.speakerOn : ICONS.speakerOff, 14));
@@ -310,6 +317,245 @@ function buildSettings(actions: ViewActions): ViewHost {
   };
 }
 
+// ── Desktop stage ────────────────────────────────────────────────
+
+function buildDesktopStage(actions: ViewActions): ViewHost {
+  const desktopStages = actions.desktopStages;
+  const status = h("div", { class: "stage-message", "aria-live": "polite" });
+  const rows = h("div", { class: "stage-list" });
+  const selectedTitle = h("div", { class: "stage-selected-title" });
+  const selectedState = h("span", { class: "stage-selected-state" });
+  const stageAction = h("div", { class: "stage-selected-actions" });
+  const screenOutline = h("div", { class: "stage-screen-outline" }, svg(ICONS.display, 28));
+  const previewCanvas = h("div", { class: "stage-preview-canvas" });
+  const previewImage = h("img", { class: "stage-preview-image", alt: "Local snapshot of the registered stage window", draggable: "false" }) as HTMLImageElement;
+  const cursorDot = h("span", { class: "stage-cua-cursor", "aria-hidden": "true" }) as HTMLSpanElement;
+  previewImage.hidden = true;
+  cursorDot.hidden = true;
+  previewCanvas.append(previewImage, cursorDot);
+  const previewTitle = h("div", { class: "stage-preview-title" });
+  const previewCopy = h("div", { class: "stage-preview-copy" });
+  const preview = h("div", { class: "stage-preview" }, screenOutline, previewCanvas, previewTitle, previewCopy);
+  const name = h("input", { class: "stage-name", type: "text", maxlength: 40, placeholder: "Stage name", "aria-label": "New stage name" });
+  const create = h("button", { class: "btn primary", onclick: () => void createStage() }, h("span", { text: "Create" }));
+  const refresh = h("button", { class: "stage-icon-button", title: "Refresh stages", "aria-label": "Refresh stages", onclick: () => void refreshStages() }, "↻");
+  const controls = h("form", { class: "stage-create", onsubmit: (event: Event) => { event.preventDefault(); void createStage(); } }, name, create);
+  controls.hidden = true;
+  const add = h("button", { class: "stage-icon-button", title: "New stage", "aria-label": "New stage", onclick: () => {
+    controls.hidden = !controls.hidden;
+    add.setAttribute("aria-expanded", String(!controls.hidden));
+    if (!controls.hidden) name.focus();
+  } }, "+");
+  const listWrap = h("div", { class: "stage-list-wrap" },
+    h("div", { class: "stage-rail-heading" }, h("span", { text: "YOUR STAGES" }), h("div", { class: "stage-rail-tools" }, refresh, add)), rows, controls);
+  const el = h("div", { class: "view stage-view" },
+    card(null,
+      listWrap,
+      h("div", { class: "stage-workspace" },
+        h("div", { class: "stage-heading" }, selectedTitle, selectedState),
+        preview,
+        h("div", { class: "stage-footer" }, h("span", { class: "stage-local-label", text: "On this computer" }), stageAction),
+        status,
+      ),
+    ),
+  );
+
+  let stages: DesktopStage[] = [];
+  let loaded = false;
+  let busy = false;
+  let message = "";
+  let selectedName: string | null = null;
+  let capturedStageName: string | null = null;
+  let captured: { dataUrl: string; width: number; height: number } | null = null;
+  let cursor: { x: number; y: number } | null = null;
+
+  function positionCursorMarker() {
+    if (!captured || !cursor || previewImage.hidden) { cursorDot.hidden = true; return; }
+    const imageRect = previewImage.getBoundingClientRect();
+    const canvasRect = previewCanvas.getBoundingClientRect();
+    if (imageRect.width <= 0 || imageRect.height <= 0 || canvasRect.width <= 0 || canvasRect.height <= 0) { cursorDot.hidden = true; return; }
+    cursorDot.hidden = false;
+    cursorDot.style.left = `${imageRect.left - canvasRect.left + cursor.x / captured.width * imageRect.width}px`;
+    cursorDot.style.top = `${imageRect.top - canvasRect.top + cursor.y / captured.height * imageRect.height}px`;
+  }
+
+  function render() {
+    status.textContent = message;
+    status.hidden = !message;
+    create.disabled = busy || !name.value.trim() || !desktopStages;
+    refresh.disabled = busy || !desktopStages;
+    name.disabled = busy || !desktopStages;
+    rows.replaceChildren();
+    const selected = stages.find((stage) => stage.name === selectedName) ?? stages.find((stage) => stage.isCurrent) ?? stages[0];
+    selectedName = selected?.name ?? null;
+    selectedTitle.textContent = selected?.name ?? "Desktop stage";
+    selectedState.textContent = selected ? (selected.status === "current" ? "You’re here" : selected.status === "background" ? "In background" : "Unavailable") : "";
+    selectedState.dataset.state = selected?.status ?? "";
+    const hasCapture = Boolean(selected && captured && capturedStageName === selected.name);
+    screenOutline.hidden = hasCapture;
+    previewCanvas.hidden = !hasCapture;
+    previewTitle.textContent = !loaded ? "Loading your stages" : hasCapture ? "Local app-window snapshot" : selected ? "Desktop preview" : "A place for your agents";
+    previewCopy.textContent = selected?.error ?? (hasCapture
+      ? cursor ? "Local Cua cursor position confirmed. This snapshot stays on this PC." : "Local snapshot · stays on this PC. Click the image to place the Cua cursor."
+      : selected?.hasAnchor ? "Capture a verified window from this stage." : selected ? "Register an app window on this stage to enable a local snapshot." : "Create a stage to keep agent windows together.");
+    if (hasCapture && captured) {
+      if (previewImage.src !== captured.dataUrl) previewImage.src = captured.dataUrl;
+      previewImage.hidden = false;
+      requestAnimationFrame(positionCursorMarker);
+    } else {
+      previewImage.hidden = true;
+      cursorDot.hidden = true;
+      if (previewImage.hasAttribute("src")) previewImage.removeAttribute("src");
+    }
+    stageAction.replaceChildren();
+    if (selected && selected.status !== "unavailable") {
+      if (selected.hasAnchor) stageAction.append(h("button", { class: "btn secondary", disabled: busy, onclick: () => void captureStage(selected.name) }, busy ? "Working…" : hasCapture ? "Refresh snapshot" : "Capture locally"));
+      if (!selected.isCurrent) stageAction.append(h("button", { class: "btn primary", disabled: busy, onclick: () => void runStageAction("activate", selected.name) }, "Open desktop", svg(ICONS.display, 12)));
+      else if (selected.returnToDesktopId) stageAction.append(h("button", { class: "btn secondary", disabled: busy, onclick: () => void runStageAction("return", selected.name) }, "Return to yours"));
+    }
+    if (!desktopStages) {
+      rows.append(h("div", { class: "stage-empty", text: "Desktop stages are available in the Windows desktop pill." }));
+      return;
+    }
+    if (!loaded) {
+      rows.append(h("div", { class: "stage-empty", text: "Loading local stages…" }));
+      return;
+    }
+    if (stages.length === 0) {
+      rows.append(h("div", { class: "stage-empty", text: "No stages saved on this PC yet." }));
+      return;
+    }
+    for (const stage of stages) {
+      const label = stage.status === "current" ? "Current desktop" : stage.status === "background" ? "Background desktop" : "Unavailable";
+      const row = h("button", { class: `stage-row${stage.name === selectedName ? " selected" : ""}`, "aria-pressed": stage.name === selectedName, onclick: () => { selectedName = stage.name; render(); } },
+        svg(ICONS.display, 15),
+        h("div", { class: "stage-row-main" },
+          h("div", { class: "stage-row-name", text: stage.name }),
+          h("div", { class: "stage-row-state", "data-state": stage.status, text: label }),
+        ),
+      );
+      rows.append(row);
+    }
+  }
+
+  async function refreshStages() {
+    if (!desktopStages || busy) return;
+    busy = true;
+    message = "Refreshing stages…";
+    render();
+    try {
+      stages = await desktopStages.list();
+      loaded = true;
+      message = "";
+    } catch (error) {
+      loaded = true;
+      message = `Could not read stages: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  async function captureStage(stageName: string) {
+    if (!desktopStages || busy) return;
+    busy = true;
+    message = `Capturing “${stageName}” locally…`;
+    render();
+    try {
+      const result = await desktopStages.capture(stageName);
+      captured = { dataUrl: result.dataUrl, width: result.width, height: result.height };
+      capturedStageName = stageName;
+      cursor = null;
+      selectedName = stageName;
+      message = "Local snapshot captured. It was not shared with the room.";
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  async function moveStageCursor(event: MouseEvent) {
+    const selected = stages.find((stage) => stage.name === selectedName);
+    if (!desktopStages || busy || !selected?.hasAnchor || !captured || capturedStageName !== selected.name || event.target !== previewImage) return;
+    const rect = previewImage.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const x = Math.max(0, Math.min(captured.width - 1, Math.round((event.clientX - rect.left) / rect.width * captured.width)));
+    const y = Math.max(0, Math.min(captured.height - 1, Math.round((event.clientY - rect.top) / rect.height * captured.height)));
+    busy = true;
+    message = "Moving the Cua cursor on this local window…";
+    render();
+    try {
+      const result = await desktopStages.moveCursor(selected.name, x, y);
+      captured = { dataUrl: result.capture.dataUrl, width: result.capture.width, height: result.capture.height };
+      capturedStageName = selected.name;
+      cursor = { x: result.cursor.x, y: result.cursor.y };
+      message = `Cua confirmed local cursor at ${result.cursor.x}, ${result.cursor.y}.`;
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  async function createStage() {
+    const stageName = name.value.trim();
+    if (!desktopStages || !stageName || busy) return;
+    busy = true;
+    message = `Creating “${stageName}”…`;
+    render();
+    try {
+      await desktopStages.create(stageName);
+      selectedName = stageName;
+      name.value = "";
+      controls.hidden = true;
+      add.setAttribute("aria-expanded", "false");
+      message = `Stage “${stageName}” created in the background.`;
+      stages = await desktopStages.list();
+      loaded = true;
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  async function runStageAction(action: "activate" | "return", stageName: string) {
+    if (!desktopStages || busy) return;
+    busy = true;
+    message = action === "activate" ? `Opening “${stageName}”…` : `Returning from “${stageName}”…`;
+    render();
+    try {
+      if (action === "activate") await desktopStages.activate(stageName);
+      else await desktopStages.returnToOwner(stageName);
+      message = action === "activate" ? `“${stageName}” is now the active desktop.` : `Returned from “${stageName}”.`;
+      stages = await desktopStages.list();
+      loaded = true;
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  name.addEventListener("input", () => {
+    create.disabled = busy || !name.value.trim() || !desktopStages;
+  });
+  previewImage.addEventListener("load", positionCursorMarker);
+  preview.addEventListener("click", (event) => void moveStageCursor(event));
+  window.addEventListener("resize", positionCursorMarker);
+  render();
+  return {
+    el,
+    activate() { if (!loaded && !busy) void refreshStages(); },
+    sync() { positionCursorMarker(); },
+  };
+}
+
 // ── Registry ─────────────────────────────────────────────────────
 
 export function buildViews(actions: ViewActions, onChatHeightChange: () => void): Map<IslandViewName, ViewHost> {
@@ -322,5 +568,6 @@ export function buildViews(actions: ViewActions, onChatHeightChange: () => void)
   map.set("note", buildNote());
   map.set("settings", buildSettings(actions));
   map.set("prompt", buildPrompt(actions, onChatHeightChange));
+  if (actions.desktopStages) map.set("stage", buildDesktopStage(actions));
   return map;
 }

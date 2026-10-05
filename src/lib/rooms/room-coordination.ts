@@ -2,6 +2,19 @@ const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 const UUID = new RegExp(`^${UUID_SOURCE}$`, "i");
 const TASK_RESOURCE = new RegExp(`^task:${UUID_SOURCE}$`, "i");
 const BROWSER_RESOURCE = /^browser:[A-Za-z0-9:_-]{1,160}$/;
+const DESKTOP_STAGE_RESOURCE = new RegExp(`^desktop:${UUID_SOURCE}:${UUID_SOURCE}$`, "i");
+const WINDOW_STAGE_RESOURCE = new RegExp(`^window:${UUID_SOURCE}:${UUID_SOURCE}$`, "i");
+
+/** Resource keys identify coordination targets only; they never grant access to a local window. */
+export function isRoomStageResourceKey(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 180) return false;
+  return DESKTOP_STAGE_RESOURCE.test(value) || WINDOW_STAGE_RESOURCE.test(value);
+}
+
+export function isRoomLeaseResourceKey(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 180
+    && (TASK_RESOURCE.test(value) || BROWSER_RESOURCE.test(value) || isRoomStageResourceKey(value));
+}
 
 export interface RoomLeaseRequest {
   action: "acquire" | "release";
@@ -41,7 +54,7 @@ export function normalizeRoomLeaseRequest(input: unknown): RoomLeaseRequestResul
   }
   if (value.action !== "acquire" && value.action !== "release") return { ok: false, error: "Room lease action is invalid." };
   if (typeof value.clientEventId !== "string" || !UUID.test(value.clientEventId)) return { ok: false, error: "Room lease identity is invalid." };
-  if (typeof value.resourceKey !== "string" || value.resourceKey.length > 180 || !(TASK_RESOURCE.test(value.resourceKey) || BROWSER_RESOURCE.test(value.resourceKey))) {
+  if (!isRoomLeaseResourceKey(value.resourceKey)) {
     return { ok: false, error: "Room lease resource is invalid." };
   }
   const actorSeatId = value.actorSeatId === undefined || value.actorSeatId === null ? null : value.actorSeatId;

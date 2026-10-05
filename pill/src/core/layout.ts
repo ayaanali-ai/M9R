@@ -10,6 +10,7 @@ export type IslandViewName =
   | "error"
   | "finished"
   | "prompt"
+  | "stage"
   | "note"
   | "settings";
 
@@ -60,6 +61,7 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   error: { height: 160, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
   finished: { height: 160, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
   prompt: { height: 160, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
+  stage: { height: 300, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
   note: { height: 160, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
   settings: { height: 160, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
 };
@@ -107,6 +109,7 @@ export function botPosition(
     case "compact":
       return { cx: 40, cy: 16, diameter: 20, opacity: 1 };
     case "expanded": {
+      if (view === "stage") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
       const layout = VIEW_LAYOUTS[view];
       if (layout.botY != null) {
         return { cx: layout.botX, cy: layout.botY, diameter: layout.botDiameter, opacity: 1 };

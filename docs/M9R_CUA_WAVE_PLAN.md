@@ -1,6 +1,6 @@
 # M9R / Cua wave plan
 
-**Current source of truth: 2026-10-04**
+**Current source of truth: 2026-10-05**
 
 This is the active status list for C1–C15. It replaces older planning language that described Cua parity as a novelty claim. A status below is only marked complete when the acceptance evidence is present; design notes and local smoke tests remain partial.
 
@@ -10,7 +10,7 @@ This is the active status list for C1–C15. It replaces older planning language
 - Spaces, `cua-spacesd`, Keyvault, and Volume are source-available with a no-competing-hosted-use clause. We may study behavior, but do not copy their code.
 - AGPL components, including OmniParser and `cua-som`, are out of scope.
 - Cua overlap is described as parity or a deliberate M9R implementation. We do not claim that an existing Cua capability is a new invention.
-- C5 is a compatibility report. M9R's current browser input path remains its own CDP broker; no Cua Driver package is a runtime dependency of the M9R web app.
+- C5 is a compatibility report. M9R's browser input path remains its own CDP broker. The Windows desktop-stage runtime separately packages Cua Driver for exact-window capture and ghost-cursor work; the M9R web app has no Cua Driver runtime dependency.
 
 ## Status legend
 
@@ -34,7 +34,7 @@ This is the active status list for C1–C15. It replaces older planning language
 | Step | Status | Evidence and boundary |
 |---|---|---|
 | **2 — room-agent adapter (master P1)** | **DONE — audited and accepted** | Existing authenticated room routes cover join, membership, events, leases, handoffs, and memory. Existing local MCP/bridge tools cover the equivalent agent surface with room namespacing, identity checks, inbox delivery, results, shared notes, and browser actions. Focused MCP, broker, and room-contract checks pass. No duplicate room system was introduced. Lease/handoff tool exposure remains Track A C4 by design. See [adapter acceptance](M9R_ROOM_AGENT_ADAPTER_ACCEPTANCE.md). |
-| **3 — OS-level stage groundwork (master P3)** | **IN PROGRESS — lifecycle slice implemented, live proof open** | Added an owner-only machine-local stage registry, public-API window inspection/moves, and experimental create/inspect/activate desktop operations through the internal shell COM service, fail-closed except on Windows 11 build baselines 26100 and 26200. The exact-window PID checks and post-move destination verification remain in place. Native compilation, focused tests, and the owner-session create/activate/return proof gate acceptance; Cua cursor control, room-joinable ownership and transition events, and the Jev-vs-CUA-S1 decision also remain open. See [Windows stage acceptance](M9R_WINDOWS_DESKTOP_STAGE_ACCEPTANCE.md). |
+| **3 — OS-level stage groundwork (master P3)** | **PARTIAL — local implementation/build proof complete; live acceptance open** | Local registry v3, exact-window inspection/move, gated Windows virtual-desktop create/activate/return, native pill Stage tab, Cua Driver 0.33.2 window snapshot/ghost cursor, opaque room-stage lease keys, member-reported transitions, and the Jev-vs-CUA-S1 decision are implemented. 44 focused tests, 15 Rust tests, Windows engine/driver packaging, pill production build, and Tauri release build are verified locally. The current whole-repo typecheck reports unrelated Worker and extension-refresh type errors. Still open: owner-session real desktop/window/pill proof, hosted application of the additive room-lease migration plus two-member verification, the planned C14 desktop-app action validation, and the release-support decision for the undocumented shell COM API. The migration has not been applied to Supabase. See [Windows stage acceptance](M9R_WINDOWS_DESKTOP_STAGE_ACCEPTANCE.md). |
 
 ## Wave 2 — product parity and depth
 
@@ -51,17 +51,17 @@ This is the active status list for C1–C15. It replaces older planning language
 | ID | Status | Evidence and remaining gates | Current framing |
 |---|---|---|---|
 | **C11** | **PARTIAL — design only** | No accepted Windows DPAPI-backed, per-domain reviewed-login implementation is recorded. | Keep as table-stakes parity. Keyvault cannot be copied. |
-| **C12** | **DECISION / NOT STARTED** | No Jev implementation has started. The build-vs-port review for MIT CUA-S1 is required first. | Evaluate adopting/porting CUA-S1 before building a separate decision model. |
+| **C12** | **PARTIAL — decision recorded; evaluation not started** | Jev already exists as optional, off-by-default server-side message-routing judgment. It is not the same job as CUA-S1's narrow computer-use model. Do not replace Jev; any CUA-S1 adoption evaluation is a separate C12 decision. | Preserve Jev's existing scope. Evaluate CUA-S1 only if its specific computer-use capability fits a later requirement. |
 | **C13** | **PARTIAL — benchmark design only** | No completed two-agent-plus-person benchmark run or scorecard is recorded. | Keep. Multiplayer handoff measurement remains a genuine M9R gap. |
-| **C14** | **REMAINING — conditional** | No accepted desktop-app implementation is recorded. It depends on a passing C5 and an explicitly widened saved scope. | Keep; use Cua Driver only after C5 and scope approval. |
+| **C14** | **PARTIAL — desktop-stage integration started; action proof open** | Cua Driver is packaged for the Windows desktop-stage runtime and currently provides registered-window capture plus a ghost cursor. Click/type/scroll/drag actions on desktop apps and their live proof are not complete. | C5 is the compatibility report; it does not itself prove M9R desktop control. |
 | **C15** | **PARTIAL — design only** | No accepted tiled multi-window stage with lease handoff exists. | Keep the build, but treat tiled/cursor control as parity with Cua Spaces; the M9R UI and governed room semantics must carry the distinction. |
 
 ## Current count
 
 - **Done:** C1, C2, C5 (3)
-- **Partial:** C3, C6, C7, C8, C10, C11, C13, C15 (8)
-- **Remaining:** C4, C14 (2)
-- **Decision or scope blocker:** C9, C12 (2)
+- **Partial:** C3, C6, C7, C8, C10, C11, C12, C13, C14, C15 (10)
+- **Remaining:** C4 (1)
+- **Decision or scope blocker:** C9 (1)
 
 C3 still needs the reviewed Cloudflare build/deploy and two-machine frame proof, but that proof is intentionally deferred until the OS-level stage sequence below is complete. C1, C2, and C5 are signed off as recorded above.
 
@@ -71,7 +71,7 @@ The owner explicitly moved C3 behind the OS-level Phase 3 work. C3 is not cancel
 
 ## Sign-off order
 
-1. **OS-level stage groundwork (master P3):** establish the Windows virtual-desktop stage, the native cursor/window control path, joinable app/window/desktop ownership, visible cross-desktop transitions, and the Jev-vs-CUA-S1 decision. C14's desktop-app Driver validation is part of this stage because C5 is already complete.
+1. **OS-level stage groundwork (master P3):** establish the Windows virtual-desktop stage, the native cursor/window control path, joinable app/window/desktop ownership, visible cross-desktop transitions, and the Jev-vs-CUA-S1 decision. C14's desktop-app Driver action validation is part of this stage because C5 is already complete. The local implementation is in place; owner-session proof, the un-applied hosted lease migration, and C14's desktop-app actions still prevent sign-off.
 2. **C4 takeover/hand-back:** prove the broker lease and clean agent pause/resume on the stage.
 3. **C15 window-pool/tiled stage:** prove the multi-window stage and lease handoff once the stage foundation exists.
 4. **C3 live-view acceptance:** run the reviewed Cloudflare Linux build/deployment and the two-machine changing-frame proof, with viewer controls absent.

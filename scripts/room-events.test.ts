@@ -177,3 +177,33 @@ test("authoritative decisions and machine-action receipts cannot be forged throu
   });
   assert.equal(agentTargetConfirmation.ok, true, "the owner may confirm a shared page on behalf of an active, room-bound agent seat");
 });
+
+test("stage-transition activity is bounded and explicitly member-reported", () => {
+  const machine = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const from = `desktop:${machine}:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb`;
+  const to = `window:${machine}:cccccccc-cccc-4ccc-8ccc-cccccccccccc`;
+  const moved = normalizeRoomEvent({
+    clientEventId: eventId,
+    kind: "share",
+    payload: { type: "desktop.stage.transition.reported", action: "moved", fromResourceKey: from, toResourceKey: to },
+  });
+  assert.equal(moved.ok, true);
+  if (!moved.ok) return;
+  assert.deepEqual(moved.value.payload, {
+    type: "desktop.stage.transition.reported",
+    action: "moved",
+    source: "member-reported",
+    fromResourceKey: from,
+    toResourceKey: to,
+  });
+  assert.equal(normalizeRoomEvent({
+    clientEventId: eventId,
+    kind: "share",
+    payload: { type: "desktop.stage.transition.reported", action: "entered", toResourceKey: from, source: "machine-verified" },
+  }).ok, false, "clients cannot label a report machine-verified");
+  assert.equal(normalizeRoomEvent({
+    clientEventId: eventId,
+    kind: "share",
+    payload: { type: "desktop.stage.transition.reported", action: "left", fromResourceKey: "window:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:4321:123" },
+  }).ok, false, "process identifiers are not valid room stage keys");
+});

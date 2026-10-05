@@ -7,7 +7,7 @@
 // away (the window shrinks to a wake strip) and when the message field needs the keyboard. They apply when the overlay
 // runs in one-pill mode (M9R_PILL_NEXT=1); the Rust side validates every value.
 
-import type { Decision, PillTransport, SessionRow } from "../core/transport";
+import type { Decision, DesktopStage, DesktopStageCapture, DesktopStageCursorMove, PillTransport, SessionRow } from "../core/transport";
 import { fromFeed, type Feed } from "./convert";
 
 type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -22,8 +22,46 @@ const POLL_MS = 1000;
 export function createDesktopTransport(invoke: Invoke): PillTransport {
   let feed: Feed | null = null;
 
+  async function stageRequest(action: "list" | "create" | "activate" | "return" | "capture" | "cursor", name?: string, x?: number, y?: number): Promise<{ stages?: DesktopStage[]; capture?: DesktopStageCapture; cursorMove?: DesktopStageCursorMove }> {
+    const raw = await invoke("desktop_stage_action", { action, ...(name ? { name } : {}), ...(x !== undefined ? { x } : {}), ...(y !== undefined ? { y } : {}) });
+    if (!raw || typeof raw !== "object") throw new Error("The desktop stage command returned an invalid response.");
+    const response = raw as { ok?: unknown; error?: unknown; stages?: unknown; capture?: unknown; cursor?: unknown };
+    if (response.ok !== true) throw new Error(typeof response.error === "string" ? response.error : "The desktop stage command failed.");
+    if (action === "list") {
+      if (!Array.isArray(response.stages)) throw new Error("The desktop stage command returned an invalid stage list.");
+      return { stages: response.stages as DesktopStage[] };
+    }
+    if (action === "capture") {
+      const capture = response.capture as Partial<DesktopStageCapture> | undefined;
+      if (!capture || typeof capture.dataUrl !== "string" || !/^data:image\/(?:png|jpeg);base64,/.test(capture.dataUrl)
+        || !Number.isInteger(capture.width) || !Number.isInteger(capture.height) || typeof capture.capturedAt !== "string") {
+        throw new Error("The desktop stage command returned an invalid local snapshot.");
+      }
+      return { capture: capture as DesktopStageCapture };
+    }
+    if (action === "cursor") {
+      const capture = response.capture as Partial<DesktopStageCapture> | undefined;
+      const cursor = response.cursor as { x?: unknown; y?: unknown; enabled?: unknown } | undefined;
+      if (!capture || typeof capture.dataUrl !== "string" || !/^data:image\/(?:png|jpeg);base64,/.test(capture.dataUrl)
+        || !Number.isInteger(capture.width) || !Number.isInteger(capture.height) || typeof capture.capturedAt !== "string"
+        || !cursor || !Number.isFinite(cursor.x) || !Number.isFinite(cursor.y) || cursor.enabled !== true) {
+        throw new Error("The desktop stage command returned an invalid cursor confirmation.");
+      }
+      return { cursorMove: { capture: capture as DesktopStageCapture, cursor: cursor as DesktopStageCursorMove["cursor"] } };
+    }
+    return {};
+  }
+
   return {
     capabilities: { allowForADay: true, linkSessions: true, saveMemory: true },
+    desktopStages: /Windows/i.test(navigator.userAgent) ? {
+      async list() { return (await stageRequest("list")).stages ?? []; },
+      async create(name) { await stageRequest("create", name); },
+      async activate(name) { await stageRequest("activate", name); },
+      async returnToOwner(name) { await stageRequest("return", name); },
+      async capture(name) { const result = await stageRequest("capture", name); return result.capture!; },
+      async moveCursor(name, x, y) { const result = await stageRequest("cursor", name, x, y); return result.cursorMove!; },
+    } : undefined,
     async listSessions(handle) {
       const raw = await invoke("list_sessions", { handle });
       const rows = typeof raw === "string" ? JSON.parse(raw) : [];

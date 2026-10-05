@@ -4,7 +4,7 @@
 // jobs: `m9r-engine m9r-hook <Event> <provider>` is what agents run per prompt, anything else is the CLI (`feed --watch`, ...).
 // Run `npm run build:cli` first; this bundles cli/dist. Output: engine/dist/m9r-engine.exe (or no extension off Windows).
 
-import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -85,6 +85,30 @@ if (process.platform === "win32") {
   r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "native-input-host"), env: cargoEnv, stdio: "inherit" });
   if (r.status !== 0) process.exit(r.status ?? 1);
   copyFileSync(join(root, "native-input-host", "target", "release", "m9r-native-input-host.exe"), join(out, "m9r-native-input-host.exe"));
+
+  // The embedded CLI loads Cua Driver from a sibling runtime directory so the native
+  // SDK DLLs stay outside the SEA blob and the owner can update them with the engine.
+  const cuaRuntime = join(out, "cua-driver-runtime", "node_modules");
+  rmSync(join(out, "cua-driver-runtime"), { recursive: true, force: true });
+  for (const packageName of [
+    "@trycua/cua-driver",
+    "@trycua/cua-driver-win32-x64-msvc",
+    "@ubjs/core",
+    "@ubjs/node",
+    "@ubjs/node-win32-x64-msvc",
+  ]) {
+    const source = join(root, "node_modules", packageName);
+    if (!existsSync(source)) throw new Error(`Cua Driver release dependency is missing: ${packageName}. Install the locked root dependencies first.`);
+    const destination = join(cuaRuntime, packageName);
+    mkdirSync(dirname(destination), { recursive: true });
+    cpSync(source, destination, { recursive: true });
+  }
+  const driverDll = join(cuaRuntime, "@trycua", "cua-driver-win32-x64-msvc", "cua_driver_sdk.dll");
+  const driverAddon = join(cuaRuntime, "@trycua", "cua-driver-win32-x64-msvc", "cua_driver_node_runtime.node");
+  const ubjsAddon = join(cuaRuntime, "@ubjs", "node-win32-x64-msvc", "uniffi-runtime-napi.win32-x64-msvc.node");
+  for (const required of [driverDll, driverAddon, ubjsAddon]) {
+    if (!existsSync(required)) throw new Error(`Cua Driver release binary is missing: ${required}`);
+  }
 }
 console.log(`Built ${exe} (${Math.round(readFileSync(exe).length / 1e6)} MB)`);
 console.log(`Built ${brokerExe} (${Math.round(readFileSync(brokerExe).length / 1e6)} MB)`);

@@ -107,6 +107,8 @@ test("room members, leases, and handoffs expose authenticated, state-checked API
   const handoffs = read("src/app/api/rooms/[roomId]/handoffs/route.ts");
   const events = read("src/app/api/rooms/[roomId]/events/route.ts");
   const migration = read("supabase/migrations/20260928020000_room_leases.sql");
+  const stageLeaseMigration = read("supabase/migrations/20261005010000_room_stage_leases.sql");
+  const roomPage = read("src/app/rooms/[roomId]/page.tsx");
   assert.match(members, /eq\("status", "active"\)/);
   assert.match(members, /agent_label/);
   assert.match(leases, /normalizeRoomLeaseRequest/);
@@ -118,6 +120,11 @@ test("room members, leases, and handoffs expose authenticated, state-checked API
   assert.match(migration, /recipient actor.*answer|handoff recipient must answer in turn/i);
   assert.match(migration, /room\.lease\.handoff/);
   assert.match(migration, /'assigneeActorId', recipient_id/);
+  assert.match(stageLeaseMigration, /desktop:\[0-9a-f\]/i);
+  assert.match(stageLeaseMigration, /window:\[0-9a-f\]/i);
+  assert.match(roomPage, /Desktop stage coordination/);
+  assert.match(roomPage, /member-reported/);
+  assert.match(roomPage, /m9r web stage room-keys/);
 });
 
 test("generic room event writes cannot forge authority decisions or machine-action receipts", () => {

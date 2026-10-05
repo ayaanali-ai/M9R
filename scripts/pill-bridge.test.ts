@@ -8,12 +8,12 @@ const ID = "abcdefghijklmnopabcdefghijklmnop";
 const BASE = `chrome-extension://${ID}/`;
 const NONCE = "0123456789abcdef0123456789abcdef";
 
-function load(opts: { origins?: string[] } = {}) {
+function load(opts: { origins?: string[]; staticMatches?: string[] } = {}) {
   const session: Record<string, unknown> = {};
   const registered: any[] = [];
   const sent: any[] = [];
   const chrome = {
-    runtime: { id: ID, getURL: (p: string) => BASE + p, onMessage: { addListener() {} }, onConnect: { addListener() {} } },
+    runtime: { id: ID, getURL: (p: string) => BASE + p, getManifest: () => ({ content_scripts: [{ matches: opts.staticMatches ?? ["http://localhost/*", "http://127.0.0.1/*"], js: ["src/presence-logic.js", "src/dock-logic.js", "src/presence-overlay.js", "src/content.js"] }] }), onMessage: { addListener() {} }, onConnect: { addListener() {} } },
     storage: { session: { async get(k: string) { return { [k]: session[k] }; }, async set(v: any) { Object.assign(session, v); } } },
     tabs: { async query() { return []; }, async sendMessage() { return { selection: "" }; }, onActivated: { addListener() {} }, onRemoved: { addListener() {} } },
     permissions: { async getAll() { return { origins: opts.origins || [] }; }, onAdded: { addListener() {} }, onRemoved: { addListener() {} } },
@@ -113,4 +113,11 @@ test("content scripts are registered for granted sites only, never localhost twi
   const none = load({ origins: ["http://localhost/*"] });
   await none.bridge._internals.syncSiteScripts();
   assert.equal(none.registered.length, 0);
+});
+
+test("all-site static injection removes an overlapping dynamic registration", async () => {
+  const { bridge, registered } = load({ origins: ["https://x.com/*", "http://*/*", "https://*/*"], staticMatches: ["http://*/*", "https://*/*"] });
+  registered.push({ id: "m9r-granted-sites", matches: ["https://x.com/*"] });
+  await bridge._internals.syncSiteScripts();
+  assert.equal(registered.length, 0, "the static manifest owns these sites; a persisted second injector must be removed");
 });

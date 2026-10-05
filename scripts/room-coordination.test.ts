@@ -25,6 +25,17 @@ test("room-owner takeover is explicit; invalid scopes, identities, and durations
   assert.equal(normalizeRoomLeaseRequest({ action: "release", clientEventId: eventId, resourceKey: `task:${taskId}`, preempt: true }).ok, false);
 });
 
+test("desktop and window lease keys accept opaque UUID labels and reject native process identifiers", () => {
+  const machine = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const stage = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const window = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  for (const resourceKey of [`desktop:${machine}:${stage}`, `window:${machine}:${window}`]) {
+    assert.equal(normalizeRoomLeaseRequest({ action: "acquire", clientEventId: eventId, resourceKey, ttlMs: 30_000 }).ok, true);
+  }
+  assert.equal(normalizeRoomLeaseRequest({ action: "acquire", clientEventId: eventId, resourceKey: `window:${machine}:4321:123`, ttlMs: 30_000 }).ok, false);
+  assert.equal(normalizeRoomLeaseRequest({ action: "acquire", clientEventId: eventId, resourceKey: `desktop:${machine}:not-a-guid`, ttlMs: 30_000 }).ok, false);
+});
+
 test("structured handoffs require a real recipient, explicit proposal context, and response for counters", () => {
   const proposal = normalizeRoomHandoffRequest({
     action: "propose",

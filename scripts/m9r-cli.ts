@@ -2571,7 +2571,24 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
 
 async function runWebCli(args: string[]): Promise<number> {
   if (args[0] === "chrome") return (await import("../src/lib/native/agent-chrome-cli")).runAgentChromeCli(args.slice(1));
-  if (args[0] === "stage") return (await import("../src/lib/native/windows-desktop-stage")).runWindowsDesktopStageCli(args.slice(1));
+  if (args[0] === "stage") {
+    const ownerTerminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+    // The native pill is a human-operated local UI. Agent context is still checked by the stage manager,
+    // so this narrowly replaces only the terminal requirement for actions arriving from that shell.
+    const ownerPillAction = process.env.M9R_DESKTOP_PILL_OWNER_ACTION === "1" && !isAgentContext(process.env);
+    const bundledStageHost = join(dirname(process.execPath), "m9r-native-input-host.exe");
+    const stageDependencies = {
+      root: defaultStoreRoot(homedir(), process.env),
+      env: process.env,
+      terminal: ownerTerminal || ownerPillAction,
+      nativeHostPath: isStandaloneEngine() && existsSync(bundledStageHost) ? bundledStageHost : undefined,
+    };
+    const stageArgs = args.slice(1);
+    if (stageArgs[0] === "capture" || stageArgs[0] === "cursor") {
+      return (await import("../src/lib/native/cua-stage-driver")).runCuaStageDriverCli(stageArgs, { stage: stageDependencies });
+    }
+    return (await import("../src/lib/native/windows-desktop-stage")).runWindowsDesktopStageCli(stageArgs, stageDependencies);
+  }
   if (args[0] === "update-extension") return runWebExtensionUpdate(args.slice(1));
   if (args[0] === "setup") return runWebSetup(args.slice(1));
   if (args[0] === "uninstall") return runWebUninstall(args.slice(1));

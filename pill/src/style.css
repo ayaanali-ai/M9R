@@ -182,6 +182,47 @@ body {
   color: var(--ink);
 }
 
+.stage-view .card { display:grid; grid-template-columns:158px minmax(0,1fr); padding:0; border-radius:16px; background:#101113; }
+.stage-list-wrap { min-height:0; padding:12px 9px; border-right:1px solid var(--hairline); background:rgba(255,255,255,.015); overflow:auto; }
+.stage-rail-heading { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; padding-left:5px; color:var(--dim-3); font-size:8px; font-weight:600; letter-spacing:1.1px; }
+.stage-rail-tools { display:flex; gap:2px; }
+.stage-icon-button { width:21px; height:21px; border:0; border-radius:6px; background:transparent; color:var(--dim-2); font:16px var(--font); cursor:pointer; }
+.stage-icon-button:hover { background:rgba(255,255,255,.08); color:var(--ink); }
+.stage-list { display:grid; gap:5px; }
+.stage-row { display:flex; align-items:center; gap:9px; width:100%; padding:10px 8px; border:1px solid transparent; border-radius:9px; background:transparent; color:var(--dim-2); text-align:left; cursor:pointer; transition:background 140ms,border-color 140ms; }
+.stage-row:hover { background:rgba(255,255,255,.04); }
+.stage-row.selected { border-color:rgba(255,255,255,.1); background:rgba(255,255,255,.065); color:var(--ink); }
+.stage-row-main { min-width:0; display:grid; gap:4px; }
+.stage-row-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; font-weight:500; }
+.stage-row-state { color:var(--dim-3); font-size:8px; }
+.stage-row-state[data-state="current"] { color:#88c7ad; }
+.stage-row-state[data-state="unavailable"] { color:#f59a9a; }
+.stage-workspace { min-width:0; min-height:0; display:flex; flex-direction:column; gap:10px; padding:13px 14px 10px; }
+.stage-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.stage-selected-title { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink); font-size:12px; font-weight:600; }
+.stage-selected-state { flex:none; color:var(--dim-2); font-size:8px; }
+.stage-selected-state[data-state="current"] { color:#88c7ad; }
+.stage-preview { flex:1; min-height:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:7px; border:1px solid rgba(255,255,255,.055); border-radius:11px; background:radial-gradient(ellipse at 50% 110%,rgba(120,135,160,.065),transparent 70%),#0b0c0e; }
+.stage-screen-outline { color:#555b64; margin-bottom:3px; }
+.stage-preview-canvas { position:relative; flex:1; min-height:0; width:100%; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+.stage-preview-image { display:block; max-width:100%; max-height:100%; width:auto; height:auto; border-radius:6px; object-fit:contain; user-select:none; -webkit-user-drag:none; cursor:crosshair; }
+.stage-preview-image[hidden],.stage-preview-canvas[hidden],.stage-screen-outline[hidden] { display:none; }
+.stage-cua-cursor { position:absolute; z-index:2; width:11px; height:11px; border:2px solid #f4fff9; border-radius:50%; background:rgba(81,220,163,.82); box-shadow:0 0 0 4px rgba(81,220,163,.18),0 0 12px rgba(81,220,163,.65); transform:translate(-50%,-50%); pointer-events:none; }
+.stage-cua-cursor[hidden] { display:none; }
+.stage-preview-title { color:#a2a6ad; font-size:11px; font-weight:500; }
+.stage-preview-copy { max-width:290px; padding:0 12px; color:#626872; font-size:9px; line-height:1.5; text-align:center; }
+.stage-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:28px; }
+.stage-local-label { color:var(--dim-3); font-size:9px; }
+.stage-selected-actions .btn { display:flex; gap:7px; min-height:27px; padding:0 10px; font-size:10px; }
+.stage-message { color:var(--dim-2); font-size:9px; line-height:1.4; max-height:28px; overflow:auto; }
+.stage-message[hidden], .stage-create[hidden] { display:none; }
+.stage-create { display:grid; gap:6px; margin-top:10px; }
+.stage-name { min-width:0; width:100%; height:28px; padding:0 8px; border:1px solid var(--hairline); border-radius:7px; outline:0; background:rgba(255,255,255,.04); color:var(--ink); font:10px var(--font); }
+.stage-name:focus { border-color:rgba(255,255,255,.35); }
+.stage-name::placeholder { color:var(--dim-3); }
+.stage-create .btn { min-height:25px; font-size:10px; }
+.stage-empty { padding:10px 5px; color:var(--dim-3); font-size:10px; line-height:1.5; }
+.stage-row:focus-visible,.stage-icon-button:focus-visible { outline:1px solid #a2a6ad; outline-offset:2px; }
 #views {
   position: relative;
   flex: 1 1 auto;

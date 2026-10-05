@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
+import { createWindowsDesktopStageManager, formatWindowsStageRoomKeys } from "../src/lib/native/windows-desktop-stage";
 
 const stageDesktop = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
 const createdDesktop = "4fc4701b-6c3e-46d1-bba1-e99d993a28a2";
@@ -15,7 +15,7 @@ function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
   return Promise.resolve(run(root)).finally(() => rmSync(root, { recursive: true, force: true }));
 }
 
-test("registers a machine-local stage from an exact window and persists its GUID", async () => withRoot(async (root) => {
+test("registers a machine-local stage from an exact window and persists opaque room identities", async () => withRoot(async (root) => {
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {}, now: () => new Date("2026-10-04T12:00:00Z"),
     invokeNative: async (request) => ({ ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } }),
@@ -25,7 +25,9 @@ test("registers a machine-local stage from an exact window and persists its GUID
   assert.equal(registered.desktopId, stageDesktop);
   assert.deepEqual(registered.anchor, { pid: 4_321, windowId: anchor.windowId });
   assert.deepEqual(manager.list(), [registered]);
-  assert.match(readFileSync(join(root, "windows-stages.json"), "utf8"), /"version": 2/);
+  assert.match(readFileSync(join(root, "windows-stages.json"), "utf8"), /"version": 3/);
+  assert.match(registered.roomDesktopId, /^[0-9a-f-]{36}$/i);
+  assert.match(registered.roomWindowId ?? "", /^[0-9a-f-]{36}$/i);
 }));
 
 test("creates a local stage without switching desktops and later activates it explicitly", async () => withRoot(async (root) => {
@@ -55,7 +57,7 @@ test("creates a local stage without switching desktops and later activates it ex
   assert.match(readFileSync(join(root, "windows-stages.json"), "utf8"), /"anchor": null/);
 }));
 
-test("reads v1 stage registries and writes v2 when changed", async () => withRoot(async (root) => {
+test("reads v1 stage registries and writes v3 when changed", async () => withRoot(async (root) => {
   const path = join(root, "windows-stages.json");
   writeFileSync(path, JSON.stringify({
     version: 1,
@@ -64,7 +66,7 @@ test("reads v1 stage registries and writes v2 when changed", async () => withRoo
   const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {} });
   assert.equal(manager.list()[0]?.anchor?.pid, 4_321);
   manager.forget("stage");
-  assert.match(readFileSync(path, "utf8"), /"version": 2/);
+  assert.match(readFileSync(path, "utf8"), /"version": 3/);
 }));
 
 test("re-registering a known desktop refreshes its anchor without changing its identity", async () => withRoot(async (root) => {
@@ -77,6 +79,35 @@ test("re-registering a known desktop refreshes its anchor without changing its i
   assert.equal(refreshed.desktopId, original.desktopId);
   assert.equal(refreshed.registeredAt, original.registeredAt);
   assert.deepEqual(refreshed.anchor, { pid: 9_876, windowId: "456" });
+  assert.equal(refreshed.roomDesktopId, original.roomDesktopId);
+  assert.notEqual(refreshed.roomWindowId, original.roomWindowId, "a different native window gets a fresh coordination identity");
+}));
+
+test("room lease keys are stable and opaque and migrate existing v2 records once", async () => withRoot(async (root) => {
+  const manager = createWindowsDesktopStageManager({
+    platform: "win32", root, terminal: true, env: {},
+    invokeNative: async (request) => ({ ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } }),
+  });
+  await manager.register("stage", "4321", anchor.windowId);
+  const first = await manager.roomKeys("stage");
+  const second = await manager.roomKeys("stage");
+  const machineId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const firstKeys = formatWindowsStageRoomKeys(machineId, first.stage);
+  const secondKeys = formatWindowsStageRoomKeys(machineId, second.stage);
+  assert.deepEqual(secondKeys, firstKeys);
+  assert.match(firstKeys.desktop, /^desktop:[0-9a-f-]{36}:[0-9a-f-]{36}$/i);
+  assert.match(firstKeys.window ?? "", /^window:[0-9a-f-]{36}:[0-9a-f-]{36}$/i);
+  assert.doesNotMatch(JSON.stringify(firstKeys), /4321|9223372036854775807|3ecb4a09/i);
+
+  const path = join(root, "windows-stages.json");
+  const v2 = JSON.parse(readFileSync(path, "utf8")) as { version: number; stages: Array<Record<string, unknown>> };
+  v2.version = 2;
+  for (const stage of v2.stages) { delete stage.roomDesktopId; delete stage.roomWindowId; }
+  writeFileSync(path, JSON.stringify(v2), "utf8");
+  const migrated = await manager.roomKeys("stage");
+  assert.match(readFileSync(path, "utf8"), /"version"\s*:\s*3/);
+  const migratedKeys = formatWindowsStageRoomKeys(machineId, migrated.stage);
+  assert.deepEqual(formatWindowsStageRoomKeys(machineId, (await manager.roomKeys("stage")).stage), migratedKeys);
 }));
 
 test("moves only the exact PID/window pair to the registered desktop and verifies the destination", async () => withRoot(async (root) => {

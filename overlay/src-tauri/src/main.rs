@@ -145,9 +145,12 @@ fn heartbeat_json(at_ms: u128, visible: bool, pid: u32) -> String {
 
 fn spawn_heartbeat(app: AppHandle) {
     std::thread::spawn(move || loop {
-        if let Some(window) = app.get_webview_window(PILL) {
+        if let Some(_window) = app.get_webview_window(PILL) {
             let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-            let visible = window.is_visible().unwrap_or(false);
+            // `window.is_visible()` reports the native wake-strip window, which remains visible even when the
+            // shared island has collapsed to its 6px wake strip. The broker should yield to the browser shell only
+            // while the actual pill is expanded, otherwise the browser shell is suppressed forever after startup.
+            let visible = !NEXT.lock().map(|next| next.collapsed).unwrap_or(false);
             let path = heartbeat_path();
             // Write beside, then rename, so the broker never reads half a file.
             let tmp = path.with_extension("json.tmp");
@@ -391,19 +394,21 @@ fn m9r_home() -> PathBuf {
     })
 }
 
-/// The self-contained M9R engine (no Node needed): `M9R_ENGINE`, else the copy `m9r-cli setup` installed, else one next to this program.
+/// The self-contained engine: explicit override, matching adjacent runtime, then user-wide installation.
 fn find_engine() -> Option<PathBuf> {
     let name = if cfg!(windows) { "m9r-engine.exe" } else { "m9r-engine" };
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(p) = std::env::var("M9R_ENGINE") {
         candidates.push(p.into());
     }
-    candidates.push(m9r_home().join("bin").join(name));
+    // A released overlay and its adjacent engine are updated together. An older
+    // user-wide installation must not override that matching runtime.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join(name));
         }
     }
+    candidates.push(m9r_home().join("bin").join(name));
     candidates.into_iter().find(|p| p.is_file())
 }
 
@@ -469,6 +474,55 @@ fn engine_call(engine: &PathBuf, args: &[&str]) -> Result<String, String> {
 
 fn plain_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn engine_stage_call(engine: &PathBuf, args: &[String]) -> Result<serde_json::Value, String> {
+    let mut cmd = Command::new(engine);
+    cmd.args(args)
+        .env("M9R_DESKTOP_PILL_OWNER_ACTION", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if out.stdout.len() > 4 * 1024 * 1024 {
+        return Err("The desktop stage response exceeded the safe local UI size.".into());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        return Err(format!("{}{}", stdout, String::from_utf8_lossy(&out.stderr)).trim().to_string());
+    }
+    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|_| "The desktop stage command returned invalid JSON.".to_string())?;
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err("The desktop stage command did not confirm success.".into());
+    }
+    Ok(value)
+}
+
+/// Local pill actions reuse the same stage registry and Windows checks as `m9r web stage`.
+#[tauri::command]
+async fn desktop_stage_action(action: String, name: Option<String>, x: Option<u32>, y: Option<u32>) -> Result<serde_json::Value, String> {
+    let needs_name = matches!(action.as_str(), "create" | "activate" | "return" | "capture" | "cursor");
+    let needs_cursor = action == "cursor";
+    if !matches!(action.as_str(), "list" | "create" | "activate" | "return" | "capture" | "cursor") {
+        return Err("Unsupported desktop stage action".into());
+    }
+    if needs_name != name.is_some() || name.as_deref().is_some_and(|value| !plain_id(value))
+        || needs_cursor != (x.is_some() && y.is_some()) || x.is_some() != y.is_some() {
+        return Err("Invalid desktop stage name".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    let mut args = vec!["web".to_string(), "stage".to_string(), action];
+    if let Some(name) = name { args.push(name); }
+    if let (Some(x), Some(y)) = (x, y) { args.extend([x.to_string(), y.to_string()]); }
+    args.push("--json".into());
+    tauri::async_runtime::spawn_blocking(move || engine_stage_call(&engine, &args))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Sessions M9R knows for one agent (`@codex`, `@claude`, ...), for the pill's link picker.
@@ -752,6 +806,13 @@ fn main() {
     let hold_to_talk_state = std::sync::Arc::new(Mutex::new(HoldToTalkState::default()));
     let handler_hold_to_talk_state = hold_to_talk_state.clone();
     tauri::Builder::default()
+        // Register first: duplicate launches must exit before starting another
+        // heartbeat writer, tray, hotkey handler, or engine supervisor.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window(PILL) {
+                let _ = window.show();
+            }
+        }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
@@ -769,7 +830,7 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, save_memory, list_sessions, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus])
         .setup(move |app| {
             let window = app.get_webview_window(PILL).expect("pill window");
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.

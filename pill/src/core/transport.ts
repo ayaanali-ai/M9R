@@ -11,9 +11,49 @@ export interface SessionRow {
   lastSeenAt: string;
 }
 
+export interface DesktopStage {
+  name: string;
+  desktopId: string;
+  returnToDesktopId: string | null;
+  hasAnchor?: boolean;
+  isCurrent: boolean;
+  status: "current" | "background" | "unavailable";
+  error?: string;
+}
+
+export interface DesktopStageCapture {
+  dataUrl: string;
+  width: number;
+  height: number;
+  capturedAt: string;
+}
+
+export interface DesktopStageCursor {
+  x: number;
+  y: number;
+  enabled: true;
+}
+
+export interface DesktopStageCursorMove {
+  capture: DesktopStageCapture;
+  cursor: DesktopStageCursor;
+}
+
+/** Local Windows virtual-desktop controls. Only the native desktop shell supplies this capability. */
+export interface DesktopStageTransport {
+  list(): Promise<DesktopStage[]>;
+  create(name: string): Promise<void>;
+  activate(name: string): Promise<void>;
+  returnToOwner(name: string): Promise<void>;
+  capture(name: string): Promise<DesktopStageCapture>;
+  moveCursor(name: string, x: number, y: number): Promise<DesktopStageCursorMove>;
+}
+
 export interface PillTransport {
   /** What this host can actually do; the UI hides controls a host cannot honour instead of faking them. */
   capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean; saveMemory?: boolean };
+  /** Present only in the Windows desktop pill; the browser pill cannot control this machine's desktops. */
+  desktopStages?: DesktopStageTransport;
   /** Opens the one-time microphone setup. Only with `capabilities.dictation`. */
   openMicSetup?(): void;
   /** Sessions the engine knows for one agent, for the link picker. Only with `capabilities.linkSessions`. */
