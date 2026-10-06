@@ -123,13 +123,25 @@ export class Island {
     this.applyGeometry();
   }
 
-  private decide(d: "allow" | "deny" | "allow_day") {
+  private deciding = false;
+
+  private async decide(d: "allow" | "deny" | "allow_day") {
     const req = State.pendingApproval;
-    if (!req) return;
-    Sound.play(d === "deny" ? "blip" : "approve");
+    if (!req || this.deciding) return;
+    this.deciding = true;
     const decision: Decision = d;
-    void this.transport.decide(req.id, decision);
-    // Optimistic: the next snapshot confirms. Keep the owner's place if more approvals wait.
+    try {
+      await this.transport.decide(req.id, decision);
+      Sound.play(d === "deny" ? "blip" : "approve");
+    } catch (error) {
+      State.chatHistory.push({ id: Date.now(), role: "assistant", content: `Decision not sent: ${error instanceof Error ? error.message : String(error)}` });
+      Sound.play("error");
+      State.notify();
+      return;
+    } finally {
+      this.deciding = false;
+    }
+    // Keep the approval until the transport accepts the owner's decision.
     State.approvals = State.approvals.filter((a) => a.id !== req.id);
     if (State.approvals.length === 0) {
       State.isPinned = false;
@@ -461,7 +473,7 @@ export class Island {
     this.markSize.target = p.diameter;
     this.markEl.style.opacity = p.opacity > 0 ? "1" : "0";
 
-    if (State.mode === "expanded") {
+    if (State.mode === "expanded" && p.opacity > 0) {
       const d = p.diameter;
       const color = botGlowColor(State.effectiveState);
       this.markGlow.style.display = "block";

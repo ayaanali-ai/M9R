@@ -712,6 +712,10 @@
     function suspend() {
       if (destroyed) return;
       for (const state of frames.values()) {
+        if (state.loadGuard) {
+          view.clearTimeout(state.loadGuard);
+          state.loadGuard = 0;
+        }
         clearFrameAuthTimer(state);
         closeFramePort(state);
         state.ready = false;
@@ -783,8 +787,42 @@
         // In that ordering, tearing down the newly transferred port here races a valid
         // handshake and can leave the frame waiting on a retry against about:blank.
         // A ready cross-origin frame has already proven its current document with the
-        // tab nonce, so keep its channel and let subsequent navigation events re-auth.
-        if (state.ready && !frame.contentDocument) return;
+        // tab nonce, so keep its channel. Chrome may deliver the old about:blank load
+        // after that proof; defer a page-origin load briefly so the real extension
+        // document can replace the stale WindowProxy before deciding to re-auth.
+        if (state.ready) {
+          if (!frame.contentDocument) return;
+          let documentUrl = "";
+          try { documentUrl = String(frame.contentDocument.URL || frame.contentDocument.location?.href || ""); } catch {}
+          // Chrome can expose the parent page's URL (or no URL) for the trailing
+          // about:blank load in the isolated world even though the authenticated
+          // extension document still owns the WindowProxy. The frame lives in a
+          // closed shadow root, so the page cannot navigate it behind our back;
+          // preserve the proven channel for that browser-only representation.
+          const pageUrl = typeof view.location?.href === "string" ? view.location.href : "";
+          if (pageUrl && (!documentUrl || documentUrl === pageUrl)) return;
+          // In Chrome's extension isolated world, contentDocument can be readable
+          // even for the authenticated extension page. Its URL is the stronger
+          // signal than the truthiness check above; keep the private port alive
+          // across that document's late load event.
+          if (documentUrl.startsWith(`${extensionOrigin}/`)) return;
+          if (documentUrl === "about:blank") {
+            if (!state.loadGuard) {
+              state.loadGuard = view.setTimeout(() => {
+                state.loadGuard = 0;
+                if (destroyed || frames.get(kind) !== state || !host.isConnected || !frame.isConnected || !state.ready || !frame.contentDocument) return;
+                state.ready = false;
+                clearFrameAuthTimer(state);
+                closeFramePort(state);
+                setFrameStage("authenticating");
+                layout(state);
+                scheduleFrameAuthRetry(state);
+                trace("G");
+              }, 50);
+            }
+            return;
+          }
+        }
         clearFrameAuthTimer(state);
         // An about:blank load may precede the extension document, and the frame may
         // announce itself before its load event. Every load invalidates the old port
@@ -910,7 +948,7 @@
       bottom = Math.min(Math.max(bottom, 4), Math.max(4, vh - h - 4));
       state.box.style.cssText = `left:${left}px;bottom:${bottom}px;width:${w / zoomK}px;height:${h / zoomK}px;transform:scale(${zoomK});transform-origin:0 100%`;
       state.box.classList.add("ready");
-      state.box.classList.toggle("hidden", !state.shown || !state.ready);
+      state.box.classList.toggle("hidden", !state.shown || !state.ready || state.suppressed === true);
       state.shownAt = { left, bottom, w, h };
     }
 
@@ -986,7 +1024,7 @@
         sp.l.setTarget(left); sp.t.setTarget(top); sp.r.setTarget(left + w); sp.b.setTarget(top + h);
       }
       state.box.classList.add("ready");
-      state.box.classList.toggle("hidden", !state.shown || !state.ready);
+      state.box.classList.toggle("hidden", !state.shown || !state.ready || state.suppressed === true);
       applyDock(state);
       if (!Object.values(sp).every((s) => s.settled()) && !dockLoop) {
         dockLast = 0;
@@ -1031,11 +1069,18 @@
       else dockLast = 0;
     }
 
-    function frameFor(source) {
+    function frameFor(source, nonce) {
       if (!host.isConnected) return null;
       for (const state of frames.values()) {
         if (state.box.isConnected && state.frame.isConnected && state.frame.contentWindow === source) return state;
       }
+      // Chrome can expose a different WindowProxy wrapper for a cross-world iframe
+      // message than the wrapper returned by iframe.contentWindow. The extension
+      // origin and the per-frame nonce have already been checked by the caller, so
+      // accept a single connected frame with that nonce instead of stranding the UI.
+      if (typeof nonce !== "string" || !nonce) return null;
+      const matches = [...frames.values()].filter((state) => state.box.isConnected && state.frame.isConnected && state.nonce === nonce);
+      if (matches.length === 1) return matches[0];
       return null;
     }
 
@@ -1046,7 +1091,7 @@
         if (host.dataset) host.dataset.m9rFrameHandshake = "origin-mismatch";
         return;
       }
-      const state = frameFor(event.source);
+      const state = frameFor(event.source, data.nonce);
       if (!state) {
         if (host.dataset) host.dataset.m9rFrameHandshake = "source-mismatch";
         return;
@@ -1104,8 +1149,9 @@
         if (storage && state.shownAt) void storage.set({ [POSITION_KEYS[state.kind]]: { left: state.shownAt.left, bottom: state.shownAt.bottom } }).catch(() => {});
       } else if (data.kind === "hotkey") {
         if (options && typeof options.onHotkey === "function" && (data.key === "m" || data.key === "n")) options.onHotkey(data.key, data.down === true);
-      } else if (data.kind === "suppress" && Number.isFinite(state.defaults.top)) {
-        // The desktop pill started or stopped. Only a change arrives, so a shortcut that brought this pill back stays.
+      } else if (data.kind === "suppress") {
+        // The desktop pill started or stopped. This applies to both the retired top-notch layout and the current
+        // edge-docked one-pill layout; the browser shell must yield to the desktop shell in either mode.
         state.suppressed = data.on === true;
         layout(state);
       } else if (data.kind === "focus-composer") {
@@ -1121,7 +1167,7 @@
     // The new pill carries its own message view, so it is mounted without a separate message bar and the shortcuts open that view.
     function openPillMessage() {
       const pill = frames.get("pill");
-      if (!pill || !Number.isFinite(pill.defaults.top)) return false;
+      if (!pill) return false;
       pill.shown = true;
       pill.suppressed = false;
       layout(pill);
@@ -1157,7 +1203,7 @@
       if (!state) {
         // The new pill listens in its own message view.
         const pill = frames.get("pill");
-        if (!pill || !Number.isFinite(pill.defaults.top)) return;
+        if (!pill) return;
         if (active) { pill.shown = true; pill.suppressed = false; layout(pill); }
         postToFrame(pill, { kind: "talk", active: !!active });
         return;
@@ -1208,6 +1254,10 @@
       attempt(() => view.removeEventListener("resize", onResize));
       attempt(() => view.removeEventListener("scroll", onScroll, true));
       for (const state of frames.values()) {
+        if (state.loadGuard) {
+          attempt(() => view.clearTimeout(state.loadGuard));
+          state.loadGuard = 0;
+        }
         clearFrameAuthTimer(state);
         attempt(() => state.frame.removeEventListener("load", state.onLoad));
         attempt(() => closeFramePort(state));

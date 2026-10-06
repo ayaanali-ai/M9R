@@ -8,6 +8,7 @@ import { fromUiState, type UiState } from "./convert";
 interface ChromeRuntime {
   id?: string;
   connect(info: { name: string }): {
+    disconnect?(): void;
     onMessage: { addListener(fn: (m: unknown) => void): void };
     onDisconnect: { addListener(fn: () => void): void };
   };
@@ -37,21 +38,38 @@ export function createExtensionTransport(runtime: ChromeRuntime): PillTransport 
     capabilities: { allowForADay: false, dictation: true, saveMemory: true },
     openMicSetup() { void runtime.sendMessage({ type: "m9r-pill-open-mic-setup" }).catch(() => {}); },
     subscribe(listener) {
+      let disposed = false;
+      let retry: ReturnType<typeof setTimeout> | undefined;
+      let currentPort: ReturnType<ChromeRuntime["connect"]> | undefined;
+      const reconnect = (delay: number) => {
+        if (disposed) return;
+        if (retry !== undefined) clearTimeout(retry);
+        retry = setTimeout(connect, delay);
+      };
       const connect = () => {
+        if (disposed) return;
         let port: ReturnType<ChromeRuntime["connect"]>;
         try {
           port = runtime.connect({ name: "m9r-pill" });
         } catch {
-          setTimeout(connect, 1500);
+          reconnect(1500);
           return;
         }
+        currentPort = port;
         port.onMessage.addListener((message) => {
+          if (disposed || currentPort !== port) return;
           const m = message as { type?: string } | null;
           if (m && m.type === "ui-state") listener(fromUiState(m as UiState));
         });
-        port.onDisconnect.addListener(() => setTimeout(connect, 1000));
+        port.onDisconnect.addListener(() => reconnect(1000));
       };
       connect();
+      return () => {
+        disposed = true;
+        if (retry !== undefined) clearTimeout(retry);
+        currentPort?.disconnect?.();
+        currentPort = undefined;
+      };
     },
     send: (text) => command({ type: "ui-command", text }),
     saveMemory: (text) => command({ type: "ui-save-note", text }),

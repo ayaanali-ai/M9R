@@ -18,6 +18,8 @@ export interface DesktopStage {
   hasAnchor?: boolean;
   isCurrent: boolean;
   status: "current" | "background" | "unavailable";
+  /** Local-only identity for the agent session mapped to this Windows stage. */
+  agentAssignment?: { handle: string; sessionTag: string };
   error?: string;
 }
 
@@ -39,14 +41,41 @@ export interface DesktopStageCursorMove {
   cursor: DesktopStageCursor;
 }
 
+export interface DesktopStageWindowOption {
+  pid: number;
+  windowId: string;
+  appName: string;
+  title: string;
+  width: number;
+  height: number;
+}
+
+export interface DesktopStageActionOutcome {
+  status: "confirmed" | "partial" | "unverifiable" | "suspected-noop" | "unverified";
+  route?: number;
+  summary?: string;
+}
+
+export interface DesktopStageActionProof {
+  capture: DesktopStageCapture;
+  outcome: DesktopStageActionOutcome;
+}
+
 /** Local Windows virtual-desktop controls. Only the native desktop shell supplies this capability. */
 export interface DesktopStageTransport {
+  setAgentPermission?(handle: string, enabled: boolean, control?: boolean): Promise<void>;
   list(): Promise<DesktopStage[]>;
   create(name: string): Promise<void>;
   activate(name: string): Promise<void>;
   returnToOwner(name: string): Promise<void>;
   capture(name: string): Promise<DesktopStageCapture>;
   moveCursor(name: string, x: number, y: number): Promise<DesktopStageCursorMove>;
+  windows(name: string): Promise<DesktopStageWindowOption[]>;
+  attachWindow(name: string, pid: number, windowId: string): Promise<void>;
+  click(name: string, x: number, y: number): Promise<DesktopStageActionProof>;
+  typeText(name: string, text: string): Promise<DesktopStageActionProof>;
+  scroll(name: string, x: number, y: number, direction: "up" | "down"): Promise<DesktopStageActionProof>;
+  drag(name: string, fromX: number, fromY: number, toX: number, toY: number): Promise<DesktopStageActionProof>;
 }
 
 export interface PillTransport {

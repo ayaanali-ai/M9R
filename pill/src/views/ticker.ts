@@ -78,6 +78,9 @@ export class Ticker {
   private queue: string[] = [];
   private startMs: number | null = null;
   private displayIndex = -1;
+  /** Which agent's steps are currently shown. Idle agents commonly share step index 0, so the task identity must
+   * participate in reset detection or a focus switch can leave the previous agent's text on screen. */
+  private displayTaskId: string | null = null;
 
   constructor() {
     this.el = h("div", { class: "ticker" }, this.a.el, this.b.el, this.c.el);
@@ -98,6 +101,8 @@ export class Ticker {
   sync(task: AgentTask | null) {
     const steps = task && task.steps.length > 0 ? task.steps : ["…"];
     const idx = task ? Math.min(task.stepIndex, steps.length - 1) : -1;
+    const taskChanged = (task?.id ?? null) !== this.displayTaskId;
+    this.displayTaskId = task?.id ?? null;
 
     // First render: drop straight into place, no animation.
     if (this.displayIndex < 0) {
@@ -108,8 +113,9 @@ export class Ticker {
       return;
     }
 
-    // The session restarted (steps were cleared): re-seed rather than scroll.
-    if (idx < this.displayIndex) {
+    // A focus switch or session restart (steps were cleared) must re-seed rather than scroll. A plain index comparison
+    // misses the common case where the newly focused agent is idle at the same index as the previous agent.
+    if (taskChanged || idx < this.displayIndex) {
       this.queue = [];
       this.startMs = null;
       this.displayIndex = idx;
