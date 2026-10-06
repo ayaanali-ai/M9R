@@ -1,6 +1,8 @@
 # M9R: quiet multi-agent cursors, agent Spaces, and one pill — research and plan
 
-Status: research done 2026-10-02 (revised after the owner's correction), **plan awaiting approval; nothing built**. Sources: Cua's public repo and docs (trycua/cua), Coucou's repo (Louis-CFM/coucou), read through fetched pages and file listings. Nothing of theirs was installed or run.
+Status: research snapshot from 2026-10-02 (revised after the owner's correction); it is not an active approval gate or implementation status. Sources: Cua's public repo and docs (trycua/cua), Coucou's repo (Louis-CFM/coucou), read through fetched pages and file listings. In that research pass, no Cua or Coucou code was installed or run.
+
+> **Historical research snapshot, not the current implementation status.** The Q/P sequence below predates later work. Use [M9R_CUA_WAVE_PLAN.md](M9R_CUA_WAVE_PLAN.md) for current C1–C15 status/order and [M9R_WINDOWS_DESKTOP_STAGE_ACCEPTANCE.md](M9R_WINDOWS_DESKTOP_STAGE_ACCEPTANCE.md) for current Track A Step 3 gates. The Coucou research and licensing notes remain reference material.
 
 ## 1. What Cua actually has (corrected)
 
