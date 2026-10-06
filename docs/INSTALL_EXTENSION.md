@@ -1,54 +1,59 @@
 # One-shot M9R Web setup (Windows 10/11)
 
-The supported quick path is `m9r web setup`. It detects Claude Code, Codex, and OpenCode, previews the exact user-config changes, installs the MCP entries and existing identity hooks, copies the fixed-ID browser extension, starts the loopback broker, and registers it for the current Windows user at sign-in. No admin rights, API keys, or M9R session tokens are needed.
+The supported path is two commands from any terminal. Node.js 18 or newer and
+at least one signed-in provider CLI are required:
 
 ```powershell
-m9r web setup
+npx m9r-cli connect
+npx m9r-cli web setup
 ```
 
-For a script/non-interactive run, pass the agent list explicitly and accept the displayed plan:
+`connect` detects Claude Code, Codex, and OpenCode, shows one browser approval,
+and configures the local provider bridge. `web setup` previews the browser and
+broker changes, copies the managed extension, starts the loopback broker, and
+opens the browser extensions page. No admin rights, API keys, or M9R session
+tokens are needed.
+
+After setup, verify the local connection:
 
 ```powershell
-m9r web setup --agents claude-code,codex --yes
+npx m9r-cli doctor
 ```
 
-For this repository checkout before the updated CLI is published:
+The only browser action that cannot be automated is loading the unpacked
+extension. Turn on **Developer mode**, select **Load unpacked**, and choose the
+copied `%LOCALAPPDATA%\M9R\extension` folder. Reload that same folder after a
+managed update; do not load a second copy from the repository.
+
+For a script/non-interactive run, pass the agent list explicitly and accept the
+displayed plan:
 
 ```powershell
-npm ci
-npm run build:cli
-node .\cli\dist\m9r.js web setup
+npx m9r-cli web setup --agents claude-code,codex --yes
 ```
-
-To install or start only the local broker login task without configuring provider MCP entries or opening an agent session, run `m9r web setup --broker-only`. It registers **M9R Web Broker** for the current Windows user (no administrator rights) and runs that broker task once to verify it. It does not launch Claude Code or another agent.
-
-The only browser action that cannot be automated is loading the unpacked extension: setup copies its folder path to the clipboard and opens the detected browser's extensions page. In each browser you use, turn on **Developer mode**, select **Load unpacked**, and choose the copied `%LOCALAPPDATA%\M9R\extension` folder. Then approve the requested site in the extension when you first use it.
 
 To remove the web-managed broker, extension files, and MCP entries:
 
 ```powershell
-m9r web uninstall
+npx m9r-cli web uninstall
 ```
 
-To refresh only the files in an already managed unpacked extension, without changing the broker, login task, provider config, or browser permissions, rebuild the CLI and run:
-
-```powershell
-npm run build:cli
-node .\cli\dist\m9r.js web update-extension --dry-run
-node .\cli\dist\m9r.js web update-extension --yes
-```
-
-The refresh updates only extension files that still match the hashes recorded by M9R setup. User-edited and untracked files are preserved. Reload the extension from `chrome://extensions` afterward.
-
-Use `m9r web setup --dry-run` to preview without writing files or starting processes. The same setup can be selected from the standalone installer with `.install-m9r.ps1 -Web`; the engine form is `m9r-engine.exe web setup` (or `m9r-engine.exe setup --web`).
+Use `npx m9r-cli web setup --dry-run` to preview without writing files or
+starting processes. The standalone engine installer is an advanced distribution
+and is not required for the supported browser setup path.
 
 M9R Web currently has working SessionStart identity bootstraps for Claude Code and Codex. OpenCode's MCP entry can be configured, but OpenCode SessionStart identity delivery is not implemented yet, so authenticated M9R web tools are not ready there.
+
+## Source-checkout fallback (development only)
+
+Use this section only when you are developing M9R itself or the published CLI
+is unavailable. It is not a second installation path for normal users.
 
 ## Manual appendix: Load unpacked and broker details
 
 This is the development / Load unpacked path for Chrome and Edge. It connects the extension to the M9R broker running on the same PC. The development manifest pins a fixed ID; the broker accepts it and, when configured, the Chrome Web Store ID from `M9R_WEB_STORE_EXTENSION_ID`. Set the production ID in that one place after the store assigns it; do not substitute a guessed ID.
 
-## 1. Prepare M9R
+## 1. Prepare a source checkout
 
 Install Node.js LTS, clone the M9R repository, and install its locked dependencies from PowerShell:
 

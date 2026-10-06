@@ -160,15 +160,14 @@ button.b:focus-visible,.cmd input:focus-visible{outline:2px solid var(--accent);
     <p>Three scripted bots on one page: each shows up as a cursor with a name. A field can be held by one agent at a time and a second agent is told no. Agents pass findings to each other. You can redirect them mid-task, and a risky step waits for you in the overlay, drawn outside the page so the page cannot fake it. In the real product those are real Claude Code, Codex and OpenCode sessions, on the subscriptions you already have.</p>
     <h3>Run it with your own agents</h3>
     <div class="setup">
-      <p><b>Today this is a developer preview for Windows 10/11.</b> It takes about ten minutes and everything runs on your own PC, with the agent subscriptions you already have. Nothing is uploaded to M9R.</p>
+      <p><b>Today this is a developer preview for Windows 10/11.</b> Everything runs on your own PC, with the agent subscriptions you already have. Nothing is uploaded to M9R.</p>
       <ol>
-        <li>Install Node.js LTS, then clone the repository and run <code>npm ci</code>.</li>
-        <li>In Chrome or Edge, open <code>chrome://extensions</code>, turn on Developer mode, choose <b>Load unpacked</b> and pick the <code>extensions/browser</code> folder. A Chrome Web Store listing is planned.</li>
-        <li>Start the local broker: <code>npx tsx scripts/m9r-web-broker.ts</code>. It only listens on your own machine and only accepts the extension ID you give it.</li>
-        <li>Add the M9R tool server to Claude Code, Codex or OpenCode. Each has a short config block in the install guide.</li>
-        <li>Ask an agent to open a page. You approve each site once, and risky clicks wait for your yes.</li>
+        <li>Install Node.js 18 or newer and keep Claude Code, Codex, or OpenCode signed in.</li>
+        <li>Run <code>npx m9r-cli connect</code> and approve the one browser request.</li>
+        <li>Run <code>npx m9r-cli web setup</code>, then load the copied managed folder from <code>%LOCALAPPDATA%\M9R\extension</code> in Chrome or Edge with Developer mode enabled.</li>
+        <li>Run <code>npx m9r-cli doctor</code>, then ask an agent to open a page. You approve each site once, and risky clicks wait for your yes.</li>
       </ol>
-      <p>Full steps and every config block: <a href="https://github.com/ayaanali-ai/M9R/blob/launch/m9r-multiplayer-web-preview/docs/INSTALL_EXTENSION.md">the install guide</a>. Join the waitlist on the <a href="/">home page</a> for the one-click installer and hosted rooms.</p>
+      <p>Full steps and current limitations: <a href="/docs/get-started">the setup guide</a>.</p>
     </div>
     <p class="note">Honest limits: two people's agents on two different machines is designed and not shipped yet. Real agents have been verified with Claude Code, Codex and OpenCode. This page is a scripted sandbox.</p>
   </section>

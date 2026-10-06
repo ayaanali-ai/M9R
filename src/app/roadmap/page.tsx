@@ -41,7 +41,7 @@ const SHIPPED: Entry[] = [
   },
   {
     title: "The M9R CLI",
-    body: "npx m9r-cli init connects an agent; submit-session seals a run; rules binds the next one. No SDK, no re-instrumentation.",
+    body: "npx m9r-cli connect links the agents already on your machine; web setup adds the shared browser; doctor verifies the bridge. No SDK, no re-instrumentation.",
     receipt: { href: "/agents", label: "Connect your agent" },
   },
   {

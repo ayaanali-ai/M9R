@@ -10,15 +10,22 @@ session without an explicit `--approved` flag.
 
 ## Quick start
 
-No install required — run it straight from npm with `npx`. `init` is a **one-time
-setup step**, so there are two paths:
+No install required — run it straight from npm with `npx`. The supported browser
+setup is two commands:
 
 **First-time setup** (no agent profile in `.m9r/agents/` yet):
 
 ```bash
 npx m9r-cli connect                               # discover installed agents; approve in browser
 npx m9r-cli web setup                             # install the browser extension when needed
+npx m9r-cli doctor                                # verify the connection
 ```
+
+Run these from any terminal. `connect` detects Claude Code, Codex, and OpenCode
+and creates one approved connection for each provider it finds. `web setup`
+installs the managed browser extension and local broker. Load the one copied
+extension folder in Chrome or Edge; do not start the development broker or load
+another extension copy.
 
 Normal terminals automatically select a single connected agent profile. With
 multiple profiles, use `--agent-kind codex` (or `claude-code`, `opencode`, or
@@ -55,9 +62,10 @@ source code, tokens, or secrets. The active run id is stored in
 `rules_loaded_count`, and `submit-session` links the session to the run and marks
 it completed.
 
-If a workspace is already connected, `npx m9r-cli init` won't create a new claim —
-it tells you the workspace is connected and points you to `doctor`/`rules`. Use
-`npx m9r-cli init --force` only to deliberately start a brand-new connection.
+If a workspace is already connected, `npx m9r-cli connect` reuses the provider
+profiles it finds. Use `npx m9r-cli doctor` to check that connection. The
+workspace-scoped `init` command below is an advanced Agent Join flow; it is not
+needed for the supported browser setup.
 
 To revoke this workspace's local agent connection and remove transient local
 state:
@@ -66,9 +74,10 @@ state:
 npx --yes m9r-cli@latest disconnect
 ```
 
-On Windows, a successful `m9r-cli connect` also starts the loopback web broker
-and installs a current-user login task. The browser extension reports ready
-only after the broker handshake. The broker listens only on `127.0.0.1`.
+On Windows, `m9r-cli connect` can register the loopback broker for the current
+user when you approve that optional prompt. Browser actions still require
+`npx m9r-cli web setup`; the extension reports ready only after the broker
+handshake. The broker listens only on `127.0.0.1`.
 
 Requires Node.js >= 18.
 
@@ -82,7 +91,7 @@ Requires Node.js >= 18.
 
 `m9r assignment complete <id> --run <run-id> --evidence-record <evidence-id>` completes only with a run and evidence record owned by that connection.
 
-### `init`
+### `init` (advanced workspace claim)
 
 One-time setup. Registers this workspace and prints a claim URL. **A human repo
 owner must approve the connection in the browser** — the CLI opens the URL for you

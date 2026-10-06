@@ -6,20 +6,19 @@ import { COMMANDS, SIGNUP_URL, SOURCE_URL } from "../src/lib/marketing-content.t
 test("documented CLI commands use a package binary and implemented top-level command", () => {
   const pkg = JSON.parse(readFileSync("cli/package.json", "utf8"));
   const core = readFileSync("src/lib/oathlock-cli-core.ts", "utf8");
+  const entry = readFileSync("scripts/m9r-cli.ts", "utf8");
   for (const item of COMMANDS) {
-    if (item.id === "install") {
-      assert.equal(item.command, `npm i -g ${pkg.name}`);
-      continue;
-    }
-    const [binary, command] = item.command.split(" ");
+    const [runner, binary, command] = item.command.split(" ");
+    assert.equal(runner, "npx");
     assert.ok(pkg.bin[binary], `${binary} must be installed by the package`);
-    assert.ok(core.includes(`case "${command}":`), `${command} must have a CLI handler`);
+    const handled = core.includes(`case "${command}":`) || (command === "web" && entry.includes('argv[0] === "web"'));
+    assert.ok(handled, `${command} must have a CLI handler`);
   }
 });
 
-test("unverified native commands are explicitly marked preview", () => {
-  for (const id of ["setup", "apply", "send", "uninstall"]) {
-    assert.equal(COMMANDS.find((command) => command.id === id)?.preview, true);
+test("public setup commands are all supported CLI steps", () => {
+  for (const command of COMMANDS) {
+    assert.equal(command.preview, false);
   }
   assert.equal(new Set(COMMANDS.map((command) => command.id)).size, COMMANDS.length);
 });

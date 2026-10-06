@@ -61,7 +61,7 @@ const FAQS = [
   },
   {
     q: "How do I start?",
-    a: "Run npx m9r-cli init in a repository, then connect the agents you already use.",
+    a: "Run npx m9r-cli connect, then npx m9r-cli web setup to connect the agents and browser you already use.",
   },
 ];
 

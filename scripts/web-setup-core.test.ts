@@ -223,6 +223,28 @@ test("extension refresh updates only files still matching the prior install hash
   assert.equal(webExtensionFileAction({ currentHash: "user", installedHash: "old" }), "preserve");
 });
 
+test("extension-only refresh removes unchanged files retired by the package and releases changed ones", () => {
+  const plan = planManagedWebExtensionRefresh({
+    sourceFiles: [{ relativePath: "manifest.json", desiredHash: "new-manifest" }],
+    installedFiles: [
+      { relativePath: "manifest.json", installedHash: "old-manifest" },
+      { relativePath: "newtab.html", installedHash: "old-newtab" },
+      { relativePath: "newtab.css", installedHash: "old-css" },
+    ],
+    currentHashes: new Map([
+      ["manifest.json", "old-manifest"],
+      ["newtab.html", "old-newtab"],
+      ["newtab.css", "user-edited-css"],
+    ]),
+  });
+
+  assert.deepEqual(plan.map(({ relativePath, action }) => [relativePath, action]), [
+    ["manifest.json", "write"],
+    ["newtab.html", "delete"],
+    ["newtab.css", "preserve"],
+  ]);
+});
+
 test("extension-only refresh updates owned files and leaves user edits and untracked files alone", () => {
   const plan = planManagedWebExtensionRefresh({
     sourceFiles: [

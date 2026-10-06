@@ -38,6 +38,11 @@ First run creates evidence. Future runs get rules.
 The published \`m9r-cli\` CLI is the primary, supported way to connect. Run it
 with \`npx\` from the repo you want to connect — no install required.
 
+For browser multiplayer, use the public machine setup first:
+\`npx m9r-cli connect\`, then \`npx m9r-cli web setup\`. The workspace-scoped
+\`init\` flow below is an advanced Agent Join path for evidence and rules; it
+is not required to install the browser bridge.
+
 \`init\` is a **one-time setup step**. Do not reconnect every session — if this
 workspace is already connected, reuse the existing connection.
 

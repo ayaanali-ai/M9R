@@ -378,10 +378,10 @@ export type ManagedWebExtensionSourceFile = { relativePath: string; desiredHash:
 export type ManagedWebExtensionInstalledFile = { relativePath: string; installedHash: string };
 export type ManagedWebExtensionRefreshPlan = {
   relativePath: string;
-  desiredHash: string;
+  desiredHash: string | null;
   installedHash: string | null;
   currentHash: string | null;
-  action: Exclude<WebExtensionFileAction, "delete">;
+  action: WebExtensionFileAction;
 };
 
 /** Plan an extension-only refresh without claiming or overwriting untracked/user-edited files. */
@@ -405,7 +405,7 @@ export function planManagedWebExtensionRefresh(input: {
     installed.set(path, file.installedHash);
   }
   const seen = new Set<string>();
-  return input.sourceFiles.map((file) => {
+  const plan: ManagedWebExtensionRefreshPlan[] = input.sourceFiles.map((file) => {
     const relativePath = normalizeRelativePath(file.relativePath);
     if (seen.has(relativePath)) throw new Error(`Duplicate extension source path: ${relativePath}`);
     seen.add(relativePath);
@@ -416,6 +416,16 @@ export function planManagedWebExtensionRefresh(input: {
     if (action === "delete") throw new Error(`Unexpected delete action for extension source path: ${relativePath}`);
     return { relativePath, desiredHash: file.desiredHash, installedHash, currentHash, action };
   });
+  // A packaged extension can remove a file between releases. Only remove it
+  // when the installed copy still matches the hash M9R recorded; changed or
+  // user-added files remain untouched and are no longer managed.
+  for (const [relativePath, installedHash] of installed) {
+    if (seen.has(relativePath)) continue;
+    const currentHash = input.currentHashes.get(relativePath) ?? null;
+    const action = webExtensionFileAction({ currentHash, installedHash, desiredHash: null });
+    plan.push({ relativePath, desiredHash: null, installedHash, currentHash, action });
+  }
+  return plan;
 }
 
 export function parseWebSetupList(raw: string, valid: readonly string[], label: string): string[] {
