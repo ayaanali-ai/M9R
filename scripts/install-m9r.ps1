@@ -171,8 +171,10 @@ function Assert-ManagedWebBrokerInstallable([string]$SourcePath) {
             return
         }
         $currentHash = (Get-FileHash -LiteralPath $paths.Target -Algorithm SHA256).Hash
-        if (-not [string]::Equals($currentHash, [string]$manifest.sha256, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "The installed web broker changed outside M9R setup at $($paths.Target); it was not overwritten."
+        $matchesRecorded = [string]::Equals($currentHash, [string]$manifest.sha256, [StringComparison]::OrdinalIgnoreCase)
+        $matchesVerifiedPackage = [string]::Equals($currentHash, $sourceHash, [StringComparison]::OrdinalIgnoreCase)
+        if (-not $matchesRecorded -and -not $matchesVerifiedPackage) {
+            throw "The installed web broker matches neither its M9R ownership record nor the verified package at $($paths.Target); it was not overwritten."
         }
     }
 }
@@ -196,7 +198,10 @@ function Install-ManagedWebBroker([string]$SourcePath) {
     if ((Test-Path -LiteralPath $paths.Target -PathType Leaf) -and
         [string]::Equals((Get-FileHash -LiteralPath $paths.Target -Algorithm SHA256).Hash, $sourceHash, [StringComparison]::OrdinalIgnoreCase)) {
         $existing = Read-ManagedWebBrokerManifest $paths
-        if (-not $existing) { Write-ManagedWebBrokerManifest $paths $sourceHash }
+        if (-not $existing -or -not [string]::Equals([string]$existing.sha256, $sourceHash, [StringComparison]::OrdinalIgnoreCase)) {
+            # The engine installs bundled companions before this installer refreshes its separate broker ownership record.
+            Write-ManagedWebBrokerManifest $paths $sourceHash
+        }
         return
     }
 
