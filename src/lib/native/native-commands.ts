@@ -7,7 +7,7 @@
  * back exactly. Local mode needs no account and no network.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,7 +83,7 @@ export const registryAutostart: Autostart = {
 const autostartOf = (io: NativeIo): Autostart => io.autostart ?? registryAutostart;
 
 type Kind = "hooks-json" | "markdown-block" | "mcp-json" | "mcp-toml";
-interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEntry & { kind: Kind }>; /** Hook program files M9R copied into its own folder; removed on uninstall. */ runtimeFiles?: string[]; /** M9R starts when you sign in to Windows (removed on uninstall). */ autostart?: boolean }
+interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEntry & { kind: Kind }>; /** Bundled runtimes installed by M9R, including retired images retained by still-running agent sessions. */ runtimeFiles?: string[]; /** M9R starts when you sign in to Windows (removed on uninstall). */ autostart?: boolean }
 
 export function nativePaths(io: Pick<NativeIo, "env" | "homeDir">) {
   const m9r = defaultStoreRoot(io.homeDir, io.env);
@@ -139,7 +139,14 @@ function shimSource(env: Record<string, string | undefined>): string | null {
 
 /** Stops a running resident engine so its file can be replaced or removed; harmless when none is running. */
 async function stopResidentEngine(io: NativeIo): Promise<void> {
-  if (await requestShutdown(hookPipePath(nativePaths(io).m9r))) await new Promise((r) => setTimeout(r, 900));
+  const pipe = hookPipePath(nativePaths(io).m9r);
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await requestShutdown(pipe, 1000);
+    await new Promise((r) => setTimeout(r, 150));
+    // A live listener means shutdown has not completed (or the pill's supervisor restarted it).
+    if (!await requestShutdown(pipe, 250)) return;
+  }
+  throw new Error("The M9R resident engine did not stop. Close the M9R desktop pill before retrying setup.");
 }
 
 const sameFile = (a: string, b: string): boolean => {
@@ -178,19 +185,67 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
   return { needed, sourceDir, targetDir, missingSource };
 }
 
+function replaceRuntimeFile(from: string, to: string): string[] {
+  if (sameFile(from, to)) return [];
+  const staged = `${to}.m9r-new-${process.pid}-${randomUUID()}`;
+  try {
+    copyFileSync(from, staged);
+    try {
+      // Same-directory rename is atomic. On Windows this works even when an agent still has the old image mapped.
+      renameSync(staged, to);
+      return [];
+    } catch (replaceError) {
+      if (process.platform !== "win32" || !existsSync(to)) throw replaceError;
+      const retired = `${to}.m9r-retired-${Date.now()}-${randomUUID()}`;
+      renameSync(to, retired);
+      try {
+        renameSync(staged, to);
+      } catch (installError) {
+        try { renameSync(retired, to); } catch { /* keep the old image recoverable if rollback is also blocked */ }
+        throw installError;
+      }
+      // A running MCP server may still be mapped to the renamed image. Keep it tracked until a later setup/uninstall
+      // can remove it after the owner closes that agent session.
+      try {
+        rmSync(retired, { force: true });
+        return [];
+      } catch {
+        return [retired];
+      }
+    }
+  } finally {
+    rmSync(staged, { force: true });
+  }
+}
+
+function pruneRetiredRuntimeFile(target: string): void {
+  let names: string[];
+  try { names = readdirSync(dirname(target)); } catch { return; }
+  const prefix = `${basename(target)}.m9r-retired-`;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    try { rmSync(join(dirname(target), name), { force: true }); } catch { /* still mapped by an open agent process */ }
+  }
+}
+
 function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> }): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
   if (plan.engine) {
     const written: string[] = [];
     for (const file of [plan.engine, ...(plan.shim ? [plan.shim] : []), ...(plan.nativeInputHost ? [plan.nativeInputHost] : []), ...(plan.companions ?? [])]) {
       mkdirSync(dirname(file.to), { recursive: true });
-      if (!sameFile(file.from, file.to)) copyFileSync(file.from, file.to);
+      pruneRetiredRuntimeFile(file.to);
+      written.push(...replaceRuntimeFile(file.from, file.to));
       written.push(file.to);
     }
     return written;
   }
   const written: string[] = [];
-  for (const f of HOOK_RUNTIME_FILES) { copyFileSync(join(plan.sourceDir, f), join(plan.targetDir, f)); written.push(join(plan.targetDir, f)); }
+  for (const f of HOOK_RUNTIME_FILES) {
+    const target = join(plan.targetDir, f);
+    pruneRetiredRuntimeFile(target);
+    written.push(...replaceRuntimeFile(join(plan.sourceDir, f), target), target);
+  }
   // The runtime files are ES modules; this keeps them working wherever the folder lives.
   const pkg = join(plan.targetDir, "package.json");
   writeFileSync(pkg, JSON.stringify({ type: "module", private: true }) + "\n", "utf8");
@@ -318,7 +373,7 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   // The hook program goes first, so a hook can never point at a file that is not there yet.
   if (runtime.needed) {
     if (runtime.engine) await stopResidentEngine(io);
-    manifest.runtimeFiles = copyRuntime(runtime);
+    manifest.runtimeFiles = [...new Set([...(manifest.runtimeFiles ?? []), ...copyRuntime(runtime)])];
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   for (const f of todo) {

@@ -23,6 +23,9 @@ After the native setup, also run the consent-driven M9R browser/MCP setup.
 
 .PARAMETER NoAutostart
 Do not add the M9R desktop pill to this Windows user's sign-in startup list.
+
+.PARAMETER NoLaunch
+Install without starting the desktop pill after setup. Intended for automated tests.
 #>
 [CmdletBinding()]
 param(
@@ -30,7 +33,8 @@ param(
     [string]$PackagePath,
     [switch]$Uninstall,
     [switch]$Web,
-    [switch]$NoAutostart
+    [switch]$NoAutostart,
+    [switch]$NoLaunch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -241,6 +245,39 @@ function Read-Consent([string]$Prompt) {
     return (Read-Host "$Prompt [y/N]") -match '^(?i:y|yes)$'
 }
 
+function Stop-InstalledM9rPill {
+    $overlay = Join-Path (Get-M9rHome) 'bin\m9r-overlay.exe'
+    if (-not (Test-Path -LiteralPath $overlay -PathType Leaf)) { return }
+    $expectedPath = [IO.Path]::GetFullPath($overlay)
+    $matchesInstalledPill = {
+        param($Process)
+        try {
+            return [string]::Equals([IO.Path]::GetFullPath($Process.Path), $expectedPath, [StringComparison]::OrdinalIgnoreCase)
+        } catch {
+            return $false
+        }
+    }
+    $running = @(Get-Process -Name 'm9r-overlay' -ErrorAction SilentlyContinue | Where-Object { & $matchesInstalledPill $_ })
+    foreach ($process in $running) {
+        try {
+            if (-not $process.CloseMainWindow()) {
+                throw "Could not request a graceful close for the installed M9R pill (PID $($process.Id)). Close it from its tray menu, then rerun setup. No installed files were replaced."
+            }
+        } catch {
+            throw "Could not close the installed M9R pill (PID $($process.Id)) before updating it. $($_.Exception.Message) No installed files were replaced."
+        }
+    }
+    foreach ($process in $running) {
+        if (-not $process.WaitForExit(15000)) {
+            throw "The installed M9R pill (PID $($process.Id)) did not exit cleanly. No installed files were replaced."
+        }
+    }
+    $stillRunning = @(Get-Process -Name 'm9r-overlay' -ErrorAction SilentlyContinue | Where-Object { & $matchesInstalledPill $_ })
+    if ($stillRunning.Count -gt 0) {
+        throw 'The installed M9R pill is still running. No installed files were replaced.'
+    }
+}
+
 function Remove-M9rTemporaryDirectory([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
@@ -361,6 +398,7 @@ try {
         exit 0
     }
 
+    Stop-InstalledM9rPill
     & $engine @applyArgs
     $setupExit = $LASTEXITCODE
     if ($setupExit -ne 0) { throw "M9R setup exited with code $setupExit. Review the engine output; do not rerun blindly." }
@@ -381,6 +419,12 @@ try {
         & $installedEngine web setup
         $webExit = $LASTEXITCODE
         if ($webExit -ne 0) { throw "M9R Web setup exited with code $webExit. Native setup remains installed and can be removed with -Uninstall." }
+    }
+    if (-not $NoLaunch) {
+        $installedOverlay = Join-Path $env:M9R_HOME 'bin\m9r-overlay.exe'
+        if (-not (Test-Path -LiteralPath $installedOverlay -PathType Leaf)) { throw "M9R setup finished but the desktop pill is missing at $installedOverlay." }
+        Start-Process -FilePath $installedOverlay -WorkingDirectory (Split-Path -Parent $installedOverlay)
+        Write-Host 'Started the M9R desktop pill. It will also start automatically when this Windows user signs in if sign-in startup was enabled.' -ForegroundColor Green
     }
     exit 0
 } catch {

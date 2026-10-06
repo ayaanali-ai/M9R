@@ -76,6 +76,19 @@ dev-server.log
 # .release-excluded/artifacts for marketing/archive use.
 /.release-excluded/
 
+# Root-level local build/demo artifacts from Windows acceptance runs. Keep the
+# files available locally, but do not let binaries or captures become source
+# changes by accident.
+/m9r-engine.exe
+/m9r-native-input-host.exe
+/m9r-overlay.exe
+/m9r-web-broker.exe
+/uninstall.exe
+/Recording 2026-10-04 025643.mp4
+/Room URL Mockup.html
+/URLpreview.png
+/factorial.py
+
 # M9R CLI local state (tokens are secret; rules and run files are transient).
 # Keep both paths ignored during the one-release legacy migration.
 .m9r/
