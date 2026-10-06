@@ -5,7 +5,7 @@ import { cleanupExpiredRateLimits } from "@/lib/rate-limit";
 import { authorizedStaticBearer } from "@/lib/request-security";
 
 /**
- * Delivery worker: invoked on a schedule (see vercel.json crons) to downgrade
+ * Delivery worker: invoked by the Cloudflare cron scheduler to downgrade
  * outbox rows whose owning connection never acknowledged them in time. Never
  * runs on end-user request; gated on CRON_SECRET, not an agent bearer token.
  */

@@ -39,11 +39,13 @@
   ],
   "exclude": [
     "services/network-core",
+    "services/cron-scheduler",
     "services/relay-do",
     "services/web-coordinator",
     "services/mission-bridge/src/worker-wrapper.ts",
     "services/mission-relay/src/worker-wrapper.ts",
     "services/mission-worker/src/worker-wrapper.ts",
+    "scripts/cloudflare-scheduler.test.ts",
     "node_modules",
     "extensions",
     "overlay",

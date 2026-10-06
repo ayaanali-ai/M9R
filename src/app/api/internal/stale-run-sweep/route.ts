@@ -4,7 +4,7 @@ import { authorizedStaticBearer } from "@/lib/request-security";
 
 /**
  * Finalizes agent_runs left in a non-terminal status by a CLI process that
- * died mid-run (see vercel.json crons). Never runs on end-user request;
+ * died mid-run. The Cloudflare cron scheduler invokes it; it never runs on an end-user request;
  * gated on CRON_SECRET, not an agent bearer token -- same convention as
  * work-signal-sweep.
  */

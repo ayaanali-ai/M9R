@@ -1,7 +1,7 @@
 /**
  * Periodic sweep for schedule-triggered channel workflows (workflow
  * automation, gap 3) — the counterpart to agent-run-service.ts's
- * sweepStaleRuns, run by the same kind of unattended Vercel Cron caller
+ * sweepStaleRuns, run by the Cloudflare cron scheduler
  * (see /api/internal/workflow-scheduler, stale-run-sweep's sibling).
  *
  * A schedule trigger has no requesting human or agent behind it, so this
@@ -11,14 +11,10 @@
  * (never mentioned an agent) is skipped, same refusal discipline as every
  * other mission-channel-binding.ts consumer.
  *
- * Honest precision limit: vercel.json's existing crons (work-signal-sweep,
- * stale-run-sweep) both run once daily, which reads as this project being on
- * Vercel's Hobby tier -- Hobby caps cron invocation to once per day. This
- * sweep is registered on the same daily cadence rather than guessing a
- * finer one that would fail deploy validation. A workflow authored with
- * trigger.interval: "30m" is real and will fire -- just at most once per day
- * until the project is on a plan that allows a shorter cron, since the sweep
- * itself is what's rate-limited, not the workflow's own interval math.
+ * Honest precision limit: the checked-in Cloudflare scheduler currently runs
+ * the workflow sweep once daily. A workflow authored with
+ * trigger.interval: "30m" is real and will fire at the scheduler's cadence;
+ * the sweep itself is what determines the observed precision.
  */
 
 import { supabase } from "@/lib/supabase";

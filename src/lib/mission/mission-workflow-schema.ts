@@ -47,7 +47,7 @@ export function isScheduleTriggerFireable(trigger: ChannelWorkflowTrigger): bool
 
 const INTERVAL_PATTERN = /^(\d+)(s|m|h|d)$/;
 const INTERVAL_UNIT_MS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
-const MIN_INTERVAL_MS = 60_000; // A sweep can only fire as often as it's invoked (Vercel Cron); a sub-minute interval would just be a lie about precision.
+const MIN_INTERVAL_MS = 60_000; // A sweep can only fire as often as the Cloudflare scheduler invokes it; a sub-minute interval would just be a lie about precision.
 
 /** Parses "30s"/"5m"/"6h"/"1d" into milliseconds, or null for anything else (a bare cron expression, garbage, or below the floor a periodic sweep can actually honor). */
 export function parseIntervalMs(interval: string): number | null {

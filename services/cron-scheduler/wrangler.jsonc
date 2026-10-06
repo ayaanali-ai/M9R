@@ -1,0 +1,23 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "m9r-cron-scheduler",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "triggers": {
+    "crons": [
+      "0 3 * * *",
+      "15 3 * * *",
+      "30 3 * * *",
+      "*/15 * * * *"
+    ]
+  },
+  "vars": {
+    "TARGET_BASE_URL": "https://m9r.dev",
+    "SCHEDULER_ENABLED": "true"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

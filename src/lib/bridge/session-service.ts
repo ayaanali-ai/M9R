@@ -529,7 +529,8 @@ async function flagIdleSessionsForArchiveProposal(db: ReturnType<typeof requireS
 }
 
 /**
- * Cron-facing entry point (see vercel.json + /api/internal/idle-session-sweep):
+ * Cron-facing entry point for the Cloudflare scheduler and
+ * /api/internal/idle-session-sweep:
  * flags idle sessions across every workspace, not just the one whose
  * dashboard happens to be open right now.
  */

@@ -3,8 +3,8 @@ import { sweepScheduledWorkflows } from "@/lib/mission/workflow-scheduler-servic
 import { authorizedStaticBearer } from "@/lib/request-security";
 
 /**
- * Fires every due schedule-triggered channel workflow (see vercel.json
- * crons). Never runs on end-user request; gated on CRON_SECRET, not an
+ * Fires every due schedule-triggered channel workflow. The Cloudflare cron
+ * scheduler invokes it; it never runs on end-user request; gated on CRON_SECRET, not an
  * agent bearer token -- same convention as stale-run-sweep.
  */
 export async function GET(req: NextRequest) {
