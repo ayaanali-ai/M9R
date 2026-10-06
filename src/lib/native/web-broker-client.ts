@@ -6,7 +6,7 @@ import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 export interface WebBrokerClient {
   taskStageApp?(token: string, taskId: string, appId?: string): Promise<{ ok: boolean; result?: unknown; error?: string }>;
   taskStageAction?(token: string, taskId: string, action: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }>;
-  prepareTaskStage?(token: string, taskId: string): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
+  prepareTaskStage?(token: string, taskId: string, timeoutMs?: number): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
   run(request: WebRequest): Promise<WebResponse>;
   runBatch?(request: WebBatchRequest): Promise<WebBatchResponse>;
   notifyMessage?(message: WebAgentMessage): Promise<boolean>;
@@ -49,12 +49,12 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
         return await response.json() as { ok: boolean; result?: unknown; error?: string };
       } catch { return { ok: false, error: "The owner-launched stage broker is not reachable." }; }
     },
-    async prepareTaskStage(token, taskId) {
+    async prepareTaskStage(token, taskId, timeoutMs = 15_000) {
       try {
         const key = readFileSync(options.keyPath, "utf8").trim();
         const response = await doFetch(`${baseUrl}/web/stage/prepare`, {
           method: "POST", headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify({ token, taskId }), signal: AbortSignal.timeout(15_000),
+          body: JSON.stringify({ token, taskId }), signal: AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, 15_000))),
         });
         return await response.json() as { ok: boolean; stage?: unknown; error?: string };
       } catch { return { ok: false, error: "The owner-launched stage broker is not reachable." }; }

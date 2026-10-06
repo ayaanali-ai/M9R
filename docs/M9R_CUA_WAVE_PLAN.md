@@ -82,3 +82,36 @@ The owner explicitly moved C3 behind the OS-level Phase 3 work. C3 is not cancel
 3. **C15 window-pool/tiled stage:** prove the multi-window stage and lease handoff once the stage foundation exists.
 4. **C3 live-view acceptance:** run the reviewed Cloudflare Linux build/deployment and the two-machine changing-frame proof, with viewer controls absent.
 5. **C6–C13:** continue the remaining product-parity, recorder, scheduler, hosted-browser, approved-login, and benchmark work in the table above, respecting the C9 and C12 decisions first.
+
+## Merged adjacent release and demo gates
+
+These items come from the ranked Windows-launch audit and other active plans. They are included here to provide one working checklist; they do not change the C1–C15 acceptance definitions or the owner-approved order above.
+
+### Windows launch gates mapped to the roadmap
+
+| Gate | Relationship to C1–C15 | Remaining acceptance |
+|---|---|---|
+| Pill task routes to a real agent's Stage and shows the owning session | Same as Track A step 3 | The pill already sends tasks through the local engine. Approved inbox tasks request session-scoped Stage preparation through MCP inbox and Codex queued delivery; Claude Code's normal prompt hook also requests preparation before inbox injection. OpenCode currently has a SessionStart hook, not a per-prompt hook. Still exercise a real connected agent and verify its named Stage/cursor through the visible pill. |
+| Version-matched engine, desktop pill, broker, input host, cursor runtime | Same as P0 package | Locally packaged and installed; the old audit claim that the package omitted the pill/runtime is superseded. Publish a Windows release asset and verify a clean install on machine two. |
+| Two real agents with distinct OS cursor identities | Same as Track A step 3 and C14 | Synthetic visible cursor proof passed; two verified real sessions, isolated actions, revocation, and continued operation of the other session remain open. |
+| Pill as the single user-facing Stage and messaging surface | Same as Track A step 3/P0 | Shared pill UI code exists, but desktop and browser host adapters remain separate. Live Stage controls and message-to-agent flow remain open. |
+| CDP browser path and extension retirement | Separate from C1 | C1's dedicated agent-owned Chrome sign-in proof is done. Pill-driven browser tasks through CDP and removing extension setup from the normal path are still open. |
+| Startup and updates on clean installs | Same as P0 and second-machine lifecycle | The package installer completed under Codex's `msi\\codexsandboxoffline` identity while `USERPROFILE` pointed at `C:\\Users\\kaina`. Installed binaries match the local build, but the owner account's sign-in entry and visible launch were not verified. Re-run/verify setup in the owner's Windows session; reboot and second-machine proof remain open. Atomic staging for a locked engine exists; signed automatic updates, coordinated component versions, rollback, and offline retry do not. |
+
+The supported `npx m9r-cli` setup still requires Node and web setup still instructs users to load the extension. The standalone Windows installer is a separate no-Node route, but the GitHub release it downloads has not been published. This is a distribution gap, not a contradiction in the package contents.
+
+### Cross-machine desktop is separate from C3
+
+C3 proves **browser-tab** viewing only. C7 is machine enrolment. Cross-machine **desktop-stage** viewing requires a separate read-only relay for explicitly selected stage frames and cursor labels after machine enrolment; remote control then requires C4's source-machine lease. None of those desktop-frame relay/control gates is passed by C3. The implementation boundary and order are in [Windows Stage acceptance](M9R_WINDOWS_DESKTOP_STAGE_ACCEPTANCE.md).
+
+### Related active plans outside C1–C15
+
+| Plan | Current state | Relationship / remaining work |
+|---|---|---|
+| **Network Core Phase 0** | Passed against the deployed Cloudflare Worker on 2026-10-03 | Separate foundational network work; pairing, credentials, events, inbox, rotation, and revocation passed. Not a duplicate of desktop Stage or C3. |
+| **Personal-agent Network Phase 1** | Local implementation; not deployed or live-tested with Muse, Dots, or Grok Bot | Parked by the owner's later instruction to focus on Claude Code, Codex, and OpenCode. Do not treat it as a current Windows launch blocker. |
+| **Claude Code/Codex/OpenCode provider interoperability** | Repository implementation/tests exist; live directional acceptance is open | One real cross-provider task-and-result path belongs in a credible multiplayer demo. The provider matrix's six directions are the fuller support sign-off; tests alone do not pass them. See [provider matrix](M9R_PROVIDER_CAPABILITY_MATRIX_2026-10-05.md). |
+| **Cloudflare scheduled-job operations** | Scheduler deployed; two `idle-session-sweep` runs recorded | Three other sweep logs remain open: `work-signal-sweep`, `stale-run-sweep`, and `workflow-scheduler`. This is operational sign-off, not a local cursor-demo prerequisite. See [system map](M9R_SYSTEM_MAP_2026-10-05.md). |
+| **Open-core/public launch** | Separate release/legal gate | A successful two-provider run overlaps the provider matrix and should reuse that evidence, not become duplicate testing. Counsel review remains separate. `OPEN_CORE_LAUNCH_PLAN.md` has a 2026-09-11 checkpoint and historical Render evidence; reconcile it with the current Cloudflare deployment map before using it to guide a release. |
+
+The audit's CDP review, C9 repository comparison, C10 Browser Run feasibility report, and demo/storyboard drafts are supporting tasks for the matching rows above, not additional roadmap items. Keep the positioning **“The multiplayer web for agents”**; Cua and other products are engineering references, not the launch headline.

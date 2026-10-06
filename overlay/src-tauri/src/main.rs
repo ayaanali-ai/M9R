@@ -78,14 +78,14 @@ const TOP_MARGIN: f64 = 8.0;
 // ── One-pill window (default; M9R_PILL_NEXT=0 for the older overlay UI) ───────────────────────────────────────────────────────────────
 // The new pill UI draws its own island inside a fixed, transparent, top-centre window and tells this side three things:
 // where the island is (so everything around it stays click-through), when it has folded away (the window shrinks to a
-// wake strip), and when it needs the keyboard (the message field). The old overlay UI does not use any of this.
+// wake handle), and when it needs the keyboard (the message field). The old overlay UI does not use any of this.
 
 /// The new UI's panel width (its `PANEL_W`); the island is centred in it, and tall enough for its largest view.
 const NEXT_W: f64 = 720.0;
 const NEXT_H: f64 = 320.0;
-/// The strip the folded-away island leaves behind so the pointer can wake it (the UI draws the same 240 x 6 strip).
+/// The folded-away island leaves behind a small hit-testable handle so the pointer can wake it.
 const WAKE_W: f64 = 240.0;
-const WAKE_H: f64 = 6.0;
+const WAKE_H: f64 = 10.0;
 /// Margin around the island that still counts as over it, matching the UI.
 const HIT_MARGIN: f64 = 14.0;
 
@@ -127,7 +127,7 @@ struct NextPill {
 
 static NEXT: Mutex<NextPill> = Mutex::new(NextPill { rect: IslandRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, collapsed: false });
 
-/// The size the window should have: the whole panel, or just the wake strip while the island is folded away.
+/// The size the window should have: the whole panel, or just the wake handle while the island is folded away.
 fn next_window_size(collapsed: bool) -> (f64, f64) {
     if collapsed { (WAKE_W, WAKE_H) } else { (NEXT_W, NEXT_H) }
 }
@@ -151,8 +151,8 @@ fn spawn_heartbeat(app: AppHandle) {
     std::thread::spawn(move || loop {
         if let Some(_window) = app.get_webview_window(PILL) {
             let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-            // `window.is_visible()` reports the native wake-strip window, which remains visible even when the
-            // shared island has collapsed to its 6px wake strip. The broker should yield to the browser shell only
+            // `window.is_visible()` reports the native wake-handle window, which remains visible even when the
+            // shared island has collapsed. The broker should yield to the browser shell only
             // while the actual pill is expanded, otherwise the browser shell is suppressed forever after startup.
             let visible = !NEXT.lock().map(|next| next.collapsed).unwrap_or(false);
             let path = heartbeat_path();
@@ -174,7 +174,7 @@ fn pill_set_rect(x: f64, y: f64, width: f64, height: f64) -> Result<(), String> 
     Ok(())
 }
 
-/// The island folded away (the window becomes the wake strip) or came back. Keeps the window's centre and top edge.
+/// The island folded away (the window becomes the visible wake handle) or came back. Keeps its centre and top edge.
 #[tauri::command]
 fn pill_set_collapsed(window: WebviewWindow, collapsed: bool) -> Result<(), String> {
     {
@@ -191,7 +191,7 @@ fn pill_set_collapsed(window: WebviewWindow, collapsed: bool) -> Result<(), Stri
     let cx = pos.x + size.width as i32 / 2;
     window.set_size(LogicalSize::new(w, h)).map_err(|e| e.to_string())?;
     window.set_position(PhysicalPosition::new(cx - (w * scale).round() as i32 / 2, pos.y)).map_err(|e| e.to_string())?;
-    // The wake strip must receive the pointer; everything else about click-through is decided by the watcher below.
+    // The wake handle must receive the pointer; everything else about click-through is decided by the watcher below.
     if collapsed {
         let _ = window.set_ignore_cursor_events(false);
     }
