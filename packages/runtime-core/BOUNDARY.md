@@ -38,3 +38,7 @@ M9R control plane. The CLI's hosted commands and the unverified terminal
 runtime remain outside the public promise until they have their own release
 evidence. Do not describe this package as a complete self-hosted replacement
 for M9R Cloud.
+
+The owner-machine local Node boundary is specified separately in
+`../../docs/M9R_LOCAL_NODE_BOUNDARY.md`. That supervisor consumes these
+contracts; it is not another package inside `runtime-core`.

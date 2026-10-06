@@ -1638,6 +1638,16 @@ async function runWebExtensionUpdate(args: string[]): Promise<number> {
       const current = await readOptional(target);
       currentHashes.set(file.relativePath, current ? digest(current) : null);
     }
+    // Also hash files recorded by the previous install. A refresh must be able
+    // to remove an unchanged file that the packaged extension no longer ships
+    // (for example, the retired New Tab page), while preserving user edits.
+    for (const relativePath of installedByRelative.keys()) {
+      if (currentHashes.has(relativePath)) continue;
+      const target = join(extensionRoot, ...relativePath.split("/"));
+      await ensureNoSymlinkPath(target);
+      const current = await readOptional(target);
+      currentHashes.set(relativePath, current ? digest(current) : null);
+    }
     const plan = planManagedWebExtensionRefresh({
       sourceFiles: sourceFiles.map(({ relativePath, desiredHash }) => ({ relativePath, desiredHash })),
       installedFiles: [...installedByRelative].map(([relativePath, file]) => ({ relativePath, installedHash: file.hash })),
@@ -1647,9 +1657,13 @@ async function runWebExtensionUpdate(args: string[]): Promise<number> {
       write: plan.filter((file) => file.action === "write").length,
       unchanged: plan.filter((file) => file.action === "unchanged").length,
       preserve: plan.filter((file) => file.action === "preserve").length,
+      remove: plan.filter((file) => file.action === "delete").length,
     };
-    process.stdout.write(`M9R managed extension refresh only: ${counts.write} update, ${counts.unchanged} unchanged, ${counts.preserve} preserved. No broker, login task, provider config, browser permissions, or repository files are touched.\n`);
-    for (const file of plan) if (file.action === "write") process.stdout.write(`  [PLAN] ${file.relativePath}\n`);
+    process.stdout.write(`M9R managed extension refresh only: ${counts.write} update, ${counts.unchanged} unchanged, ${counts.preserve} preserved, ${counts.remove} remove. No broker, login task, provider config, browser permissions, or repository files are touched.\n`);
+    for (const file of plan) {
+      if (file.action === "write") process.stdout.write(`  [PLAN] ${file.relativePath}\n`);
+      else if (file.action === "delete") process.stdout.write(`  [PLAN REMOVE] ${file.relativePath}\n`);
+    }
     if (args.includes("--dry-run")) { process.stdout.write("Dry run only; no files were changed.\n"); return 0; }
     if (!args.includes("--yes") && !(await deps.confirm?.("Update only M9R-owned browser-extension files, preserving any changed or untracked files?"))) {
       process.stdout.write("Cancelled. Nothing was changed.\n");
@@ -1660,12 +1674,30 @@ async function runWebExtensionUpdate(args: string[]): Promise<number> {
     const records = new Map(installedByRelative);
     const createdDirectories = new Set(manifest.extensionDirectories ?? []);
     for (const item of plan) {
+      const source = sourceByRelative.get(item.relativePath);
+      if (!source) {
+        // This path was removed from the packaged extension. Drop it from the
+        // ownership manifest even when a user edited it, so future refreshes
+        // cannot claim or delete the preserved file.
+        const target = join(extensionRoot, ...item.relativePath.split("/"));
+        await ensureNoSymlinkPath(target);
+        if (item.action === "delete") {
+          await unlink(target).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== "ENOENT") throw error;
+          });
+          process.stdout.write(`  [REMOVED] ${item.relativePath}\n`);
+        } else if (item.currentHash !== null) {
+          process.stdout.write(`  [KEEP] Preserved removed or changed extension file: ${item.relativePath}\n`);
+        }
+        records.delete(item.relativePath);
+        manifest.extensionFiles = [...records.values()];
+        await writeAtomic(setupManifestPath, JSON.stringify(manifest, null, 2) + "\n");
+        continue;
+      }
       if (item.action !== "write") {
         if (item.action === "preserve") process.stdout.write(`  [KEEP] Preserved changed or untracked extension file: ${item.relativePath}\n`);
         continue;
       }
-      const source = sourceByRelative.get(item.relativePath);
-      if (!source) throw new Error(`The packaged extension source changed during refresh: ${item.relativePath}`);
       const content = await readFile(source.sourcePath);
       if (digest(content) !== item.desiredHash) throw new Error(`The packaged extension source changed during refresh: ${item.relativePath}`);
       const target = join(extensionRoot, ...item.relativePath.split("/"));
@@ -2572,6 +2604,23 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
 async function runWebCli(args: string[]): Promise<number> {
   if (args[0] === "chrome") return (await import("../src/lib/native/agent-chrome-cli")).runAgentChromeCli(args.slice(1));
   if (args[0] === "stage") {
+    if (args[1] === "approve-app") {
+      const { approveStageApp } = await import("../src/lib/native/task-stage-apps");
+      if (args.length !== 4) throw new Error("Usage: m9r web stage approve-app <app-id> <absolute-executable-path>");
+      approveStageApp(defaultStoreRoot(homedir(), process.env), args[2]!, args[3]!, [], {
+        terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY), env: process.env,
+      });
+      process.stdout.write(JSON.stringify({ ok: true, appId: args[2] }) + "\n");
+      return 0;
+    }
+    if (["allow-agent", "allow-control", "revoke-agent"].includes(args[1] ?? "")) {
+      const { setTaskStagePermission } = await import("../src/lib/native/task-desktop-stage");
+      const policy = setTaskStagePermission(defaultStoreRoot(homedir(), process.env), args[2] ?? "", args[1] !== "revoke-agent", {
+        terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY) || (process.env.M9R_DESKTOP_PILL_OWNER_ACTION === "1" && !isAgentContext(process.env)), env: process.env,
+      }, args[1] === "allow-control");
+      process.stdout.write(JSON.stringify({ ok: true, ...policy }) + "\n");
+      return 0;
+    }
     const ownerTerminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
     // The native pill is a human-operated local UI. Agent context is still checked by the stage manager,
     // so this narrowly replaces only the terminal requirement for actions arriving from that shell.
@@ -2584,7 +2633,7 @@ async function runWebCli(args: string[]): Promise<number> {
       nativeHostPath: isStandaloneEngine() && existsSync(bundledStageHost) ? bundledStageHost : undefined,
     };
     const stageArgs = args.slice(1);
-    if (stageArgs[0] === "capture" || stageArgs[0] === "cursor") {
+    if (["windows", "capture", "cursor", "click", "type", "scroll", "drag"].includes(stageArgs[0] ?? "")) {
       return (await import("../src/lib/native/cua-stage-driver")).runCuaStageDriverCli(stageArgs, { stage: stageDependencies });
     }
     return (await import("../src/lib/native/windows-desktop-stage")).runWindowsDesktopStageCli(stageArgs, stageDependencies);

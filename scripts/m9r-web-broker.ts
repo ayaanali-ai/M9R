@@ -6,6 +6,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
+import { createTaskDesktopStageService } from "@/lib/native/task-desktop-stage";
 import { writeWebActivity } from "@/lib/native/feed-writer";
 import { apiKeyLaunchBlock } from "@/lib/native/vendor-launch-core";
 import { createWebLiveSessions, loadAgentsConfig, projectRoomId } from "@/lib/native/web-live-sessions";
@@ -52,7 +53,8 @@ async function main(): Promise<void> {
   // A real POST /web/shutdown (m9r web restart, or any owner-triggered restart) must stop this whole process, not just
   // close the HTTP socket, or the unref'd-less feed timer below keeps Node running forever with nothing left listening.
   let requestShutdown = () => {};
-  const broker = await startWebBroker({ key, port, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
+  const taskStages = createTaskDesktopStageService({ store: createLocalStore(root) });
+  const broker = await startWebBroker({ key, port, taskStages, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
   const config = loadAgentsConfig(root, { cwd: projectRoot });
   const sessions = createWebLiveSessions({
     agents: config.agents, storeRoot: root, repoRoot: projectRoot, brokerPort: broker.port,
@@ -79,7 +81,8 @@ async function main(): Promise<void> {
   const stop = () => {
     if (stopping) return;
     stopping = true;
-    clearInterval(webTimer); clearInterval(presenceTimer); sessions.close(); ui.close(); void broker.close().then(() => process.exit(0));
+    clearInterval(webTimer); clearInterval(presenceTimer); sessions.close(); ui.close();
+    void taskStages.close().catch(() => undefined).then(() => broker.close()).then(() => process.exit(0));
   };
   requestShutdown = stop;
   process.on("SIGINT", stop);

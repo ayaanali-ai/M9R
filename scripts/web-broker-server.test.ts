@@ -19,6 +19,46 @@ import { webExtensionAllowlist, WEB_EXTENSION_ID } from "@/lib/native/web-setup-
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<ToolResult> }> };
 
+test("task stage app/action routes require loopback key, reject origins and extra target fields", async () => {
+  const key = randomBytes(32).toString("hex");
+  let calls = 0;
+  const broker = await startWebBroker({ key, port: 0, taskStages: {
+    prepare: async () => ({}), act: async () => { calls++; return {}; },
+    launch: async () => { calls++; return {}; }, closeApp: async () => { calls++; return {}; },
+  } });
+  try {
+    for (const [path, body] of [["action", { token: "session-token", taskId: "T1", action: { kind: "capture" } }],
+      ["launch", { token: "session-token", taskId: "T1", appId: "fixture" }], ["close", { token: "session-token", taskId: "T1" }]] as const) {
+      const request = (headers: Record<string, string>, payload: unknown = body) => fetch(`http://127.0.0.1:${broker.port}/web/stage/${path}`, {
+        method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(payload),
+      });
+      assert.equal((await request({})).status, 401);
+      assert.equal((await request({ "x-m9r-key": key, origin: "https://untrusted.example" })).status, 403);
+      assert.equal((await request({ "x-m9r-key": key }, { ...body, executable: "unapproved.exe" })).status, 403);
+      assert.equal((await request({ "x-m9r-key": key })).status, 200);
+    }
+    assert.equal(calls, 3);
+  } finally { await broker.close(); }
+});
+
+test("task stage preparation requires the broker key and refuses browser origins and extra control fields", async () => {
+  let calls = 0;
+  const key = randomBytes(32).toString("hex");
+  const broker = await startWebBroker({ key, port: 0, taskStages: { prepare: async () => { calls++; return { name: "agent-fixture" }; } } });
+  try {
+    const url = `http://127.0.0.1:${broker.port}/web/stage/prepare`;
+    const request = (headers: Record<string, string>, body: unknown = { token: "session-token", taskId: "T1" }) => fetch(url, {
+      method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body),
+    });
+    assert.equal((await request({})).status, 401);
+    assert.equal((await request({ "x-m9r-key": key, origin: "https://untrusted.example" })).status, 403);
+    assert.equal((await request({ "x-m9r-key": key }, { token: "session-token", taskId: "T1", pid: 123 })).status, 403);
+    assert.equal(calls, 0);
+    assert.equal((await request({ "x-m9r-key": key })).status, 200);
+    assert.equal(calls, 1);
+  } finally { await broker.close(); }
+});
+
 test("authority snapshot replacement retries transient file locks but fails closed on permanent errors", () => {
   let attempts = 0;
   const waits: number[] = [];

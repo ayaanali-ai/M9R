@@ -24,6 +24,7 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+#variable_conflict use_column
 declare
   caller_id uuid := auth.uid();
   member_row public.m9r_room_members%rowtype;

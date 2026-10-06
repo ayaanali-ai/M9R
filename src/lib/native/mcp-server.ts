@@ -24,6 +24,7 @@ import type { NetworkCoreClient } from "./network-core-client";
 import { registerNetworkCoreTools } from "./network-core-mcp-tools";
 import { pushCloudNote } from "./cloud-memory";
 import { gitRead, readGovernedFile } from "../bridge/governed-agent-tools";
+import { prepareTaskStageNotice } from "./task-stage-notice";
 
 export interface McpServerDeps {
   store: LocalStore;
@@ -102,6 +103,49 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       return { content: [{ type: "text", text: `You are @${identity.handle} (${identity.provider}), session ${identity.sessionId}.` }] };
     },
   );
+
+  server.registerTool("m9r_stage_app", {
+    description: "Launch an owner-approved app on your approved task stage, or discard this task's broker-owned app. Only select an approved app ID; executable paths and arguments come from owner configuration. Discard closes the app without saving; use it only after preserving the task result. Apps that hand off to another process need a separate adapter.",
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), appId: z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/).optional() },
+  }, async ({ token, taskId, operation, appId }) => {
+    requireIdentity(token);
+    if ((operation === "launch") !== (appId !== undefined)) throw new Error("Launch requires an app ID; discard takes no app ID.");
+    const result = deps.web?.taskStageApp ? await deps.web.taskStageApp(token, taskId, appId)
+      : { ok: false, error: "The owner-launched stage broker is unavailable." };
+    return { content: [{ type: "text" as const, text: JSON.stringify(result) }], isError: !result.ok };
+  });
+
+  server.registerTool("m9r_stage_action", {
+    description: "Capture or control your session's task stage. Requires an approved unfinished task and separate owner computer-control permission. Targets only its registered app window; never switches desktops. Read the outcome and verify effects; posted input is not proof of success.",
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), action: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("capture") }).strict(),
+      z.object({ kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
+      z.object({ kind: z.literal("type"), text: z.string().min(1).max(500) }).strict(),
+      z.object({ kind: z.literal("scroll"), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), direction: z.enum(["up", "down"]) }).strict(),
+      z.object({ kind: z.literal("drag"), fromX: z.number().int().min(0).max(16383), fromY: z.number().int().min(0).max(16383), toX: z.number().int().min(0).max(16383), toY: z.number().int().min(0).max(16383) }).strict(),
+    ]) },
+  }, async ({ token, taskId, action }) => {
+    requireIdentity(token);
+    const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(token, taskId, action)
+      : { ok: false, error: "The owner-launched stage broker is unavailable." };
+    const capture = (response.result as { capture?: { dataUrl?: string } } | undefined)?.capture;
+    const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
+      { type: "text", text: JSON.stringify({ ...response, result: response.result ? { ...response.result as object, capture: capture ? { ...capture, dataUrl: undefined } : undefined } : undefined }) },
+    ];
+    if (response.ok && capture?.dataUrl?.startsWith("data:image/png;base64,")) content.push({ type: "image", data: capture.dataUrl.slice("data:image/png;base64,".length), mimeType: "image/png" });
+    return { content, isError: !response.ok };
+  });
+
+  server.registerTool("m9r_stage_prepare", {
+    description: "Prepare your agent's Windows virtual desktop for an approved unfinished M9R task. Requires owner stage permission. Reuses your session's stage; never switches the owner's desktop. Returns approved app IDs and separate computer-control permission. Use m9r_stage_app and m9r_stage_action for authorized execution; preparation itself does not prove input support.",
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/) },
+  }, async ({ token, taskId }) => {
+    requireIdentity(token);
+    const result = deps.web?.prepareTaskStage
+      ? await deps.web.prepareTaskStage(token, taskId)
+      : { ok: false, error: "The owner-launched stage broker is unavailable." };
+    return { content: [{ type: "text" as const, text: JSON.stringify(result) }], isError: !result.ok };
+  });
 
   server.registerTool(
     "m9r_agents",
@@ -227,8 +271,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           : queuedTasks;
         const injection = renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000, now: (deps.now ?? (() => new Date()))().getTime() });
         if (injection.text) {
+          const included = authorizedTasks.find((task) => task.seq > cursor && task.seq <= injection.newCursor
+            && ["approved", "not_needed"].includes(task.approval));
+          const stageNotice = included ? await prepareTaskStageNotice(deps.store.root, deps.web, token, identity.handle, included.id) : "";
           deps.store.setCursor(handle, cursorSession, injection.newCursor);
-          return { content: [{ type: "text" as const, text: injection.text }] };
+          return { content: [{ type: "text" as const, text: injection.text + (stageNotice ? `\n\n${stageNotice}` : "") }] };
         }
         if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
         await sleep(300);

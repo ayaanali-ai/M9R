@@ -115,6 +115,9 @@ function readBody(req: IncomingMessage): Promise<string | null> {
 }
 
 export interface WebBrokerServerOptions {
+  /** Owner-hosted, task-authorized desktop preparation; absent means desktop access is unavailable. */
+  taskStages?: { prepare(token: string, taskId: string): Promise<unknown>; act?(token: string, taskId: string, action: unknown): Promise<unknown>;
+    launch?(token: string, taskId: string, appId: string): Promise<unknown>; closeApp?(token: string, taskId: string): Promise<unknown> };
   /** Dedicated browser transport. Extension connections are disabled on this broker. */
   browserTransport?: BrowserTransport;
   key: string;
@@ -391,6 +394,50 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (requestUrl.pathname.startsWith("/web/")) {
       if (req.headers.origin !== undefined) return reply(res, 403, { ok: false, error: "browser-originated requests are refused" });
       if (!sameSecret(req.headers["x-m9r-key"] as string | undefined, options.key)) return reply(res, 401, { ok: false, error: "missing or wrong key" });
+      if (req.method === "POST" && ["/web/stage/launch", "/web/stage/close"].includes(requestUrl.pathname)) {
+        const launch = requestUrl.pathname === "/web/stage/launch";
+        if (launch ? !options.taskStages?.launch : !options.taskStages?.closeApp) return reply(res, 503, { ok: false, error: "Task stage applications are unavailable on this broker." });
+        try {
+          const body: unknown = JSON.parse(await readBody(req) || "null");
+          if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
+          const value = body as Record<string, unknown>;
+          const fields = launch ? ["token", "taskId", "appId"] : ["token", "taskId"];
+          if (Object.keys(value).some((key) => !fields.includes(key)) || typeof value.token !== "string" || value.token.length > 128
+            || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
+            || launch && (typeof value.appId !== "string" || !/^[a-z][a-z0-9_-]{0,39}$/.test(value.appId))) throw new Error("Invalid stage request.");
+          const result = launch ? await options.taskStages!.launch!(value.token, value.taskId, value.appId as string)
+            : await options.taskStages!.closeApp!(value.token, value.taskId);
+          return reply(res, 200, { ok: true, result });
+        } catch (error) { return reply(res, 403, { ok: false, error: error instanceof Error ? error.message : "Stage app request failed." }); }
+      }
+      if (req.method === "POST" && requestUrl.pathname === "/web/stage/action") {
+        if (!options.taskStages?.act) return reply(res, 503, { ok: false, error: "Task stage control is unavailable on this broker." });
+        try {
+          const body: unknown = JSON.parse(await readBody(req) || "null");
+          if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
+          const value = body as Record<string, unknown>;
+          if (Object.keys(value).some((key) => !["token", "taskId", "action"].includes(key))
+            || typeof value.token !== "string" || value.token.length > 128
+            || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)) throw new Error("Invalid stage request.");
+          return reply(res, 200, { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action) });
+        } catch (error) {
+          return reply(res, 403, { ok: false, error: error instanceof Error ? error.message : "Stage action failed." });
+        }
+      }
+      if (req.method === "POST" && requestUrl.pathname === "/web/stage/prepare") {
+        if (!options.taskStages) return reply(res, 503, { ok: false, error: "Task stages are unavailable on this broker." });
+        try {
+          const body: unknown = JSON.parse(await readBody(req) || "null");
+          if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
+          const value = body as Record<string, unknown>;
+          if (Object.keys(value).some((key) => !["token", "taskId"].includes(key))
+            || typeof value.token !== "string" || value.token.length > 128
+            || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)) throw new Error("Invalid stage request.");
+          return reply(res, 200, { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId) });
+        } catch (error) {
+          return reply(res, 403, { ok: false, error: error instanceof Error ? error.message : "Stage preparation failed." });
+        }
+      }
       if (req.method === "GET" && requestUrl.pathname === "/web/status") {
         return reply(res, 200, { ok: true, broker: "ready", browserTransport: options.browserTransport ? "agent-chrome" : "extension", browserReady: options.browserTransport?.ready() ?? (!!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN), extensionConnected: !!extension && extension.readyState === WebSocket.OPEN, extensionReady: !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN });
       }

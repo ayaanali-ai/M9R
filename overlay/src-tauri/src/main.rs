@@ -7,7 +7,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::{Duration, Instant, SystemTime},
 };
 
@@ -66,6 +69,7 @@ impl HoldToTalkState {
 
 /// The engine child the overlay started, so quitting the overlay stops it too.
 static ENGINE: Mutex<Option<Child>> = Mutex::new(None);
+static ENGINE_STOPPING: AtomicBool = AtomicBool::new(false);
 
 const PILL: &str = "pill";
 const COLLAPSED_W: f64 = 220.0;
@@ -419,7 +423,11 @@ fn spawn_engine_supervisor() {
     if std::env::var("M9R_FEED").is_ok() || std::env::var("M9R_NO_ENGINE").is_ok() {
         return;
     }
+    ENGINE_STOPPING.store(false, Ordering::SeqCst);
     std::thread::spawn(|| loop {
+        if ENGINE_STOPPING.load(Ordering::SeqCst) {
+            return;
+        }
         let mut wait = Duration::from_secs(5);
         if let Some(engine) = find_engine() {
             let mut cmd = Command::new(engine);
@@ -433,6 +441,13 @@ fn spawn_engine_supervisor() {
             if let Ok(child) = cmd.spawn() {
                 *ENGINE.lock().unwrap() = Some(child);
                 loop {
+                    if ENGINE_STOPPING.load(Ordering::SeqCst) {
+                        if let Some(mut child) = ENGINE.lock().unwrap().take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        return;
+                    }
                     std::thread::sleep(Duration::from_secs(2));
                     let mut guard = ENGINE.lock().unwrap();
                     match guard.as_mut().map(|c| c.try_wait()) {
@@ -449,6 +464,9 @@ fn spawn_engine_supervisor() {
             }
         } else {
             wait = Duration::from_secs(30);
+        }
+        if ENGINE_STOPPING.load(Ordering::SeqCst) {
+            return;
         }
         std::thread::sleep(wait);
     });
@@ -476,11 +494,11 @@ fn plain_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn engine_stage_call(engine: &PathBuf, args: &[String]) -> Result<serde_json::Value, String> {
+fn engine_stage_call_with_input(engine: &PathBuf, args: &[String], input: Option<String>) -> Result<serde_json::Value, String> {
     let mut cmd = Command::new(engine);
     cmd.args(args)
         .env("M9R_DESKTOP_PILL_OWNER_ACTION", "1")
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
@@ -488,7 +506,18 @@ fn engine_stage_call(engine: &PathBuf, args: &[String]) -> Result<serde_json::Va
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd.output().map_err(|e| e.to_string())?;
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    if let Some(input) = input {
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(error) = stdin.write_all(input.as_bytes()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+        }
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
     if out.stdout.len() > 4 * 1024 * 1024 {
         return Err("The desktop stage response exceeded the safe local UI size.".into());
     }
@@ -505,24 +534,70 @@ fn engine_stage_call(engine: &PathBuf, args: &[String]) -> Result<serde_json::Va
 
 /// Local pill actions reuse the same stage registry and Windows checks as `m9r web stage`.
 #[tauri::command]
-async fn desktop_stage_action(action: String, name: Option<String>, x: Option<u32>, y: Option<u32>) -> Result<serde_json::Value, String> {
-    let needs_name = matches!(action.as_str(), "create" | "activate" | "return" | "capture" | "cursor");
-    let needs_cursor = action == "cursor";
-    if !matches!(action.as_str(), "list" | "create" | "activate" | "return" | "capture" | "cursor") {
+async fn desktop_stage_action(
+    action: String,
+    name: Option<String>,
+    x: Option<u32>,
+    y: Option<u32>,
+    pid: Option<u32>,
+    window_id: Option<String>,
+    text: Option<String>,
+    direction: Option<String>,
+    from_x: Option<u32>,
+    from_y: Option<u32>,
+    to_x: Option<u32>,
+    to_y: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let needs_name = matches!(action.as_str(), "create" | "activate" | "return" | "capture" | "cursor" | "windows" | "attach" | "click" | "type" | "scroll" | "drag" | "allow-agent" | "allow-control" | "revoke-agent");
+    let needs_xy = matches!(action.as_str(), "cursor" | "click" | "scroll");
+    let needs_attach = action == "attach";
+    let needs_text = action == "type";
+    let needs_direction = action == "scroll";
+    let needs_drag = action == "drag";
+    if !matches!(action.as_str(), "list" | "create" | "activate" | "return" | "capture" | "cursor" | "windows" | "attach" | "click" | "type" | "scroll" | "drag" | "allow-agent" | "allow-control" | "revoke-agent") {
         return Err("Unsupported desktop stage action".into());
     }
     if needs_name != name.is_some() || name.as_deref().is_some_and(|value| !plain_id(value))
-        || needs_cursor != (x.is_some() && y.is_some()) || x.is_some() != y.is_some() {
-        return Err("Invalid desktop stage name".into());
+        || needs_xy != (x.is_some() && y.is_some()) || x.is_some() != y.is_some()
+        || needs_attach != pid.is_some() || needs_attach != window_id.is_some()
+        || window_id.as_deref().is_some_and(|value| !valid_window_id(value))
+        || needs_text != text.is_some() || text.as_deref().is_some_and(|value| value.chars().count() > 500)
+        || needs_direction != direction.is_some() || direction.as_deref().is_some_and(|value| value != "up" && value != "down")
+        || needs_drag != (from_x.is_some() && from_y.is_some() && to_x.is_some() && to_y.is_some())
+        || (!needs_drag && (from_x.is_some() || from_y.is_some() || to_x.is_some() || to_y.is_some()))
+        || [x, y, from_x, from_y, to_x, to_y].into_iter().flatten().any(|value| value > 99_999)
+        || pid.is_some_and(|value| value == 0) {
+        return Err("Invalid desktop stage action arguments".into());
     }
     let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
-    let mut args = vec!["web".to_string(), "stage".to_string(), action];
+    let engine_action = if action == "attach" { "attach-window" } else { action.as_str() };
+    let mut args = vec!["web".to_string(), "stage".to_string(), engine_action.to_string()];
     if let Some(name) = name { args.push(name); }
     if let (Some(x), Some(y)) = (x, y) { args.extend([x.to_string(), y.to_string()]); }
+    if needs_attach {
+        args.extend([pid.unwrap().to_string(), window_id.unwrap()]);
+    }
+    if needs_text {
+        args.push("--stdin-json".into());
+    }
+    if let Some(direction) = direction { args.push(direction); }
+    if let (Some(from_x), Some(from_y), Some(to_x), Some(to_y)) = (from_x, from_y, to_x, to_y) {
+        args.extend([from_x.to_string(), from_y.to_string(), to_x.to_string(), to_y.to_string()]);
+    }
     args.push("--json".into());
-    tauri::async_runtime::spawn_blocking(move || engine_stage_call(&engine, &args))
+    let input = text.map(|text| serde_json::json!({ "text": text }).to_string());
+    tauri::async_runtime::spawn_blocking(move || engine_stage_call_with_input(&engine, &args, input))
         .await
         .map_err(|e| e.to_string())?
+}
+
+fn valid_window_id(value: &str) -> bool {
+    let parsed = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse::<u64>().ok()
+    };
+    parsed.is_some_and(|handle| handle > 0)
 }
 
 /// Sessions M9R knows for one agent (`@codex`, `@claude`, ...), for the pill's link picker.
@@ -751,8 +826,10 @@ fn toggle_pill(app: &AppHandle) {
 }
 
 fn stop_engine() {
+    ENGINE_STOPPING.store(true, Ordering::SeqCst);
     if let Some(mut child) = ENGINE.lock().unwrap().take() {
         let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -896,10 +973,18 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::Moved(pos) = event {
-                if let Ok(size) = window.outer_size() {
-                    save_position(window.app_handle(), pos.x + size.width as i32 / 2, pos.y);
+            match event {
+                WindowEvent::Moved(pos) => {
+                    if let Ok(size) = window.outer_size() {
+                        save_position(window.app_handle(), pos.x + size.width as i32 / 2, pos.y);
+                    }
                 }
+                WindowEvent::CloseRequested { .. } => {
+                    let _ = fs::remove_file(heartbeat_path());
+                    stop_engine();
+                    window.app_handle().exit(0);
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())

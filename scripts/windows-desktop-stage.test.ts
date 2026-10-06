@@ -10,6 +10,41 @@ const createdDesktop = "4fc4701b-6c3e-46d1-bba1-e99d993a28a2";
 const ownerDesktop = "c0999999-87d4-4f8b-9fd1-48bc9d8c14ae";
 const anchor = { pid: 4_321, windowId: "9223372036854775807", desktopId: stageDesktop, onCurrentDesktop: false };
 
+test("owned launch discovery accepts hidden windows only from the exact child process", async () => withRoot(async (root) => {
+  let wrongProcess = false;
+  const requests: Record<string, unknown>[] = [];
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async (request) => {
+      requests.push(request);
+      if (request.op === "createDesktop" || request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: createdDesktop, isCurrent: false, returnDesktopId: ownerDesktop } };
+      if (request.op === "listOwnedWindows") return { ok: true, windows: [{ pid: wrongProcess ? 9999 : 4321, windowId: "1234", title: "Hidden owned app", width: 656, height: 519 }] };
+      throw new Error("Unexpected native request");
+    } });
+  await manager.create("launch-test");
+  assert.equal((await manager.listOwnedWindows("launch-test", 4321))[0]?.windowId, "1234");
+  assert.deepEqual(requests.at(-1), { op: "listOwnedWindows", pid: 4321 });
+  wrongProcess = true;
+  await assert.rejects(manager.listOwnedWindows("launch-test", 4321), /invalid identity/);
+  await assert.rejects(manager.listOwnedWindows("launch-test", 0), /Invalid owned process/);
+}));
+
+test("moves only the exact broker-owned child to its background stage without activation", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async (request) => {
+      requests.push(request);
+      if (request.op === "createDesktop" || request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: createdDesktop, isCurrent: false, returnDesktopId: ownerDesktop } };
+      if (request.op === "showAndMoveOwnedWindow") return { ok: true, window: { pid: 4321, windowId: "1234", desktopId: createdDesktop, onCurrentDesktop: false } };
+      throw new Error("Unexpected native request");
+    } });
+  await manager.create("launch-test");
+  const result = await manager.moveOwnedWindow("launch-test", 4321, "1234");
+  assert.equal(result.window.desktopId, createdDesktop);
+  assert.equal(result.window.onCurrentDesktop, false);
+  assert.deepEqual(requests.at(-1), { op: "showAndMoveOwnedWindow", pid: 4321, windowId: "1234", desktopId: createdDesktop });
+  await assert.rejects(manager.moveOwnedWindow("launch-test", 4322, "1234"), /did not confirm/);
+}));
+
 function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "m9r-windows-stage-"));
   return Promise.resolve(run(root)).finally(() => rmSync(root, { recursive: true, force: true }));
@@ -126,6 +161,37 @@ test("moves only the exact PID/window pair to the registered desktop and verifie
   assert.equal(result.fromDesktopId, ownerDesktop);
   assert.equal(result.window.desktopId, stageDesktop);
   assert.deepEqual(requests.at(-1), { op: "move", pid: 7_777, windowId: "0x1fff", desktopId: stageDesktop });
+}));
+
+test("attaches only the selected live window, moves it to the stage, then records it as the anchor", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const desktopByWindow = new Map([["4321:123", stageDesktop], ["7777:999", ownerDesktop]]);
+  const manager = createWindowsDesktopStageManager({
+    platform: "win32", root, terminal: true, env: {},
+    invokeNative: async (request) => {
+      requests.push(request);
+      if (request.op === "move") {
+        desktopByWindow.set(`${request.pid}:${request.windowId}`, String(request.desktopId));
+      }
+      const key = `${request.pid}:${request.windowId}`;
+      const desktopId = desktopByWindow.get(key);
+      if (request.op === "inspect" && desktopId) {
+        return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId, onCurrentDesktop: desktopId === ownerDesktop } };
+      }
+      if (request.op === "move" && desktopId) {
+        return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId, onCurrentDesktop: false } };
+      }
+      throw new Error(`Unexpected native operation: ${String(request.op)}`);
+    },
+  });
+  await manager.register("stage", "4321", "123");
+  const result = await manager.attachWindow("stage", "7777", "999");
+  assert.deepEqual(result.stage.anchor, { pid: 7777, windowId: "999" });
+  assert.equal(result.window.desktopId, stageDesktop);
+  assert.deepEqual(requests.filter((request) => request.op === "move"), [
+    { op: "move", pid: 7777, windowId: "999", desktopId: stageDesktop },
+  ]);
+  assert.deepEqual((await manager.inspectStage("stage")).anchor, result.window);
 }));
 
 test("requires an interactive owner terminal and rejects agent initiated stage changes", async () => withRoot(async (root) => {

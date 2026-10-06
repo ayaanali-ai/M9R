@@ -10,8 +10,13 @@ import { delimiter, join } from "node:path";
 import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
 import { windowsFileHolders, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
+import { defaultStoreRoot } from "./local-store";
+import { createWebBrokerClient } from "./web-broker-client";
+import { brokerKeyPath } from "./web-broker-paths";
+import { prepareTaskStageNotice } from "./task-stage-notice";
 
 export interface DeliveryDeps {
+  prepareTaskStage?(token: string, taskId: string): Promise<string>;
   resolveCodex(): CodexCommand | null;
   runCodex(command: CodexCommand, args: string[]): Promise<{ code: number | null; stderr: string; spawnError?: string }>;
   /** Last bytes of the rollout file for a thread, or null when it cannot be found. */
@@ -40,10 +45,12 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
     store.setDelivery(taskId, { state: "failed", attempts, error: reason });
     return { state: "failed", reason };
   };
-  const queueMessageFor = (sessionId: string): string | null => {
+  const queueMessageFor = async (sessionId: string): Promise<string | null> => {
     if (!deps.requireTargetIdentity) return buildQueueMessage(task);
     const token = store.identityTokenFor("codex", sessionId);
-    return token ? buildQueueMessage(task, token) : null;
+    if (!token) return null;
+    const stageNotice = deps.prepareTaskStage ? await deps.prepareTaskStage(token, taskId).catch(() => "M9R task stage preparation failed; no desktop control was granted.") : "";
+    return buildQueueMessage(task, token) + (stageNotice ? `\n\n${stageNotice}` : "");
   };
   const everySession = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
 
@@ -51,7 +58,7 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   const linked = task.fromSession && !task.targetSession ? store.linkedSession(task.from, task.fromSession, "codex", task.cwd) : undefined;
   const linkedTargets = linked ? everySession.filter((session) => session.sessionId === linked.sessionId && (!linked.cwd || normCwd(session.cwd) === normCwd(linked.cwd))) : [];
   if (linked && linkedTargets.length === 1 && isThreadId(linked.sessionId)) {
-    const message = queueMessageFor(linked.sessionId);
+    const message = await queueMessageFor(linked.sessionId);
     if (!message) return fail("The target Codex session has no active M9R token; reconnect it before delivery.");
     const command = deps.resolveCodex();
     if (!command) return fail("The codex command was not found on this machine.");
@@ -87,7 +94,7 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   );
   const endpoint = choice.session;
   if (!isThreadId(endpoint.sessionId)) return fail("The Codex session id looks wrong; open Codex again and retry.");
-  const message = queueMessageFor(endpoint.sessionId);
+  const message = await queueMessageFor(endpoint.sessionId);
   if (!message) return fail("The target Codex session has no active M9R token; reconnect it before delivery.");
   const command = deps.resolveCodex();
   if (!command) return fail("The codex command was not found on this machine.");
@@ -189,7 +196,10 @@ export function readRolloutTailFor(threadId: string, env: Record<string, string 
 }
 
 export function realDeps(env: Record<string, string | undefined> = process.env): DeliveryDeps {
+  const root = defaultStoreRoot(homedir(), env);
+  const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
   return {
+    prepareTaskStage: (token, taskId) => prepareTaskStageNotice(root, web, token, "codex", taskId),
     requireTargetIdentity: true,
     resolveCodex: () => resolveCodexCommand({
       platform: process.platform,

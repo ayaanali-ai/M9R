@@ -24,6 +24,8 @@ export interface WindowsStageRecord {
   anchor: { pid: number; windowId: string } | null;
   /** Random identity rotated whenever the registered anchor window changes. */
   roomWindowId: string | null;
+  /** Local-only owner mapping; never included in room coordination events. */
+  agentAssignment?: { handle: string; sessionTag: string };
   registeredAt: string;
 }
 
@@ -44,6 +46,8 @@ interface NativeStageResponse {
   error?: string;
   window?: NativeWindowStageInfo;
   desktop?: NativeDesktopStageInfo;
+  input?: { childWindowId: string };
+  windows?: { pid: number; windowId: string; title: string; width: number; height: number }[];
 }
 
 interface NativeDesktopStageInfo {
@@ -109,6 +113,17 @@ function parseRegistry(raw: string): StageRegistry {
       || (anchor === null && roomWindowId !== null) || (anchor !== null && roomWindowId === null)) {
       throw new Error("The local Windows stage registry contains an invalid room coordination identity; it was left unchanged.");
     }
+    let agentAssignment: WindowsStageRecord["agentAssignment"];
+    if (record.agentAssignment !== undefined) {
+      const value = record.agentAssignment as { handle?: unknown; sessionTag?: unknown } | null;
+      if (value !== null && (!value || typeof value !== "object" || Array.isArray(value)
+        || Object.keys(value).some((key) => key !== "handle" && key !== "sessionTag")
+        || typeof value.handle !== "string" || !/^[a-z0-9_-]{1,40}$/.test(value.handle)
+        || typeof value.sessionTag !== "string" || !/^[a-f0-9]{8}$/.test(value.sessionTag))) {
+        throw new Error("The local Windows stage registry contains an invalid agent assignment; it was left unchanged.");
+      }
+      if (value) agentAssignment = { handle: value.handle as string, sessionTag: value.sessionTag as string };
+    }
     return {
       name,
       desktopId: record.desktopId.toLowerCase(),
@@ -116,6 +131,7 @@ function parseRegistry(raw: string): StageRegistry {
       returnToDesktopId: returnToDesktopId?.toLowerCase() ?? null,
       anchor,
       roomWindowId: roomWindowId?.toLowerCase() ?? null,
+      ...(agentAssignment ? { agentAssignment } : {}),
       registeredAt: record.registeredAt,
     };
   });
@@ -248,6 +264,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
         roomWindowId: existing?.anchor?.pid === info.pid && existing.anchor.windowId === info.windowId
           ? existing.roomWindowId
           : randomUUID(),
+        ...(existing?.agentAssignment ? { agentAssignment: existing.agentAssignment } : {}),
         registeredAt: existing?.registeredAt ?? now().toISOString(),
       };
       if (!existing && registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
@@ -379,6 +396,22 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return { fromDesktopId: current.desktopId, window: moved, stage };
   }
 
+  async function attachWindow(nameInput: string, pidInput: string, windowIdInput: string): Promise<{ stage: WindowsStageRecord; window: NativeWindowStageInfo }> {
+    assertWindows();
+    assertOwner();
+    const name = normalizedName(nameInput);
+    const stage = readRegistry(root).stages.find((item) => item.name === name);
+    if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
+    const current = await inspectWindow(pidInput, windowIdInput);
+    if (current.desktopId !== stage.desktopId) await moveWindow(name, pidInput, windowIdInput);
+    const registered = await register(name, pidInput, windowIdInput);
+    const inspected = await inspectStage(name);
+    if (!inspected.anchor || inspected.anchor.pid !== registered.anchor?.pid || inspected.anchor.windowId !== registered.anchor?.windowId) {
+      throw new Error(`Windows did not confirm that the selected app window is attached to stage “${name}”.`);
+    }
+    return { stage: registered, window: inspected.anchor };
+  }
+
   async function roomKeys(nameInput: string): Promise<{ stage: WindowsStageRecord; desktop: NativeDesktopStageInfo; anchor?: NativeWindowStageInfo }> {
     const inspected = await inspectStage(nameInput);
     const name = inspected.stage.name;
@@ -410,6 +443,31 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return readRegistry(root).stages;
   }
 
+  function assignAgent(nameInput: string, assignment: { handle: string; sessionTag: string } | null): WindowsStageRecord {
+    assertWindows();
+    assertOwner();
+    const name = normalizedName(nameInput);
+    if (assignment && (!/^[a-z0-9_-]{1,40}$/.test(assignment.handle) || !/^[a-f0-9]{8}$/.test(assignment.sessionTag))) {
+      throw new Error("Invalid local agent-to-stage assignment.");
+    }
+    const release = acquireRegistryLock(root);
+    try {
+      const registry = readRegistry(root);
+      const stage = registry.stages.find((item) => item.name === name);
+      if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
+      if (assignment && stage.agentAssignment
+        && (stage.agentAssignment.handle !== assignment.handle || stage.agentAssignment.sessionTag !== assignment.sessionTag)) {
+        throw new Error(`Stage “${name}” is already mapped to another agent session.`);
+      }
+      if (assignment) stage.agentAssignment = { ...assignment };
+      else delete stage.agentAssignment;
+      writeRegistryWhileLocked(root, registry);
+      return stage;
+    } finally {
+      release();
+    }
+  }
+
   function forget(nameInput: string): WindowsStageRecord {
     assertWindows();
     assertOwner();
@@ -426,7 +484,62 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     }
   }
 
-  return { inspectWindow, register, create, inspectStage, activate, returnToOwnerDesktop, moveWindow, roomKeys, list, forget };
+  async function controlInput(name: string, kind: "click" | "type" | "scroll", input: { x: number; y: number; imageWidth: number; imageHeight: number; text?: string; direction?: "up" | "down" }) {
+    const inspected = await inspectStage(name);
+    if (!inspected.anchor) throw new Error("Stage has no registered app window.");
+    const result = await invokeNative({ op: "input", kind, pid: inspected.anchor.pid, windowId: inspected.anchor.windowId,
+      desktopId: inspected.stage.desktopId, ...input });
+    if (!result.ok) throw new Error(result.error ?? "Native child-control input failed.");
+    if (!result.input?.childWindowId) throw new Error("Native input returned no exact control identity.");
+    return result.input;
+  }
+
+  async function listOwnedWindows(name: string, pid: number) {
+    await inspectStage(name);
+    if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0xffff_ffff) throw new Error("Invalid owned process id.");
+    const result = await invokeNative({ op: "listOwnedWindows", pid });
+    if (!result.ok || !Array.isArray(result.windows)) throw new Error(result.error ?? "Owned-window discovery failed.");
+    if (result.windows.length > 16 || result.windows.some((window) => window.pid !== pid
+      || typeof window.windowId !== "string" || !WINDOW_ID_RE.test(window.windowId)
+      || !/[^0]/.test(window.windowId.replace(/^0[xX]/, ""))
+      || typeof window.title !== "string" || !Number.isFinite(window.width) || !Number.isFinite(window.height)
+      || window.width < 80 || window.height < 60)) throw new Error("Owned-window discovery returned an invalid identity.");
+    return result.windows;
+  }
+
+  async function showOwnedWindow(name: string) {
+    const inspected = await inspectStage(name);
+    if (!inspected.anchor) throw new Error("Stage has no registered owned app.");
+    const result = await invokeNative({ op: "showOwnedWindow", pid: inspected.anchor.pid, windowId: inspected.anchor.windowId, desktopId: inspected.stage.desktopId });
+    if (!result.ok) throw new Error(result.error ?? "The owned app could not be shown on its background stage.");
+    return normalizeWindowInfo(result.window);
+  }
+
+  async function moveOwnedWindow(name: string, pid: number, windowId: string) {
+    const inspected = await inspectStage(name);
+    if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0xffff_ffff) throw new Error("Invalid owned process id.");
+    const id = parseWindowId(windowId);
+    const result = await invokeNative({ op: "showAndMoveOwnedWindow", pid, windowId: id, desktopId: inspected.stage.desktopId });
+    if (!result.ok) throw new Error(result.error ?? "Windows could not place the launched app on its stage.");
+    const window = normalizeWindowInfo(result.window);
+    if (window.pid !== pid || window.windowId !== id || window.desktopId !== inspected.stage.desktopId || window.onCurrentDesktop) {
+      throw new Error("Windows did not confirm the launched app on its background stage.");
+    }
+    return { stage: inspected.stage, window };
+  }
+
+  function clearOwnedAnchor(nameInput: string, pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    const name = normalizedName(nameInput), release = acquireRegistryLock(root);
+    try {
+      const registry = readRegistry(root), stage = registry.stages.find((item) => item.name === name);
+      if (!stage || stage.anchor?.pid !== pid || stage.anchor.windowId !== windowId) throw new Error("The task app is no longer this stage's registered window.");
+      stage.anchor = null; stage.roomWindowId = null;
+      writeRegistryWhileLocked(root, registry);
+    } finally { release(); }
+  }
+
+  return { inspectWindow, register, create, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, moveOwnedWindow, showOwnedWindow, clearOwnedAnchor };
 }
 
 function parsePid(value: string): number {
@@ -501,6 +614,7 @@ export async function runWindowsDesktopStageCli(args: string[], deps: WindowsSta
             name: stage.name,
             desktopId: stage.desktopId,
             returnToDesktopId: stage.returnToDesktopId,
+            ...(stage.agentAssignment ? { agentAssignment: stage.agentAssignment } : {}),
             hasAnchor: Boolean(inspected.anchor),
             isCurrent: inspected.desktop.isCurrent,
             status: inspected.desktop.isCurrent ? "current" : "background",
@@ -510,6 +624,7 @@ export async function runWindowsDesktopStageCli(args: string[], deps: WindowsSta
             name: stage.name,
             desktopId: stage.desktopId,
             returnToDesktopId: stage.returnToDesktopId,
+            ...(stage.agentAssignment ? { agentAssignment: stage.agentAssignment } : {}),
             hasAnchor: false,
             isCurrent: false,
             status: "unavailable",
@@ -556,6 +671,11 @@ export async function runWindowsDesktopStageCli(args: string[], deps: WindowsSta
       const stage = await manager.register(commandArgs[1]!, commandArgs[2]!, commandArgs[3]!);
       process.stdout.write(`Registered local stage “${stage.name}” on desktop ${stage.desktopId}.\n`);
       process.stdout.write("The stage label is local to this machine. M9R did not create or switch a desktop.\n");
+      return 0;
+    }
+    if (json && action === "attach-window" && commandArgs.length === 4) {
+      const result = await manager.attachWindow(commandArgs[1]!, commandArgs[2]!, commandArgs[3]!);
+      process.stdout.write(`${JSON.stringify({ ok: true, window: result.window })}\n`);
       return 0;
     }
     if (action === "create" && commandArgs.length === 2) {

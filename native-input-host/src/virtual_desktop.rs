@@ -106,7 +106,7 @@ fn supports_internal_desktop_api(major: u32, minor: u32, build: u32) -> bool {
 }
 
 /// Dispatches the deliberately narrow local stage API. Desktop creation and activation use the
-/// version-gated Windows shell interface; window inspection and movement stay on the public API.
+/// version-gated Windows shell interface; window inspection stays on the public API.
 pub fn handle_desktop_stage_request(value: &Value) -> Value {
     let request_id = value.get("requestId").and_then(Value::as_str).unwrap_or("");
     match value.get("op").and_then(Value::as_str) {
@@ -133,6 +133,28 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
                 Err(error) => json!({ "ok": false, "requestId": request_id, "error": error }),
             }
         }
+        #[cfg(windows)]
+        Some("listOwnedWindows") => match platform::list_owned_windows(value) {
+            Ok(windows) => json!({"ok":true,"requestId":request_id,"windows":windows}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("showAndMoveOwnedWindow") => match platform::show_and_move_owned_window(value) {
+            Ok(window) => json!({"ok":true,"requestId":request_id,"window":to_json(window)}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("showOwnedWindow") => match platform::show_owned_window(value) {
+            Ok(window) => json!({"ok":true,"requestId":request_id,"window":to_json(window)}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("input") => match platform::input_window(value) {
+            Ok(child) => {
+                json!({"ok":true,"requestId":request_id,"input":{"childWindowId":child.to_string()}})
+            }
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
         Some("createDesktop") => match create_desktop() {
             Ok(desktop) => {
                 json!({ "ok": true, "requestId": request_id, "desktop": desktop_to_json(desktop) })
@@ -316,6 +338,12 @@ mod platform {
         data3: 0x11ce,
         data4: [0x80, 0x34, 0x00, 0xaa, 0x00, 0x60, 0x09, 0xfa],
     };
+    const IID_APPLICATION_VIEW_COLLECTION: GuidRaw = GuidRaw {
+        data1: 0x1841c6d7,
+        data2: 0x4f9d,
+        data3: 0x42c0,
+        data4: [0xaf, 0x41, 0x87, 0x47, 0x53, 0x8f, 0x10, 0xe5],
+    };
     const IID_VIRTUAL_DESKTOP: GuidRaw = GuidRaw {
         data1: 0x3f07f4be,
         data2: 0xb107,
@@ -375,6 +403,20 @@ mod platform {
             unsafe extern "system" fn(Interface, u32, *const GuidRaw, *mut Interface) -> HResult,
     }
 
+    // Only the prefix through GetViewForHwnd is needed. Never resolve a different
+    // process/main window when the owner's exact HWND cannot be represented.
+    #[repr(C)]
+    struct ApplicationViewCollectionVTable {
+        query_interface: QueryInterfaceFn,
+        add_ref: AddRefFn,
+        release: ReleaseFn,
+        get_views: unsafe extern "system" fn(Interface, *mut Interface) -> HResult,
+        get_views_by_z_order: unsafe extern "system" fn(Interface, *mut Interface) -> HResult,
+        get_views_by_app_user_model_id:
+            unsafe extern "system" fn(Interface, *const u16, *mut Interface) -> HResult,
+        get_view_for_hwnd: unsafe extern "system" fn(Interface, Hwnd, *mut Interface) -> HResult,
+    }
+
     #[repr(C)]
     struct VirtualDesktopVTable {
         query_interface: QueryInterfaceFn,
@@ -405,7 +447,285 @@ mod platform {
     #[link(name = "user32")]
     unsafe extern "system" {
         fn IsWindow(window: Hwnd) -> i32;
+        fn IsWindowEnabled(window: Hwnd) -> i32;
+        fn ShowWindow(window: Hwnd, command: i32) -> i32;
+        fn EnumWindows(callback: unsafe extern "system" fn(Hwnd, isize) -> i32, parameter: isize) -> i32;
+        fn GetWindowTextW(window: Hwnd, buffer: *mut u16, count: i32) -> i32;
         fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
+        fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
+        fn ScreenToClient(window: Hwnd, point: *mut Point) -> i32;
+        fn ChildWindowFromPointEx(window: Hwnd, point: Point, flags: u32) -> Hwnd;
+        fn GetClassNameW(window: Hwnd, buffer: *mut u16, count: i32) -> i32;
+        fn PostMessageW(window: Hwnd, message: u32, wparam: usize, lparam: isize) -> i32;
+        fn SendMessageTimeoutW(
+            window: Hwnd,
+            message: u32,
+            wparam: usize,
+            lparam: isize,
+            flags: u32,
+            timeout_ms: u32,
+            result: *mut usize,
+        ) -> isize;
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    /// Launch discovery must include hidden top-level windows. Cua's user-facing
+    /// window inventory is not an ownership handshake for a hidden new process.
+    pub(super) fn list_owned_windows(value: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+        let pid = value.get("pid").and_then(serde_json::Value::as_u64)
+            .filter(|pid| *pid > 0 && *pid <= u32::MAX as u64)
+            .ok_or("invalid owned process id")? as u32;
+        struct Search { pid: u32, windows: Vec<serde_json::Value> }
+        unsafe extern "system" fn visit(window: Hwnd, parameter: isize) -> i32 {
+            let search = unsafe { &mut *(parameter as *mut Search) };
+            let mut actual_pid = 0;
+            unsafe { GetWindowThreadProcessId(window, &mut actual_pid); }
+            if actual_pid != search.pid { return 1; }
+            let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+            let mut title = [0u16; 256];
+            let length = unsafe { GetWindowTextW(window, title.as_mut_ptr(), title.len() as i32) };
+            if length <= 0 || unsafe { GetWindowRect(window, &mut rect) } == 0 { return 1; }
+            let width = rect.right.saturating_sub(rect.left);
+            let height = rect.bottom.saturating_sub(rect.top);
+            if width < 80 || height < 60 { return 1; }
+            search.windows.push(serde_json::json!({"pid":actual_pid,"windowId":(window as usize).to_string(),
+                "title":String::from_utf16_lossy(&title[..length as usize]),"width":width,"height":height}));
+            if search.windows.len() >= 16 { 0 } else { 1 }
+        }
+        let mut search = Search { pid, windows: Vec::new() };
+        let enumerated = unsafe { EnumWindows(visit, &mut search as *mut Search as isize) };
+        if enumerated == 0 && search.windows.len() < 16 {
+            return Err("Windows owned-window enumeration failed".into());
+        }
+        Ok(search.windows)
+    }
+
+    pub(super) fn show_owned_window(value: &serde_json::Value) -> Result<WindowDesktop, String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let desktop = super::parse_desktop_id(value)?;
+        let _apartment = ComApartment::initialize()?;
+        let manager = Manager::create()?;
+        let window = validate_window(pid, handle)?;
+        if manager.desktop_id(window)? != desktop || manager.is_on_current_desktop(window)? {
+            return Err("owned app must be on its authorized background stage before showing".into());
+        }
+        unsafe { ShowWindow(window, 4); } // SW_SHOWNOACTIVATE: never activate the owner's foreground.
+        if manager.desktop_id(window)? != desktop || manager.is_on_current_desktop(window)? {
+            return Err("owned app left its authorized background stage while showing".into());
+        }
+        Ok(WindowDesktop { pid, window_id: handle.to_string(), desktop_id: desktop.as_string(), on_current_desktop: false })
+    }
+
+    /// A newly created hidden HWND may not yet have a shell application view,
+    /// so IVirtualDesktopManager cannot resolve its desktop. Show only the
+    /// exact broker-owned HWND without activation and move it to its stage,
+    /// leaving it visible there for capture and control. If movement fails,
+    /// hide it on the original desktop and leave that desktop active.
+    pub(super) fn show_and_move_owned_window(value: &serde_json::Value) -> Result<WindowDesktop, String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let target = super::parse_desktop_id(value)?;
+        let _apartment = ComApartment::initialize()?;
+        let public = Manager::create()?;
+        let internal = InternalManager::create()?;
+        let window = validate_window(pid, handle)?;
+        let original = internal.current_id()?;
+        let target_desktop = internal.find_desktop(target)?.ok_or("authorized target desktop no longer exists")?;
+        if original == target { return Err("owned app must be moved from the owner desktop to its stage".into()); }
+        unsafe { ShowWindow(window, 4); } // SW_SHOWNOACTIVATE, never steals foreground.
+        let moved = (|| {
+            validate_window(pid, handle)?;
+            if !public.is_on_current_desktop(window)? {
+                return Err("owned app is not on the desktop that was active when its stage launch began");
+            }
+            internal.move_exact_window(window, target)?;
+            if internal.current_id()? != original { return Err("Windows changed the active desktop while moving the owned app"); }
+            if public.desktop_id(window)? != target { return Err("Windows did not confirm the owned app reached its stage"); }
+            read_window(&public, pid, window)
+        })();
+        drop(target_desktop);
+        if moved.is_err() {
+            // Hide only this exact child window; do not switch desktops to clean up.
+            validate_window(pid, handle)?;
+            unsafe { ShowWindow(window, 0); }
+        }
+        moved.map_err(str::to_owned)
+    }
+
+    pub(super) fn input_window(value: &serde_json::Value) -> Result<usize, String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let desktop = super::parse_desktop_id(value)?;
+        let kind = value
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("invalid input kind")?;
+        if !matches!(kind, "click" | "type" | "scroll") {
+            return Err("unsupported input kind".into());
+        }
+        let coord = |key| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_i64)
+                .filter(|n| *n >= 0 && *n < 16384)
+                .map(|n| n as i32)
+                .ok_or("invalid input coordinates")
+        };
+        let x = coord("x")?;
+        let y = coord("y")?;
+        let image_width = coord("imageWidth")?;
+        let image_height = coord("imageHeight")?;
+        if image_width < 1 || image_height < 1 || x >= image_width || y >= image_height {
+            return Err("input point is outside the current screenshot".into());
+        }
+        let text = value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if kind == "type"
+            && (text.is_empty() || text.chars().count() > 500 || text.chars().any(char::is_control))
+        {
+            return Err("invalid input text".into());
+        }
+        let direction = value
+            .get("direction")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if kind == "scroll" && !matches!(direction, "up" | "down") {
+            return Err("invalid scroll direction".into());
+        }
+        let _apartment = ComApartment::initialize()?;
+        let manager = Manager::create()?;
+        let root = validate_window(pid, handle)?;
+        if manager.desktop_id(root)? != desktop {
+            return Err("app window is no longer on the authorized stage".into());
+        }
+        let mut class_buffer = [0u16; 256];
+        let length = unsafe { GetClassNameW(root, class_buffer.as_mut_ptr(), 256) };
+        let class = String::from_utf16_lossy(&class_buffer[..length.max(0) as usize]);
+        // This route is only for classic WinForms controls. Chromium, Electron,
+        // games and owner foreground input remain outside this bounded adapter.
+        if !class.starts_with("WindowsForms10.") {
+            return Err("unsupported native-control window".into());
+        }
+        let mut rect = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetWindowRect(root, &mut rect) } == 0
+            || rect.right <= rect.left
+            || rect.bottom <= rect.top
+        {
+            return Err("input point is outside the exact app window".into());
+        }
+        let screen = Point {
+            x: rect.left
+                + ((x as i64 * (rect.right - rect.left) as i64) / image_width as i64) as i32,
+            y: rect.top
+                + ((y as i64 * (rect.bottom - rect.top) as i64) / image_height as i64) as i32,
+        };
+        let mut child = root;
+        for _ in 0..32 {
+            let mut local = screen;
+            if unsafe { ScreenToClient(child, &mut local) } == 0 {
+                return Err("could not map child input coordinates".into());
+            }
+            let next = unsafe { ChildWindowFromPointEx(child, local, 2) };
+            if next.is_null() || next == child {
+                break;
+            }
+            validate_window(pid, next as usize)?;
+            child = next;
+        }
+        validate_window(pid, child as usize)?;
+        let mut local = screen;
+        if unsafe { ScreenToClient(child, &mut local) } == 0 {
+            return Err("could not map exact control input".into());
+        }
+        let position = ((local.y as u32 & 0xffff) << 16 | (local.x as u32 & 0xffff)) as isize;
+        let post = |message, wparam, lparam| {
+            if unsafe { PostMessageW(child, message, wparam, lparam) } != 0 {
+                Ok(())
+            } else {
+                Err("Windows refused exact child-control input")
+            }
+        };
+        let send_timeout = |message, wparam, lparam| {
+            let mut result = 0usize;
+            // These are system-defined edit-control messages (< WM_USER), so
+            // Windows marshals them safely across the native host boundary.
+            // Bound the wait in case the app's UI thread is unresponsive.
+            if unsafe {
+                SendMessageTimeoutW(child, message, wparam, lparam, 0x22, 750, &mut result)
+            } == 0
+            {
+                Err("the exact native edit control did not respond")
+            } else {
+                Ok(result)
+            }
+        };
+        match kind {
+            "click" => {
+                let length = unsafe { GetClassNameW(child, class_buffer.as_mut_ptr(), 256) };
+                let class = String::from_utf16_lossy(&class_buffer[..length.max(0) as usize]);
+                if unsafe { IsWindowEnabled(child) } == 0 {
+                    return Err("the selected native control is disabled".into());
+                }
+                if class.starts_with("WindowsForms10.EDIT.") {
+                    // WM_LBUTTONDOWN gives a WinForms edit control keyboard
+                    // focus, which can activate its hidden virtual desktop.
+                    // Resolve the clicked character and move only the edit
+                    // caret instead; neither message activates the window.
+                    let character = (send_timeout(0x00d7, 0, position)? as u32 & 0xffff) as usize;
+                    if character == 0xffff {
+                        return Err("the click point is outside the native edit text area".into());
+                    }
+                    send_timeout(0x00b1, character, character as isize)?;
+                } else if class.starts_with("WindowsForms10.BUTTON.") {
+                    // WinForms Button.OnMouseUp checks WindowFromPoint on the
+                    // active desktop before raising Click. Posted mouse input
+                    // therefore cannot invoke an off-desktop button. Deliver
+                    // its reflected BN_CLICKED command to the exact validated
+                    // button instead; this never activates or moves a window.
+                    // Delivery is still not evidence of an application effect.
+                    post(0x2111, 0, child as isize)?;
+                } else {
+                    post(0x0201, 1, position)?;
+                    post(0x0202, 0, position)?;
+                }
+            }
+            "type" => {
+                let length = unsafe { GetClassNameW(child, class_buffer.as_mut_ptr(), 256) };
+                let class = String::from_utf16_lossy(&class_buffer[..length.max(0) as usize]);
+                if !class.starts_with("WindowsForms10.EDIT.") {
+                    return Err(format!("the selected native control is not an editable text field (class={class}, mapped=({},{}), image={}x{}, window={}x{})", local.x, local.y, image_width, image_height, rect.right-rect.left, rect.bottom-rect.top));
+                }
+                for unit in text.encode_utf16() {
+                    post(0x0102, unit as usize, 1)?;
+                }
+            }
+            "scroll" => {
+                let wheel = if direction == "down" { -360i16 } else { 360i16 };
+                let screen_position =
+                    ((screen.y as u32 & 0xffff) << 16 | (screen.x as u32 & 0xffff)) as isize;
+                post(0x020a, (wheel as u16 as usize) << 16, screen_position)?;
+            }
+            _ => unreachable!(),
+        }
+        Ok(child as usize)
     }
 
     struct ComApartment;
@@ -481,14 +801,6 @@ mod platform {
                 return Err("could not check the window's current virtual desktop");
             }
             Ok(is_current != 0)
-        }
-
-        fn move_to(&self, window: Hwnd, desktop: &Guid) -> Result<(), &'static str> {
-            let result = unsafe { (self.vtable().move_window_to_desktop)(self.0, window, desktop) };
-            if result < 0 {
-                return Err("Windows refused to move the window to that virtual desktop");
-            }
-            Ok(())
         }
     }
 
@@ -627,6 +939,63 @@ mod platform {
             let status = unsafe { (self.vtable().switch_desktop)(self.0.value(), desktop) };
             if status < 0 {
                 return Err("Windows refused to activate the requested virtual desktop");
+            }
+            Ok(())
+        }
+
+        fn move_exact_window(&self, window: Hwnd, target: Guid) -> Result<(), &'static str> {
+            let desktop = self
+                .find_desktop(target)?
+                .ok_or("the requested virtual desktop no longer exists")?;
+            let mut shell = std::ptr::null_mut();
+            let status = unsafe {
+                CoCreateInstance(
+                    &CLSID_IMMERSIVE_SHELL,
+                    std::ptr::null_mut(),
+                    CLSCTX_ALL,
+                    &IID_SERVICE_PROVIDER,
+                    &mut shell,
+                )
+            };
+            if status < 0 || shell.is_null() {
+                return Err("Windows immersive shell service is unavailable");
+            }
+            let shell = OwnedInterface(shell);
+            let provider = unsafe { &**(shell.value() as *mut *mut IServiceProviderVTable) };
+            let mut collection = std::ptr::null_mut();
+            let status = unsafe {
+                (provider.query_service)(
+                    shell.value(),
+                    &IID_APPLICATION_VIEW_COLLECTION,
+                    &IID_APPLICATION_VIEW_COLLECTION,
+                    &mut collection,
+                )
+            };
+            if status < 0 || collection.is_null() {
+                return Err("Windows application view collection is unavailable");
+            }
+            let collection = OwnedInterface(collection);
+            let views =
+                unsafe { &**(collection.value() as *mut *mut ApplicationViewCollectionVTable) };
+            let mut view = std::ptr::null_mut();
+            let status =
+                unsafe { (views.get_view_for_hwnd)(collection.value(), window, &mut view) };
+            if status < 0 || view.is_null() {
+                return Err("Windows cannot resolve the exact requested app window");
+            }
+            let view = OwnedInterface(view);
+            let mut permitted = 0;
+            let status = unsafe {
+                (self.vtable().can_view_move_desktops)(self.0.value(), view.value(), &mut permitted)
+            };
+            if status < 0 || permitted == 0 {
+                return Err("Windows does not allow this app window to move desktops");
+            }
+            let status = unsafe {
+                (self.vtable().move_view_to_desktop)(self.0.value(), view.value(), desktop.value())
+            };
+            if status < 0 {
+                return Err("Windows refused to move the exact app view to the stage");
             }
             Ok(())
         }
@@ -776,7 +1145,16 @@ mod platform {
         let _apartment = ComApartment::initialize()?;
         let manager = Manager::create()?;
         let window = validate_window(pid, handle)?;
-        manager.move_to(window, &target)?;
+        // The public API only moves windows owned by this helper process. The
+        // task app lives in another process, so use the build-gated shell view
+        // API for that exact validated HWND; never switch the desktop to move it.
+        let internal = InternalManager::create()?;
+        let original = internal.current_id()?;
+        validate_window(pid, handle)?;
+        internal.move_exact_window(window, target)?;
+        if internal.current_id()? != original {
+            return Err("Windows changed the active desktop while moving the app window");
+        }
         let result = read_window(&manager, pid, window)?;
         if result.desktop_id != target.as_string() {
             return Err(
