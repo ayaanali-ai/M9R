@@ -5,6 +5,7 @@
 // Run `npm run build:cli` first; this bundles cli/dist. Output: engine/dist/m9r-engine.exe (or no extension off Windows).
 
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -16,6 +17,9 @@ const work = join(out, "work");
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(root, "cli", "dist", "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";
+const cuaDriverVersion = "0.33.4";
+const cuaDriverArchiveSha256 = "93f658ac02080ac1fac709f88f79ba38980ce77b816725ec2a0128aeba1811f5";
+const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua-driver-rs-v${cuaDriverVersion}/cua-driver-${cuaDriverVersion}-windows-x86_64-binary.zip`;
 
 if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle)) throw new Error("cli/dist is missing: run `npm run build:cli` first.");
 rmSync(work, { recursive: true, force: true });
@@ -86,10 +90,13 @@ if (process.platform === "win32") {
   if (r.status !== 0) process.exit(r.status ?? 1);
   copyFileSync(join(root, "native-input-host", "target", "release", "m9r-native-input-host.exe"), join(out, "m9r-native-input-host.exe"));
 
-  // The embedded CLI loads Cua Driver from a sibling runtime directory so the native
-  // SDK DLLs stay outside the SEA blob and the owner can update them with the engine.
-  const cuaRuntime = join(out, "cua-driver-runtime", "node_modules");
-  rmSync(join(out, "cua-driver-runtime"), { recursive: true, force: true });
+  // Keep the JavaScript SDK and native bindings beside the executable, and include
+  // Cua's separately built DPI-aware Windows daemon. M9R must use the daemon path
+  // for the OS cursor overlay; the in-process Node runtime is DPI-virtualized on
+  // scaled Windows displays.
+  const cuaRuntimeRoot = join(out, "cua-driver-runtime");
+  const cuaRuntime = join(cuaRuntimeRoot, "node_modules");
+  rmSync(cuaRuntimeRoot, { recursive: true, force: true });
   for (const packageName of [
     "@trycua/cua-driver",
     "@trycua/cua-driver-win32-x64-msvc",
@@ -109,6 +116,45 @@ if (process.platform === "win32") {
   for (const required of [driverDll, driverAddon, ubjsAddon]) {
     if (!existsSync(required)) throw new Error(`Cua Driver release binary is missing: ${required}`);
   }
+
+  const installedDriverPackage = JSON.parse(readFileSync(join(cuaRuntime, "@trycua", "cua-driver", "package.json"), "utf8"));
+  if (installedDriverPackage.version !== cuaDriverVersion) {
+    throw new Error(`The JavaScript Cua Driver package is ${installedDriverPackage.version}; the Windows runtime is pinned to ${cuaDriverVersion}.`);
+  }
+
+  const archiveRoot = join(root, ".workcache", "cua-driver-release", cuaDriverVersion);
+  const archivePath = join(archiveRoot, `cua-driver-${cuaDriverVersion}-windows-x86_64-binary.zip`);
+  mkdirSync(archiveRoot, { recursive: true });
+  if (!existsSync(archivePath)) {
+    console.log(`Downloading pinned Cua Driver ${cuaDriverVersion} Windows daemon...`);
+    const response = await fetch(cuaDriverArchiveUrl, { redirect: "follow" });
+    if (!response.ok) throw new Error(`Could not download Cua Driver ${cuaDriverVersion} (${response.status} ${response.statusText}).`);
+    writeFileSync(archivePath, Buffer.from(await response.arrayBuffer()));
+  }
+  const archiveHash = createHash("sha256").update(readFileSync(archivePath)).digest("hex");
+  if (archiveHash !== cuaDriverArchiveSha256) {
+    throw new Error(`Cua Driver ${cuaDriverVersion} Windows archive checksum mismatch: ${archiveHash}. Refusing to package an unverified daemon.`);
+  }
+  const expectedEntries = ["cua-driver.exe", "cua-cursor-theme.exe", "cua-driver-uia.exe", "cua_driver_sdk.dll", "cua_driver_node_runtime.node", "cua_driver_abi.h"];
+  const archiveEntries = spawnSync("tar.exe", ["-tf", archivePath], { encoding: "utf8", windowsHide: true });
+  if (archiveEntries.status !== 0) throw new Error(`Could not list the verified Cua Driver archive: ${archiveEntries.stderr || archiveEntries.stdout}`);
+  const entries = archiveEntries.stdout.trim().split(/\r?\n/).filter(Boolean).sort();
+  if (JSON.stringify(entries) !== JSON.stringify([...expectedEntries].sort())) {
+    throw new Error(`Cua Driver ${cuaDriverVersion} archive contents changed; review before packaging. Found: ${entries.join(", ")}`);
+  }
+  const extractedRoot = join(work, `cua-driver-${cuaDriverVersion}-windows`);
+  rmSync(extractedRoot, { recursive: true, force: true });
+  mkdirSync(extractedRoot, { recursive: true });
+  const extraction = spawnSync("tar.exe", ["-xf", archivePath, "-C", extractedRoot], { stdio: "inherit", windowsHide: true });
+  if (extraction.status !== 0) throw new Error(`Could not extract verified Cua Driver ${cuaDriverVersion} Windows files.`);
+  const binaryRoot = join(cuaRuntimeRoot, "bin");
+  mkdirSync(binaryRoot, { recursive: true });
+  for (const asset of expectedEntries) {
+    const source = join(extractedRoot, asset);
+    if (!existsSync(source)) throw new Error(`Verified Cua Driver archive is missing ${asset}.`);
+    copyFileSync(source, join(binaryRoot, asset));
+  }
+  console.log(`Packaged Cua Driver ${cuaDriverVersion} Windows standalone host (SHA-256 verified).`);
 }
 console.log(`Built ${exe} (${Math.round(readFileSync(exe).length / 1e6)} MB)`);
 console.log(`Built ${brokerExe} (${Math.round(readFileSync(brokerExe).length / 1e6)} MB)`);

@@ -7,7 +7,7 @@
  * back exactly. Local mode needs no account and no network.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -146,7 +146,7 @@ const sameFile = (a: string, b: string): boolean => {
   try { return statSync(a).size === statSync(b).size && createHash("sha256").update(readFileSync(a)).digest("hex") === createHash("sha256").update(readFileSync(b)).digest("hex"); } catch { return false; }
 };
 
-function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; targetDir: string; missingSource: string[]; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string } } {
+function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; targetDir: string; missingSource: string[]; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> } {
   const targetDir = join(nativePaths(io).m9r, "bin");
   const engine = engineSource(io.env);
   if (engine && !io.env.M9R_HOOK_ENTRY?.trim()) {
@@ -157,7 +157,19 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
     const nativeInputHost = nativeInputSource && existsSync(nativeInputSource)
       ? { from: nativeInputSource, to: join(targetDir, "m9r-native-input-host.exe") }
       : undefined;
-    return { needed: !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)) || (!!nativeInputHost && !sameFile(nativeInputHost.from, nativeInputHost.to)), sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim, nativeInputHost };
+    const companions: Array<{ from: string; to: string }> = [];
+    const collect = (source: string, target: string) => {
+      const info = lstatSync(source);
+      if (info.isSymbolicLink()) throw new Error("The bundled runtime must not contain symbolic links.");
+      if (info.isDirectory()) for (const name of readdirSync(source)) collect(join(source, name), join(target, name));
+      else if (info.isFile()) companions.push({ from: source, to: target });
+      else throw new Error("The bundled runtime contains an unsupported file type.");
+    };
+    for (const name of ["m9r-overlay.exe", "m9r-web-broker.exe", "cua-driver-runtime", "THIRD_PARTY_NOTICES.txt"]) {
+      const source = join(dirname(engine), name);
+      if (existsSync(source)) collect(source, join(targetDir, name));
+    }
+    return { needed: !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)) || (!!nativeInputHost && !sameFile(nativeInputHost.from, nativeInputHost.to)) || companions.some((file) => !sameFile(file.from, file.to)), sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim, nativeInputHost, companions };
   }
   const sourceDir = hookSourceDir(io.env);
   if (io.env.M9R_HOOK_ENTRY?.trim()) return { needed: false, sourceDir, targetDir, missingSource: [] };
@@ -166,13 +178,15 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
   return { needed, sourceDir, targetDir, missingSource };
 }
 
-function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string } }): string[] {
+function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> }): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
   if (plan.engine) {
-    const written = [plan.engine.to];
-    copyFileSync(plan.engine.from, plan.engine.to);
-    if (plan.shim) { copyFileSync(plan.shim.from, plan.shim.to); written.push(plan.shim.to); }
-    if (plan.nativeInputHost) { copyFileSync(plan.nativeInputHost.from, plan.nativeInputHost.to); written.push(plan.nativeInputHost.to); }
+    const written: string[] = [];
+    for (const file of [plan.engine, ...(plan.shim ? [plan.shim] : []), ...(plan.nativeInputHost ? [plan.nativeInputHost] : []), ...(plan.companions ?? [])]) {
+      mkdirSync(dirname(file.to), { recursive: true });
+      if (!sameFile(file.from, file.to)) copyFileSync(file.from, file.to);
+      written.push(file.to);
+    }
     return written;
   }
   const written: string[] = [];
@@ -282,8 +296,12 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
     io.err("Nothing was changed.");
     return 1;
   }
-  if (todo.length === 0 && !runtime.needed) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
+  // A previously installed user can opt into startup without reinstalling hooks.
+  const startupRequested = flags.autostart === true && !!runtime.engine && !!runtime.shim
+    && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
+  if (todo.length === 0 && !runtime.needed && !startupRequested) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
   io.out("This will:");
+  if (startupRequested) io.out("  - start the M9R desktop pill when this Windows user signs in (uninstall removes this entry)");
   if (runtime.needed) io.out(`  - copy the small hook program to ${runtime.targetDir} (so the hooks keep working even if this CLI moves or is updated)`);
   if (runtime.engine && runtime.shim) io.out("  - start the M9R background engine, which answers your agents' hooks in milliseconds (uninstall stops it)");
   for (const f of todo) io.out(`  - ${f.summary}`);
@@ -384,7 +402,14 @@ export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?:
   // Only what this install turned on: a scratch install's uninstall must never switch off the real one.
   if (manifest.autostart) autostartOf(io).disable();
   if ((manifest.runtimeFiles ?? []).length > 0) await stopResidentEngine(io);
-  for (const f of manifest.runtimeFiles ?? []) rmSync(f, { force: true });
+  // The standalone installer records the broker separately so it can preserve a broker that a user changed after
+  // installation. The engine copied that companion during setup, but must leave it for the installer-owned manifest
+  // to verify and remove; a direct engine-only install has no separate record and still removes it normally.
+  const managedWebBroker = existsSync(join(p.m9r, "web-broker-install.json"));
+  for (const f of manifest.runtimeFiles ?? []) {
+    if (managedWebBroker && basename(f).toLowerCase() === "m9r-web-broker.exe") continue;
+    rmSync(f, { force: true });
+  }
   try { rmdirSync(join(p.m9r, "bin")); } catch { /* not empty or already gone: leave it */ }
   rmSync(p.manifest, { force: true });
   if (flags.purge) rmSync(p.m9r, { recursive: true, force: true });

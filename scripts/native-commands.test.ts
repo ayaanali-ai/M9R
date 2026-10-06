@@ -409,7 +409,6 @@ test("starting with Windows is optional: only with --autostart (or a yes to its 
   autostartCalls.length = 0; autostartOn = false;
   assert.equal(await s.run("setup", ["--yes"]), 0);
   assert.deepEqual(autostartCalls, [], "--yes alone never turns it on");
-  assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(await s.run("setup", ["--yes", "--autostart"]), 0);
   assert.equal(autostartCalls.length, 1);
   assert.match(autostartCalls[0], /^enable ".*m9r-engine\.exe" feed --watch --serve-hooks$/);
@@ -417,6 +416,30 @@ test("starting with Windows is optional: only with --autostart (or a yes to its 
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(autostartCalls.at(-1), "disable");
   s.done();
+});
+
+test("Windows setup installs the pill, broker, and Driver runtime together and starts the pill", async () => {
+  if (process.platform !== "win32") return;
+  const s = sandbox();
+  try {
+    for (const name of ["m9r-engine.exe", "m9r-hook.exe", "m9r-overlay.exe", "m9r-web-broker.exe"]) writeFileSync(join(s.home, name), name);
+    const driverDir = join(s.home, "cua-driver-runtime", "node_modules", "driver");
+    mkdirSync(driverDir, { recursive: true });
+    writeFileSync(join(driverDir, "driver.node"), "driver fixture");
+    delete s.io.env.M9R_HOOK_ENTRY;
+    s.io.env.M9R_ENGINE = join(s.home, "m9r-engine.exe");
+    s.io.env.M9R_NO_DAEMON = "1";
+    autostartCalls.length = 0;
+    assert.equal(await s.run("setup", ["--yes", "--autostart"]), 0);
+    assert.match(autostartCalls.at(-1)!, /m9r-overlay\.exe/);
+    assert.equal(readFileSync(join(s.p.m9r, "bin", "m9r-web-broker.exe"), "utf8"), "m9r-web-broker.exe");
+    assert.equal(readFileSync(join(s.p.m9r, "bin", "cua-driver-runtime", "node_modules", "driver", "driver.node"), "utf8"), "driver fixture");
+    assert.equal(await s.run("setup", ["--yes"]), 0);
+    assert.match(s.out.at(-2) ?? s.out.join("\n"), /Already set up|M9R/);
+    assert.equal(await s.run("uninstall", ["--yes"]), 0);
+    assert.equal(existsSync(join(s.p.m9r, "bin", "m9r-overlay.exe")), false);
+    assert.equal(existsSync(join(s.p.m9r, "bin", "cua-driver-runtime", "node_modules", "driver", "driver.node")), false);
+  } finally { s.done(); }
 });
 
 test("m9r note saves to the project room's shared memory where agents read it, and refuses empty or oversized notes", async () => {

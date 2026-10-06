@@ -111,7 +111,7 @@
     "@paper-design/shaders-react": "^0.0.80",
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.108.2",
-    "@trycua/cua-driver": "0.33.2",
+    "@trycua/cua-driver": "0.33.4",
     "@types/web-push": "^3.6.4",
     "@typesafe-ai/sdk": "^0.6.0",
     "@xterm/addon-fit": "^0.11.0",

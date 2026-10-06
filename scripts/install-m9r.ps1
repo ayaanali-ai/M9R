@@ -20,13 +20,17 @@ because Windows does not allow a process to delete its own executable.
 
 .PARAMETER Web
 After the native setup, also run the consent-driven M9R browser/MCP setup.
+
+.PARAMETER NoAutostart
+Do not add the M9R desktop pill to this Windows user's sign-in startup list.
 #>
 [CmdletBinding()]
 param(
     [string]$Version,
     [string]$PackagePath,
     [switch]$Uninstall,
-    [switch]$Web
+    [switch]$Web,
+    [switch]$NoAutostart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +47,16 @@ function Assert-M9rWindows {
     if (-not [Environment]::Is64BitOperatingSystem) {
         throw 'The standalone engine release currently supports 64-bit Windows only.'
     }
+}
+
+function Get-M9rHome {
+    $configured = $env:M9R_HOME
+    if ([string]::IsNullOrWhiteSpace($configured)) {
+        $configured = Join-Path $env:USERPROFILE '.m9r'
+    } else {
+        $configured = $configured.Trim()
+    }
+    return [IO.Path]::GetFullPath($configured)
 }
 
 function Get-ReleaseAssets([string]$RequestedVersion) {
@@ -109,7 +123,7 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
         }
     } finally { $archive.Dispose() }
     [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
-    foreach ($name in @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'INSTALLATION.txt')) {
+    foreach ($name in @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'INSTALLATION.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Destination $name) -PathType Leaf)) {
             throw "The release package is incomplete; '$name' is missing."
         }
@@ -117,7 +131,7 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
 }
 
 function Get-ManagedWebBrokerPaths {
-    $m9rRoot = Join-Path $env:USERPROFILE '.m9r'
+    $m9rRoot = Get-M9rHome
     $bin = Join-Path $m9rRoot 'bin'
     return @{
         M9rRoot = $m9rRoot
@@ -144,8 +158,18 @@ function Assert-ManagedWebBrokerInstallable([string]$SourcePath) {
     if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { throw "The standalone web broker is missing from the verified package: $SourcePath" }
     $paths = Get-ManagedWebBrokerPaths
     $manifest = Read-ManagedWebBrokerManifest $paths
+    $sourceHash = (Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash
     if (Test-Path -LiteralPath $paths.Target -PathType Leaf) {
-        if (-not $manifest) { throw "Refusing to overwrite an unowned file at $($paths.Target)." }
+        if (-not $manifest) {
+            # The engine copies all bundled companions during its atomic runtime install. The standalone
+            # installer owns the broker's separate manifest, so claim an identical companion instead of
+            # treating our own freshly copied file as an unrelated user binary.
+            $currentHash = (Get-FileHash -LiteralPath $paths.Target -Algorithm SHA256).Hash
+            if (-not [string]::Equals($currentHash, $sourceHash, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Refusing to overwrite an unowned file at $($paths.Target)."
+            }
+            return
+        }
         $currentHash = (Get-FileHash -LiteralPath $paths.Target -Algorithm SHA256).Hash
         if (-not [string]::Equals($currentHash, [string]$manifest.sha256, [StringComparison]::OrdinalIgnoreCase)) {
             throw "The installed web broker changed outside M9R setup at $($paths.Target); it was not overwritten."
@@ -172,7 +196,7 @@ function Install-ManagedWebBroker([string]$SourcePath) {
     if ((Test-Path -LiteralPath $paths.Target -PathType Leaf) -and
         [string]::Equals((Get-FileHash -LiteralPath $paths.Target -Algorithm SHA256).Hash, $sourceHash, [StringComparison]::OrdinalIgnoreCase)) {
         $existing = Read-ManagedWebBrokerManifest $paths
-        if (-not $existing) { throw "Refusing to claim the unowned file at $($paths.Target)." }
+        if (-not $existing) { Write-ManagedWebBrokerManifest $paths $sourceHash }
         return
     }
 
@@ -224,7 +248,8 @@ function Remove-M9rTemporaryDirectory([string]$Path) {
 }
 
 function Invoke-InstalledUninstall {
-    $installed = Join-Path $env:USERPROFILE '.m9r\bin\m9r-engine.exe'
+    $m9rRoot = Get-M9rHome
+    $installed = Join-Path $m9rRoot 'bin\m9r-engine.exe'
     if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
         [void](Remove-ManagedWebBroker)
         throw "M9R engine was not found at $installed"
@@ -234,9 +259,9 @@ function Invoke-InstalledUninstall {
     try {
         $maintenanceExe = Join-Path $maintenanceDir 'm9r-engine.exe'
         Copy-Item -LiteralPath $installed -Destination $maintenanceExe
-        $manifestPath = Join-Path $env:USERPROFILE '.m9r\install-manifest.json'
+        $manifestPath = Join-Path $m9rRoot 'install-manifest.json'
         Write-Host 'M9R uninstall will:' -ForegroundColor Cyan
-        $webBrokerManifest = Join-Path $env:USERPROFILE '.m9r\web-broker-install.json'
+        $webBrokerManifest = Join-Path $m9rRoot 'web-broker-install.json'
         if (Test-Path -LiteralPath $webBrokerManifest -PathType Leaf) {
             $webBrokerPaths = Get-ManagedWebBrokerPaths
             [void](Read-ManagedWebBrokerManifest $webBrokerPaths)
@@ -258,7 +283,7 @@ function Invoke-InstalledUninstall {
             Write-Host 'Nothing was changed.'
             return
         }
-        $webManifest = Join-Path $env:USERPROFILE '.m9r\web-setup-manifest.json'
+        $webManifest = Join-Path $m9rRoot 'web-setup-manifest.json'
         if (Test-Path -LiteralPath $webManifest -PathType Leaf) {
             & $maintenanceExe web uninstall --yes
             $webExit = $LASTEXITCODE
@@ -280,6 +305,9 @@ function Invoke-InstalledUninstall {
 $temporaryRoot = $null
 try {
     Assert-M9rWindows
+    # Keep the standalone engine and this PowerShell wrapper on one store root,
+    # including when the caller already has a custom M9R_HOME configured.
+    $env:M9R_HOME = Get-M9rHome
     if ($Uninstall) {
         Invoke-InstalledUninstall
         exit 0
@@ -297,13 +325,24 @@ try {
     Write-Host ''
     Write-Host 'M9R FIRST-RUN CONSENT' -ForegroundColor Cyan
     Write-Host 'The verified package contains unsigned Windows executables. SHA-256 checks integrity, not publisher identity. No administrator access is requested.'
-    Write-Host 'If you continue, M9R will install its engine, hook helper, browser native-input helper, and standalone Web broker in your user profile, add managed M9R instructions/hooks to supported local agent configuration, and back up files before changing them.'
+    Write-Host 'If you continue, M9R will install its engine, desktop pill, hook helper, browser native-input helper, and standalone Web broker in your user profile, add managed M9R instructions/hooks to supported local agent configuration, and back up files before changing them.'
+    if ($NoAutostart) {
+        Write-Host "M9R will not be added to this Windows user's sign-in startup list."
+    } else {
+        Write-Host 'M9R will start the desktop pill when this Windows user signs in. Pass -NoAutostart to skip this.'
+    }
     Write-Host 'The local engine watches supported local agent session files to detect session status and explicit @agent mentions. This local setup does not upload those files or require an M9R account. Cloud connections are separate.'
     Write-Host 'Codex may show its own /hooks trust screen later; that provider-controlled trust step remains yours to accept or decline.'
     Write-Host ''
     Write-Host 'Exact setup plan from the engine:' -ForegroundColor Cyan
     $engine = Join-Path $payload 'm9r-engine.exe'
-    $plan = @(& $engine setup --dry-run 2>&1)
+    $dryRunArgs = @('setup', '--dry-run')
+    $applyArgs = @('setup', '--yes')
+    if (-not $NoAutostart) {
+        $dryRunArgs += '--autostart'
+        $applyArgs += '--autostart'
+    }
+    $plan = @(& $engine @dryRunArgs 2>&1)
     $planExit = $LASTEXITCODE
     if ($planExit -ne 0) { $plan | ForEach-Object { Write-Host $_ }; throw "M9R could not prepare its setup plan (exit $planExit). Nothing was installed." }
     foreach ($line in $plan) {
@@ -317,14 +356,14 @@ try {
         exit 0
     }
 
-    & $engine setup --yes
+    & $engine @applyArgs
     $setupExit = $LASTEXITCODE
     if ($setupExit -ne 0) { throw "M9R setup exited with code $setupExit. Review the engine output; do not rerun blindly." }
-    $installedEngine = Join-Path $env:USERPROFILE '.m9r\bin\m9r-engine.exe'
+    $installedEngine = Join-Path $env:M9R_HOME 'bin\m9r-engine.exe'
     Install-ManagedWebBroker $packageBroker
     Write-Host ''
     Write-Host 'M9R setup finished. Start a new supported agent session to activate its hooks.' -ForegroundColor Green
-    Write-Host "To undo the managed setup later: `"$env:USERPROFILE\.m9r\bin\m9r-engine.exe`" uninstall"
+    Write-Host "To undo the managed setup later: `"$installedEngine`" uninstall"
     Write-Host 'Codex hook trust remains optional and is handled by Codex itself.'
     if ($Web) {
         $extensionPackage = Join-Path $payload 'extension'
