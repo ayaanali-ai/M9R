@@ -533,13 +533,11 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     }, cursorIdentity);
   }
 
-  async function listWindows(name: string, ownedPid?: number): Promise<CuaStageWindowOption[]> {
+  async function listWindowOptions(ownedPid?: number): Promise<CuaStageWindowOption[]> {
     if (ownedPid !== undefined && (!Number.isSafeInteger(ownedPid) || ownedPid < 1)) throw new Error("Invalid owned application process.");
-    // Inspecting the stage enforces the same interactive-owner and agent-context guard as stage changes.
-    await manager.inspectStage(name);
     const runtime = await createRuntime();
     const { sdk, driver } = runtime;
-    const session = safeSessionName(name);
+    const session = safeSessionName(ownedPid === undefined ? "owner-visible" : `owned-${ownedPid}`);
     let started = false;
     try {
       await driver.startSession({ session });
@@ -569,6 +567,22 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       }
       await disposeRuntime(runtime);
     }
+  }
+
+  async function listVisibleWindows(): Promise<CuaStageWindowOption[]> {
+    // The registry read supplies the same Windows/interactive-owner and
+    // agent-context guard as other stage operations without requiring an
+    // existing stage name. This is used only to adopt a newly-created window
+    // from the user's personal browser process.
+    manager.list();
+    return listWindowOptions();
+  }
+
+  async function listWindows(name: string, ownedPid?: number): Promise<CuaStageWindowOption[]> {
+    if (ownedPid !== undefined && (!Number.isSafeInteger(ownedPid) || ownedPid < 1)) throw new Error("Invalid owned application process.");
+    // Inspecting the stage enforces the same interactive-owner and agent-context guard as stage changes.
+    await manager.inspectStage(name);
+    return listWindowOptions(ownedPid);
   }
 
   async function click(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
@@ -678,7 +692,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     } catch { /* the runtime never initialized */ }
   }
 
-  return { capture, describeTarget, moveCursor, listWindows, click, typeText, scroll, drag, closeAgentCursor, shutdown };
+  return { capture, describeTarget, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, drag, closeAgentCursor, shutdown };
 }
 
 async function readStageTextFromStdin(): Promise<string> {

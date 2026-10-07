@@ -5,11 +5,82 @@ import { basename, isAbsolute, join } from "node:path";
 import { isAgentContext } from "./approval-core";
 
 export interface ApprovedStageApp { executable: string; args: string[]; sha256: string }
-/** Keep Chromium from handing a stage launch to the user's already-running browser process. */
-export function ownedBrowserLaunch(root: string, stageName: string, app: ApprovedStageApp): ApprovedStageApp {
+export type BrowserLaunchMode = "personal" | "isolated";
+
+/** The browser executable family that the stage broker knows how to attach. */
+export type StageBrowserKind = "chrome" | "msedge";
+
+export interface BrowserWindowCandidate {
+  pid: number;
+  windowId: string;
+  appName: string;
+  title: string;
+}
+
+/**
+ * Keep browser launch policy explicit. Personal is the default: it uses the
+ * user's normal profile and cookies. Isolated remains available as an owner
+ * selected mode for tests or a deliberately separate profile.
+ */
+export function ownedBrowserLaunch(
+  root: string,
+  stageName: string,
+  app: ApprovedStageApp,
+  options: { mode?: BrowserLaunchMode; startUrl?: string } = {},
+): ApprovedStageApp {
   if (!/^(?:preview-)?agent-[a-f0-9]{24}$/.test(stageName)) throw new Error("Invalid browser stage name.");
   if (app.args.length || !/^(?:chrome|msedge)\.exe$/i.test(basename(app.executable))) return app;
-  return { ...app, args: [`--user-data-dir=${join(root, "stage-browser-profiles", stageName)}`, "--no-first-run", "--no-default-browser-check", "--new-window", "about:blank"] };
+  const mode = options.mode ?? "personal";
+  if (mode === "isolated") {
+    return {
+      ...app,
+      args: [
+        `--user-data-dir=${join(root, "stage-browser-profiles", stageName)}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--new-window",
+        options.startUrl ?? "about:blank",
+      ],
+    };
+  }
+  // Chrome hands a personal launch to its existing browser process. Always
+  // request a new window so the broker can identify the window created for the
+  // task without stealing an already-open window the owner is using.
+  return { ...app, args: ["--new-window", ...(options.startUrl ? [options.startUrl] : [])] };
+}
+
+export function stageBrowserKind(executable: string): StageBrowserKind | undefined {
+  const name = basename(executable).toLowerCase();
+  if (name === "chrome.exe") return "chrome";
+  if (name === "msedge.exe") return "msedge";
+  return undefined;
+}
+
+function browserWindowMatches(candidate: BrowserWindowCandidate, kind: StageBrowserKind): boolean {
+  const app = `${candidate.appName} ${candidate.title}`;
+  if (kind === "chrome") return /(?:^|[\\/ ])(?:chrome|google chrome)(?:\.exe)?(?:$|[\\/ ])/.test(app.toLowerCase())
+    && !/(?:edge|msedge)/i.test(app);
+  return /(?:^|[\\/ ])(?:msedge|microsoft edge)(?:\.exe)?(?:$|[\\/ ])/.test(app.toLowerCase());
+}
+
+/**
+ * Return only a newly-created personal browser window. A pre-existing window
+ * is never guessed when more than one candidate exists; the caller can keep
+ * polling while Chrome finishes delegating the launch to its browser process.
+ */
+export function selectPersonalBrowserWindow(
+  kind: StageBrowserKind,
+  windows: readonly BrowserWindowCandidate[],
+  beforeKeys: ReadonlySet<string>,
+): BrowserWindowCandidate | undefined {
+  const matches = windows.filter((candidate) => browserWindowMatches(candidate, kind));
+  const fresh = matches.filter((candidate) => !beforeKeys.has(`${candidate.pid}:${candidate.windowId}`));
+  if (fresh.length > 1) throw new Error(`Personal ${kind === "chrome" ? "Chrome" : "Edge"} opened multiple new windows; owner selection is required.`);
+  if (fresh.length === 1) return fresh[0];
+  // If the browser was not running before launch, one visible candidate is a
+  // safe adoption even when the platform did not expose a stable before-list.
+  if (beforeKeys.size === 0 && matches.length === 1) return matches[0];
+  return undefined;
 }
 const CATALOG = "task-stage-apps.json";
 const APP_ID = /^[a-z][a-z0-9_-]{0,39}$/;

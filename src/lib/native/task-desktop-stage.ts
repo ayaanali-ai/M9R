@@ -8,7 +8,17 @@ import { createWindowsDesktopStageManager, type WindowsStageDependencies } from 
 import { createCuaStageDriver, type CuaAgentCursorIdentity } from "./cua-stage-driver";
 import { parseTaskStageAction, runTaskStageAction, stageClickNeedsApproval } from "./task-stage-actions";
 import type { StageApprovalRequest } from "./web-broker-core";
-import { launchApprovedStageApp, listApprovedStageApps, ownedBrowserLaunch, readApprovedStageApp, resolveUnlistedStageApp, type ApprovedStageApp } from "./task-stage-apps";
+import {
+  launchApprovedStageApp,
+  listApprovedStageApps,
+  ownedBrowserLaunch,
+  readApprovedStageApp,
+  resolveUnlistedStageApp,
+  selectPersonalBrowserWindow,
+  stageBrowserKind,
+  type ApprovedStageApp,
+  type BrowserLaunchMode,
+} from "./task-stage-apps";
 import type { ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -130,6 +140,8 @@ export function createTaskDesktopStageService(input: {
   readPolicy?: () => { handles: string[]; controlHandles?: string[]; modes?: Record<string, TaskStageAccessMode> };
   /** Test seam: replaces the Cua driver (production always constructs the real one). */
   driver?: ReturnType<typeof createCuaStageDriver>;
+  /** Owner-selected browser policy. Personal profile is the safe product default. */
+  browserLaunchMode?: BrowserLaunchMode;
   /**
    * Owner-approval route for the money carve-out, resolved lazily because the broker that owns the
    * approval list is constructed after this service. Absent in tests and in brokers without one.
@@ -144,7 +156,15 @@ export function createTaskDesktopStageService(input: {
   const readPolicy = input.readPolicy ?? (() => readTaskStagePolicy(root));
   // Serialize preparations so duplicate deliveries cannot create duplicate desktops.
   let pending: Promise<unknown> = Promise.resolve();
-  const ownedApps = new Map<string, { taskId: string; appId: string; process: ChildProcess; windowId: string }>();
+  const browserLaunchMode = input.browserLaunchMode ?? "personal";
+  const ownedApps = new Map<string, {
+    taskId: string;
+    appId: string;
+    pid: number;
+    process?: ChildProcess;
+    ownsProcess: boolean;
+    windowId: string;
+  }>();
   const activeAgentCursors = new Map<string, CuaAgentCursorIdentity>();
   let cursorReaperQueued = false;
 
@@ -292,30 +312,69 @@ export function createTaskDesktopStageService(input: {
         approved = target.app;
       }
       const prior = ownedApps.get(name);
-      if (prior && prior.process.exitCode === null && !prior.process.killed) {
-        if (prior.taskId !== taskId || prior.appId !== appId) throw new Error("This session already has an unfinished stage app.");
-        await manager.inspectStage(name);
-        return { name, taskId, appId, running: true };
+      if (prior) {
+        let running = false;
+        if (prior.process) {
+          running = prior.process.exitCode === null && !prior.process.killed;
+        } else {
+          try {
+            const inspected = await manager.inspectStage(name);
+            running = inspected.anchor?.pid === prior.pid && inspected.anchor.windowId === prior.windowId;
+          } catch { /* the personal browser window may have been closed; launch a fresh one */ }
+        }
+        if (running) {
+          if (prior.taskId !== taskId || prior.appId !== appId) throw new Error("This session already has an unfinished stage app.");
+          return { name, taskId, appId, running: true };
+        }
+        ownedApps.delete(name);
       }
       if (mode === "background" && !manager.list().some((stage) => stage.name === name)) await manager.create(name);
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-      const child = launchApprovedStageApp(ownedBrowserLaunch(root, name, approved), { windowsHide: mode !== "owner-preview" });
+      const browserKind = stageBrowserKind(approved.executable);
+      const personalBrowser = browserKind !== undefined && browserLaunchMode === "personal";
+      const beforeBrowserWindows = personalBrowser
+        ? new Set((await driver.listVisibleWindows()).map((window) => `${window.pid}:${window.windowId}`))
+        : undefined;
+      const child = launchApprovedStageApp(ownedBrowserLaunch(root, name, approved, { mode: browserLaunchMode }), { windowsHide: mode !== "owner-preview" });
       let spawnError: Error | undefined;
       child.on("error", (error) => { spawnError = error; });
+      let adoptedPersonalBrowser = false;
       try {
         for (let attempt = 0; attempt < 40; attempt++) {
           authorize(token, taskId, mode);
           if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-          if (spawnError || child.exitCode !== null || child.killed || !child.pid) throw new Error("The approved app did not start a persistent owned process.");
-          const windows = mode === "owner-preview"
-            ? await manager.listOwnedWindowsForProcess(child.pid)
-            : await manager.listOwnedWindows(name, child.pid);
-          if (windows.length > 1) throw new Error("The approved app has multiple candidate windows; owner selection is required.");
-          if (windows.length === 1) {
+          // Personal Chromium commonly exits its launcher PID immediately after
+          // handing the request to the already-running browser process. The
+          // Cua window list, not that transient PID, is the ownership proof.
+          if (spawnError || child.killed || !child.pid || (!personalBrowser && child.exitCode !== null)) {
+            throw new Error("The approved app did not start a persistent owned process.");
+          }
+          let selectedPid = child.pid;
+          let selectedWindowId: string | undefined;
+          let candidateWindows: Array<{ pid: number; windowId: string; title?: string; width?: number; height?: number }>;
+          if (personalBrowser) {
+            const visible = await driver.listVisibleWindows();
+            const candidate = selectPersonalBrowserWindow(browserKind!, visible, beforeBrowserWindows!);
+            if (!candidate) {
+              await delay(100);
+              continue;
+            }
+            adoptedPersonalBrowser = true;
+            selectedPid = candidate.pid;
+            selectedWindowId = candidate.windowId;
+            candidateWindows = [candidate];
+          } else {
+            candidateWindows = mode === "owner-preview"
+              ? await manager.listOwnedWindowsForProcess(child.pid)
+              : await manager.listOwnedWindows(name, child.pid);
+          }
+          if (candidateWindows.length > 1) throw new Error("The approved app has multiple candidate windows; owner selection is required.");
+          if (candidateWindows.length === 1) {
             authorize(token, taskId, mode);
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-            if (mode === "background") await manager.moveOwnedWindow(name, child.pid, windows[0]!.windowId);
+            selectedWindowId = candidateWindows[0]!.windowId;
+            if (mode === "background") await manager.moveOwnedWindow(name, selectedPid, selectedWindowId);
             if (mode === "owner-preview") {
               // Windows can enumerate a newly-created top-level HWND before the
               // shell has attached its virtual-desktop application view.  A
@@ -327,7 +386,7 @@ export function createTaskDesktopStageService(input: {
               let lastRegistrationError: unknown;
               for (let attempt = 0; attempt < 20; attempt++) {
                 try {
-                  await manager.register(name, String(child.pid), windows[0]!.windowId);
+                  await manager.register(name, String(selectedPid), selectedWindowId);
                   registered = true;
                   break;
                 } catch (error) {
@@ -345,12 +404,12 @@ export function createTaskDesktopStageService(input: {
                 : new Error("Windows did not expose the owner-preview window's virtual desktop view in time.");
               const preview = await manager.inspectStage(name);
               if (!preview.desktop.isCurrent) {
-                manager.clearOwnedAnchor(name, child.pid, windows[0]!.windowId);
+                manager.clearOwnedAnchor(name, selectedPid, selectedWindowId);
                 throw new Error("The approved app did not open on the owner's current desktop for the preview stage.");
               }
               const sessionTag = createHash("sha256").update(`${normalizeHandle(identity.handle)}\0${identity.sessionId}`).digest("hex").slice(0, 8);
               await manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
-            } else await manager.attachWindow(name, String(child.pid), windows[0]!.windowId);
+            } else await manager.attachWindow(name, String(selectedPid), selectedWindowId);
             try {
               authorize(token, taskId, mode);
               if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
@@ -358,14 +417,26 @@ export function createTaskDesktopStageService(input: {
               authorize(token, taskId, mode);
               if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
             }
-            catch (error) { manager.clearOwnedAnchor(name, child.pid, windows[0]!.windowId); throw error; }
-            ownedApps.set(name, { taskId, appId, process: child, windowId: windows[0]!.windowId });
+            catch (error) { manager.clearOwnedAnchor(name, selectedPid, selectedWindowId); throw error; }
+            ownedApps.set(name, {
+              taskId,
+              appId,
+              pid: selectedPid,
+              ...(personalBrowser ? {} : { process: child }),
+              ownsProcess: !personalBrowser,
+              windowId: selectedWindowId,
+            });
             return { name, taskId, appId, running: true };
           }
           await delay(100);
         }
-        throw new Error("The app exposes no supported exact-process window; it requires an app-specific launch adapter.");
-      } catch (error) { if (child.exitCode === null && !child.killed) child.kill(); throw error; }
+        throw new Error(personalBrowser
+          ? `Personal ${browserKind === "chrome" ? "Chrome" : "Edge"} did not expose a new task window; the existing personal window was left untouched.`
+          : "The app exposes no supported exact-process window; it requires an app-specific launch adapter.");
+      } catch (error) {
+        if (!adoptedPersonalBrowser && child.exitCode === null && !child.killed) child.kill();
+        throw error;
+      }
     };
     const result = pending.then(run, run); pending = result.catch(() => undefined); return result;
   }
@@ -376,9 +447,10 @@ export function createTaskDesktopStageService(input: {
       const { name } = authorize(token, taskId, mode);
       const app = ownedApps.get(name);
       if (!app || app.taskId !== taskId) throw new Error("This task has no broker-owned app to discard.");
-      if (!app.process.pid) throw new Error("The task app process identity is missing.");
-      manager.clearOwnedAnchor(name, app.process.pid, app.windowId);
-      if (app.process.exitCode === null && !app.process.killed) app.process.kill();
+      manager.clearOwnedAnchor(name, app.pid, app.windowId);
+      // Personal Chrome belongs to the user. Discarding a task detaches the
+      // stage anchor but never closes the user's browser process.
+      if (app.ownsProcess && app.process && app.process.exitCode === null && !app.process.killed) app.process.kill();
       ownedApps.delete(name);
       return { name, taskId, closed: true };
     };
