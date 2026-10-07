@@ -30,4 +30,5 @@ test("personal browser adoption chooses only a newly-created Chrome window", () 
   assert.equal(selectPersonalBrowserWindow("chrome", [{ ...candidate, windowId: "0x10" }], before), undefined);
   assert.throws(() => selectPersonalBrowserWindow("chrome", [candidate, { ...candidate, windowId: "0x12" }], before), /multiple new windows/);
   assert.equal(selectPersonalBrowserWindow("chrome", [{ ...candidate, appName: "msedge.exe" }], new Set()), undefined);
+  assert.deepEqual(selectPersonalBrowserWindow("chrome", [{ ...candidate, appName: "Chrome_WidgetWin_1" }], new Set()), { ...candidate, appName: "Chrome_WidgetWin_1" });
 });

@@ -58,7 +58,7 @@ export function stageBrowserKind(executable: string): StageBrowserKind | undefin
 
 function browserWindowMatches(candidate: BrowserWindowCandidate, kind: StageBrowserKind): boolean {
   const app = `${candidate.appName} ${candidate.title}`;
-  if (kind === "chrome") return /(?:^|[\\/ ])(?:chrome|google chrome)(?:\.exe)?(?:$|[\\/ ])/.test(app.toLowerCase())
+  if (kind === "chrome") return /(?:^|[\\/ _])(?:chrome|google chrome|chrome_widgetwin_1)(?:\.exe)?(?:$|[\\/ _])/.test(app.toLowerCase())
     && !/(?:edge|msedge)/i.test(app);
   return /(?:^|[\\/ ])(?:msedge|microsoft edge)(?:\.exe)?(?:$|[\\/ ])/.test(app.toLowerCase());
 }
