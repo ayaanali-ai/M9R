@@ -253,7 +253,8 @@ async function acknowledgeOpenCodeTask(sessionID, cwd, entry) {
 }
 
 async function pollOpenCodeSession(sessionID, cwd, client, entry) {
-  if (entry.polling || Date.now() < entry.retryAfter || !client?.session?.prompt) return;
+  const submitPrompt = client?.session?.promptAsync ?? client?.session?.prompt;
+  if (entry.polling || Date.now() < entry.retryAfter || typeof submitPrompt !== "function") return;
   entry.polling = true;
   try {
     if (entry.pendingAck) {
@@ -267,7 +268,7 @@ async function pollOpenCodeSession(sessionID, cwd, client, entry) {
     // OpenCode's own session API creates a real user turn in this session; this is not inbox text awaiting a future prompt.
     entry.submittedTaskID = task.task_id;
     try {
-      const response = await client.session.prompt({
+      const response = await submitPrompt.call(client.session, {
         path: { id: sessionID },
         body: { parts: [{ type: "text", text: task.prompt }] },
       });
@@ -288,7 +289,8 @@ async function pollOpenCodeSession(sessionID, cwd, client, entry) {
 }
 
 function startOpenCodePoller(sessionID, cwd, client) {
-  if (M9R_SESSION_POLLERS.has(sessionID) || !client?.session?.prompt) return;
+  if (M9R_SESSION_POLLERS.has(sessionID)
+    || (typeof client?.session?.promptAsync !== "function" && typeof client?.session?.prompt !== "function")) return;
   if (M9R_SESSION_POLLERS.size >= M9R_MAX_CACHED_SESSIONS) {
     const oldest = M9R_SESSION_POLLERS.keys().next().value;
     if (oldest !== undefined) {

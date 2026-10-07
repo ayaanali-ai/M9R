@@ -45,7 +45,7 @@ function evaluateGeneratedPlugin(
     .replace(/^import \{ spawn \} from "node:child_process";\r?\n/m, "")
     .replace(/^export const M9rIdentity = /m, "const M9rIdentity = ");
   return new Function("spawn", "process", "setInterval", "clearInterval", `${executable}\nreturn M9rIdentity;`)(mockedSpawn, { cwd: () => "C:/process-cwd" }, setIntervalFn, clearIntervalFn) as
-    (context: { directory?: string; client?: { session?: { prompt?: (input: unknown) => Promise<unknown>; list?: (input?: unknown) => Promise<unknown>; status?: (input?: unknown) => Promise<unknown> } } }) => Promise<{ "experimental.chat.system.transform": (input: { sessionID?: string }, output: { system: string[] }) => Promise<void> }>;
+    (context: { directory?: string; client?: { session?: { prompt?: (input: unknown) => Promise<unknown>; promptAsync?: (input: unknown) => Promise<unknown>; list?: (input?: unknown) => Promise<unknown>; status?: (input?: unknown) => Promise<unknown> } } }) => Promise<{ "experimental.chat.system.transform": (input: { sessionID?: string }, output: { system: string[] }) => Promise<void> }>;
 }
 
 test("OpenCode identity invocation runs the installed engine SessionStart hook", () => {
@@ -112,7 +112,7 @@ test("generated plugin uses sessionID and appends only parsed additionalContext 
   assert.doesNotMatch(source, /output\.system\.push\(raw\)/);
   assert.match(source, /M9R_HOOK_PROMPT_ARGS[\s\S]*"m9r-hook",\s*"UserPromptSubmit",\s*"opencode"/);
   assert.match(source, /runM9rPrompt\(sessionID, cwd\)/);
-  assert.match(source, /client\.session\.prompt\(/);
+  assert.match(source, /client\?\.session\?\.promptAsync \?\? client\?\.session\?\.prompt/);
   assert.match(source, /M9R_HOOK_POLL_ARGS/);
   assert.match(source, /M9R_HOOK_DELIVERED_ARGS/);
 });
@@ -223,6 +223,34 @@ test("a resolved OpenCode SDK error never acknowledges task delivery", async () 
   await plugin["experimental.chat.system.transform"]({ sessionID: "oc-session" }, { system: [] });
   for (let attempt = 0; attempt < 10; attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(calls.filter((call) => call.args.includes("OpenCodeDelivered")).length, 0);
+});
+
+test("OpenCode uses promptAsync so a later model failure cannot replay an accepted M9R task", async () => {
+  const hook = (event: string, context: string) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: context } });
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  const factory = evaluateGeneratedPlugin(buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }), createMockSpawn([
+    { code: 0, output: hook("SessionStart", "connected") },
+    { code: 0, output: hook("UserPromptSubmit", "") },
+    { code: 0, output: hook("OpenCodePoll", JSON.stringify({ task_id: "T2", prompt: "cursor task" })) },
+    { code: 0, output: hook("OpenCodeDelivered", JSON.stringify({ accepted: true, task_id: "T2" })) },
+    { code: 0, output: hook("OpenCodePoll", "") },
+  ], calls), (() => ({ unref() {} })) as unknown as typeof setInterval);
+  const asyncPrompts: unknown[] = [];
+  let blockingPromptCalls = 0;
+  const plugin = await factory({
+    directory: "C:/repo",
+    client: { session: {
+      promptAsync: async (input) => { asyncPrompts.push(input); return { data: undefined }; },
+      prompt: async () => { blockingPromptCalls += 1; return { error: { message: "model failed after accepting the turn" } }; },
+    } },
+  });
+  await plugin["experimental.chat.system.transform"]({ sessionID: "oc-session" }, { system: [] });
+  for (let attempt = 0; attempt < 20 && calls.filter((call) => call.args.includes("OpenCodeDelivered")).length === 0; attempt++) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(asyncPrompts.length, 1);
+  assert.equal(blockingPromptCalls, 0, "M9R must not wait for model completion before acknowledging delivery");
+  assert.equal(calls.filter((call) => call.args.includes("OpenCodeDelivered")).length, 1);
 });
 
 test("generated plugin shares one successful bootstrap per session, delivers prompt-time inbox, and retries failures", async () => {

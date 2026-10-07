@@ -163,6 +163,24 @@ test("SessionStart registers the endpoint and prints a short card that lists rec
   done();
 });
 
+test("an already-open Codex session restores its missing identity on the next trusted prompt", () => {
+  const { store, done } = tempStore();
+  store.registerEndpoint({ provider: "codex", sessionId: "codex-open", cwd: "C:/repo" });
+  assert.equal(store.identityTokenFor("codex", "codex-open"), null);
+
+  const result = handleHookEvent({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "codex-open",
+    cwd: "C:/repo",
+    prompt: "continue",
+  }, ctx(store, "codex"));
+
+  assert.ok(store.identityTokenFor("codex", "codex-open"));
+  assert.match(ctxOf(result) ?? "", /M9R connected as @codex/);
+  assert.match(ctxOf(result) ?? "", /M9R session token/);
+  done();
+});
+
 test("OpenCode polling pushes only an approved, fresh task into its exact authenticated session and acknowledges once", () => {
   const now = new Date("2026-10-07T12:00:00Z");
   const { store, done } = tempStore(() => now);

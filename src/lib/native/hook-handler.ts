@@ -277,6 +277,19 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const cwd = projectCwd ?? input.cwd ?? process.cwd();
       const parts: string[] = [];
 
+      // SessionStart is a one-time provider event, but the local state can be
+      // recovered or reinstalled while a provider session remains open. Heal
+      // that split-brain state on the next trusted provider prompt so an
+      // already-open Codex session does not stay permanently unable to receive
+      // governed work. OpenCode has its own persistent SessionStart poller.
+      const knownSession = input.session_id
+        ? ctx.store.sessionsFor(self, projectCwd).some((session) => session.sessionId === input.session_id)
+        : false;
+      if (self === "codex" && input.session_id && knownSession && !ctx.store.identityTokenFor(self, input.session_id)) {
+        const identity = ctx.store.issueIdentity(self, ctx.provider, input.session_id);
+        parts.push(renderSessionCard({ handle: self, others: [], pendingCount: 0, awaitingApproval: 0, identityToken: identity.token }));
+      }
+
       parts.push(...routeTypedMentions(input, ctx).acks);
 
       // A prompt M9R pushed in is a task by itself: nothing else (older inbox items, results) is mixed into it, or the agent
