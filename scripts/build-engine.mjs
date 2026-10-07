@@ -17,9 +17,9 @@ const work = join(out, "work");
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(root, "cli", "dist", "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";
-const cuaDriverVersion = "0.33.4";
-const cuaDriverArchiveSha256 = "93f658ac02080ac1fac709f88f79ba38980ce77b816725ec2a0128aeba1811f5";
-const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua-driver-rs-v${cuaDriverVersion}/cua-driver-${cuaDriverVersion}-windows-x86_64-binary.zip`;
+const cuaDriverVersion = "0.34.0";
+const cuaDriverArchiveSha256 = "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b408608b0ea4423a8b888";
+const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua-driver-rs-v${cuaDriverVersion}/cua-driver-rs-${cuaDriverVersion}-windows-x86_64-binary.zip`;
 
 if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle)) throw new Error("cli/dist is missing: run `npm run build:cli` first.");
 rmSync(work, { recursive: true, force: true });
@@ -123,7 +123,7 @@ if (process.platform === "win32") {
   }
 
   const archiveRoot = join(root, ".workcache", "cua-driver-release", cuaDriverVersion);
-  const archivePath = join(archiveRoot, `cua-driver-${cuaDriverVersion}-windows-x86_64-binary.zip`);
+  const archivePath = join(archiveRoot, `cua-driver-rs-${cuaDriverVersion}-windows-x86_64-binary.zip`);
   mkdirSync(archiveRoot, { recursive: true });
   if (!existsSync(archivePath)) {
     console.log(`Downloading pinned Cua Driver ${cuaDriverVersion} Windows daemon...`);

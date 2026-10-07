@@ -38,7 +38,7 @@ import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type Delivery
 import { codexNoteInEffect, createCodexWatcher } from "./codex-watch";
 import { hookPipePath, requestShutdown, startHookServer } from "./hook-server";
 import { runHookRequest } from "./hook-run";
-import { canQueue } from "./codex-delivery-core";
+import { canQueue, normCwd } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
@@ -53,7 +53,7 @@ export interface NativeIo {
   confirm?(question: string): Promise<boolean>;
   /** Codex delivery dependencies; tests inject fakes, production uses the real `codex queue`. */
   codexDeps?: DeliveryDeps;
-  /** Where the command was run; the default is the process's own folder. Used to pick between several open sessions. */
+  /** The caller's working folder, used to pick a session. M9R's own install directory is never a project folder. */
   cwd?: string;
   /** Start-with-Windows switch; tests inject a fake so nothing ever touches the real registry. */
   autostart?: Autostart;
@@ -478,7 +478,25 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
   const store = createLocalStore(nativePaths(io).m9r);
   // Typed by a person only with a real terminal and no agent markers; an agent running this command is agent-initiated.
   const human = isHumanContext({ hasTerminal: !!io.confirm, env: io.env });
-  const { task, created } = store.addTask({ from: input.from ?? (human ? "you" : "agent"), to: handleForProvider(to), goal: input.text, origin: human ? "human_typed" : "agent_initiated", cwd: io.cwd ?? process.cwd(), ...(input.session ? { targetSession: input.session } : {}), idempotencyKey: input.key ?? randomUUID() });
+  const workingDirectory = io.env.M9R_PROJECT_ROOT?.trim() || io.cwd || process.cwd();
+  const storeRoot = normCwd(nativePaths(io).m9r);
+  const normalizedWorkingDirectory = normCwd(workingDirectory);
+  // M9R's installed executables live under ~/.m9r/bin. When a pill/shortcut starts the CLI there,
+  // that process directory is not the user's project and must not be used to route a task to Codex.
+  let taskCwd = normalizedWorkingDirectory === storeRoot || normalizedWorkingDirectory.startsWith(`${storeRoot}/`)
+    ? undefined
+    : workingDirectory;
+  if (!taskCwd) {
+    // A sign-in-launched pill inherits the install folder, not a project.
+    // Recover only the owner's saved broker project, never another agent's cwd.
+    try {
+      const configured = JSON.parse(readFileSync(join(nativePaths(io).m9r, "broker-autostart.json"), "utf8").replace(/^\uFEFF/, "")) as { projectRoot?: unknown };
+      if (typeof configured.projectRoot === "string" && configured.projectRoot.trim()
+        && normCwd(configured.projectRoot) !== storeRoot
+        && !normCwd(configured.projectRoot).startsWith(`${storeRoot}/`)) taskCwd = configured.projectRoot;
+    } catch { /* no owner-configured project: keep the existing unscoped route */ }
+  }
+  const { task, created } = store.addTask({ from: input.from ?? (human ? "you" : "agent"), to: handleForProvider(to), goal: input.text, origin: human ? "human_typed" : "agent_initiated", ...(taskCwd ? { cwd: taskCwd } : {}), ...(input.session ? { targetSession: input.session } : {}), idempotencyKey: input.key ?? randomUUID() });
   if (task.approval === "pending") {
     io.out(`Task ${task.id} to @${task.to} is waiting for the user's approval; nothing was delivered.`);
     io.out(`Tell the user to run: m9r-cli approve ${task.id}${isProtectedAction(task.goal) ? "  (it looks like a protected action, so a standing rule would not cover it)" : ""}`);

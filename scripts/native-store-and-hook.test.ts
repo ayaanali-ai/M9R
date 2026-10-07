@@ -163,6 +163,88 @@ test("SessionStart registers the endpoint and prints a short card that lists rec
   done();
 });
 
+test("OpenCode polling pushes only an approved, fresh task into its exact authenticated session and acknowledges once", () => {
+  const now = new Date("2026-10-07T12:00:00Z");
+  const { store, done } = tempStore(() => now);
+  store.registerEndpoint({ provider: "opencode", sessionId: "oc-1", cwd: "C:/repo" });
+  const identity = store.issueIdentity("opencode", "opencode", "oc-1");
+  const pinned = store.addTask({
+    from: "codex", to: "opencode", goal: "review the shared change", origin: "human_typed",
+    cwd: "C:/repo", targetSession: "oc-1", idempotencyKey: "opencode-live-prompt",
+  }).task;
+  const pending = store.addTask({
+    from: "claude", to: "opencode", goal: "publish the announcement", origin: "agent_initiated",
+    cwd: "C:/repo", targetSession: "oc-1", idempotencyKey: "opencode-live-approval",
+  }).task;
+  const context = { ...ctx(store, "opencode"), now: () => now };
+  const poll = (session = "oc-1") => handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: session, cwd: "C:/repo" }, context);
+
+  const offered = poll();
+  assert.equal(offered?.hookSpecificOutput.hookEventName, "OpenCodePoll");
+  const envelope = JSON.parse(ctxOf(offered)!) as { task_id: string; prompt: string };
+  assert.equal(envelope.task_id, pinned.id);
+  assert.equal(envelope.prompt.startsWith("[M9R T1]\n"), true);
+  assert.match(envelope.prompt, /review the shared change/);
+  assert.match(envelope.prompt, new RegExp(identity.token));
+  assert.equal(store.getTask(pinned.id)?.delivery, undefined, "offering a task is not proof OpenCode accepted it");
+  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), 0);
+  assert.equal(poll("different-session"), null, "a pinned task never leaks into another OpenCode session");
+
+  const ack = handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "oc-1", cwd: "C:/repo", task_id: pinned.id }, context);
+  assert.deepEqual(JSON.parse(ctxOf(ack)!), { accepted: true, task_id: pinned.id });
+  assert.equal(store.getTask(pinned.id)?.delivery?.state, "queued");
+  assert.equal(store.getTask(pinned.id)?.deliveredSession, "oc-1");
+  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pinned.seq);
+  assert.deepEqual(JSON.parse(ctxOf(handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "oc-1", cwd: "C:/repo", task_id: pinned.id }, context))!), { accepted: true, task_id: pinned.id }, "ack retry is idempotent");
+  assert.equal(poll(), null, "acknowledged work is not prompted a second time");
+
+  assert.equal(poll(), null, "agent work stays blocked while approval is pending");
+  store.setApproval(pending.id, "approved");
+  const approved = JSON.parse(ctxOf(poll())!) as { task_id: string; prompt: string };
+  assert.equal(approved.task_id, pending.id);
+  assert.match(approved.prompt, /publish the announcement/);
+
+  // A normal user prompt must not consume or cursor past work before the live task pump receives it.
+  assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "oc-1", cwd: "C:/repo", prompt: "ordinary prompt" }, context), null);
+  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pinned.seq);
+  done();
+});
+
+test("a stale authenticated OpenCode session cannot block the current session's unpinned task", () => {
+  let clock = new Date("2026-10-07T11:00:00Z");
+  const { store, done } = tempStore(() => clock);
+  store.registerEndpoint({ provider: "opencode", sessionId: "closed", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "closed");
+  clock = new Date("2026-10-07T12:00:00Z");
+  store.registerEndpoint({ provider: "opencode", sessionId: "current", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "current");
+  const task = store.addTask({ from: "you", to: "opencode", goal: "show the cursor", origin: "human_typed", cwd: "C:/repo", idempotencyKey: "stale-session" }).task;
+  const context = { ...ctx(store, "opencode"), now: () => clock };
+  const output = handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: "current", cwd: "C:/repo" }, context);
+  assert.equal(JSON.parse(ctxOf(output)!).task_id, task.id);
+  handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "current", cwd: "C:/repo", task_id: task.id }, context);
+  assert.equal(store.getTask(task.id)?.deliveredSession, "current");
+  done();
+});
+
+test("OpenCode live task acknowledgement refuses revoked identities, denied approvals, and another project", () => {
+  const now = new Date("2026-10-07T12:00:00Z");
+  const { store, done } = tempStore(() => now);
+  store.registerEndpoint({ provider: "opencode", sessionId: "oc-1", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "oc-1");
+  const taskRecord = store.addTask({
+    from: "codex", to: "opencode", goal: "inspect this project", origin: "human_typed",
+    cwd: "C:/other", targetSession: "oc-1", idempotencyKey: "wrong-project",
+  }).task;
+  const context = { ...ctx(store, "opencode"), now: () => now };
+  assert.equal(handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: "oc-1", cwd: "C:/repo" }, context), null);
+  assert.equal(handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "oc-1", cwd: "C:/repo", task_id: taskRecord.id }, context), null);
+  assert.equal(store.getTask(taskRecord.id)?.delivery, undefined);
+  store.revokeIdentity("oc-1");
+  assert.equal(handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: "oc-1", cwd: "C:/other" }, context), null);
+  done();
+});
+
 test("a typed mention creates a task for the target and tells the sender not to do the work", () => {
   const { store, done } = tempStore();
   store.registerEndpoint({ provider: "codex" });
@@ -172,8 +254,99 @@ test("a typed mention creates a task for the target and tells the sender not to 
   assert.equal(t[0].goal, "investigate the relay reconnect bug");
   assert.equal(t[0].from, "claude");
   assert.equal(t[0].origin, "human_typed");
-  assert.match(ctxOf(out)!, /sent your message to @codex as task T1/);
+  // No dispatch is wired in this ctx, so no push is attempted: the ack must say held, not sent.
+  assert.match(ctxOf(out)!, /held your message to @codex as task T1/);
   assert.match(ctxOf(out)!, /do not do that work yourself/i);
+  done();
+});
+
+test("a mention states the true delivery state: pushed, inbox pickup, or held", () => {
+  const { store, done } = tempStore();
+  const dispatched: string[] = [];
+  const wire = (provider: string) => ({ provider, store, pathExists: () => false, readIndex: () => null, dispatch: (id: string) => dispatched.push(id) });
+  // Pushed: @codex mentioned from claude, with a queue push attempted live.
+  const pushed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "@codex review the relay" }, wire("claude-code"));
+  assert.match(ctxOf(pushed)!, /already sent your message to @codex/);
+  assert.equal(dispatched.length, 1);
+  // Inbox pickup: a live claude session exists, but nothing pushes to it mid-turn.
+  // (Sent from codex so @claude is another agent, not a self-mention.)
+  store.registerEndpoint({ provider: "claude-code", sessionId: "cl-live", cwd: "/repo" });
+  store.issueIdentity("claude", "claude-code", "cl-live");
+  const pickup = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s9", cwd: "/repo", prompt: "@claude check the relay too" }, wire("codex"));
+  assert.match(ctxOf(pickup)!, /in their inbox as task T2/);
+  assert.match(ctxOf(pickup)!, /next prompt/);
+  assert.match(ctxOf(pickup)!, /Do not do that work yourself/);
+  // Held: no live opencode session anywhere.
+  const held = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s9", cwd: "/repo", prompt: "@opencode compare notes" }, wire("codex"));
+  assert.match(ctxOf(held)!, /held your message to @opencode/);
+  assert.match(ctxOf(held)!, /no active session/);
+  assert.match(ctxOf(held)!, /Do not do that work yourself/);
+  done();
+});
+
+test("the per-user M9R install folder is never persisted as a project scope", () => {
+  const { root, store, done } = tempStore();
+  store.registerEndpoint({ provider: "codex", sessionId: "codex-install", cwd: join(root, "bin") });
+  const direct = store.addTask({ from: "you", to: "codex", goal: "direct store task", origin: "human_typed", cwd: join(root, "bin"), idempotencyKey: "direct-install-cwd" });
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s-install", cwd: join(root, "bin"), prompt: "@codex use the approved stage" }, ctx(store));
+
+  const endpoint = store.listEndpoints().find((item) => item.handle === "claude");
+  assert.equal(endpoint?.cwd, undefined);
+  assert.equal(store.sessionsFor("codex")[0]?.cwd, undefined);
+  assert.equal(direct.task.cwd, undefined);
+  assert.equal(store.tasksFor("codex")[0]?.cwd, undefined);
+
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s-project", cwd: "C:/RunLeak/runleak", prompt: "@codex use the project" }, ctx(store));
+  assert.equal(store.tasksFor("codex")[2]?.cwd, "C:/RunLeak/runleak");
+  done();
+});
+
+test("cursor and session-link APIs also discard an M9R install cwd", () => {
+  const { root, store, done } = tempStore();
+  const installCwd = join(root, "bin");
+
+  store.setCursor("codex", "install-session", 7, installCwd);
+  assert.equal(store.cursorFor("codex", "install-session", installCwd), 7, "install-scoped callers use the unscoped session cursor");
+  assert.equal(store.cursorFor("codex", "install-session"), 7, "the install path cannot create a separate project cursor");
+
+  store.setLink(
+    { handle: "codex", sessionId: "install-session", cwd: installCwd },
+    { handle: "claude", sessionId: "partner-session", cwd: installCwd },
+    "picked",
+  );
+  const link = store.allLinks()[0];
+  assert.equal(link.a.cwd, undefined);
+  assert.equal(link.b.cwd, undefined);
+  assert.equal(store.linksFor("codex", "install-session", installCwd).length, 1);
+  assert.doesNotMatch(readFileSync(join(root, "state.json"), "utf8"), /\\bin[\\"]|\/bin[\"]/, "the install directory is not written into store state");
+  done();
+});
+
+test("legacy records with an M9R install cwd are repaired on the next store write", () => {
+  const { root, store, done } = tempStore();
+  const installCwd = join(root, "bin");
+  writeFileSync(join(root, "state.json"), JSON.stringify({
+    version: 1,
+    nextTaskNo: 4,
+    nextSeq: { codex: 3 },
+    tasks: [{ id: "T3", seq: 3, from: "you", to: "codex", goal: "old proof", origin: "human_typed", idempotencyKey: "old-proof", cwd: installCwd }],
+    cursors: {},
+    endpoints: { codex: { handle: "codex", provider: "codex", cwd: installCwd, lastSeenAt: new Date().toISOString() } },
+    events: [],
+    rules: [],
+    nextRuleNo: 1,
+    sessions: [{ handle: "codex", provider: "codex", sessionId: "old", cwd: installCwd, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString() }],
+    links: [{ id: "L1", a: { handle: "codex", sessionId: "old", cwd: installCwd }, b: { handle: "claude", sessionId: "partner", cwd: installCwd }, origin: "picked", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
+    nextLinkNo: 2,
+    identities: [],
+  }), "utf8");
+
+  assert.equal(store.getTask("T3")?.cwd, undefined);
+  assert.equal(store.listEndpoints()[0]?.cwd, undefined);
+  assert.equal(store.sessionsFor("codex")[0]?.cwd, undefined);
+  assert.equal(store.allLinks()[0]?.a.cwd, undefined);
+  store.dismiss([]); // force the repaired read-state to be persisted atomically
+  assert.doesNotMatch(readFileSync(join(root, "state.json"), "utf8"), /\\bin[\\"]|\/bin[\"]/);
   done();
 });
 

@@ -2,11 +2,12 @@ import { readFileSync } from "node:fs";
 import type { WebBatchRequest, WebBatchResponse, WebRequest, WebResponse } from "./web-broker-core";
 import type { WebAgentMessage } from "./web-broker-core";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
+import type { TaskStageMode } from "./task-desktop-stage";
 
 export interface WebBrokerClient {
-  taskStageApp?(token: string, taskId: string, appId?: string): Promise<{ ok: boolean; result?: unknown; error?: string }>;
-  taskStageAction?(token: string, taskId: string, action: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }>;
-  prepareTaskStage?(token: string, taskId: string, timeoutMs?: number): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
+  taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode): Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode): Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
   run(request: WebRequest): Promise<WebResponse>;
   runBatch?(request: WebBatchRequest): Promise<WebBatchResponse>;
   notifyMessage?(message: WebAgentMessage): Promise<boolean>;
@@ -29,32 +30,32 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
   const doFetch = options.fetchImpl ?? fetch;
   const baseUrl = `http://127.0.0.1:${options.port ?? DEFAULT_BROKER_PORT}`;
   return {
-    async taskStageApp(token, taskId, appId) {
+    async taskStageApp(token, taskId, appId, mode = "background") {
       try {
         const key = readFileSync(options.keyPath, "utf8").trim();
         const response = await doFetch(`${baseUrl}/web/stage/${appId === undefined ? "close" : "launch"}`, {
           method: "POST", headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify({ token, taskId, ...(appId === undefined ? {} : { appId }) }), signal: AbortSignal.timeout(15_000),
+          body: JSON.stringify({ token, taskId, mode, ...(appId === undefined ? {} : { appId }) }), signal: AbortSignal.timeout(15_000),
         });
         return await response.json() as { ok: boolean; result?: unknown; error?: string };
       } catch { return { ok: false, error: "The owner-launched stage broker is not reachable." }; }
     },
-    async taskStageAction(token, taskId, action) {
+    async taskStageAction(token, taskId, action, mode = "background") {
       try {
         const key = readFileSync(options.keyPath, "utf8").trim();
         const response = await doFetch(`${baseUrl}/web/stage/action`, {
           method: "POST", headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify({ token, taskId, action }), signal: AbortSignal.timeout(15_000),
+          body: JSON.stringify({ token, taskId, action, mode }), signal: AbortSignal.timeout(15_000),
         });
         return await response.json() as { ok: boolean; result?: unknown; error?: string };
       } catch { return { ok: false, error: "The owner-launched stage broker is not reachable." }; }
     },
-    async prepareTaskStage(token, taskId, timeoutMs = 15_000) {
+    async prepareTaskStage(token, taskId, mode = "background", timeoutMs = 15_000) {
       try {
         const key = readFileSync(options.keyPath, "utf8").trim();
         const response = await doFetch(`${baseUrl}/web/stage/prepare`, {
           method: "POST", headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify({ token, taskId }), signal: AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, 15_000))),
+          body: JSON.stringify({ token, taskId, mode }), signal: AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, 15_000))),
         });
         return await response.json() as { ok: boolean; stage?: unknown; error?: string };
       } catch { return { ok: false, error: "The owner-launched stage broker is not reachable." }; }

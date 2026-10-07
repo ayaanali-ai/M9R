@@ -1240,7 +1240,10 @@ function webMcpRuntime(): { command: string; args: readonly string[] } {
   });
 }
 
-function webOpenCodeHookInvocation(runtime: { command: string }): { command: string; args: readonly string[] } {
+function webOpenCodeHookInvocation(
+  runtime: { command: string },
+  event: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" = "SessionStart",
+): { command: string; args: readonly string[] } {
   const entry = fileURLToPath(import.meta.url);
   const engineName = runtime.command.split(/[\\/]/).pop() ?? "";
   const compiledHookPath = join(dirname(entry), "m9r-hook.js");
@@ -1250,6 +1253,7 @@ function webOpenCodeHookInvocation(runtime: { command: string }): { command: str
     ...( /^m9r-engine(?:\.exe)?$/i.test(engineName) ? { engineExecutable: runtime.command } : {}),
     ...(awaitableExists(compiledHookPath) ? { compiledHookPath } : {}),
     ...(awaitableExists(sourceHookPath) ? { sourceHookPath, sourceNodeArgs: process.execArgv } : {}),
+    event,
   });
 }
 
@@ -1792,8 +1796,11 @@ async function runWebSetup(args: string[]): Promise<number> {
     } | null = null;
     if (selected.includes("opencode")) {
       const hook = webOpenCodeHookInvocation(runtime);
+      const promptHook = webOpenCodeHookInvocation(runtime, "UserPromptSubmit");
+      const pollHook = webOpenCodeHookInvocation(runtime, "OpenCodePoll");
+      const deliveredHook = webOpenCodeHookInvocation(runtime, "OpenCodeDelivered");
       const path = join(openCodePaths.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME);
-      const bytes = Buffer.from(buildOpenCodeIdentityPluginSource(hook));
+      const bytes = Buffer.from(buildOpenCodeIdentityPluginSource(hook, promptHook, pollHook, deliveredHook));
       const current = await readOptional(path);
       openCodePlugin = {
         path,
@@ -2613,11 +2620,11 @@ async function runWebCli(args: string[]): Promise<number> {
       process.stdout.write(JSON.stringify({ ok: true, appId: args[2] }) + "\n");
       return 0;
     }
-    if (["allow-agent", "allow-control", "revoke-agent"].includes(args[1] ?? "")) {
+    if (["allow-agent", "allow-control", "allow-full", "revoke-agent"].includes(args[1] ?? "")) {
       const { setTaskStagePermission } = await import("../src/lib/native/task-desktop-stage");
       const policy = setTaskStagePermission(defaultStoreRoot(homedir(), process.env), args[2] ?? "", args[1] !== "revoke-agent", {
         terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY) || (process.env.M9R_DESKTOP_PILL_OWNER_ACTION === "1" && !isAgentContext(process.env)), env: process.env,
-      }, args[1] === "allow-control");
+      }, args[1] === "allow-control" || args[1] === "allow-full", args[1] === "allow-full" ? "full" : undefined);
       process.stdout.write(JSON.stringify({ ok: true, ...policy }) + "\n");
       return 0;
     }

@@ -1,4 +1,5 @@
-import { createCuaStageDriver, type CuaAgentCursorIdentity } from "./cua-stage-driver";
+import { createCuaStageDriver, type CuaAgentCursorIdentity, type CuaStageTargetDescription } from "./cua-stage-driver";
+import { classifyWebActionRisk } from "./risk-core";
 
 export type TaskStageAction =
   | { kind: "capture" }
@@ -37,4 +38,17 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "scroll": return driver.scroll(name, action.x, action.y, action.direction, identity);
     case "drag": return driver.drag(name, action.fromX, action.fromY, action.toX, action.toY, identity);
   }
+}
+
+/**
+ * Money carve-out for stage clicks. The owner pre-approves everything else an agent may do on its
+ * registered window, but a click that looks like it moves or commits money always waits for the owner.
+ * Same label patterns as the web broker's click gate; fail-closed when the target has no readable label,
+ * because an unidentified control must never be assumed harmless.
+ */
+export function stageClickNeedsApproval(target: CuaStageTargetDescription | undefined): { hold: boolean; label?: string } {
+  const label = target?.label?.trim() || undefined;
+  if (!label) return { hold: true };
+  const risk = classifyWebActionRisk({ action: "click", targetLabel: label });
+  return { hold: risk.risky && risk.category === "money", label };
 }

@@ -9,7 +9,7 @@ export type PillBadge = "approval" | "finished" | "error";
 
 /** Wire shape: what a shell gives the pill. */
 export interface PillSnapshot {
-  agents: Array<{ handle: string; provider: Provider; state: AgentRunState; activity: string[] }>;
+  agents: Array<{ handle: string; provider: Provider; state: AgentRunState; activity: string[]; task?: string }>;
   approvals: Array<{ id: string; agent: string; title: string; detail: string }>;
   /** Replies and notices from agents, newest last. */
   thread: Array<{ id: string; from: string; text: string; link?: LinkOffer }>;
@@ -33,6 +33,8 @@ export interface AgentTask {
   state: BotStateName;
   stepIndex: number;
   steps: string[];
+  /** Current task goal supplied by the host feed when one is active. */
+  task?: string;
   pillBadge?: PillBadge | null;
 }
 
@@ -41,6 +43,9 @@ export interface ApprovalInfo {
   agent: string;
   title: string;
   detail: string;
+  /** A poll omitted this approval; keep it visible but warn that the server must revalidate a decision. */
+  unconfirmed?: boolean;
+  unconfirmedSince?: number;
 }
 
 export interface ChatMessage {
@@ -80,6 +85,7 @@ const RUN_TO_BOT: Record<AgentRunState, BotStateName> = {
 };
 
 type Listener = () => void;
+const APPROVAL_RECOVERY_MS = 24 * 60 * 60_000;
 
 class AppState {
   mode: IslandMode = "hidden";
@@ -106,6 +112,7 @@ class AppState {
 
   private listeners = new Set<Listener>();
   private seenApprovals = new Set<string>();
+  private resolvedApprovals = new Map<string, number>();
   private lastThread = "";
   private threadSeeded = false;
 
@@ -144,8 +151,20 @@ class AppState {
   }
 
   /** Applies a snapshot from the shell. Returns what is new, so the island can open on a fresh approval or reply. */
-  apply(snapshot: PillSnapshot): { newApprovals: string[]; newReplies: PillSnapshot["thread"] } {
-    const waiting = new Set(snapshot.approvals.map((a) => a.agent));
+  apply(snapshot: PillSnapshot, now = Date.now()): { newApprovals: string[]; newReplies: PillSnapshot["thread"] } {
+    for (const [id, resolvedAt] of this.resolvedApprovals) {
+      if (now - resolvedAt >= APPROVAL_RECOVERY_MS) this.resolvedApprovals.delete(id);
+    }
+    const currentApprovals = snapshot.approvals.filter((approval) => !this.resolvedApprovals.has(approval.id));
+    const incomingIds = new Set(currentApprovals.map((approval) => approval.id));
+    const confirmed = currentApprovals.map((approval) => ({ ...approval, unconfirmed: false, unconfirmedSince: undefined }));
+    const recovered = this.approvals
+      .filter((approval) => !incomingIds.has(approval.id)
+        && !this.resolvedApprovals.has(approval.id)
+        && now - (approval.unconfirmedSince ?? now) < APPROVAL_RECOVERY_MS)
+      .map((approval) => ({ ...approval, unconfirmed: true, unconfirmedSince: approval.unconfirmedSince ?? now }));
+    this.approvals = [...confirmed, ...recovered];
+    const waiting = new Set(this.approvals.map((a) => a.agent));
     this.tasks = snapshot.agents.map((a) => {
       const prev = this.tasks.find((t) => t.id === a.handle);
       const steps = a.activity.slice(-20);
@@ -158,13 +177,13 @@ class AppState {
         state: waiting.has(a.handle) ? "approval" : RUN_TO_BOT[a.state] ?? "idle",
         stepIndex: Math.max(0, steps.length - 1),
         steps,
+        ...(a.task ? { task: a.task } : {}),
         pillBadge: waiting.has(a.handle) ? "approval" : a.state === "failed" ? "error" : finished ? "finished" : prev?.pillBadge ?? null,
       };
     });
     if (!this.focusId || !this.tasks.some((t) => t.id === this.focusId)) this.focusId = this.tasks[0]?.id ?? null;
 
-    this.approvals = snapshot.approvals.map((a) => ({ ...a }));
-    const newApprovals = this.approvals.filter((a) => !this.seenApprovals.has(a.id)).map((a) => a.id);
+    const newApprovals = confirmed.filter((a) => !this.seenApprovals.has(a.id)).map((a) => a.id);
     for (const a of this.approvals) this.seenApprovals.add(a.id);
 
     // Replies are new when they come after the last one already seen; the very first snapshot only sets the baseline.
@@ -178,6 +197,12 @@ class AppState {
     this.lastThread = ids.at(-1) ?? this.lastThread;
     this.notify();
     return { newApprovals, newReplies };
+  }
+
+  /** Remove an approval only after the transport accepted the owner's decision. */
+  resolveApproval(id: string, now = Date.now()) {
+    this.resolvedApprovals.set(id, now);
+    this.approvals = this.approvals.filter((approval) => approval.id !== id);
   }
 
   defaultView(): IslandViewName {

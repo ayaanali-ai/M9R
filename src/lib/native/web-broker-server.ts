@@ -16,7 +16,7 @@ import { platform } from "node:os";
 import { WebSocket, WebSocketServer } from "ws";
 import type { BrowserTransport } from "./agent-chrome";
 import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
-import { createWebBroker, ROOM_MODES, type RoomMode, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
+import { createWebBroker, ROOM_MODES, type RoomMode, type StageApprovalRequest, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import { startOwnerPipe, type OwnerPipeRequest } from "./owner-pipe";
 import { isUiMessage, type UiState, type WebUiBridge } from "./web-ui-bridge";
@@ -116,8 +116,8 @@ function readBody(req: IncomingMessage): Promise<string | null> {
 
 export interface WebBrokerServerOptions {
   /** Owner-hosted, task-authorized desktop preparation; absent means desktop access is unavailable. */
-  taskStages?: { prepare(token: string, taskId: string): Promise<unknown>; act?(token: string, taskId: string, action: unknown): Promise<unknown>;
-    launch?(token: string, taskId: string, appId: string): Promise<unknown>; closeApp?(token: string, taskId: string): Promise<unknown> };
+  taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview"): Promise<unknown>;
+    launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview"): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown> };
   /** Dedicated browser transport. Extension connections are disabled on this broker. */
   browserTransport?: BrowserTransport;
   key: string;
@@ -153,7 +153,7 @@ export interface WebBrokerServerOptions {
   ownerPipePath?: string;
 }
 
-export async function startWebBroker(options: WebBrokerServerOptions): Promise<{ port: number; close: () => Promise<void> }> {
+export async function startWebBroker(options: WebBrokerServerOptions): Promise<{ port: number; close: () => Promise<void>; requestStageApproval: (request: StageApprovalRequest) => Promise<boolean> }> {
   const host = options.host ?? "127.0.0.1";
   const allowed = (options.allowedExtensionIds ?? []).filter(Boolean);
   const allowAnyExtension = allowed.length === 0 && (options.allowAnyExtension === true || process.env.M9R_ALLOW_ANY_EXTENSION === "1");
@@ -401,12 +401,14 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
           const body: unknown = JSON.parse(await readBody(req) || "null");
           if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
           const value = body as Record<string, unknown>;
-          const fields = launch ? ["token", "taskId", "appId"] : ["token", "taskId"];
+          const fields = launch ? ["token", "taskId", "appId", "mode"] : ["token", "taskId", "mode"];
           if (Object.keys(value).some((key) => !fields.includes(key)) || typeof value.token !== "string" || value.token.length > 128
             || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
+            || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")
             || launch && (typeof value.appId !== "string" || !/^[a-z][a-z0-9_-]{0,39}$/.test(value.appId))) throw new Error("Invalid stage request.");
-          const result = launch ? await options.taskStages!.launch!(value.token, value.taskId, value.appId as string)
-            : await options.taskStages!.closeApp!(value.token, value.taskId);
+          const result = launch
+            ? await options.taskStages!.launch!(value.token, value.taskId, value.appId as string, value.mode as "background" | "owner-preview" | undefined)
+            : await options.taskStages!.closeApp!(value.token, value.taskId, value.mode as "background" | "owner-preview" | undefined);
           return reply(res, 200, { ok: true, result });
         } catch (error) { return reply(res, 403, { ok: false, error: error instanceof Error ? error.message : "Stage app request failed." }); }
       }
@@ -416,10 +418,11 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
           const body: unknown = JSON.parse(await readBody(req) || "null");
           if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
           const value = body as Record<string, unknown>;
-          if (Object.keys(value).some((key) => !["token", "taskId", "action"].includes(key))
+          if (Object.keys(value).some((key) => !["token", "taskId", "action", "mode"].includes(key))
             || typeof value.token !== "string" || value.token.length > 128
-            || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)) throw new Error("Invalid stage request.");
-          return reply(res, 200, { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action) });
+            || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
+            || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
+          return reply(res, 200, { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, value.mode as "background" | "owner-preview" | undefined) });
         } catch (error) {
           return reply(res, 403, { ok: false, error: error instanceof Error ? error.message : "Stage action failed." });
         }
@@ -430,10 +433,11 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
           const body: unknown = JSON.parse(await readBody(req) || "null");
           if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
           const value = body as Record<string, unknown>;
-          if (Object.keys(value).some((key) => !["token", "taskId"].includes(key))
+          if (Object.keys(value).some((key) => !["token", "taskId", "mode"].includes(key))
             || typeof value.token !== "string" || value.token.length > 128
-            || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)) throw new Error("Invalid stage request.");
-          return reply(res, 200, { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId) });
+            || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
+            || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
+          return reply(res, 200, { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, value.mode as "background" | "owner-preview" | undefined) });
         } catch (error) {
           return reply(res, 403, { ok: false, error: error instanceof Error ? error.message : "Stage preparation failed." });
         }
@@ -746,5 +750,5 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     return closePromise;
   };
   closeServer = close;
-  return { port, close };
+  return { port, close, requestStageApproval: (request) => broker.requestStageApproval(request) };
 }

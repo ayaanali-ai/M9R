@@ -43,8 +43,9 @@ test("task stage app/action routes require loopback key, reject origins and extr
 
 test("task stage preparation requires the broker key and refuses browser origins and extra control fields", async () => {
   let calls = 0;
+  let mode: string | undefined;
   const key = randomBytes(32).toString("hex");
-  const broker = await startWebBroker({ key, port: 0, taskStages: { prepare: async () => { calls++; return { name: "agent-fixture" }; } } });
+  const broker = await startWebBroker({ key, port: 0, taskStages: { prepare: async (_token, _taskId, requestedMode) => { calls++; mode = requestedMode; return { name: "agent-fixture", mode: requestedMode }; } } });
   try {
     const url = `http://127.0.0.1:${broker.port}/web/stage/prepare`;
     const request = (headers: Record<string, string>, body: unknown = { token: "session-token", taskId: "T1" }) => fetch(url, {
@@ -54,8 +55,9 @@ test("task stage preparation requires the broker key and refuses browser origins
     assert.equal((await request({ "x-m9r-key": key, origin: "https://untrusted.example" })).status, 403);
     assert.equal((await request({ "x-m9r-key": key }, { token: "session-token", taskId: "T1", pid: 123 })).status, 403);
     assert.equal(calls, 0);
-    assert.equal((await request({ "x-m9r-key": key })).status, 200);
+    assert.equal((await request({ "x-m9r-key": key }, { token: "session-token", taskId: "T1", mode: "owner-preview" })).status, 200);
     assert.equal(calls, 1);
+    assert.equal(mode, "owner-preview");
   } finally { await broker.close(); }
 });
 

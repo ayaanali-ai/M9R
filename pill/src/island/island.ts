@@ -142,7 +142,7 @@ export class Island {
       this.deciding = false;
     }
     // Keep the approval until the transport accepts the owner's decision.
-    State.approvals = State.approvals.filter((a) => a.id !== req.id);
+    State.resolveApproval(req.id);
     if (State.approvals.length === 0) {
       State.isPinned = false;
       this.fsm.pinned = false;
@@ -216,6 +216,7 @@ export class Island {
   private setMode(mode: IslandMode) {
     const prev = State.mode;
     if (mode === prev) return;
+    if (prev === "expanded" && mode !== "expanded") this.views.get(State.view)?.deactivate?.();
     State.mode = mode;
     if (mode === "expanded") Sound.play("open");
     if (prev === "expanded") {
@@ -229,7 +230,9 @@ export class Island {
   }
 
   expand(view: IslandViewName) {
+    if (State.view !== view) this.views.get(State.view)?.deactivate?.();
     State.view = view;
+    this.views.get(view)?.activate?.();
     if (State.mode !== "expanded") this.setMode("expanded");
     else this.animateGeometry(false);
     State.lastActivity = performance.now();
@@ -238,6 +241,7 @@ export class Island {
   }
 
   setView(view: IslandViewName) {
+    if (State.view !== view) this.views.get(State.view)?.deactivate?.();
     if (State.mode !== "expanded") {
       this.fsm.forceHome();
       State.view = view;

@@ -16,6 +16,7 @@ import { pullCloudNotes, pushCloudNote } from "@/lib/native/cloud-memory";
 import { readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
 import { DEFAULT_BROKER_PORT, brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
+import type { StageApprovalRequest } from "@/lib/native/web-broker-core";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { webExtensionAllowlist } from "@/lib/native/web-setup-core";
@@ -53,8 +54,12 @@ async function main(): Promise<void> {
   // A real POST /web/shutdown (m9r web restart, or any owner-triggered restart) must stop this whole process, not just
   // close the HTTP socket, or the unref'd-less feed timer below keeps Node running forever with nothing left listening.
   let requestShutdown = () => {};
-  const taskStages = createTaskDesktopStageService({ store: createLocalStore(root) });
+  // The stage service is built before the broker that owns the approval list, so it reads the route lazily:
+  // money-gated stage clicks hold for the owner through the same pill approvals as web actions.
+  const stageApprovals: { requestApproval?: (request: StageApprovalRequest) => Promise<boolean> } = {};
+  const taskStages = createTaskDesktopStageService({ store: createLocalStore(root), approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
   const broker = await startWebBroker({ key, port, taskStages, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
+  stageApprovals.requestApproval = (request) => broker.requestStageApproval(request);
   const config = loadAgentsConfig(root, { cwd: projectRoot });
   const sessions = createWebLiveSessions({
     agents: config.agents, storeRoot: root, repoRoot: projectRoot, brokerPort: broker.port,

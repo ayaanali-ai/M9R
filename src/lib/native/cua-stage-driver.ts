@@ -10,7 +10,7 @@ import { createWindowsDesktopStageManager, type WindowsStageDependencies } from 
 import type { VerifiedIdentity } from "./identity-core";
 
 const CUA_PACKAGE = "@trycua/cua-driver";
-const CUA_DRIVER_VERSION = "0.33.4";
+const CUA_DRIVER_VERSION = "0.34.0";
 const CURSOR_SESSION_LABEL_MAX_LENGTH = 28;
 const MAX_IMAGE_DIMENSION = 1024;
 // Keep the base64 JSON response comfortably below the native pill's 4 MiB stdout cap.
@@ -35,6 +35,8 @@ type CuaSdk = {
   ScrollDirection: { Up: number; Down: number };
   ScrollBy: { Line: number };
   CursorReducedMotion: { Auto: number };
+  CursorMotionStyle: typeof import("@trycua/cua-driver").CursorMotionStyle;
+  CursorMotionTiming: typeof import("@trycua/cua-driver").CursorMotionTiming;
 };
 
 export type CuaAgentCursorIdentity = Pick<VerifiedIdentity, "handle" | "sessionId">;
@@ -90,10 +92,36 @@ export interface CuaStageCapture {
 }
 
 export interface CuaStageCursorProof {
+  /** Requested point in the registered app's screenshot coordinates. */
   x: number;
   y: number;
+  /** Confirmed position of the synthetic cursor in desktop screen coordinates. */
+  screenX: number;
+  screenY: number;
   enabled: true;
   visible: true;
+}
+
+interface CuaStageWindowBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface CuaStageWindowFrame {
+  dataUrl: string;
+  width: number;
+  height: number;
+  windowBounds?: CuaStageWindowBounds;
+}
+
+export interface CuaStageTargetDescription {
+  /** Accessible label of the smallest enabled control at the point, if the snapshot provided one. */
+  label?: string;
+  role?: string;
+  /** Screenshot-pixel frame of the resolved control, when the snapshot provided one. */
+  rect?: { x: number; y: number; width: number; height: number };
 }
 
 export interface CuaStageDriverDependencies {
@@ -252,7 +280,22 @@ function validPoint(x: number, y: number, capture: { width: number; height: numb
 }
 
 function stageCapture(capture: { dataUrl: string; width: number; height: number }, now: () => Date): CuaStageCapture {
-  return { ...capture, capturedAt: now().toISOString() };
+  return { dataUrl: capture.dataUrl, width: capture.width, height: capture.height, capturedAt: now().toISOString() };
+}
+
+function cursorScreenPoint(x: number, y: number, frame: CuaStageWindowFrame): { x: number; y: number } {
+  const bounds = frame.windowBounds;
+  if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
+    || bounds.width <= 0 || bounds.height <= 0 || frame.width <= 0 || frame.height <= 0) {
+    throw new Error("Cua Driver did not provide valid screen bounds for this stage window.");
+  }
+  // Stage coordinates are pixels in the scaled window screenshot. Cua's
+  // synthetic cursor API accepts desktop screen points, so map through the
+  // exact window bounds instead of placing the cursor at the same raw numbers.
+  return {
+    x: bounds.x + x * bounds.width / frame.width,
+    y: bounds.y + y * bounds.height / frame.height,
+  };
 }
 
 function cursorStateFromResult(result: { isError: boolean; structuredJson?: string; rawJson?: string }): { enabled: boolean; x?: number; y?: number } {
@@ -328,22 +371,15 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         },
       });
       started = true;
-      // Configuration is also idempotent. Reapply it in case Cua reclaimed and
-      // recreated this named session while M9R was idle.
+      // Configure adaptive motion before showing the cursor and reapply it in
+      // case Cua reclaimed this named session while M9R was idle.
       resultError(await runtime.driver.setAgentCursorMotion({
         session: details.session,
-        // Let Cua choose glide duration from travel distance. A fixed 220 ms
-        // made long and short moves look equally abrupt. These values preserve
-        // its smooth curved path while keeping the label visible after action.
-        startHandle: 0.3,
-        endHandle: 0.3,
-        arcSize: 0.25,
-        arcFlow: 0,
-        spring: 0.72,
-        glideDurationMs: 0,
+        style: runtime.sdk.CursorMotionStyle.Adaptive,
+        timing: runtime.sdk.CursorMotionTiming.Fitts,
+        effects: { trail: true, glow: true },
         dwellAfterClickMs: 100,
-        idleHideMs: 15_000,
-        turnRadius: 80,
+        idleHideMs: 60_000,
       }), "Cua Driver could not configure the agent cursor motion.");
       agentSessions.set(details.key, details);
     } catch (error) {
@@ -355,17 +391,18 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return { runtime, session: agentSessions.get(details.key)! };
   }
 
-  async function moveAndVerifyCursor(input: { driver: CuaDriverLike; sdk: CuaSdk; session: string; pid: number; windowId: bigint }, x: number, y: number) {
+  async function moveAndVerifyCursor(input: { driver: CuaDriverLike; sdk: CuaSdk; session: string; pid: number; windowId: bigint }, x: number, y: number, frame: CuaStageWindowFrame) {
+    const point = cursorScreenPoint(x, y, frame);
     resultError(await input.driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cua Driver could not enable the agent cursor.");
     const target = new input.sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId });
-    resultError(await input.driver.moveCursor({ x, y, target, session: input.session }), "Cua Driver could not move the agent cursor.");
+    resultError(await input.driver.moveCursor({ ...point, target, session: input.session }), "Cua Driver could not move the agent cursor.");
     const state = cursorStateFromResult(await input.driver.getAgentCursorState({ session: input.session }));
-    if (!state.enabled || state.x === undefined || state.y === undefined || Math.abs(state.x - x) > 1 || Math.abs(state.y - y) > 1) {
+    if (!state.enabled || state.x === undefined || state.y === undefined || Math.abs(state.x - point.x) > 1 || Math.abs(state.y - point.y) > 1) {
       throw new Error("Cua Driver did not confirm the requested agent cursor position on this stage window.");
     }
     const sessionState = await input.driver.getSession({ session: input.session });
     if (sessionState.cursorVisible !== true) throw new Error("Cua Driver moved the agent cursor but did not confirm that its desktop overlay is visible.");
-    return { x: state.x, y: state.y, enabled: true as const, visible: true as const };
+    return { x, y, screenX: state.x, screenY: state.y, enabled: true as const, visible: true as const };
   }
   async function nativeControl(name: string, kind: "click" | "type" | "scroll", point?: { x: number; y: number; imageWidth: number; imageHeight: number }, extra?: { text?: string; direction?: "up" | "down" }) {
     const { stage, anchor } = await manager.inspectStage(name);
@@ -395,8 +432,9 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     session: string;
     pid: number;
     windowId: bigint;
-    capture: () => Promise<{ dataUrl: string; width: number; height: number }>;
+    capture: () => Promise<CuaStageWindowFrame>;
     elementAt: (x: number, y: number) => Promise<string | undefined>;
+    captureTarget: (x: number, y: number) => Promise<CuaStageTargetDescription | undefined>;
   }) => Promise<T>, cursorIdentity?: CuaAgentCursorIdentity): Promise<T> {
     const { stage, anchor } = await manager.inspectStage(nameInput);
     if (!anchor) throw new Error(`Stage “${stage.name}” has no registered app window. Register an owned window before capturing or moving the Cua cursor.`);
@@ -424,9 +462,15 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
           timeoutMs: 1_500,
         });
         const image = imageFromWindowState(state, pid, windowId);
-        return { dataUrl: image.dataUrl, width: image.width, height: image.height };
+        const bounds = state.windowBounds;
+        return {
+          dataUrl: image.dataUrl,
+          width: image.width,
+          height: image.height,
+          ...(bounds ? { windowBounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } } : {}),
+        };
       };
-      const elementAt = async (x: number, y: number) => {
+      const hitTarget = async (x: number, y: number) => {
         const state = await driver.getWindowState({ pid, windowId, session, includeAccessibilityTree: true,
           includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, timeoutMs: 1500 });
         imageFromWindowState(state, pid, windowId);
@@ -441,9 +485,20 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
           return element.enabled !== false && element.elementToken && frame && frame.w > 0 && frame.h > 0
             && screenX >= frame.x && screenY >= frame.y && screenX < frame.x + frame.w && screenY < frame.y + frame.h;
         }).sort((a, b) => a.frame!.w * a.frame!.h - b.frame!.w * b.frame!.h);
-        return hits[0]?.elementToken;
+        return hits[0];
       };
-      return await run({ driver, sdk, session, pid, windowId, capture, elementAt });
+      const elementAt = async (x: number, y: number) => (await hitTarget(x, y))?.elementToken;
+      const describeAt = async (x: number, y: number): Promise<CuaStageTargetDescription | undefined> => {
+        const hit = await hitTarget(x, y);
+        if (!hit) return undefined;
+        const description: CuaStageTargetDescription = {};
+        if (typeof hit.label === "string" && hit.label.trim()) description.label = hit.label.replace(/[\r\n\t]+/g, " ").slice(0, 160);
+        if (typeof hit.role === "string" && hit.role.trim()) description.role = hit.role.slice(0, 40);
+        const frame = hit.frame;
+        if (frame && frame.w > 0 && frame.h > 0) description.rect = { x: frame.x, y: frame.y, width: frame.w, height: frame.h };
+        return description;
+      };
+      return await run({ driver, sdk, session, pid, windowId, capture, captureTarget: describeAt, elementAt });
     } finally {
       if (!persistent && started) {
         try { await driver.endSession({ session }); } catch { /* preserve the primary operation result */ }
@@ -453,10 +508,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function capture(name: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageCapture> {
-    return withRegisteredWindow(name, async ({ capture: captureWindow }) => ({
-      ...await captureWindow(),
-      capturedAt: now().toISOString(),
-    }), cursorIdentity);
+    return withRegisteredWindow(name, async ({ capture: captureWindow }) => stageCapture(await captureWindow(), now), cursorIdentity);
   }
 
   async function moveCursor(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity): Promise<{ capture: CuaStageCapture; cursor: CuaStageCursorProof }> {
@@ -464,11 +516,20 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
       const captured = await captureWindow();
       if (x >= captured.width || y >= captured.height) throw new Error("Cursor coordinates must fall inside the current stage window snapshot.");
-      const cursor = await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y);
+      const cursor = await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, captured);
       return {
         capture: stageCapture(captured, now),
         cursor,
       };
+    }, cursorIdentity);
+  }
+
+  async function describeTarget(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageTargetDescription | undefined> {
+    if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < 0 || y < 0) throw new Error("Target coordinates must be non-negative whole screenshot pixels.");
+    return withRegisteredWindow(name, async ({ capture: captureWindow, captureTarget }) => {
+      const captured = await captureWindow();
+      if (x >= captured.width || y >= captured.height) throw new Error("Target coordinates must fall inside the current stage window snapshot.");
+      return captureTarget(x, y);
     }, cursorIdentity);
   }
 
@@ -514,7 +575,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementAt }) => {
       const before = await captureWindow();
       if (!validPoint(x, y, before)) throw new Error("Click coordinates must fall inside the current stage window snapshot.");
-      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y);
+      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
       if (await nativeControl(name, "click", { x, y, imageWidth: before.width, imageHeight: before.height })) return { capture: stageCapture(await captureWindow(), now),
         outcome: { status: "unverifiable", summary: "Routed the click to the exact native child control; application effect requires verification." } };
       const target = new sdk.ActionTarget.Window({ pid, windowId });
@@ -549,7 +610,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
       const before = await captureWindow();
       if (!validPoint(x, y, before)) throw new Error("Scroll coordinates must fall inside the current stage window snapshot.");
-      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y);
+      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
       if (await nativeControl(name, "scroll", { x, y, imageWidth: before.width, imageHeight: before.height }, { direction })) return { capture: stageCapture(await captureWindow(), now),
         outcome: { status: "unverifiable", summary: "Posted wheel input to the exact native child control; application effect requires verification." } };
       const target = new sdk.ActionTarget.Window({ pid, windowId });
@@ -573,7 +634,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       if (!validPoint(fromX, fromY, before) || !validPoint(toX, toY, before)) {
         throw new Error("Both drag points must fall inside the current stage window snapshot.");
       }
-      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, fromX, fromY);
+      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, fromX, fromY, before);
       const target = new sdk.ActionTarget.Window({ pid, windowId });
       const result = await driver.drag({
         fromX,
@@ -617,7 +678,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     } catch { /* the runtime never initialized */ }
   }
 
-  return { capture, moveCursor, listWindows, click, typeText, scroll, drag, closeAgentCursor, shutdown };
+  return { capture, describeTarget, moveCursor, listWindows, click, typeText, scroll, drag, closeAgentCursor, shutdown };
 }
 
 async function readStageTextFromStdin(): Promise<string> {

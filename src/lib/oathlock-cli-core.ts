@@ -3416,7 +3416,7 @@ Environment:
 /** Adapts the CLI's dependencies for the native front-door commands; undefined without a home directory (tests). */
 function nativeIo(deps: CliDeps): NativeIo {
   const homeDir = deps.env.USERPROFILE ?? deps.env.HOME ?? "";
-  return { env: deps.env, homeDir, out: (l) => deps.out(l), err: (l) => deps.err(l), confirm: deps.confirm };
+  return { env: deps.env, homeDir, cwd: deps.cwd, out: (l) => deps.out(l), err: (l) => deps.err(l), confirm: deps.confirm };
 }
 
 /** Run the CLI. Returns a process exit code. */

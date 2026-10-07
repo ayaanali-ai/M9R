@@ -161,6 +161,18 @@ test("uninstall with nothing installed says so and does nothing; --purge also re
   s.done();
 });
 
+test("pill sends from the install folder retain the owner's configured project", async () => {
+  const s = sandbox();
+  try {
+    mkdirSync(s.p.m9r, { recursive: true });
+    const project = join(s.home, "project");
+    s.io.cwd = join(s.p.m9r, "bin");
+    writeFileSync(join(s.p.m9r, "broker-autostart.json"), JSON.stringify({ projectRoot: project }));
+    await s.run("send", ["@opencode", "show your cursor"]);
+    assert.equal(createLocalStore(s.p.m9r).tasksFor("opencode")[0]?.cwd, project);
+  } finally { s.done(); }
+});
+
 test("send creates a task for the agent, once per key, and rejects an empty message", async () => {
   const s = sandbox();
   assert.equal(await s.run("send", ["@claude", "review", "lease.ts", "--from", "codex", "--key", "same"]), 0);

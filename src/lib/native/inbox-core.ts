@@ -268,6 +268,25 @@ export function renderSentAck(taskId: string, to: string): string {
 }
 
 /**
+ * Truthful delivery states for a mention the hook did NOT push live (only Codex receives a queue push).
+ * A target with a live session picks the task up at its next prompt; a target with no session waits
+ * until it connects. Both keep the do-not-do-it-yourself directive: the failure mode being fixed is the
+ * sender believing "sent" means "being worked on right now".
+ */
+export function renderInboxAck(taskId: string, to: string): string {
+  return `M9R put your message to @${to} in their inbox as task ${taskId}; they pick it up at their next prompt, so it is not being worked on this instant. Do not do that work yourself: tell the user it was handed to @${to}, and continue with anything else. The result will arrive in your inbox.`;
+}
+
+/** OpenCode's resident plugin pushes approved work into the exact live session without waiting for another user prompt. */
+export function renderOpenCodePendingAck(taskId: string): string {
+  return `M9R queued task ${taskId} for @opencode's active session. Its M9R plugin will deliver the task directly without a manual inbox check; delivery is not confirmed until that session acknowledges it. Do not do that work yourself: tell the user it is queued for @opencode, and continue with anything else. The result will arrive in your inbox.`;
+}
+
+export function renderHeldAck(taskId: string, to: string): string {
+  return `M9R held your message to @${to} as task ${taskId} because @${to} has no active session right now; it reaches them when they connect. Do not do that work yourself: tell the user it is waiting for @${to}, and continue with anything else. The result will arrive in your inbox.`;
+}
+
+/**
  * Keeps the task list from growing forever (a live room can produce thousands of tasks; the file that holds them gets
  * rewritten whole on every write, so its size directly costs every save). Only a task that is fully done -- the target
  * has a recorded result that the sender has seen, or a delivered task was denied/expired. Pending approvals,

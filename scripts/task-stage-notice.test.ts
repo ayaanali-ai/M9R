@@ -11,7 +11,7 @@ import { runHookRequest } from "../src/lib/native/hook-run";
 const SESSION = "claude-session-stage-proof";
 const STAGE = "agent-0123456789abcdef01234567";
 
-test("the normal Claude inbox hook prepares its approved task stage before injecting the task", async () => {
+test("task delivery describes both stage modes without silently creating a background desktop", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-hook-task-stage-"));
   let received: { token?: string; taskId?: string } | undefined;
   const server = createServer(async (request, response) => {
@@ -31,7 +31,7 @@ test("the normal Claude inbox hook prepares its approved task stage before injec
     assert.ok(address && typeof address !== "string");
 
     const store = createLocalStore(root);
-    const identity = store.issueIdentity("claude", "claude-code", SESSION);
+    store.issueIdentity("claude", "claude-code", SESSION);
     const task = store.addTask({
       from: "codex",
       to: "claude",
@@ -54,9 +54,10 @@ test("the normal Claude inbox hook prepares its approved task stage before injec
     const hookOutput = JSON.parse(output) as { hookSpecificOutput?: { additionalContext?: string } };
     const context = hookOutput.hookSpecificOutput?.additionalContext ?? "";
     assert.match(context, new RegExp(task.id));
-    assert.match(context, new RegExp(STAGE));
-    assert.match(context, /Computer control is not enabled/);
-    assert.deepEqual(received, { token: identity.token, taskId: task.id });
+    assert.match(context, /owner-preview/);
+    assert.match(context, /no desktop has been prepared by delivery/);
+    assert.match(context, /own session token and identity/);
+    assert.equal(received, undefined);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(root, { recursive: true, force: true });

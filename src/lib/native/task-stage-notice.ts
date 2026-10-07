@@ -6,17 +6,15 @@ import { isM9rPushedPrompt } from "./codex-delivery-core";
 
 /** Optional stage preparation never turns successful task delivery into a failed delivery. */
 export async function prepareTaskStageNotice(root: string, web: WebBrokerClient | undefined, token: string, handle: string, taskId: string, timeoutMs?: number): Promise<string> {
+  // Preserve the delivery adapter's call signature; preparation now belongs to
+  // the task's explicit tool call, so no transport timeout is consumed here.
+  void timeoutMs;
   try {
     if (!readTaskStagePolicy(root).handles.includes(handle)) return "";
     if (!web?.prepareTaskStage) return "M9R task stage unavailable: the owner-launched broker is not connected.";
-    const result = await web.prepareTaskStage(token, taskId, timeoutMs);
-    if (!result.ok) return `M9R task stage unavailable: ${(result.error ?? "preparation failed").slice(0, 240)}`;
-    const stage = result.stage as { name?: unknown; controlEnabled?: unknown; approvedApps?: unknown } | undefined;
-    if (!stage || typeof stage.name !== "string" || !/^agent-[a-f0-9]{24}$/.test(stage.name)) return "M9R task stage returned an invalid response.";
-    const appIds = Array.isArray(stage.approvedApps) ? stage.approvedApps.filter((id): id is string => typeof id === "string" && /^[a-z][a-z0-9_-]{0,39}$/.test(id)).slice(0, 16) : [];
-    return `M9R prepared your Windows virtual desktop ${stage.name} for ${taskId}. It has not switched the owner's desktop. ${stage.controlEnabled === true
-      ? `Owner-authorized stage control is enabled. Use m9r_stage_app to launch an approved app ID (${appIds.join(", ") || "none configured"}), m9r_stage_action to inspect/control its exact window, then discard only after preserving your result. Verify effects: posted input does not prove success.`
-      : "Computer control is not enabled; the owner must grant it separately. Desktop preparation alone does not prove an app is running."}`;
+    // Delivery does not imply desktop isolation. Let the actual task choose its
+    // mode rather than silently preparing a background desktop for every prompt.
+    return `M9R desktop tools are available for ${taskId}; no desktop has been prepared by delivery. For a cursor visible on the owner's current screen, use m9r_stage_prepare with mode "owner-preview", then m9r_stage_app and m9r_stage_action with that same mode and this task ID. For explicitly requested isolated work use mode "background" instead. Use your own session token and identity. Capture the exact app window before choosing coordinates, then use cursor/click actions; do not substitute the Computer Use pointer. Authorization is checked by each tool. Report tool failures exactly; cursor metadata alone is not visual confirmation.`;
   } catch { return "M9R task stage permission settings could not be read; computer access remains disabled."; }
 }
 

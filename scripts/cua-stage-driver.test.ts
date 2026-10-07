@@ -83,6 +83,7 @@ function makeSdk(options: {
         screenshotFrameValid: true,
         screenshotWidth: 200,
         screenshotHeight: 100,
+        windowBounds: { x: 100, y: 50, width: 400, height: 200 },
         images: [{ mimeType: "image/png", dataBase64: imageData }],
       };
     },
@@ -90,7 +91,11 @@ function makeSdk(options: {
     async moveCursor(input: unknown) { options.calls.push({ method: "moveCursor", value: input }); return { isError: false }; },
     async getAgentCursorState() {
       options.calls.push({ method: "getAgentCursorState" });
-      return { isError: false, structuredJson: JSON.stringify(options.cursorState ?? { enabled: true, position: { x: 42, y: 24 } }) };
+      const lastMove = [...options.calls].reverse().find((call) => call.method === "moveCursor")?.value as { x?: number; y?: number } | undefined;
+      return { isError: false, structuredJson: JSON.stringify(options.cursorState ?? {
+        enabled: true,
+        position: { x: lastMove?.x ?? 42, y: lastMove?.y ?? 24 },
+      }) };
     },
     async getSession(input: unknown) { options.calls.push({ method: "getSession", value: input }); return { cursorVisible: options.cursorVisible ?? true }; },
     async listWindows(input: unknown) {
@@ -127,6 +132,8 @@ function makeSdk(options: {
     ScrollDirection: { Up: 0, Down: 1 },
     ScrollBy: { Line: 0 },
     CursorReducedMotion: { Auto: 0 },
+    CursorMotionStyle: { Adaptive: 4 },
+    CursorMotionTiming: { Fitts: 1 },
   };
 }
 
@@ -152,7 +159,7 @@ test("captures only the registered window and reliably closes the Cua session", 
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession", "shutdown"]);
 }));
 
-test("moves and verifies Cua's window-scoped ghost cursor using captured screenshot pixels", async () => withRoot(async (root) => {
+test("maps app screenshot pixels to desktop screen points before moving and verifying Cua's ghost cursor", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({
@@ -162,18 +169,38 @@ test("moves and verifies Cua's window-scoped ghost cursor using captured screens
   });
 
   const result = await driver.moveCursor("stage", 42, 24);
-  assert.deepEqual(result.cursor, { x: 42, y: 24, enabled: true, visible: true });
+  assert.deepEqual(result.cursor, { x: 42, y: 24, screenX: 184, screenY: 98, enabled: true, visible: true });
   const target = calls.find((call) => call.method === "windowTarget")?.value as { pid: number; windowId: bigint };
   assert.equal(target.pid, 4321);
   assert.equal(target.windowId, BigInt(windowId));
   const move = calls.find((call) => call.method === "moveCursor")?.value as { x: number; y: number; target: unknown };
-  assert.equal(move.x, 42);
-  assert.equal(move.y, 24);
+  assert.equal(move.x, 184);
+  assert.equal(move.y, 98);
   assert.ok(move.target);
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession", "shutdown"]);
 }));
 
-test("shows a distinct agent label on each native cursor and uses distance-based glide motion", async () => withRoot(async (root) => {
+test("refuses to move the ghost cursor when the stage frame has no screen bounds", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls, state: {
+      pid: 4321,
+      windowId: BigInt(windowId),
+      screenshotFrameValid: true,
+      screenshotWidth: 200,
+      screenshotHeight: 100,
+      images: [{ mimeType: "image/png", dataBase64: imageData }],
+    } }) as never,
+  });
+
+  await assert.rejects(() => driver.moveCursor("stage", 42, 24), /valid screen bounds/);
+  assert.equal(calls.some((call) => call.method === "setAgentCursorEnabled" || call.method === "moveCursor"), false);
+  await driver.shutdown();
+}));
+
+test("shows a distinct agent label on each native cursor and configures adaptive motion", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never });
@@ -190,8 +217,15 @@ test("shows a distinct agent label on each native cursor and uses distance-based
   assert.match(sessions[1]!, /^@claude-code-[0-9a-f]{8}$/);
   assert.ok(sessions.every((session) => session.length <= 28), "the complete identity and suffix fit Cua's visible badge limit");
   const motion = calls.filter((call) => call.method === "setAgentCursorMotion").map((call) => call.value as Record<string, unknown>);
-  assert.deepEqual(motion.map(({ session, glideDurationMs, arcSize, spring }) => ({ session, glideDurationMs, arcSize, spring })), sessions.map((session) => ({
-    session, glideDurationMs: 0, arcSize: 0.25, spring: 0.72,
+  assert.deepEqual(motion.map(({ session, style, timing, effects, dwellAfterClickMs, idleHideMs }) => ({
+    session, style, timing, effects, dwellAfterClickMs, idleHideMs,
+  })), sessions.map((session) => ({
+    session,
+    style: 4,
+    timing: 1,
+    effects: { trail: true, glow: true },
+    dwellAfterClickMs: 100,
+    idleHideMs: 60_000,
   })));
   assert.equal(calls.filter((call) => call.method === "moveCursor").length, 2);
   for (const identity of identities) await driver.closeAgentCursor(identity);
@@ -355,4 +389,22 @@ test("surfaces a Cua Driver background refusal instead of retrying with foregrou
   await assert.rejects(() => driver.typeText("stage", "sample"), /background input is unavailable/);
   assert.equal(calls.some((call) => call.method === "click"), false);
   assert.ok(calls.some((call) => call.method === "shutdown"));
+}));
+
+test("describeTarget reports the smallest enabled control label for the money gate", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true,
+    screenshotWidth: 200, screenshotHeight: 100, windowBounds: { x: 0, y: 0, width: 200, height: 100 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }],
+    elements: [
+      { frame: { x: 0, y: 0, w: 200, h: 100 } },
+      { elementToken: "pay", label: "Pay $49 now", role: "button", frame: { x: 20, y: 10, w: 70, h: 30 } },
+    ] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
+  assert.deepEqual(await driver.describeTarget("stage", 42, 24),
+    { label: "Pay $49 now", role: "button", rect: { x: 20, y: 10, width: 70, height: 30 } });
+  assert.equal(await driver.describeTarget("stage", 199, 99), undefined, "a point on no tokened control describes nothing");
+  await assert.rejects(() => driver.describeTarget("stage", 200, 24), /inside the current stage window snapshot/);
+  assert.equal(calls.some((call) => ["click", "typeText", "scroll", "drag"].includes(call.method)), false, "describing never acts");
 }));

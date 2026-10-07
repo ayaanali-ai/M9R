@@ -103,6 +103,41 @@ const normalizeSessionFolder = (cwd?: string): string => {
   return "";
 };
 
+/** The per-user M9R home is install state, never a project/session folder. */
+const isWithinStoreRoot = (storeRoot: string, candidate?: string): boolean => {
+  const root = normalizeSessionFolder(storeRoot);
+  const path = normalizeSessionFolder(candidate);
+  return Boolean(root && path && (path === root || path.startsWith(`${root}/`)));
+};
+
+/** Drop an inherited broker/engine cwd when it points inside ~/.m9r. */
+const projectCwd = (storeRoot: string, cwd?: string): string | undefined => isWithinStoreRoot(storeRoot, cwd) ? undefined : cwd;
+
+/** Normalize a persisted session reference at the store boundary. Install paths are never project identity. */
+const projectSessionRef = (storeRoot: string, session: SessionRef): SessionRef => normalizeSessionRef({
+  ...session,
+  cwd: projectCwd(storeRoot, session.cwd),
+});
+
+/** Repair records written by older builds so a stale install path cannot remain visible after the next read/write. */
+const dropInstallCwd = <T extends { cwd?: string }>(storeRoot: string, record: T): T => {
+  if (!isWithinStoreRoot(storeRoot, record.cwd)) return record;
+  const { cwd: _ignoredInstallCwd, ...withoutCwd } = record;
+  return withoutCwd as T;
+};
+
+const normalizeStoredScopes = (storeRoot: string, state: StoreState): StoreState => {
+  state.endpoints = Object.fromEntries(Object.entries(state.endpoints).map(([key, value]) => [key, dropInstallCwd(storeRoot, value)]));
+  state.sessions = state.sessions.map((session) => dropInstallCwd(storeRoot, session));
+  state.tasks = state.tasks.map((task) => dropInstallCwd(storeRoot, task));
+  state.links = state.links.map((link) => ({
+    ...link,
+    a: dropInstallCwd(storeRoot, link.a),
+    b: dropInstallCwd(storeRoot, link.b),
+  }));
+  return state;
+};
+
 const cursorKey = (handle: string, sessionId?: string, cwd?: string): string => {
   const normalizedHandle = normalizeHandle(handle);
   if (!sessionId) return normalizedHandle;
@@ -176,7 +211,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     if (fileBytes > maxStateBytes) throw new LocalStateCapacityError(fileBytes, maxStateBytes);
     try {
       const parsed = JSON.parse(readFileSync(statePath, "utf8")) as StoreState;
-      return parsed && parsed.version === 1 ? { ...emptyState(), ...parsed } : emptyState();
+      return parsed && parsed.version === 1 ? normalizeStoredScopes(root, { ...emptyState(), ...parsed }) : emptyState();
     } catch {
       // A corrupt file must never brick the agent's prompts: keep it aside and start clean.
       try { renameSync(statePath, `${statePath}.corrupt-${Date.now()}`); } catch { /* ignore */ }
@@ -235,7 +270,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const previous = s.endpoints[handle];
         const seen = input.seenAt ?? now().toISOString();
-        const folder = normalizeSessionFolder(input.cwd);
+        const folder = normalizeSessionFolder(projectCwd(root, input.cwd));
         const record: EndpointRecord = { handle, provider: input.provider, sessionId: input.sessionId, cwd: folder || undefined, lastSeenAt: previous && Date.parse(previous.lastSeenAt) > Date.parse(seen) ? previous.lastSeenAt : seen };
         s.endpoints[handle] = record;
         let newSession = false;
@@ -260,13 +295,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     /** Sessions of one agent, most recently seen first. */
     sessionsFor(handle: string, cwd?: string): SessionRecord[] {
-      const folder = cwd === undefined ? undefined : normalizeSessionFolder(cwd);
+      const folder = cwd === undefined ? undefined : normalizeSessionFolder(projectCwd(root, cwd));
       return readState().sessions.filter((x) => normalizeHandle(x.handle) === normalizeHandle(handle) && (folder === undefined || normalizeSessionFolder(x.cwd) === folder)).sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
     },
 
     /** Sessions that have a live M9R identity token. Delivery must never guess a provider session without one. */
     sessionsWithIdentity(handle: string, cwd?: string): SessionRecord[] {
-      const folder = cwd === undefined ? undefined : normalizeSessionFolder(cwd);
+      const folder = cwd === undefined ? undefined : normalizeSessionFolder(projectCwd(root, cwd));
       const state = readState();
       const live = new Set(state.identities.filter((identity) => !identity.revokedAt && normalizeHandle(identity.handle) === normalizeHandle(handle)).map((identity) => identity.sessionId));
       return state.sessions
@@ -286,7 +321,14 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     /** Same idempotency key for the same recipient returns the existing task, so a repeated send delivers once. */
     addTask(input: NewTaskInput): { task: Task; created: boolean } {
-      const normalizedInput = { ...input, from: normalizeHandle(input.from), to: normalizeHandle(input.to) };
+      const scopedCwd = projectCwd(root, input.cwd);
+      const { cwd: _ignoredInstallCwd, ...inputWithoutCwd } = input;
+      const normalizedInput = {
+        ...inputWithoutCwd,
+        ...(scopedCwd ? { cwd: scopedCwd } : {}),
+        from: normalizeHandle(input.from),
+        to: normalizeHandle(input.to),
+      };
       return update((s) => {
         const existing = findByIdempotencyKey(s.tasks, normalizedInput.to, normalizedInput.idempotencyKey);
         if (existing) return { task: existing, created: false };
@@ -368,10 +410,11 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     /** Every link this session takes part in, either side. */
     linksFor(handle: string, sessionId: string, cwd?: string): SessionLink[] {
-      const wanted = normalizeSessionRef({ handle, sessionId, cwd });
+      const projectFolder = projectCwd(root, cwd);
+      const wanted = normalizeSessionRef({ handle, sessionId, cwd: projectFolder });
       const matches = (ref: SessionRef) => normalizeHandle(ref.handle) === wanted.handle
         && ref.sessionId === wanted.sessionId
-        && (cwd === undefined || normalizeSessionFolder(ref.cwd) === normalizeSessionFolder(cwd));
+        && (projectFolder === undefined || normalizeSessionFolder(projectCwd(root, ref.cwd)) === normalizeSessionFolder(projectFolder));
       return readState().links.filter((l) => matches(l.a) || matches(l.b));
     },
 
@@ -379,10 +422,11 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     linkedSession(handle: string, sessionId: string, partnerHandle: string, cwd?: string): { sessionId: string; cwd?: string } | undefined {
       let links = this.linksFor(handle, sessionId, cwd).filter((x) => normalizeHandle(x.a.handle) === normalizeHandle(partnerHandle) || normalizeHandle(x.b.handle) === normalizeHandle(partnerHandle));
       let allowLegacyFolderless = false;
-      if (links.length === 0 && cwd !== undefined) {
+      const projectFolder = projectCwd(root, cwd);
+      if (links.length === 0 && projectFolder !== undefined) {
         const state = readState();
         const knownSourceFolders = state.sessions.filter((x) => normalizeHandle(x.handle) === normalizeHandle(handle) && x.sessionId === sessionId);
-        const requestedFolder = normalizeSessionFolder(cwd);
+        const requestedFolder = normalizeSessionFolder(projectFolder);
         allowLegacyFolderless = knownSourceFolders.length === 0 || (knownSourceFolders.length === 1 && normalizeSessionFolder(knownSourceFolders[0].cwd) === requestedFolder);
         if (allowLegacyFolderless) {
           links = state.links.filter((link) => {
@@ -392,10 +436,10 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         }
       }
       if (links.length !== 1) return undefined;
-      const wanted = normalizeSessionRef({ handle, sessionId, cwd });
+      const wanted = normalizeSessionRef({ handle, sessionId, cwd: projectFolder });
       const sourceMatches = (ref: SessionRef) => normalizeHandle(ref.handle) === wanted.handle
         && ref.sessionId === wanted.sessionId
-        && (cwd === undefined || normalizeSessionFolder(ref.cwd) === normalizeSessionFolder(cwd) || (allowLegacyFolderless && !normalizeSessionFolder(ref.cwd)));
+        && (projectFolder === undefined || normalizeSessionFolder(projectCwd(root, ref.cwd)) === normalizeSessionFolder(projectFolder) || (allowLegacyFolderless && !normalizeSessionFolder(ref.cwd)));
       const sourceIsA = sourceMatches(links[0].a);
       const other = sourceIsA ? links[0].b : links[0].a;
       return { sessionId: other.sessionId, ...(other.cwd ? { cwd: other.cwd } : {}) };
@@ -405,8 +449,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     setLink(aInput: SessionRef, bInput: SessionRef, origin: "auto" | "picked"): SessionLink {
       return update((s) => {
         const at = now().toISOString();
-        const a = normalizeSessionRef(aInput);
-        const b = normalizeSessionRef(bInput);
+        const a = projectSessionRef(root, aInput);
+        const b = projectSessionRef(root, bInput);
         const keep = s.links.filter((l) => !(
           (sameSessionRef(l.a, a) && l.b.handle === b.handle)
           || (sameSessionRef(l.b, a) && l.a.handle === b.handle)
@@ -517,6 +561,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         const t = s.tasks.find((x) => x.id === id);
         if (!t) return undefined;
         t.delivery = { attempts: 0, ...t.delivery, ...patch };
+        if (patch.state === "queued" && patch.threadId && !t.deliveredSession) t.deliveredSession = patch.threadId;
         if (patch.state === "queued" && !t.deliveredAt) {
           t.deliveredAt = now().toISOString();
           pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `${id} pushed into @${t.to}'s session` });
@@ -572,12 +617,12 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
      * gets a cursor, just not one isolated from other id-less callers.
      */
     cursorFor(handle: string, sessionId?: string, cwd?: string): number {
-      return readState().cursors[cursorKey(handle, sessionId, cwd)] ?? 0;
+      return readState().cursors[cursorKey(handle, sessionId, projectCwd(root, cwd))] ?? 0;
     },
 
     setCursor(handle: string, sessionId: string | undefined, seq: number, cwd?: string): void {
       update((s) => {
-        const key = cursorKey(handle, sessionId, cwd);
+        const key = cursorKey(handle, sessionId, projectCwd(root, cwd));
         if (seq > (s.cursors[key] ?? 0)) s.cursors[key] = seq;
       });
     },

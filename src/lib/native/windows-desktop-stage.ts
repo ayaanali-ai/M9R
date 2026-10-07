@@ -496,6 +496,18 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
 
   async function listOwnedWindows(name: string, pid: number) {
     await inspectStage(name);
+    return listOwnedWindowsForProcess(pid);
+  }
+
+  /**
+   * Discover windows for an owner-approved process before a stage exists.
+   * Preview stages use this to adopt the window on whatever desktop the owner
+   * is currently viewing. It intentionally returns only exact-process window
+   * identities; no arbitrary desktop or HWND can be supplied by an agent.
+   */
+  async function listOwnedWindowsForProcess(pid: number) {
+    assertWindows();
+    assertOwner();
     if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0xffff_ffff) throw new Error("Invalid owned process id.");
     const result = await invokeNative({ op: "listOwnedWindows", pid });
     if (!result.ok || !Array.isArray(result.windows)) throw new Error(result.error ?? "Owned-window discovery failed.");
@@ -539,7 +551,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, register, create, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, moveOwnedWindow, showOwnedWindow, clearOwnedAnchor };
+  return { inspectWindow, register, create, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, showOwnedWindow, clearOwnedAnchor };
 }
 
 function parsePid(value: string): number {

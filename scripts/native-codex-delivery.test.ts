@@ -220,8 +220,11 @@ test("a prompt M9R pushed into Codex is not routed as a new mention (it names it
   assert.equal(dispatched.length, 0);
   assert.doesNotMatch(out?.hookSpecificOutput.additionalContext ?? "", /already sent your message/, "Codex is not told to skip the work");
   // A person's own prompt with a mention still routes, so the guard is only for M9R's own pushed prompts.
+  // @claude has no live session here, so the ack must say the task is held -- not pretend it was pushed.
   const own = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "@claude please look at this" }, { provider: "codex", store, pathExists: () => false, readIndex: () => null });
-  assert.match(own?.hookSpecificOutput.additionalContext ?? "", /already sent your message to @claude/);
+  assert.match(own?.hookSpecificOutput.additionalContext ?? "", /held your message to @claude/, "an unpushed mention must not promise immediate work");
+  assert.match(own?.hookSpecificOutput.additionalContext ?? "", /no active session/, "the sender learns why it is waiting");
+  assert.match(own?.hookSpecificOutput.additionalContext ?? "", /Do not do that work yourself/, "the held ack still stops the sender doing the work");
 });
 
 const A = "01a0bfd8-4e13-76d3-9077-fdef973a978c";
@@ -268,6 +271,23 @@ test("the sender's own folder aims the push, and --session pins it exactly", asy
   const pinned = store.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "b", cwd: "C:/nowhere", targetSession: B.slice(0, 12) }).task;
   assert.deepEqual(await deliverToCodex(store, pinned.id, deps), { state: "queued", threadId: B });
   assert.deepEqual(deps.calls.map((c) => c[2]), [A, B]);
+});
+
+test("the M9R install directory is not treated as a Codex project folder", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: THREAD, cwd: "C:/runleak/runleak" });
+  const deps = fakeDeps();
+  const t = store.addTask({
+    from: "you",
+    to: "codex",
+    goal: "Show one labeled M9R ghost cursor",
+    origin: "human_typed",
+    idempotencyKey: "install-cwd",
+    cwd: join(store.root, "bin"),
+  }).task;
+
+  assert.deepEqual(await deliverToCodex(store, t.id, deps), { state: "queued", threadId: THREAD });
+  assert.equal(deps.calls.length, 1, "a task created from the runtime install folder still reaches the live project session");
 });
 
 test("`sessions` lists what was seen and how to aim a task", async () => {

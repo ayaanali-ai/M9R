@@ -114,6 +114,22 @@ export interface WebBatchResponse {
 export type RoomMode = "watch" | "ask" | "hands-off";
 export const ROOM_MODES: readonly RoomMode[] = ["watch", "ask", "hands-off"];
 
+export interface StageApprovalRequest {
+  agent: string;
+  provider: string;
+  sessionId: string;
+  /** Short owner-facing step text, shown in the pill approvals thread. */
+  step: string;
+  /** What the click target calls itself (accessibility label), when known. */
+  targetLabel?: string;
+  /** Audited action name and pill verb source. Defaults to click; stage launches pass launch. */
+  action?: string;
+  /** Audit category. Defaults to money; stage launches pass their own name. */
+  risk?: string;
+  /** Upper bound on the wait. Stage callers keep this below their own transport timeout so a slow owner resolves to a clean denial, not a lost proof. */
+  timeoutMs?: number;
+}
+
 /**
  * watch: agents act freely on the shared page; only things that leave it (post, message, buy, upload, download, and send/delete-like
  * controls) ask. ask: every risky action asks. hands-off: nothing asks except money and secrets.
@@ -413,6 +429,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
     expiresAt: number;
     resolve: (response: WebResponse) => void;
     timer: ReturnType<typeof setTimeout>;
+    /** Stage-control path: the entry carries no dispatchable WebRequest, so the decision goes to this continuation instead of resolve(). */
+    onDecision?: (decision: "approve" | "deny") => void;
   }
   interface DoneNoticeAckEntry {
     tab: string;
@@ -1067,12 +1085,76 @@ export function createWebBroker(deps: WebBrokerDeps) {
       entry.resolve(fail("approval decision could not be persisted; the action was refused"));
       return false;
     }
+    if (entry.onDecision) {
+      entry.onDecision(decision);
+      return true;
+    }
     if (decision === "deny") {
       entry.resolve(fail("owner denied the browser action"));
       return true;
     }
     void dispatch(entry.request).then(entry.resolve);
     return true;
+  }
+
+  /**
+   * Owner hold for stage-control actions the standing policy never auto-allows (money clicks).
+   * The entry surfaces in the same pill approval list as web actions -- no pill changes needed --
+   * and resolves true only on an explicit owner approve. Deny and timeout both resolve false.
+   */
+  function requestStageApproval(request: StageApprovalRequest): Promise<boolean> {
+    if (stopState.state === "stopped") return Promise.resolve(false);
+    const id = newId();
+    const createdAt = now();
+    const waitMs = Math.min(10 * 60_000, Math.max(1_000, request.timeoutMs ?? approvalTimeoutMs));
+    let resolveDecision: (approved: boolean) => void = () => {};
+    const decided = new Promise<boolean>((resolve) => { resolveDecision = resolve; });
+    const audit = (kind: "action.requested" | "action.timed_out" | "action.approved" | "action.denied", detail: string): boolean => {
+      try {
+        deps.authority?.recordActionDecision(kind, request.agent, { action: request.action ?? "click", detail });
+        deps.onAuthorityChange?.();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!deps.authority) return Promise.resolve(false);
+    // The stage money carve-out arrives as money; unlisted-app launches arrive under their own name.
+    const risk = request.risk ?? "money";
+    if (!audit("action.requested", risk)) return Promise.resolve(false);
+    const syntheticRequest: WebRequest = {
+      agent: request.agent,
+      provider: request.provider,
+      sessionId: request.sessionId,
+      // Carried through to the pill verbatim (narrateStep takes any action string); the WebAction cast
+      // only satisfies the dispatchable-request shape, which stage entries never dispatch through.
+      action: (request.action ?? "click") as WebRequest["action"],
+      ...(request.targetLabel ? { targetLabel: request.targetLabel } : {}),
+    };
+    const timer = setTimeout(() => {
+      if (!approvals.delete(id)) return;
+      audit("action.timed_out", risk);
+      emit({ kind: "approvals-changed" });
+      resolveDecision(false);
+    }, waitMs);
+    approvals.set(id, {
+      id,
+      actor: request.agent,
+      request: syntheticRequest,
+      risk,
+      createdAt,
+      expiresAt: createdAt + waitMs,
+      resolve: () => {},
+      timer,
+      // decideApproval already audited, emitted, cleared the timer, and removed the entry above.
+      onDecision: (decision) => {
+        resolveDecision(decision === "approve");
+      },
+    });
+    advanceFeed();
+    emit({ kind: "approval", id, agent: request.agent, provider: request.provider, step: request.step });
+    void decided.then(() => emit({ kind: "approvals-changed" }));
+    return decided;
   }
 
   function onExtensionMessage(raw: unknown): void {
@@ -1449,5 +1531,5 @@ export function createWebBroker(deps: WebBrokerDeps) {
     };
   }
 
-  return { submit, submitBatch, pendingApprovals, decideApproval, onExtensionMessage, onExtensionClosed, currentClaims, notifyAgentMessage, markAgentDone, noteOwnerUrls, setMessageTextVisibility, stopAll, feedSnapshot };
+  return { submit, submitBatch, pendingApprovals, decideApproval, requestStageApproval, onExtensionMessage, onExtensionClosed, currentClaims, notifyAgentMessage, markAgentDone, noteOwnerUrls, setMessageTextVisibility, stopAll, feedSnapshot };
 }

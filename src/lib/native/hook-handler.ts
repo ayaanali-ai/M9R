@@ -10,8 +10,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { renderInboxInjection, renderResultsInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
-import { canQueue, isM9rPushedPrompt } from "./codex-delivery-core";
+import { inboxMaxAgeMs, renderHeldAck, renderInboxAck, renderInboxInjection, renderOpenCodePendingAck, renderResultsInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
+import { buildQueueMessage, canQueue, isM9rPushedPrompt, normCwd } from "./codex-delivery-core";
 import { findEndpointMentions } from "./mention-core";
 import { findMemoryHints, renderMemoryHint } from "./memory-hint-core";
 import { handleForProvider, type LocalStore } from "./local-store";
@@ -22,6 +22,8 @@ export interface HookInput {
   transcript_path?: string;
   cwd?: string;
   prompt?: string;
+  /** OpenCode's generated plugin acknowledges a prompt only after its session API accepted and completed it. */
+  task_id?: string;
 }
 
 export interface HookContext {
@@ -59,6 +61,20 @@ const out = (event: string, text: string): AdditionalContext | null =>
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 24);
 
+/**
+ * The installed broker and hook entrypoints live under the per-user M9R home
+ * (normally ~/.m9r).  A provider can inherit that folder as process.cwd()
+ * when M9R launches it, but that is install state, never the user's project.
+ * Keep that path out of task/session routing; a real project cwd remains
+ * folder-scoped exactly as before.
+ */
+function projectCwdForStore(store: Pick<LocalStore, "root">, cwd: string | undefined): string | undefined {
+  if (!cwd) return undefined;
+  const root = normCwd(store.root);
+  const candidate = normCwd(cwd);
+  return root && (candidate === root || candidate.startsWith(`${root}/`)) ? undefined : cwd;
+}
+
 /** The task's goal is what the human wrote, minus the routing token, so the target reads a clean request. */
 function goalFor(prompt: string, handle: string): string {
   // Claude Code wraps pasted text in <pasted_content ...> tags; they are not part of what the person asked.
@@ -86,7 +102,8 @@ export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "pro
   const exists = ctx.pathExists ?? existsSync;
   const acks: string[] = [];
   const tasks: Array<{ id: string; to: string }> = [];
-  ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: input.cwd });
+  const projectCwd = projectCwdForStore(ctx.store, input.cwd);
+  ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: projectCwd });
   // Handles inside pasted text (old test chatter, logs) were never addressed to anyone, so only what the person typed routes.
   // Text another agent sent into this session (a subagent report, a notification) is not the person typing, so it never routes.
   // A prompt M9R pushed in ("[M9R T3] Task from @claude ...") names its sender; routing that would bounce it back.
@@ -94,15 +111,18 @@ export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "pro
     aliases: ctx.store.knownAliases().filter((a) => a !== self),
     pathExists: (token) => exists(resolve(join(cwd, token))),
   });
-  if (targets.length) { try { ctx.captureMentionInput?.(input, targets, ctx.rawPayload); } catch { /* diagnostics cannot block delivery */ } }
+  if (targets.length) {
+    try { ctx.captureMentionInput?.({ ...input, cwd: projectCwd }, targets, ctx.rawPayload); }
+    catch { /* diagnostics cannot block delivery */ }
+  }
   for (const to of targets) {
     const goal = goalFor(prompt, to);
     if (!goal) continue;
     const enforceIdentity = ctx.strictTargetIdentity === true;
-    const knownTargetSessions = enforceIdentity ? ctx.store.sessionsFor(to, input.cwd) : [];
-    const identityTargetSessions = enforceIdentity ? ctx.store.sessionsWithIdentity(to, input.cwd) : [];
+    const knownTargetSessions = enforceIdentity ? ctx.store.sessionsFor(to, projectCwd) : [];
+    const identityTargetSessions = enforceIdentity ? ctx.store.sessionsWithIdentity(to, projectCwd) : [];
     const targetSession = enforceIdentity && knownTargetSessions.length > 0 && identityTargetSessions.length === 1 ? identityTargetSessions[0].sessionId : undefined;
-    const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", cwd: input.cwd, fromSession: input.session_id, ...(targetSession ? { targetSession } : {}), idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
+    const { task, created } = ctx.store.addTask({ from: self, to, goal: goal.slice(0, MAX_GOAL_CHARS * 2), origin: "human_typed", ...(projectCwd ? { cwd: projectCwd } : {}), fromSession: input.session_id, ...(targetSession ? { targetSession } : {}), idempotencyKey: sha(`${input.session_id ?? ""}|${to}|${prompt}`) });
     if (enforceIdentity && created && identityTargetSessions.length === 0) {
       const reason = `@${to} has no session with an active M9R identity. Start or reconnect the target session so it receives an M9R SessionStart card, then retry.`;
       ctx.store.setDelivery(task.id, { state: "failed", error: reason });
@@ -117,9 +137,19 @@ export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "pro
       tasks.push({ id: task.id, to });
       continue;
     }
-    acks.push(renderSentAck(task.id, to));
+    // Codex is pushed by its queue adapter. OpenCode's installed plugin polls the live session and calls its session API;
+    // other providers receive inbox context at their next supported hook. A target without an identity waits until it connects.
+    const pushed = created && to === "codex" && canQueue(task) && ctx.dispatch !== undefined;
+    if (!pushed && created) {
+      const live = ctx.store.sessionsWithIdentity(to, projectCwd);
+      acks.push(live.length > 0
+        ? to === "opencode" ? renderOpenCodePendingAck(task.id) : renderInboxAck(task.id, to)
+        : renderHeldAck(task.id, to));
+    } else {
+      acks.push(renderSentAck(task.id, to));
+    }
     tasks.push({ id: task.id, to });
-    if (created && to === "codex" && canQueue(task)) ctx.dispatch?.(task.id);
+    if (pushed) ctx.dispatch?.(task.id);
   }
   return { acks, tasks };
 }
@@ -130,19 +160,85 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
     const self = handleForProvider(ctx.provider);
     const now = (ctx.now ?? (() => new Date()))();
     const activeWindow = ctx.activeWindowMs ?? 10 * 60_000;
+    const projectCwd = projectCwdForStore(ctx.store, input.cwd);
 
     if (event === "SessionStart") {
-      ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: input.cwd });
+      ctx.store.registerEndpoint({ provider: ctx.provider, sessionId: input.session_id, cwd: projectCwd });
       const others = ctx.store.listEndpoints().filter((e) => e.handle !== self && now.getTime() - Date.parse(e.lastSeenAt) < activeWindow).map((e) => ({ handle: e.handle }));
       const pending = input.session_id
-        ? renderInboxInjection(ctx.store.tasksForSession(self, input.session_id), ctx.store.cursorFor(self, input.session_id, input.cwd), { now: now.getTime() }).includedIds.length
-        : renderInboxInjection(ctx.store.tasksFor(self), ctx.store.cursorFor(self, input.session_id, input.cwd), { now: now.getTime() }).includedIds.length;
+        ? renderInboxInjection(ctx.store.tasksForSession(self, input.session_id), ctx.store.cursorFor(self, input.session_id, projectCwd), { now: now.getTime() }).includedIds.length
+        : renderInboxInjection(ctx.store.tasksFor(self), ctx.store.cursorFor(self, input.session_id, projectCwd), { now: now.getTime() }).includedIds.length;
       // Only mention memory if the index file really exists here (the earlier card pointed at a file that did not).
-      const memoryDir = ctx.memoryDir ?? (input.cwd && (ctx.pathExists ?? existsSync)(join(input.cwd, ".m9r", "memory", "index.md")) ? ".m9r/memory" : undefined);
+      const memoryDir = ctx.memoryDir ?? (projectCwd && (ctx.pathExists ?? existsSync)(join(projectCwd, ".m9r", "memory", "index.md")) ? ".m9r/memory" : undefined);
       ctx.store.sweepExpired();
       const awaitingApproval = ctx.store.pendingApprovals().length;
       const identityToken = input.session_id ? ctx.store.issueIdentity(self, ctx.provider, input.session_id).token : undefined;
       return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir, identityToken }));
+    }
+
+    // The OpenCode plugin polls independently of user prompts, then inserts an approved task as a real prompt into
+    // this exact live session. Never choose an arbitrary session when the task wasn't explicitly pinned.
+    if (event === "OpenCodePoll") {
+      if (self !== "opencode" || !input.session_id) return null;
+      const sessionId = input.session_id;
+      const identityToken = ctx.store.identityTokenFor(self, sessionId);
+      if (!identityToken) return null;
+      // Identity tokens outlive terminal sessions. Only recent sessions may compete
+      // for an unpinned task; otherwise a closed terminal blocks delivery forever.
+      ctx.store.registerEndpoint({ provider: ctx.provider, sessionId, cwd: projectCwd });
+      const sessions = ctx.store.sessionsWithIdentity(self, projectCwd)
+        .filter((session) => now.getTime() - Date.parse(session.lastSeenAt) < activeWindow);
+      if (!sessions.some((session) => session.sessionId === sessionId)) return null;
+      const cursor = ctx.store.cursorFor(self, sessionId, projectCwd);
+      const maxAge = inboxMaxAgeMs();
+      const task = ctx.store.tasksForSession(self, sessionId)
+        .filter((candidate) => candidate.seq > cursor
+          && canQueue(candidate)
+          && !candidate.resultSummary
+          && candidate.delivery?.state !== "queued"
+          && candidate.delivery?.state !== "done"
+          && (candidate.targetSession === sessionId || (!candidate.targetSession && sessions.length === 1))
+          && (!candidate.cwd || (projectCwd && normCwd(candidate.cwd) === normCwd(projectCwd)))
+          && Number.isFinite(Date.parse(candidate.createdAt))
+          && now.getTime() - Date.parse(candidate.createdAt) >= 0
+          && now.getTime() - Date.parse(candidate.createdAt) <= maxAge)
+        .sort((left, right) => left.seq - right.seq)[0];
+      if (!task) return null;
+      return out(event, JSON.stringify({ task_id: task.id, prompt: buildQueueMessage(task, identityToken) }));
+    }
+
+    // A successful OpenCode SDK prompt is recorded only after rechecking identity, task approval, project, and target.
+    // The idempotent same-session case handles an acknowledgement retry without queueing a second turn.
+    if (event === "OpenCodeDelivered") {
+      if (self !== "opencode" || !input.session_id || !/^T\d{1,12}$/.test(input.task_id ?? "")) return null;
+      const sessionId = input.session_id;
+      if (!ctx.store.identityTokenFor(self, sessionId)) return null;
+      ctx.store.registerEndpoint({ provider: ctx.provider, sessionId, cwd: projectCwd });
+      const sessions = ctx.store.sessionsWithIdentity(self, projectCwd)
+        .filter((session) => now.getTime() - Date.parse(session.lastSeenAt) < activeWindow);
+      if (!sessions.some((session) => session.sessionId === sessionId)) return null;
+      const task = ctx.store.getTask(input.task_id!);
+      if (!task || task.to !== self) return null;
+      if (task.delivery?.state === "queued" || task.delivery?.state === "done") {
+        return task.delivery.threadId === sessionId ? out(event, JSON.stringify({ accepted: true, task_id: task.id })) : null;
+      }
+      const cursor = ctx.store.cursorFor(self, sessionId, projectCwd);
+      const maxAge = inboxMaxAgeMs();
+      if (!canQueue(task) || task.seq <= cursor
+        || !(task.targetSession === sessionId || (!task.targetSession && sessions.length === 1))
+        || (task.cwd && (!projectCwd || normCwd(task.cwd) !== normCwd(projectCwd)))
+        || !Number.isFinite(Date.parse(task.createdAt))
+        || now.getTime() - Date.parse(task.createdAt) < 0
+        || now.getTime() - Date.parse(task.createdAt) > maxAge) return null;
+      ctx.store.setDelivery(task.id, {
+        state: "queued",
+        attempts: (task.delivery?.attempts ?? 0) + 1,
+        threadId: sessionId,
+        queuedAt: now.toISOString(),
+        error: undefined,
+      });
+      ctx.store.setCursor(self, sessionId, task.seq, projectCwd);
+      return out(event, JSON.stringify({ accepted: true, task_id: task.id }));
     }
 
     // A turn finished. If this session was shown tasks other agents sent, its final message is the answer: record it and send it back.
@@ -164,17 +260,17 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
     // results can carry a page's forged text. So this channel carries information, never a redirect; real interrupts go
     // through a live session's user-turn input (live-session-core.ts). Registering it would add a hook run to every tool call.
     if (event === "PostToolUse") {
-      const cursor = ctx.store.cursorFor(self, input.session_id, input.cwd);
+      const cursor = ctx.store.cursorFor(self, input.session_id, projectCwd);
       const injection = renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { now: now.getTime() });
       if (!injection.text) return null;
-      ctx.store.setCursor(self, input.session_id, injection.newCursor, input.cwd);
+      ctx.store.setCursor(self, input.session_id, injection.newCursor, projectCwd);
       ctx.store.markDelivered(injection.includedIds, input.session_id);
       return out(event, injection.text.replace(/^M9R inbox \(/, "M9R inbox, arrived while you were working ("));
     }
 
     if (event === "UserPromptSubmit") {
       const prompt = input.prompt ?? "";
-      const cwd = input.cwd ?? process.cwd();
+      const cwd = projectCwd ?? input.cwd ?? process.cwd();
       const parts: string[] = [];
 
       parts.push(...routeTypedMentions(input, ctx).acks);
@@ -190,7 +286,9 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
 
       // 2b. Anything new in our own inbox, delta-only.
       const cursor = ctx.store.cursorFor(self, input.session_id, cwd);
-      const injection = renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { now: now.getTime() });
+      const injection = self === "opencode"
+        ? { text: "", includedIds: [] as string[], newCursor: cursor, omitted: 0 }
+        : renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { now: now.getTime() });
       if (injection.text) {
         const codexHasIdentity = self !== "codex" || Boolean(input.session_id && ctx.store.identityTokenFor(self, input.session_id));
         if (!codexHasIdentity) {

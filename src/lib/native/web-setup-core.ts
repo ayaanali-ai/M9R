@@ -47,36 +47,39 @@ export interface OpenCodeHookInvocation {
   args: readonly string[];
 }
 
-/** Prefer the standalone engine so the plugin invokes the same native SessionStart flow as installed hooks. */
+/** Prefer the standalone engine so the plugin invokes the same native hook flows as installed hooks. */
 export function resolveOpenCodeHookInvocation(input: {
   nodeCommand: string;
   engineExecutable?: string;
   compiledHookPath?: string;
   sourceHookPath?: string;
   sourceNodeArgs?: readonly string[];
+  /** OpenCode also polls an active session and acknowledges accepted live prompts. */
+  event?: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered";
 }): OpenCodeHookInvocation {
+  const event = input.event ?? "SessionStart";
   if (input.engineExecutable?.trim()) {
     return {
       command: input.engineExecutable,
-      args: ["m9r-hook", "SessionStart", "opencode"],
+      args: ["m9r-hook", event, "opencode"],
     };
   }
   if (input.compiledHookPath) {
     return {
       command: input.nodeCommand,
-      args: [input.compiledHookPath, "SessionStart", "opencode"],
+      args: [input.compiledHookPath, event, "opencode"],
     };
   }
   if (input.sourceHookPath) {
     return {
       command: input.nodeCommand,
-      args: [...(input.sourceNodeArgs ?? []), input.sourceHookPath, "SessionStart", "opencode"],
+      args: [...(input.sourceNodeArgs ?? []), input.sourceHookPath, event, "opencode"],
     };
   }
-  throw new Error("The M9R OpenCode SessionStart hook entry point was not found beside this CLI or in the local M9R installation.");
+  throw new Error(`The M9R OpenCode ${event} hook entry point was not found beside this CLI or in the local M9R installation.`);
 }
 
-/** Accept only the additionalContext field returned for the SessionStart hook. */
+/** Accept only the additionalContext field returned for a session or prompt-time hook. */
 export function extractOpenCodeAdditionalContext(raw: string): string | null {
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -84,7 +87,9 @@ export function extractOpenCodeAdditionalContext(raw: string): string | null {
     const hookOutput = (parsed as Record<string, unknown>).hookSpecificOutput;
     if (!hookOutput || typeof hookOutput !== "object" || Array.isArray(hookOutput)) return null;
     const record = hookOutput as Record<string, unknown>;
-    return record.hookEventName === "SessionStart" && typeof record.additionalContext === "string" && record.additionalContext.length > 0
+    return (record.hookEventName === "SessionStart" || record.hookEventName === "UserPromptSubmit"
+      || record.hookEventName === "OpenCodePoll" || record.hookEventName === "OpenCodeDelivered")
+      && typeof record.additionalContext === "string" && record.additionalContext.length > 0
       ? record.additionalContext
       : null;
   } catch {
@@ -122,24 +127,41 @@ export function planOpenCodeIdentityPluginRemoval(input: {
 }
 
 /** Build a self-contained OpenCode plugin; parse the hook response before injecting its one trusted field. */
-export function buildOpenCodeIdentityPluginSource(invocation: OpenCodeHookInvocation): string {
+export function buildOpenCodeIdentityPluginSource(
+  invocation: OpenCodeHookInvocation,
+  promptInvocation?: OpenCodeHookInvocation,
+  pollInvocation?: OpenCodeHookInvocation,
+  deliveredInvocation?: OpenCodeHookInvocation,
+): string {
+  const prompt = promptInvocation ?? { command: invocation.command, args: ["m9r-hook", "UserPromptSubmit", "opencode"] };
+  const poll = pollInvocation ?? { command: invocation.command, args: ["m9r-hook", "OpenCodePoll", "opencode"] };
+  const delivered = deliveredInvocation ?? { command: invocation.command, args: ["m9r-hook", "OpenCodeDelivered", "opencode"] };
   const parser = extractOpenCodeAdditionalContext.toString().replace(/^function /, "function ");
   return `import { spawn } from "node:child_process";
 
 const M9R_HOOK_COMMAND = ${JSON.stringify(invocation.command)};
 const M9R_HOOK_ARGS = ${JSON.stringify(invocation.args)};
+const M9R_HOOK_PROMPT_COMMAND = ${JSON.stringify(prompt.command)};
+const M9R_HOOK_PROMPT_ARGS = ${JSON.stringify(prompt.args)};
+const M9R_HOOK_POLL_COMMAND = ${JSON.stringify(poll.command)};
+const M9R_HOOK_POLL_ARGS = ${JSON.stringify(poll.args)};
+const M9R_HOOK_DELIVERED_COMMAND = ${JSON.stringify(delivered.command)};
+const M9R_HOOK_DELIVERED_ARGS = ${JSON.stringify(delivered.args)};
 const M9R_HOOK_TIMEOUT_MS = 5000;
 const M9R_MAX_CACHED_SESSIONS = 256;
+const M9R_POLL_INTERVAL_MS = 1500;
+const M9R_POLL_RETRY_MS = 5000;
 const M9R_SESSION_BOOTSTRAPS = new Map();
+const M9R_SESSION_POLLERS = new Map();
 
 ${parser}
 
-function runM9rSessionStart(sessionID, cwd) {
+function runM9rHook(command, args, sessionID, cwd, extra = {}) {
   return new Promise((resolve) => {
     let stdout = "";
     let settled = false;
     let oversized = false;
-    const child = spawn(M9R_HOOK_COMMAND, M9R_HOOK_ARGS, {
+    const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
     });
@@ -167,8 +189,114 @@ function runM9rSessionStart(sessionID, cwd) {
     child.once("error", () => finish(null));
     child.once("close", (code) => finish(!oversized && code === 0 ? stdout : null));
     child.stdin.once("error", () => finish(null));
-    child.stdin.end(JSON.stringify({ session_id: sessionID, cwd }));
+    child.stdin.end(JSON.stringify({ session_id: sessionID, cwd, ...extra }));
   });
+}
+
+function runM9rSessionStart(sessionID, cwd) {
+  return runM9rHook(M9R_HOOK_COMMAND, M9R_HOOK_ARGS, sessionID, cwd);
+}
+
+function runM9rPrompt(sessionID, cwd) {
+  // No prompt text leaves the plugin: the hook delivers inbox deltas and results for this session only.
+  // An empty turn resolves to null, so ordinary prompts cost one local spawn and zero tokens.
+  return runM9rHook(M9R_HOOK_PROMPT_COMMAND, M9R_HOOK_PROMPT_ARGS, sessionID, cwd);
+}
+
+function runM9rPoll(sessionID, cwd) {
+  return runM9rHook(M9R_HOOK_POLL_COMMAND, M9R_HOOK_POLL_ARGS, sessionID, cwd);
+}
+
+function runM9rDelivered(sessionID, cwd, taskID) {
+  return runM9rHook(M9R_HOOK_DELIVERED_COMMAND, M9R_HOOK_DELIVERED_ARGS, sessionID, cwd, { task_id: taskID });
+}
+
+function parseOpenCodeTask(raw) {
+  const context = typeof raw === "string" ? extractOpenCodeAdditionalContext(raw) : null;
+  if (!context || context.length > 32768) return null;
+  try {
+    const task = JSON.parse(context);
+    return task && typeof task === "object" && !Array.isArray(task)
+      && typeof task.task_id === "string" && /^T\\d{1,12}$/.test(task.task_id)
+      && typeof task.prompt === "string" && task.prompt.length > 0 && task.prompt.length <= 24000
+      ? task
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseOpenCodeDeliveryAck(raw, taskID) {
+  const context = typeof raw === "string" ? extractOpenCodeAdditionalContext(raw) : null;
+  if (!context || context.length > 4096) return false;
+  try {
+    const ack = JSON.parse(context);
+    return ack && typeof ack === "object" && !Array.isArray(ack)
+      && ack.accepted === true && ack.task_id === taskID;
+  } catch {
+    return false;
+  }
+}
+
+async function acknowledgeOpenCodeTask(sessionID, cwd, entry) {
+  if (!entry.pendingAck) return false;
+  const taskID = entry.pendingAck;
+  const raw = await runM9rDelivered(sessionID, cwd, taskID).catch(() => null);
+  if (!parseOpenCodeDeliveryAck(raw, taskID)) return false;
+  entry.pendingAck = null;
+  entry.submittedTaskID = null;
+  return true;
+}
+
+async function pollOpenCodeSession(sessionID, cwd, client, entry) {
+  if (entry.polling || Date.now() < entry.retryAfter || !client?.session?.prompt) return;
+  entry.polling = true;
+  try {
+    if (entry.pendingAck) {
+      if (!await acknowledgeOpenCodeTask(sessionID, cwd, entry)) entry.retryAfter = Date.now() + M9R_POLL_RETRY_MS;
+      return;
+    }
+    const raw = await runM9rPoll(sessionID, cwd).catch(() => null);
+    const task = parseOpenCodeTask(raw);
+    if (!task || task.task_id === entry.submittedTaskID) return;
+
+    // OpenCode's own session API creates a real user turn in this session; this is not inbox text awaiting a future prompt.
+    entry.submittedTaskID = task.task_id;
+    try {
+      const response = await client.session.prompt({
+        path: { id: sessionID },
+        body: { parts: [{ type: "text", text: task.prompt }] },
+      });
+      // The SDK can resolve an HTTP failure instead of throwing it. That is not
+      // an accepted user turn and must never advance the M9R inbox cursor.
+      if (response?.error) throw new Error("OpenCode rejected the M9R prompt");
+    } catch {
+      entry.submittedTaskID = null;
+      entry.retryAfter = Date.now() + M9R_POLL_RETRY_MS;
+      return;
+    }
+
+    entry.pendingAck = task.task_id;
+    if (!await acknowledgeOpenCodeTask(sessionID, cwd, entry)) entry.retryAfter = Date.now() + M9R_POLL_RETRY_MS;
+  } finally {
+    entry.polling = false;
+  }
+}
+
+function startOpenCodePoller(sessionID, cwd, client) {
+  if (M9R_SESSION_POLLERS.has(sessionID) || !client?.session?.prompt) return;
+  if (M9R_SESSION_POLLERS.size >= M9R_MAX_CACHED_SESSIONS) {
+    const oldest = M9R_SESSION_POLLERS.keys().next().value;
+    if (oldest !== undefined) {
+      clearInterval(M9R_SESSION_POLLERS.get(oldest)?.timer);
+      M9R_SESSION_POLLERS.delete(oldest);
+    }
+  }
+  const entry = { timer: null, polling: false, submittedTaskID: null, pendingAck: null, retryAfter: 0 };
+  entry.timer = setInterval(() => { void pollOpenCodeSession(sessionID, cwd, client, entry); }, M9R_POLL_INTERVAL_MS);
+  entry.timer.unref?.();
+  M9R_SESSION_POLLERS.set(sessionID, entry);
+  void pollOpenCodeSession(sessionID, cwd, client, entry);
 }
 
 function bootstrapSession(sessionID, cwd) {
@@ -202,13 +330,20 @@ function bootstrapSession(sessionID, cwd) {
   return promise;
 }
 
-export const M9rIdentity = async ({ directory } = {}) => ({
+export const M9rIdentity = async ({ directory, client } = {}) => ({
   "experimental.chat.system.transform": async (input, output) => {
     const sessionID = input?.sessionID;
     if (typeof sessionID !== "string" || sessionID.length === 0) return;
     const cwd = typeof directory === "string" && directory.length > 0 ? directory : process.cwd();
     const context = await bootstrapSession(sessionID, cwd);
     if (context !== null && Array.isArray(output?.system)) output.system.push(context);
+    // Prompt-time delivery: inbox deltas and answers for this session, like other providers' prompt hooks.
+    // Fail-silent by design: a broken or slow hook must never block, slow, or pollute the turn.
+    const promptContext = await runM9rPrompt(sessionID, cwd)
+      .then((raw) => typeof raw === "string" ? extractOpenCodeAdditionalContext(raw) : null)
+      .catch(() => null);
+    if (promptContext !== null && Array.isArray(output?.system)) output.system.push(promptContext);
+    startOpenCodePoller(sessionID, cwd, client);
   },
 });
 `;

@@ -38,6 +38,7 @@ export function fromUiState(message: UiState): PillSnapshot {
       provider: providerOf(a.provider || handle),
       state: (RUN_STATES.has(a.state as AgentRunState) ? a.state : "idle") as AgentRunState,
       activity,
+      ...(doing ? { task: doing } : {}),
     };
   });
   const approvals = (Array.isArray(message.approvals) ? message.approvals : []).map((p) => ({
@@ -84,17 +85,22 @@ export function fromFeed(feed: Feed): PillSnapshot {
   const progress = Array.isArray(feed.inProgress) ? feed.inProgress : [];
   const agents = (Array.isArray(feed.agents) ? feed.agents : []).map((a) => {
     const handle = String(a.handle).replace(/^@/, "");
-    const mine = progress.filter((p) => p.to === handle).map((p) => clip(`@${p.from} asked: ${p.goal}`, 140));
+    const assigned = progress.filter((p) => p.to === handle);
+    // A queued or next-prompt task is not the agent's current work. Only expose a goal as
+    // `task` when the feed says it is already working; otherwise the UI can mislabel it.
+    const active = assigned.find((p) => p.state === "working");
+    const mine = assigned.map((p) => clip(`@${p.from} asked: ${p.goal}`, 140));
     // Web events arrive newest first; show them oldest first like the other shell does.
     const acted = web.filter((w) => w.agent === handle && (w.kind === "action" || w.kind === "message")).slice(0, 8).reverse().map((w) => clip(w.text, 140));
     let state: AgentRunState = FEED_STATES[String(a.state)] ?? "idle";
     if (state === "idle" && progress.some((p) => p.to === handle && p.state === "working")) state = "working";
     // What the agent is doing right now, read from its own transcript. Last, so it is the line the ticker highlights.
     const doing = typeof (a as FeedAgent).doing === "string" ? clip((a as FeedAgent).doing as string, 140) : "";
+    const task = doing || (active ? clip(active.goal, 140) : "");
     const steps = [...acted, ...mine];
     if (doing && steps.at(-1) !== doing) steps.push(doing);
     if (state === "working" && steps.length === 0) steps.push("Working on a turn");
-    return { handle, provider: providerOf(handle), state, activity: steps.slice(-12) };
+    return { handle, provider: providerOf(handle), state, activity: steps.slice(-12), ...(task ? { task } : {}) };
   });
   const needs = Array.isArray(feed.needsYou) ? feed.needsYou : [];
   const approvals = needs.flatMap((n) => n.kind === "approval"

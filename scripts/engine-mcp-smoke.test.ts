@@ -27,7 +27,7 @@ test("the built engine exe's `mcp` subcommand completes a real MCP handshake and
 
     type ToolInfo = {
       name: string;
-      inputSchema?: { properties?: Record<string, { pattern?: string; description?: string }> };
+      inputSchema?: { properties?: Record<string, { pattern?: string; description?: string; enum?: string[]; default?: string }> };
     };
     const messages = out.trim().split("\n").map((line) => { try { return JSON.parse(line) as { id?: number; result?: { tools?: ToolInfo[] } }; } catch { return null; } }).filter((m): m is NonNullable<typeof m> => Boolean(m));
     const initResult = messages.find((m) => m.id === 1);
@@ -46,6 +46,16 @@ test("the built engine exe's `mcp` subcommand completes a real MCP handshake and
       "^e[a-f0-9]{24}_\\d{1,3}$",
       "the built engine must expose the current snapshot-scoped nonce-ref format",
     );
+    for (const toolName of ["m9r_stage_prepare", "m9r_stage_app", "m9r_stage_action"]) {
+      const stageTool: ToolInfo | undefined = toolsResult.result!.tools!.find((tool: ToolInfo) => tool.name === toolName);
+      assert.ok(stageTool, `${toolName} missing from the built engine's real tool list`);
+      assert.deepEqual(
+        stageTool.inputSchema?.properties?.mode?.enum,
+        ["background", "owner-preview"],
+        `${toolName} must expose both background and owner-preview modes`,
+      );
+      assert.equal(stageTool.inputSchema?.properties?.mode?.default, "background");
+    }
   } finally {
     child.kill();
   }

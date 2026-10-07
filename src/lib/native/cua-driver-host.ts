@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { CuaDriverLike } from "@trycua/cua-driver";
 
-const DRIVER_VERSION = "0.33.4";
+const DRIVER_VERSION = "0.34.0";
 const START_TIMEOUT_MS = 12_000;
 const RETRY_INTERVAL_MS = 100;
 

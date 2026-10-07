@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parseTaskStageAction } from "../src/lib/native/task-stage-actions";
+import { parseTaskStageAction, stageClickNeedsApproval } from "../src/lib/native/task-stage-actions";
 import { approveStageApp, listApprovedStageApps, readApprovedStageApp } from "../src/lib/native/task-stage-apps";
 import { readTaskStagePolicy, setTaskStagePermission } from "../src/lib/native/task-desktop-stage";
 
@@ -17,6 +17,20 @@ test("stage action boundary accepts bounded operations and rejects alternate tar
     { kind: "type", text: "x".repeat(501) }, { kind: "scroll", x: 1, y: 2, direction: "left" }, { kind: "drag", fromX: 1 }]) {
     assert.throws(() => parseTaskStageAction(action));
   }
+});
+
+test("money carve-out holds purchase-like clicks and nothing else, fail-closed without a label", () => {
+  for (const label of ["Pay now", "BUY", "Place order", "Subscribe", "Transfer funds", "Checkout", "Pay $49.00"]) {
+    const gate = stageClickNeedsApproval({ label });
+    assert.equal(gate.hold, true, label);
+    assert.equal(gate.label, label);
+  }
+  for (const label of ["Next", "Cancel", "Send message", "Delete draft", "Search", "OK"]) {
+    assert.equal(stageClickNeedsApproval({ label }).hold, false, `${label} stays under standing approval`);
+  }
+  assert.equal(stageClickNeedsApproval(undefined).hold, true, "an undescribed target is never assumed harmless");
+  assert.equal(stageClickNeedsApproval({}).hold, true);
+  assert.equal(stageClickNeedsApproval({ label: "   " }).hold, true);
 });
 
 test("preparation permission never implies computer control; owner revocation removes both", () => {

@@ -105,28 +105,28 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   );
 
   server.registerTool("m9r_stage_app", {
-    description: "Launch an owner-approved app on your approved task stage, or discard this task's broker-owned app. Only select an approved app ID; executable paths and arguments come from owner configuration. Discard closes the app without saving; use it only after preserving the task result. Apps that hand off to another process need a separate adapter.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), appId: z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/).optional() },
-  }, async ({ token, taskId, operation, appId }) => {
+    description: "Launch an owner-approved app on your background stage or owner-visible preview stage, or discard this task's broker-owned app. Only select an approved app ID; executable paths and arguments come from owner configuration. Discard closes the app without saving; use it only after preserving the task result. Apps that hand off to another process need a separate adapter.",
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("background"), appId: z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/).optional() },
+  }, async ({ token, taskId, operation, mode, appId }) => {
     requireIdentity(token);
     if ((operation === "launch") !== (appId !== undefined)) throw new Error("Launch requires an app ID; discard takes no app ID.");
-    const result = deps.web?.taskStageApp ? await deps.web.taskStageApp(token, taskId, appId)
+    const result = deps.web?.taskStageApp ? await deps.web.taskStageApp(token, taskId, appId, mode)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
     return { content: [{ type: "text" as const, text: JSON.stringify(result) }], isError: !result.ok };
   });
 
   server.registerTool("m9r_stage_action", {
-    description: "Capture or control your session's task stage. Requires an approved unfinished task and separate owner computer-control permission. Targets only its registered app window; never switches desktops. Read the outcome and verify effects; posted input is not proof of success.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), action: z.discriminatedUnion("kind", [
+    description: "Capture or control your session's task stage for native Windows desktop apps. Use owner-preview to show the labeled cursor on the owner's current desktop; background keeps the agent on its own Windows desktop. Requires an approved unfinished task and separate owner computer-control permission. Targets only its registered app window and never switches desktops. For webpage content in Chrome or Edge, use m9r_web_* instead: the native Stage driver may refuse background text input to Chromium and never retries through foreground input. Read the outcome and verify effects; posted input is not proof of success.",
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("background"), action: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("capture") }).strict(),
       z.object({ kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
       z.object({ kind: z.literal("type"), text: z.string().min(1).max(500) }).strict(),
       z.object({ kind: z.literal("scroll"), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), direction: z.enum(["up", "down"]) }).strict(),
       z.object({ kind: z.literal("drag"), fromX: z.number().int().min(0).max(16383), fromY: z.number().int().min(0).max(16383), toX: z.number().int().min(0).max(16383), toY: z.number().int().min(0).max(16383) }).strict(),
     ]) },
-  }, async ({ token, taskId, action }) => {
+  }, async ({ token, taskId, mode, action }) => {
     requireIdentity(token);
-    const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(token, taskId, action)
+    const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(token, taskId, action, mode)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
     const capture = (response.result as { capture?: { dataUrl?: string } } | undefined)?.capture;
     const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
@@ -137,12 +137,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   });
 
   server.registerTool("m9r_stage_prepare", {
-    description: "Prepare your agent's Windows virtual desktop for an approved unfinished M9R task. Requires owner stage permission. Reuses your session's stage; never switches the owner's desktop. Returns approved app IDs and separate computer-control permission. Use m9r_stage_app and m9r_stage_action for authorized execution; preparation itself does not prove input support.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/) },
-  }, async ({ token, taskId }) => {
+    description: "Prepare an approved unfinished M9R task on a background Windows desktop or an owner-visible preview bound to the current desktop. Requires owner stage permission. Preview preparation never creates or switches desktops. Returns approved app IDs and separate computer-control permission. Use m9r_stage_app and m9r_stage_action for authorized execution; preparation itself does not prove input support.",
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("background") },
+  }, async ({ token, taskId, mode }) => {
     requireIdentity(token);
     const result = deps.web?.prepareTaskStage
-      ? await deps.web.prepareTaskStage(token, taskId)
+      ? await deps.web.prepareTaskStage(token, taskId, mode)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
     return { content: [{ type: "text" as const, text: JSON.stringify(result) }], isError: !result.ok };
   });

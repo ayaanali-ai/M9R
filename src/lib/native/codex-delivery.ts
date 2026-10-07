@@ -32,6 +32,14 @@ export type DeliveryOutcome =
   | { state: "failed"; reason: string }
   | { state: "skipped"; reason: string };
 
+/** A task launched by M9R itself can inherit ~/.m9r/bin as process.cwd(); that is install state, never a project. */
+function projectCwdForTask(store: LocalStore, cwd: string | undefined): string | undefined {
+  if (!cwd) return undefined;
+  const root = normCwd(store.root);
+  const candidate = normCwd(cwd);
+  return root && (candidate === root || candidate.startsWith(`${root}/`)) ? undefined : cwd;
+}
+
 /** Pushes one task into the target Codex session. Only tasks a human typed or approved are ever pushed. */
 export async function deliverToCodex(store: LocalStore, taskId: string, deps: DeliveryDeps): Promise<DeliveryOutcome> {
   const task = store.getTask(taskId);
@@ -39,6 +47,9 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   if (task.to !== "codex") return { state: "skipped", reason: "not addressed to codex" };
   if (!canQueue(task)) return { state: "skipped", reason: "waiting for approval" };
   if (task.delivery?.state === "queued" || task.delivery?.state === "done") return { state: "skipped", reason: "already pushed" };
+  // Old task records may already have captured the engine install directory. Treat that path as
+  // an unknown sender folder too, so those tasks can use the current live Codex identity.
+  const taskCwd = projectCwdForTask(store, task.cwd);
 
   const attempts = (task.delivery?.attempts ?? 0) + 1;
   const fail = (reason: string): DeliveryOutcome => {
@@ -55,7 +66,7 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   const everySession = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
 
   // Rule 1: an explicit link the person made (or M9R made from one clear match) always wins, even over folder or recency.
-  const linked = task.fromSession && !task.targetSession ? store.linkedSession(task.from, task.fromSession, "codex", task.cwd) : undefined;
+  const linked = task.fromSession && !task.targetSession ? store.linkedSession(task.from, task.fromSession, "codex", taskCwd) : undefined;
   const linkedTargets = linked ? everySession.filter((session) => session.sessionId === linked.sessionId && (!linked.cwd || normCwd(session.cwd) === normCwd(linked.cwd))) : [];
   if (linked && linkedTargets.length === 1 && isThreadId(linked.sessionId)) {
     const message = await queueMessageFor(linked.sessionId);
@@ -72,23 +83,23 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   // the sender: it could be another project, or an old thread, and a clean new session must never lose its task to one. Only an explicit
   // `--session`, or a sender with no known folder, may reach any session.
   let known = everySession;
-  if (task.cwd && !task.targetSession) {
-    const exact = everySession.filter((s) => normCwd(s.cwd) === normCwd(task.cwd));
+  if (taskCwd && !task.targetSession) {
+    const exact = everySession.filter((s) => normCwd(s.cwd) === normCwd(taskCwd));
     known = exact;
     if (known.length === 0 && everySession.length > 0) return fail(deps.requireTargetIdentity
-      ? `No Codex session with an active M9R identity is open in ${task.cwd}. Start or reconnect Codex so its M9R SessionStart card is present, then retry.`
-      : `No Codex session is open in ${task.cwd}; it will show at the next prompt in whichever session you use. Send one message explicitly to aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
+      ? `No Codex session with an active M9R identity is open in ${taskCwd}. Start or reconnect Codex so its M9R SessionStart card is present, then retry.`
+      : `No Codex session is open in ${taskCwd}; it will show at the next prompt in whichever session you use. Send one message explicitly to aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
   }
   // Asking the machine costs about a second, so only when there is a choice to make and nobody pinned one.
   const liveness = !task.targetSession && known.length > 1 && deps.sessionLiveness ? await deps.sessionLiveness(known.map((s) => s.sessionId)).catch(() => undefined) : undefined;
-  const choice = pickSession(known, { pinned: task.targetSession, senderCwd: task.cwd, now: new Date(), liveness });
+  const choice = pickSession(known, { pinned: task.targetSession, senderCwd: taskCwd, now: new Date(), liveness });
   if (choice.kind === "none") return fail(task.targetSession
     ? (deps.requireTargetIdentity ? `No Codex session with an active M9R identity matches "${task.targetSession}". Start or reconnect that session, then retry.` : `No Codex session matches "${task.targetSession}"; start that session, then retry.`)
     : (deps.requireTargetIdentity ? "No Codex session with an active M9R identity is known. Start Codex with M9R enabled so it receives a SessionStart card, then retry." : "No Codex session is known. Start Codex, then retry."));
   if (choice.kind === "ambiguous") return fail(`${choice.sessions.length} Codex sessions are open here and M9R cannot tell which you mean, so it will show at the next prompt in whichever you use. To aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
   // Rule 2: exactly one candidate was just resolved for a sender with a known session: remember it as an auto-link for next time.
   if (task.fromSession) store.setLink(
-    { handle: task.from, sessionId: task.fromSession, cwd: task.cwd },
+    { handle: task.from, sessionId: task.fromSession, cwd: taskCwd },
     { handle: "codex", sessionId: choice.session.sessionId, cwd: choice.session.cwd },
     "auto",
   );
@@ -111,8 +122,9 @@ export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps:
   if (!task || !task.resultSummary) return { state: "skipped", reason: "no answer yet" };
   if (task.from !== "codex" || !isThreadId(task.fromSession)) return { state: "skipped", reason: "the asker is not a Codex session we can push into" };
   if (task.answerPushedAt) return { state: "skipped", reason: "already sent back" };
+  const taskCwd = projectCwdForTask(store, task.cwd);
   const sessions = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
-  const askerSessions = sessions.filter((session) => session.sessionId === task.fromSession && (!task.cwd || normCwd(session.cwd) === normCwd(task.cwd)));
+  const askerSessions = sessions.filter((session) => session.sessionId === task.fromSession && (!taskCwd || normCwd(session.cwd) === normCwd(taskCwd)));
   if (askerSessions.length !== 1) return { state: "failed", reason: askerSessions.length === 0 ? "the originating Codex session is no longer registered in its folder" : "the originating Codex session is ambiguous; no answer was pushed" };
   const command = deps.resolveCodex();
   if (!command) return { state: "failed", reason: "The codex command was not found on this machine." };

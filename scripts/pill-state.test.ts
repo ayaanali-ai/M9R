@@ -25,17 +25,29 @@ test("the first snapshot is a baseline; a reply that arrives later on an empty t
 });
 
 test("approvals are reported once, queue in order, and mark the asking agent", () => {
+  const now = Date.now();
   const a1 = { id: "a1", agent: "codex", title: "Post", detail: "Click Post" };
   const a2 = { id: "a2", agent: "claude", title: "Buy", detail: "Click Buy" };
-  const first = State.apply(snap({ approvals: [a1] }));
+  const first = State.apply(snap({ approvals: [a1] }), now);
   assert.deepEqual(first.newApprovals, ["a1"]);
   assert.equal(State.pendingApproval?.id, "a1");
   assert.equal(State.tasks.find((t) => t.id === "codex")?.state, "approval");
-  const second = State.apply(snap({ approvals: [a1, a2] }));
+  const second = State.apply(snap({ approvals: [a1, a2] }), now + 1);
   assert.deepEqual(second.newApprovals, ["a2"], "only the new one is reported");
   assert.equal(State.approvals.length, 2);
-  State.apply(snap({ approvals: [] }));
-  assert.equal(State.pendingApproval, null);
+  State.apply(snap({ approvals: [] }), now + 2);
+  assert.equal(State.approvals.length, 2, "an empty or partial snapshot does not erase a recently visible approval");
+  assert.equal(State.pendingApproval?.id, "a1");
+  assert.equal(State.pendingApproval?.unconfirmed, true);
+  assert.equal(State.tasks.find((t) => t.id === "codex")?.state, "approval");
+  assert.equal(State.defaultView(), "approval");
+  const recovered = State.apply(snap({ approvals: [a1, a2] }), now + 3);
+  assert.deepEqual(recovered.newApprovals, [], "a returning approval is not alerted twice");
+  assert.equal(State.pendingApproval?.unconfirmed, false);
+  State.resolveApproval("a1", now + 4);
+  State.resolveApproval("a2", now + 4);
+  State.apply(snap({ approvals: [a1, a2] }), now + 5);
+  assert.equal(State.approvals.length, 0, "accepted owner decisions suppress stale snapshots from restoring old cards");
   assert.equal(State.defaultView(), "overview");
 });
 
