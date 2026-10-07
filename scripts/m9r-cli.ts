@@ -2035,7 +2035,8 @@ async function runWebSetup(args: string[]): Promise<number> {
       const plannedConfig = item.agent === "codex"
         ? mergeCodexWebMcp(beforeText, runtimePlan)
         : item.agent === "opencode"
-          ? mergeOpenCodeWebMcp(beforeText, item.layout ?? "legacy", runtimePlan)
+          ? mergeOpenCodeWebMcp(beforeText, item.layout ?? "legacy", runtimePlan,
+            Boolean(openCodePlugin && ["install", "upgrade", "unchanged"].includes(openCodePlugin.action)))
           : null;
       const record: WebSetupManifest["configs"][number] = priorRecord
         ? { ...priorRecord, path, ...(item.layout ? { layout: item.layout } : {}), installedHash: plannedConfig ? digest(plannedConfig) : "" }
@@ -2349,7 +2350,11 @@ async function runWebUninstall(args: string[]): Promise<number> {
     else if (action === "delete-created-file") await unlink(config.path).catch(() => undefined);
     else if (action === "remove-managed-entry" && current) {
       const text = current.toString("utf8");
-      const after = config.agent === "codex" ? removeCodexWebMcp(text) : config.agent === "opencode" ? removeOpenCodeWebMcp(text, config.layout ?? "legacy") : null;
+      const after = config.agent === "codex"
+        ? removeCodexWebMcp(text)
+        : config.agent === "opencode"
+          ? removeOpenCodeWebMcp(text, config.layout ?? "legacy", Boolean(manifest.openCodeIdentityPluginPath))
+          : null;
       if (after !== null) await writeAtomic(config.path, after);
       else {
         const claude = await detectInstalledAgents(probeWebAgentVersion).then((agents) => agents.find((agent) => agent.kind === "claude-code"));

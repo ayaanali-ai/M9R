@@ -38,7 +38,7 @@ import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type Delivery
 import { codexNoteInEffect, createCodexWatcher } from "./codex-watch";
 import { hookPipePath, requestShutdown, startHookServer } from "./hook-server";
 import { runHookRequest } from "./hook-run";
-import { canQueue, normCwd } from "./codex-delivery-core";
+import { canQueue, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
@@ -481,9 +481,12 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
   const workingDirectory = io.env.M9R_PROJECT_ROOT?.trim() || io.cwd || process.cwd();
   const storeRoot = normCwd(nativePaths(io).m9r);
   const normalizedWorkingDirectory = normCwd(workingDirectory);
-  // M9R's installed executables live under ~/.m9r/bin. When a pill/shortcut starts the CLI there,
-  // that process directory is not the user's project and must not be used to route a task to Codex.
-  let taskCwd = normalizedWorkingDirectory === storeRoot || normalizedWorkingDirectory.startsWith(`${storeRoot}/`)
+  // M9R's installed executables live under ~/.m9r/bin. A sign-in shortcut can
+  // also inherit Windows\System32 when the shell did not provide a project.
+  // Neither location is a user's project and neither may pin delivery to a
+  // nonexistent Codex session.
+  let taskCwd = isWindowsSystemCwd(workingDirectory)
+    || normalizedWorkingDirectory === storeRoot || normalizedWorkingDirectory.startsWith(`${storeRoot}/`)
     ? undefined
     : workingDirectory;
   if (!taskCwd) {
@@ -493,7 +496,8 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
       const configured = JSON.parse(readFileSync(join(nativePaths(io).m9r, "broker-autostart.json"), "utf8").replace(/^\uFEFF/, "")) as { projectRoot?: unknown };
       if (typeof configured.projectRoot === "string" && configured.projectRoot.trim()
         && normCwd(configured.projectRoot) !== storeRoot
-        && !normCwd(configured.projectRoot).startsWith(`${storeRoot}/`)) taskCwd = configured.projectRoot;
+        && !normCwd(configured.projectRoot).startsWith(`${storeRoot}/`)
+        && !isWindowsSystemCwd(configured.projectRoot)) taskCwd = configured.projectRoot;
     } catch { /* no owner-configured project: keep the existing unscoped route */ }
   }
   const { task, created } = store.addTask({ from: input.from ?? (human ? "you" : "agent"), to: handleForProvider(to), goal: input.text, origin: human ? "human_typed" : "agent_initiated", ...(taskCwd ? { cwd: taskCwd } : {}), ...(input.session ? { targetSession: input.session } : {}), idempotencyKey: input.key ?? randomUUID() });

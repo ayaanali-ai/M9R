@@ -11,7 +11,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { inboxMaxAgeMs, renderHeldAck, renderInboxAck, renderInboxInjection, renderOpenCodePendingAck, renderResultsInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
-import { buildQueueMessage, canQueue, isM9rPushedPrompt, normCwd } from "./codex-delivery-core";
+import { buildQueueMessage, canQueue, isM9rPushedPrompt, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
 import { findEndpointMentions } from "./mention-core";
 import { findMemoryHints, renderMemoryHint } from "./memory-hint-core";
 import { handleForProvider, type LocalStore } from "./local-store";
@@ -70,6 +70,10 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex").slice(0,
  */
 function projectCwdForStore(store: Pick<LocalStore, "root">, cwd: string | undefined): string | undefined {
   if (!cwd) return undefined;
+  // A provider launched by a shortcut or a shell with no project can inherit
+  // Windows' system directory. It is OS state, never an M9R project, and must
+  // not pin an identity or an @mention to C:\\Windows\\System32.
+  if (isWindowsSystemCwd(cwd)) return undefined;
   const root = normCwd(store.root);
   const candidate = normCwd(cwd);
   return root && (candidate === root || candidate.startsWith(`${root}/`)) ? undefined : cwd;

@@ -82,6 +82,20 @@ export function selectPersonalBrowserWindow(
   if (beforeKeys.size === 0 && matches.length === 1) return matches[0];
   return undefined;
 }
+
+/**
+ * Adopt the user's already-open personal browser for an owner-visible preview.
+ * The broker never guesses between multiple windows: the caller must either
+ * close the extra windows or use an explicit window-selection flow.
+ */
+export function selectExistingPersonalBrowserWindow(
+  kind: StageBrowserKind,
+  windows: readonly BrowserWindowCandidate[],
+): BrowserWindowCandidate | undefined {
+  const matches = windows.filter((candidate) => browserWindowMatches(candidate, kind));
+  if (matches.length > 1) throw new Error(`Personal ${kind === "chrome" ? "Chrome" : "Edge"} has multiple visible windows; owner selection is required.`);
+  return matches[0];
+}
 const CATALOG = "task-stage-apps.json";
 const APP_ID = /^[a-z][a-z0-9_-]{0,39}$/;
 
@@ -137,10 +151,11 @@ export function launchApprovedStageApp(app: ApprovedStageApp, options: { windows
 }
 
 /**
- * Broker-resolved executables for full/request access modes. The mapping is fixed in code: an agent
- * names an id (or, in full mode only, an absolute path) and the broker resolves it to an exact file,
- * so agent input can never smuggle in arguments, flags, or a shell. Launched with fixed empty args and
- * hash-recorded at launch time, under the same exact-process custody as catalog apps.
+ * Broker-resolved executables for full/request access modes. An agent names an id (or, in full mode
+ * only, an absolute path) and the broker resolves it to an exact file, so agent input can never
+ * smuggle in arguments, flags, or a shell. Launched with fixed empty args and hash-recorded at launch
+ * time, under the same exact-process custody as catalog apps. Full mode also searches PATH and the
+ * Windows system directory, so ordinary installed tools never need catalog entries.
  */
 export interface ResolvedUnlistedApp extends ApprovedStageApp {
   /** False when the agent named an absolute path (full mode only); always audited at launch. */
@@ -170,6 +185,16 @@ function wellKnownCandidates(id: string, roots: string[]): string[] {
   }
 }
 
+function pathCandidates(id: string, env: Record<string, string | undefined>): string[] {
+  if (!APP_ID.test(id)) return [];
+  const pathValue = env.Path ?? env.PATH ?? "";
+  const dirs = pathValue.split(/[;]/).map((value) => value.trim()).filter(Boolean);
+  const systemRoot = env.SystemRoot?.trim() || env.WINDIR?.trim();
+  if (systemRoot) dirs.push(join(systemRoot, "System32"));
+  const names = id.toLowerCase().endsWith(".exe") ? [id] : [id, `${id}.exe`];
+  return [...new Set(dirs.flatMap((dir) => names.map((name) => join(dir, name))))];
+}
+
 export function resolveUnlistedStageApp(appId: string, input: { allowAbsolutePath: boolean; env?: Record<string, string | undefined>; exists?: (path: string) => boolean } = { allowAbsolutePath: false }): ResolvedUnlistedApp {
   const env = input.env ?? process.env;
   const exists = input.exists ?? existsSync;
@@ -178,12 +203,16 @@ export function resolveUnlistedStageApp(appId: string, input: { allowAbsolutePat
     if (!exists(candidate)) continue;
     return { ...readApprovedStageAppShape(candidate), wellKnown: true };
   }
-  if (wellKnown.length > 0) throw new Error(`The ${appId} browser is not installed at any of its standard locations.`);
+  for (const candidate of pathCandidates(appId, env)) {
+    if (!exists(candidate)) continue;
+    return { ...readApprovedStageAppShape(candidate), wellKnown: true };
+  }
+  if (wellKnown.length > 0) throw new Error(`The ${appId} browser is not installed at any of its standard locations or PATH.`);
   // Absolute paths are a full-mode-only escape hatch; request mode resolves well-known ids alone.
   if (input.allowAbsolutePath && isAbsolute(appId) && /\.exe$/i.test(appId) && exists(appId)) {
     return { ...readApprovedStageAppShape(appId), wellKnown: false };
   }
-  throw new Error("This app has not been approved for task stages.");
+  throw new Error(`The app "${appId}" is not installed or could not be resolved on this machine.`);
 }
 
 function readApprovedStageAppShape(executable: string): ApprovedStageApp {

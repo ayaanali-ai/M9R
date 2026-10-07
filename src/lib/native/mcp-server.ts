@@ -39,6 +39,7 @@ export interface McpServerDeps {
 }
 
 const TOKEN_FIELD = { token: z.string().min(1).describe("Your M9R session token, from the line the SessionStart card gave you (\"M9R session token: ...\"). Required on every call.") };
+const STAGE_APP_REF = z.string().min(1).max(1024).refine((value) => /^[a-z][a-z0-9_-]{0,39}$/.test(value) || /^(?:[A-Za-z]:[\\/]|\\\\).+\.exe$/i.test(value), "Use an app id or an absolute .exe path.");
 
 export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const server = new McpServer({ name: "m9r-mcp", version: "1.0.0" });
@@ -105,8 +106,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   );
 
   server.registerTool("m9r_stage_app", {
-    description: "Launch an owner-approved app on your background stage or owner-visible preview stage, or discard this task's broker-owned app. Only select an approved app ID; executable paths and arguments come from owner configuration. Discard closes the app without saving; use it only after preserving the task result. Apps that hand off to another process need a separate adapter.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("background"), appId: z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/).optional() },
+    description: "Launch an installed desktop app on your background stage or owner-visible preview stage, or discard this task's broker-owned app. Normal stage grants resolve the user's installed app directly; no per-app catalog approval is required. Use a short app id (for example chrome or notepad) or an absolute .exe path. Explicit scoped/request policies may still restrict launches. Discard closes only an app owned by this task; preserve the task result first. Apps that hand off to another process need a separate adapter.",
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("background"), appId: STAGE_APP_REF.optional() },
   }, async ({ token, taskId, operation, mode, appId }) => {
     requireIdentity(token);
     if ((operation === "launch") !== (appId !== undefined)) throw new Error("Launch requires an app ID; discard takes no app ID.");
@@ -137,7 +138,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   });
 
   server.registerTool("m9r_stage_prepare", {
-    description: "Prepare an approved unfinished M9R task on a background Windows desktop or an owner-visible preview bound to the current desktop. Requires owner stage permission. Preview preparation never creates or switches desktops. Returns approved app IDs and separate computer-control permission. Use m9r_stage_app and m9r_stage_action for authorized execution; preparation itself does not prove input support.",
+    description: "Prepare an approved unfinished M9R task on a background Windows desktop or an owner-visible preview bound to the current desktop. Requires owner stage permission. Preview preparation never creates or switches desktops. Ordinary installed apps do not need catalog approval; the result may include legacy catalog metadata for compatibility. Use m9r_stage_app and m9r_stage_action for authorized execution; preparation itself does not prove input support.",
     inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("background") },
   }, async ({ token, taskId, mode }) => {
     requireIdentity(token);

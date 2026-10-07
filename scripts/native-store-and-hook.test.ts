@@ -301,6 +301,16 @@ test("the per-user M9R install folder is never persisted as a project scope", ()
   done();
 });
 
+test("Windows System32 is never persisted as a provider project scope", () => {
+  const { store, done } = tempStore();
+  handleHookEvent({ hook_event_name: "SessionStart", session_id: "system-session", cwd: "C:\\WINDOWS\\System32" }, { ...ctx(store, "codex") });
+  assert.equal(store.sessionsFor("codex")[0]?.cwd, undefined);
+  const routed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "source", cwd: "C:\\WINDOWS\\System32", prompt: "@codex use the current project" }, { ...ctx(store, "opencode"), strictTargetIdentity: false });
+  assert.match(ctxOf(routed) ?? "", /task T1/);
+  assert.equal(store.tasksFor("codex")[0]?.cwd, undefined);
+  done();
+});
+
 test("cursor and session-link APIs also discard an M9R install cwd", () => {
   const { root, store, done } = tempStore();
   const installCwd = join(root, "bin");

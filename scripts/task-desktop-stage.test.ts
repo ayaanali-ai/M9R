@@ -193,21 +193,22 @@ test("revoking control while the owner decides stops the click even after approv
   } finally { f.cleanup(); }
 });
 
-test("access modes round-trip through the owner-only policy; legacy entries stay scoped", async () => {
+test("access modes round-trip through the owner-only policy; ordinary grants are full by default", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-stage-modes-"));
   try {
     setTaskStagePermission(root, "codex", true, { terminal: true, env: {} }, true, "full");
     assert.deepEqual(readTaskStagePolicy(root), { handles: ["codex"], controlHandles: ["codex"], modes: { codex: "full" } });
     assert.equal(stageAccessMode(readTaskStagePolicy(root), "codex"), "full");
-    // Re-granting without a mode returns the handle to scoped, deterministically.
+    // Re-granting without a mode clears overrides and returns the handle to full access.
     setTaskStagePermission(root, "codex", true, { terminal: true, env: {} }, true);
     assert.deepEqual(readTaskStagePolicy(root), { handles: ["codex"], controlHandles: ["codex"] });
-    assert.equal(stageAccessMode(readTaskStagePolicy(root), "codex"), "scoped");
+    assert.equal(stageAccessMode(readTaskStagePolicy(root), "codex"), "full");
     setTaskStagePermission(root, "codex", true, { terminal: true, env: {} }, true, "request");
     assert.equal(stageAccessMode(readTaskStagePolicy(root), "codex"), "request");
     setTaskStagePermission(root, "codex", false, { terminal: true, env: {} });
     assert.deepEqual(readTaskStagePolicy(root), { handles: [] });
     assert.equal(stageAccessMode(readTaskStagePolicy(root), "codex"), "scoped");
+    assert.equal(stageAccessMode({ handles: ["codex"], modes: { codex: "scoped" } }, "codex"), "scoped");
     assert.throws(() => setTaskStagePermission(root, "codex", true, { terminal: true, env: {} }, true, "everything" as never), /Invalid stage access mode/);
     assert.throws(() => setTaskStagePermission(root, "codex", true, { terminal: true, env: { OPENCODE: "1" } }, true, "full"), /Only the owner/);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -220,13 +221,13 @@ test("unlisted app resolution is broker-fixed: well-known ids probe install root
     writeFileSync(exe, "fake exe bytes");
     const env = { ProgramFiles: root, "ProgramFiles(x86)": root, LocalAppData: root };
     assert.throws(() => resolveUnlistedStageApp("chrome", { allowAbsolutePath: true, env, exists: () => false }), /not installed at any of its standard locations/);
-    assert.throws(() => resolveUnlistedStageApp("notepad", { allowAbsolutePath: true, env }), /not been approved/);
-    assert.throws(() => resolveUnlistedStageApp(exe, { allowAbsolutePath: false, env }), /not been approved/, "request mode never takes agent-named paths");
+    assert.throws(() => resolveUnlistedStageApp("notepad", { allowAbsolutePath: true, env }), /not installed or could not be resolved/);
+    assert.throws(() => resolveUnlistedStageApp(exe, { allowAbsolutePath: false, env }), /not installed or could not be resolved/, "request mode never takes agent-named paths");
     const resolved = resolveUnlistedStageApp(exe, { allowAbsolutePath: true, env });
     assert.equal(resolved.wellKnown, false);
     assert.deepEqual(resolved.args, []);
     assert.match(resolved.sha256, /^[a-f0-9]{64}$/);
-    assert.throws(() => resolveUnlistedStageApp(join(root, "app.txt"), { allowAbsolutePath: true, env }), /not been approved/);
+    assert.throws(() => resolveUnlistedStageApp(join(root, "app.txt"), { allowAbsolutePath: true, env }), /not installed or could not be resolved/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -237,14 +238,14 @@ test("launch decisions: catalog flows, full resolves unlisted, request holds, sc
     writeFileSync(exe, "fake exe bytes");
     const chromeExe = join(root, "Google", "Chrome", "Application", "chrome.exe");
     const full = { handles: ["codex"], controlHandles: ["codex"], modes: { codex: "full" as const } };
-    const scoped = { handles: ["codex"], controlHandles: ["codex"] };
+    const scoped = { handles: ["codex"], controlHandles: ["codex"], modes: { codex: "scoped" as const } };
     const request = { handles: ["codex"], controlHandles: ["codex"], modes: { codex: "request" as const } };
     const decided = resolveLaunchTarget(root, full, "codex", exe);
     assert.equal(decided.app.executable, exe);
     assert.equal(decided.needsApproval, undefined);
     assert.throws(() => resolveLaunchTarget(root, scoped, "codex", exe), /not been approved/);
     // Request mode never takes agent-named paths, even for existing files.
-    assert.throws(() => resolveLaunchTarget(root, request, "codex", exe), /not been approved/);
+    assert.throws(() => resolveLaunchTarget(root, request, "codex", exe), /not installed or could not be resolved/);
     // But it holds broker-resolved browsers for the owner: fake an installed Chrome.
     mkdirSync(join(root, "Google", "Chrome", "Application"), { recursive: true });
     writeFileSync(chromeExe, "fake chrome bytes");

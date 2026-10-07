@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
 import { windowsFileHolders, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
 import { defaultStoreRoot } from "./local-store";
@@ -37,7 +37,7 @@ function projectCwdForTask(store: LocalStore, cwd: string | undefined): string |
   if (!cwd) return undefined;
   const root = normCwd(store.root);
   const candidate = normCwd(cwd);
-  return root && (candidate === root || candidate.startsWith(`${root}/`)) ? undefined : cwd;
+  return isWindowsSystemCwd(cwd) || (root && (candidate === root || candidate.startsWith(`${root}/`))) ? undefined : cwd;
 }
 
 /** Pushes one task into the target Codex session. Only tasks a human typed or approved are ever pushed. */

@@ -86,6 +86,14 @@ const CLEAR_WINNER_RECENT_MS = 12 * 60 * 60_000;
 const CLEAR_WINNER_GAP_MS = 5 * 60_000;
 export const normCwd = (p: string | undefined) => (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 
+/** A launcher may inherit Windows' system directory when no project was supplied.
+ * System32/SysWOW64 are OS state, never a user's project, and must not become a
+ * routing constraint for an agent session. */
+export function isWindowsSystemCwd(cwd: string | undefined): boolean {
+  const value = normCwd(cwd);
+  return /^(?:[a-z]:)?\/windows\/(?:system32|syswow64)(?:\/|$)/i.test(value);
+}
+
 /** True when one folder is the other or contains it. */
 export const foldersRelated = (a: string | undefined, b: string | undefined): boolean => {
   const x = normCwd(a), y = normCwd(b);

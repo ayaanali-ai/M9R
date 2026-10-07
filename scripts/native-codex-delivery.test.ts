@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
 import { collectCodexResults, deliverToCodex, findRolloutFile, type DeliveryDeps } from "../src/lib/native/codex-delivery";
 import { renderInboxInjection, renderResultsInjection } from "../src/lib/native/inbox-core";
 import { handleHookEvent } from "../src/lib/native/hook-handler";
@@ -288,6 +288,23 @@ test("the M9R install directory is not treated as a Codex project folder", async
 
   assert.deepEqual(await deliverToCodex(store, t.id, deps), { state: "queued", threadId: THREAD });
   assert.equal(deps.calls.length, 1, "a task created from the runtime install folder still reaches the live project session");
+});
+
+test("Windows System32 is never treated as a Codex project folder", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: THREAD, cwd: "C:/runleak/runleak" });
+  assert.equal(isWindowsSystemCwd("C:\\WINDOWS\\System32"), true);
+  const deps = fakeDeps();
+  const task = store.addTask({
+    from: "you",
+    to: "codex",
+    goal: "Show one labeled M9R ghost cursor",
+    origin: "human_typed",
+    idempotencyKey: "system32-cwd",
+    cwd: "C:\\WINDOWS\\System32",
+  }).task;
+  assert.deepEqual(await deliverToCodex(store, task.id, deps), { state: "queued", threadId: THREAD });
+  assert.equal(deps.calls.length, 1);
 });
 
 test("`sessions` lists what was seen and how to aim a task", async () => {

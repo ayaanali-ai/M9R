@@ -14,6 +14,7 @@ import {
   ownedBrowserLaunch,
   readApprovedStageApp,
   resolveUnlistedStageApp,
+  selectExistingPersonalBrowserWindow,
   selectPersonalBrowserWindow,
   stageBrowserKind,
   type ApprovedStageApp,
@@ -26,10 +27,9 @@ export const TASK_STAGE_POLICY_FILE = "task-stage-policy.json";
 export type TaskStageMode = "background" | "owner-preview";
 
 /**
- * Per-agent access mode. `scoped` is the historical behavior (catalog apps only; control iff listed).
- * `full` additionally allows broker-resolved or absolute-path apps with fixed empty args, hash-recorded
- * at launch. `request` resolves the same set but holds unlisted launches for owner approval. The money
- * carve-out holds in every mode. Absent entries behave as `scoped`.
+ * Per-agent access mode. An enabled handle defaults to `full`: ordinary desktop apps are resolved
+ * without a per-app catalog approval. `scoped` and `request` remain explicit opt-ins for owners who
+ * want the legacy catalog or an approval-on-launch policy. The money carve-out holds in every mode.
  */
 export type TaskStageAccessMode = "full" | "scoped" | "request";
 const ACCESS_MODES: readonly TaskStageAccessMode[] = ["full", "scoped", "request"];
@@ -55,8 +55,9 @@ export function setTaskStagePermission(root: string, handle: string, enabled: bo
     const modes = { ...(policy.modes ?? {}) } as Record<string, TaskStageAccessMode>;
     delete modes[handle];
     // Deterministic mapping: each grant writes the full triple, so the file always says what it means.
-    // allow-agent -> scoped without control; allow-control -> scoped with control; allow-full -> full with control.
-    // "scoped" is the default and is never persisted, so legacy files read back unchanged.
+    // allow-agent -> full without control; allow-control -> full with control; allow-full -> full with control.
+    // Explicit scoped/request choices are persisted; the ordinary owner grant intentionally has no
+    // catalog gate so a user's installed apps are usable without editing a list.
     if (enabled) {
       handles.push(handle);
       if (control || policy.controlHandles?.includes(handle)) controlHandles.push(handle);
@@ -103,10 +104,12 @@ export function readTaskStagePolicy(root: string): { handles: string[]; controlH
   return { handles, ...(Array.isArray(policy.controlHandles) && policy.controlHandles.length ? { controlHandles: [...new Set(policy.controlHandles as string[])] } : {}), ...(modes && Object.keys(modes).length ? { modes } : {}) };
 }
 
-/** Effective access mode. Legacy entries without a modes record behave as scoped. */
+/** Effective access mode. An enabled handle without an explicit mode is unrestricted for ordinary app launches. */
 export function stageAccessMode(policy: { handles: string[]; modes?: Record<string, TaskStageAccessMode> }, handle: string): TaskStageAccessMode {
-  const mode = policy.modes?.[normalizeHandle(handle)];
-  return mode === "full" || mode === "request" ? mode : "scoped";
+  const normalized = normalizeHandle(handle);
+  if (!policy.handles.includes(normalized)) return "scoped";
+  const mode = policy.modes?.[normalized];
+  return mode === "scoped" || mode === "request" ? mode : "full";
 }
 
 export interface StageLaunchTarget {
@@ -116,8 +119,9 @@ export interface StageLaunchTarget {
 }
 
 /**
- * Pure launch decision: catalog hit, full-mode broker resolution, or request-mode hold. Scoped
- * misses refuse exactly as before. No process is started here; launch() owns spawning and custody.
+ * Pure launch decision: catalog hit, unrestricted broker resolution, or an explicit request-mode
+ * hold. Scoped misses refuse exactly as before. No process is started here; launch() owns spawning
+ * and custody.
  */
 export function resolveLaunchTarget(root: string, policy: { handles: string[]; modes?: Record<string, TaskStageAccessMode> }, handle: string, appId: string, opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean } = {}): StageLaunchTarget {
   try {
@@ -333,13 +337,18 @@ export function createTaskDesktopStageService(input: {
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
       const browserKind = stageBrowserKind(approved.executable);
       const personalBrowser = browserKind !== undefined && browserLaunchMode === "personal";
-      const beforeBrowserWindows = personalBrowser
+      const existingPersonalBrowser = personalBrowser && mode === "owner-preview"
+        ? selectExistingPersonalBrowserWindow(browserKind!, await driver.listVisibleWindows({ onScreenOnly: true }))
+        : undefined;
+      const beforeBrowserWindows = personalBrowser && !existingPersonalBrowser
         ? new Set((await driver.listVisibleWindows({ onScreenOnly: mode === "owner-preview" })).map((window) => `${window.pid}:${window.windowId}`))
         : undefined;
-      const child = launchApprovedStageApp(ownedBrowserLaunch(root, name, approved, { mode: browserLaunchMode }), { windowsHide: mode !== "owner-preview" });
+      const child = existingPersonalBrowser
+        ? undefined
+        : launchApprovedStageApp(ownedBrowserLaunch(root, name, approved, { mode: browserLaunchMode }), { windowsHide: mode !== "owner-preview" });
       let spawnError: Error | undefined;
-      child.on("error", (error) => { spawnError = error; });
-      let adoptedPersonalBrowser = false;
+      child?.on("error", (error) => { spawnError = error; });
+      let adoptedPersonalBrowser = Boolean(existingPersonalBrowser);
       try {
         for (let attempt = 0; attempt < 40; attempt++) {
           authorize(token, taskId, mode);
@@ -347,15 +356,15 @@ export function createTaskDesktopStageService(input: {
           // Personal Chromium commonly exits its launcher PID immediately after
           // handing the request to the already-running browser process. The
           // Cua window list, not that transient PID, is the ownership proof.
-          if (spawnError || child.killed || !child.pid || (!personalBrowser && child.exitCode !== null)) {
+          const processPid = child?.pid;
+          if (!adoptedPersonalBrowser && (!child || spawnError || child.killed || !processPid || (!personalBrowser && child.exitCode !== null))) {
             throw new Error("The approved app did not start a persistent owned process.");
           }
-          let selectedPid = child.pid;
-          let selectedWindowId: string | undefined;
+          let selectedPid = existingPersonalBrowser?.pid ?? child?.pid;
+          let selectedWindowId: string | undefined = existingPersonalBrowser?.windowId;
           let candidateWindows: Array<{ pid: number; windowId: string; title?: string; width?: number; height?: number }>;
           if (personalBrowser) {
-            const visible = await driver.listVisibleWindows({ onScreenOnly: mode === "owner-preview" });
-            const candidate = selectPersonalBrowserWindow(browserKind!, visible, beforeBrowserWindows!);
+            const candidate = existingPersonalBrowser ?? selectPersonalBrowserWindow(browserKind!, await driver.listVisibleWindows({ onScreenOnly: mode === "owner-preview" }), beforeBrowserWindows!);
             if (!candidate) {
               await delay(100);
               continue;
@@ -365,16 +374,19 @@ export function createTaskDesktopStageService(input: {
             selectedWindowId = candidate.windowId;
             candidateWindows = [candidate];
           } else {
+            if (!processPid) throw new Error("The approved app did not expose a process id.");
             candidateWindows = mode === "owner-preview"
-              ? await manager.listOwnedWindowsForProcess(child.pid)
-              : await manager.listOwnedWindows(name, child.pid);
+              ? await manager.listOwnedWindowsForProcess(processPid)
+              : await manager.listOwnedWindows(name, processPid);
           }
           if (candidateWindows.length > 1) throw new Error("The approved app has multiple candidate windows; owner selection is required.");
           if (candidateWindows.length === 1) {
             authorize(token, taskId, mode);
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
             selectedWindowId = candidateWindows[0]!.windowId;
-            if (mode === "background") await manager.moveOwnedWindow(name, selectedPid, selectedWindowId);
+            if (selectedPid === undefined) throw new Error("The approved app did not expose a process id.");
+            const ownedPid = selectedPid;
+            if (mode === "background") await manager.moveOwnedWindow(name, ownedPid, selectedWindowId);
             if (mode === "owner-preview") {
               // Windows can enumerate a newly-created top-level HWND before the
               // shell has attached its virtual-desktop application view.  A
@@ -386,7 +398,7 @@ export function createTaskDesktopStageService(input: {
               let lastRegistrationError: unknown;
               for (let attempt = 0; attempt < 20; attempt++) {
                 try {
-                  await manager.register(name, String(selectedPid), selectedWindowId);
+                  await manager.register(name, String(ownedPid), selectedWindowId);
                   registered = true;
                   break;
                 } catch (error) {
@@ -404,12 +416,12 @@ export function createTaskDesktopStageService(input: {
                 : new Error("Windows did not expose the owner-preview window's virtual desktop view in time.");
               const preview = await manager.inspectStage(name);
               if (!preview.desktop.isCurrent) {
-                manager.clearOwnedAnchor(name, selectedPid, selectedWindowId);
+                manager.clearOwnedAnchor(name, ownedPid, selectedWindowId);
                 throw new Error("The approved app did not open on the owner's current desktop for the preview stage.");
               }
               const sessionTag = createHash("sha256").update(`${normalizeHandle(identity.handle)}\0${identity.sessionId}`).digest("hex").slice(0, 8);
               await manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
-            } else await manager.attachWindow(name, String(selectedPid), selectedWindowId);
+            } else await manager.attachWindow(name, String(ownedPid), selectedWindowId);
             try {
               authorize(token, taskId, mode);
               if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
@@ -417,11 +429,11 @@ export function createTaskDesktopStageService(input: {
               authorize(token, taskId, mode);
               if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
             }
-            catch (error) { manager.clearOwnedAnchor(name, selectedPid, selectedWindowId); throw error; }
+            catch (error) { manager.clearOwnedAnchor(name, ownedPid, selectedWindowId); throw error; }
             ownedApps.set(name, {
               taskId,
               appId,
-              pid: selectedPid,
+              pid: ownedPid,
               ...(personalBrowser ? {} : { process: child }),
               ownsProcess: !personalBrowser,
               windowId: selectedWindowId,
@@ -434,7 +446,7 @@ export function createTaskDesktopStageService(input: {
           ? `Personal ${browserKind === "chrome" ? "Chrome" : "Edge"} did not expose a new task window; the existing personal window was left untouched.`
           : "The app exposes no supported exact-process window; it requires an app-specific launch adapter.");
       } catch (error) {
-        if (!adoptedPersonalBrowser && child.exitCode === null && !child.killed) child.kill();
+        if (!adoptedPersonalBrowser && child && child.exitCode === null && !child.killed) child.kill();
         throw error;
       }
     };

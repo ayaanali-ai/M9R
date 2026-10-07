@@ -173,6 +173,23 @@ test("OpenCode JSONC merge uses legacy or v2 layout without rewriting unrelated 
   assert.match(uninstalled, /"github"/);
 });
 
+test("OpenCode setup explicitly loads the M9R identity plugin beside the active config", () => {
+  const original = `{
+  // keep the user's existing plugin path
+  "plugin": ["./plugins"],
+  "mcp": {},
+}`;
+  const installed = mergeOpenCodeWebMcp(original, "legacy", command, true);
+  const normalized = installed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1");
+  const parsed = JSON.parse(normalized) as { plugin: string[] };
+  assert.deepEqual(parsed.plugin, ["./plugins", "./plugins/m9r-identity.js"]);
+  assert.equal(mergeOpenCodeWebMcp(installed, "legacy", command, true), installed);
+  const removed = removeOpenCodeWebMcp(installed, "legacy", true);
+  const removedParsed = JSON.parse(removed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1")) as { plugin: string[]; mcp?: Record<string, unknown> };
+  assert.deepEqual(removedParsed.plugin, ["./plugins"]);
+  assert.deepEqual(removedParsed.mcp, {});
+});
+
 test("invalid OpenCode JSONC is refused rather than replaced or truncated", () => {
   assert.throws(() => mergeOpenCodeWebMcp("{ broken", "servers", command), /invalid|parse/i);
 });

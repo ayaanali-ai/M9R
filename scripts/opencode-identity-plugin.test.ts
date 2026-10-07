@@ -6,6 +6,7 @@ import {
   extractOpenCodeAdditionalContext,
   planOpenCodeIdentityPluginInstall,
   planOpenCodeIdentityPluginRemoval,
+  resolveOpenCodeGlobalPaths,
   resolveOpenCodeHookInvocation,
 } from "../src/lib/native/web-setup-core.ts";
 
@@ -44,7 +45,7 @@ function evaluateGeneratedPlugin(
     .replace(/^import \{ spawn \} from "node:child_process";\r?\n/m, "")
     .replace(/^export const M9rIdentity = /m, "const M9rIdentity = ");
   return new Function("spawn", "process", "setInterval", "clearInterval", `${executable}\nreturn M9rIdentity;`)(mockedSpawn, { cwd: () => "C:/process-cwd" }, setIntervalFn, clearIntervalFn) as
-    (context: { directory?: string; client?: { session?: { prompt?: (input: unknown) => Promise<unknown> } } }) => Promise<{ "experimental.chat.system.transform": (input: { sessionID?: string }, output: { system: string[] }) => Promise<void> }>;
+    (context: { directory?: string; client?: { session?: { prompt?: (input: unknown) => Promise<unknown>; list?: (input?: unknown) => Promise<unknown>; status?: (input?: unknown) => Promise<unknown> } } }) => Promise<{ "experimental.chat.system.transform": (input: { sessionID?: string }, output: { system: string[] }) => Promise<void> }>;
 }
 
 test("OpenCode identity invocation runs the installed engine SessionStart hook", () => {
@@ -64,6 +65,17 @@ test("OpenCode identity invocation supports the packaged hook script when no eng
   }), {
     command: "node.exe",
     args: ["C:/m9r/cli/dist/m9r-hook.js", "SessionStart", "opencode"],
+  });
+});
+
+test("OpenCode setup follows the legacy ~/.opencode config when that is the active layout", () => {
+  const paths = resolveOpenCodeGlobalPaths({
+    home: "C:/Users/Ada",
+    exists: (path) => /[\\/]\.opencode[\\/]opencode\.json$/.test(path),
+  });
+  assert.deepEqual(paths, {
+    configPath: "C:\\Users\\Ada\\.opencode\\opencode.json",
+    pluginDirectory: "C:\\Users\\Ada\\.opencode\\plugins",
   });
 });
 
@@ -165,6 +177,38 @@ test("OpenCode live polling creates one real session turn and records receipt on
   timers[0]!.callback();
   await waitFor(() => calls.length === 5);
   assert.equal(prompts.length, 1, "an acknowledged task is not pushed twice");
+});
+
+test("OpenCode startup discovers active sessions so inbox delivery does not wait for a prompt", async () => {
+  const hook = (event: string, additionalContext: string) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  const timers: Array<{ callback: () => void; ms: number; unref: () => void }> = [];
+  const setIntervalMock = ((callback: () => void, ms = 0) => {
+    const timer = { callback, ms, unref: () => undefined };
+    timers.push(timer);
+    return timer as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval;
+  const factory = evaluateGeneratedPlugin(buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }), createMockSpawn([
+    { code: 0, output: JSON.stringify({ hookSpecificOutput: { hookEventName: "OpenCodePoll", additionalContext: "" } }) },
+  ], calls), setIntervalMock);
+  const prompts: unknown[] = [];
+  const plugin = await factory({
+    directory: "C:/repo",
+    client: {
+      session: {
+        list: async (input) => ({ data: [{ id: "open-session", directory: "C:/repo" }], input }),
+        status: async () => ({ data: { "open-session": { type: "idle" } } }),
+        prompt: async (input) => { prompts.push(input); return {}; },
+      },
+    },
+  });
+  for (let attempt = 0; attempt < 20 && timers.length === 0; attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0]!.ms, 1500);
+  assert.deepEqual(calls[0]?.args, ["m9r-hook", "OpenCodePoll", "opencode"]);
+  assert.deepEqual(JSON.parse(calls[0]!.input), { session_id: "open-session", cwd: "C:/repo" });
+  assert.equal(prompts.length, 0);
+  void plugin;
 });
 
 test("a resolved OpenCode SDK error never acknowledges task delivery", async () => {
