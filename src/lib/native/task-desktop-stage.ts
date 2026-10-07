@@ -334,7 +334,7 @@ export function createTaskDesktopStageService(input: {
       const browserKind = stageBrowserKind(approved.executable);
       const personalBrowser = browserKind !== undefined && browserLaunchMode === "personal";
       const beforeBrowserWindows = personalBrowser
-        ? new Set((await driver.listVisibleWindows()).map((window) => `${window.pid}:${window.windowId}`))
+        ? new Set((await driver.listVisibleWindows({ onScreenOnly: mode === "owner-preview" })).map((window) => `${window.pid}:${window.windowId}`))
         : undefined;
       const child = launchApprovedStageApp(ownedBrowserLaunch(root, name, approved, { mode: browserLaunchMode }), { windowsHide: mode !== "owner-preview" });
       let spawnError: Error | undefined;
@@ -354,7 +354,7 @@ export function createTaskDesktopStageService(input: {
           let selectedWindowId: string | undefined;
           let candidateWindows: Array<{ pid: number; windowId: string; title?: string; width?: number; height?: number }>;
           if (personalBrowser) {
-            const visible = await driver.listVisibleWindows();
+            const visible = await driver.listVisibleWindows({ onScreenOnly: mode === "owner-preview" });
             const candidate = selectPersonalBrowserWindow(browserKind!, visible, beforeBrowserWindows!);
             if (!candidate) {
               await delay(100);

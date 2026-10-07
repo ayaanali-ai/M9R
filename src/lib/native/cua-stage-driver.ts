@@ -533,7 +533,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     }, cursorIdentity);
   }
 
-  async function listWindowOptions(ownedPid?: number): Promise<CuaStageWindowOption[]> {
+  async function listWindowOptions(ownedPid?: number, onScreenOnly = ownedPid === undefined): Promise<CuaStageWindowOption[]> {
     if (ownedPid !== undefined && (!Number.isSafeInteger(ownedPid) || ownedPid < 1)) throw new Error("Invalid owned application process.");
     const runtime = await createRuntime();
     const { sdk, driver } = runtime;
@@ -542,7 +542,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     try {
       await driver.startSession({ session });
       started = true;
-      const result = await driver.listWindows({ onScreenOnly: ownedPid === undefined });
+      const result = await driver.listWindows({ onScreenOnly });
       return result.windows
         .filter((window) => Number.isSafeInteger(window.pid) && (window.pid ?? 0) > 0 && window.pid !== process.pid
           && typeof window.windowId === "bigint" && window.windowId > BigInt(0)
@@ -569,13 +569,13 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     }
   }
 
-  async function listVisibleWindows(): Promise<CuaStageWindowOption[]> {
+  async function listVisibleWindows(options: { onScreenOnly?: boolean } = {}): Promise<CuaStageWindowOption[]> {
     // The registry read supplies the same Windows/interactive-owner and
     // agent-context guard as other stage operations without requiring an
     // existing stage name. This is used only to adopt a newly-created window
     // from the user's personal browser process.
     manager.list();
-    return listWindowOptions();
+    return listWindowOptions(undefined, options.onScreenOnly ?? true);
   }
 
   async function listWindows(name: string, ownedPid?: number): Promise<CuaStageWindowOption[]> {
