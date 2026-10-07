@@ -317,6 +317,47 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     }
   }
 
+  /**
+   * Rebinds an owner-preview mapping to the desktop Windows is showing.
+   * Any old HWND association is detached as registry metadata only; the user
+   * window itself is never closed, moved, or activated.
+   */
+  async function adoptCurrentDesktop(nameInput: string): Promise<WindowsStageRecord> {
+    assertWindows();
+    assertOwner();
+    const name = normalizedName(nameInput);
+    const result = await invokeNative({ op: "currentDesktop" });
+    if (!result.ok) throw new Error(result.error ?? "Windows could not identify the active desktop.");
+    const desktop = normalizeDesktopInfo(result.desktop);
+    if (!desktop.isCurrent) throw new Error("Windows did not confirm that the reported desktop is active.");
+
+    const release = acquireRegistryLock(root);
+    try {
+      const registry = readRegistry(root);
+      const existing = registry.stages.find((stage) => stage.name === name);
+      if (!existing && registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
+      const record: WindowsStageRecord = {
+        name,
+        desktopId: desktop.desktopId,
+        roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
+        returnToDesktopId: null,
+        anchor: null,
+        roomWindowId: null,
+        ...(existing?.agentAssignment ? { agentAssignment: existing.agentAssignment } : {}),
+        registeredAt: existing?.registeredAt ?? now().toISOString(),
+      };
+      writeRegistryWhileLocked(root, {
+        version: STAGE_REGISTRY_VERSION,
+        stages: existing
+          ? registry.stages.map((item) => item.name === name ? record : item)
+          : [...registry.stages, record],
+      });
+      return record;
+    } finally {
+      release();
+    }
+  }
+
   function normalizeDesktopInfo(value: unknown): NativeDesktopStageInfo {
     if (!value || typeof value !== "object") throw new Error("The native Windows stage helper returned no desktop result.");
     const item = value as Partial<NativeDesktopStageInfo>;
@@ -551,7 +592,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, register, create, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, showOwnedWindow, clearOwnedAnchor };
+  return { inspectWindow, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, showOwnedWindow, clearOwnedAnchor };
 }
 
 function parsePid(value: string): number {

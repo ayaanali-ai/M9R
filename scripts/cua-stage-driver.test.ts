@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,21 +45,25 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
     root,
     terminal: true,
     env: {},
-    invokeNative: async (request) => request.op === "input" ? { ok: false, error: "unsupported native-control window" } : ({
-      ok: true,
-      window: {
-        pid: Number(request.pid),
-        windowId: String(request.windowId),
-        desktopId,
-        onCurrentDesktop: true,
-      },
-    }),
+    invokeNative: async (request) => {
+      if (request.op === "input") return { ok: false, error: "unsupported native-control window" };
+      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId, isCurrent: true } };
+      if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: true } };
+      return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId, onCurrentDesktop: true } };
+    },
   };
 }
 
 async function registerStage(root: string): Promise<void> {
   const manager = createWindowsDesktopStageManager(stageDependencies(root));
   await manager.register("stage", "4321", windowId);
+}
+
+async function registerOwnerPreview(root: string, identity = { handle: "codex", sessionId: "desktop-session" }): Promise<void> {
+  const manager = createWindowsDesktopStageManager(stageDependencies(root));
+  await manager.adoptCurrentDesktop("preview");
+  const sessionTag = createHash("sha256").update(`${identity.handle}\0${identity.sessionId}`).digest("hex").slice(0, 8);
+  manager.assignAgent("preview", { handle: identity.handle, sessionTag });
 }
 
 function makeSdk(options: {
@@ -68,6 +73,7 @@ function makeSdk(options: {
   toolResult?: Record<string, unknown>;
   windows?: Array<Record<string, unknown>>;
   cursorVisible?: boolean;
+  desktopMetadata?: Record<string, unknown>;
   calls: Array<{ method: string; value?: unknown }>;
 }) {
   const actionResult = options.actionResult ?? { effect: 0, route: 1, summary: "action confirmed" };
@@ -87,6 +93,18 @@ function makeSdk(options: {
         images: [{ mimeType: "image/png", dataBase64: imageData }],
       };
     },
+    async getDesktopState(input: unknown) {
+      options.calls.push({ method: "getDesktopState", value: input });
+      return { text: "", images: [{ mimeType: "image/png", dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB9sAAAAASUVORK5CYII=" }],
+        structuredJson: JSON.stringify(options.desktopMetadata ?? { captureId: "desktop-capture" }), isError: false, degraded: false, rawJson: "" };
+    },
+    async getSessionState(input: unknown) { options.calls.push({ method: "getSessionState", value: input }); return { desktopCaptureAuthorized: true }; },
+    async escalateSession(input: unknown) { options.calls.push({ method: "escalateSession", value: input }); return { desktopCaptureAuthorized: true }; },
+    async parseVisualRegions(input: unknown) {
+      options.calls.push({ method: "parseVisualRegions", value: input });
+      return { text: "", images: [], isError: false, degraded: false, rawJson: "",
+        structuredJson: JSON.stringify({ regions: [{ label: "Chrome", bounds: { x: 0, y: 0, width: 1, height: 1 } }] }) };
+    },
     async setAgentCursorEnabled(input: unknown) { options.calls.push({ method: "setAgentCursorEnabled", value: input }); return { isError: false }; },
     async moveCursor(input: unknown) { options.calls.push({ method: "moveCursor", value: input }); return { isError: false }; },
     async getAgentCursorState() {
@@ -103,6 +121,8 @@ function makeSdk(options: {
       return { windows: options.windows ?? [] };
     },
     async click(input: unknown) { options.calls.push({ method: "click", value: input }); return actionResult; },
+    async pressKey(input: unknown) { options.calls.push({ method: "pressKey", value: input }); return toolResult; },
+    async hotkey(input: unknown) { options.calls.push({ method: "hotkey", value: input }); return toolResult; },
     async typeText(input: unknown) { options.calls.push({ method: "typeText", value: input }); return toolResult; },
     async scroll(input: unknown) { options.calls.push({ method: "scroll", value: input }); return toolResult; },
     async drag(input: unknown) { options.calls.push({ method: "drag", value: input }); return toolResult; },
@@ -116,6 +136,10 @@ function makeSdk(options: {
       options.calls.push({ method: "windowTarget", value: input });
     }
   }
+  class DesktopTarget {
+    readonly input: { displayId: string };
+    constructor(input: { displayId: string }) { this.input = input; options.calls.push({ method: "desktopTarget", value: input }); }
+  }
   class CoordinatePosition {
     readonly inner: { x: number; y: number };
     constructor(input: { x: number; y: number }) { this.inner = input; }
@@ -124,13 +148,21 @@ function makeSdk(options: {
     readonly inner: { elementToken: string };
     constructor(input: { elementToken: string }) { this.inner = input; }
   }
+  class CapturedPosition {
+    readonly inner: { x: number; y: number; captureId: string };
+    constructor(input: { x: number; y: number; captureId: string }) { this.inner = input; options.calls.push({ method: "capturedPosition", value: input }); }
+  }
   return {
     CuaDriver: { create() { options.calls.push({ method: "create" }); return driver; } },
-    ActionTarget: { Window: WindowTarget },
-    ClickPosition: { Coordinates: CoordinatePosition, Element: ElementPosition },
-    InputDeliveryMode: { Background: 0 },
+    ActionTarget: { Window: WindowTarget, Desktop: DesktopTarget },
+    ClickPosition: { Coordinates: CoordinatePosition, Element: ElementPosition, CapturedCoordinates: CapturedPosition },
+    InputDeliveryMode: { Background: 0, Foreground: 1 },
+    EscalationReason: { NoWindowTarget: 3 },
+    CaptureScope: { Desktop: 2 },
+    ClickButton: { Left: 0, Right: 1, Middle: 2 },
     ScrollDirection: { Up: 0, Down: 1 },
     ScrollBy: { Line: 0 },
+    VisualRegionKind: { Text: 0, Icon: 1 },
     CursorReducedMotion: { Auto: 0 },
     CursorMotionStyle: { Adaptive: 4 },
     CursorMotionTiming: { Fitts: 1 },
@@ -178,6 +210,32 @@ test("maps app screenshot pixels to desktop screen points before moving and veri
   assert.equal(move.y, 98);
   assert.ok(move.target);
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession", "shutdown"]);
+}));
+
+test("owner preview captures the whole current desktop and binds visible cursor clicks to that capture", async () => withRoot(async (root) => {
+  await registerOwnerPreview(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never });
+
+  const capture = await driver.captureDesktop("preview", { handle: "codex", sessionId: "desktop-session" });
+  assert.equal(capture.width, 1);
+  assert.equal("captureId" in capture, false, "opaque capture handles stay inside the local driver");
+  assert.equal((await driver.describeDesktopTarget("preview", 0, 0, { handle: "codex", sessionId: "desktop-session" }))?.label, "Chrome");
+  const cursor = await driver.moveDesktopCursor("preview", 0, 0, { handle: "codex", sessionId: "desktop-session" });
+  assert.equal(cursor.cursor.visible, true);
+  const click = await driver.clickDesktop("preview", 0, 0, { handle: "codex", sessionId: "desktop-session" }, { count: 2 });
+  assert.equal(click.outcome.status, "confirmed");
+
+  const desktopCapture = calls.find((call) => call.method === "getDesktopState")?.value as Record<string, unknown>;
+  assert.equal(desktopCapture.maxImageDimension, 1024);
+  assert.ok(calls.some((call) => call.method === "desktopTarget"), "owner-preview actions use the desktop target, not an HWND");
+  const position = calls.find((call) => call.method === "capturedPosition")?.value as Record<string, unknown>;
+  assert.deepEqual(position, { x: 0, y: 0, captureId: "desktop-capture" });
+  const clickInput = calls.find((call) => call.method === "click")?.value as Record<string, unknown>;
+  assert.equal(clickInput.deliveryMode, 1, "owner preview performs visible foreground desktop input");
+  assert.equal(clickInput.count, 2);
+  assert.equal(calls.some((call) => call.method === "getWindowState"), false, "desktop-wide preview does not require a selected app window");
+  await driver.shutdown();
 }));
 
 test("refuses to move the ghost cursor when the stage frame has no screen bounds", async () => withRoot(async (root) => {

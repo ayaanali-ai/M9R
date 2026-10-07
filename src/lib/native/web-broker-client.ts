@@ -30,7 +30,7 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
   const doFetch = options.fetchImpl ?? fetch;
   const baseUrl = `http://127.0.0.1:${options.port ?? DEFAULT_BROKER_PORT}`;
   return {
-    async taskStageApp(token, taskId, appId, mode = "background") {
+    async taskStageApp(token, taskId, appId, mode = "owner-preview") {
       try {
         const key = readFileSync(options.keyPath, "utf8").trim();
         const response = await doFetch(`${baseUrl}/web/stage/${appId === undefined ? "close" : "launch"}`, {
@@ -40,7 +40,7 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
         return await response.json() as { ok: boolean; result?: unknown; error?: string };
       } catch { return { ok: false, error: "The owner-launched stage broker is not reachable." }; }
     },
-    async taskStageAction(token, taskId, action, mode = "background") {
+    async taskStageAction(token, taskId, action, mode = "owner-preview") {
       try {
         const key = readFileSync(options.keyPath, "utf8").trim();
         const response = await doFetch(`${baseUrl}/web/stage/action`, {
@@ -50,7 +50,7 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
         return await response.json() as { ok: boolean; result?: unknown; error?: string };
       } catch { return { ok: false, error: "The owner-launched stage broker is not reachable." }; }
     },
-    async prepareTaskStage(token, taskId, mode = "background", timeoutMs = 15_000) {
+    async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000) {
       try {
         const key = readFileSync(options.keyPath, "utf8").trim();
         const response = await doFetch(`${baseUrl}/web/stage/prepare`, {

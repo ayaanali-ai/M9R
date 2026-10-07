@@ -106,8 +106,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   );
 
   server.registerTool("m9r_stage_app", {
-    description: "Launch an installed desktop app on your background stage or owner-visible preview stage, or discard this task's broker-owned app. Normal stage grants resolve the user's installed app directly; no per-app catalog approval is required. Use a short app id (for example chrome or notepad) or an absolute .exe path. Explicit scoped/request policies may still restrict launches. Discard closes only an app owned by this task; preserve the task result first. Apps that hand off to another process need a separate adapter.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("background"), appId: STAGE_APP_REF.optional() },
+    description: "Stage mode defaults to owner-preview: it never launches a separate process, so open visible apps with m9r_stage_action by clicking the desktop, taskbar, or Start icon. Pass mode \"background\" only for an explicitly requested isolated desktop. In background mode, launch an installed app using the owner's active access policy or discard an app owned by this task; preserve the task result first.",
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), appId: STAGE_APP_REF.optional() },
   }, async ({ token, taskId, operation, mode, appId }) => {
     requireIdentity(token);
     if ((operation === "launch") !== (appId !== undefined)) throw new Error("Launch requires an app ID; discard takes no app ID.");
@@ -117,13 +117,16 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   });
 
   server.registerTool("m9r_stage_action", {
-    description: "Capture or control your session's task stage for native Windows desktop apps. Use owner-preview to show the labeled cursor on the owner's current desktop; background keeps the agent on its own Windows desktop. Requires an approved unfinished task and separate owner computer-control permission. Targets only its registered app window and never switches desktops. For webpage content in Chrome or Edge, use m9r_web_* instead: the native Stage driver may refuse background text input to Chromium and never retries through foreground input. Read the outcome and verify effects; posted input is not proof of success.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("background"), action: z.discriminatedUnion("kind", [
+    description: "Capture or control this task's desktop; mode defaults to owner-preview and actions use the whole desktop the owner is currently viewing. Click desktop icons, taskbar apps, Start, windows, and controls directly; this never launches a second app window or switches desktops. Pass mode \"background\" only for an explicitly requested isolated desktop. Supports capture, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Capture before each action, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Read the outcome and verify effects; an input acknowledgement alone is not proof of success.",
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), action: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("capture") }).strict(),
       z.object({ kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
+      z.object({ kind: z.enum(["double_click", "right_click"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
       z.object({ kind: z.literal("type"), text: z.string().min(1).max(500) }).strict(),
       z.object({ kind: z.literal("scroll"), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), direction: z.enum(["up", "down"]) }).strict(),
       z.object({ kind: z.literal("drag"), fromX: z.number().int().min(0).max(16383), fromY: z.number().int().min(0).max(16383), toX: z.number().int().min(0).max(16383), toY: z.number().int().min(0).max(16383) }).strict(),
+      z.object({ kind: z.literal("press_key"), key: z.string().min(1).max(20).regex(/^(?:[a-z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Ctrl|Control|Alt|Shift|Meta|Win|Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Insert|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Up|Down|Left|Right|CapsLock|PrintScreen)$/i) }).strict(),
+      z.object({ kind: z.literal("hotkey"), keys: z.array(z.string().min(1).max(20)).min(1).max(4) }).strict(),
     ]) },
   }, async ({ token, taskId, mode, action }) => {
     requireIdentity(token);
@@ -138,8 +141,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   });
 
   server.registerTool("m9r_stage_prepare", {
-    description: "Prepare an approved unfinished M9R task on a background Windows desktop or an owner-visible preview bound to the current desktop. Requires owner stage permission. Preview preparation never creates or switches desktops. Ordinary installed apps do not need catalog approval; the result may include legacy catalog metadata for compatibility. Use m9r_stage_app and m9r_stage_action for authorized execution; preparation itself does not prove input support.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("background") },
+    description: "Bind an approved unfinished task to the desktop the owner is currently viewing; mode defaults to owner-preview. Preparation never creates, switches, moves, or closes desktops or windows. Pass mode \"background\" only when the task explicitly requests an isolated Windows desktop. Use the same mode on each m9r_stage_action call; preparation itself does not prove an action succeeded.",
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview") },
   }, async ({ token, taskId, mode }) => {
     requireIdentity(token);
     const result = deps.web?.prepareTaskStage

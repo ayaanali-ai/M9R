@@ -24,6 +24,8 @@ export interface HookInput {
   prompt?: string;
   /** OpenCode's generated plugin acknowledges a prompt only after its session API accepted and completed it. */
   task_id?: string;
+  /** Fixed, non-sensitive delivery diagnostic; raw SDK errors and request bodies never cross this boundary. */
+  delivery_error?: "session_rejected" | "unknown";
 }
 
 export interface HookContext {
@@ -199,8 +201,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
         .filter((candidate) => candidate.seq > cursor
           && canQueue(candidate)
           && !candidate.resultSummary
-          && candidate.delivery?.state !== "queued"
-          && candidate.delivery?.state !== "done"
+          && !candidate.delivery
           && (candidate.targetSession === sessionId || (!candidate.targetSession && sessions.length === 1))
           && (!candidate.cwd || (projectCwd && normCwd(candidate.cwd) === normCwd(projectCwd)))
           && Number.isFinite(Date.parse(candidate.createdAt))
@@ -208,41 +209,56 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
           && now.getTime() - Date.parse(candidate.createdAt) <= maxAge)
         .sort((left, right) => left.seq - right.seq)[0];
       if (!task) return null;
-      return out(event, JSON.stringify({ task_id: task.id, prompt: buildQueueMessage(task, identityToken) }));
+      const claimed = ctx.store.claimOpenCodeTask(task.id, {
+        sessionId,
+        identityToken,
+        cwd: projectCwd,
+        activeWindowMs: activeWindow,
+        maxAgeMs: maxAge,
+      });
+      if (!claimed) return null;
+      return out(event, JSON.stringify({ task_id: claimed.id, prompt: buildQueueMessage(claimed, identityToken) }));
     }
 
-    // A successful OpenCode SDK prompt is recorded only after rechecking identity, task approval, project, and target.
-    // The idempotent same-session case handles an acknowledgement retry without queueing a second turn.
+    // An OpenCode prompt is recorded as accepted only after the asynchronous provider API accepts it.
+    // Acceptance does not claim that the agent has begun or completed the task.
     if (event === "OpenCodeDelivered") {
       if (self !== "opencode" || !input.session_id || !/^T\d{1,12}$/.test(input.task_id ?? "")) return null;
       const sessionId = input.session_id;
-      if (!ctx.store.identityTokenFor(self, sessionId)) return null;
+      const identityToken = ctx.store.identityTokenFor(self, sessionId);
+      if (!identityToken) return null;
       ctx.store.registerEndpoint({ provider: ctx.provider, sessionId, cwd: projectCwd });
       const sessions = ctx.store.sessionsWithIdentity(self, projectCwd)
         .filter((session) => now.getTime() - Date.parse(session.lastSeenAt) < activeWindow);
       if (!sessions.some((session) => session.sessionId === sessionId)) return null;
       const task = ctx.store.getTask(input.task_id!);
       if (!task || task.to !== self) return null;
-      if (task.delivery?.state === "queued" || task.delivery?.state === "done") {
-        return task.delivery.threadId === sessionId ? out(event, JSON.stringify({ accepted: true, task_id: task.id })) : null;
-      }
-      const cursor = ctx.store.cursorFor(self, sessionId, projectCwd);
-      const maxAge = inboxMaxAgeMs();
-      if (!canQueue(task) || task.seq <= cursor
+      if (task.delivery?.threadId !== sessionId
         || !(task.targetSession === sessionId || (!task.targetSession && sessions.length === 1))
-        || (task.cwd && (!projectCwd || normCwd(task.cwd) !== normCwd(projectCwd)))
-        || !Number.isFinite(Date.parse(task.createdAt))
-        || now.getTime() - Date.parse(task.createdAt) < 0
-        || now.getTime() - Date.parse(task.createdAt) > maxAge) return null;
-      ctx.store.setDelivery(task.id, {
-        state: "queued",
-        attempts: (task.delivery?.attempts ?? 0) + 1,
-        threadId: sessionId,
-        queuedAt: now.toISOString(),
-        error: undefined,
+        || (task.cwd && (!projectCwd || normCwd(task.cwd) !== normCwd(projectCwd)))) return null;
+      const settled = ctx.store.settleOpenCodeTask(task.id, sessionId, identityToken, { state: "queued" });
+      return settled ? out(event, JSON.stringify({ accepted: true, task_id: task.id })) : null;
+    }
+
+    // A prompt rejection is terminal; transport ambiguity is recorded separately. Neither state is replayed.
+    if (event === "OpenCodeDeliveryFailed") {
+      if (self !== "opencode" || !input.session_id || !/^T\d{1,12}$/.test(input.task_id ?? "")) return null;
+      const sessionId = input.session_id;
+      const identityToken = ctx.store.identityTokenFor(self, sessionId);
+      if (!identityToken) return null;
+      ctx.store.registerEndpoint({ provider: ctx.provider, sessionId, cwd: projectCwd });
+      const sessions = ctx.store.sessionsWithIdentity(self, projectCwd)
+        .filter((session) => now.getTime() - Date.parse(session.lastSeenAt) < activeWindow);
+      if (!sessions.some((session) => session.sessionId === sessionId)) return null;
+      const task = ctx.store.getTask(input.task_id!);
+      if (!task || task.to !== self || task.delivery?.threadId !== sessionId) return null;
+      const rejected = input.delivery_error === "session_rejected";
+      const diagnostic = rejected ? "OpenCode rejected the task prompt." : "OpenCode could not confirm task delivery.";
+      const settled = ctx.store.settleOpenCodeTask(task.id, sessionId, identityToken, {
+        state: rejected ? "failed" : "uncertain",
+        error: diagnostic,
       });
-      ctx.store.setCursor(self, sessionId, task.seq, projectCwd);
-      return out(event, JSON.stringify({ accepted: true, task_id: task.id }));
+      return settled ? out(event, JSON.stringify({ accepted: true, task_id: task.id })) : null;
     }
 
     // A turn finished. If this session was shown tasks other agents sent, its final message is the answer: record it and send it back.
@@ -264,6 +280,10 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
     // results can carry a page's forged text. So this channel carries information, never a redirect; real interrupts go
     // through a live session's user-turn input (live-session-core.ts). Registering it would add a hook run to every tool call.
     if (event === "PostToolUse") {
+      // This informational inbox hook is Claude-only. If an old or manually
+      // copied hook registration fires for another provider, never inject the
+      // same inbox task through a second delivery channel.
+      if (self !== "claude") return null;
       const cursor = ctx.store.cursorFor(self, input.session_id, projectCwd);
       const injection = renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { now: now.getTime() });
       if (!injection.text) return null;

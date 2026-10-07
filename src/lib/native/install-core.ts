@@ -552,6 +552,16 @@ export function buildLocalBrokerScheduledTaskStartScript(taskName: string): stri
   ].join("\n");
 }
 
+/** Stop only the named current-user broker task after its authenticated shutdown request. */
+export function buildLocalBrokerScheduledTaskStopScript(taskName: string): string {
+  if (typeof taskName !== "string" || taskName.trim() === "" || taskName.includes("\0")) throw new Error("task name is required");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$task = Get-ScheduledTask -TaskName ${powerShellLiteral(taskName)} -TaskPath '\\' -ErrorAction SilentlyContinue`,
+    "if ($null -ne $task -and [string]$task.State -in @('Running', 'Queued')) { Stop-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath }",
+  ].join("\n");
+}
+
 export function buildLocalBrokerScheduledTaskRemoveScript(taskName: string): string {
   if (typeof taskName !== "string" || taskName.trim() === "" || taskName.includes("\0")) throw new Error("task name is required");
   return [

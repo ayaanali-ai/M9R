@@ -59,7 +59,7 @@ export function resolveOpenCodeHookInvocation(input: {
   sourceHookPath?: string;
   sourceNodeArgs?: readonly string[];
   /** OpenCode also polls an active session and acknowledges accepted live prompts. */
-  event?: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered";
+  event?: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed";
 }): OpenCodeHookInvocation {
   const event = input.event ?? "SessionStart";
   if (input.engineExecutable?.trim()) {
@@ -92,7 +92,8 @@ export function extractOpenCodeAdditionalContext(raw: string): string | null {
     if (!hookOutput || typeof hookOutput !== "object" || Array.isArray(hookOutput)) return null;
     const record = hookOutput as Record<string, unknown>;
     return (record.hookEventName === "SessionStart" || record.hookEventName === "UserPromptSubmit"
-      || record.hookEventName === "OpenCodePoll" || record.hookEventName === "OpenCodeDelivered")
+      || record.hookEventName === "OpenCodePoll" || record.hookEventName === "OpenCodeDelivered"
+      || record.hookEventName === "OpenCodeDeliveryFailed")
       && typeof record.additionalContext === "string" && record.additionalContext.length > 0
       ? record.additionalContext
       : null;
@@ -136,10 +137,12 @@ export function buildOpenCodeIdentityPluginSource(
   promptInvocation?: OpenCodeHookInvocation,
   pollInvocation?: OpenCodeHookInvocation,
   deliveredInvocation?: OpenCodeHookInvocation,
+  deliveryFailedInvocation?: OpenCodeHookInvocation,
 ): string {
   const prompt = promptInvocation ?? { command: invocation.command, args: ["m9r-hook", "UserPromptSubmit", "opencode"] };
   const poll = pollInvocation ?? { command: invocation.command, args: ["m9r-hook", "OpenCodePoll", "opencode"] };
   const delivered = deliveredInvocation ?? { command: invocation.command, args: ["m9r-hook", "OpenCodeDelivered", "opencode"] };
+  const deliveryFailed = deliveryFailedInvocation ?? { command: invocation.command, args: ["m9r-hook", "OpenCodeDeliveryFailed", "opencode"] };
   const parser = extractOpenCodeAdditionalContext.toString().replace(/^function /, "function ");
   return `import { spawn } from "node:child_process";
 
@@ -151,6 +154,8 @@ const M9R_HOOK_POLL_COMMAND = ${JSON.stringify(poll.command)};
 const M9R_HOOK_POLL_ARGS = ${JSON.stringify(poll.args)};
 const M9R_HOOK_DELIVERED_COMMAND = ${JSON.stringify(delivered.command)};
 const M9R_HOOK_DELIVERED_ARGS = ${JSON.stringify(delivered.args)};
+const M9R_HOOK_DELIVERY_FAILED_COMMAND = ${JSON.stringify(deliveryFailed.command)};
+const M9R_HOOK_DELIVERY_FAILED_ARGS = ${JSON.stringify(deliveryFailed.args)};
 const M9R_HOOK_TIMEOUT_MS = 5000;
 const M9R_MAX_CACHED_SESSIONS = 256;
 const M9R_POLL_INTERVAL_MS = 1500;
@@ -215,6 +220,13 @@ function runM9rDelivered(sessionID, cwd, taskID) {
   return runM9rHook(M9R_HOOK_DELIVERED_COMMAND, M9R_HOOK_DELIVERED_ARGS, sessionID, cwd, { task_id: taskID });
 }
 
+function runM9rDeliveryFailed(sessionID, cwd, taskID, deliveryError) {
+  return runM9rHook(M9R_HOOK_DELIVERY_FAILED_COMMAND, M9R_HOOK_DELIVERY_FAILED_ARGS, sessionID, cwd, {
+    task_id: taskID,
+    delivery_error: deliveryError,
+  });
+}
+
 function parseOpenCodeTask(raw) {
   const context = typeof raw === "string" ? extractOpenCodeAdditionalContext(raw) : null;
   if (!context || context.length > 32768) return null;
@@ -242,55 +254,51 @@ function parseOpenCodeDeliveryAck(raw, taskID) {
   }
 }
 
-async function acknowledgeOpenCodeTask(sessionID, cwd, entry) {
-  if (!entry.pendingAck) return false;
-  const taskID = entry.pendingAck;
-  const raw = await runM9rDelivered(sessionID, cwd, taskID).catch(() => null);
+async function settleOpenCodeTask(sessionID, cwd, entry) {
+  if (!entry.pendingSettlement) return false;
+  const { taskID, outcome } = entry.pendingSettlement;
+  const raw = outcome === "accepted"
+    ? await runM9rDelivered(sessionID, cwd, taskID).catch(() => null)
+    : await runM9rDeliveryFailed(sessionID, cwd, taskID, outcome).catch(() => null);
   if (!parseOpenCodeDeliveryAck(raw, taskID)) return false;
-  entry.pendingAck = null;
-  entry.submittedTaskID = null;
+  entry.pendingSettlement = null;
   return true;
 }
 
 async function pollOpenCodeSession(sessionID, cwd, client, entry) {
-  const submitPrompt = client?.session?.promptAsync ?? client?.session?.prompt;
-  if (entry.polling || Date.now() < entry.retryAfter || typeof submitPrompt !== "function") return;
+  const submitPromptAsync = client?.session?.promptAsync;
+  if (entry.polling || Date.now() < entry.retryAfter || typeof submitPromptAsync !== "function") return;
   entry.polling = true;
   try {
-    if (entry.pendingAck) {
-      if (!await acknowledgeOpenCodeTask(sessionID, cwd, entry)) entry.retryAfter = Date.now() + M9R_POLL_RETRY_MS;
+    if (entry.pendingSettlement) {
+      if (!await settleOpenCodeTask(sessionID, cwd, entry)) entry.retryAfter = Date.now() + M9R_POLL_RETRY_MS;
       return;
     }
     const raw = await runM9rPoll(sessionID, cwd).catch(() => null);
     const task = parseOpenCodeTask(raw);
-    if (!task || task.task_id === entry.submittedTaskID) return;
+    if (!task) return;
 
     // OpenCode's own session API creates a real user turn in this session; this is not inbox text awaiting a future prompt.
-    entry.submittedTaskID = task.task_id;
+    // The server atomically claims before exposing this prompt. Never replay it, including after
+    // an ambiguous transport failure: replaying could create a duplicate user turn.
     try {
-      const response = await submitPrompt.call(client.session, {
+      const response = await submitPromptAsync.call(client.session, {
         path: { id: sessionID },
         body: { parts: [{ type: "text", text: task.prompt }] },
       });
-      // The SDK can resolve an HTTP failure instead of throwing it. That is not
-      // an accepted user turn and must never advance the M9R inbox cursor.
-      if (response?.error) throw new Error("OpenCode rejected the M9R prompt");
+      entry.pendingSettlement = { taskID: task.task_id, outcome: response?.error ? "session_rejected" : "accepted" };
     } catch {
-      entry.submittedTaskID = null;
-      entry.retryAfter = Date.now() + M9R_POLL_RETRY_MS;
-      return;
+      entry.pendingSettlement = { taskID: task.task_id, outcome: "unknown" };
     }
 
-    entry.pendingAck = task.task_id;
-    if (!await acknowledgeOpenCodeTask(sessionID, cwd, entry)) entry.retryAfter = Date.now() + M9R_POLL_RETRY_MS;
+    if (!await settleOpenCodeTask(sessionID, cwd, entry)) entry.retryAfter = Date.now() + M9R_POLL_RETRY_MS;
   } finally {
     entry.polling = false;
   }
 }
 
 function startOpenCodePoller(sessionID, cwd, client) {
-  if (M9R_SESSION_POLLERS.has(sessionID)
-    || (typeof client?.session?.promptAsync !== "function" && typeof client?.session?.prompt !== "function")) return;
+  if (M9R_SESSION_POLLERS.has(sessionID) || typeof client?.session?.promptAsync !== "function") return;
   if (M9R_SESSION_POLLERS.size >= M9R_MAX_CACHED_SESSIONS) {
     const oldest = M9R_SESSION_POLLERS.keys().next().value;
     if (oldest !== undefined) {
@@ -298,7 +306,7 @@ function startOpenCodePoller(sessionID, cwd, client) {
       M9R_SESSION_POLLERS.delete(oldest);
     }
   }
-  const entry = { timer: null, polling: false, submittedTaskID: null, pendingAck: null, retryAfter: 0 };
+  const entry = { timer: null, polling: false, pendingSettlement: null, retryAfter: 0 };
   entry.timer = setInterval(() => { void pollOpenCodeSession(sessionID, cwd, client, entry); }, M9R_POLL_INTERVAL_MS);
   entry.timer.unref?.();
   M9R_SESSION_POLLERS.set(sessionID, entry);

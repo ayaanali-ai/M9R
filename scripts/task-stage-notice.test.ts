@@ -55,8 +55,11 @@ test("task delivery describes both stage modes without silently creating a backg
     const context = hookOutput.hookSpecificOutput?.additionalContext ?? "";
     assert.match(context, new RegExp(task.id));
     assert.match(context, /owner-preview/);
-    assert.match(context, /no desktop has been prepared by delivery/);
-    assert.match(context, /own session token and identity/);
+    assert.match(context, /delivery has not started desktop work/);
+    assert.match(context, /desktop-wide view/);
+    assert.match(context, /same mode on every m9r_stage_action call/);
+    assert.match(context, /Use mode "background" only when the task explicitly asks/);
+    assert.match(context, /Do not call m9r_stage_app in owner-preview/);
     assert.equal(received, undefined);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

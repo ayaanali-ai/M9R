@@ -30,7 +30,7 @@ test("browser ui-state becomes a snapshot: agents with their recent actions, app
     ],
     approvals: [{ id: "p1", agent: "codex", provider: "codex", text: "Click “Post” on the composer", site: "x.com", action: "post" }],
   });
-  assert.deepEqual(snap.agents.map((a) => [a.handle, a.provider, a.state]), [["claude", "claude", "working"], ["codex", "codex", "waiting"], ["weird", "agent", "idle"]]);
+  assert.deepEqual(snap.agents.map((a) => [a.handle, a.provider, a.state]), [["claude", "claude", "working"], ["codex", "codex", "waiting"], ["weird", "agent", "unknown"]]);
   assert.deepEqual(snap.agents[0].activity, ["Opened example.com", "Found three plans.", "Reading the pricing table"], "start markers are dropped, the live line is last");
   assert.deepEqual(snap.agents[1].activity, ["Clicked Buy"]);
   assert.deepEqual(snap.approvals, [{ id: "p1", agent: "codex", title: "post", detail: "Click “Post” on the composer  ·  x.com" }]);
@@ -42,7 +42,7 @@ test("malformed ui-state degrades to an empty snapshot instead of throwing", () 
   assert.deepEqual(fromUiState({ agents: null, thread: "x", approvals: 3 } as never), { agents: [], approvals: [], thread: [] });
 });
 
-test("the desktop feed becomes a snapshot: states, queued asks as activity, approvals and answers", () => {
+test("the desktop feed keeps provider activity separate from queued asks, approvals and answers", () => {
   const snap = fromFeed({
     agents: [{ handle: "claude", state: "open_working" }, { handle: "codex", state: "open_idle" }, { handle: "opencode", state: "offline" }],
     inProgress: [{ taskId: "T5", from: "claude", to: "codex", goal: "review the diff", state: "working" }],
@@ -53,7 +53,7 @@ test("the desktop feed becomes a snapshot: states, queued asks as activity, appr
     ],
     web: [{ at: "2026-10-02T19:00:00Z", agent: "claude", kind: "action", text: "Opened x.com" }, { at: "2026-10-02T18:59:00Z", agent: "claude", kind: "worker", text: "run ended" }],
   });
-  assert.deepEqual(snap.agents.map((a) => [a.handle, a.state]), [["claude", "working"], ["codex", "working"], ["opencode", "stopped"]], "an agent with a working task counts as working");
+  assert.deepEqual(snap.agents.map((a) => [a.handle, a.state]), [["claude", "working"], ["codex", "idle"], ["opencode", "stopped"]], "a waiting assignment does not claim the provider is working");
   assert.deepEqual(snap.agents[0].activity, ["Opened x.com"], "worker lines are not activity");
   assert.deepEqual(snap.agents[1].activity, ["@claude asked: review the diff"]);
   assert.deepEqual(snap.approvals, [{ id: "T6", agent: "opencode", title: "@claude asks @opencode", detail: "read secrets.txt" }]);

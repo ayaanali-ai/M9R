@@ -9,6 +9,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, 
 import { join, posix, win32 } from "node:path";
 import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
 import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
+import { canQueue } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 
 export interface EndpointRecord {
@@ -31,7 +32,7 @@ export interface SessionRecord {
 
 export interface EventRecord {
   at: string;
-  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked" | "mention.double";
+  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.delivery_failed" | "task.delivery_uncertain" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked" | "mention.double";
   handle?: string;
   taskId?: string;
   text: string;
@@ -567,6 +568,70 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `${id} pushed into @${t.to}'s session` });
         }
         return t;
+      });
+    },
+
+    /** Atomically claims one OpenCode task so independent pollers cannot inject the same turn twice. */
+    claimOpenCodeTask(id: string, input: { sessionId: string; identityToken: string; cwd?: string; activeWindowMs: number; maxAgeMs: number }): Task | undefined {
+      return update((s) => {
+        const at = now();
+        const handle = "opencode";
+        const folder = normalizeSessionFolder(projectCwd(root, input.cwd));
+        const identity = s.identities.find((item) => !item.revokedAt && item.token === input.identityToken
+          && normalizeHandle(item.handle) === handle && item.sessionId === input.sessionId);
+        if (!identity) return undefined;
+        const activeSessions = s.sessions.filter((session) => normalizeHandle(session.handle) === handle
+          && session.sessionId === input.sessionId
+          && normalizeSessionFolder(session.cwd) === folder
+          && at.getTime() - Date.parse(session.lastSeenAt) >= 0
+          && at.getTime() - Date.parse(session.lastSeenAt) < input.activeWindowMs);
+        if (activeSessions.length !== 1) return undefined;
+        const task = s.tasks.find((candidate) => candidate.id === id);
+        // `delivery` is the durable at-most-once fence. `deliveredAt` also
+        // fences records created by older releases that advanced the inbox
+        // cursor before delivery metadata existed. Neither may be replayed.
+        if (!task || normalizeHandle(task.to) !== handle || task.delivery || task.deliveredAt || task.resultSummary || !canQueue(task)) return undefined;
+        const cursor = s.cursors[cursorKey(handle, input.sessionId, folder)] ?? 0;
+        if (task.seq <= cursor || !(task.targetSession === input.sessionId
+          || (!task.targetSession && activeSessions.length === 1))
+          || (task.cwd && (!folder || normalizeSessionFolder(task.cwd) !== folder))) return undefined;
+        const createdAt = Date.parse(task.createdAt);
+        if (!Number.isFinite(createdAt) || at.getTime() - createdAt < 0 || at.getTime() - createdAt > input.maxAgeMs) return undefined;
+        task.delivery = { attempts: 1, state: "sending", threadId: input.sessionId, claimedAt: at.toISOString() };
+        task.deliveredSession = input.sessionId;
+        s.cursors[cursorKey(handle, input.sessionId, folder)] = Math.max(cursor, task.seq);
+        return task;
+      });
+    },
+
+    /** Finalizes an already-claimed task. A failed or accepted task is never made pollable again. */
+    settleOpenCodeTask(id: string, sessionId: string, identityToken: string, outcome: { state: "queued" } | { state: "failed" | "uncertain"; error: string }): boolean {
+      return update((s) => {
+        const handle = "opencode";
+        const identity = s.identities.find((item) => !item.revokedAt && item.token === identityToken
+          && normalizeHandle(item.handle) === handle && item.sessionId === sessionId);
+        if (!identity) return false;
+        const task = s.tasks.find((candidate) => candidate.id === id);
+        if (!task || normalizeHandle(task.to) !== handle) return false;
+        const delivery = task.delivery;
+        if (delivery?.threadId !== sessionId) return false;
+        if (outcome.state === "queued" && (delivery.state === "queued" || delivery.state === "done")) return true;
+        if (outcome.state === "failed" && delivery.state === "failed") return true;
+        if (outcome.state === "uncertain" && delivery.state === "uncertain") return true;
+        if (delivery.state !== "sending") return false;
+        const at = now().toISOString();
+        if (outcome.state === "queued") {
+          task.delivery = { ...delivery, state: "queued", queuedAt: at };
+          task.deliveredAt = at;
+          pushEvent(s, { kind: "task.delivered", taskId: id, handle, text: `${id} accepted by @opencode's session` });
+        } else if (outcome.state === "failed") {
+          task.delivery = { ...delivery, state: "failed", failedAt: at, error: redactSecrets(outcome.error).slice(0, 240) };
+          pushEvent(s, { kind: "task.delivery_failed", taskId: id, handle, text: `${id} was rejected by @opencode's session` });
+        } else {
+          task.delivery = { ...delivery, state: "uncertain", uncertainAt: at, error: redactSecrets(outcome.error).slice(0, 240) };
+          pushEvent(s, { kind: "task.delivery_uncertain", taskId: id, handle, text: `${id} delivery to @opencode could not be confirmed; it will not be resent automatically` });
+        }
+        return true;
       });
     },
 

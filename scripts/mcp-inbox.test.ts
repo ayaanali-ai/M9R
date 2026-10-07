@@ -12,7 +12,7 @@ import { createM9rMcpServer } from "@/lib/native/mcp-server";
 import { handleHookEvent } from "@/lib/native/hook-handler";
 import type { WebBrokerClient } from "@/lib/native/web-broker-client";
 
-type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ type: string; text: string }> }> }> };
+type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ type: string; text: string }> }>; inputSchema: unknown; description?: string }> };
 
 function setup(options: { allowRule?: boolean; web?: WebBrokerClient; roomStartedAt?: number; now?: () => Date } = {}) {
   const root = mkdtempSync(join(tmpdir(), "m9r-inbox-"));
@@ -22,12 +22,25 @@ function setup(options: { allowRule?: boolean; web?: WebBrokerClient; roomStarte
   const call = async (name: string, args: unknown) => (await (server as unknown as ToolServer)._registeredTools[name].handler(args)).content[0].text;
   return {
     store,
+    server,
     call,
     claude: store.issueIdentity("claude", "claude-code", "c1").token,
     codex: store.issueIdentity("codex", "codex", "x1").token,
     done: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+test("desktop stage MCP tools default to the current owner desktop", () => {
+  const t = setup();
+  try {
+    const tools = (t.server as unknown as ToolServer)._registeredTools;
+    for (const name of ["m9r_stage_prepare", "m9r_stage_action", "m9r_stage_app"]) {
+      const shape = (tools[name]?.inputSchema as { shape?: Record<string, { parse(value: unknown): unknown }> } | undefined)?.shape;
+      assert.equal(shape?.mode?.parse(undefined), "owner-preview", `${name} must not silently select a background desktop`);
+      assert.match(tools[name]?.description ?? "", /owner-preview/);
+    }
+  } finally { t.done(); }
+});
 
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });

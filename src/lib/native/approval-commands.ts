@@ -26,7 +26,9 @@ export function stateLabel(t: Task): string {
   if (t.approval === "denied") return "denied";
   if (t.approval === "expired") return "lapsed";
   if (t.delivery?.state === "done") return "answered";
-  if (t.delivery?.state === "queued") return "pushed into the session";
+  if (t.delivery?.state === "queued") return "accepted by the session; waiting for a result";
+  if (t.delivery?.state === "sending") return "being sent to the session";
+  if (t.delivery?.state === "uncertain") return "delivery could not be confirmed; it will not be resent automatically";
   if (t.delivery?.state === "failed") return "push failed, waits in the inbox";
   return t.deliveredAt ? "delivered" : "in the inbox";
 }

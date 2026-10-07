@@ -21,6 +21,7 @@ const SESSION_PREFIX = "m9r-stage-";
 
 type WindowTargetFactory = {
   Window: new (input: { pid: number; windowId: bigint }) => ActionTarget;
+  Desktop: new (input: { displayId: string }) => ActionTarget;
 };
 
 type CuaSdk = {
@@ -30,10 +31,15 @@ type CuaSdk = {
   };
   ActionTarget: WindowTargetFactory;
   ClickPosition: { Coordinates: new (input: { x: number; y: number }) => CuaClickPosition;
+    CapturedCoordinates: new (input: { x: number; y: number; captureId: string }) => CuaClickPosition;
     Element?: new (input: { elementToken: string }) => CuaClickPosition };
-  InputDeliveryMode: { Background: number };
+  InputDeliveryMode: { Background: number; Foreground: number };
+  CaptureScope: { Desktop: number };
+  EscalationReason: { NoWindowTarget: number };
+  ClickButton: { Left: number; Right: number; Middle: number };
   ScrollDirection: { Up: number; Down: number };
   ScrollBy: { Line: number };
+  VisualRegionKind: { Text: number; Icon: number };
   CursorReducedMotion: { Auto: number };
   CursorMotionStyle: typeof import("@trycua/cua-driver").CursorMotionStyle;
   CursorMotionTiming: typeof import("@trycua/cua-driver").CursorMotionTiming;
@@ -89,6 +95,15 @@ export interface CuaStageCapture {
   width: number;
   height: number;
   capturedAt: string;
+  /** Cua's opaque ID for this exact desktop screenshot; used to bind visual coordinates. */
+  captureId?: string;
+}
+
+/** Private handle to one immutable desktop image; only the broker uses this to bind a click to its capture. */
+export interface CuaDesktopTargetSnapshot extends CuaStageTargetDescription {
+  captureId: string;
+  width: number;
+  height: number;
 }
 
 export interface CuaStageCursorProof {
@@ -124,11 +139,21 @@ export interface CuaStageTargetDescription {
   rect?: { x: number; y: number; width: number; height: number };
 }
 
+export type CuaDesktopClickOptions = { button?: "left" | "right"; count?: 1 | 2 };
+
 export interface CuaStageDriverDependencies {
   stage?: WindowsStageDependencies;
   loadSdk?: () => Promise<CuaSdk>;
   connectRuntime?: CuaStageRuntimeConnector;
   now?: () => Date;
+}
+
+interface CachedDesktopCapture extends CuaDesktopTargetSnapshot {
+  dataUrl: string;
+  capturedAtMs: number;
+  capturedAt: string;
+  stageName: string;
+  identityKey: string;
 }
 
 function bundledSdkUrl(): string | null {
@@ -280,7 +305,8 @@ function validPoint(x: number, y: number, capture: { width: number; height: numb
 }
 
 function stageCapture(capture: { dataUrl: string; width: number; height: number }, now: () => Date): CuaStageCapture {
-  return { dataUrl: capture.dataUrl, width: capture.width, height: capture.height, capturedAt: now().toISOString() };
+  return { dataUrl: capture.dataUrl, width: capture.width, height: capture.height,
+    capturedAt: "capturedAt" in capture && typeof capture.capturedAt === "string" ? capture.capturedAt : now().toISOString() };
 }
 
 function cursorScreenPoint(x: number, y: number, frame: CuaStageWindowFrame): { x: number; y: number } {
@@ -315,6 +341,50 @@ function cursorStateFromResult(result: { isError: boolean; structuredJson?: stri
   };
 }
 
+function findDesktopCaptureId(value: unknown): string | undefined {
+  const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  let visited = 0;
+  while (pending.length && visited < 256) {
+    const current = pending.shift()!;
+    visited += 1;
+    if (!current.value || typeof current.value !== "object" || Array.isArray(current.value) || current.depth > 5) continue;
+    const record = current.value as Record<string, unknown>;
+    for (const key of ["captureId", "capture_id"]) {
+      const candidate = record[key];
+      if (typeof candidate === "string" && candidate.length > 0 && candidate.length <= 256
+        && !/[\u0000-\u001f\u007f]/.test(candidate)) return candidate;
+    }
+    for (const child of Object.values(record)) {
+      if (child && typeof child === "object") pending.push({ value: child, depth: current.depth + 1 });
+    }
+  }
+  return undefined;
+}
+
+function desktopTargetAt(result: ToolResult, x: number, y: number): CuaStageTargetDescription | undefined {
+  resultError(result, "Cua Driver could not identify the desktop control under the cursor.");
+  const encoded = result.structuredJson ?? result.rawJson;
+  if (!encoded) return undefined;
+  let parsed: unknown;
+  try { parsed = JSON.parse(encoded); } catch { throw new Error("Cua Driver returned malformed desktop region data."); }
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  const regions = Array.isArray(record?.regions) ? record.regions : [];
+  const hits = regions.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const region = item as Record<string, unknown>;
+    const bounds = region.bounds && typeof region.bounds === "object" ? region.bounds as Record<string, unknown> : undefined;
+    const rx = bounds?.x, ry = bounds?.y, width = bounds?.width, height = bounds?.height;
+    if (![rx, ry, width, height].every((value) => typeof value === "number" && Number.isFinite(value))
+      || (rx as number) > x || (ry as number) > y || (rx as number) + (width as number) <= x || (ry as number) + (height as number) <= y) return [];
+    const label = typeof region.label === "string" && region.label.trim() ? region.label.trim()
+      : typeof region.text === "string" && region.text.trim() ? region.text.trim() : undefined;
+    if (!label) return [];
+    return [{ label, area: (width as number) * (height as number), rect: { x: rx as number, y: ry as number, width: width as number, height: height as number } }];
+  }).sort((left, right) => left.area - right.area);
+  const hit = hits[0];
+  return hit ? { label: hit.label.replace(/[\r\n\t]+/g, " ").slice(0, 160), rect: hit.rect } : undefined;
+}
+
 /**
  * Cua Driver window-only local desktop-stage adapter. Every action is addressed to the exact registered
  * PID/HWND pair; frames and window labels remain local to the native pill.
@@ -325,6 +395,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   const now = deps.now ?? (() => new Date());
   const root = deps.stage?.root ?? defaultStoreRoot(homedir(), deps.stage?.env ?? process.env);
   const agentSessions = new Map<string, AgentCursorSession>();
+  const desktopCaptures = new Map<string, CachedDesktopCapture>();
   let agentRuntimePromise: Promise<CuaRuntime> | undefined;
 
   async function createRuntime(): Promise<CuaRuntime> {
@@ -389,6 +460,111 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       throw error;
     }
     return { runtime, session: agentSessions.get(details.key)! };
+  }
+
+  async function ensureDesktopCapturePermission(runtime: CuaRuntime, session: string): Promise<void> {
+    let state = await runtime.driver.getSessionState({ session });
+    if (!state.desktopCaptureAuthorized) {
+      await runtime.driver.escalateSession({ session, reason: runtime.sdk.EscalationReason.NoWindowTarget });
+      state = await runtime.driver.getSessionState({ session });
+    }
+    if (!state.desktopCaptureAuthorized) {
+      throw new Error("Cua Driver did not authorize desktop-wide capture for this M9R agent session.");
+    }
+  }
+
+  async function inspectOwnerDesktop(name: string, identity: CuaAgentCursorIdentity) {
+    const { stage, desktop, anchor } = await manager.inspectStage(name);
+    const details = agentCursorDetails(identity);
+    if (anchor) throw new Error("The owner-preview stage is not a desktop-wide mapping. Prepare it again to detach any stale app-window anchor.");
+    if (!desktop.isCurrent) throw new Error("The owner-preview desktop is no longer the desktop shown to the owner. No desktop switch was made.");
+    if (stage.agentAssignment?.handle !== details.handle || stage.agentAssignment.sessionTag !== details.sessionTag) {
+      throw new Error("This Windows desktop is not assigned to the requesting M9R agent session.");
+    }
+    return { stage, desktop };
+  }
+
+  function desktopCaptureKey(name: string, identity: CuaAgentCursorIdentity): string {
+    return `${name}\0${agentCursorDetails(identity).key}`;
+  }
+
+  function currentDesktopCapture(name: string, identity: CuaAgentCursorIdentity): CachedDesktopCapture {
+    const key = desktopCaptureKey(name, identity);
+    const capture = desktopCaptures.get(key);
+    if (!capture || now().getTime() - capture.capturedAtMs > 30_000) {
+      desktopCaptures.delete(key);
+      throw new Error("The desktop view is missing or expired. Capture the current desktop again before acting on it.");
+    }
+    return capture;
+  }
+
+  function invalidateDesktopCaptures(): void {
+    // Any foreground input can change focus or layout for every agent sharing this desktop.
+    desktopCaptures.clear();
+  }
+
+  async function captureOwnerDesktop(name: string, identity: CuaAgentCursorIdentity, refresh = false): Promise<CuaStageCapture> {
+    const details = agentCursorDetails(identity);
+    const { runtime, session } = await ensureAgentSession(identity);
+    await ensureDesktopCapturePermission(runtime, session.session);
+    await inspectOwnerDesktop(name, identity);
+    if (!refresh) {
+      try { return stageCapture(currentDesktopCapture(name, identity), now); } catch { /* take a new capture */ }
+    }
+    const result = await runtime.driver.getDesktopState({ session: session.session, maxImageDimension: MAX_IMAGE_DIMENSION });
+    resultError(result, "Cua Driver could not capture the owner's current desktop.");
+    const image = result.images?.[0];
+    if (!image) throw new Error("Cua Driver returned no image for the owner's current desktop.");
+    const safe = checkImage(image.mimeType, image.dataBase64);
+    if (safe.mimeType !== "image/png") throw new Error("Cua Driver returned a desktop screenshot that is not PNG.");
+    const bytes = Buffer.from(safe.dataBase64, "base64");
+    if (bytes.length < 33 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+      || bytes.toString("ascii", 12, 16) !== "IHDR") {
+      throw new Error("Cua Driver returned a desktop screenshot without a valid PNG frame.");
+    }
+    const width = bytes.readUInt32BE(16);
+    const height = bytes.readUInt32BE(20);
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1
+      || width > 16_384 || height > 16_384) throw new Error("Cua Driver returned invalid desktop screenshot dimensions.");
+    const encoded = result.structuredJson ?? result.rawJson;
+    let metadata: unknown;
+    try { metadata = encoded ? JSON.parse(encoded) : null; } catch { metadata = null; }
+    const captureId = findDesktopCaptureId(metadata);
+    if (!captureId) throw new Error("Cua Driver did not return the capture identity required to bind desktop actions to this exact screenshot.");
+    await inspectOwnerDesktop(name, identity);
+    const capturedAt = now();
+    const cacheKey = `${name}\0${details.key}`;
+    desktopCaptures.set(cacheKey, { captureId, width, height, stageName: name, identityKey: details.key,
+      dataUrl: `data:image/png;base64,${safe.dataBase64}`, capturedAtMs: capturedAt.getTime(), capturedAt: capturedAt.toISOString() });
+    return { dataUrl: `data:image/png;base64,${safe.dataBase64}`, width, height, capturedAt: capturedAt.toISOString() };
+  }
+
+  async function withOwnerDesktop<T>(name: string, identity: CuaAgentCursorIdentity, run: (input: {
+    runtime: CuaRuntime;
+    session: AgentCursorSession;
+    capture: CachedDesktopCapture;
+  }) => Promise<T>): Promise<T> {
+    const { runtime, session } = await ensureAgentSession(identity);
+    await ensureDesktopCapturePermission(runtime, session.session);
+    await inspectOwnerDesktop(name, identity);
+    const capture = currentDesktopCapture(name, identity);
+    if (capture.stageName !== name || capture.identityKey !== session.key) throw new Error("The captured desktop does not belong to this agent's current stage session.");
+    return run({ runtime, session, capture });
+  }
+
+  async function moveOwnerCursor(runtime: CuaRuntime, session: AgentCursorSession, x: number, y: number, capture: CachedDesktopCapture): Promise<CuaStageCursorProof> {
+    if (!validPoint(x, y, capture)) throw new Error("Cursor coordinates must fall inside the latest desktop screenshot.");
+    resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not enable the desktop agent cursor.");
+    const target = new runtime.sdk.ActionTarget.Desktop({ displayId: "primary" });
+    resultError(await runtime.driver.moveCursor({ x, y, target, session: session.session }), "Cua Driver could not move the labeled cursor on the owner's desktop.");
+    const state = cursorStateFromResult(await runtime.driver.getAgentCursorState({ session: session.session }));
+    if (!state.enabled || state.x === undefined || state.y === undefined || Math.abs(state.x - x) > 1 || Math.abs(state.y - y) > 1) {
+      throw new Error("Cua Driver did not confirm the requested desktop cursor position.");
+    }
+    if ((await runtime.driver.getSession({ session: session.session })).cursorVisible !== true) {
+      throw new Error("Cua Driver moved the cursor but did not confirm its overlay is visible on the owner's desktop.");
+    }
+    return { x, y, screenX: state.x, screenY: state.y, enabled: true, visible: true };
   }
 
   async function moveAndVerifyCursor(input: { driver: CuaDriverLike; sdk: CuaSdk; session: string; pid: number; windowId: bigint }, x: number, y: number, frame: CuaStageWindowFrame) {
@@ -533,6 +709,111 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     }, cursorIdentity);
   }
 
+  async function captureDesktop(name: string, cursorIdentity: CuaAgentCursorIdentity): Promise<CuaStageCapture> {
+    return captureOwnerDesktop(name, cursorIdentity, true);
+  }
+
+  async function describeDesktopTarget(name: string, x: number, y: number, cursorIdentity: CuaAgentCursorIdentity): Promise<CuaStageTargetDescription | undefined> {
+    return withOwnerDesktop(name, cursorIdentity, async ({ runtime, session, capture }) => {
+      if (!validPoint(x, y, capture)) throw new Error("Target coordinates must fall inside the latest desktop screenshot.");
+      const result = await runtime.driver.parseVisualRegions({
+        captureId: capture.captureId,
+        options: { kinds: [runtime.sdk.VisualRegionKind.Text, runtime.sdk.VisualRegionKind.Icon], minConfidence: 0.35, maxRegions: 128 },
+      });
+      void session;
+      return desktopTargetAt(result, x, y);
+    });
+  }
+
+  async function moveDesktopCursor(name: string, x: number, y: number, identity: CuaAgentCursorIdentity) {
+    const result = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
+      const cursor = await moveOwnerCursor(runtime, session, x, y, capture);
+      await inspectOwnerDesktop(name, identity);
+      return { capture: stageCapture(capture, now), cursor };
+    });
+    // Moving the synthetic cursor does not change desktop pixels or invalidate
+    // the immutable capture used to bind the next coordinate action.
+    return result;
+  }
+
+  async function clickDesktop(name: string, x: number, y: number, identity: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}) {
+    const result = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
+      if (!validPoint(x, y, capture)) throw new Error("Click coordinates must fall inside the latest desktop screenshot.");
+      await moveOwnerCursor(runtime, session, x, y, capture);
+      await inspectOwnerDesktop(name, identity);
+      const target = new runtime.sdk.ActionTarget.Desktop({ displayId: "primary" });
+      const position = new runtime.sdk.ClickPosition.CapturedCoordinates({ x, y, captureId: capture.captureId });
+      const button = options.button === "right" ? runtime.sdk.ClickButton.Right : runtime.sdk.ClickButton.Left;
+      const outcome = actionOutcome(await runtime.driver.click({ target, position, session: session.session,
+        deliveryMode: runtime.sdk.InputDeliveryMode.Foreground, button, count: options.count ?? 1 }),
+      "Cua Driver could not deliver the click to the owner's current desktop.");
+      return outcome;
+    });
+    invalidateDesktopCaptures();
+    return { capture: await captureOwnerDesktop(name, identity, true), outcome: result };
+  }
+
+  async function typeTextDesktop(name: string, text: string, identity: CuaAgentCursorIdentity) {
+    if (typeof text !== "string" || text.length < 1 || text.length > MAX_TEXT_ACTION_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
+      throw new Error(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
+    }
+    const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session }) => {
+      await inspectOwnerDesktop(name, identity);
+      return actionOutcome(await runtime.driver.typeText({ text, target: new runtime.sdk.ActionTarget.Desktop({ displayId: "primary" }), session: session.session }),
+        "Cua Driver could not type into the focused application on the owner's desktop.");
+    });
+    invalidateDesktopCaptures();
+    return { capture: await captureOwnerDesktop(name, identity, true), outcome };
+  }
+
+  async function scrollDesktop(name: string, x: number, y: number, direction: "up" | "down", identity: CuaAgentCursorIdentity) {
+    const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
+      if (!validPoint(x, y, capture)) throw new Error("Scroll coordinates must fall inside the latest desktop screenshot.");
+      await moveOwnerCursor(runtime, session, x, y, capture);
+      await inspectOwnerDesktop(name, identity);
+      const target = new runtime.sdk.ActionTarget.Desktop({ displayId: "primary" });
+      return actionOutcome(await runtime.driver.scroll({ x, y,
+        direction: direction === "up" ? runtime.sdk.ScrollDirection.Up : runtime.sdk.ScrollDirection.Down,
+        target, session: session.session, by: runtime.sdk.ScrollBy.Line, amount: BigInt(3) }),
+      "Cua Driver could not scroll the owner's current desktop.");
+    });
+    invalidateDesktopCaptures();
+    return { capture: await captureOwnerDesktop(name, identity, true), outcome };
+  }
+
+  async function dragDesktop(name: string, fromX: number, fromY: number, toX: number, toY: number, identity: CuaAgentCursorIdentity) {
+    const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
+      if (!validPoint(fromX, fromY, capture) || !validPoint(toX, toY, capture)) throw new Error("Both drag points must fall inside the latest desktop screenshot.");
+      await moveOwnerCursor(runtime, session, fromX, fromY, capture);
+      await inspectOwnerDesktop(name, identity);
+      const target = new runtime.sdk.ActionTarget.Desktop({ displayId: "primary" });
+      return actionOutcome(await runtime.driver.drag({ fromX, fromY, toX, toY, target, session: session.session,
+        durationMs: BigInt(500), steps: BigInt(10) }), "Cua Driver could not drag on the owner's current desktop.");
+    });
+    invalidateDesktopCaptures();
+    return { capture: await captureOwnerDesktop(name, identity, true), outcome };
+  }
+
+  async function pressKeyDesktop(name: string, key: string, identity: CuaAgentCursorIdentity) {
+    const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session }) => {
+      await inspectOwnerDesktop(name, identity);
+      return actionOutcome(await runtime.driver.pressKey({ key, target: new runtime.sdk.ActionTarget.Desktop({ displayId: "primary" }), session: session.session }),
+        "Cua Driver could not press the requested key on the owner's desktop.");
+    });
+    invalidateDesktopCaptures();
+    return { capture: await captureOwnerDesktop(name, identity, true), outcome };
+  }
+
+  async function hotkeyDesktop(name: string, keys: string[], identity: CuaAgentCursorIdentity) {
+    const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session }) => {
+      await inspectOwnerDesktop(name, identity);
+      return actionOutcome(await runtime.driver.hotkey({ keys, target: new runtime.sdk.ActionTarget.Desktop({ displayId: "primary" }), session: session.session }),
+        "Cua Driver could not send the requested key combination to the owner's desktop.");
+    });
+    invalidateDesktopCaptures();
+    return { capture: await captureOwnerDesktop(name, identity, true), outcome };
+  }
+
   async function listWindowOptions(ownedPid?: number, onScreenOnly = ownedPid === undefined): Promise<CuaStageWindowOption[]> {
     if (ownedPid !== undefined && (!Number.isSafeInteger(ownedPid) || ownedPid < 1)) throw new Error("Invalid owned application process.");
     const runtime = await createRuntime();
@@ -585,12 +866,13 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return listWindowOptions(ownedPid);
   }
 
-  async function click(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
+  async function click(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementAt }) => {
       const before = await captureWindow();
       if (!validPoint(x, y, before)) throw new Error("Click coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
-      if (await nativeControl(name, "click", { x, y, imageWidth: before.width, imageHeight: before.height })) return { capture: stageCapture(await captureWindow(), now),
+      if (options.button === undefined && options.count === undefined
+        && await nativeControl(name, "click", { x, y, imageWidth: before.width, imageHeight: before.height })) return { capture: stageCapture(await captureWindow(), now),
         outcome: { status: "unverifiable", summary: "Routed the click to the exact native child control; application effect requires verification." } };
       const target = new sdk.ActionTarget.Window({ pid, windowId });
       const token = sdk.ClickPosition.Element ? await elementAt(x, y) : undefined;
@@ -598,9 +880,29 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         target,
         position: token && sdk.ClickPosition.Element ? new sdk.ClickPosition.Element({ elementToken: token }) : new sdk.ClickPosition.Coordinates({ x, y }),
         deliveryMode: sdk.InputDeliveryMode.Background,
+        ...(options.button ? { button: options.button === "right" ? sdk.ClickButton.Right : sdk.ClickButton.Left } : {}),
+        ...(options.count ? { count: options.count } : {}),
         session,
       });
       const outcome = actionOutcome(result, "Cua Driver could not click the registered stage window.");
+      return { capture: stageCapture(await captureWindow(), now), outcome };
+    }, cursorIdentity);
+  }
+
+  async function pressKey(name: string, key: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
+      await captureWindow();
+      const result = await driver.pressKey({ key, target: new sdk.ActionTarget.Window({ pid, windowId }), session });
+      const outcome = actionOutcome(result, "Cua Driver could not press the requested key in the registered stage window.");
+      return { capture: stageCapture(await captureWindow(), now), outcome };
+    }, cursorIdentity);
+  }
+
+  async function hotkey(name: string, keys: string[], cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
+      await captureWindow();
+      const result = await driver.hotkey({ keys, target: new sdk.ActionTarget.Window({ pid, windowId }), session });
+      const outcome = actionOutcome(result, "Cua Driver could not send the requested key combination to the registered stage window.");
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -692,7 +994,9 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     } catch { /* the runtime never initialized */ }
   }
 
-  return { capture, describeTarget, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, drag, closeAgentCursor, shutdown };
+  return { capture, describeTarget, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, drag,
+    captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, dragDesktop,
+    pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown };
 }
 
 async function readStageTextFromStdin(): Promise<string> {

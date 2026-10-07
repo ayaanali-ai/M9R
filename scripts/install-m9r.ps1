@@ -278,6 +278,24 @@ function Stop-InstalledM9rPill {
     }
 }
 
+function Invoke-ManagedBrokerUpdate([string]$EnginePath, [ValidateSet('stop', 'start')][string]$Phase) {
+    if (-not (Test-Path -LiteralPath $EnginePath -PathType Leaf)) {
+        throw "The M9R engine required to manage the broker update is missing: $EnginePath"
+    }
+    $output = @(& $EnginePath web broker-update $Phase 2>&1)
+    $code = $LASTEXITCODE
+    foreach ($line in $output) { Write-Host ([string]$line) }
+    if ($code -ne 0) { throw "M9R could not safely $Phase the managed Web broker (exit $code). No further installer files were replaced." }
+    $resultLine = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^\{.*"phase"\s*:\s*"' + [regex]::Escape($Phase) + '".*\}$' } | Select-Object -Last 1)
+    if ($resultLine.Count -ne 1) { throw "M9R broker $Phase completed without a verifiable lifecycle receipt." }
+    try { $result = $resultLine[0] | ConvertFrom-Json }
+    catch { throw "M9R broker $Phase returned an invalid lifecycle receipt." }
+    if ($result.ok -ne $true -or $result.phase -ne $Phase -or $result.managedTask -isnot [bool]) {
+        throw "M9R broker $Phase returned an incomplete lifecycle receipt."
+    }
+    return $result
+}
+
 function Remove-M9rTemporaryDirectory([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
@@ -345,6 +363,8 @@ function Invoke-InstalledUninstall {
 }
 
 $temporaryRoot = $null
+$brokerNeedsResume = $false
+$brokerResumeEngine = $null
 try {
     Assert-M9rWindows
     # Keep the standalone engine and this PowerShell wrapper on one store root,
@@ -398,11 +418,18 @@ try {
         exit 0
     }
 
+    # Quiesce an owned broker before the engine setup replaces its companion files.
+    # The packaged engine validates the current-user task and authenticated shutdown;
+    # no process is killed by name and unrelated local services are left alone.
+    $brokerResumeEngine = $engine
+    $brokerStop = Invoke-ManagedBrokerUpdate $engine 'stop'
+    $brokerNeedsResume = $brokerStop.managedTask
     Stop-InstalledM9rPill
     & $engine @applyArgs
     $setupExit = $LASTEXITCODE
     if ($setupExit -ne 0) { throw "M9R setup exited with code $setupExit. Review the engine output; do not rerun blindly." }
     $installedEngine = Join-Path $env:M9R_HOME 'bin\m9r-engine.exe'
+    $brokerResumeEngine = $installedEngine
     Install-ManagedWebBroker $packageBroker
     Write-Host ''
     Write-Host 'M9R setup finished. Start a new supported agent session to activate its hooks.' -ForegroundColor Green
@@ -420,6 +447,9 @@ try {
         $webExit = $LASTEXITCODE
         if ($webExit -ne 0) { throw "M9R Web setup exited with code $webExit. Native setup remains installed and can be removed with -Uninstall." }
     }
+    $brokerStart = Invoke-ManagedBrokerUpdate $installedEngine 'start'
+    $brokerNeedsResume = $false
+    if ($brokerStart.managedTask) { Write-Host 'Verified the M9R Web broker is running from the installed package.' -ForegroundColor Green }
     if (-not $NoLaunch) {
         $installedOverlay = Join-Path $env:M9R_HOME 'bin\m9r-overlay.exe'
         if (-not (Test-Path -LiteralPath $installedOverlay -PathType Leaf)) { throw "M9R setup finished but the desktop pill is missing at $installedOverlay." }
@@ -431,6 +461,12 @@ try {
     Write-Host $_ -ForegroundColor Red
     exit 1
 } finally {
+    if ($brokerNeedsResume -and $brokerResumeEngine -and (Test-Path -LiteralPath $brokerResumeEngine -PathType Leaf)) {
+        try {
+            Write-Warning 'The install did not reach its broker restart step; restoring the previously managed broker service.'
+            [void](Invoke-ManagedBrokerUpdate $brokerResumeEngine 'start')
+        } catch { Write-Warning "Could not restore the managed broker automatically: $($_.Exception.Message)" }
+    }
     if ($temporaryRoot -and (Test-Path -LiteralPath $temporaryRoot)) {
         Remove-M9rTemporaryDirectory $temporaryRoot
     }

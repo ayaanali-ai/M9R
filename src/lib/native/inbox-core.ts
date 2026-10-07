@@ -66,11 +66,14 @@ export interface Task {
 }
 
 export interface TaskDelivery {
-  /** `queued` = pushed into the target session; `done` = the answer came back; `failed` = fell back to the inbox. */
-  state: "queued" | "failed" | "done";
+  /** `sending` is a one-time claim; `queued` is provider acceptance, never proof the agent started work. */
+  state: "sending" | "queued" | "uncertain" | "failed" | "done";
   attempts: number;
   threadId?: string;
+  claimedAt?: string;
   queuedAt?: string;
+  uncertainAt?: string;
+  failedAt?: string;
   error?: string;
 }
 

@@ -374,20 +374,28 @@ function buildDesktopStage(actions: ViewActions): ViewHost {
 
   function agentStateLabel(task: AgentTask | undefined): string {
     if (!task) return "Not connected";
-    if (task.state === "working") return "Working";
-    if (task.state === "thinking") return "Starting";
+    if (task.runState === "working") return "Working";
+    if (task.runState === "starting") return "Starting";
     if (task.state === "approval") return "Waiting for approval";
-    if (task.state === "error") return "Error";
-    if (task.state === "sleeping") return "Stopped";
-    return "Idle";
+    if (task.runState === "failed") return "Error";
+    if (task.runState === "stopped") return "Stopped";
+    if (task.runState === "not_connected") return "Not connected";
+    if (task.runState === "seen") return "Seen recently · live status unavailable";
+    if (task.runState === "unknown") return "Live status unavailable";
+    if (task.runState === "idle") return "Idle";
+    return "Waiting";
   }
 
   function currentTaskText(task: AgentTask | undefined): string {
     if (!task) return "No current task reported.";
-    if (task.state === "working" || task.state === "thinking") return task.task ?? "Working on a turn";
+    if (task.runState === "working" || task.runState === "starting") return task.task ?? (task.runState === "working" ? "Working on a turn" : "Starting a turn");
     if (task.state === "approval") return "Waiting for approval.";
-    if (task.state === "error") return "The agent reported an error.";
-    if (task.state === "sleeping") return "The agent is stopped.";
+    if (task.runState === "failed") return "The agent reported an error.";
+    if (task.runState === "stopped") return "The agent is stopped.";
+    if (task.runState === "not_connected") return "No session for this agent has been seen on this computer.";
+    if (task.runState === "seen") return "Seen recently; M9R cannot confirm its current activity.";
+    if (task.runState === "unknown") return "M9R cannot confirm this agent's current activity.";
+    if (task.runState === "waiting") return "The agent is waiting.";
     return "No current task reported.";
   }
 
@@ -487,7 +495,7 @@ function buildDesktopStage(actions: ViewActions): ViewHost {
     detailSession.textContent = "Session " + assignment.sessionTag;
     detailStatus.textContent = stageLabel(selected);
     detailStatus.dataset.state = selected.status;
-    activityLabel.textContent = task?.state === "working" || task?.state === "thinking" ? "CURRENT TASK" : "CURRENT STATUS";
+    activityLabel.textContent = task?.runState === "working" || task?.runState === "starting" ? "CURRENT TASK" : "CURRENT STATUS";
     activity.textContent = currentTaskText(task);
     cursorNote.hidden = !selected.hasAnchor;
     if (selected.error) {

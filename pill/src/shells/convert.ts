@@ -19,7 +19,7 @@ interface UiThread { id: string; kind: string; agent?: string; text: string; pha
 interface UiApproval { id: string; agent?: string; provider?: string; text: string; site?: string; url?: string; action?: string }
 export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; desktopPill?: boolean }
 
-const RUN_STATES = new Set<AgentRunState>(["idle", "starting", "working", "waiting", "blocked", "stopped", "failed"]);
+const RUN_STATES = new Set<AgentRunState>(["idle", "starting", "working", "waiting", "blocked", "stopped", "failed", "seen", "unknown", "not_connected"]);
 
 export function fromUiState(message: UiState): PillSnapshot {
   const thread = Array.isArray(message.thread) ? message.thread : [];
@@ -36,7 +36,7 @@ export function fromUiState(message: UiState): PillSnapshot {
     return {
       handle,
       provider: providerOf(a.provider || handle),
-      state: (RUN_STATES.has(a.state as AgentRunState) ? a.state : "idle") as AgentRunState,
+      state: (RUN_STATES.has(a.state as AgentRunState) ? a.state : "unknown") as AgentRunState,
       activity,
       ...(doing ? { task: doing } : {}),
     };
@@ -60,6 +60,7 @@ interface FeedAgent { handle: string; state?: string; doing?: string | null }
 type FeedNeeds =
   | { kind: "approval"; taskId: string; from: string; to: string; goal: string; protected?: boolean }
   | { kind: "push_failed"; taskId: string; from: string; fromSession?: string; to: string; reason: string; fix?: string; linkable?: boolean }
+  | { kind: "delivery_uncertain"; taskId: string; from: string; to: string; reason: string }
   | { kind: "answer"; taskId: string; from: string; summary: string };
 interface FeedInProgress { taskId: string; from: string; to: string; goal: string; state?: string }
 interface FeedWeb { at: string; agent: string; kind: string; text: string }
@@ -74,10 +75,10 @@ export interface Feed {
 const FEED_STATES: Record<string, AgentRunState> = {
   open_working: "working",
   open_idle: "idle",
-  seen: "idle",
-  unknown: "idle",
+  seen: "seen",
+  unknown: "unknown",
   offline: "stopped",
-  not_connected: "stopped",
+  not_connected: "not_connected",
 };
 
 export function fromFeed(feed: Feed): PillSnapshot {
@@ -86,20 +87,18 @@ export function fromFeed(feed: Feed): PillSnapshot {
   const agents = (Array.isArray(feed.agents) ? feed.agents : []).map((a) => {
     const handle = String(a.handle).replace(/^@/, "");
     const assigned = progress.filter((p) => p.to === handle);
-    // A queued or next-prompt task is not the agent's current work. Only expose a goal as
-    // `task` when the feed says it is already working; otherwise the UI can mislabel it.
-    const active = assigned.find((p) => p.state === "working");
+    // Provider probes own the live state. A task being sent, queued, or waiting for a prompt
+    // is never promoted to a running turn.
     const mine = assigned.map((p) => clip(`@${p.from} asked: ${p.goal}`, 140));
     // Web events arrive newest first; show them oldest first like the other shell does.
     const acted = web.filter((w) => w.agent === handle && (w.kind === "action" || w.kind === "message")).slice(0, 8).reverse().map((w) => clip(w.text, 140));
-    let state: AgentRunState = FEED_STATES[String(a.state)] ?? "idle";
-    if (state === "idle" && progress.some((p) => p.to === handle && p.state === "working")) state = "working";
+    let state: AgentRunState = FEED_STATES[String(a.state)] ?? "unknown";
     // What the agent is doing right now, read from its own transcript. Last, so it is the line the ticker highlights.
     const doing = typeof (a as FeedAgent).doing === "string" ? clip((a as FeedAgent).doing as string, 140) : "";
-    const task = doing || (active ? clip(active.goal, 140) : "");
+    const task = doing || "";
     const steps = [...acted, ...mine];
     if (doing && steps.at(-1) !== doing) steps.push(doing);
-    if (state === "working" && steps.length === 0) steps.push("Working on a turn");
+    else if (state === "working" && steps.length === 0) steps.push("Working on a turn");
     return { handle, provider: providerOf(handle), state, activity: steps.slice(-12), ...(task ? { task } : {}) };
   });
   const needs = Array.isArray(feed.needsYou) ? feed.needsYou : [];
@@ -114,6 +113,8 @@ export function fromFeed(feed: Feed): PillSnapshot {
           id: `failed-${n.taskId}`, from: n.to, text: clip(`Could not deliver ${n.taskId}: ${n.reason}`, 300),
           ...(n.linkable === true ? { link: { taskId: n.taskId, from: n.from, ...(n.fromSession ? { fromSession: n.fromSession } : {}), to: n.to } } : {}),
         }]
+        : n.kind === "delivery_uncertain"
+          ? [{ id: `uncertain-${n.taskId}`, from: "m9r", text: clip(`Could not confirm delivery of ${n.taskId} to @${n.to}; it will not be resent automatically. ${n.reason}`, 300) }]
         : []),
   ];
   return { agents, approvals, thread };

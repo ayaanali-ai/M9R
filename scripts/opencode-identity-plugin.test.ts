@@ -112,7 +112,7 @@ test("generated plugin uses sessionID and appends only parsed additionalContext 
   assert.doesNotMatch(source, /output\.system\.push\(raw\)/);
   assert.match(source, /M9R_HOOK_PROMPT_ARGS[\s\S]*"m9r-hook",\s*"UserPromptSubmit",\s*"opencode"/);
   assert.match(source, /runM9rPrompt\(sessionID, cwd\)/);
-  assert.match(source, /client\?\.session\?\.promptAsync \?\? client\?\.session\?\.prompt/);
+  assert.match(source, /client\?\.session\?\.promptAsync/);
   assert.match(source, /M9R_HOOK_POLL_ARGS/);
   assert.match(source, /M9R_HOOK_DELIVERED_ARGS/);
 });
@@ -144,7 +144,7 @@ test("OpenCode live polling creates one real session turn and records receipt on
   const prompts: unknown[] = [];
   const plugin = await pluginFactory({
     directory: "C:/repo",
-    client: { session: { prompt: async (input) => { prompts.push(input); await promptPending; return {}; } } },
+    client: { session: { promptAsync: async (input) => { prompts.push(input); await promptPending; return {}; } } },
   });
   await plugin["experimental.chat.system.transform"]({ sessionID: "oc-session" }, { system: [] });
 
@@ -198,7 +198,7 @@ test("OpenCode startup discovers active sessions so inbox delivery does not wait
       session: {
         list: async (input) => ({ data: [{ id: "open-session", directory: "C:/repo" }], input }),
         status: async () => ({ data: { "open-session": { type: "idle" } } }),
-        prompt: async (input) => { prompts.push(input); return {}; },
+        promptAsync: async (input) => { prompts.push(input); return {}; },
       },
     },
   });
@@ -219,7 +219,7 @@ test("a resolved OpenCode SDK error never acknowledges task delivery", async () 
     { code: 0, output: hook("UserPromptSubmit", "") },
     { code: 0, output: hook("OpenCodePoll", JSON.stringify({ task_id: "T1", prompt: "cursor task" })) },
   ], calls), (() => ({ unref() {} })) as unknown as typeof setInterval);
-  const plugin = await factory({ directory: "C:/repo", client: { session: { prompt: async () => ({ error: { message: "session unavailable" } }) } } });
+  const plugin = await factory({ directory: "C:/repo", client: { session: { promptAsync: async () => ({ error: { message: "session unavailable" } }) } } });
   await plugin["experimental.chat.system.transform"]({ sessionID: "oc-session" }, { system: [] });
   for (let attempt = 0; attempt < 10; attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(calls.filter((call) => call.args.includes("OpenCodeDelivered")).length, 0);

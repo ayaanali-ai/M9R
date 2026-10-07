@@ -1,0 +1,140 @@
+# M9R Product and Runtime Audit Checkpoint — 2026-10-07
+
+## Scope and outcome
+
+### Follow-through — implementation and cleanup
+
+This dated follow-through supersedes the earlier open status for the findings it explicitly marks complete. The original audit snapshot and its remaining findings are retained below as historical evidence.
+
+- **One-time delivery and truthful activity:** fixed in source and covered by the selected regression suites. An accepted task is not replayed on the same provider session; provider rejection/uncertain delivery stays distinct from active work. The pill no longer treats delivery alone as proof that the provider is currently working.
+- **Desktop targeting:** owner-preview/current-desktop targeting is now the default across the stage MCP schema, broker client, and action runner. Background virtual desktops remain an explicit mode. A visible owner-preview cannot silently create a blank app; the agent must target an app visible on the user's desktop.
+- **Broker image:** the installer now stops the exact verified M9R broker task before replacing its files and restarts it afterward. At follow-through verification, PID `27572` was running from `C:\Users\kaina\.m9r\bin\m9r-web-broker.exe`; the manifest path matched, and the installed file SHA-256 matched the ownership manifest (`0fd4385171d54128b046d26e91dc7a82fb4e62623f31846c681b32b3a0d1d197`). The process started after the replacement file was written, and authenticated broker health passed after restart. This verifies the current local build, not a public release or second-machine install.
+- **Verification:** `npm run typecheck` passed; selected desktop/provider/pill regressions passed **172/172**; installer/native lifecycle regressions passed **39/39**; the engine/package build and install completed. The full canonical `npm test` command remains unavailable because Windows rejects its expanded command line, so these results are focused evidence rather than a full-suite claim.
+- **Safe generated-file cleanup:** removed four ignored root build executables, 15 specifically classified stale/generated `.workcache` directories, and 20 manifest-unreferenced runtime backup executables after checking containment and active process references. This removed about **5.62 GB**. Kept the installed runtime, current and rollback packages, manifest-listed retired images, successful Stage proof/evidence, provider sessions, the recording, research notes, and all 52 ignored root-level M9R notes (there were no exact duplicates). Kept `uninstall.exe` because it was not proven stale.
+- **Still open:** the live task must prove the user's actual Chrome icon is clicked, the resulting personal Chrome window is adopted, `X.com` is entered visibly, and the task finishes once. Two-agent distinct cursors, assignment/join/return/revocation, cross-provider active-session work, CDP/extension parity, and clean second-machine lifecycle are not accepted yet. The demo is **not ready to publish**.
+
+This is a read-only audit of the main product paths that affect the demo and release: native desktop input, Chrome launch/adoption, provider task delivery, pill state, virtual-desktop stages, packaging/update flow, roadmap status, tests, and local artifacts. It is not a line-by-line security certification.
+
+At the original audit snapshot, no source code, installed binaries, running services, or project artifacts had been changed or deleted. Subsequent approved fixes and cleanup are recorded in the follow-through above. The audit found concrete integration and delivery defects; the demo is **not ready to publish**. The visible cursor was seen once, as the owner reported, but the requested everyday task (use the existing Chrome icon, enter the site, and verify the result) has not passed end to end.
+
+The first failure is not that the user needs to write a more detailed prompt. M9R's current native action interface does not expose the OS desktop and keyboard operations required to carry out the behavior the user already described.
+
+## Workspace snapshot
+
+- Checkout: `C:\RunLeak\runleak`
+- Branch and starting commit: `codex/shared-cursor-delivery` at `d3d76098` (`Fix persistent provider task delivery`). Tracked files were clean at the start of the audit.
+- The three existing untracked files at audit start were the 2026-10-07 recording, `chen-essay-full-breakdown.md`, and `docs/M9R_DELIVERY_PARITY_MONEY_GATE_HANDOFF_2026-10-07.md`. They are evidence/research/current handoff material and were preserved. At that original snapshot, this checkpoint was also uncommitted; nothing had been pushed or committed yet.
+
+## Priority findings
+
+### P0 — Fix before another live cursor task
+
+1. **Do not replay a rejected OpenCode task indefinitely.** The installed-source template polls every 1.5 seconds. If OpenCode rejects the submitted prompt, the plugin clears its submitted-task marker and retries after 5 seconds. The task remains in the inbox, so a provider/model rejection can cause the same text to be injected again. The owner-provided screenshot included `Model not found: anthropic/claude-sonnet-4-5`; that is a plausible rejection trigger, but the installed plugin/model configuration was not readable in this audit and the exact live sequence was not correlated to a runtime log. Delivery needs a durable task/session idempotency receipt and a surfaced terminal provider error; an arbitrary retry-count cap would hide, not fix, the delivery state.
+2. **Confirm which broker image is actually running before the next proof.** The broker process observed at audit time started before the on-disk broker executable was replaced. The disk file and install manifest match, but that does not prove the long-running process has loaded the same bytes. No restart was performed. Record the old process/version, then deliberately start and verify the current installed image before accepting a live task.
+3. **Use the actual Windows desktop as the first action target.** The Stage action schema only accepts a registered window and exposes capture, cursor, click, type, scroll, and drag. It has no desktop-wide capture/target, key press/hotkey, or double-click action. The installed Driver 0.34 SDK already declares desktop targets, foreground input mode, hotkeys, key presses, and click counts. M9R has not wired those capabilities through its Stage adapter. This is why an agent cannot yet inspect and click the visible Chrome desktop/taskbar icon through the current task API.
+4. **The current Chrome path launches a window instead of clicking the user's icon.** `ownedBrowserLaunch()` defaults to the personal-profile mode, but it invokes Chrome with `--new-window`; without a URL it creates a blank window. It does not use a cursor to click the existing desktop/taskbar shortcut. The code does not add an alternate `--user-data-dir` in personal mode, so the audit cannot claim it used a different profile; it also cannot claim the opened window was visibly verified as the owner's signed-in Chrome. The user-requested acceptance is to click the existing icon, adopt that exact resulting window, and avoid a surprise blank window.
+5. **Keep task scope attached to the intended project session.** M9R identities and tasks are scoped by provider session and working folder. A Codex session whose working folder is `C:\Windows\System32` is not the same identity as the one under `C:\RunLeak\runleak`; refusing delivery there is correct. The global runtime in `%USERPROFILE%\.m9r\bin` is a separate concern and is not itself evidence of a wrong project root. Do not hard-code `C:\RunLeak\runleak` for all users; use the folder the user selected and reject a mismatched session clearly.
+
+### P0 — User-visible correctness gaps
+
+- **Cursor label:** the OS badge is generated as `@codex-<8 hex characters>` (and similarly for other providers). The hash distinguishes sessions internally but is poor user-facing identity. The pill already has provider colors (Claude orange, Codex blue, OpenCode green), while the native cursor uses the same `cua.default` theme for each session. There is no verified settings path for per-provider cursor colors.
+- **Activity can look stale:** the pill marks a delivered task “working” from `deliveredAt` for up to an hour without a fresh provider-running signal. The desktop shell also has no dictation capability; speech input exists in the extension shell only. The user has repeatedly asked for desktop-pill dictation.
+- **History is split:** task/event and room memory are persisted in existing stores, but the pill chat transcript is in-memory. There is no single durable task/history/context-recovery view across provider sessions. This is a later ship-readiness item, not a prerequisite for proving the first cursor.
+- **The roster is useful but not acceptance proof:** Stage assignment and Join/return controls exist. The visible Stage detail still exposes an opaque session tag, and a stage assignment is keyed to a provider session. The feed model deduplicates its top-level agent list by handle, so the multiple Codex/OpenCode cards the owner saw cannot be attributed to duplicate cards in that source alone; live registry/session rows must be compared with rendered cards before deleting sessions or processes. A polished, provider-labeled roster and reliable task detail are still required for the two-agent demo.
+- **Full app mode exists; old refusal text may be stale.** The current owner policy defaults enabled agents to `full`, which resolves unlisted local applications without catalog approval. `scoped` and `request` are optional owner-selected modes. The historical “Chrome is not approved” response does not match the current full-mode source; a stale broker, old session policy, or mismatched runtime remains to be ruled out. Do not remove the optional modes as a shortcut to fixing the observed stale refusal.
+
+## Fix order to keep
+
+The cursor order discussed before this audit remains:
+
+1. Bind the proof to the owner's current visible Windows desktop and capture that desktop.
+2. Move one labeled M9R cursor to the existing Google Chrome icon and click it in place (desktop shortcut: double-click; taskbar shortcut: single-click). Do not launch Chrome by command in this owner-visible proof.
+3. Adopt the exact Chrome window created or restored by that click; click its address bar and type `X.com` with visible cursor activity. Verify the text on screen. Press Enter only when the task asks to navigate.
+4. Replace the hash-shaped badge with a clear provider identity while retaining a distinct internal identity per provider session.
+5. Handle Chrome's process/window handoff and stale HWNDs without creating a second blank window, another provider session, or an invisible fallback.
+6. Accept the complete single-agent task only after the installed pill/broker route proves the same behavior with no repeated task injection and a user-visible result.
+
+The OpenCode once-only delivery fix and the broker-image check above are **preconditions** to this six-step sequence; they do not replace it. The acceptance should use ordinary wording such as “Open Chrome and go to X,” plus several natural paraphrases. The product must infer normal mouse/keyboard steps; the user should not need to specify coordinates or narrate every click.
+
+## Demo gates and roadmap status
+
+The canonical status document is [M9R_CUA_WAVE_PLAN.md](M9R_CUA_WAVE_PLAN.md), with detailed evidence in [Windows Stage acceptance](M9R_WINDOWS_DESKTOP_STAGE_ACCEPTANCE.md) and [provider capability matrix](M9R_PROVIDER_CAPABILITY_MATRIX_2026-10-05.md). The merged plan is the working checklist; the older implementation lists should be treated as historical until their open rows are reconciled.
+
+### Demo order
+
+The first six gates establish that the local pill and desktop path work reliably before testing more complex provider collaboration:
+
+1. **One real agent task on the owner's desktop:** an ordinary request is translated into visible mouse/keyboard work, including finding and opening an installed app through its visible desktop, taskbar, or Start entry point. Use the owner's personal Chrome for the browser example; do not spawn a surprise blank window. Prove navigation and the requested result, not just a cursor move. The user should not need to provide coordinates or narrate each click.
+2. **Two agents with distinct identities and desktop assignments:** each can act in its assigned desktop/window; the owner can join and return; revocation works; one agent's task does not erase or misattribute the other's work.
+3. **Three-agent and shared-desktop behavior:** prove three distinct live identities, then prove two agents can join the same agent desktop/session when asked and continue their assigned work without duplicate or replayed tasks.
+4. **Browser route and cursor bridge:** prove the browser path before retiring the extension. CDP is a separate route today; no capability-negotiated hybrid is accepted. Extension capabilities such as tabs/groups, content scripts, host permissions, and extension UI/service-worker behavior must be mapped and replaced or retained intentionally.
+5. **Safety and delivery:** prove one-time task delivery, useful terminal failure reporting, persistent owner approvals, revocation, and the agreed money/secrets/download/install boundaries. Ordinary installed-app use must not require per-app catalog setup.
+6. **Install and lifecycle:** prove a clean install and restart on machine two, sign-in startup, task delivery, and a supported update path. Owner reports that the pill returned after a reboot; the second-machine lifecycle and saved clean proof are still open.
+
+**After those six gates, prove active-session cross-provider collaboration as its own acceptance gate.** Test Codex entering Claude's active session and Claude entering Codex's; test OpenCode in both directions with Codex and, when available, Claude; and test multiple agents entering one active session. The recipient must visibly work in the caller's session, return its result there, and let the caller review and resume. A queued @mention, inbox pickup, tool call, or later result injection alone does not pass.
+
+**Public launch readiness follows the live product gates:** update the README and public setup/release instructions; align the open waitlist copy; complete Stripe product/payment/webhook acceptance if charging at launch; settle licensing/open-core promises before publishing them.
+
+### Current roadmap rows
+
+- **C1, C2, C5:** marked signed off against their recorded acceptance. **C1's recorded dedicated/isolated Chrome acceptance conflicts with the latest product requirement to use the owner's personal Chrome.** Keep the historical proof, but reopen/re-scope the Chrome demo acceptance; it does not prove the current requested icon-click path.
+- **Track A step 2 / room-agent adapter:** marked done and audited.
+- **Track A step 3 / OS desktop stages:** partial. Local fixture lifecycle, package installation, Stage roster, and synthetic cursor evidence exist. The owner now reports seeing a real OpenCode cursor once; record that as owner-observed evidence, but it does not pass the Chrome icon/navigation, two-agent, join/return/revocation, or repeatability gates.
+- **P0 package/installer:** complete locally, not a public release. The release asset, clean second-machine install, update lifecycle, and demo task acceptance remain separate.
+- **C3:** partial and intentionally deferred. It is browser-tab live-view, not desktop-stage streaming. Cross-machine desktop relay is separate and requires machine enrollment plus its own read-only relay and later lease/control acceptance.
+- **C4:** remaining takeover/hand-back lease acceptance.
+- **C6–C14:** partial/design/decision work (workspace concept, machine enrollment, replay evidence, scheduler scope correction, hosted-browser feasibility, DPAPI login, Jev/CUA-S1 evaluation, benchmark, and pill-path desktop-action acceptance). C9 needs its comparison before scope is frozen; C14 is part of the current desktop action proof.
+- **C15:** optional, not a demo gate. Windows Task View already provides desktop overview/switching; revisit a custom tile/window-pool view only if users need it.
+- **Network Core Phase 0 and Track A step 2:** separate from OS desktop stages and marked passed/done in the canonical plan. The personal-agent product layer is parked per the user's scope change; current demo focus is Claude Code, Codex, and OpenCode.
+- **Stripe, waitlist, and licensing:** distinct release gates. Waitlist is open per the owner, but some checked-in copy still says otherwise; Stripe is not live-accepted; open-core versus fully open-source versus paid access remains undecided.
+
+### Product requirements carried forward
+
+- The user expects ordinary, varied natural-language requests to become mouse/keyboard work across local apps and sites; users should not have to provide coordinates, exact UI labels, or a click-by-click script. Evaluation must cover paraphrased tasks, not just one canned prompt.
+- Enabled agents use the user's available apps without per-app catalog setup. Full mode is already present. Keep the separately requested human gates for secrets, purchases/transfers, downloads/installers, and other explicitly high-impact actions, and verify them rather than weakening policy to make a demo pass.
+- The preferred browser for the current proof is the user's personal Chrome/profile. A separate profile may be an optional future mode; it is not the requested default. Provider sessions may be required for the current demo; sessionless/background provider execution is later work, not silently assumed done.
+- True cross-provider “call the other agent inside my active session, let it work there, return, review, then resume” is a distinct requirement from simple @mentions. The pill's multi-mention route and web workspace relay already exist in some form, but the live desktop-poll path and that stronger session behavior need separate acceptance.
+- Pill follow-ups include dictation, clear expandable live task/status, durable conversation/task history, readable per-provider cursor identities/colors, and a less cramped task composer. Diffs are a later enhancement. Adaptive/Fitts motion and cursor trail/glow are configured; custom motion/color controls are not accepted.
+- The pill's messaging experience needs a visual and behavior pass: preserve the existing agent logo while presenting agent identity/status more clearly; support useful multi-agent mentions without flooding the pill with repeated prompts or low-value chatter; keep task delivery and completion messages concise and deduplicated. The composer must support desktop-pill dictation.
+- The agent/home view must show live, truthful state sourced from the connected provider session and current process/desktop/window signals: what each agent is doing, the current app or site, and its Windows desktop. A stopped/disconnected agent must not remain labeled “working”; stale or unavailable signals must be shown as unknown/stale rather than invented activity. Selecting an agent should reveal enough task detail to understand its current work.
+- The visual pass should include research into Kyzo's One for interface ideas. Treat it as design research for the later polish pass, not as a dependency for the current runtime fixes.
+- Agent identity proof must stay distinct between public presentation and internal routing: readable provider-facing names/colors (Claude orange, Codex blue, OpenCode green as the current proposal) while preserving unique per-session identity internally. Custom cursor color settings remain a later polish option.
+- CDP should become the primary browser route only after its gaps and extension-only capabilities have an explicit bridge/retention plan. Keep the extension until that proof. C3 remains browser-tab relay; desktop-stage relay is separately gated.
+- The existing rooms, AWARE/network layer, and shared-memory/history work are not safe to remove as cleanup: retirement of rooms was deferred until demo feedback and architecture review. Shared room memory exists, but it is not yet a unified durable cross-provider context/history product.
+- Product wording is not settled consistently: the canonical plan currently says “The multiplayer web for agents”; the user has also defined the product as a multiplayer computer / multiplayer layer, with the pill as its control surface. Do not invent a final tagline. Product naming, the Andrew Chen/Muse material, and the requested Gumloop research belong in the deliberate launch narrative, not in the cursor implementation.
+- Installation has two surfaces today: the standalone Windows installer installs the engine, broker, native host, and desktop pill (sign-in startup is on by default); `npx m9r-cli connect`, `web setup`, and `doctor` configure agent/browser connectivity, and web setup still involves the extension. There is not yet one unified flow that installs and verifies every part. Users can rerun the installer for a published stable release, but the signed update-manifest verifier is not wired into a complete in-app update, rollback, and coordinated-component lifecycle. The local package is not the same as a public release.
+- Public-facing readiness still includes a detailed README, accurate installation guidance, release/update behavior, waitlist copy, Stripe readiness if charging, and a clear open-core/licensing decision before making public promises.
+
+## Test and build evidence
+
+- `npm run typecheck`: passed.
+- Focused desktop/provider/pill/dictation suites: **134 passed, 0 failed**.
+- `npm test`: did not start. Its expanded Windows command exceeds the command-line length limit.
+- A direct Node auto-discovery workaround ran **3,751 tests: 3,725 passed, 22 failed, 4 skipped**. This is not the canonical suite: it auto-ran utility scripts and lacked the TSX loader/importScripts harness that some test files require. It is not a valid “release suite passed” result.
+- Review items surfaced by the broader run: `src/app/api/rooms/[roomId]/memory/route.ts` is outside the public-error test's reviewed list. Inspection shows that route returns a typed `AgentJoinError` message and a generic response for unknown errors; this is an allowlist/review gap, not a verified raw exception leak. The test should document that reviewed public-error path. `20261002010000_agent_run_settings.sql` creates a policy without the required immediately preceding matching drop, so the migration is not safely repeatable under this repo's SQL check. The CLI package-metadata test expects the old two-file npm allowlist; the current package also includes required third-party notices/licenses, so update the test rather than removing those files. Several other failures are stale static source expectations or test-harness/environment failures and need triage rather than being counted automatically as product defects.
+- Four tests were skipped for the host's Chromium renderer failure (`0xC000001D`) or unavailable Windows Restart Manager. A browser behavior pass on this host is therefore not established.
+
+## Cleanup inventory — original audit classification
+
+### Keep
+
+- The five canonical installed runtime components under `%USERPROFILE%\.m9r\bin`, their matching manifest, and any `.m9r-retired-*` image still referenced by the manifest or mapped by a running process. The global runtime path is intentional; it is not the user's project root.
+- The latest known-good rollback package and latest cursor/Stage evidence until the current failure order is repaired and re-proven.
+- The current plan, Stage acceptance, provider matrix, current 2026-10-07 delivery handoff, and the owner's research/video attachments.
+- The packaged third-party notices and license files. Product branding can stay M9R; required attribution for redistributed MIT components is not disposable clutter.
+
+### Candidates identified at audit time (some handled in the follow-through above)
+
+- Four ignored root-level `.exe` build copies (about 190 MB total) are older than the installed package and are not used by the release packaging path. Remove only after confirming no script or active process points at them.
+- The global runtime folder contains roughly 1.93 GB across canonical files, old backups, and retired images. The canonical files are required; old `.backup-*`, `.old*`, `.prev.exe`, and similar unmanifested copies are candidates after preserving one rollback set. Do not manually remove manifest-listed retired files while a process may still have them loaded; the installer has deferred cleanup for those.
+- `.workcache` contains repeated proof/build folders. Keep one latest passing result and the failure evidence needed for the next diagnosis; prune repeated stale runs only after a compact audit record is saved. Do not bulk-delete the cache.
+- There are 52 ignored root-level `M9R*.md` notes and no exact byte-for-byte duplicates. They are private working notes, not public release files. Archive or reconcile the clearly superseded 2026-09-23 demo/master plans (they say desktop apps are out of scope); preserve older research until its still-open findings have been merged into the current plan.
+
+### Do not misclassify as duplication
+
+- The observed single broker, single pill, and three engine processes had distinct roles (feed watcher and provider MCP connections); they were not three duplicate engine installations. Fourteen Chrome child processes are normal Chromium multi-process structure. Do not kill these based on count alone.
+- The OpenCode plugin installed under the user's configuration path could not be read in this audit sandbox. Source behavior is verified; the exact installed plugin hash/version and active OpenCode session were not. Do not claim a live provider fix until those are checked through an allowed owner-session path.
+
+## Next checkpoint transition
+
+The once-only delivery fix and current-broker verification are now complete; the safe generated-file cleanup is recorded above. Continue with the six-step cursor order and update this checkpoint with exact live evidence. Keep C15 optional. Do not claim demo readiness until the ordered live gates pass.

@@ -14,7 +14,6 @@ import {
   ownedBrowserLaunch,
   readApprovedStageApp,
   resolveUnlistedStageApp,
-  selectExistingPersonalBrowserWindow,
   selectPersonalBrowserWindow,
   stageBrowserKind,
   type ApprovedStageApp,
@@ -35,7 +34,9 @@ export type TaskStageAccessMode = "full" | "scoped" | "request";
 const ACCESS_MODES: readonly TaskStageAccessMode[] = ["full", "scoped", "request"];
 
 function stageMode(value: unknown): TaskStageMode {
-  return value === "owner-preview" ? "owner-preview" : "background";
+  if (value === undefined || value === "owner-preview") return "owner-preview";
+  if (value === "background") return "background";
+  throw new Error("Invalid task stage mode.");
 }
 
 export function setTaskStagePermission(root: string, handle: string, enabled: boolean, context: { terminal: boolean; env: Record<string, string | undefined> }, control = false, mode?: TaskStageAccessMode) {
@@ -176,7 +177,7 @@ export function createTaskDesktopStageService(input: {
     return `${normalizeHandle(identity.handle)}\0${identity.sessionId}`;
   }
 
-  function authorize(token: string, taskId: string, mode: TaskStageMode = "background") {
+  function authorize(token: string, taskId: string, mode: TaskStageMode) {
     if (isAgentContext(stageDeps.env ?? process.env)) {
       throw new Error("Task stages require the owner-launched M9R broker; an agent process cannot host this service.");
     }
@@ -203,7 +204,7 @@ export function createTaskDesktopStageService(input: {
     return { identity, task, name, mode };
   }
 
-  async function prepare(token: string, taskId: string, requestedMode: TaskStageMode = "background") {
+  async function prepare(token: string, taskId: string, requestedMode?: TaskStageMode) {
     const mode = stageMode(requestedMode);
     const run = async () => {
       const { name, identity } = authorize(token, taskId, mode);
@@ -214,23 +215,25 @@ export function createTaskDesktopStageService(input: {
         if (existing) await manager.inspectStage(name);
         else await manager.create(name);
         assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
-      } else if (existing) {
-        const inspected = await manager.inspectStage(name);
-        if (!inspected.desktop.isCurrent) throw new Error("The owner-visible preview stage is not on the owner's current desktop.");
+      } else {
+        // Owner preview is desktop-wide, follows the desktop the user is
+        // viewing now, and detaches only stale registry HWND metadata. It never
+        // creates, activates, moves, or closes a desktop or user window.
+        await manager.adoptCurrentDesktop(name);
         assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
       }
       // Return opaque coordination IDs only, never desktop GUIDs or owner-window identifiers.
       return { name, mode, agent: normalizeHandle(identity.handle), sessionTag, taskId, hasAnchor: Boolean(assignedStage?.anchor),
-        ...(assignedStage ? { roomDesktopId: assignedStage.roomDesktopId } : {}),
+        ...(mode === "background" && assignedStage ? { roomDesktopId: assignedStage.roomDesktopId } : {}),
         controlEnabled: readPolicy().controlHandles?.includes(normalizeHandle(identity.handle)) === true,
-        approvedApps: listApprovedStageApps(root) };
+        ...(mode === "background" ? { approvedApps: listApprovedStageApps(root) } : {}) };
     };
     const result = pending.then(run, run);
     pending = result.catch(() => undefined);
     return result;
   }
 
-  async function act(token: string, taskId: string, value: unknown, requestedMode: TaskStageMode = "background") {
+  async function act(token: string, taskId: string, value: unknown, requestedMode?: TaskStageMode) {
     const mode = stageMode(requestedMode);
     const action = parseTaskStageAction(value);
     const run = async () => {
@@ -241,11 +244,13 @@ export function createTaskDesktopStageService(input: {
       // Recheck after inspection and at dequeue time: queued work cannot survive revocation.
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-      if (action.kind === "click") await moneyGate(name, identity, action.x, action.y);
+      if (action.kind === "click" || action.kind === "double_click" || action.kind === "right_click") {
+        await moneyGate(name, identity, action.x, action.y, mode);
+      }
       // The approval wait above can outlast a revocation: recheck before anything executes.
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-      const result = await runTaskStageAction(driver, name, action, identity);
+      const result = await runTaskStageAction(driver, name, action, identity, mode);
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
       return result;
@@ -260,10 +265,12 @@ export function createTaskDesktopStageService(input: {
    * owner, no matter what standing approvals exist. Anything else proceeds to the normal action path.
    * Fail-closed when the target cannot be described: an unidentified control is never assumed harmless.
    */
-  async function moneyGate(name: string, identity: { handle: string; sessionId: string; provider: string }, x: number, y: number): Promise<void> {
+  async function moneyGate(name: string, identity: { handle: string; sessionId: string; provider: string }, x: number, y: number, mode: TaskStageMode): Promise<void> {
     let described;
     try {
-      described = await driver.describeTarget(name, x, y, identity);
+      described = mode === "owner-preview"
+        ? await driver.describeDesktopTarget(name, x, y, identity)
+        : await driver.describeTarget(name, x, y, identity);
     } catch (error) {
       // No registered window means the click itself will fail below with the anchor error; anything
       // else (unreadable snapshot, missing accessibility tree) holds for the owner instead of guessing.
@@ -288,11 +295,14 @@ export function createTaskDesktopStageService(input: {
     if (!approved) throw new Error(`The owner did not approve clicking ${target}; the action was not sent. Ask them to approve it in the pill, then try again.`);
   }
 
-  async function launch(token: string, taskId: string, appId: string, requestedMode: TaskStageMode = "background") {
+  async function launch(token: string, taskId: string, appId: string, requestedMode?: TaskStageMode) {
     const mode = stageMode(requestedMode);
     const run = async () => {
       const { name, identity } = authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
+      if (mode === "owner-preview") {
+        throw new Error("Owner preview controls the desktop already on screen. Open apps through their visible desktop icon, taskbar, or Start menu with m9r_stage_action; it does not launch a separate app window.");
+      }
       const target = resolveLaunchTarget(root, readPolicy(), identity.handle, appId);
       let approved: ApprovedStageApp;
       if (!target.needsApproval) {
@@ -332,23 +342,17 @@ export function createTaskDesktopStageService(input: {
         }
         ownedApps.delete(name);
       }
-      if (mode === "background" && !manager.list().some((stage) => stage.name === name)) await manager.create(name);
+      if (!manager.list().some((stage) => stage.name === name)) await manager.create(name);
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
       const browserKind = stageBrowserKind(approved.executable);
       const personalBrowser = browserKind !== undefined && browserLaunchMode === "personal";
-      const existingPersonalBrowser = personalBrowser && mode === "owner-preview"
-        ? selectExistingPersonalBrowserWindow(browserKind!, await driver.listVisibleWindows({ onScreenOnly: true }))
+      const beforeBrowserWindows = personalBrowser
+        ? new Set((await driver.listVisibleWindows({ onScreenOnly: false })).map((window) => `${window.pid}:${window.windowId}`))
         : undefined;
-      const beforeBrowserWindows = personalBrowser && !existingPersonalBrowser
-        ? new Set((await driver.listVisibleWindows({ onScreenOnly: mode === "owner-preview" })).map((window) => `${window.pid}:${window.windowId}`))
-        : undefined;
-      const child = existingPersonalBrowser
-        ? undefined
-        : launchApprovedStageApp(ownedBrowserLaunch(root, name, approved, { mode: browserLaunchMode }), { windowsHide: mode !== "owner-preview" });
+      const child = launchApprovedStageApp(ownedBrowserLaunch(root, name, approved, { mode: browserLaunchMode }), { windowsHide: true });
       let spawnError: Error | undefined;
       child?.on("error", (error) => { spawnError = error; });
-      let adoptedPersonalBrowser = Boolean(existingPersonalBrowser);
       try {
         for (let attempt = 0; attempt < 40; attempt++) {
           authorize(token, taskId, mode);
@@ -357,27 +361,24 @@ export function createTaskDesktopStageService(input: {
           // handing the request to the already-running browser process. The
           // Cua window list, not that transient PID, is the ownership proof.
           const processPid = child?.pid;
-          if (!adoptedPersonalBrowser && (!child || spawnError || child.killed || !processPid || (!personalBrowser && child.exitCode !== null))) {
+          if (!child || spawnError || child.killed || !processPid || (!personalBrowser && child.exitCode !== null)) {
             throw new Error("The approved app did not start a persistent owned process.");
           }
-          let selectedPid = existingPersonalBrowser?.pid ?? child?.pid;
-          let selectedWindowId: string | undefined = existingPersonalBrowser?.windowId;
+          let selectedPid = child.pid;
+          let selectedWindowId: string | undefined;
           let candidateWindows: Array<{ pid: number; windowId: string; title?: string; width?: number; height?: number }>;
           if (personalBrowser) {
-            const candidate = existingPersonalBrowser ?? selectPersonalBrowserWindow(browserKind!, await driver.listVisibleWindows({ onScreenOnly: mode === "owner-preview" }), beforeBrowserWindows!);
+            const candidate = selectPersonalBrowserWindow(browserKind!, await driver.listVisibleWindows({ onScreenOnly: false }), beforeBrowserWindows!);
             if (!candidate) {
               await delay(100);
               continue;
             }
-            adoptedPersonalBrowser = true;
             selectedPid = candidate.pid;
             selectedWindowId = candidate.windowId;
             candidateWindows = [candidate];
           } else {
             if (!processPid) throw new Error("The approved app did not expose a process id.");
-            candidateWindows = mode === "owner-preview"
-              ? await manager.listOwnedWindowsForProcess(processPid)
-              : await manager.listOwnedWindows(name, processPid);
+            candidateWindows = await manager.listOwnedWindows(name, processPid);
           }
           if (candidateWindows.length > 1) throw new Error("The approved app has multiple candidate windows; owner selection is required.");
           if (candidateWindows.length === 1) {
@@ -386,46 +387,12 @@ export function createTaskDesktopStageService(input: {
             selectedWindowId = candidateWindows[0]!.windowId;
             if (selectedPid === undefined) throw new Error("The approved app did not expose a process id.");
             const ownedPid = selectedPid;
-            if (mode === "background") await manager.moveOwnedWindow(name, ownedPid, selectedWindowId);
-            if (mode === "owner-preview") {
-              // Windows can enumerate a newly-created top-level HWND before the
-              // shell has attached its virtual-desktop application view.  A
-              // single immediate registration then fails with
-              // "could not read the window's virtual desktop id".  Retry only
-              // that transient readiness boundary; all other errors remain
-              // fail-closed and are reported immediately.
-              let registered = false;
-              let lastRegistrationError: unknown;
-              for (let attempt = 0; attempt < 20; attempt++) {
-                try {
-                  await manager.register(name, String(ownedPid), selectedWindowId);
-                  registered = true;
-                  break;
-                } catch (error) {
-                  lastRegistrationError = error;
-                  const detail = error instanceof Error ? error.message : String(error);
-                  if (!detail.includes("could not read the window's virtual desktop id")
-                    && !detail.includes("could not check the window's current virtual desktop")) {
-                    throw error;
-                  }
-                  await delay(100);
-                }
-              }
-              if (!registered) throw lastRegistrationError instanceof Error
-                ? lastRegistrationError
-                : new Error("Windows did not expose the owner-preview window's virtual desktop view in time.");
-              const preview = await manager.inspectStage(name);
-              if (!preview.desktop.isCurrent) {
-                manager.clearOwnedAnchor(name, ownedPid, selectedWindowId);
-                throw new Error("The approved app did not open on the owner's current desktop for the preview stage.");
-              }
-              const sessionTag = createHash("sha256").update(`${normalizeHandle(identity.handle)}\0${identity.sessionId}`).digest("hex").slice(0, 8);
-              await manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
-            } else await manager.attachWindow(name, String(ownedPid), selectedWindowId);
+            await manager.moveOwnedWindow(name, ownedPid, selectedWindowId);
+            await manager.attachWindow(name, String(ownedPid), selectedWindowId);
             try {
               authorize(token, taskId, mode);
               if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-              if (mode === "background") await manager.showOwnedWindow(name);
+              await manager.showOwnedWindow(name);
               authorize(token, taskId, mode);
               if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
             }
@@ -446,14 +413,14 @@ export function createTaskDesktopStageService(input: {
           ? `Personal ${browserKind === "chrome" ? "Chrome" : "Edge"} did not expose a new task window; the existing personal window was left untouched.`
           : "The app exposes no supported exact-process window; it requires an app-specific launch adapter.");
       } catch (error) {
-        if (!adoptedPersonalBrowser && child && child.exitCode === null && !child.killed) child.kill();
+        if (child && child.exitCode === null && !child.killed) child.kill();
         throw error;
       }
     };
     const result = pending.then(run, run); pending = result.catch(() => undefined); return result;
   }
 
-  async function closeApp(token: string, taskId: string, requestedMode: TaskStageMode = "background") {
+  async function closeApp(token: string, taskId: string, requestedMode?: TaskStageMode) {
     const mode = stageMode(requestedMode);
     const run = async () => {
       const { name } = authorize(token, taskId, mode);

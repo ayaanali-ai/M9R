@@ -232,7 +232,7 @@ test("Claude Code sessions come from Claude's own registry: open ones show as op
   assert.equal(claude?.sessions[0].cwd, "C:/demo", "the working session's folder is shown first");
 });
 
-test("work under way is listed so a pause reads as progress: queued, waiting for the next prompt, working; answered or failed ones are not", () => {
+test("delivery is distinguished from provider activity; queued and waiting tasks do not claim a live turn", () => {
   const f = buildFeed(input({ tasks: [
     task({ id: "T1", createdAt: "2026-09-20T11:59:00Z", delivery: { state: "queued", attempts: 1, threadId: S1, queuedAt: "2026-09-20T11:59:02Z" } }),
     task({ id: "T2", from: "codex", to: "claude", createdAt: "2026-09-20T11:59:10Z" }),
@@ -241,5 +241,18 @@ test("work under way is listed so a pause reads as progress: queued, waiting for
     task({ id: "T5", createdAt: "2026-09-20T11:59:40Z", delivery: { state: "failed", attempts: 1, error: "no session" } }),
     task({ id: "T6", createdAt: "2026-09-20T08:00:00Z" }),
   ] }), null);
-  assert.deepEqual(f.inProgress.map((p) => [p.taskId, p.state]), [["T3", "working"], ["T2", "waiting_prompt"], ["T1", "queued"]]);
+  assert.deepEqual(f.inProgress.map((p) => [p.taskId, p.state]), [["T3", "waiting_prompt"], ["T2", "waiting_prompt"], ["T1", "queued"]]);
+});
+
+test("an unconfirmed OpenCode delivery ages into an explicit uncertain state and is never shown as active work", () => {
+  const f = buildFeed(input({
+    now: new Date("2026-09-20T12:02:00Z"),
+    tasks: [task({ id: "T8", createdAt: "2026-09-20T12:00:00Z", delivery: {
+      state: "sending", attempts: 1, threadId: "opencode-session", claimedAt: "2026-09-20T12:00:30Z",
+    } })],
+  }), null);
+  assert.deepEqual(f.inProgress, []);
+  const uncertain = f.needsYou.find((item) => item.taskId === "T8");
+  assert.equal(uncertain?.kind, "delivery_uncertain");
+  if (uncertain?.kind === "delivery_uncertain") assert.match(uncertain.reason, /will not resend/i);
 });

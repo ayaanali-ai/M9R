@@ -155,6 +155,12 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             }
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
+        Some("currentDesktop") => match current_desktop() {
+            Ok(desktop) => {
+                json!({ "ok": true, "requestId": request_id, "desktop": desktop_to_json(desktop) })
+            }
+            Err(error) => json!({ "ok": false, "requestId": request_id, "error": error }),
+        },
         Some("createDesktop") => match create_desktop() {
             Ok(desktop) => {
                 json!({ "ok": true, "requestId": request_id, "desktop": desktop_to_json(desktop) })
@@ -240,6 +246,16 @@ fn create_desktop() -> Result<DesktopInfo, &'static str> {
 
 #[cfg(not(windows))]
 fn create_desktop() -> Result<DesktopInfo, &'static str> {
+    Err("Windows virtual desktop control is available only on Windows")
+}
+
+#[cfg(windows)]
+fn current_desktop() -> Result<DesktopInfo, &'static str> {
+    platform::current_desktop()
+}
+
+#[cfg(not(windows))]
+fn current_desktop() -> Result<DesktopInfo, &'static str> {
     Err("Windows virtual desktop control is available only on Windows")
 }
 
@@ -1060,6 +1076,17 @@ mod platform {
             desktop_id: created_id,
             is_current: false,
             return_desktop_id: Some(original),
+        })
+    }
+
+    /// Reads the active Windows desktop without creating or activating one.
+    pub(super) fn current_desktop() -> Result<DesktopInfo, &'static str> {
+        let _apartment = ComApartment::initialize()?;
+        let manager = InternalManager::create()?;
+        Ok(DesktopInfo {
+            desktop_id: manager.current_id()?,
+            is_current: true,
+            return_desktop_id: None,
         })
     }
 

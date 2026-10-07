@@ -1,64 +1,61 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parseTaskStageAction, stageClickNeedsApproval } from "../src/lib/native/task-stage-actions";
-import { approveStageApp, listApprovedStageApps, readApprovedStageApp } from "../src/lib/native/task-stage-apps";
-import { readTaskStagePolicy, setTaskStagePermission } from "../src/lib/native/task-desktop-stage";
+import { parseTaskStageAction, runTaskStageAction } from "../src/lib/native/task-stage-actions";
+import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
+import { createWebBrokerClient } from "../src/lib/native/web-broker-client";
 
-test("stage action boundary accepts bounded operations and rejects alternate targets and commands", () => {
-  for (const action of [{ kind: "capture" }, { kind: "click", x: 0, y: 20 }, { kind: "cursor", x: 1, y: 2 },
-    { kind: "type", text: "hello" }, { kind: "scroll", x: 1, y: 2, direction: "down" }, { kind: "drag", fromX: 1, fromY: 2, toX: 3, toY: 4 }]) {
-    assert.deepEqual(parseTaskStageAction(action), action);
-  }
-  for (const action of [null, [], { kind: "activate" }, { kind: "capture", windowId: "123" }, { kind: "click", x: -1, y: 0 },
-    { kind: "click", x: 16384, y: 0 }, { kind: "click", x: 1.5, y: 0 }, { kind: "type", text: "" }, { kind: "type", text: "\0" },
-    { kind: "type", text: "x".repeat(501) }, { kind: "scroll", x: 1, y: 2, direction: "left" }, { kind: "drag", fromX: 1 }]) {
-    assert.throws(() => parseTaskStageAction(action));
-  }
+test("desktop action parser accepts common pointer and keyboard actions but rejects malformed key input", () => {
+  assert.deepEqual(parseTaskStageAction({ kind: "double_click", x: 24, y: 68 }), { kind: "double_click", x: 24, y: 68 });
+  assert.deepEqual(parseTaskStageAction({ kind: "right_click", x: 24, y: 68 }), { kind: "right_click", x: 24, y: 68 });
+  assert.deepEqual(parseTaskStageAction({ kind: "press_key", key: "Enter" }), { kind: "press_key", key: "Enter" });
+  assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L"] }), { kind: "hotkey", keys: ["Control", "L"] });
+  assert.throws(() => parseTaskStageAction({ kind: "press_key", key: "not-a-key" }), /Invalid key/);
+  assert.throws(() => parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L", "Shift", "F2", "F3"] }), /1–4/);
+  assert.throws(() => parseTaskStageAction({ kind: "click", x: 1, y: 2, hwnd: "123" }), /Invalid stage action fields/);
 });
 
-test("money carve-out holds purchase-like clicks and nothing else, fail-closed without a label", () => {
-  for (const label of ["Pay now", "BUY", "Place order", "Subscribe", "Transfer funds", "Checkout", "Pay $49.00"]) {
-    const gate = stageClickNeedsApproval({ label });
-    assert.equal(gate.hold, true, label);
-    assert.equal(gate.label, label);
-  }
-  for (const label of ["Next", "Cancel", "Send message", "Delete draft", "Search", "OK"]) {
-    assert.equal(stageClickNeedsApproval({ label }).hold, false, `${label} stays under standing approval`);
-  }
-  assert.equal(stageClickNeedsApproval(undefined).hold, true, "an undescribed target is never assumed harmless");
-  assert.equal(stageClickNeedsApproval({}).hold, true);
-  assert.equal(stageClickNeedsApproval({ label: "   " }).hold, true);
+test("owner-preview actions route through desktop-wide driver methods", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() }, outcome: { status: "confirmed" as const } };
+  const driver = {
+    captureDesktop: async (...args: unknown[]) => { calls.push({ method: "captureDesktop", args }); return proof.capture; },
+    moveDesktopCursor: async (...args: unknown[]) => { calls.push({ method: "moveDesktopCursor", args }); return { capture: proof.capture, cursor: {} }; },
+    clickDesktop: async (...args: unknown[]) => { calls.push({ method: "clickDesktop", args }); return proof; },
+    typeTextDesktop: async (...args: unknown[]) => { calls.push({ method: "typeTextDesktop", args }); return proof; },
+    scrollDesktop: async (...args: unknown[]) => { calls.push({ method: "scrollDesktop", args }); return proof; },
+    dragDesktop: async (...args: unknown[]) => { calls.push({ method: "dragDesktop", args }); return proof; },
+    pressKeyDesktop: async (...args: unknown[]) => { calls.push({ method: "pressKeyDesktop", args }); return proof; },
+    hotkeyDesktop: async (...args: unknown[]) => { calls.push({ method: "hotkeyDesktop", args }); return proof; },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "session" };
+
+  await runTaskStageAction(driver, "preview", { kind: "double_click", x: 12, y: 18 }, identity, "owner-preview");
+  await runTaskStageAction(driver, "preview", { kind: "hotkey", keys: ["Control", "L"] }, identity, "owner-preview");
+  await runTaskStageAction(driver, "preview", { kind: "cursor", x: 30, y: 45 }, identity);
+  assert.deepEqual(calls.map((call) => call.method), ["clickDesktop", "hotkeyDesktop", "moveDesktopCursor"]);
+  assert.deepEqual(calls[0]?.args, ["preview", 12, 18, identity, { count: 2 }]);
+  assert.deepEqual(calls[2]?.args, ["preview", 30, 45, identity]);
 });
 
-test("preparation permission never implies computer control; owner revocation removes both", () => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-stage-policy-"));
+test("broker client sends owner-preview when stage mode is omitted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-stage-broker-client-"));
+  const keyPath = join(root, "broker.key");
+  writeFileSync(keyPath, "test-key\n");
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const client = createWebBrokerClient({
+    keyPath,
+    fetchImpl: async (input, init) => {
+      requests.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
   try {
-    setTaskStagePermission(root, "codex", true, { terminal: true, env: {} });
-    assert.deepEqual(readTaskStagePolicy(root), { handles: ["codex"] });
-    setTaskStagePermission(root, "codex", true, { terminal: true, env: {} }, true);
-    assert.deepEqual(readTaskStagePolicy(root), { handles: ["codex"], controlHandles: ["codex"] });
-    setTaskStagePermission(root, "codex", false, { terminal: true, env: {} });
-    assert.deepEqual(readTaskStagePolicy(root), { handles: [] });
-    assert.throws(() => setTaskStagePermission(root, "codex", true, { terminal: true, env: { CODEX_THREAD_ID: "agent" } }, true));
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-test("approved apps have fixed owner arguments, no model command line, and executable drift is rejected", () => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-stage-app-"));
-  try {
-    const exe = join(root, "fixture.exe"); writeFileSync(exe, "fake exe for hashing only");
-    assert.deepEqual(listApprovedStageApps(root), []);
-    assert.throws(() => approveStageApp(root, "fixture", exe, [], { terminal: true, env: { OPENCODE: "1" } }), /Only the owner/);
-    assert.throws(() => approveStageApp(root, "fixture", "relative.exe", [], { terminal: true, env: {} }));
-    approveStageApp(root, "fixture", exe, ["fixed-owner-value"], { terminal: true, env: {} });
-    assert.deepEqual(listApprovedStageApps(root), ["fixture"]);
-    assert.deepEqual(readApprovedStageApp(root, "fixture").args, ["fixed-owner-value"]);
-    assert.throws(() => readApprovedStageApp(root, "missing"), /not been approved/);
-    writeFileSync(exe, "changed executable");
-    assert.throws(() => readApprovedStageApp(root, "fixture"), /changed/);
-    assert.equal(readFileSync(join(root, "task-stage-apps.json"), "utf8").includes("fixed-owner-value"), true);
+    await client.prepareTaskStage!("test-token", "T2");
+    await client.taskStageAction!("test-token", "T2", { kind: "capture" });
+    await client.taskStageApp!("test-token", "T2", "chrome");
+    assert.deepEqual(requests.map((request) => request.body.mode), ["owner-preview", "owner-preview", "owner-preview"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -24,7 +24,8 @@ export type BotStateName =
   | "error"
   | "finished"
   | "ratelimit"
-  | "sleeping";
+  | "sleeping"
+  | "unknown";
 
 export type AgentLayoutMode = "none" | "grid" | "pills" | "column";
 
@@ -139,6 +140,8 @@ export function botGlowColor(s: BotStateName): string {
       return "#34D399";
     case "ratelimit":
       return "#F59E0B";
+    case "unknown":
+      return "#9AA1AC";
     default:
       return "#FFFFFF";
   }
@@ -148,6 +151,7 @@ export function botGlowOpacity(s: BotStateName): number {
   switch (s) {
     case "idle":
     case "sleeping":
+    case "unknown":
       return 0.15;
     default:
       return 0.65;

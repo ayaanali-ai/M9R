@@ -204,8 +204,9 @@ test("OpenCode polling pushes only an approved, fresh task into its exact authen
   assert.equal(envelope.prompt.startsWith("[M9R T1]\n"), true);
   assert.match(envelope.prompt, /review the shared change/);
   assert.match(envelope.prompt, new RegExp(identity.token));
-  assert.equal(store.getTask(pinned.id)?.delivery, undefined, "offering a task is not proof OpenCode accepted it");
-  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), 0);
+  assert.equal(store.getTask(pinned.id)?.delivery?.state, "sending", "the durable claim prevents a second prompt while acceptance is unconfirmed");
+  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pinned.seq);
+  assert.equal(poll(), null, "an unacknowledged offer is still delivered at most once");
   assert.equal(poll("different-session"), null, "a pinned task never leaks into another OpenCode session");
 
   const ack = handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "oc-1", cwd: "C:/repo", task_id: pinned.id }, context);
@@ -222,9 +223,9 @@ test("OpenCode polling pushes only an approved, fresh task into its exact authen
   assert.equal(approved.task_id, pending.id);
   assert.match(approved.prompt, /publish the announcement/);
 
-  // A normal user prompt must not consume or cursor past work before the live task pump receives it.
+  // The dedicated task pump owns the cursor once it claims a task; an unrelated provider prompt does not.
   assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "oc-1", cwd: "C:/repo", prompt: "ordinary prompt" }, context), null);
-  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pinned.seq);
+  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pending.seq);
   done();
 });
 
@@ -518,6 +519,23 @@ test("hook failures are silent: a broken store or unknown event prints nothing a
   assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "@codex hi" }, ctx(broken)), null);
   assert.equal(handleHookEvent({ hook_event_name: "PostToolUse" }, ctx(store)), null);
   assert.equal(handleHookEvent({}, ctx(store)), null);
+  done();
+});
+
+test("stale OpenCode PostToolUse hook registrations cannot inject the same task on every tool call", () => {
+  const { store, done } = tempStore();
+  store.registerEndpoint({ provider: "opencode", sessionId: "oc-1", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "oc-1");
+  const { task: pending } = store.addTask({
+    from: "codex", to: "opencode", goal: "inspect this file", origin: "human_typed", cwd: "C:/repo", targetSession: "oc-1", idempotencyKey: "stale-opencode-posttooluse",
+  });
+  const context = { ...ctx(store, "opencode"), now: () => new Date("2026-10-07T12:00:00Z") };
+  const event = { hook_event_name: "PostToolUse", session_id: "oc-1", cwd: "C:/repo", tool_name: "read" };
+  assert.equal(handleHookEvent(event, context), null);
+  assert.equal(handleHookEvent(event, context), null);
+  assert.equal(store.getTask(pending.id)?.delivery, undefined);
+  assert.equal(store.getTask(pending.id)?.deliveredAt, undefined);
+  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), 0);
   done();
 });
 

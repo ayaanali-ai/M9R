@@ -119,7 +119,13 @@ test("installer contains no Node/npm dependency and changes no saved PowerShell 
   assert.match(source, /\[switch\]\$NoAutostart/);
   assert.match(source, /\[switch\]\$NoLaunch/);
   assert.match(source, /function Stop-InstalledM9rPill/);
-  assert.match(source, /Stop-InstalledM9rPill\s*\r?\n\s*& \$engine \@applyArgs/);
+  assert.match(source, /function Invoke-ManagedBrokerUpdate/);
+  assert.match(source, /Invoke-ManagedBrokerUpdate\s+\$engine\s+'stop'[\s\S]*Stop-InstalledM9rPill[\s\S]*& \$engine \@applyArgs/,
+    "updates must authenticate and stop the owned broker before engine setup can replace its runtime image");
+  assert.match(source, /Invoke-ManagedBrokerUpdate\s+\$installedEngine\s+'start'/,
+    "updates must restart and verify the owned broker using the newly installed engine");
+  assert.match(source, /brokerNeedsResume[\s\S]*Invoke-ManagedBrokerUpdate \$brokerResumeEngine 'start'/,
+    "a failed install must attempt to restore the previously managed broker");
   assert.match(source, /Start-Process -FilePath \$installedOverlay/);
   assert.match(source, /--autostart/);
   assert.match(source, /maintenanceExe uninstall/);
@@ -133,6 +139,7 @@ test("standalone release packages the web broker beside the engine", () => {
   const packagerSource = readFileSync(releasePackager, "utf8");
   const installerSource = readFileSync(installer, "utf8");
   const builderSource = readFileSync(engineBuilder, "utf8");
+  const cliSource = readFileSync(resolve("scripts/m9r-cli.ts"), "utf8");
   assert.match(builderSource, /m9r-web-broker\.cjs[\s\S]*m9r-web-broker\.exe/, "the build must turn the bundled broker into its own executable");
   assert.doesNotMatch(builderSource, /rmSync\(out,\s*\{\s*recursive:\s*true/, "the build must preserve other files already in engine/dist");
   assert.match(packagerSource, /m9r-web-broker\.exe/, "the release ZIP must contain the standalone broker");
@@ -144,6 +151,7 @@ test("standalone release packages the web broker beside the engine", () => {
   assert.match(installerSource, /Remove-ManagedWebBroker/, "uninstall must remove only the unchanged installer-owned broker");
   assert.match(installerSource, /web-broker-install\.json/, "the broker ownership record must persist across installer runs");
   assert.match(installerSource, /& \$installedEngine web setup/, "Web setup must resolve its broker beside the persistent engine");
+  assert.match(cliSource, /args\[0\] === "broker-update"/, "the packaged engine must expose the installer's broker lifecycle command");
 });
 
 test("runtime updates replace a Windows-locked engine image without stopping active MCP sessions", () => {

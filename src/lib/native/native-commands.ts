@@ -508,7 +508,7 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
   }
   if (task.to === "codex" && created && canQueue(task)) {
     const outcome = await deliverToCodex(store, task.id, io.codexDeps ?? realDeps(io.env));
-    if (outcome.state === "queued") { io.out(`Sent to @codex as task ${task.id} and pushed into its session; it runs there now. The answer reaches ${task.from === "you" ? "your" : `@${task.from}'s`} inbox.`); return 0; }
+    if (outcome.state === "queued") { io.out(`Sent to @codex as task ${task.id} and accepted by its session. That confirms delivery, not that work has started. The answer reaches ${task.from === "you" ? "your" : `@${task.from}'s`} inbox.`); return 0; }
     if (outcome.state === "failed") { io.out(`Sent to @codex as task ${task.id}, but it could not be pushed: ${outcome.reason}`); io.out("It will show at Codex's next prompt instead."); return 0; }
   }
   io.out(`${created ? "Sent" : "Already sent"} to @${task.to} as task ${task.id}. It appears at that agent's next prompt.`);

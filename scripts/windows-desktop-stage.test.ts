@@ -92,6 +92,34 @@ test("creates a local stage without switching desktops and later activates it ex
   assert.match(readFileSync(join(root, "windows-stages.json"), "utf8"), /"anchor": null/);
 }));
 
+test("owner-preview rebind detaches a stale window and follows the desktop the owner is viewing", async () => withRoot(async (root) => {
+  let currentDesktop = stageDesktop;
+  const requests: Record<string, unknown>[] = [];
+  const manager = createWindowsDesktopStageManager({
+    platform: "win32", root, terminal: true, env: {},
+    invokeNative: async (request) => {
+      requests.push(request);
+      if (request.op === "inspect") return { ok: true, window: { ...anchor, desktopId: stageDesktop, onCurrentDesktop: false } };
+      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentDesktop, isCurrent: true } };
+      if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: true } };
+      throw new Error(`Unexpected native operation: ${String(request.op)}`);
+    },
+  });
+  const original = await manager.register("preview", "4321", anchor.windowId);
+  const assignment = { handle: "codex", sessionTag: "1234abcd" };
+  manager.assignAgent("preview", assignment);
+  currentDesktop = ownerDesktop;
+
+  const rebound = await manager.adoptCurrentDesktop("preview");
+  assert.equal(rebound.desktopId, ownerDesktop);
+  assert.equal(rebound.anchor, null);
+  assert.equal(rebound.roomWindowId, null);
+  assert.equal(rebound.roomDesktopId, original.roomDesktopId, "opaque desktop lease identity remains stable");
+  assert.deepEqual(rebound.agentAssignment, assignment);
+  assert.equal(requests.some((request) => request.op === "move" || request.op === "activateDesktop" || request.op === "close"), false,
+    "rebinding changes only the local mapping and never manipulates the user's desktop or window");
+}));
+
 test("reads v1 stage registries and writes v3 when changed", async () => withRoot(async (root) => {
   const path = join(root, "windows-stages.json");
   writeFileSync(path, JSON.stringify({

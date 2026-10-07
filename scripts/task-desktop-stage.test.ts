@@ -9,33 +9,74 @@ import { resolveUnlistedStageApp } from "../src/lib/native/task-stage-apps";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
 
-function fixture() {
+function fixture(control = false) {
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "session-one");
   const { task } = store.addTask({ from: "you", to: "codex", goal: "Use a stage", origin: "human_typed", idempotencyKey: "stage-one", targetSession: "session-one" });
   let creations = 0;
-  const service = createTaskDesktopStageService({ store, readPolicy: () => ({ handles: ["codex"] }), stage: {
+  const desktopActions: Array<{ kind: string; x?: number; y?: number }> = [];
+  const currentDesktopId = "33333333-3333-4333-8333-333333333333";
+  const previewCapture = { dataUrl: "data:image/png;base64,eA==", width: 1280, height: 720, capturedAt: new Date(0).toISOString() };
+  const driver = {
+    captureDesktop: async () => { desktopActions.push({ kind: "capture" }); return previewCapture; },
+    moveDesktopCursor: async (_name: string, x: number, y: number) => {
+      desktopActions.push({ kind: "cursor", x, y });
+      return { capture: previewCapture, outcome: { status: "confirmed" as const } };
+    },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const service = createTaskDesktopStageService({ store, readPolicy: () => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) }), driver, stage: {
     platform: "win32", env: {}, invokeNative: async (request) => {
+      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentDesktopId, isCurrent: true } };
       if (request.op === "createDesktop") {
         creations++;
         return { ok: true, desktop: { desktopId: "11111111-1111-4111-8111-111111111111", isCurrent: false, returnDesktopId: "22222222-2222-4222-8222-222222222222" } };
       }
-      if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: false } };
+      if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: String(request.desktopId) === currentDesktopId } };
       throw new Error("Unexpected native operation; preparation must not move or activate windows.");
     },
   } });
-  return { root, store, identity, task, service, creations: () => creations, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, store, identity, task, service, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("approved task preparation is idempotent and does not expose desktop GUIDs", async () => {
   const f = fixture();
   try {
-    const [a, b] = await Promise.all([f.service.prepare(f.identity.token, f.task.id), f.service.prepare(f.identity.token, f.task.id)]);
+    const [a, b] = await Promise.all([f.service.prepare(f.identity.token, f.task.id, "background"), f.service.prepare(f.identity.token, f.task.id, "background")]);
     assert.deepEqual(a, b);
     assert.equal(f.creations(), 1);
     assert.equal(JSON.stringify(a).includes("11111111-1111"), false);
     assert.equal(a.hasAnchor, false);
+  } finally { f.cleanup(); }
+});
+
+test("omitted mode stays on the owner's current desktop for preparation and cursor actions", async () => {
+  const f = fixture(true);
+  try {
+    const prepared = await f.service.prepare(f.identity.token, f.task.id);
+    assert.equal(prepared.mode, "owner-preview");
+    assert.match(prepared.name, /^preview-agent-[a-f0-9]{24}$/);
+    assert.equal(f.creations(), 0, "normal task preparation must not create a virtual desktop");
+
+    await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 88, y: 144 });
+    assert.deepEqual(f.desktopActions, [{ kind: "cursor", x: 88, y: 144 }], "an omitted action mode must use the owner-visible desktop driver");
+    assert.equal(f.creations(), 0);
+  } finally { f.cleanup(); }
+});
+
+test("an omitted app launch mode cannot spawn a background app window", async () => {
+  const f = fixture(true);
+  try {
+    await assert.rejects(f.service.launch(f.identity.token, f.task.id, "chrome"), /Owner preview controls the desktop already on screen/);
+    assert.equal(f.creations(), 0, "launch without an explicit background mode must not create a desktop or process");
+  } finally { f.cleanup(); }
+});
+
+test("invalid stage modes fail closed instead of becoming background mode", async () => {
+  const f = fixture();
+  try {
+    await assert.rejects(f.service.prepare(f.identity.token, f.task.id, "unexpected" as never), /Invalid task stage mode/);
+    assert.equal(f.creations(), 0);
   } finally { f.cleanup(); }
 });
 
