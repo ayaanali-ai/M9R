@@ -120,6 +120,33 @@ test("owner-preview rebind detaches a stale window and follows the desktop the o
     "rebinding changes only the local mapping and never manipulates the user's desktop or window");
 }));
 
+test("owner-preview inspection uses the current desktop query and never the private desktop-list API", async () => withRoot(async (root) => {
+  let currentDesktop = stageDesktop;
+  const requests: Record<string, unknown>[] = [];
+  const manager = createWindowsDesktopStageManager({
+    platform: "win32", root, terminal: true, env: {},
+    invokeNative: async (request) => {
+      requests.push(request);
+      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentDesktop, isCurrent: true } };
+      throw new Error(`Owner-preview must not call ${String(request.op)}`);
+    },
+  });
+  const name = "preview-agent-0123456789abcdef01234567";
+  await manager.adoptCurrentDesktop(name);
+  manager.assignAgent(name, { handle: "codex", sessionTag: "1234abcd" });
+
+  assert.deepEqual(await manager.inspectStage(name), {
+    stage: manager.list()[0],
+    desktop: { desktopId: stageDesktop, isCurrent: true },
+  });
+  currentDesktop = ownerDesktop;
+  assert.deepEqual(await manager.inspectStage(name), {
+    stage: manager.list()[0],
+    desktop: { desktopId: stageDesktop, isCurrent: false },
+  });
+  assert.deepEqual(requests.map((request) => request.op), ["currentDesktop", "currentDesktop", "currentDesktop"]);
+}));
+
 test("reads v1 stage registries and writes v3 when changed", async () => withRoot(async (root) => {
   const path = join(root, "windows-stages.json");
   writeFileSync(path, JSON.stringify({

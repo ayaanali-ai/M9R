@@ -9,6 +9,7 @@ import { defaultStoreRoot } from "./local-store";
 const STAGE_REGISTRY_VERSION = 3;
 const MAX_STAGES = 16;
 const MAX_NATIVE_RESPONSE_BYTES = 32 * 1024;
+const OWNER_PREVIEW_STAGE_PREFIX = "preview-agent-";
 const DESKTOP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW_ID_RE = /^(?:0[xX][0-9a-f]+|[0-9]+)$/;
 const MACHINE_ID_FILE = "windows-stage-machine-id";
@@ -386,6 +387,16 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       if (anchor.desktopId !== stage.desktopId) throw new Error(`Stage “${name}” anchor moved to another desktop. The saved mapping was kept; re-register it only after owner review.`);
       return { stage, desktop: { desktopId: anchor.desktopId, isCurrent: anchor.onCurrentDesktop }, anchor };
     }
+    // Owner-preview is a live view of the desktop currently shown to the user.
+    // Its desktop identity is rechecked through the public foreground-window
+    // query; querying the private shell desktop manager here made ordinary
+    // preview actions depend on an unrelated, version-sensitive COM service.
+    if (name.startsWith(OWNER_PREVIEW_STAGE_PREFIX) && stage.agentAssignment) {
+      const current = await invokeNative({ op: "currentDesktop" });
+      if (!current.ok) throw new Error(`The owner's current desktop is unavailable: ${current.error ?? "unknown desktop error"}.`);
+      const desktop = normalizeDesktopInfo(current.desktop);
+      return { stage, desktop: { desktopId: stage.desktopId, isCurrent: desktop.desktopId === stage.desktopId } };
+    }
     const result = await invokeNative({ op: "inspectDesktop", desktopId: stage.desktopId });
     if (!result.ok) throw new Error(`Stage “${name}” is unavailable: ${result.error ?? "unknown desktop error"}. The local mapping was kept.`);
     const desktop = normalizeDesktopInfo(result.desktop);
@@ -619,7 +630,8 @@ function invokeWindowsStageHelper(executable: string, request: Record<string, un
       if (settled) return;
       settled = true;
       child.kill();
-      reject(new Error("The native Windows stage helper timed out."));
+      const operation = typeof request.op === "string" ? request.op : "unknown";
+      reject(new Error(`Native Windows desktop-stage operation “${operation}” timed out after 8 seconds; the helper was terminated.`));
     }, 8_000);
     const finish = (error?: Error, value?: NativeStageResponse) => {
       if (settled) return;

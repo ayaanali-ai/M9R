@@ -464,6 +464,7 @@ mod platform {
     unsafe extern "system" {
         fn IsWindow(window: Hwnd) -> i32;
         fn IsWindowEnabled(window: Hwnd) -> i32;
+        fn GetForegroundWindow() -> Hwnd;
         fn ShowWindow(window: Hwnd, command: i32) -> i32;
         fn EnumWindows(callback: unsafe extern "system" fn(Hwnd, isize) -> i32, parameter: isize) -> i32;
         fn GetWindowTextW(window: Hwnd, buffer: *mut u16, count: i32) -> i32;
@@ -1079,15 +1080,34 @@ mod platform {
         })
     }
 
-    /// Reads the active Windows desktop without creating or activating one.
+    /// Reads the active Windows desktop from the user's foreground window.
+    /// This uses the documented public IVirtualDesktopManager API so the
+    /// owner-preview path does not depend on the private immersive-shell
+    /// service used for creating and switching desktops.
     pub(super) fn current_desktop() -> Result<DesktopInfo, &'static str> {
         let _apartment = ComApartment::initialize()?;
-        let manager = InternalManager::create()?;
-        Ok(DesktopInfo {
-            desktop_id: manager.current_id()?,
-            is_current: true,
-            return_desktop_id: None,
-        })
+        let manager = Manager::create()?;
+        for _ in 0..3 {
+            let window = unsafe { GetForegroundWindow() };
+            if window.is_null() || unsafe { IsWindow(window) } == 0 {
+                continue;
+            }
+            let Ok(desktop_id) = manager.desktop_id(window) else {
+                continue;
+            };
+            let Ok(is_current) = manager.is_on_current_desktop(window) else {
+                continue;
+            };
+            let still_foreground = unsafe { GetForegroundWindow() } == window;
+            if is_current && still_foreground {
+                return Ok(DesktopInfo {
+                    desktop_id,
+                    is_current: true,
+                    return_desktop_id: None,
+                });
+            }
+        }
+        Err("Windows could not stably identify the active desktop from the foreground window")
     }
 
     pub(super) fn inspect_desktop(target: Guid) -> Result<Option<DesktopInfo>, &'static str> {

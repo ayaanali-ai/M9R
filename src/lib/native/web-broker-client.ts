@@ -26,39 +26,79 @@ export interface WebBrokerClientOptions {
   fetchImpl?: typeof fetch;
 }
 
+function stageTransportFailure(error: unknown): string {
+  if (error && typeof error === "object") {
+    const value = error as { name?: unknown; message?: unknown; cause?: { code?: unknown } };
+    if (value.name === "TimeoutError" || value.name === "AbortError") {
+      return "The local M9R desktop-stage request timed out before the broker responded.";
+    }
+    switch (value.cause?.code) {
+      case "ECONNREFUSED": return "The local M9R web broker refused the desktop-stage request.";
+      case "ECONNRESET": return "The local M9R web broker closed the desktop-stage request before replying.";
+      case "EACCES": case "EPERM": return "Windows denied the local desktop-stage broker connection.";
+    }
+    if (typeof value.message === "string" && value.message.trim()) {
+      return `The local M9R desktop-stage request failed: ${value.message.trim().slice(0, 180)}`;
+    }
+  }
+  return "The local M9R desktop-stage request failed with an unknown transport error.";
+}
+
+async function taskStageRequest<T extends { ok: boolean; error?: string }>(input: {
+  fetchImpl: typeof fetch;
+  keyPath: string;
+  url: string;
+  body: Record<string, unknown>;
+  timeoutMs: number;
+}): Promise<T> {
+  let key: string;
+  try {
+    key = readFileSync(input.keyPath, "utf8").trim();
+  } catch {
+    return { ok: false, error: "The local M9R desktop-stage broker key could not be read." } as T;
+  }
+  let response: Response;
+  try {
+    response = await input.fetchImpl(input.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-m9r-key": key },
+      body: JSON.stringify(input.body),
+      signal: AbortSignal.timeout(Math.max(1, Math.min(input.timeoutMs, 15_000))),
+    });
+  } catch (error) {
+    return { ok: false, error: stageTransportFailure(error) } as T;
+  }
+  let result: unknown;
+  try {
+    result = await response.json();
+  } catch {
+    return { ok: false, error: `The local M9R web broker returned invalid JSON (HTTP ${response.status}).` } as T;
+  }
+  if (!result || typeof result !== "object" || typeof (result as { ok?: unknown }).ok !== "boolean") {
+    return { ok: false, error: `The local M9R web broker returned an invalid stage response (HTTP ${response.status}).` } as T;
+  }
+  if (!response.ok && (result as { ok: boolean }).ok) {
+    return { ok: false, error: `The local M9R web broker rejected the stage request (HTTP ${response.status}).` } as T;
+  }
+  return result as T;
+}
+
 export function createWebBrokerClient(options: WebBrokerClientOptions): WebBrokerClient {
   const doFetch = options.fetchImpl ?? fetch;
   const baseUrl = `http://127.0.0.1:${options.port ?? DEFAULT_BROKER_PORT}`;
   return {
     async taskStageApp(token, taskId, appId, mode = "owner-preview") {
-      try {
-        const key = readFileSync(options.keyPath, "utf8").trim();
-        const response = await doFetch(`${baseUrl}/web/stage/${appId === undefined ? "close" : "launch"}`, {
-          method: "POST", headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify({ token, taskId, mode, ...(appId === undefined ? {} : { appId }) }), signal: AbortSignal.timeout(15_000),
-        });
-        return await response.json() as { ok: boolean; result?: unknown; error?: string };
-      } catch { return { ok: false, error: "The owner-launched stage broker is not reachable." }; }
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath,
+        url: `${baseUrl}/web/stage/${appId === undefined ? "close" : "launch"}`,
+        body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }) }, timeoutMs: 15_000 });
     },
     async taskStageAction(token, taskId, action, mode = "owner-preview") {
-      try {
-        const key = readFileSync(options.keyPath, "utf8").trim();
-        const response = await doFetch(`${baseUrl}/web/stage/action`, {
-          method: "POST", headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify({ token, taskId, action, mode }), signal: AbortSignal.timeout(15_000),
-        });
-        return await response.json() as { ok: boolean; result?: unknown; error?: string };
-      } catch { return { ok: false, error: "The owner-launched stage broker is not reachable." }; }
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, url: `${baseUrl}/web/stage/action`,
+        body: { token, taskId, action, mode }, timeoutMs: 15_000 });
     },
     async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000) {
-      try {
-        const key = readFileSync(options.keyPath, "utf8").trim();
-        const response = await doFetch(`${baseUrl}/web/stage/prepare`, {
-          method: "POST", headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify({ token, taskId, mode }), signal: AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, 15_000))),
-        });
-        return await response.json() as { ok: boolean; stage?: unknown; error?: string };
-      } catch { return { ok: false, error: "The owner-launched stage broker is not reachable." }; }
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, url: `${baseUrl}/web/stage/prepare`,
+        body: { token, taskId, mode }, timeoutMs });
     },
     async run(request) {
       let key: string;
