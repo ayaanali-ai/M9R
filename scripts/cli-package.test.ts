@@ -137,10 +137,18 @@ test("built entry has the correct shebang and a relative core import", () => {
   assert.ok(existsSync(resolve(distDir, "oathlock-cli-core.js")));
   assert.equal(compatibilityEntry, entry, "legacy oathlock entry must remain the same compiled CLI");
   assert.ok(existsSync(resolve(distDir, "adapter-contract.js")));
+  assert.ok(existsSync(resolve(distDir, "broker-update-record.js")), "the CLI broker updater must ship its BOM-compatible ownership-record parser");
   assert.ok(existsSync(resolve(distDir, "agent-task-routing.js")));
   assert.ok(existsSync(resolve(distDir, "opencode-capture-backfill-core.js")));
   assert.ok(!readFileSync(resolve(distDir, "resident-provider-adapters.js"), "utf8").includes("@/lib/"));
   assert.ok(!readFileSync(resolve(distDir, "oathlock-resident-core.js"), "utf8").includes("@/lib/"));
+});
+
+test("packaged broker updater parses both legacy BOM and BOM-free ownership records", async () => {
+  const { parseBrokerUpdateRecord } = await import(pathToFileURL(resolve(distDir, "broker-update-record.js")).href);
+  const expected = { version: 1, path: "C:/Users/test/.m9r/bin/m9r-web-broker.exe" };
+  assert.deepEqual(parseBrokerUpdateRecord(Buffer.from(JSON.stringify(expected), "utf8"), "web broker install"), expected);
+  assert.deepEqual(parseBrokerUpdateRecord(Buffer.from(`\uFEFF${JSON.stringify(expected)}`, "utf8"), "web broker install"), expected);
 });
 
 test("built MCP package includes the web broker, turn scheduler, powers, and page-notes runtime dependencies", () => {

@@ -241,7 +241,9 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
     assert.ok(existsSync(installedBroker));
     assert.deepEqual(readFileSync(installedBroker), readFileSync(join(engineDist, "m9r-web-broker.exe")));
     const brokerOwnershipPath = join(profile.m9rHome, "web-broker-install.json");
-    const brokerOwnership = JSON.parse(readFileSync(brokerOwnershipPath, "utf8"));
+    const brokerOwnershipBytes = readFileSync(brokerOwnershipPath);
+    assert.equal(brokerOwnershipBytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])), false, "the broker ownership JSON must be UTF-8 without a BOM so Node can parse it");
+    const brokerOwnership = JSON.parse(brokerOwnershipBytes.toString("utf8"));
     // Windows may spell the same file differently when it uses an 8.3 account alias.
     // Resolve both paths through the OS before comparing their identities.
     assert.equal(canonicalPath(brokerOwnership.path), canonicalPath(installedBroker));

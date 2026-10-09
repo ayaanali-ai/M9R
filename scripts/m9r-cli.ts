@@ -74,6 +74,7 @@ import {
   type OpenCodeIdentityPluginInstallAction, type OpenCodeIdentityPluginRemovalAction, type WebSetupBrowser,
 } from "@/lib/native/web-setup-core";
 import { loadOrCreateBrokerKey } from "@/lib/native/web-broker-server";
+import { parseBrokerUpdateRecord } from "@/lib/native/broker-update-record";
 import {
   buildLocalBrokerAutostartMarker,
   buildLocalBrokerAutostartSpec,
@@ -1540,17 +1541,6 @@ async function stopAuthenticatedLocalBroker(root: string, port: number): Promise
 type ManagedBrokerInstallManifest = { version: 1; path: string; sha256: string };
 type BrokerUpdatePhase = "stop" | "start";
 
-function parseJsonRecord(bytes: Buffer | null, label: string): Record<string, unknown> | null {
-  if (!bytes) return null;
-  try {
-    const parsed: unknown = JSON.parse(bytes.toString("utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid record");
-    return parsed as Record<string, unknown>;
-  } catch {
-    throw new Error(`The M9R ${label} ownership record is unreadable; refusing to change the broker process.`);
-  }
-}
-
 function normalizeWindowsPath(value: string): string {
   return resolve(value).replace(/[\\/]+$/, "").toLocaleLowerCase();
 }
@@ -1650,9 +1640,9 @@ async function loadManagedBrokerUpdateTarget(root: string): Promise<{
     readOptional(join(root, "broker-autostart.json")),
     readOptional(join(root, "web-broker-install.json")),
   ]);
-  const setup = parseJsonRecord(setupBytes, "web setup");
-  const marker = parseJsonRecord(markerBytes, "broker startup");
-  const installRecord = parseJsonRecord(installBytes, "web broker install");
+  const setup = parseBrokerUpdateRecord(setupBytes, "web setup");
+  const marker = parseBrokerUpdateRecord(markerBytes, "broker startup");
+  const installRecord = parseBrokerUpdateRecord(installBytes, "web broker install");
   let installManifest: ManagedBrokerInstallManifest | null = null;
   if (installRecord) {
     if (installRecord.version !== 1 || typeof installRecord.path !== "string" || typeof installRecord.sha256 !== "string"

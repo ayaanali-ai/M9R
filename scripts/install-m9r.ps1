@@ -187,7 +187,8 @@ function Write-ManagedWebBrokerManifest($Paths, [string]$Hash) {
     $temporary = Join-Path $Paths.M9rRoot ("web-broker-install-" + [guid]::NewGuid().ToString('N') + '.tmp')
     $document = [ordered]@{ version = 1; path = [IO.Path]::GetFullPath($Paths.Target); sha256 = $Hash.ToLowerInvariant() }
     try {
-        ConvertTo-Json -InputObject $document | Set-Content -LiteralPath $temporary -Encoding UTF8
+        $json = ConvertTo-Json -InputObject $document
+        [IO.File]::WriteAllText($temporary, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
         Move-Item -LiteralPath $temporary -Destination $Paths.Manifest -Force
     } finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force }
