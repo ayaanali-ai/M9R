@@ -14,6 +14,7 @@ import { build } from "esbuild";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const out = join(root, "engine", "dist");
 const work = join(out, "work");
+const overlayExe = join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(root, "cli", "dist", "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";
@@ -22,6 +23,9 @@ const cuaDriverArchiveSha256 = "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b4086
 const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua-driver-rs-v${cuaDriverVersion}/cua-driver-rs-${cuaDriverVersion}-windows-x86_64-binary.zip`;
 
 if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle)) throw new Error("cli/dist is missing: run `npm run build:cli` first.");
+if (process.platform === "win32" && !existsSync(overlayExe)) {
+  throw new Error("The Windows desktop pill is missing: build it with `npm --prefix overlay run build` before building the standalone engine.");
+}
 rmSync(work, { recursive: true, force: true });
 for (const name of [exeName, brokerExeName, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native", ...(process.platform === "win32" ? ["m9r-native-input-host.exe"] : [])]) {
   rmSync(join(out, name), { force: true });
@@ -154,7 +158,13 @@ if (process.platform === "win32") {
     if (!existsSync(source)) throw new Error(`Verified Cua Driver archive is missing ${asset}.`);
     copyFileSync(source, join(binaryRoot, asset));
   }
+
+  // Keep engine/dist as the single runtime source used by local setup and release packaging.
+  // The release workflow builds the pill before this script, so this copy cannot silently retain
+  // a previous overlay when a new desktop build has been produced.
+  copyFileSync(overlayExe, join(out, "m9r-overlay.exe"));
   console.log(`Packaged Cua Driver ${cuaDriverVersion} Windows standalone host (SHA-256 verified).`);
 }
 console.log(`Built ${exe} (${Math.round(readFileSync(exe).length / 1e6)} MB)`);
 console.log(`Built ${brokerExe} (${Math.round(readFileSync(brokerExe).length / 1e6)} MB)`);
+if (process.platform === "win32") console.log(`Packaged ${join(out, "m9r-overlay.exe")} from the current desktop build.`);

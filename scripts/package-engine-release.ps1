@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root 'engine\dist'
 $assets = @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe')
-$overlay = Join-Path $root 'overlay\src-tauri\target\release\m9r-overlay.exe'
+$overlay = Join-Path $dist 'm9r-overlay.exe'
 $extension = Join-Path $root 'cli\dist\extension'
 $cuaRuntime = Join-Path $dist 'cua-driver-runtime'
 $destination = [IO.Path]::GetFullPath($OutputDirectory)
@@ -18,7 +18,7 @@ foreach ($asset in $assets) {
     if (-not (Test-Path -LiteralPath (Join-Path $dist $asset) -PathType Leaf)) { throw "Required release binary is missing: engine/dist/$asset" }
 }
 if (-not (Test-Path -LiteralPath $overlay -PathType Leaf)) {
-    throw 'Required release binary is missing: overlay/src-tauri/target/release/m9r-overlay.exe. Build the M9R desktop pill before packaging the standalone release.'
+    throw 'Required release binary is missing: engine/dist/m9r-overlay.exe. Build the M9R desktop pill, then run npm run build:engine before packaging the standalone release.'
 }
 if (-not (Test-Path -LiteralPath (Join-Path $extension 'manifest.json') -PathType Leaf)) { throw 'cli/dist/extension is missing. Run npm run build:cli first.' }
 foreach ($runtimeFile in @(

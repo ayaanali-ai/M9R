@@ -24,7 +24,7 @@ const engineBuilder = resolve("scripts/build-engine.mjs");
 const powershell = process.env.M9R_TEST_PWSH ?? "pwsh";
 const canRunNativeInstaller = process.platform === "win32"
   && ["m9r-engine.exe", "m9r-hook.exe", "m9r-native-input-host.exe", "m9r-web-broker.exe"].every((name) => existsSync(join(engineDist, name)))
-  && existsSync(resolve("overlay/src-tauri/target/release/m9r-overlay.exe"));
+  && existsSync(join(engineDist, "m9r-overlay.exe"));
 const skipNative = canRunNativeInstaller ? false : "Windows engine binaries are required (CI builds them first).";
 
 function runPowerShell(script, args = [], { input, env = process.env } = {}) {
@@ -46,7 +46,7 @@ function createPackage(directory) {
   for (const file of ["m9r-engine.exe", "m9r-hook.exe", "m9r-native-input-host.exe", "m9r-web-broker.exe"]) {
     cpSync(join(engineDist, file), join(stage, file));
   }
-  cpSync(resolve("overlay/src-tauri/target/release/m9r-overlay.exe"), join(stage, "m9r-overlay.exe"));
+  cpSync(join(engineDist, "m9r-overlay.exe"), join(stage, "m9r-overlay.exe"));
   cpSync(installer, join(stage, "install-m9r.ps1"));
   cpSync(resolve("scripts/install-m9r.cmd"), join(stage, "install-m9r.cmd"));
   writeFileSync(join(stage, "INSTALLATION.txt"), "M9R Windows standalone installer test package\n");
@@ -135,15 +135,25 @@ test("installer contains no Node/npm dependency and changes no saved PowerShell 
   assert.doesNotMatch(clickEntry, /Set-ExecutionPolicy/i);
 });
 
-test("standalone release packages the web broker beside the engine", () => {
+test("standalone release packages runtime companions from the canonical engine distribution", () => {
   const packagerSource = readFileSync(releasePackager, "utf8");
   const installerSource = readFileSync(installer, "utf8");
   const builderSource = readFileSync(engineBuilder, "utf8");
+  const workflowSource = readFileSync(resolve(".github/workflows/m9r-engine-release.yml"), "utf8");
   const cliSource = readFileSync(resolve("scripts/m9r-cli.ts"), "utf8");
+  const overlayPreflightIndex = builderSource.indexOf('if (process.platform === "win32" && !existsSync(overlayExe))');
+  const buildCleanupIndex = builderSource.indexOf('rmSync(work, { recursive: true, force: true });');
+  assert.ok(overlayPreflightIndex >= 0 && buildCleanupIndex > overlayPreflightIndex, "missing pill input must fail before build cleanup can remove prior artifacts");
   assert.match(builderSource, /m9r-web-broker\.cjs[\s\S]*m9r-web-broker\.exe/, "the build must turn the bundled broker into its own executable");
+  assert.match(builderSource, /copyFileSync\(overlayExe, join\(out, "m9r-overlay\.exe"\)\)/, "the engine distribution must capture the just-built desktop pill");
   assert.doesNotMatch(builderSource, /rmSync\(out,\s*\{\s*recursive:\s*true/, "the build must preserve other files already in engine/dist");
   assert.match(packagerSource, /m9r-web-broker\.exe/, "the release ZIP must contain the standalone broker");
   assert.match(packagerSource, /m9r-overlay\.exe/, "the release ZIP must contain the M9R desktop pill");
+  assert.match(packagerSource, /\$overlay\s*=\s*Join-Path\s+\$dist\s+'m9r-overlay\.exe'/, "the release ZIP must take the pill from the same engine distribution used by local setup");
+  assert.doesNotMatch(packagerSource, /overlay\\src-tauri\\target\\release\\m9r-overlay\.exe/i, "release packaging must not bypass the canonical engine distribution");
+  const pillBuildIndex = workflowSource.indexOf("npm --prefix overlay run build");
+  const engineBuildIndex = workflowSource.indexOf("npm run build:engine");
+  assert.ok(pillBuildIndex >= 0 && engineBuildIndex > pillBuildIndex, "the release workflow must build the pill before the engine captures it");
   assert.match(installerSource, /m9r-web-broker\.exe/, "the installer must require the broker from the verified package");
   assert.match(installerSource, /m9r-overlay\.exe/, "the installer must require the M9R desktop pill from the verified package");
   assert.match(installerSource, /Install-ManagedWebBroker/, "the installer must place the broker beside the installed engine");
@@ -224,7 +234,7 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
     assert.ok(existsSync(join(profile.m9rHome, "bin", "m9r-native-input-host.exe")));
     const installedOverlay = join(profile.m9rHome, "bin", "m9r-overlay.exe");
     assert.ok(existsSync(installedOverlay));
-    assert.deepEqual(readFileSync(installedOverlay), readFileSync(resolve("overlay/src-tauri/target/release/m9r-overlay.exe")));
+    assert.deepEqual(readFileSync(installedOverlay), readFileSync(join(engineDist, "m9r-overlay.exe")));
     const installedBroker = join(profile.m9rHome, "bin", "m9r-web-broker.exe");
     assert.ok(existsSync(installedBroker));
     assert.deepEqual(readFileSync(installedBroker), readFileSync(join(engineDist, "m9r-web-broker.exe")));
