@@ -395,11 +395,17 @@ test("with the engine, setup registers the M9R MCP server for Claude (and Codex,
   assert.deepEqual(claudeMcp.mcpServers.other, { command: "npx", args: ["-y", "other-server"] }, "an already-registered server is left alone");
   assert.match(claudeMcp.mcpServers.m9r.command, /m9r-engine(\.exe)?$/);
   assert.deepEqual(claudeMcp.mcpServers.m9r.args, ["mcp"]);
+  assert.equal(claudeMcp.mcpServers.m9r.env.M9R_HOME, s.p.m9r);
+  assert.equal(claudeMcp.mcpServers.m9r.env.M9R_WEB_BROKER_PORT, "47821");
 
   const codexConfig = readFileSync(s.p.codexConfig, "utf8");
   assert.match(codexConfig, /\[mcp_servers\.github\]/);
   assert.match(codexConfig, /\[mcp_servers\.m9r\]/);
   assert.match(codexConfig, /args = \["mcp"\]/);
+  assert.match(codexConfig, /\[mcp_servers\.m9r\.env\]/);
+  const tomlM9rHome = s.p.m9r.replace(/\\/g, "\\\\");
+  assert.ok(codexConfig.includes(`M9R_HOME = "${tomlM9rHome}"`));
+  assert.match(codexConfig, /M9R_WEB_BROKER_PORT = "47821"/);
 
   assert.equal(await s.run("setup", ["--yes"]), 0);
   assert.match(s.out.join("\n"), /Already set up/);

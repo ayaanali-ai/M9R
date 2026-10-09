@@ -281,7 +281,16 @@ export const MCP_SERVER_NAME = "m9r";
  */
 function mcpServerSpec(io: NativeIo): McpServerSpec | null {
   const entry = activeHookEntry(io);
-  return /m9r-engine(\.exe)?$/i.test(entry) ? { command: slash(entry), args: ["mcp"] } : null;
+  if (!/m9r-engine(\.exe)?$/i.test(entry)) return null;
+  const m9r = nativePaths(io).m9r;
+  return {
+    command: slash(entry),
+    args: ["mcp"],
+    env: {
+      M9R_HOME: m9r,
+      M9R_WEB_BROKER_PORT: io.env.M9R_WEB_BROKER_PORT?.trim() || "47821",
+    },
+  };
 }
 
 interface PlannedFile { path: string; kind: Kind; before: string | null; after: string; changed: boolean; summary: string }

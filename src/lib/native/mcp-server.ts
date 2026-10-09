@@ -52,7 +52,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       throw new Error(`M9R session token is malformed: received ${token.length} characters; expected a 32-character base64url token. Use the exact token from this session's SessionStart card.`);
     }
     const identity = deps.store.verifyIdentity(token);
-    if (!identity) throw new Error("This well-formed M9R token is not active in the local runtime. It may belong to a different or revoked session; reconnect the agent session to issue an active identity.");
+    if (!identity) {
+      throw new Error("This well-formed M9R session token is not active in the configured M9R store. It may be revoked, or this process may use a different M9R_HOME from the SessionStart hook. Run M9R setup to synchronize M9R_HOME, then restart the agent session. The token value was not logged.");
+    }
     return identity;
   }
 

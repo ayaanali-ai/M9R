@@ -142,7 +142,7 @@ test("a new browser room inbox ignores pre-start work but still shows tasks crea
 
 test("a bad token is refused", async () => {
   const t = setup();
-  await assert.rejects(t.call("m9r_inbox", { token: "nope", waitSeconds: 0 }), /invalid or has been revoked/);
+  await assert.rejects(t.call("m9r_inbox", { token: "nope", waitSeconds: 0 }), /token is malformed/);
   t.done();
 });
 

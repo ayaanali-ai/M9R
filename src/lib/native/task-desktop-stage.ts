@@ -182,7 +182,9 @@ export function createTaskDesktopStageService(input: {
       throw new Error("Task stages require the owner-launched M9R broker; an agent process cannot host this service.");
     }
     const identity = input.store.verifyIdentity(token);
-    if (!identity) throw new Error("Stage request identity is invalid or revoked.");
+    if (!identity) {
+      throw new Error("The owner-launched stage broker cannot verify this session identity in its configured M9R store. The agent MCP server and broker may have different M9R_HOME values, or the token was revoked. Run M9R setup to synchronize their M9R_HOME settings, then restart the broker and reconnect the agent.");
+    }
     if (!readPolicy().handles.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled task stages for this agent.");
     const task = input.store.getTask(taskId);
     const handle = normalizeHandle(identity.handle);

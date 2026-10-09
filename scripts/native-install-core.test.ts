@@ -396,7 +396,11 @@ test("uninstall removes only our entries when the user edited the file after ini
 // ---------------------------------------------------------------------------------------------------------------
 // MCP server registration
 
-const mcpSpec = { command: String.raw`C:\Users\u\.m9r\bin\m9r-engine.exe`, args: ["mcp"] };
+const mcpSpec = {
+  command: String.raw`C:\Users\u\.m9r\bin\m9r-engine.exe`,
+  args: ["mcp"],
+  env: { M9R_HOME: String.raw`C:\Users\u\.m9r`, M9R_WEB_BROKER_PORT: "47821" },
+};
 
 test("mergeMcpServerJson adds our entry, keeps every other server, and is idempotent", () => {
   const existing = JSON.stringify({ mcpServers: { github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"] } } });
@@ -411,10 +415,15 @@ test("mergeMcpServerJson adds our entry, keeps every other server, and is idempo
 });
 
 test("mergeMcpServerJson updates our entry in place when the spec changes, and refuses invalid JSON", () => {
-  const existing = JSON.stringify({ mcpServers: { m9r: { command: "old", args: [] } } });
+  const existing = JSON.stringify({ mcpServers: { m9r: { command: "old", args: [], customField: "keep", env: { M9R_HOME: "C:/old/.m9r", M9R_NETWORK_CREDENTIALS_JSON: "private-but-preserved" } } } });
   const updated = mergeMcpServerJson(existing, "m9r", mcpSpec);
   assert.equal(updated.changed, true);
-  assert.deepEqual(JSON.parse(updated.content).mcpServers.m9r, mcpSpec);
+  assert.deepEqual(JSON.parse(updated.content).mcpServers.m9r, {
+    command: mcpSpec.command,
+    args: mcpSpec.args,
+    customField: "keep",
+    env: { ...mcpSpec.env, M9R_NETWORK_CREDENTIALS_JSON: "private-but-preserved" },
+  });
   assert.throws(() => mergeMcpServerJson("not json", "m9r", mcpSpec), UnparseableConfigError);
 });
 
@@ -470,8 +479,32 @@ test("mergeMcpServerToml replaces only our own block in place when the spec chan
   const updated = mergeMcpServerToml(first.content, "m9r", mcpSpec);
   assert.equal(updated.changed, true);
   assert.match(updated.content, /command = "C:\\\\Users\\\\u\\\\\.m9r\\\\bin\\\\m9r-engine\.exe"/);
+  assert.match(updated.content, /M9R_HOME = "C:\\\\Users\\\\u\\\\\.m9r"/);
+  assert.match(updated.content, /M9R_WEB_BROKER_PORT = "47821"/);
   assert.match(updated.content, /\[mcp_servers\.other\]/);
   assert.doesNotMatch(updated.content, /command = "old"/);
+});
+
+test("mergeMcpServerToml updates only M9R_HOME and preserves other M9R environment entries", () => {
+  const existing = [
+    "# m9r-mcp (managed by M9R -- edits here will be overwritten on the next `m9r init`)",
+    "[mcp_servers.m9r]",
+    "command = \"old\"",
+    "args = []",
+    "",
+    "[mcp_servers.m9r.env]",
+    "M9R_HOME = \"C:/old/.m9r\"",
+    "M9R_NETWORK_CREDENTIALS_JSON = '{\"credential\":\"preserve\"}'",
+    "# owner configured this value",
+    "",
+    "[mcp_servers.github]",
+    "command = \"gh\"",
+  ].join("\n");
+  const updated = mergeMcpServerToml(existing, "m9r", mcpSpec);
+  assert.match(updated.content, /M9R_HOME = "C:\\\\Users\\\\u\\\\\.m9r"/);
+  assert.ok(updated.content.includes(`M9R_NETWORK_CREDENTIALS_JSON = '{"credential":"preserve"}'`));
+  assert.match(updated.content, /# owner configured this value/);
+  assert.match(updated.content, /\[mcp_servers\.github\]/);
 });
 
 test("removeMcpServerToml removes only our block; a config with none of ours is unchanged", () => {

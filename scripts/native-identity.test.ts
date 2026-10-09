@@ -73,7 +73,13 @@ test("m9r_whoami refuses an invalid token and answers with the verified identity
   assert.match(ok.content[0].text, /@claude/);
 
   await assert.rejects(() => callTool(server, "m9r_whoami", { token: "garbage" }), /token is malformed: received 7 characters/);
-  await assert.rejects(() => callTool(server, "m9r_whoami", { token: newToken() }), /well-formed M9R token is not active in the local runtime/);
+  const unknownToken = newToken();
+  await assert.rejects(() => callTool(server, "m9r_whoami", { token: unknownToken }), (error: unknown) => {
+    assert.match(String(error), /not active in the configured M9R store/);
+    assert.match(String(error), /synchronize M9R_HOME/);
+    assert.ok(!String(error).includes(unknownToken), "the rejected token must not be echoed");
+    return true;
+  });
   done();
 });
 

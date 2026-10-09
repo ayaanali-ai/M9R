@@ -792,7 +792,7 @@ test("a command waits for the extension ready handshake before dispatching", asy
 
 test("a bad token is refused before anything reaches the broker", async () => {
   const t = await setup();
-  await assert.rejects(t.call("m9r_web_read", { token: "not-a-token" }), /invalid or has been revoked/);
+  await assert.rejects(t.call("m9r_web_read", { token: "not-a-token" }), /token is malformed/);
   await t.done();
 });
 

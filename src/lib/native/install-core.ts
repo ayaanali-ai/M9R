@@ -120,6 +120,8 @@ export function removeHooks(existingJsonText: string | null, what = "the setting
 export interface McpServerSpec {
   command: string;
   args: readonly string[];
+  /** Environment values M9R must set so its hooks and MCP process share one identity store. */
+  env?: Readonly<Record<string, string>>;
 }
 
 export const MCP_MARKER = "m9r-mcp";
@@ -128,9 +130,16 @@ export const MCP_MARKER = "m9r-mcp";
 export function mergeMcpServerJson(existingJsonText: string | null, name: string, spec: McpServerSpec, what = "the MCP config file"): { content: string; changed: boolean } {
   const root = parseObject(existingJsonText, what);
   const servers: Record<string, unknown> = isRecord(root.mcpServers) ? { ...root.mcpServers } : {};
-  const entry = { command: spec.command, args: [...spec.args] };
   const current = servers[name];
-  if (isRecord(current) && current.command === entry.command && Array.isArray(current.args) && current.args.length === entry.args.length && current.args.every((a, i) => a === entry.args[i])) {
+  const currentEntry = isRecord(current) ? current : {};
+  const currentEnv = isRecord(currentEntry.env) ? currentEntry.env : {};
+  const env = { ...currentEnv, ...spec.env };
+  const entry: Record<string, unknown> = { ...currentEntry, command: spec.command, args: [...spec.args] };
+  if (Object.keys(env).length) entry.env = env;
+  else delete entry.env;
+  const envAlreadyMatches = Object.entries(spec.env ?? {}).every(([key, value]) => currentEnv[key] === value);
+  if (isRecord(current) && current.command === entry.command && Array.isArray(current.args) && current.args.length === spec.args.length
+    && current.args.every((a, i) => a === spec.args[i]) && envAlreadyMatches) {
     return { content: existingJsonText ?? "", changed: false };
   }
   servers[name] = entry;
@@ -152,7 +161,28 @@ function tomlString(s: string): string {
   return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-function codexBlock(name: string, spec: McpServerSpec): string {
+function existingMcpTomlEnvLines(existing: string, name: string): string[] {
+  const bounds = codexBlockBounds(existing, name);
+  if (!bounds) return [];
+  const header = `[mcp_servers.${name}.env]`;
+  const lines = existing.slice(bounds.start, bounds.end).split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === header);
+  if (start < 0) return [];
+  const end = lines.findIndex((line, index) => index > start && /^\s*\[/.test(line));
+  return lines.slice(start + 1, end < 0 ? undefined : end);
+}
+
+function tomlEnvironmentEntries(env: Readonly<Record<string, string>> | undefined): string[] {
+  const entries = Object.entries(env ?? {}).sort(([left], [right]) => left.localeCompare(right));
+  for (const [key, value] of entries) {
+    if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(key) || typeof value !== "string") {
+      throw new Error("MCP environment keys must be simple names and values must be strings");
+    }
+  }
+  return entries.map(([key, value]) => `${key} = ${tomlString(value)}`);
+}
+
+function codexBlock(name: string, spec: McpServerSpec, preservedEnvLines: readonly string[] = []): string {
   const lines = [
     `# ${MCP_MARKER} (managed by M9R -- edits here will be overwritten on the next \`m9r init\`)`,
     `[mcp_servers.${name}]`,
@@ -160,6 +190,10 @@ function codexBlock(name: string, spec: McpServerSpec): string {
     `args = [${spec.args.map(tomlString).join(", ")}]`,
     `startup_timeout_sec = 30.0`,
   ];
+  const envEntries = tomlEnvironmentEntries(spec.env);
+  if (preservedEnvLines.length || envEntries.length) {
+    lines.push("", `[mcp_servers.${name}.env]`, ...preservedEnvLines, ...envEntries);
+  }
   return lines.join("\n");
 }
 
@@ -196,7 +230,14 @@ function codexBlockBounds(text: string, name: string): { start: number; end: num
 /** Adds or updates our `[mcp_servers.<name>]` table in a Codex `config.toml`; every other server's table is left byte-for-byte as found. */
 export function mergeMcpServerToml(existingTomlText: string | null, name: string, spec: McpServerSpec): { content: string; changed: boolean } {
   const existing = existingTomlText ?? "";
-  const block = codexBlock(name, spec);
+  const managedEnvKeys = new Set(Object.keys(spec.env ?? {}));
+  const preservedEnvLines = existingMcpTomlEnvLines(existing, name).filter((line) => {
+    const key = line.match(/^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*=/)?.[1];
+    return !key || !managedEnvKeys.has(key);
+  });
+  while (preservedEnvLines[0]?.trim() === "") preservedEnvLines.shift();
+  while (preservedEnvLines.at(-1)?.trim() === "") preservedEnvLines.pop();
+  const block = codexBlock(name, spec, preservedEnvLines);
   const bounds = codexBlockBounds(existing, name);
   if (!bounds) {
     const separator = existing.length === 0 ? "" : existing.endsWith("\n\n") ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
