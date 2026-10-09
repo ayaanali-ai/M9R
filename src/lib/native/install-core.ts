@@ -384,6 +384,48 @@ export interface LocalBrokerAutostartSpec {
   removeOnDisconnect: true;
 }
 
+export type LocalBrokerAutostartMarkerState = "registering" | "configured";
+
+export interface LocalBrokerAutostartMarkerInput {
+  entry: string;
+  port: number;
+  executable: string;
+  projectRoot: string;
+  workingDirectory: string;
+  taskActionHash: string;
+  taskDefinitionHash?: string;
+  state: LocalBrokerAutostartMarkerState;
+}
+
+/**
+ * Persist only login-task configuration state. Runtime health is transient and
+ * must come from the authenticated broker probe, never from this marker.
+ */
+export function buildLocalBrokerAutostartMarker(input: LocalBrokerAutostartMarkerInput) {
+  for (const [label, value] of [["entry", input.entry], ["executable", input.executable], ["project root", input.projectRoot], ["working directory", input.workingDirectory]] as const) {
+    if (typeof value !== "string" || value.trim() === "") throw new Error(`${label} is required for broker autostart marker`);
+  }
+  if (!Number.isSafeInteger(input.port) || input.port < 1 || input.port > 65535) {
+    throw new Error("broker autostart marker port must be an integer from 1 to 65535");
+  }
+  if (!/^[a-f0-9]{64}$/i.test(input.taskActionHash)) throw new Error("broker autostart marker requires a SHA-256 task action hash");
+  if (input.taskDefinitionHash !== undefined && !/^[a-f0-9]{64}$/i.test(input.taskDefinitionHash)) {
+    throw new Error("broker autostart marker task definition hash must be SHA-256");
+  }
+  return {
+    version: 1 as const,
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    entry: input.entry,
+    port: input.port,
+    executable: input.executable,
+    projectRoot: input.projectRoot,
+    workingDirectory: input.workingDirectory,
+    taskActionHash: input.taskActionHash,
+    ...(input.taskDefinitionHash ? { taskDefinitionHash: input.taskDefinitionHash } : {}),
+    state: input.state,
+  };
+}
+
 export interface LocalBrokerScheduledTaskInput {
   taskName: string;
   executable: string;

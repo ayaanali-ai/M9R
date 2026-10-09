@@ -9,8 +9,9 @@ import { WebSocket } from "ws";
 import { createLocalStore } from "@/lib/native/local-store";
 import { createM9rMcpServer } from "@/lib/native/mcp-server";
 import { runHookRequest } from "@/lib/native/hook-run";
+import { requestOwnerPipe } from "@/lib/native/owner-pipe";
 import { createWebBrokerClient } from "@/lib/native/web-broker-client";
-import { brokerKeyPath } from "@/lib/native/web-broker-paths";
+import { brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { createWebAuthority, verifyAudit } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore, renameWithRetry } from "@/lib/native/web-authority-store";
 import { loadOrCreateBrokerKey, startWebBroker, tightenKeyFileAcl } from "@/lib/native/web-broker-server";
@@ -78,6 +79,65 @@ test("health reports broker liveness without claiming desktop readiness", async 
   } finally { await broker.close(); }
 });
 
+test("restricted agent MCP writes go through the owner broker and are identity-scoped", async () => {
+  const ctx = await setup();
+  try {
+    const alice = ctx.store.issueIdentity("alice", "codex", "session-alice");
+    const bob = ctx.store.issueIdentity("bob", "claude", "session-bob");
+    const charlie = ctx.store.issueIdentity("charlie", "opencode", "session-charlie");
+    const web = createWebBrokerClient({
+      keyPath: brokerKeyPath(ctx.root), ownerPipePath: ownerPipePath(ctx.root), port: ctx.broker.port,
+      fetchImpl: async () => { throw new Error("M9R agent task-state writes must not use loopback HTTP"); },
+    });
+
+    const sent = await web.submitAgentTask!(alice.token, "@bob", "Review the current diff.");
+    assert.equal(sent.ok, true);
+    assert.equal(sent.created, true);
+    assert.ok(sent.taskId);
+    assert.deepEqual(
+      (({ from, to, goal, fromSession }) => ({ from, to, goal, fromSession }))(ctx.store.getTask(sent.taskId!)!),
+      { from: "alice", to: "bob", goal: "Review the current diff.", fromSession: "session-alice" },
+    );
+
+    const repeated = await web.submitAgentTask!(alice.token, "bob", "Review the current diff.");
+    assert.equal(repeated.ok, true);
+    assert.equal(repeated.taskId, sent.taskId, "a retry after an uncertain HTTP response must reuse the task receipt");
+    assert.equal(repeated.created, false);
+
+    const advanced = await web.advanceAgentInboxCursor!(bob.token, 17);
+    assert.equal(advanced.ok, true);
+    assert.equal(ctx.store.cursorFor("bob", "session-bob"), 17);
+
+    const denied = await web.recordAgentTaskResult!(charlie.token, sent.taskId!, "not my task");
+    assert.equal(denied.ok, false);
+    assert.match(denied.error ?? "", /not sent to you/);
+    assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, undefined);
+
+    const recorded = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.");
+    assert.equal(recorded.ok, true);
+    assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, "Reviewed the diff.");
+
+    const extraFieldRejected = await requestOwnerPipe<{ ok: boolean; error?: string }>(ownerPipePath(ctx.root), {
+      method: "POST", path: "/web/mcp/store",
+      body: { action: "send", token: alice.token, to: "bob", goal: "invalid request", executable: "anything.exe" },
+    });
+    assert.equal(extraFieldRejected?.ok, false);
+    assert.match(extraFieldRejected?.error ?? "", /Invalid M9R task message/);
+    assert.equal(ctx.store.tasksFrom("alice").length, 1, "invalid requests must not mutate the task store");
+
+    const malformed = await web.submitAgentTask!("not-a-session-token", "bob", "not accepted");
+    assert.equal(malformed.ok, false);
+    assert.match(malformed.error ?? "", /malformed/);
+    assert.doesNotMatch(malformed.error ?? "", /not-a-session-token/);
+
+    ctx.store.revokeIdentity("session-alice");
+    const revoked = await web.submitAgentTask!(alice.token, "bob", "revoked identity task");
+    assert.equal(revoked.ok, false);
+    assert.match(revoked.error ?? "", /not active/);
+    assert.equal(ctx.store.tasksFrom("alice").length, 1);
+  } finally { await ctx.done(); }
+});
+
 test("task stage preparation requires the broker key and refuses browser origins and extra control fields", async () => {
   let calls = 0;
   let mode: string | undefined;
@@ -141,9 +201,12 @@ async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtensio
   writeFileSync(brokerKeyPath(root), `${key}\n`, "utf8");
   const authorityStore = createWebAuthorityStore(root);
   if (authorityStore && options.authority) authorityStore.save(options.authority.snapshot());
+  const store = createLocalStore(root);
   const startBroker = () => startWebBroker({
     key,
     port: 0,
+    agentMcpStore: store,
+    ownerPipePath: ownerPipePath(root),
     allowedExtensionIds: options.allowedExtensionIds,
     allowAnyExtension: options.allowAnyExtension,
     extensionConnectTimeoutMs: options.extensionConnectTimeoutMs ?? 50,
@@ -155,8 +218,7 @@ async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtensio
     onShutdownRequested: options.onShutdownRequested,
   });
   let broker = await startBroker();
-  const store = createLocalStore(root);
-  let web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: broker.port });
+  let web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: broker.port });
   let server = createM9rMcpServer({ store, web });
   const call = (name: string, args: unknown) => (server as unknown as ToolServer)._registeredTools[name].handler(args);
   const sockets: WebSocket[] = [];
@@ -178,7 +240,7 @@ async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtensio
       sockets.length = 0;
       await broker.close();
       broker = await startBroker();
-      web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: broker.port });
+      web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: broker.port });
       server = createM9rMcpServer({ store, web });
       return broker;
     },

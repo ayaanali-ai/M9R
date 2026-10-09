@@ -9,14 +9,14 @@ import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { createM9rMcpServer } from "@/lib/native/mcp-server";
 import { createNetworkCoreClient, parseNetworkCredentials } from "@/lib/native/network-core-client";
 import { createWebBrokerClient } from "@/lib/native/web-broker-client";
-import { brokerKeyPath } from "@/lib/native/web-broker-paths";
+import { brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 async function main(): Promise<void> {
   const root = defaultStoreRoot(homedir(), process.env);
   const store = createLocalStore(root);
-  const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: Number(process.env.M9R_WEB_BROKER_PORT) || undefined });
+  const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: Number(process.env.M9R_WEB_BROKER_PORT) || undefined });
   const networkCore = createNetworkCoreClient({
     baseUrl: process.env.M9R_NETWORK_CORE_URL,
     credentials: parseNetworkCredentials(process.env.M9R_NETWORK_CREDENTIALS_JSON),

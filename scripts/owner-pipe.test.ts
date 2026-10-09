@@ -21,7 +21,7 @@ async function http(port: number, key: string, path: string, method = "GET", bod
   });
 }
 
-test("owner mutations use the authenticated loopback API and the local pipe is read-only", async () => {
+test("owner mutations use the authenticated loopback API while the local pipe allows only scoped agent task writes", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-owner-pipe-"));
   const authority = createWebAuthority({ ownerId: "alice" });
   try {

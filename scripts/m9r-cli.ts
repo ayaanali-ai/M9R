@@ -75,6 +75,7 @@ import {
 } from "@/lib/native/web-setup-core";
 import { loadOrCreateBrokerKey } from "@/lib/native/web-broker-server";
 import {
+  buildLocalBrokerAutostartMarker,
   buildLocalBrokerAutostartSpec,
   buildLocalBrokerScheduledTaskAction,
   buildLocalBrokerScheduledTaskInspectScript,
@@ -2862,20 +2863,20 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
   try {
     // Persist the ownership intent first so a crash between task registration and
     // the final marker write cannot strand a task that every retry must refuse.
-    await writeAtomic(markerPath, JSON.stringify({
-      version: 1, taskName: WEB_TASK_NAME, entry, port, executable: spec.nodeExecutable,
-      projectRoot, workingDirectory: spec.workingDirectory, taskActionHash: desiredTaskHash, state: "registering",
-    }) + "\n");
+    await writeAtomic(markerPath, JSON.stringify(buildLocalBrokerAutostartMarker({
+      entry, port, executable: spec.nodeExecutable, projectRoot, workingDirectory: spec.workingDirectory,
+      taskActionHash: desiredTaskHash, state: "registering",
+    })) + "\n");
     await powerShell(buildLocalBrokerScheduledTaskRegisterScript({ ...brokerTaskInput, replaceExisting: Boolean(existingTask) }));
     const registeredTask = await inspectLocalBrokerTask(spec.taskName);
     if (!registeredTask || localBrokerTaskActionHash(registeredTask) !== desiredTaskHash || !localBrokerTaskMatchesContract(registeredTask, desiredTaskAction)) {
       return { ok: false, message: "Windows Task Scheduler did not retain the exact current-user M9R broker definition that setup requested." };
     }
     const taskDefinitionHash = hashLocalBrokerScheduledTaskDefinition(registeredTask);
-    await writeAtomic(markerPath, JSON.stringify({
-      version: 1, taskName: WEB_TASK_NAME, entry, port, executable: spec.nodeExecutable,
-      projectRoot, workingDirectory: spec.workingDirectory, taskActionHash: desiredTaskHash, taskDefinitionHash, state: "ready",
-    }) + "\n");
+    await writeAtomic(markerPath, JSON.stringify(buildLocalBrokerAutostartMarker({
+      entry, port, executable: spec.nodeExecutable, projectRoot, workingDirectory: spec.workingDirectory,
+      taskActionHash: desiredTaskHash, taskDefinitionHash, state: "configured",
+    })) + "\n");
     if (hasSetupManifest && setupManifest) {
       setupManifest.brokerTaskActionHash = desiredTaskHash;
       setupManifest.brokerTaskDefinitionHash = taskDefinitionHash;

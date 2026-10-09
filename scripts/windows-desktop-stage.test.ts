@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { createWindowsDesktopStageManager, formatWindowsStageRoomKeys } from "../src/lib/native/windows-desktop-stage";
 
@@ -46,7 +45,9 @@ test("moves only the exact broker-owned child to its background stage without ac
 }));
 
 function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "m9r-windows-stage-"));
+  const fixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures");
+  mkdirSync(fixtureRoot, { recursive: true });
+  const root = mkdtempSync(join(fixtureRoot, "m9r-windows-stage-"));
   return Promise.resolve(run(root)).finally(() => rmSync(root, { recursive: true, force: true }));
 }
 

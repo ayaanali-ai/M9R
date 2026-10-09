@@ -107,7 +107,9 @@ test("package.json has the publishable bin/metadata shape", () => {
   assert.equal(pkg.bin.oathlock, "dist/oathlock.js");
   assert.ok(pkg.license, "license placeholder required");
   assert.ok(pkg.repository, "repository required for publishing");
-  assert.deepEqual(pkg.files, ["dist/", "README.md"]);
+  // The shipped CLI includes required third-party attribution and license
+  // texts alongside the compiled product and README.
+  assert.deepEqual(pkg.files, ["dist/", "README.md", "THIRD_PARTY_NOTICES.md", "licenses/"]);
   assert.ok(pkg.dependencies?.["node-pty"], "packaged terminal bridge requires node-pty");
   assert.ok(pkg.dependencies?.ws, "packaged terminal bridge requires ws");
 });
@@ -186,7 +188,12 @@ test("built standalone web setup includes its broker runtime resolver", () => {
 });
 
 test("managed extension refresh changes only owned extension files and preserves user files", () => {
-  const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-extension-refresh-"));
+  // Keep the simulated LOCALAPPDATA on the same writable volume as this
+  // checkout. Some Windows sandboxes redirect the system temp directory into
+  // an AppContainer that allows writes but denies atomic replacement renames.
+  const fixtureRoot = resolve(repoRoot, ".workcache", "cli-package-fixtures");
+  mkdirSync(fixtureRoot, { recursive: true });
+  const temporaryRoot = mkdtempSync(join(fixtureRoot, "m9r-extension-refresh-"));
   const home = join(temporaryRoot, "home");
   const localAppData = join(temporaryRoot, "local-app-data");
   const source = join(temporaryRoot, "source-extension");

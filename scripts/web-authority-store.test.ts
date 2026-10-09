@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import test from "node:test";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createWebAuthority, verifyAudit, type AuditEntry, type WebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES } from "../packages/web-protocol-placeholder/src/index.ts";
@@ -12,7 +11,9 @@ const bob = { owner: "bob", agent: "claude" };
 const site = "https://shop.example";
 
 function withStore(run: (root: string) => void): void {
-  const root = mkdtempSync(join(tmpdir(), "m9r-web-authority-"));
+  const fixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures");
+  mkdirSync(fixtureRoot, { recursive: true });
+  const root = mkdtempSync(join(fixtureRoot, "m9r-web-authority-"));
   try {
     run(root);
   } finally {

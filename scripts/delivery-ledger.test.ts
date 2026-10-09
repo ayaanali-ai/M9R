@@ -1,14 +1,25 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { after, test } from "node:test";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { join, resolve } from "node:path";
 import { DeliveryLedger, LEDGER_RETENTION_MS } from "@/lib/bridge/delivery-ledger";
 import { stateForTimingStage } from "@/lib/delivery-state";
 
+const fixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures", "delivery-ledger");
+mkdirSync(fixtureRoot, { recursive: true });
+const fixtureDirectories = new Set<string>();
+
 function tempPath() {
-  return join(mkdtempSync(join(tmpdir(), "m9r-ledger-")), "runtime", "delivery-ledger-codex.jsonl");
+  const directory = join(fixtureRoot, randomUUID());
+  mkdirSync(directory, { recursive: true });
+  fixtureDirectories.add(directory);
+  return join(directory, "runtime", "delivery-ledger-codex.jsonl");
 }
+
+after(() => {
+  for (const directory of fixtureDirectories) rmSync(directory, { recursive: true, force: true });
+});
 
 test("recording writes a line before returning true, creating the directory, and survives a restart", () => {
   const path = tempPath();

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { createCuaStageDriver as createCuaStageDriverCore, type CuaStageDriverDependencies } from "../src/lib/native/cua-stage-driver";
 import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
@@ -35,7 +34,9 @@ test("Windows optional frame-valid flag accepts matching PNG metadata and reject
 }));
 
 function withRoot(run: (root: string) => Promise<void>): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "m9r-cua-stage-"));
+  const fixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures");
+  mkdirSync(fixtureRoot, { recursive: true });
+  const root = mkdtempSync(join(fixtureRoot, "m9r-cua-stage-"));
   return run(root).finally(() => rmSync(root, { recursive: true, force: true }));
 }
 

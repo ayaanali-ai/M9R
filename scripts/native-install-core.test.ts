@@ -8,6 +8,7 @@ import {
   STANDING_START,
   UnparseableConfigError,
   applyStandingInstruction,
+  buildLocalBrokerAutostartMarker,
   buildLocalBrokerAutostartSpec,
   buildLocalBrokerScheduledTaskAction,
   buildLocalBrokerScheduledTaskInspectScript,
@@ -126,6 +127,32 @@ test("local broker autostart contract rejects invalid ports and incomplete execu
   assert.throws(() => buildLocalBrokerAutostartSpec({ ...input, port: 0 }), /port/i);
   assert.throws(() => buildLocalBrokerAutostartSpec({ ...input, port: 65536 }), /port/i);
   assert.throws(() => buildLocalBrokerAutostartSpec({ ...input, nodeExecutable: "  " }), /executable/i);
+});
+
+test("broker autostart marker records task configuration without claiming live broker readiness", () => {
+  const marker = buildLocalBrokerAutostartMarker({
+    entry: "C:\\Tools\\m9r-web-broker.cjs",
+    port: 47821,
+    executable: "C:\\Program Files\\nodejs\\node.exe",
+    projectRoot: "C:\\repo",
+    workingDirectory: "C:\\repo",
+    taskActionHash: "a".repeat(64),
+    taskDefinitionHash: "b".repeat(64),
+    state: "configured",
+  });
+
+  assert.equal(marker.state, "configured");
+  assert.notEqual(marker.state, "ready");
+  assert.equal(marker.taskDefinitionHash, "b".repeat(64));
+  assert.throws(() => buildLocalBrokerAutostartMarker({
+    entry: "C:\\Tools\\m9r-web-broker.cjs",
+    port: 47821,
+    executable: "C:\\Program Files\\nodejs\\node.exe",
+    projectRoot: "C:\\repo",
+    workingDirectory: "C:\\repo",
+    taskActionHash: "not-a-hash",
+    state: "registering",
+  }), /SHA-256 task action hash/);
 });
 
 test("Windows task arguments preserve spaces, embedded quotes, and trailing backslashes", () => {

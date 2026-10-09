@@ -2,7 +2,8 @@
  * Local transport for the web broker (spike). Three doors:
  * - POST /cmd from the M9R MCP tools, allowed only with the owner-scoped key in ~/.m9r/web-broker.key. Requests that
  *   carry an Origin header are refused, so a web page cannot drive the browser through this port.
- * - a local named pipe/Unix socket with read-only status access; it is not an approval or mutation path.
+ * - a local named pipe/Unix socket for read-only status plus narrowly scoped, session-token-authorized agent task
+ *   mutations; owner approvals, authority changes, and arbitrary store writes are never accepted on this pipe.
  * - a WebSocket at /ext for the browser extension, allowed only from a chrome-extension:// origin and either a
  *   listed extension id or an explicit development-only opt-in when no ids are configured. One extension at a time:
  *   an authorized new connection replaces the old one.
@@ -11,6 +12,8 @@ import { execFileSync } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { VerifiedIdentity } from "./identity-core";
+import type { LocalStore } from "./local-store";
 import { dirname } from "node:path";
 import { platform } from "node:os";
 import { WebSocket, WebSocketServer } from "ws";
@@ -138,6 +141,8 @@ export interface WebBrokerServerOptions {
   /** Owner-hosted, task-authorized desktop preparation; absent means desktop access is unavailable. */
   taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview"): Promise<unknown>;
     launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview"): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown> };
+  /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
+  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult">;
   /** Dedicated browser transport. Extension connections are disabled on this broker. */
   browserTransport?: BrowserTransport;
   key: string;
@@ -171,6 +176,79 @@ export interface WebBrokerServerOptions {
   onShutdownRequested?: () => void | Promise<void>;
   /** When set, this local endpoint exposes read-only status; mutations use the broker-key HTTP API after CLI confirmation. */
   ownerPipePath?: string;
+}
+
+type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string; taskId?: string; created?: boolean } };
+
+/**
+ * Apply only the three durable MCP writes needed by agent messaging. The
+ * provider MCP process may be sandboxed from ~/.m9r, so the trusted owner
+ * broker verifies the same session token and performs these writes under its
+ * own user ACL. This is intentionally not a generic store/RPC endpoint.
+ */
+export function applyAgentMcpStoreMutation(
+  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult">,
+  input: unknown,
+): AgentMcpStoreResult {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { status: 400, body: { ok: false, error: "request body must be an object" } };
+  const value = input as Record<string, unknown>;
+  if (typeof value.token !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(value.token)) return { status: 400, body: { ok: false, error: "M9R session token is malformed." } };
+  let identity: VerifiedIdentity | null;
+  try { identity = store.verifyIdentity(value.token); }
+  catch { return { status: 503, body: { ok: false, error: "M9R identity state could not be read by the owner broker." } }; }
+  if (!identity) return { status: 403, body: { ok: false, error: "This M9R session identity is not active in the owner broker." } };
+  const inRoom = identity.sessionId.startsWith("web-");
+  const ownHandle = identity.handle.toLowerCase();
+  const inboxHandle = inRoom ? `web-${ownHandle}` : ownHandle;
+
+  try {
+    if (value.action === "send") {
+      if (Object.keys(value).some((key) => !["action", "token", "to", "goal"].includes(key))
+        || typeof value.to !== "string" || typeof value.goal !== "string" || value.goal.trim().length < 1 || value.goal.length > 4_000) {
+        return { status: 400, body: { ok: false, error: "Invalid M9R task message." } };
+      }
+      const to = value.to.replace(/^@+/, "").trim().toLowerCase();
+      if (!/^[a-z][a-z0-9_-]{0,39}$/.test(to) || to === "you") return { status: 400, body: { ok: false, error: "Recipient must be a valid M9R agent handle." } };
+      const taskTo = inRoom && !to.startsWith("web-") ? `web-${to}` : to;
+      const taskFrom = inboxHandle;
+      const result = store.addTask({
+        to: taskTo,
+        from: taskFrom,
+        goal: value.goal,
+        fromSession: identity.sessionId,
+        origin: "agent_initiated",
+        idempotencyKey: `mcp:${identity.sessionId}:${to}:${value.goal.slice(0, 200)}`,
+      });
+      return { status: 200, body: { ok: true, taskId: result.task.id, created: result.created } };
+    }
+
+    if (value.action === "cursor") {
+      if (Object.keys(value).some((key) => !["action", "token", "seq"].includes(key))
+        || !Number.isSafeInteger(value.seq) || (value.seq as number) < 0) {
+        return { status: 400, body: { ok: false, error: "Invalid M9R inbox cursor." } };
+      }
+      store.setCursor(inboxHandle, inRoom ? undefined : identity.sessionId, value.seq as number);
+      return { status: 200, body: { ok: true } };
+    }
+
+    if (value.action === "result") {
+      if (Object.keys(value).some((key) => !["action", "token", "taskId", "summary"].includes(key))
+        || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
+        || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 4_000) {
+        return { status: 400, body: { ok: false, error: "Invalid M9R task result." } };
+      }
+      const existing = store.getTask(value.taskId);
+      if (!existing) return { status: 404, body: { ok: false, error: `No task ${value.taskId} found.` } };
+      if (existing.to !== ownHandle && existing.to !== inboxHandle) {
+        return { status: 403, body: { ok: false, error: `Task ${value.taskId} was not sent to you; refusing to report a result for it.` } };
+      }
+      if (!store.setResult(value.taskId, value.summary)) return { status: 404, body: { ok: false, error: `No task ${value.taskId} found.` } };
+      return { status: 200, body: { ok: true } };
+    }
+    return { status: 400, body: { ok: false, error: "Unknown M9R agent-store action." } };
+  } catch {
+    return { status: 503, body: { ok: false, error: "The owner broker could not update M9R task state; the task was not accepted." } };
+  }
 }
 
 export async function startWebBroker(options: WebBrokerServerOptions): Promise<{ port: number; close: () => Promise<void>; requestStageApproval: (request: StageApprovalRequest) => Promise<boolean> }> {
@@ -420,9 +498,14 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   };
   const ownerServer = options.ownerPipePath ? await startOwnerPipe({
     path: options.ownerPipePath,
-    handle: (request) => request.method === "GET"
-      ? handleOwnerRequest(request)
-      : ownerReply(false, { error: "owner pipe is read-only; mutations require the authenticated loopback API" }),
+    handle: (request) => {
+      if (request.method === "GET") return handleOwnerRequest(request);
+      if (request.method === "POST" && request.path === "/web/mcp/store") {
+        if (!options.agentMcpStore) return { ok: false, error: "Owner-brokered M9R task state writes are unavailable." };
+        return applyAgentMcpStoreMutation(options.agentMcpStore, request.body).body;
+      }
+      return ownerReply(false, { error: "the local pipe only accepts read-only status and authenticated agent task-state operations" });
+    },
   }) : null;
 
   const server = createServer(async (req, res) => {

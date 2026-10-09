@@ -57,13 +57,17 @@ async function main(): Promise<void> {
   // The stage service is built before the broker that owns the approval list, so it reads the route lazily:
   // money-gated stage clicks hold for the owner through the same pill approvals as web actions.
   const stageApprovals: { requestApproval?: (request: StageApprovalRequest) => Promise<boolean> } = {};
-  const taskStages = createTaskDesktopStageService({ store: createLocalStore(root), approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
-  const broker = await startWebBroker({ key, port, taskStages, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
+  // One owner-owned store instance is shared by the broker, stage service, and provider-session supervisor.
+  // Restricted MCP child processes use the broker's narrow token-checked write endpoint instead of taking the
+  // state.lock directory themselves; the owner-only store ACL stays intact.
+  const store = createLocalStore(root);
+  const taskStages = createTaskDesktopStageService({ store, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
+  const broker = await startWebBroker({ key, port, taskStages, agentMcpStore: store, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
   stageApprovals.requestApproval = (request) => broker.requestStageApproval(request);
   const config = loadAgentsConfig(root, { cwd: projectRoot });
   const sessions = createWebLiveSessions({
     agents: config.agents, storeRoot: root, repoRoot: projectRoot, brokerPort: broker.port,
-    store: createLocalStore(root), onEvent: (event) => ui.onSessionEvent(event),
+    store, onEvent: (event) => ui.onSessionEvent(event),
   });
   ui.attachSessions(sessions);
   process.stdout.write(`M9R web broker listening on 127.0.0.1:${broker.port}\n`);

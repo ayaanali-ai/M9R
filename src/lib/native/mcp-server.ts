@@ -199,25 +199,33 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           throw new Error(authorization?.error ?? "AWARE room membership could not be checked; the message was not sent.");
         }
       }
-      const result = deps.store.addTask({
-        to: roomHandle(identity, to),
-        from: roomHandle(identity, identity.handle),
-        goal,
-        fromSession: identity.sessionId,
-        origin: "agent_initiated",
-        idempotencyKey: `mcp:${identity.sessionId}:${to}:${goal.slice(0, 200)}`,
-      });
+      let taskId: string;
+      if (deps.web?.submitAgentTask) {
+        const result = await deps.web.submitAgentTask(token, to, goal);
+        if (!result.ok || !result.taskId) throw new Error(result.error ?? "The owner broker did not accept the M9R task.");
+        taskId = result.taskId;
+      } else {
+        const result = deps.store.addTask({
+          to: roomHandle(identity, to),
+          from: roomHandle(identity, identity.handle),
+          goal,
+          fromSession: identity.sessionId,
+          origin: "agent_initiated",
+          idempotencyKey: `mcp:${identity.sessionId}:${to}:${goal.slice(0, 200)}`,
+        });
+        taskId = result.task.id;
+      }
       if (deps.web?.notifyMessage) {
         void deps.web.notifyMessage({
           agent: identity.handle,
           provider: identity.provider,
           sessionId: identity.sessionId,
           to,
-          messageId: result.task.id,
-          text: result.task.goal,
+          messageId: taskId,
+          text: goal,
         }).catch(() => false);
       }
-      return { content: [{ type: "text", text: `Sent to @${to} as task ${result.task.id}.` }] };
+      return { content: [{ type: "text", text: `Sent to @${to} as task ${taskId}.` }] };
     },
   );
 
@@ -285,7 +293,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           const included = authorizedTasks.find((task) => task.seq > cursor && task.seq <= injection.newCursor
             && ["approved", "not_needed"].includes(task.approval));
           const stageNotice = included ? await prepareTaskStageNotice(deps.store.root, deps.web, token, identity.handle, included.id) : "";
-          deps.store.setCursor(handle, cursorSession, injection.newCursor);
+          if (deps.web?.advanceAgentInboxCursor) {
+            const saved = await deps.web.advanceAgentInboxCursor(token, injection.newCursor);
+            if (!saved.ok) throw new Error(saved.error ?? "The owner broker could not record which M9R messages were shown.");
+          } else {
+            deps.store.setCursor(handle, cursorSession, injection.newCursor);
+          }
           return { content: [{ type: "text" as const, text: injection.text + (stageNotice ? `\n\n${stageNotice}` : "") }] };
         }
         if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
@@ -309,8 +322,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const existing = deps.store.getTask?.(taskId);
       if (!existing) throw new Error(`No task ${taskId} found.`);
       if (existing.to !== identity.handle && existing.to !== roomHandle(identity, identity.handle)) throw new Error(`Task ${taskId} was not sent to you (@${identity.handle}), refusing to report a result for it.`);
-      const task = deps.store.setResult(taskId, summary)!;
-      return { content: [{ type: "text", text: `Recorded result for ${taskId}, visible to @${task.from} next time they check their results.` }] };
+      if (deps.web?.recordAgentTaskResult) {
+        const recorded = await deps.web.recordAgentTaskResult(token, taskId, summary);
+        if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
+      } else {
+        deps.store.setResult(taskId, summary);
+      }
+      return { content: [{ type: "text", text: `Recorded result for ${taskId}, visible to @${existing.from} next time they check their results.` }] };
     },
   );
 
