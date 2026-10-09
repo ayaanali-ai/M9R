@@ -5,6 +5,8 @@
   const EDGE = 10;
   const MESSAGE_TTL_MS = 4000;
   const FRAME_AUTH_TIMEOUT_MS = 1000;
+  const FRAME_HEALTH_TIMEOUT_MS = 1000;
+  const MAX_FRAME_AUTH_RETRIES = 3;
   const IDLE_AFTER_MS = 4000;
   // Without a roster from the broker there is no "session ended" signal; an agent silent this long is taken as gone.
   const ORPHAN_AFTER_MS = 90000;
@@ -651,8 +653,14 @@
         // invalidates the port that is already carrying the shared UI.
         if (state.ready && state.port && state.box.isConnected && state.frame.isConnected) {
           layout(state);
+          probeFramePort(state);
           continue;
         }
+        if (host.dataset && host.dataset[state.failureKey] === "authentication-timeout") {
+          layout(state); // A terminal retry failure needs a page reload, not another automatic retry loop.
+          continue;
+        }
+        clearFrameHealthTimer(state);
         clearFrameAuthTimer(state);
         closeFramePort(state);
         state.ready = false;
@@ -673,6 +681,7 @@
         }
         layout(state);
         state.frame.src = state.src;
+        scheduleFrameAuthRetry(state); // A missing load event must not strand resume in an unbounded wait.
       }
     }
 
@@ -728,13 +737,14 @@
       shadow.appendChild(box);
       let nonce = "";
       try { nonce = new URL(src, doc.baseURI).searchParams.get("n") || ""; } catch {}
-      const state = { kind, box, frame, src, nonce, port: null, size: { w: defaults.w, h: defaults.h }, pos: null, shown: true, defaults, ready: false, pending: new Map(), setFrameStage, loadCount: 0, authCount: 0, retryCount: 0 };
+      const state = { kind, box, frame, src, nonce, port: null, size: { w: defaults.w, h: defaults.h }, pos: null, shown: true, defaults, ready: false, pending: new Map(), setFrameStage, loadCount: 0, authCount: 0, retryCount: 0, healthProbeId: "", healthProbeSeq: 0, healthTimer: 0 };
       const traceKey = `m9r${kind === "pill" ? "Pill" : "Composer"}Lifecycle`;
       const trace = (stage) => {
         if (!host.dataset) return;
         host.dataset[traceKey] = `${host.dataset[traceKey] || ""}${stage};`.slice(-96);
       };
       state.trace = trace;
+      state.failureKey = `m9r${kind === "pill" ? "Pill" : "Composer"}Failure`;
       setFrameStage("mounted");
       // The thread pill rides the dock track when the dock module is loaded; otherwise it keeps its old free position.
       state.dock = kind === "pill" && !!global.M9RDock && !Number.isFinite(defaults.top);
@@ -839,6 +849,58 @@
       state.port = null;
     }
 
+    function clearFrameHealthTimer(state) {
+      if (state.healthTimer) {
+        try { view.clearTimeout(state.healthTimer); } catch {}
+      }
+      state.healthTimer = 0;
+      state.healthProbeId = "";
+    }
+
+    function recoverFrameAfterHealthFailure(state, probeId) {
+      if (destroyed || state.healthProbeId !== probeId || frames.get(state.kind) !== state || !state.frame.isConnected) return;
+      clearFrameHealthTimer(state);
+      state.ready = false;
+      closeFramePort(state);
+      state.pending.clear(); // Never replay stale UI commands into a replacement document.
+      state.setFrameStage("retrying");
+      if (host.dataset) host.dataset[state.failureKey] = "port-unresponsive";
+      state.trace("Q");
+      layout(state);
+      retryFrame(state);
+    }
+
+    function probeFramePort(state) {
+      if (destroyed || !state.ready || !state.port || state.healthProbeId) return;
+      const probeId = `${Date.now().toString(36)}-${++state.healthProbeSeq}`;
+      state.healthProbeId = probeId;
+      state.healthTimer = view.setTimeout(() => recoverFrameAfterHealthFailure(state, probeId), FRAME_HEALTH_TIMEOUT_MS);
+      try {
+        state.port.postMessage({ m9r: "host", nonce: state.nonce, kind: "health-ping", probeId });
+      } catch {
+        recoverFrameAfterHealthFailure(state, probeId);
+      }
+    }
+
+    function onFramePortMessage(state, event) {
+      const data = event && event.data;
+      if (!data || data.m9r !== "frame" || data.nonce !== state.nonce || data.kind !== "health-pong" || data.probeId !== state.healthProbeId) return;
+      clearFrameHealthTimer(state);
+      state.trace("P");
+    }
+
+    function failFrameAuthentication(state) {
+      clearFrameAuthTimer(state);
+      clearFrameHealthTimer(state);
+      state.ready = false;
+      closeFramePort(state);
+      state.pending.clear();
+      state.setFrameStage("failed");
+      if (host.dataset) host.dataset[state.failureKey] = "authentication-timeout";
+      state.trace("F");
+      layout(state);
+    }
+
     function clearFrameAuthTimer(state) {
       if (!state.authTimer) return;
       try { view.clearTimeout(state.authTimer); } catch {}
@@ -850,21 +912,33 @@
       state.authTimer = view.setTimeout(() => {
         state.authTimer = 0;
         if (destroyed || state.ready || !host.isConnected || !state.frame.isConnected || frames.get(state.kind) !== state) return;
-        // A load event has no origin. Until the frame proves its extension origin with its nonce,
-        // keep it hidden and retry the known extension URL rather than leaving an orphan page mounted.
-        state.setFrameStage("retrying");
-        state.retryCount++;
-        if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Retries`] = String(state.retryCount);
-        if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Recipient`] = state.frame.contentDocument ? "page-origin" : "cross-origin";
-        if (host.dataset) {
-          const key = `m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`;
-          host.dataset[key] = `${host.dataset[key] || ""}R${state.retryCount}${state.frame.contentDocument ? "P" : "X"};`.slice(-96);
+        if (state.retryCount >= MAX_FRAME_AUTH_RETRIES) {
+          failFrameAuthentication(state);
+          return;
         }
-        closeFramePort(state);
-        const retryUrl = new URL(state.src);
-        retryUrl.searchParams.set("m9r_retry", String(state.retryCount));
-        state.frame.src = retryUrl.href;
+        retryFrame(state);
       }, FRAME_AUTH_TIMEOUT_MS);
+    }
+
+    function retryFrame(state) {
+      if (destroyed || frames.get(state.kind) !== state || !host.isConnected || !state.frame.isConnected) return;
+      if (state.retryCount >= MAX_FRAME_AUTH_RETRIES) {
+        failFrameAuthentication(state);
+        return;
+      }
+      state.retryCount++;
+      state.setFrameStage("retrying");
+      if (host.dataset) {
+        host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Retries`] = String(state.retryCount);
+        host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Recipient`] = state.frame.contentDocument ? "page-origin" : "cross-origin";
+        const key = `m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`;
+        host.dataset[key] = `${host.dataset[key] || ""}R${state.retryCount}${state.frame.contentDocument ? "P" : "X"};`.slice(-96);
+      }
+      closeFramePort(state);
+      const retryUrl = new URL(state.src);
+      retryUrl.searchParams.set("m9r_retry", String(state.retryCount));
+      state.frame.src = retryUrl.href;
+      scheduleFrameAuthRetry(state); // Also covers a trusted URL assignment that never produces a load event.
     }
 
     function postToFrame(state, payload) {
@@ -1071,6 +1145,10 @@
         if (typeof global.MessageChannel !== "function") return;
         const channel = new global.MessageChannel();
         state.port = channel.port1;
+        state.port.onmessage = (message) => onFramePortMessage(state, message);
+        state.port.onmessageerror = () => {
+          if (state.healthProbeId) recoverFrameAfterHealthFailure(state, state.healthProbeId);
+        };
         try {
           state.frame.contentWindow.postMessage({ m9r: "host-port", nonce: state.nonce }, extensionOrigin, [channel.port2]);
         } catch {
@@ -1082,6 +1160,8 @@
         state.ready = true;
         state.setFrameStage("ready");
         state.authCount++;
+        state.retryCount = 0;
+        if (host.dataset) host.dataset[state.failureKey] = "";
         if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Auths`] = String(state.authCount);
         if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`] = `${host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`] || ""}A${state.authCount}${state.frame.contentDocument ? "P" : "X"};`.slice(-96);
         if (host.dataset) host.dataset.m9rFrameHandshake = "ready";
@@ -1225,6 +1305,7 @@
           attempt(() => view.clearTimeout(state.loadGuard));
           state.loadGuard = 0;
         }
+        clearFrameHealthTimer(state);
         clearFrameAuthTimer(state);
         attempt(() => state.frame.removeEventListener("load", state.onLoad));
         attempt(() => closeFramePort(state));

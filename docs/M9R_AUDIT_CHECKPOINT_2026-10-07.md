@@ -187,3 +187,9 @@ The first six gates establish that the local pill and desktop path work reliably
 ## Next checkpoint transition
 
 The once-only delivery fix, current-broker verification, and owner-preview source/runtime update are complete. The owner-visible Chrome/X acceptance is still open because T4 failed on the previous build; request one fresh task and record the actual visual result before moving to two-agent cursors. Continue with the six-step cursor order and update this checkpoint with exact live evidence. Keep C15 optional. Do not claim demo readiness until the ordered live gates pass.
+
+### Extension frame recovery follow-through — 2026-10-09
+
+- Added a nonce-bound health ping/pong over the authenticated pill frame channel. `resume()` now keeps a frame only while its channel acknowledges; a missing acknowledgement closes that channel and starts a bounded reload/auth sequence.
+- Authentication recovery now retries at most three times, re-arms a timeout after every trusted URL assignment (including when Chrome emits no load event), and records a terminal `authentication-timeout` reason instead of looping or remaining indefinitely in `retrying`.
+- Regressions passed: `scripts/presence-frame-lifecycle.test.js` **10/10** and `scripts/pill-shells.test.ts` **13/13**. The rebuilt extension bundle is still source/build evidence only: Chrome’s loaded folder has not been synchronized or reloaded, so the live pill-disappearance issue remains open pending browser evidence.

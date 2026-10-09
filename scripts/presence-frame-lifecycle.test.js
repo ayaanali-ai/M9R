@@ -544,6 +544,7 @@ test('resume reloads a ready frame whose private port does not acknowledge liven
 
   assert.equal(deadPort.closed, true, 'a non-responsive port is discarded');
   assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'retrying');
+  assert.equal(doc.documentElement.child.dataset.m9rComposerFailure, 'port-unresponsive', 'the liveness failure remains diagnosable during recovery');
   assert.equal(srcAssignments, 2, 'the trusted frame URL is reloaded once after failed liveness');
   assert.ok(timers.size > 0, 'authentication recovery is monitored until the replacement frame responds');
   overlay.destroy();
