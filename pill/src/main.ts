@@ -1,13 +1,14 @@
 // Entry point: create the island, connect it to the host's transport, start the intro.
 
 import "./style.css";
+import { listen } from "@tauri-apps/api/event";
 import { getTransport } from "./core/transport";
 import { chromeRuntime, createExtensionTransport } from "./shells/extension";
 import { createFrameHost } from "./shells/frame-host";
 import { createDesktopTransport, tauriInvoke } from "./shells/desktop";
 import { Island } from "./island/island";
 
-function main() {
+async function main() {
   const root = document.getElementById("root");
   if (!root) return;
   // The host decides how the pill reaches its data: an extension frame, the desktop window, or (developer) the mock.
@@ -19,6 +20,16 @@ function main() {
   const frame = runtime && window.parent !== window ? createFrameHost(base) : null;
   const transport = frame ? frame.transport : base;
   const island = new Island(root, transport);
+  if (invoke) {
+    try {
+      await listen<string>("hold-to-talk", ({ payload }) => {
+        if (payload === "pressed") island.talk(true);
+        else if (payload === "released") island.talk(false);
+      });
+    } catch (error) {
+      console.error("M9R could not register the desktop dictation hotkey listener", error);
+    }
+  }
   frame?.onHostCommand((kind, data) => {
     if (kind === "open-message") island.openMessage();
     else if (kind === "talk") island.talk(data.active === true);
@@ -28,4 +39,4 @@ function main() {
   island.launch();
 }
 
-main();
+void main();

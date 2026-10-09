@@ -193,6 +193,27 @@ test("the desktop transport forwards the island's window hooks to the overlay co
   ], "a rejected rectangle does not throw into the UI");
 });
 
+test("desktop dictation uses the WebView permission flow and opens Windows settings only after denial", () => {
+  const oldWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const recognizer = class {} as unknown as new () => import("../pill/src/core/speech").RecognitionLike;
+  const calls: string[] = [];
+  try {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { SpeechRecognition: recognizer } });
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: { language: "en-US" } });
+    const transport = createDesktopTransport(async (command) => { calls.push(command); return ""; });
+    assert.equal(transport.capabilities?.dictation, true);
+    const speech = transport.createDictationEnvironment!();
+    assert.equal(speech.Recognition, recognizer);
+    assert.equal(speech.micIsOn, undefined, "the desktop lets the WebView request permission on the Alt+M press");
+    speech.openMicSetup();
+    assert.deepEqual(calls, ["open_microphone_settings"]);
+  } finally {
+    if (oldWindow) Object.defineProperty(globalThis, "window", oldWindow); else Reflect.deleteProperty(globalThis, "window");
+    if (oldNavigator) Object.defineProperty(globalThis, "navigator", oldNavigator); else Reflect.deleteProperty(globalThis, "navigator");
+  }
+});
+
 test("the browser shell carries the desktop-pill flag, and the frame asks its page to step aside only when it changes", () => {
   assert.equal(fromUiState({ agents: [], desktopPill: true }).desktopPill, true);
   assert.equal("desktopPill" in fromUiState({ agents: [] }), false);

@@ -1,5 +1,5 @@
-// Push-to-talk: speech becomes text in the message field and is never sent on its own. Browser-only (the desktop window
-// has no speech service), so the pill offers it only when the host says it can.
+// Push-to-talk: speech becomes text in the message field and is never sent on its own. Hosts provide the recognizer
+// environment so a browser extension and the desktop WebView can handle first-use permission differently.
 
 export interface RecognitionResultLike {
   isFinal: boolean;
@@ -20,7 +20,8 @@ export interface RecognitionLike {
 export interface SpeechEnv {
   /** The browser's recognizer, or null when it has none. */
   Recognition: (new () => RecognitionLike) | null;
-  micIsOn(): Promise<boolean>;
+  /** Optional preflight used by the extension, which has a dedicated permission-setup page. */
+  micIsOn?(): Promise<boolean>;
   /** Opens the one-time microphone setup tab; asking inside a page's frame would steal focus mid-press. */
   openMicSetup(): void;
   lang: string;
@@ -71,7 +72,7 @@ export function createDictation(env: SpeechEnv, events: DictationEvents, timers 
     if (listening || want) return;
     want = true;
     if (!env.Recognition) { want = false; events.onNotice("Speech isn't available in this browser", true); return; }
-    if (!(await env.micIsOn())) { want = false; events.onNotice("Turn on the microphone for M9R first (opening setup)", true); env.openMicSetup(); return; }
+    if (env.micIsOn && !(await env.micIsOn())) { want = false; events.onNotice("Turn on the microphone for M9R first (opening setup)", true); env.openMicSetup(); return; }
     if (!want) return; // released while the permission check ran
     heard = "";
     stopping = false;
@@ -127,7 +128,11 @@ export function createDictation(env: SpeechEnv, events: DictationEvents, timers 
     } catch {
       listening = false;
       want = false;
+      clearCap();
+      endMeter();
+      recognizer = null;
       events.onListening(false);
+      events.onNotice("Couldn't start speech recognition. Check microphone access and try again.", true);
     }
   }
 
@@ -142,16 +147,12 @@ export function createDictation(env: SpeechEnv, events: DictationEvents, timers 
   return { start, stop, get listening() { return listening; } };
 }
 
-/** The real browser environment. `openMicSetup` is supplied by the shell. */
-export function browserSpeechEnv(openMicSetup: () => void): SpeechEnv {
+function browserSpeechEnvBase(openMicSetup: () => void): SpeechEnv {
   const w = window as unknown as { SpeechRecognition?: new () => RecognitionLike; webkitSpeechRecognition?: new () => RecognitionLike };
   return {
     Recognition: w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null,
     lang: navigator.language || "en-US",
     openMicSetup,
-    async micIsOn() {
-      try { return (await navigator.permissions.query({ name: "microphone" as PermissionName })).state === "granted"; } catch { return false; }
-    },
     async startMeter(onLevel) {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -174,4 +175,19 @@ export function browserSpeechEnv(openMicSetup: () => void): SpeechEnv {
       return () => { cancelAnimationFrame(frame); stream.getTracks().forEach((t) => t.stop()); void ctx.close().catch(() => {}); };
     },
   };
+}
+
+/** Extension speech uses a dedicated page to request permission before the recognition session starts. */
+export function browserSpeechEnv(openMicSetup: () => void): SpeechEnv {
+  return {
+    ...browserSpeechEnvBase(openMicSetup),
+    async micIsOn() {
+      try { return (await navigator.permissions.query({ name: "microphone" as PermissionName })).state === "granted"; } catch { return false; }
+    },
+  };
+}
+
+/** Desktop WebView speech asks through its normal microphone permission flow on the user's Alt+M press. */
+export function desktopSpeechEnv(openMicSetup: () => void): SpeechEnv {
+  return browserSpeechEnvBase(openMicSetup);
 }

@@ -2,6 +2,7 @@
 // in a plain browser tab (npm run dev) the mock below stands in so the UI can be developed and inspected alone.
 
 import type { LinkOffer, PillSnapshot, Settings } from "./state";
+import type { SpeechEnv } from "./speech";
 
 export type Decision = "allow" | "deny" | "allow_day";
 
@@ -85,6 +86,8 @@ export interface PillTransport {
   desktopStages?: DesktopStageTransport;
   /** Opens the one-time microphone setup. Only with `capabilities.dictation`. */
   openMicSetup?(): void;
+  /** Creates a shell-specific speech environment when browser permission behavior differs by host. */
+  createDictationEnvironment?(): SpeechEnv;
   /** Sessions the engine knows for one agent, for the link picker. Only with `capabilities.linkSessions`. */
   listSessions?(handle: string): Promise<SessionRow[]>;
   /** Always route future messages from `offer.from` to this session of `offer.to`. Rejects with a sentence the owner can read. */

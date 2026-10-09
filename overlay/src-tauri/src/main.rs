@@ -31,10 +31,10 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 const TOGGLE_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT).union(Modifiers::SHIFT);
 const TOGGLE_HOTKEY_CODE: Code = Code::KeyM;
 const TOGGLE_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+M";
-/// A scaffold only: press/release is surfaced to the UI, but no audio device or transcription provider is opened.
-const HOLD_TO_TALK_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT).union(Modifiers::SHIFT);
-const HOLD_TO_TALK_HOTKEY_CODE: Code = Code::Space;
-const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+Space";
+/// Hold Alt+M to open the message pill and dictate into its draft field.
+const HOLD_TO_TALK_HOTKEY_MODS: Modifiers = Modifiers::ALT;
+const HOLD_TO_TALK_HOTKEY_CODE: Code = Code::KeyM;
+const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Alt+M";
 /// Private single-instance handoff used by the installer to close the running pill cleanly.
 const UPDATE_SHUTDOWN_ARGUMENT: &str = "--m9r-update-shutdown";
 
@@ -208,6 +208,23 @@ fn pill_set_focus(window: WebviewWindow, focused: bool) -> Result<(), String> {
         window.set_focus().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Opens the Windows microphone privacy page after speech recognition reports denied permission.
+#[tauri::command]
+fn open_microphone_settings() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe")
+            .arg("ms-settings:privacy-microphone")
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("Could not open Windows microphone settings: {error}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Microphone settings are only available from the Windows desktop pill.".to_string())
+    }
 }
 
 /// Makes the transparent area around the island click-through, so the pill never blocks the page or app underneath. The
@@ -815,7 +832,7 @@ fn spawn_fullscreen_watcher(app: AppHandle) {
 }
 
 /// Shows the pill if hidden, hides it if shown. The one manual control the person has over it, reachable from the tray
-/// menu and from a global hotkey (Alt+Shift+M) so it works even if the tray icon is tucked into Windows' overflow drawer,
+/// menu and from a global hotkey (Ctrl+Alt+Shift+M) so it works even if the tray icon is tucked into Windows' overflow drawer,
 /// which is where a new icon lands by default and easy to never notice.
 fn toggle_pill(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(PILL) {
@@ -913,15 +930,18 @@ fn main() {
                         let pressed = event.state() == ShortcutState::Pressed;
                         let transition = handler_hold_to_talk_state.lock().unwrap().transition(pressed);
                         if let Some(transition) = transition {
-                            // This is only an input-state hook for a future provider/privacy contract. It deliberately
-                            // does not open a microphone, record audio, or start transcription.
+                            if transition == HoldToTalkEvent::Pressed {
+                                if let Some(window) = app.get_webview_window(PILL) {
+                                    let _ = window.show();
+                                }
+                            }
                             let _ = app.emit("hold-to-talk", transition.as_str());
                         }
                     }
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus, open_microphone_settings])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.
@@ -983,8 +1003,8 @@ fn main() {
                 Err(e) => eprintln!("M9R: could not register global hotkey {TOGGLE_HOTKEY_LABEL} ({e}); use the tray menu's Show/hide instead"),
             }
             match app.global_shortcut().register(hold_to_talk_shortcut) {
-                Ok(()) => eprintln!("M9R: registered hold-to-talk scaffold {HOLD_TO_TALK_HOTKEY_LABEL} (no audio capture)"),
-                Err(e) => eprintln!("M9R: could not register hold-to-talk scaffold {HOLD_TO_TALK_HOTKEY_LABEL} ({e})"),
+                Ok(()) => eprintln!("M9R: registered dictation hotkey {HOLD_TO_TALK_HOTKEY_LABEL}"),
+                Err(e) => eprintln!("M9R: could not register dictation hotkey {HOLD_TO_TALK_HOTKEY_LABEL} ({e})"),
             }
             Ok(())
         })
@@ -1063,11 +1083,14 @@ mod one_pill_window_tests {
 
 #[cfg(test)]
 mod hold_to_talk_tests {
-    use super::{parse_mentions, HoldToTalkEvent, HoldToTalkState, HOLD_TO_TALK_HOTKEY_LABEL};
+    use super::{parse_mentions, HoldToTalkEvent, HoldToTalkState, HOLD_TO_TALK_HOTKEY_CODE, HOLD_TO_TALK_HOTKEY_LABEL, HOLD_TO_TALK_HOTKEY_MODS};
+    use tauri_plugin_global_shortcut::{Code, Modifiers};
 
     #[test]
     fn hold_to_talk_shortcut_is_alt_m() {
         assert_eq!(HOLD_TO_TALK_HOTKEY_LABEL, "Alt+M");
+        assert_eq!(HOLD_TO_TALK_HOTKEY_CODE, Code::KeyM);
+        assert_eq!(HOLD_TO_TALK_HOTKEY_MODS, Modifiers::ALT);
     }
 
     #[test]

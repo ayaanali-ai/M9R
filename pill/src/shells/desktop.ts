@@ -8,6 +8,7 @@
 // runs in one-pill mode (M9R_PILL_NEXT=1); the Rust side validates every value.
 
 import type { Decision, DesktopStage, DesktopStageActionProof, DesktopStageCapture, DesktopStageCursorMove, DesktopStageWindowOption, PillTransport, SessionRow } from "../core/transport";
+import { desktopSpeechEnv } from "../core/speech";
 import { fromFeed, type Feed } from "./convert";
 
 type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -84,7 +85,8 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
   }
 
   return {
-    capabilities: { allowForADay: true, linkSessions: true, saveMemory: true },
+    capabilities: { allowForADay: true, linkSessions: true, dictation: true, saveMemory: true },
+    createDictationEnvironment() { return desktopSpeechEnv(() => { void invoke("open_microphone_settings").catch(() => {}); }); },
     desktopStages: /Windows/i.test(navigator.userAgent) ? {
       async setAgentPermission(handle, enabled, control = false) { await stageRequest(enabled ? (control ? "allow-control" : "allow-agent") : "revoke-agent", handle); },
       async list() { return (await stageRequest("list")).stages ?? []; },
