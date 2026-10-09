@@ -178,7 +178,12 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const memoryDir = ctx.memoryDir ?? (projectCwd && (ctx.pathExists ?? existsSync)(join(projectCwd, ".m9r", "memory", "index.md")) ? ".m9r/memory" : undefined);
       ctx.store.sweepExpired();
       const awaitingApproval = ctx.store.pendingApprovals().length;
-      const identityToken = input.session_id ? ctx.store.issueIdentity(self, ctx.provider, input.session_id).token : undefined;
+      // Some providers repeat SessionStart when they resume or restore an existing conversation. Keep the token
+      // stable for that same session so an earlier SessionStart card still authenticates; only mint a new token
+      // when this session has no active identity (for example, after an explicit revoke).
+      const identityToken = input.session_id
+        ? ctx.store.identityTokenFor(self, input.session_id) ?? ctx.store.issueIdentity(self, ctx.provider, input.session_id).token
+        : undefined;
       return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir, identityToken }));
     }
 

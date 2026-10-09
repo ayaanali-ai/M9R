@@ -246,7 +246,7 @@ export interface CardInput {
   awaitingApproval?: number;
   /** Only set when the folder really exists; otherwise the card says nothing about memory. */
   memoryDir?: string;
-  /** Freshly issued this SessionStart; scopes the M9R MCP server to this one verified identity. */
+  /** Stable for this provider session; scopes M9R MCP calls to this verified identity. */
   identityToken?: string;
 }
 

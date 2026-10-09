@@ -163,6 +163,28 @@ test("SessionStart registers the endpoint and prints a short card that lists rec
   done();
 });
 
+test("repeated SessionStart for the same session keeps its token valid, while explicit revocation allows a fresh token", () => {
+  const { store, done } = tempStore();
+  const start = () => handleHookEvent({ hook_event_name: "SessionStart", session_id: "resume-me", cwd: "/repo" }, ctx(store));
+  const extractToken = (out: unknown) => {
+    const match = /M9R session token[^:]*: ([A-Za-z0-9_-]{32})/.exec(ctxOf(out) ?? "");
+    assert.ok(match, "SessionStart must include the session identity token");
+    return match[1];
+  };
+
+  const firstToken = extractToken(start());
+  const resumedToken = extractToken(start());
+  assert.equal(resumedToken, firstToken, "resuming a provider session must not invalidate its earlier SessionStart card");
+  assert.notEqual(store.verifyIdentity(firstToken), null);
+
+  store.revokeIdentity("resume-me");
+  const afterRevoke = extractToken(start());
+  assert.notEqual(afterRevoke, firstToken, "a revoked identity must be replaced when the provider session reconnects");
+  assert.equal(store.verifyIdentity(firstToken), null);
+  assert.notEqual(store.verifyIdentity(afterRevoke), null);
+  done();
+});
+
 test("an already-open Codex session restores its missing identity on the next trusted prompt", () => {
   const { store, done } = tempStore();
   store.registerEndpoint({ provider: "codex", sessionId: "codex-open", cwd: "C:/repo" });
