@@ -59,6 +59,11 @@ function createHarness() {
     chrome,
     WebSocket: FakeWebSocket,
     M9RPillBridge: bridge,
+    // The harness evaluates background.js directly instead of executing Chrome's importScripts loader.
+    // Quiet-input is unrelated to readiness, but the service worker creates it during startup.
+    M9RQuietInput: {
+      create() { return { adoptAndRelease() {}, stopAll() {}, resumeAll() {} }; },
+    },
     importScripts() {},
     setTimeout(callback, ms) { const timer = { callback, ms, cleared: false }; timers.push(timer); return timer; },
     clearTimeout(timer) { if (timer) timer.cleared = true; },
