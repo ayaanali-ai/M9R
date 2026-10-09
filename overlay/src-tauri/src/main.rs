@@ -1063,7 +1063,12 @@ mod one_pill_window_tests {
 
 #[cfg(test)]
 mod hold_to_talk_tests {
-    use super::{parse_mentions, HoldToTalkEvent, HoldToTalkState};
+    use super::{parse_mentions, HoldToTalkEvent, HoldToTalkState, HOLD_TO_TALK_HOTKEY_LABEL};
+
+    #[test]
+    fn hold_to_talk_shortcut_is_alt_m() {
+        assert_eq!(HOLD_TO_TALK_HOTKEY_LABEL, "Alt+M");
+    }
 
     #[test]
     fn mentions_pick_recipients_and_leave_the_message() {
