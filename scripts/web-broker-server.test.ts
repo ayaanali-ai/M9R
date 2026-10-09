@@ -41,6 +41,43 @@ test("task stage app/action routes require loopback key, reject origins and extr
   } finally { await broker.close(); }
 });
 
+test("task stage action responses preserve structured Cua Driver tool failures", async () => {
+  const key = randomBytes(32).toString("hex");
+  const driverFailure = Object.assign(new Error("DriverError.Tool"), {
+    inner: { tool: "getDesktopState", message: "The active desktop could not be captured.", errorCode: "desktop_unavailable" },
+  });
+  const broker = await startWebBroker({ key, port: 0, taskStages: {
+    prepare: async () => ({}),
+    act: async () => { throw driverFailure; },
+  } });
+  try {
+    const response = await fetch(`http://127.0.0.1:${broker.port}/web/stage/action`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-m9r-key": key },
+      body: JSON.stringify({ token: "session-token", taskId: "T28", action: { kind: "capture" }, mode: "owner-preview" }),
+    });
+    const body = await response.json() as { error?: string; driverError?: { tool?: string; errorCode?: string; message?: string } };
+    assert.equal(response.status, 403);
+    assert.match(body.error ?? "", /getDesktopState/);
+    assert.match(body.error ?? "", /desktop_unavailable/);
+    assert.match(body.error ?? "", /active desktop could not be captured/);
+    assert.deepEqual(body.driverError, {
+      tool: "getDesktopState",
+      errorCode: "desktop_unavailable",
+      message: "The active desktop could not be captured.",
+    });
+  } finally { await broker.close(); }
+});
+
+test("health reports broker liveness without claiming desktop readiness", async () => {
+  const broker = await startWebBroker({ key: randomBytes(32).toString("hex"), port: 0 });
+  try {
+    const response = await fetch(`http://127.0.0.1:${broker.port}/health`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, broker: "alive", desktopStage: "not-probed" });
+  } finally { await broker.close(); }
+});
+
 test("task stage preparation requires the broker key and refuses browser origins and extra control fields", async () => {
   let calls = 0;
   let mode: string | undefined;

@@ -94,6 +94,26 @@ function reply(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+function stageFailure(error: unknown, fallback: string): Record<string, unknown> {
+  if (typeof error === "object" && error !== null && "inner" in error) {
+    const inner = (error as { inner?: unknown }).inner;
+    if (typeof inner === "object" && inner !== null) {
+      const detail = inner as Record<string, unknown>;
+      if (typeof detail.tool === "string" && typeof detail.message === "string" && typeof detail.errorCode === "string") {
+        const tool = detail.tool.slice(0, 120);
+        const message = detail.message.slice(0, 2_000);
+        const errorCode = detail.errorCode.slice(0, 120);
+        return {
+          ok: false,
+          error: `${tool} (${errorCode}): ${message}`,
+          driverError: { tool, errorCode, message },
+        };
+      }
+    }
+  }
+  return { ok: false, error: error instanceof Error ? error.message : fallback };
+}
+
 function readBody(req: IncomingMessage): Promise<string | null> {
   return new Promise((resolve) => {
     let size = 0;
@@ -406,7 +426,9 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   }) : null;
 
   const server = createServer(async (req, res) => {
-    if (req.method === "GET" && req.url === "/health") return reply(res, 200, { ok: true });
+    // This is process liveness only. Desktop capture/control is task-scoped and is
+    // verified by an actual stage capture; do not imply that liveness proves it.
+    if (req.method === "GET" && req.url === "/health") return reply(res, 200, { ok: true, broker: "alive", desktopStage: "not-probed" });
     const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
     if (requestUrl.pathname.startsWith("/web/")) {
       if (req.headers.origin !== undefined) return reply(res, 403, { ok: false, error: "browser-originated requests are refused" });
@@ -427,7 +449,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
             ? await options.taskStages!.launch!(value.token, value.taskId, value.appId as string, value.mode as "background" | "owner-preview" | undefined)
             : await options.taskStages!.closeApp!(value.token, value.taskId, value.mode as "background" | "owner-preview" | undefined);
           return reply(res, 200, { ok: true, result });
-        } catch (error) { return reply(res, 403, { ok: false, error: error instanceof Error ? error.message : "Stage app request failed." }); }
+        } catch (error) { return reply(res, 403, stageFailure(error, "Stage app request failed.")); }
       }
       if (req.method === "POST" && requestUrl.pathname === "/web/stage/action") {
         if (!options.taskStages?.act) return reply(res, 503, { ok: false, error: "Task stage control is unavailable on this broker." });
@@ -441,7 +463,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
             || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
           return reply(res, 200, { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, value.mode as "background" | "owner-preview" | undefined) });
         } catch (error) {
-          return reply(res, 403, { ok: false, error: error instanceof Error ? error.message : "Stage action failed." });
+          return reply(res, 403, stageFailure(error, "Stage action failed."));
         }
       }
       if (req.method === "POST" && requestUrl.pathname === "/web/stage/prepare") {
@@ -456,7 +478,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
             || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
           return reply(res, 200, { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, value.mode as "background" | "owner-preview" | undefined) });
         } catch (error) {
-          return reply(res, 403, { ok: false, error: error instanceof Error ? error.message : "Stage preparation failed." });
+          return reply(res, 403, stageFailure(error, "Stage preparation failed."));
         }
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/status") {
