@@ -35,7 +35,6 @@ type CuaSdk = {
     Element?: new (input: { elementToken: string }) => CuaClickPosition };
   InputDeliveryMode: { Background: number; Foreground: number };
   CaptureScope: { Desktop: number };
-  EscalationReason: { NoWindowTarget: number };
   ClickButton: { Left: number; Right: number; Middle: number };
   ScrollDirection: { Up: number; Down: number };
   ScrollBy: { Line: number };
@@ -562,17 +561,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return { runtime, session: agentSessions.get(details.key)! };
   }
 
-  async function ensureDesktopCapturePermission(runtime: CuaRuntime, session: string): Promise<void> {
-    let state = await runtime.driver.getSessionState({ session });
-    if (!state.desktopCaptureAuthorized) {
-      await runtime.driver.escalateSession({ session, reason: runtime.sdk.EscalationReason.NoWindowTarget });
-      state = await runtime.driver.getSessionState({ session });
-    }
-    if (!state.desktopCaptureAuthorized) {
-      throw new Error("Cua Driver did not authorize desktop-wide capture for this M9R agent session.");
-    }
-  }
-
   async function inspectOwnerDesktop(name: string, identity: CuaAgentCursorIdentity) {
     const { stage, desktop, anchor } = await manager.inspectStage(name);
     const details = agentCursorDetails(identity);
@@ -606,7 +594,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   async function captureOwnerDesktop(name: string, identity: CuaAgentCursorIdentity, refresh = false): Promise<CuaStageCapture> {
     const details = agentCursorDetails(identity);
     const { runtime, session } = await ensureAgentSession(identity);
-    await ensureDesktopCapturePermission(runtime, session.session);
     await inspectOwnerDesktop(name, identity);
     if (!refresh) {
       try { return stageCapture(currentDesktopCapture(name, identity), now); } catch { /* take a new capture */ }
@@ -645,7 +632,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     capture: CachedDesktopCapture;
   }) => Promise<T>): Promise<T> {
     const { runtime, session } = await ensureAgentSession(identity);
-    await ensureDesktopCapturePermission(runtime, session.session);
     await inspectOwnerDesktop(name, identity);
     const capture = currentDesktopCapture(name, identity);
     if (capture.stageName !== name || capture.identityKey !== session.key) throw new Error("The captured desktop does not belong to this agent's current stage session.");

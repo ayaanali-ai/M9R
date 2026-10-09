@@ -76,6 +76,8 @@ function makeSdk(options: {
   screenSize?: { width: number; height: number };
   cursorVisible?: boolean;
   desktopMetadata?: Record<string, unknown>;
+  sessionStateError?: Error;
+  escalationError?: Error;
   calls: Array<{ method: string; value?: unknown }>;
 }) {
   const actionResult = options.actionResult ?? { effect: 0, route: 1, summary: "action confirmed" };
@@ -105,8 +107,16 @@ function makeSdk(options: {
       return { text: "", images: [], isError: false, degraded: false, rawJson: "",
         structuredJson: JSON.stringify(options.screenSize ?? { width: 1920, height: 1080 }) };
     },
-    async getSessionState(input: unknown) { options.calls.push({ method: "getSessionState", value: input }); return { desktopCaptureAuthorized: true }; },
-    async escalateSession(input: unknown) { options.calls.push({ method: "escalateSession", value: input }); return { desktopCaptureAuthorized: true }; },
+    async getSessionState(input: unknown) {
+      options.calls.push({ method: "getSessionState", value: input });
+      if (options.sessionStateError) throw options.sessionStateError;
+      return { desktopCaptureAuthorized: true };
+    },
+    async escalateSession(input: unknown) {
+      options.calls.push({ method: "escalateSession", value: input });
+      if (options.escalationError) throw options.escalationError;
+      return { desktopCaptureAuthorized: true };
+    },
     async parseVisualRegions(input: unknown) {
       options.calls.push({ method: "parseVisualRegions", value: input });
       return { text: "", images: [], isError: false, degraded: false, rawJson: "",
@@ -452,6 +462,30 @@ test("shows a distinct agent label on each native cursor and configures adaptive
   })));
   assert.equal(calls.filter((call) => call.method === "moveCursor").length, 2);
   for (const identity of identities) await driver.closeAgentCursor(identity);
+}));
+
+test("owner desktop capture does not use legacy capture-scope session escalation", async () => withRoot(async (root) => {
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await registerOwnerPreview(root, identity);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({
+      calls,
+      sessionStateError: new Error("session has no capture policy; call start_session first"),
+      escalationError: new Error("legacy capture-scope escalation is unavailable for this session"),
+    }) as never,
+  });
+
+  const capture = await driver.captureDesktop("preview", identity);
+
+  assert.equal(capture.width, 1);
+  assert.equal(capture.height, 1);
+  assert.ok(calls.some((call) => call.method === "startSession"));
+  assert.ok(calls.some((call) => call.method === "getDesktopState"));
+  assert.equal(calls.some((call) => call.method === "getSessionState" || call.method === "escalateSession"), false,
+    "modern per-action desktop capture must not depend on the deprecated legacy capture policy");
+  await driver.shutdown();
 }));
 
 test("refuses out-of-bounds cursor input before enabling or moving the ghost cursor", async () => withRoot(async (root) => {
