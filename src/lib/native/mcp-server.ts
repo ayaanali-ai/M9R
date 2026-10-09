@@ -46,8 +46,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const pageNotes = deps.pageNotes ?? createPageNotesStore(deps.store.root);
 
   function requireIdentity(token: string): VerifiedIdentity {
+    // Tokens are 24 random bytes encoded as base64url. Detect copied or truncated
+    // values before consulting the store so they are not misreported as revoked.
+    if (!/^[A-Za-z0-9_-]{32}$/.test(token)) {
+      throw new Error(`M9R session token is malformed: received ${token.length} characters; expected a 32-character base64url token. Use the exact token from this session's SessionStart card.`);
+    }
     const identity = deps.store.verifyIdentity(token);
-    if (!identity) throw new Error("This M9R session token is invalid or has been revoked. Reconnect (start a new session) to get a fresh one from the SessionStart card.");
+    if (!identity) throw new Error("This well-formed M9R token is not active in the local runtime. It may belong to a different or revoked session; reconnect the agent session to issue an active identity.");
     return identity;
   }
 
