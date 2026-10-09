@@ -148,7 +148,7 @@ export interface WebBrokerServerOptions {
   /** Called on a real POST /web/shutdown, in addition to closing this HTTP/WS server, so the caller can also stop its own
    * timers, sessions and exit the process. Without this the server socket closes but the process (and any interval it
    * started that isn't unref'd) keeps running. */
-  onShutdownRequested?: () => void;
+  onShutdownRequested?: () => void | Promise<void>;
   /** When set, this local endpoint exposes read-only status; mutations use the broker-key HTTP API after CLI confirmation. */
   ownerPipePath?: string;
 }
@@ -283,6 +283,23 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     const principalId = `agent:${memberOwner}/${agent}`;
     return principalId.length <= 128 ? principalId : null;
   }
+  function scheduleShutdown(): void {
+    setTimeout(() => {
+      if (!options.onShutdownRequested) {
+        void closeServer();
+        return;
+      }
+      try {
+        // The process owner must finish draining its desktop/session resources before the
+        // listener closes. Otherwise health disappears while the process is still alive,
+        // and an updater can mistake an early HTTP close for a completed shutdown.
+        void Promise.resolve(options.onShutdownRequested()).then(() => closeServer()).catch(() => undefined);
+      } catch {
+        // Leave the broker available if the owner's shutdown hook cannot start; callers
+        // will time out safely instead of replacing a live image.
+      }
+    }, 0);
+  }
   function decideDisclosure(requestId: string, decision: "approve" | "deny"): { ok: true; receiptId: string } | { ok: false; error: string } {
     const open = protocolLedger.pendingDisclosures(LOCAL_AWARE_ROOM_ID).find((frame) => frame.payload.request_id === requestId);
     if (!open) return { ok: false, error: "disclosure request was not found or has expired" };
@@ -343,7 +360,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     }
     if (request.path === "/web/shutdown") {
       if (request.method !== "POST") return ownerReply(false, { error: "shutdown requires POST" });
-      setTimeout(() => { options.onShutdownRequested?.(); void closeServer(); }, 0);
+      scheduleShutdown();
       return ownerReply(true, { stopped: true });
     }
     if (!authority) return ownerReply(false, { error: "web authority is not configured" });
@@ -461,7 +478,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       }
       if (req.method === "POST" && requestUrl.pathname === "/web/shutdown") {
         reply(res, 200, { ok: true, stopped: true });
-        setTimeout(() => { options.onShutdownRequested?.(); void closeServer(); }, 0);
+        scheduleShutdown();
         return;
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/feed") return reply(res, 200, broker.feedSnapshot());

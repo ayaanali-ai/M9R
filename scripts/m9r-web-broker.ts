@@ -53,7 +53,7 @@ async function main(): Promise<void> {
   setInterval(() => void pullCloudNotes(root), 5 * 60_000).unref();
   // A real POST /web/shutdown (m9r web restart, or any owner-triggered restart) must stop this whole process, not just
   // close the HTTP socket, or the unref'd-less feed timer below keeps Node running forever with nothing left listening.
-  let requestShutdown = () => {};
+  let requestShutdown: () => Promise<void> = async () => {};
   // The stage service is built before the broker that owns the approval list, so it reads the route lazily:
   // money-gated stage clicks hold for the owner through the same pill approvals as web actions.
   const stageApprovals: { requestApproval?: (request: StageApprovalRequest) => Promise<boolean> } = {};
@@ -82,16 +82,34 @@ async function main(): Promise<void> {
   }, 1000);
   // One pill at a time: the desktop pill beats a heartbeat file; while it is running the in-page pill steps aside.
   const presenceTimer = setInterval(() => ui.setDesktopPill(readDesktopPillRunning(root)), 2000);
-  let stopping = false;
-  const stop = () => {
-    if (stopping) return;
-    stopping = true;
+  let stopPromise: Promise<void> | undefined;
+  const stop = (): Promise<void> => {
+    if (stopPromise) return stopPromise;
     clearInterval(webTimer); clearInterval(presenceTimer); sessions.close(); ui.close();
-    void taskStages.close().catch(() => undefined).then(() => broker.close()).then(() => process.exit(0));
+    // Keep the broker listener alive until stage/runtime cleanup finishes. The authenticated
+    // shutdown caller uses listener closure as its signal that owned resources have drained.
+    stopPromise = (async () => {
+      await taskStages.close();
+      await broker.close();
+    })().catch((error: unknown) => {
+      // A failed drain must leave the broker available so an authenticated retry can
+      // attempt cleanup again. Keeping a rejected promise here would make every later
+      // shutdown request fail without re-running the stage close operation.
+      stopPromise = undefined;
+      throw error;
+    });
+    return stopPromise;
   };
-  requestShutdown = stop;
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
+  const requestStop = (): Promise<void> => {
+    const operation = stop();
+    void operation.then(() => process.exit(0), (error) => {
+      process.stderr.write(`M9R web broker shutdown did not complete: ${error instanceof Error ? error.message : String(error)}\n`);
+    });
+    return operation;
+  };
+  requestShutdown = requestStop;
+  process.on("SIGINT", () => { void requestStop(); });
+  process.on("SIGTERM", () => { void requestStop(); });
 }
 
 // A single failed background write must not take the owner's broker down in the middle of a demo.

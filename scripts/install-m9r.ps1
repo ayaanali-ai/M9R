@@ -260,8 +260,12 @@ function Stop-InstalledM9rPill {
     $running = @(Get-Process -Name 'm9r-overlay' -ErrorAction SilentlyContinue | Where-Object { & $matchesInstalledPill $_ })
     foreach ($process in $running) {
         try {
-            if (-not $process.CloseMainWindow()) {
-                throw "Could not request a graceful close for the installed M9R pill (PID $($process.Id)). Close it from its tray menu, then rerun setup. No installed files were replaced."
+            # The pill handles this through its existing single-instance channel, so shutdown
+            # runs on the UI thread and also stops the engine child it owns. Keep WM_CLOSE as a
+            # compatibility fallback for versions installed before this private argument existed.
+            $request = Start-Process -FilePath $overlay -ArgumentList '--m9r-update-shutdown' -WorkingDirectory (Split-Path -Parent $overlay) -WindowStyle Hidden -PassThru
+            if (-not $request.WaitForExit(5000)) {
+                throw "The M9R pill's update-shutdown request (PID $($request.Id)) did not return."
             }
         } catch {
             throw "Could not close the installed M9R pill (PID $($process.Id)) before updating it. $($_.Exception.Message) No installed files were replaced."
@@ -269,7 +273,10 @@ function Stop-InstalledM9rPill {
     }
     foreach ($process in $running) {
         if (-not $process.WaitForExit(15000)) {
-            throw "The installed M9R pill (PID $($process.Id)) did not exit cleanly. No installed files were replaced."
+            try { [void]$process.CloseMainWindow() } catch { }
+            if (-not $process.WaitForExit(2000)) {
+                throw "The installed M9R pill (PID $($process.Id)) did not exit after its managed shutdown request. No installed files were replaced."
+            }
         }
     }
     $stillRunning = @(Get-Process -Name 'm9r-overlay' -ErrorAction SilentlyContinue | Where-Object { & $matchesInstalledPill $_ })

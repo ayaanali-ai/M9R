@@ -1518,16 +1518,20 @@ async function stopAuthenticatedLocalBroker(root: string, port: number): Promise
   const key = keyBytes.toString("utf8").trim();
   const status = await fetch(`${baseUrl}/web/status`, { headers: { "x-m9r-key": key }, signal: AbortSignal.timeout(700) }).catch(() => null);
   if (!status?.ok) return "not-owned-or-unavailable";
-  await fetch(`${baseUrl}/web/shutdown`, {
+  const shutdown = await fetch(`${baseUrl}/web/shutdown`, {
     method: "POST",
     headers: { "x-m9r-key": key, "content-type": "application/json" },
     body: "{}",
     signal: AbortSignal.timeout(1_000),
   }).catch(() => null);
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    const after = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(300) }).catch(() => null);
+  if (!shutdown?.ok) return "not-owned-or-unavailable";
+  const acknowledgement = await shutdown.json().catch(() => null) as { ok?: unknown; stopped?: unknown } | null;
+  if (acknowledgement?.ok !== true || acknowledgement.stopped !== true) return "not-owned-or-unavailable";
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const after = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(500) }).catch(() => null);
     if (!after?.ok) return "stopped";
-    await new Promise((wait) => setTimeout(wait, 100));
+    await new Promise((wait) => setTimeout(wait, 250));
   }
   return "not-owned-or-unavailable";
 }
@@ -1701,19 +1705,44 @@ async function stopManagedBrokerForUpdate(target: NonNullable<Awaited<ReturnType
   if (stopped === "not-owned-or-unavailable") {
     throw new Error("The scheduled task is M9R-owned, but authenticated broker shutdown failed; no installed files were replaced.");
   }
+  // Health closes only after the broker's shutdown hook has drained its owned resources.
+  // Still prove the exact installed image exited before asking Task Scheduler to clean up
+  // its wrapper; stopping the task while this child is alive can orphan it on Windows.
+  const processDeadline = Date.now() + 15_000;
+  let image = await readManagedBrokerProcessState(target.brokerPath);
+  while (image.processes.length > 0 && Date.now() < processDeadline) {
+    await new Promise((wait) => setTimeout(wait, 250));
+    image = await readManagedBrokerProcessState(target.brokerPath);
+  }
+  if (image.processes.length > 0) {
+    throw new Error("The broker health endpoint closed, but its exact installed process did not exit; no installed files were replaced.");
+  }
+
   let task = await inspectLocalBrokerTask(WEB_TASK_NAME);
   if (!task || !localBrokerTaskDefinitionOwned(task, target.taskDefinitionHash, target.taskActionHash)) {
     throw new Error("The M9R broker task changed while the installer was stopping it; no installed files were replaced.");
   }
   if (["Running", "Queued"].includes(task.state)) {
-    try { task = await waitForBrokerTaskState(WEB_TASK_NAME, false, 8); }
+    try { task = await waitForBrokerTaskState(WEB_TASK_NAME, false); }
     catch {
-      await powerShell(buildLocalBrokerScheduledTaskStopScript(WEB_TASK_NAME));
-      task = await waitForBrokerTaskState(WEB_TASK_NAME, false, 12);
+      const currentImage = await readManagedBrokerProcessState(target.brokerPath);
+      if (currentImage.processes.length > 0) {
+        throw new Error("The broker task remained active while its installed process was still running; no task or runtime files were forcibly stopped.");
+      }
+      const currentTask = await inspectLocalBrokerTask(WEB_TASK_NAME);
+      if (!currentTask || !localBrokerTaskDefinitionOwned(currentTask, target.taskDefinitionHash, target.taskActionHash)) {
+        throw new Error("The M9R broker task changed during shutdown; no installed files were replaced.");
+      }
+      if (["Running", "Queued"].includes(currentTask.state)) {
+        await powerShell(buildLocalBrokerScheduledTaskStopScript(WEB_TASK_NAME));
+        task = await waitForBrokerTaskState(WEB_TASK_NAME, false, 12);
+      } else {
+        task = currentTask;
+      }
     }
   }
-  const image = await readManagedBrokerProcessState(target.brokerPath);
-  if (image.processes.length) throw new Error("The authenticated broker stopped responding, but its process is still running; no installed files were replaced.");
+  const finalImage = await readManagedBrokerProcessState(target.brokerPath);
+  if (finalImage.processes.length) throw new Error("The broker process returned during shutdown; no installed files were replaced.");
 }
 
 async function startManagedBrokerAfterUpdate(target: NonNullable<Awaited<ReturnType<typeof loadManagedBrokerUpdateTarget>>>): Promise<void> {

@@ -35,6 +35,8 @@ const TOGGLE_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+M";
 const HOLD_TO_TALK_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT).union(Modifiers::SHIFT);
 const HOLD_TO_TALK_HOTKEY_CODE: Code = Code::Space;
 const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+Space";
+/// Private single-instance handoff used by the installer to close the running pill cleanly.
+const UPDATE_SHUTDOWN_ARGUMENT: &str = "--m9r-update-shutdown";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HoldToTalkEvent {
@@ -833,6 +835,16 @@ fn stop_engine() {
     }
 }
 
+fn has_update_shutdown_argument(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == UPDATE_SHUTDOWN_ARGUMENT)
+}
+
+fn shutdown_pill(app: &AppHandle) {
+    let _ = fs::remove_file(heartbeat_path());
+    stop_engine();
+    app.exit(0);
+}
+
 /// Watches both source files (a quarter-second poll: no extra dependency) and emits a merged view when either changes.
 fn spawn_feed_watcher(app: AppHandle) {
     std::thread::spawn(move || {
@@ -885,8 +897,10 @@ fn main() {
     tauri::Builder::default()
         // Register first: duplicate launches must exit before starting another
         // heartbeat writer, tray, hotkey handler, or engine supervisor.
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window(PILL) {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if has_update_shutdown_argument(&args) {
+                shutdown_pill(app);
+            } else if let Some(window) = app.get_webview_window(PILL) {
                 let _ = window.show();
             }
         }))
@@ -909,6 +923,12 @@ fn main() {
         )
         .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus])
         .setup(move |app| {
+            // If no pill instance exists, the installer handoff can start this process. Exit
+            // before creating the tray, heartbeat, feed watcher, or engine supervisor.
+            if has_update_shutdown_argument(&std::env::args().collect::<Vec<_>>()) {
+                shutdown_pill(app.handle());
+                return Ok(());
+            }
             let window = app.get_webview_window(PILL).expect("pill window");
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
             let _ = window.set_focusable(false);
@@ -947,11 +967,7 @@ fn main() {
                 "dnd" => {
                     let _ = app.emit("dnd", dnd.is_checked().unwrap_or(false));
                 }
-                "quit" => {
-                    let _ = fs::remove_file(heartbeat_path());
-                    stop_engine();
-                    app.exit(0)
-                }
+                "quit" => shutdown_pill(app),
                 _ => {}
             })
             .build(app)?;
@@ -980,9 +996,7 @@ fn main() {
                     }
                 }
                 WindowEvent::CloseRequested { .. } => {
-                    let _ = fs::remove_file(heartbeat_path());
-                    stop_engine();
-                    window.app_handle().exit(0);
+                    shutdown_pill(window.app_handle());
                 }
                 _ => {}
             }
@@ -993,7 +1007,17 @@ fn main() {
 
 #[cfg(test)]
 mod one_pill_window_tests {
-    use super::{heartbeat_json, next_window_size, IslandRect, HIT_MARGIN, NEXT_H, NEXT_W, WAKE_H, WAKE_W};
+    use super::{has_update_shutdown_argument, heartbeat_json, next_window_size, IslandRect, HIT_MARGIN, NEXT_H, NEXT_W, UPDATE_SHUTDOWN_ARGUMENT, WAKE_H, WAKE_W};
+
+    #[test]
+    fn only_the_private_installer_argument_requests_shutdown() {
+        assert!(has_update_shutdown_argument(&[
+            "m9r-overlay.exe".into(),
+            UPDATE_SHUTDOWN_ARGUMENT.into(),
+        ]));
+        assert!(!has_update_shutdown_argument(&["m9r-overlay.exe".into()]));
+        assert!(!has_update_shutdown_argument(&["m9r-overlay.exe".into(), "--quit".into()]));
+    }
 
     #[test]
     fn the_heartbeat_is_the_json_the_broker_reads() {

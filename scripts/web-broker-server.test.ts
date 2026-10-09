@@ -96,7 +96,7 @@ test("legacy authority snapshots migrate to a bounded v2 audit chain and persist
   }
 });
 
-async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtension?: boolean; authority?: ReturnType<typeof createWebAuthority>; approvalTimeoutMs?: number; extensionConnectTimeoutMs?: number; ownerId?: string; requestTimeoutMs?: number } = {}) {
+async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtension?: boolean; authority?: ReturnType<typeof createWebAuthority>; approvalTimeoutMs?: number; extensionConnectTimeoutMs?: number; ownerId?: string; requestTimeoutMs?: number; onShutdownRequested?: () => void | Promise<void> } = {}) {
   // Keep broker fixtures inside the writable project tree: the sandbox intentionally blocks deleting arbitrary OS-temp
   // directories. Production key ACL behavior is covered by its dedicated test below.
   const root = mkdtempSync(join(process.cwd(), ".m9r-web-broker-"));
@@ -115,6 +115,7 @@ async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtensio
     ownerId: options.ownerId,
     authority: options.authority,
     authorityStore,
+    onShutdownRequested: options.onShutdownRequested,
   });
   let broker = await startBroker();
   const store = createLocalStore(root);
@@ -709,6 +710,64 @@ test("authenticated owner shutdown closes the loopback broker", async () => {
     assert.equal(response.status, 200);
     await new Promise((resolve) => setTimeout(resolve, 25));
     await assert.rejects(fetch(`http://127.0.0.1:${t.broker.port}/health`));
+  } finally {
+    await t.done();
+  }
+});
+
+test("authenticated shutdown keeps health available until owned cleanup finishes", async () => {
+  let finishCleanup!: () => void;
+  const cleanup = new Promise<void>((resolve) => { finishCleanup = resolve; });
+  const t = await setup({ allowAnyExtension: true, onShutdownRequested: () => cleanup });
+  try {
+    const response = await ownerRequest(t.broker.port, t.key, "/web/shutdown", "POST", {});
+    assert.equal(response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal((await fetch(`http://127.0.0.1:${t.broker.port}/health`)).status, 200,
+      "a shutdown acknowledgement must not make the broker look stopped while its owner is still draining resources");
+
+    finishCleanup();
+    const deadline = Date.now() + 2_000;
+    let closed = false;
+    while (!closed && Date.now() < deadline) {
+      try { await fetch(`http://127.0.0.1:${t.broker.port}/health`, { signal: AbortSignal.timeout(100) }); }
+      catch { closed = true; }
+      if (!closed) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(closed, true, "the broker listener should close after cleanup settles");
+  } finally {
+    finishCleanup();
+    await t.done();
+  }
+});
+
+test("a failed shutdown drain leaves health available for an authenticated retry", async () => {
+  let attempts = 0;
+  const t = await setup({
+    allowAnyExtension: true,
+    onShutdownRequested: () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary drain failure");
+    },
+  });
+  try {
+    const first = await ownerRequest(t.broker.port, t.key, "/web/shutdown", "POST", {});
+    assert.equal(first.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal((await fetch(`http://127.0.0.1:${t.broker.port}/health`)).status, 200,
+      "a failed resource drain must not make a still-running broker look stopped");
+
+    const second = await ownerRequest(t.broker.port, t.key, "/web/shutdown", "POST", {});
+    assert.equal(second.status, 200);
+    const deadline = Date.now() + 2_000;
+    let closed = false;
+    while (!closed && Date.now() < deadline) {
+      try { await fetch(`http://127.0.0.1:${t.broker.port}/health`, { signal: AbortSignal.timeout(100) }); }
+      catch { closed = true; }
+      if (!closed) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(attempts, 2, "a retry must invoke the owner cleanup hook again");
+    assert.equal(closed, true, "the listener should close after a successful cleanup retry");
   } finally {
     await t.done();
   }

@@ -119,6 +119,8 @@ test("installer contains no Node/npm dependency and changes no saved PowerShell 
   assert.match(source, /\[switch\]\$NoAutostart/);
   assert.match(source, /\[switch\]\$NoLaunch/);
   assert.match(source, /function Stop-InstalledM9rPill/);
+  assert.match(source, /--m9r-update-shutdown/, "pill updates must use the app's single-instance shutdown handoff");
+  assert.match(source, /WaitForExit\(15000\)/, "the installer must wait for the installed pill to exit before replacing its image");
   assert.match(source, /function Invoke-ManagedBrokerUpdate/);
   assert.match(source, /Invoke-ManagedBrokerUpdate\s+\$engine\s+'stop'[\s\S]*Stop-InstalledM9rPill[\s\S]*& \$engine \@applyArgs/,
     "updates must authenticate and stop the owned broker before engine setup can replace its runtime image");
