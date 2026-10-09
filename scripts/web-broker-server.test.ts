@@ -58,7 +58,7 @@ test("task stage action responses preserve structured Cua Driver tool failures",
       body: JSON.stringify({ token: "session-token", taskId: "T28", action: { kind: "capture" }, mode: "owner-preview" }),
     });
     const body = await response.json() as { error?: string; driverError?: { tool?: string; errorCode?: string; message?: string } };
-    assert.equal(response.status, 403);
+    assert.equal(response.status, 502);
     assert.match(body.error ?? "", /getDesktopState/);
     assert.match(body.error ?? "", /desktop_unavailable/);
     assert.match(body.error ?? "", /active desktop could not be captured/);

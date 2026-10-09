@@ -285,6 +285,30 @@ test("owner preview captures the whole current desktop and binds visible cursor 
   await driver.shutdown();
 }));
 
+test("owner-preview excludes the daemon's unlabeled overlay before snapshot and input", async () => withRoot(async (root) => {
+  await registerOwnerPreview(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const windows = [
+    { pid: 999, windowId: BigInt(99), appName: "", title: "", bounds: { x: 0, y: 0, width: 1920, height: 1080 }, isOnScreen: true, zIndex: BigInt(99) },
+    { pid: 4321, windowId: BigInt(windowId), appName: "Notepad", title: "Untitled", bounds: { x: 0, y: 0, width: 1920, height: 1080 }, isOnScreen: true, zIndex: BigInt(1) },
+  ];
+  const sdk = makeSdk({ calls, windows, state: { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true,
+    screenshotWidth: 200, screenshotHeight: 100, windowBounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }] } });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => sdk as never,
+    connectRuntime: async () => ({ driver: sdk.CuaDriver.create() as never, processId: 999, close: async () => {} }) });
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await driver.captureDesktop("preview", identity);
+  await driver.moveDesktopCursor("preview", 0, 0, identity);
+  await driver.clickDesktop("preview", 0, 0, identity);
+  await driver.typeTextDesktop("preview", "hello", identity);
+  const snapshots = calls.filter((call) => call.method === "getWindowState");
+  assert.ok(snapshots.length > 0);
+  assert.ok(snapshots.every((call) => (call.value as { pid: number }).pid === 4321));
+  assert.equal(calls.some((call) => call.method === "desktopTarget"), false);
+  await driver.shutdown();
+}));
+
 test("desktop hit testing chooses the documented frontmost HWND and refuses unknown or tied stacking", () => {
   const back = { pid: 100, windowId: BigInt(10), appName: "back.exe", title: "Back",
     bounds: { x: 0, y: 0, width: 500, height: 400 }, isOnScreen: true, minimized: false, zIndex: BigInt(1) };

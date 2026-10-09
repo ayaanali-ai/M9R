@@ -57,6 +57,7 @@ interface AgentCursorSession {
 interface CuaRuntime {
   sdk: CuaSdk;
   driver: CuaDriverLike;
+  processId?: number;
   close?: () => Promise<void>;
 }
 
@@ -502,7 +503,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     const connection = deps.connectRuntime
       ? await deps.connectRuntime(sdk)
       : await startCuaDriverHost(sdk, { workingDirectory: process.cwd() });
-    return { sdk, driver: connection.driver, close: connection.close };
+    return { sdk, driver: connection.driver, processId: connection.processId, close: connection.close };
   }
 
   async function disposeRuntime(runtime: CuaRuntime): Promise<void> {
@@ -653,7 +654,11 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
 
   async function resolveOwnerWindowPoint(runtime: CuaRuntime, session: AgentCursorSession, screenPoint: { x: number; y: number }) {
     const listed = await runtime.driver.listWindows({ onScreenOnly: true });
-    const selected = topmostWindowAtScreenPoint(listed.windows, screenPoint.x, screenPoint.y);
+    // The native daemon's transparent cursor windows cover the desktop. Cua
+    // deliberately refuses targeting its own process, so exclude its known PID
+    // before hit testing rather than relying on localized overlay window titles.
+    const windows = listed.windows.filter((window) => window.pid !== runtime.processId);
+    const selected = topmostWindowAtScreenPoint(windows, screenPoint.x, screenPoint.y);
     const pid = selected.pid!;
     const windowId = selected.windowId;
     const state = await runtime.driver.getWindowState({ pid, windowId, session: session.session,

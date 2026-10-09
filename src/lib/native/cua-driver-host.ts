@@ -9,12 +9,25 @@ const DRIVER_VERSION = "0.34.0";
 const START_TIMEOUT_MS = 12_000;
 const RETRY_INTERVAL_MS = 100;
 
+class HostConfigurationError extends Error {}
+
+export function validateCuaDriverHostMetadata(metadata: { driverVersion: string; embedded: boolean }): void {
+  if (metadata.driverVersion !== DRIVER_VERSION) {
+    throw new HostConfigurationError(`The Cua Driver host is ${metadata.driverVersion}; M9R requires ${DRIVER_VERSION}.`);
+  }
+  if (metadata.embedded !== false) {
+    throw new HostConfigurationError("The Cua Driver host connected in embedded mode; the visible Windows overlay requires the standalone DPI-aware host.");
+  }
+}
+
 export interface CuaDriverSdkConnector {
   CuaDriver: { connect(socketPath: string | undefined): CuaDriverLike };
 }
 
 export interface CuaDriverHostConnection {
   driver: CuaDriverLike;
+  /** The daemon owns click-through overlay HWNDs that must never become input targets. */
+  processId?: number;
   close(): Promise<void>;
 }
 
@@ -100,14 +113,12 @@ export async function startCuaDriverHost(
       try {
         driver = sdk.CuaDriver.connect(socketPath);
         const metadata = await driver.metadata();
-        if (metadata.driverVersion !== DRIVER_VERSION) {
-          throw new Error(`The Cua Driver host is ${metadata.driverVersion}; M9R requires ${DRIVER_VERSION}.`);
-        }
-        if (metadata.embedded !== false) throw new Error("The Cua Driver host connected in embedded mode; the visible Windows overlay requires the standalone DPI-aware host.");
+        validateCuaDriverHostMetadata(metadata);
         const connectedDriver = driver;
         let closed = false;
         return {
           driver: connectedDriver,
+          processId: child.pid,
           async close() {
             if (closed) return;
             closed = true;
@@ -120,7 +131,7 @@ export async function startCuaDriverHost(
           },
         };
       } catch (error) {
-        if (error instanceof Error && /requires 0\.33\.4|connected in embedded mode/.test(error.message)) throw error;
+        if (error instanceof HostConfigurationError) throw error;
         lastConnectionError = error instanceof Error ? error.message.replace(/[\r\n\t]+/g, " ").slice(0, 240) : "connection failed";
         await closeClient(driver);
         driver = undefined;

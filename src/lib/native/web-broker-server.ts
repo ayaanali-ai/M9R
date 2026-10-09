@@ -117,6 +117,13 @@ function stageFailure(error: unknown, fallback: string): Record<string, unknown>
   return { ok: false, error: error instanceof Error ? error.message : fallback };
 }
 
+function replyStageFailure(res: ServerResponse, error: unknown, fallback: string): void {
+  const body = stageFailure(error, fallback);
+  // A native execution failure is not a rejection of the caller's credentials.
+  // Keep genuine stage authorization refusals on the existing forbidden route.
+  reply(res, body.driverError ? 502 : 403, body);
+}
+
 function readBody(req: IncomingMessage): Promise<string | null> {
   return new Promise((resolve) => {
     let size = 0;
@@ -532,7 +539,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
             ? await options.taskStages!.launch!(value.token, value.taskId, value.appId as string, value.mode as "background" | "owner-preview" | undefined)
             : await options.taskStages!.closeApp!(value.token, value.taskId, value.mode as "background" | "owner-preview" | undefined);
           return reply(res, 200, { ok: true, result });
-        } catch (error) { return reply(res, 403, stageFailure(error, "Stage app request failed.")); }
+        } catch (error) { return replyStageFailure(res, error, "Stage app request failed."); }
       }
       if (req.method === "POST" && requestUrl.pathname === "/web/stage/action") {
         if (!options.taskStages?.act) return reply(res, 503, { ok: false, error: "Task stage control is unavailable on this broker." });
@@ -546,7 +553,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
             || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
           return reply(res, 200, { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, value.mode as "background" | "owner-preview" | undefined) });
         } catch (error) {
-          return reply(res, 403, stageFailure(error, "Stage action failed."));
+          return replyStageFailure(res, error, "Stage action failed.");
         }
       }
       if (req.method === "POST" && requestUrl.pathname === "/web/stage/prepare") {
@@ -561,7 +568,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
             || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
           return reply(res, 200, { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, value.mode as "background" | "owner-preview" | undefined) });
         } catch (error) {
-          return reply(res, 403, stageFailure(error, "Stage preparation failed."));
+          return replyStageFailure(res, error, "Stage preparation failed.");
         }
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/status") {
