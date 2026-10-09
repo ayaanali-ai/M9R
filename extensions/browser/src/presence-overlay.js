@@ -190,9 +190,9 @@
     function highlightRect(agent, now) {
       const selected = elementRect(resolveTarget(agent));
       if (selected) return selected;
-      if (agent.nativePoint && typeof doc.elementFromPoint === "function") {
+      if (agent.pagePoint && typeof doc.elementFromPoint === "function") {
         let hit = null;
-        try { hit = doc.elementFromPoint(agent.nativePoint.x, agent.nativePoint.y); } catch { /* A page may reject hit-testing during navigation. */ }
+        try { hit = doc.elementFromPoint(agent.pagePoint.x, agent.pagePoint.y); } catch { /* A page may reject hit-testing during navigation. */ }
         if (hit && typeof hit.closest === "function") {
           try { hit = hit.closest("button,a,input,textarea,select,[role='button'],[contenteditable='true']") || hit; } catch { /* Keep the exact hit target. */ }
         }
@@ -234,7 +234,7 @@
 
     function destination(agent, now) {
       if (agent.docked) return dockPoint(agent);
-      if (agent.nativePoint) return agent.nativePoint;
+      if (agent.pagePoint) return agent.pagePoint;
       const el = resolveTarget(agent);
       // When the page cannot resolve the selector (a control in a shadow root or a replaced node), the extension still measured
       // the element; travel to that spot so the cursor never stays put while the click happens somewhere else.
@@ -259,7 +259,6 @@
       const vh = view.innerHeight;
       let keepFrame = false;
       for (const agent of agents.values()) {
-        if (agent.nativePointerLive) keepFrame = true;
         const dest = destination(agent, now);
         let x = dest.x;
         let y = dest.y;
@@ -306,7 +305,7 @@
         agent.el.classList.toggle("flip-x", cx > vw - 300);
         agent.el.classList.toggle("flip-y", cy > vh - 110);
         const activeRect = highlightRect(agent, now);
-        const showFocus = activeRect && (agent.targetActive || agent.nativePointerLive || agent.focusUntil > now || agent.claimedUntil > now);
+        const showFocus = activeRect && (agent.targetActive || agent.focusUntil > now || agent.claimedUntil > now);
         agent.focus.classList.toggle("on", !!showFocus);
         agent.focus.classList.toggle("claimed", agent.claimedUntil > now && !(agent.focusUntil > now));
         if (showFocus) {
@@ -351,7 +350,7 @@
         const idle = !agent.glide && now - agent.lastSeen > IDLE_AFTER_MS && !(agent.typingUntil > now) && !isWorking(agent);
         agent.el.classList.toggle("idle", idle);
         agent.miniCaret.hidden = !typing;
-        if (agent.nativePointerLive || agent.typingUntil > now || agent.focusUntil > now || agent.claimedUntil > now || now - agent.lastActionAt <= 3200) keepFrame = true;
+        if (agent.typingUntil > now || agent.focusUntil > now || agent.claimedUntil > now || now - agent.lastActionAt <= 3200) keepFrame = true;
       }
       if (keepFrame) loop = view.requestAnimationFrame(frameTick);
     }
@@ -370,37 +369,6 @@
         const done = () => { view.clearTimeout(timer); resolve(); };
         if (!agent || !agent.glide) { view.setTimeout(done, DWELL_MS); return; }
         (agent.glide.waiters || (agent.glide.waiters = [])).push(done);
-      });
-    }
-
-    function nativePointer(agentId, x, y, active) {
-      const agent = agents.get(String(agentId || "").slice(0, 64));
-      if (!agent || !Number.isFinite(x) || !Number.isFinite(y)) return Promise.resolve(false);
-      agent.lastSeen = Date.now();
-      agent.lastActionAt = agent.lastSeen;
-      agent.docked = false;
-      agent.el.classList.remove("parked");
-      agent.glide = null;
-      agent.pendingClick = false;
-      agent.point = { x, y };
-      if (active) {
-        agent.nativePoint = { x, y };
-        agent.nativePointerLive = true;
-        agent.targetActive = true;
-      } else {
-        agent.nativePoint = null;
-        agent.nativePointerLive = false;
-        agent.targetActive = false;
-        agent.focusUntil = Math.max(agent.focusUntil, Date.now() + FOCUS_FADE_MS);
-        agent.selector = null;
-        agent.targetEl = null;
-        agent.hintRect = null;
-      }
-      kick();
-      // Wait for the position update to cross a rendered frame. The trusted OS
-      // input host uses this acknowledgment before pressing the mouse button.
-      return new Promise((resolve) => {
-        view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve(true)));
       });
     }
 
@@ -556,8 +524,7 @@
       const verb = verbOf(msg);
 
       if (phase === "start" && !isAgentMessage) {
-        agent.nativePoint = exactPoint;
-        agent.nativePointerLive = false;
+        agent.pagePoint = exactPoint;
         agent.hintRect = hint ? { x: hint.x, y: hint.y, width: Number(hint.width) || 0, height: Number(hint.height) || 0, at: now } : null;
         agent.targetActive = Boolean(selector || agent.hintRect || exactPoint);
         agent.focusUntil = 0;
@@ -1290,7 +1257,7 @@
     }
 
     const api = {
-      update, remove, leave, stop, resume, destroy, snapshot, isDoneVisible, syncAgents, nativePointer,
+      update, remove, leave, stop, resume, destroy, snapshot, isDoneVisible, syncAgents,
       mountFrame, showComposer, toggleComposer, togglePill, talk, whenArrived, setZoom, suspend,
     };
     view.__m9rPresenceOverlayInstance = api;

@@ -116,16 +116,6 @@
         }
       }
       else if (msg && msg.type === "m9r-zoom") overlay.setZoom(msg.zoom);
-      else if (msg && msg.type === "m9r-native-pointer") {
-        const painted = overlay.nativePointer(msg.agent, msg.x, msg.y, msg.active === true);
-        if (msg.phase === "arrived") {
-          Promise.resolve(painted).then(
-            (visible) => { if (current()) sendResponse({ painted: visible === true }); },
-            () => { if (current()) sendResponse({ painted: false }); },
-          );
-          return true;
-        }
-      }
       else if (msg && msg.type === "owner-stop") overlay.stop(msg.owner);
       else if (msg && msg.type === "owner-resume") overlay.resume();
       else if (msg && msg.type === "m9r-agents") overlay.syncAgents(msg.agents);

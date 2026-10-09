@@ -1,4 +1,4 @@
-importScripts("page-actions.js", "powers.js", "permission-logic.js", "pill-bridge.js", "native-input-client.js", "quiet-input.js");
+importScripts("page-actions.js", "powers.js", "permission-logic.js", "pill-bridge.js", "quiet-input.js");
 
 const BROKER_URL = "ws://127.0.0.1:47821/ext";
 const BROKER_AUTH_TIMEOUT_MS = 5000;
@@ -14,12 +14,11 @@ let brokerAuthTimeout = null;
 let actionsStopped = false;
 const permissionQueue = [];
 const promptingGrants = new Set();
-const nativeInput = M9RNativeInputClient.create(chrome.runtime);
 const quietInput = M9RQuietInput.create(chrome);
 void quietInput.adoptAndRelease();
 
-// Quiet mode is opt-in twice: the owner turns the setting on AND Chrome's optional debugger permission is granted.
-// Without both, clicks use the existing native route exactly as before.
+// Browser clicks must never move the owner's physical mouse. They use the
+// extension's explicitly enabled Chrome debugger route or fail closed.
 async function quietModeReady() {
   try {
     const stored = await chrome.storage.local.get("m9rQuietMode");
@@ -68,7 +67,8 @@ function connect() {
         if (typeof M9RPillBridge !== "undefined") M9RPillBridge.brokerOpen();
       }
       actionsStopped = message.stopped;
-      if (actionsStopped) nativeInput.close();
+      if (actionsStopped) void quietInput.stopAll();
+      else quietInput.resumeAll();
       void chrome.tabs.query({}).then((tabs) => {
         for (const tab of tabs) if (Number.isSafeInteger(tab.id)) {
           chrome.tabs.sendMessage(tab.id, { type: actionsStopped ? "owner-stop" : "owner-resume", owner: "you" }).catch(() => {});
@@ -96,7 +96,7 @@ function connect() {
     }
     else if (message && message.type === "stop-all") {
       actionsStopped = true;
-      nativeInput.close();
+      void quietInput.stopAll();
       void chrome.tabs.query({}).then((tabs) => {
         for (const tab of tabs) if (Number.isSafeInteger(tab.id)) {
           chrome.tabs.sendMessage(tab.id, { type: "owner-stop", owner: message.owner }).catch(() => {});
@@ -318,7 +318,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
     actionsStopped = true;
-    nativeInput.close();
+    void quietInput.stopAll();
     socket.send(JSON.stringify({ type: "stop-all" }));
     sendResponse({ ok: true });
     return;
@@ -735,20 +735,21 @@ async function handle(command) {
       : targetInfo && targetInfo.ok && targetInfo.data ? targetInfo.data.selector || null : null;
     // On the quiet route no OS pointer moves, so the page overlay must glide the agent's cursor itself.
     const quietRoute = nativeClickAction && await quietModeReady();
-    const nativePointerDrivesCursor = nativeClickAction && !quietRoute && !!(nativeClickPlan && nativeClickPlan.ok && nativeClickPlan.data);
-    const arrival = announce(
-      tab.id,
-      actionPresence,
-      nativePointerDrivesCursor ? null : liveSelector,
-      nativePointerDrivesCursor ? null : targetRect,
-      nativePointerDrivesCursor ? null : nativeClickPlan && nativeClickPlan.ok && nativeClickPlan.data
-        ? { x: nativeClickPlan.data.x, y: nativeClickPlan.data.y }
-        : null,
-    );
-    // A target glide and native OS movement must never race each other. Establish the action label first, then let
-    // native pointer progress be the sole source of cursor movement for trusted clicks.
-    if (nativePointerDrivesCursor) await arrival;
-    else if (humanLike) await Promise.race([arrival, new Promise((resolve) => setTimeout(resolve, 1000))]);
+    const quietRouteUnavailable = nativeClickAction && !quietRoute;
+    const arrival = quietRouteUnavailable
+      ? Promise.resolve()
+      : announce(
+        tab.id,
+        actionPresence,
+        liveSelector,
+        targetRect,
+        nativeClickPlan && nativeClickPlan.ok && nativeClickPlan.data
+          ? { x: nativeClickPlan.data.x, y: nativeClickPlan.data.y }
+          : null,
+      );
+    // Do not animate an apparent click when the independent-input permission
+    // is off: no click will be sent and no owner-pointer fallback exists.
+    if (!quietRouteUnavailable && humanLike) await Promise.race([arrival, new Promise((resolve) => setTimeout(resolve, 1000))]);
 
     let preLabel = targetInfo && targetInfo.ok && targetInfo.data && typeof targetInfo.data.name === "string" ? targetInfo.data.name : null;
     // m9rPagePower already returns the accessible target name. A second label
@@ -761,7 +762,8 @@ async function handle(command) {
     if (command.action === "read") result = await run(tab.id, m9rPageRead, [command.selector || null, command.expectOrigin || null, command.expectPathPrefix || null]);
     else if (nativeClickAction) {
       const plan = nativeClickPlan;
-      if (!plan || !plan.ok || !plan.data) result = plan || { ok: false, error: "could not prepare the trusted click" };
+      if (!quietRoute) result = { ok: false, error: "quiet_input_required: enable independent browser input in the M9R extension panel; M9R will not move your physical mouse" };
+      else if (!plan || !plan.ok || !plan.data) result = plan || { ok: false, error: "could not prepare the trusted click" };
       else {
         const currentTab = await chrome.tabs.get(tab.id);
         if (actionsStopped) {
@@ -769,7 +771,7 @@ async function handle(command) {
         } else if (currentTab.url !== nativeClickPlanUrl
           || !await hasHostPermission(currentTab.url, command.expectOrigin || null, command.expectPathPrefix)) {
           result = { ok: false, error: "page permission or grant changed before the trusted click" };
-        } else if (quietRoute) {
+        } else {
           // Quiet route: same planning and the same checks, but delivered through the debugger, so the owner's mouse and focus
           // are untouched and Chrome need not be in front. A refusal is reported, never turned into a visible click.
           const requestId = `m9r_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
@@ -799,83 +801,6 @@ async function handle(command) {
             result = { ok: false, error: `${error && error.code || "quiet_failed"}: ${String(error && error.message || error).slice(0, 180)}` };
           } finally {
             await run(tab.id, m9rPageNativeClickTarget, targetArgs("clear", null, null), 0, false).catch(() => null);
-          }
-        } else {
-          const focusedWindow = await chrome.windows.getLastFocused();
-          const activeTabs = await chrome.tabs.query({ active: true, windowId: focusedWindow.id });
-          if (!activeTabs.some((active) => active.id === tab.id)) {
-            result = { ok: false, error: "the shared tab is no longer the visible active Chrome tab; no click was sent" };
-          } else {
-            const requestId = `m9r_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
-            const capturedTarget = await run(tab.id, m9rPageNativeClickTarget, [
-              command.selector || null, command.action, plan.data.x, plan.data.y, null, null,
-              requestId, "capture", command.expectOrigin || null, command.expectPathPrefix || null, nativeClickPlanUrl,
-            ], 0, false);
-            if (!capturedTarget || !capturedTarget.ok) {
-              result = { ok: false, error: capturedTarget && capturedTarget.error || "could not capture the planned click target" };
-            } else if (actionsStopped) {
-              await run(tab.id, m9rPageNativeClickTarget, [
-                command.selector || null, command.action, plan.data.x, plan.data.y, null, null,
-                requestId, "clear", command.expectOrigin || null, command.expectPathPrefix || null, nativeClickPlanUrl,
-              ], 0, false);
-              result = { ok: false, error: "browser actions are stopped by the owner" };
-            } else {
-              let nativeInputTiming = null;
-              try {
-                const nativeInputResult = await nativeInput.click({
-                  requestId,
-                  x: plan.data.x,
-                  y: plan.data.y,
-                  viewportWidth: plan.data.viewportWidth,
-                  viewportHeight: plan.data.viewportHeight,
-                  button: plan.data.button,
-                  clickCount: plan.data.clickCount,
-                }, (progress) => chrome.tabs.sendMessage(tab.id, {
-                  type: "m9r-native-pointer",
-                  agent: String(command.presence && command.presence.agent || "").slice(0, 64),
-                  x: progress.x,
-                  y: progress.y,
-                  phase: progress.phase,
-                  active: true,
-                }), {
-                  beforeMouseDown: async (progress) => {
-                    if (actionsStopped) throw new Error("browser actions are stopped by the owner");
-                    const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-                    if (!activeTab || activeTab.id !== tab.id) throw new Error("the planned tab is no longer the visible active tab");
-                    if (activeTab.url !== nativeClickPlanUrl) throw new Error("the tab URL changed after the click was planned");
-                    if (!await hasHostPermission(activeTab.url, command.expectOrigin || null, command.expectPathPrefix)) {
-                      throw new Error("page permission or grant changed before mouse-down");
-                    }
-                    const [stillActiveTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-                    if (!stillActiveTab || stillActiveTab.id !== tab.id || stillActiveTab.url !== nativeClickPlanUrl) {
-                      throw new Error("the active tab or URL changed during final click validation");
-                    }
-                    if (actionsStopped) throw new Error("browser actions are stopped by the owner");
-                    const verified = await run(tab.id, m9rPageNativeClickTarget, [
-                      command.selector || null, command.action, plan.data.x, plan.data.y, progress.x, progress.y,
-                      requestId, "validate", command.expectOrigin || null, command.expectPathPrefix || null, nativeClickPlanUrl,
-                    ], 0, false);
-                    if (!verified || !verified.ok) throw new Error(verified && verified.error || "the planned click target changed");
-                    if (actionsStopped) throw new Error("browser actions are stopped by the owner");
-                    return true;
-                  },
-                });
-                nativeInputTiming = nativeInputResult && nativeInputResult.timingMs || null;
-              } finally {
-                await run(tab.id, m9rPageNativeClickTarget, [
-                  command.selector || null, command.action, plan.data.x, plan.data.y, null, null,
-                  requestId, "clear", command.expectOrigin || null, command.expectPathPrefix || null, nativeClickPlanUrl,
-                ], 0, false);
-                await chrome.tabs.sendMessage(tab.id, {
-                  type: "m9r-native-pointer",
-                  agent: String(command.presence && command.presence.agent || "").slice(0, 64),
-                  x: plan.data.x,
-                  y: plan.data.y,
-                  active: false,
-                }).catch(() => {});
-              }
-              result = { ok: true, data: { clicked: true, trustedInput: "native-desktop", target: plan.data.name, rect: plan.data.rect, nativeInputTiming } };
-            }
           }
         }
       }

@@ -116,7 +116,7 @@ test("store manifest grants ordinary-site access at install and leaves Chrome's 
   assert.equal("optional_host_permissions" in manifest, false);
   assert.equal("chrome_url_overrides" in manifest, false);
   assert.equal("content_scripts" in manifest, false);
-  assert.deepEqual(manifest.permissions, ["tabs", "scripting", "alarms", "storage", "nativeMessaging", "search"]);
+  assert.deepEqual(manifest.permissions, ["tabs", "scripting", "alarms", "storage", "search"]);
   assert.deepEqual(manifest.web_accessible_resources, [{ resources: ["assets/providers/*.svg", "pill-next/*"], matches: ["http://*/*", "https://*/*"] }]);
   assert.ok(manifest.description.length <= 132);
 });
@@ -124,7 +124,7 @@ test("store manifest grants ordinary-site access at install and leaves Chrome's 
 test("development manifest also grants ordinary sites and leaves Chrome's New Tab alone", async () => {
   const manifest = JSON.parse(await readFile(new URL("../extensions/browser/manifest.json", import.meta.url), "utf8"));
   assert.deepEqual(manifest.host_permissions, ["http://*/*", "https://*/*"]);
-  assert.ok(manifest.permissions.includes("nativeMessaging"));
+  assert.equal(manifest.permissions.includes("nativeMessaging"), false, "the extension no longer has a native host path that can move the owner's mouse");
   assert.equal("optional_host_permissions" in manifest, false);
   assert.equal("chrome_url_overrides" in manifest, false);
 });

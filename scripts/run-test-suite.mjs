@@ -56,7 +56,6 @@ function belongsToSuite(name) {
       "page-notes-mcp.test.ts",
       "page-notes-store.test.ts",
       "browser-extension-store-package.test.mjs",
-      "native-input-client.test.js",
       "quiet-input.test.js",
       "pill-state.test.ts",
       "pill-shells.test.ts",
