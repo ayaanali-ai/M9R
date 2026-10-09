@@ -13,6 +13,10 @@ export interface PillSnapshot {
   approvals: Array<{ id: string; agent: string; title: string; detail: string }>;
   /** Replies and notices from agents, newest last. */
   thread: Array<{ id: string; from: string; text: string; link?: LinkOffer }>;
+  /** Browser-broker connection health, when the host can observe it. */
+  connection?: "connecting" | "connected" | "disconnected";
+  /** A connection-only update must not replace the last provider snapshot. */
+  connectionOnly?: boolean;
   /** Browser shell only: the desktop pill is running, so this in-page pill should step aside. */
   desktopPill?: boolean;
 }
@@ -111,6 +115,8 @@ class AppState {
   noteMessage: string | null = null;
   chatHistory: ChatMessage[] = [];
   approvals: ApprovalInfo[] = [];
+  brokerConnection: "unknown" | "connecting" | "connected" | "disconnected" = "unknown";
+  decisionError: { approvalId: string; message: string } | null = null;
 
   lastActivity = performance.now();
   settings: Settings = { ...DEFAULT_SETTINGS };
@@ -157,6 +163,12 @@ class AppState {
 
   /** Applies a snapshot from the shell. Returns what is new, so the island can open on a fresh approval or reply. */
   apply(snapshot: PillSnapshot, now = Date.now()): { newApprovals: string[]; newReplies: PillSnapshot["thread"] } {
+    if (snapshot.connection) this.brokerConnection = snapshot.connection;
+    if (snapshot.connectionOnly) {
+      this.notify();
+      return { newApprovals: [], newReplies: [] };
+    }
+
     for (const [id, resolvedAt] of this.resolvedApprovals) {
       if (now - resolvedAt >= APPROVAL_RECOVERY_MS) this.resolvedApprovals.delete(id);
     }
@@ -169,6 +181,9 @@ class AppState {
         && now - (approval.unconfirmedSince ?? now) < APPROVAL_RECOVERY_MS)
       .map((approval) => ({ ...approval, unconfirmed: true, unconfirmedSince: approval.unconfirmedSince ?? now }));
     this.approvals = [...confirmed, ...recovered];
+    if (this.decisionError && !this.approvals.some((approval) => approval.id === this.decisionError?.approvalId)) {
+      this.decisionError = null;
+    }
     const waiting = new Set(this.approvals.map((a) => a.agent));
     this.tasks = snapshot.agents.map((a) => {
       const prev = this.tasks.find((t) => t.id === a.handle);
@@ -192,15 +207,24 @@ class AppState {
     const newApprovals = confirmed.filter((a) => !this.seenApprovals.has(a.id)).map((a) => a.id);
     for (const a of this.approvals) this.seenApprovals.add(a.id);
 
-    // Replies are new when they come after the last one already seen; the very first snapshot only sets the baseline.
+    // The first authoritative snapshot hydrates the visible transcript without firing arrival effects.
+    // A disconnect carries no authority to seed or replace conversation history.
     const ids = snapshot.thread.map((m) => m.id);
     let newReplies: PillSnapshot["thread"] = [];
-    if (this.threadSeeded) {
+    if (!this.threadSeeded && snapshot.connection !== "disconnected") {
+      this.chatHistory = snapshot.thread.map((message, index) => ({
+        id: Date.now() + index,
+        role: "assistant",
+        content: `${message.from}: ${message.text}`,
+        link: message.link,
+      }));
+      this.threadSeeded = true;
+      this.lastThread = ids.at(-1) ?? "";
+    } else if (this.threadSeeded && snapshot.connection !== "disconnected") {
       const at = this.lastThread === "" ? 0 : ids.indexOf(this.lastThread) + 1;
       newReplies = at <= 0 && this.lastThread !== "" ? snapshot.thread : snapshot.thread.slice(at);
+      this.lastThread = ids.at(-1) ?? this.lastThread;
     }
-    this.threadSeeded = true;
-    this.lastThread = ids.at(-1) ?? this.lastThread;
     this.notify();
     return { newApprovals, newReplies };
   }
@@ -209,6 +233,12 @@ class AppState {
   resolveApproval(id: string, now = Date.now()) {
     this.resolvedApprovals.set(id, now);
     this.approvals = this.approvals.filter((approval) => approval.id !== id);
+    if (this.decisionError?.approvalId === id) this.decisionError = null;
+  }
+
+  setDecisionError(approvalId: string, message: string | null) {
+    this.decisionError = message ? { approvalId, message } : null;
+    this.notify();
   }
 
   defaultView(): IslandViewName {

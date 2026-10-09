@@ -86,6 +86,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const tabStage = actions.desktopStages
     ? h("button", { class: "tab", title: "Desktop stage", onclick: () => go("stage") }, svg(ICONS.display, 14, { stroke: 1.7 }))
     : null;
+  const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
 
@@ -98,7 +99,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
     "div",
     { id: "header" },
     h("div", { class: "tabs" }, tabHome, tabChat, tabStage),
-    h("div", { class: "header-actions" }, gearBtn, soundBtn),
+    h("div", { class: "header-actions" }, brokerStatus, gearBtn, soundBtn),
   );
 
   return {
@@ -109,6 +110,11 @@ export function buildHeader(actions: ViewActions): ViewHost {
       tabChat.classList.toggle("on", v === "prompt");
       tabStage?.classList.toggle("on", v === "stage");
       gearBtn.classList.toggle("on", v === "settings");
+      const connection = State.brokerConnection;
+      brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";
+      brokerStatus.dataset.state = connection;
+      brokerStatus.title = connection === "disconnected" ? "The M9R browser broker is disconnected" : "Connecting to the M9R browser broker";
+      brokerStatus.style.display = connection === "connecting" || connection === "disconnected" ? "inline-flex" : "none";
       clear(soundBtn);
       soundBtn.append(svg(State.settings.soundEnabled ? ICONS.speakerOn : ICONS.speakerOff, 14));
     },
@@ -217,7 +223,7 @@ function buildEmpty(actions: ViewActions): ViewHost {
 function buildApproval(actions: ViewActions): ViewHost {
   const who = h("div");
   const code = h("div", { class: "code" });
-  const status = h("div", { class: "detail approval-status" });
+  const status = h("div", { class: "detail approval-status", role: "status", "aria-live": "polite" });
   const row = h("div", { class: "actions" });
   const el = h("div", { class: "view" }, card("amber", stack(116, 16, who, code, status, row)));
   let built = false;
@@ -231,10 +237,14 @@ function buildApproval(actions: ViewActions): ViewHost {
       who.append(agentWho(agent ?? State.focusTask, `wants to: ${req?.title ?? "act"}${more}`));
       // The line being authorised: the action, path or address, not just the name of the tool asking.
       code.textContent = req?.detail || "…";
-      status.textContent = req?.unconfirmed
-        ? "Approval status is unconfirmed. M9R will validate your choice before applying it."
-        : "";
-      status.hidden = !req?.unconfirmed;
+      const decisionError = req && State.decisionError?.approvalId === req.id ? State.decisionError.message : null;
+      status.textContent = decisionError
+        ? `Decision not sent: ${decisionError}`
+        : req?.unconfirmed
+          ? "Approval status is unconfirmed. M9R will validate your choice before applying it."
+          : "";
+      status.dataset.state = decisionError ? "error" : req?.unconfirmed ? "unconfirmed" : "";
+      status.hidden = !decisionError && !req?.unconfirmed;
       // Built once: rebuilding buttons between a mouse-down and a mouse-up would swallow the click.
       if (built) return;
       built = true;

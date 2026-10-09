@@ -3,6 +3,7 @@
 // the current pill uses, so the trust rules (nonce-bound frames only) are unchanged.
 
 import type { Decision, PillTransport } from "../core/transport";
+import type { PillSnapshot } from "../core/state";
 import { fromUiState, type UiState } from "./convert";
 
 interface ChromeRuntime {
@@ -41,6 +42,14 @@ export function createExtensionTransport(runtime: ChromeRuntime): PillTransport 
       let disposed = false;
       let retry: ReturnType<typeof setTimeout> | undefined;
       let currentPort: ReturnType<ChromeRuntime["connect"]> | undefined;
+      let brokerState: "connecting" | "connected" | "disconnected" = "disconnected";
+      const publishConnection = (state: "connecting" | "disconnected") => {
+        if (disposed || brokerState === state) return;
+        brokerState = state;
+        if (state === "disconnected") listener({ agents: [], approvals: [], thread: [], connection: state });
+        else listener({ agents: [], approvals: [], thread: [], connection: state, connectionOnly: true });
+      };
+      publishConnection("connecting");
       const reconnect = (delay: number) => {
         if (disposed) return;
         if (retry !== undefined) clearTimeout(retry);
@@ -48,10 +57,12 @@ export function createExtensionTransport(runtime: ChromeRuntime): PillTransport 
       };
       const connect = () => {
         if (disposed) return;
+        publishConnection("connecting");
         let port: ReturnType<ChromeRuntime["connect"]>;
         try {
           port = runtime.connect({ name: "m9r-pill" });
         } catch {
+          publishConnection("disconnected");
           reconnect(1500);
           return;
         }
@@ -59,9 +70,24 @@ export function createExtensionTransport(runtime: ChromeRuntime): PillTransport 
         port.onMessage.addListener((message) => {
           if (disposed || currentPort !== port) return;
           const m = message as { type?: string } | null;
-          if (m && m.type === "ui-state") listener(fromUiState(m as UiState));
+          if (m && m.type === "m9r-broker" && typeof (m as { connected?: unknown }).connected === "boolean") {
+            const connected = (m as { connected: boolean }).connected;
+            if (!connected) publishConnection("disconnected");
+            else if (brokerState !== "connected") publishConnection("connecting");
+            return;
+          }
+          if (m && m.type === "ui-state" && brokerState !== "disconnected") {
+            const snapshot: PillSnapshot = { ...fromUiState(m as UiState), connection: "connected" };
+            brokerState = "connected";
+            listener(snapshot);
+          }
         });
-        port.onDisconnect.addListener(() => reconnect(1000));
+        port.onDisconnect.addListener(() => {
+          if (disposed || currentPort !== port) return;
+          currentPort = undefined;
+          publishConnection("disconnected");
+          reconnect(1000);
+        });
       };
       connect();
       return () => {

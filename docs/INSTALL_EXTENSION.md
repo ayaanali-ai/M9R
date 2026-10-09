@@ -72,7 +72,7 @@ The development key pins the extension ID even if the folder moves; keep the fol
 4. Confirm the development ID shown on the extension card is `mahhaigfogjneccbmbpbedlnkhgdcmhb` in both Chrome and Edge.
 5. Pin M9R if you want its panel visible in the toolbar.
 
-When you first use a site, open the M9R panel and approve that origin in Chrome/Edge. The browser permission is origin-wide; M9R separately checks its own grant scope and action list. Only approve sites whose contents you are willing to expose to the agent you choose.
+The current development manifest requests HTTP and HTTPS host access up front. Chrome still lets you restrict this extension to selected sites or to a click in its **Site access** controls; M9R cannot override that browser choice. For your own connected agents to work across sites without repeated site prompts, set **Site access** to **On all sites** once. The current extension does not ask for an M9R site grant for your own agents. Cross-owner agents use a separate M9R grant scoped to a site and allowed actions.
 
 ## 3. Start the local broker manually
 
@@ -200,7 +200,7 @@ After restart, use `m9r_network_roster`, `m9r_network_send`, `m9r_network_inbox`
 1. Confirm the M9R broker says it is listening and the extension completes the ready handshake (the development build ID is fixed and pre-authorized).
 2. Confirm the M9R MCP server appears in the provider's MCP panel/list.
 3. Start a fresh agent session so it receives its M9R identity card. Never copy a session token into source control or a shared config file.
-4. Ask the agent to call `m9r_web_open` on a harmless test page, approve the browser's site prompt, then use `m9r_web_read`. Use `m9r_web_type` and `m9r_web_click` only on a test form.
+4. Ask the agent to call `m9r_web_open` on a harmless test page, then use `m9r_web_read`. If M9R reports that Chrome withheld site access, check the extension's **Site access** setting and choose **On all sites** for frictionless owner-agent use. Use `m9r_web_type` and `m9r_web_click` only on a test form.
 5. Use the extension panel's **Stop all browser actions** control to stop future broker actions. An action already dispatched to the page can still finish; restart the broker to resume.
 
 The extension does not make an agent's provider account available to M9R. Each provider remains logged in and operates under its own account, quota, and data-handling policy.

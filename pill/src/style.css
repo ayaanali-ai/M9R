@@ -184,6 +184,16 @@ body {
   padding-right: 16px;
 }
 
+.broker-status {
+  align-items: center;
+  color: #f5a524;
+  font-size: 9px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.broker-status[data-state="disconnected"] { color: #f4505e; }
+
 .header-actions button {
   border: 0;
   background: transparent;

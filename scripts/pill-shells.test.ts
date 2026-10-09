@@ -85,20 +85,30 @@ test("extension transport sends the exact commands the service worker validates,
   await assert.rejects(transport.send("x"), /not connected/);
 });
 
-test("extension transport delivers only ui-state messages from the port, converted", () => {
+test("extension transport reports broker state and ignores stale snapshots while offline", () => {
   const got: unknown[] = [];
   let onMessage: (m: unknown) => void = () => {};
+  let onDisconnect: () => void = () => {};
   const transport = createExtensionTransport({
     id: "ext",
-    connect: () => ({ onMessage: { addListener: (fn) => { onMessage = fn; } }, onDisconnect: { addListener() {} } }),
+    connect: () => ({ onMessage: { addListener: (fn) => { onMessage = fn; } }, onDisconnect: { addListener: (fn) => { onDisconnect = fn; } } }),
     sendMessage: async () => ({ ok: true }),
   });
-  transport.subscribe((s) => got.push(s));
+  const stop = transport.subscribe((s) => got.push(s));
+  assert.equal((got.at(-1) as { connection?: string }).connection, "connecting");
   onMessage({ type: "m9r-broker", connected: true });
+  assert.equal((got.at(-1) as { connection?: string }).connection, "connecting");
   onMessage(null);
   onMessage({ type: "ui-state", agents: [{ id: "claude", provider: "claude", state: "idle" }], thread: [], approvals: [] });
-  assert.equal(got.length, 1);
-  assert.equal((got[0] as { agents: unknown[] }).agents.length, 1);
+  assert.equal((got.at(-1) as { connection?: string }).connection, "connected");
+  assert.equal((got.at(-1) as { agents: unknown[] }).agents.length, 1);
+  onMessage({ type: "m9r-broker", connected: false });
+  assert.equal((got.at(-1) as { connection?: string }).connection, "disconnected");
+  onMessage({ type: "ui-state", agents: [{ id: "claude", provider: "claude", state: "working" }], thread: [], approvals: [] });
+  assert.equal((got.at(-1) as { connection?: string }).connection, "disconnected", "late state cannot restore stale working status");
+  onDisconnect();
+  assert.equal((got.at(-1) as { connection?: string }).connection, "disconnected");
+  stop?.();
 });
 
 test("desktop transport maps decisions and typed messages onto the overlay's commands", async () => {

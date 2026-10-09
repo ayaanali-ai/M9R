@@ -132,13 +132,13 @@ export class Island {
     if (!req || this.deciding) return;
     this.deciding = true;
     const decision: Decision = d;
+    State.setDecisionError(req.id, null);
     try {
       await this.transport.decide(req.id, decision);
       Sound.play(d === "deny" ? "blip" : "approve");
     } catch (error) {
-      State.chatHistory.push({ id: Date.now(), role: "assistant", content: `Decision not sent: ${error instanceof Error ? error.message : String(error)}` });
+      State.setDecisionError(req.id, String(error instanceof Error ? error.message : error).slice(0, 300));
       Sound.play("error");
-      State.notify();
       return;
     } finally {
       this.deciding = false;
