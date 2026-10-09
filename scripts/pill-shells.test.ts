@@ -182,11 +182,14 @@ test("the page frame answers the host's hello, then reports exactly the island's
   assert.deepEqual(sent, [{ m9r: "frame", nonce, kind: "size", w: 240, h: 6 }]);
 
   let onmessage: ((m: unknown) => void) | null = null;
-  const port = { start() {}, close() {}, set onmessage(fn: (m: unknown) => void) { onmessage = fn; } };
+  const replies: unknown[] = [];
+  const port = { start() {}, close() {}, postMessage(message: unknown) { replies.push(message); }, set onmessage(fn: (m: unknown) => void) { onmessage = fn; } };
   deliver({ m9r: "host-port", nonce }, parent, [port]);
   onmessage!({ data: { m9r: "host", nonce, kind: "open-message" } });
   onmessage!({ data: { m9r: "host", nonce: "c".repeat(32), kind: "open-message" } });
+  onmessage!({ data: { m9r: "host", nonce, kind: "health-ping", probeId: "probe-1" } });
   assert.deepEqual(commands, ["open-message"], "only commands carrying this frame's nonce are honoured");
+  assert.deepEqual(replies, [{ m9r: "frame", nonce, kind: "health-pong", probeId: "probe-1" }], "a live frame acknowledges its private-port health probe");
 });
 
 test("the desktop transport forwards the island's window hooks to the overlay commands", async () => {
