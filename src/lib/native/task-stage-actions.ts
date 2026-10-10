@@ -17,10 +17,11 @@ const KEY_NAMES = new Set([
   "Backspace", "Delete", "Insert", "Home", "End", "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft",
   "ArrowRight", "Up", "Down", "Left", "Right", "CapsLock", "PrintScreen",
 ]);
+const CANONICAL_KEYS = new Map([...KEY_NAMES].map((key) => [key.toLowerCase(), key]));
 
 function validKey(value: unknown): value is string {
   return typeof value === "string" && value.length <= 20
-    && (/^[a-z0-9]$/i.test(value) || /^F(?:[1-9]|1[0-9]|2[0-4])$/i.test(value) || KEY_NAMES.has(value));
+    && (/^[a-z0-9]$/i.test(value) || /^F(?:[1-9]|1[0-9]|2[0-4])$/i.test(value) || CANONICAL_KEYS.has(value.toLowerCase()));
 }
 
 /** Reject extra fields so an action cannot carry a desktop name, HWND, or command. */
@@ -46,6 +47,8 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (action.kind === "press_key" && !validKey(action.key)) throw new Error("Invalid key name.");
   if (action.kind === "hotkey" && (!Array.isArray(action.keys) || action.keys.length < 1 || action.keys.length > 4
     || !action.keys.every(validKey))) throw new Error("A hotkey must contain 1–4 supported key names.");
+  if (action.kind === "press_key") return { ...action, key: CANONICAL_KEYS.get((action.key as string).toLowerCase()) ?? action.key } as TaskStageAction;
+  if (action.kind === "hotkey") return { ...action, keys: (action.keys as string[]).map((key) => CANONICAL_KEYS.get(key.toLowerCase()) ?? key) } as TaskStageAction;
   return action as TaskStageAction;
 }
 

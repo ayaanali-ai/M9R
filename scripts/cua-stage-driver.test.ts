@@ -41,6 +41,22 @@ test("Windows optional frame-valid flag accepts matching PNG metadata and reject
   await assert.rejects(driver({ images: [{ mimeType: "image/png", dataBase64: imageData }] }).capture("stage"), /matching PNG dimensions/);
 }));
 
+test("app captures expose bounded accessibility targets in screenshot coordinates", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true,
+    screenshotWidth: 200, screenshotHeight: 100, windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }],
+    elements: [{ label: "Search\nfield", role: "Edit", enabled: true, frame: { x: 120, y: 70, w: 200, h: 40 } },
+      { label: "Disabled", enabled: false, frame: { x: 120, y: 70, w: 200, h: 40 } }] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ state, calls: [] }) as never });
+  assert.deepEqual((await driver.capture("stage")).controls, [{ label: "Search field", role: "Edit", rect: { x: 10, y: 10, width: 100, height: 20 } }]);
+}));
+
+test("stage key parsing accepts the case-insensitive names advertised by MCP", () => {
+  assert.deepEqual(parseTaskStageAction({ kind: "press_key", key: "enter" }), { kind: "press_key", key: "Enter" });
+  assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["ctrl", "l"] }), { kind: "hotkey", keys: ["Ctrl", "l"] });
+});
+
 test("background text refusal is reported without activating the window or retrying through global input", async () => withRoot(async (root) => {
   await registerStage(root, "4567");
   const identity = { handle: "codex", sessionId: "terminal-session" };
@@ -294,7 +310,8 @@ test("captures only the registered window and reliably closes the Cua session", 
   const request = calls.find((call) => call.method === "getWindowState")?.value as Record<string, unknown>;
   assert.equal(request.pid, 4321);
   assert.equal(request.windowId, BigInt(windowId));
-  assert.equal(request.includeAccessibilityTree, false);
+  assert.equal(request.includeAccessibilityTree, true);
+  assert.deepEqual(capture.controls, []);
   assert.equal(request.includeScreenshot, true);
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession", "shutdown"]);
 }));

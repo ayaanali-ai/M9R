@@ -96,6 +96,8 @@ export interface CuaStageCapture {
   capturedAt: string;
   /** Cua's opaque ID for this exact desktop screenshot; used to bind visual coordinates. */
   captureId?: string;
+  /** Bounded accessible targets from this same window snapshot, in screenshot pixels. */
+  controls?: CuaStageTargetDescription[];
 }
 
 /** Private handle to one immutable desktop image; only the broker uses this to bind a click to its capture. */
@@ -128,6 +130,7 @@ interface CuaStageWindowFrame {
   width: number;
   height: number;
   windowBounds?: CuaStageWindowBounds;
+  controls?: CuaStageTargetDescription[];
 }
 
 export interface CuaStageTargetDescription {
@@ -432,8 +435,9 @@ function desktopPointInWindow(screenPoint: { x: number; y: number }, frame: CuaS
   return { x: localX, y: localY };
 }
 
-function stageCapture(capture: { dataUrl: string; width: number; height: number }, now: () => Date): CuaStageCapture {
+function stageCapture(capture: { dataUrl: string; width: number; height: number; controls?: CuaStageTargetDescription[] }, now: () => Date): CuaStageCapture {
   return { dataUrl: capture.dataUrl, width: capture.width, height: capture.height,
+    ...(capture.controls ? { controls: capture.controls } : {}),
     capturedAt: "capturedAt" in capture && typeof capture.capturedAt === "string" ? capture.capturedAt : now().toISOString() };
 }
 
@@ -875,17 +879,36 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
           pid,
           windowId,
           session,
-          includeAccessibilityTree: false,
+          includeAccessibilityTree: true,
           includeScreenshot: true,
           maxImageDimension: MAX_IMAGE_DIMENSION,
           timeoutMs: 1_500,
         });
         const image = imageFromWindowState(state, pid, windowId);
         const bounds = state.windowBounds;
+        const controls: CuaStageTargetDescription[] = [];
+        if (bounds && bounds.width > 0 && bounds.height > 0) {
+          for (const element of state.elements ?? []) {
+            const frame = element.frame;
+            if (element.enabled === false || !frame || frame.w <= 0 || frame.h <= 0) continue;
+            const left = Math.max(0, (frame.x - bounds.x) * image.width / bounds.width);
+            const top = Math.max(0, (frame.y - bounds.y) * image.height / bounds.height);
+            const right = Math.min(image.width, (frame.x + frame.w - bounds.x) * image.width / bounds.width);
+            const bottom = Math.min(image.height, (frame.y + frame.h - bounds.y) * image.height / bounds.height);
+            if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) continue;
+            controls.push({
+              ...(element.label ? { label: element.label.replace(/[\r\n\t]+/g, " ").slice(0, 160) } : {}),
+              ...(element.role ? { role: element.role.slice(0, 40) } : {}),
+              rect: { x: left, y: top, width: right - left, height: bottom - top },
+            });
+            if (controls.length === 200) break;
+          }
+        }
         return {
           dataUrl: image.dataUrl,
           width: image.width,
           height: image.height,
+          controls,
           ...(bounds ? { windowBounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } } : {}),
         };
       };

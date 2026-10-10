@@ -136,7 +136,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
 
   server.registerTool("m9r_stage_action", {
     description: "Capture or control this task's desktop; mode defaults to owner-preview. After m9r_stage_app selects an app, omitted action.view uses that exact app window; otherwise it uses the owner's current desktop. Set action.view to app or desktop to explicitly choose screenshot coordinates. Desktop icons, taskbar apps, Start, windows, and controls are supported. Pass background mode only for an explicitly requested isolated desktop. Supports capture, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Mutating inputs carry a durable one-shot receipt: if the receipt says already_applied, in_progress, or uncertain, do not repeat the action; capture and inspect first. Input remains bound to the exact window and does not activate the app as a fallback. If a target class rejects background input, the action reports the target and fails without sending text; add an accessibility value adapter or app-specific background route for that control. Capture before input, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Verify effects; a driver receipt alone is not proof of the application state.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), action: z.discriminatedUnion("kind", [
+    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional().describe("Stable ID for one intended input. Reuse this ID when reconciling a lost response; never generate a new ID to retry an uncertain action."), action: z.discriminatedUnion("kind", [
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("capture") }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["double_click", "right_click"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
@@ -146,9 +146,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("press_key"), key: z.string().min(1).max(20).regex(/^(?:[a-z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Ctrl|Control|Alt|Shift|Meta|Win|Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Insert|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Up|Down|Left|Right|CapsLock|PrintScreen)$/i) }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("hotkey"), keys: z.array(z.string().min(1).max(20)).min(1).max(4) }).strict(),
   ]) },
-  }, async ({ token, taskId, mode, action }, extra) => {
+  }, async ({ token, taskId, mode, action, operationId: requestedOperationId }, extra) => {
     requireIdentity(token);
-    const operationId = createHash("sha256").update(`${operationNamespace}\0${String(extra.requestId)}`).digest("hex");
+    const operationId = requestedOperationId ?? createHash("sha256").update(`${operationNamespace}\0${String(extra.requestId)}`).digest("hex");
     const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(token, taskId, action, mode, operationId)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
     const capture = (response.result as { capture?: { dataUrl?: string } } | undefined)?.capture;

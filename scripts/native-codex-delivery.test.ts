@@ -29,6 +29,41 @@ function seedCodex(store: ReturnType<typeof newStore>) {
 const typed = (store: ReturnType<typeof newStore>, goal = "Review lease.ts", key = "k1") =>
   store.addTask({ from: "claude", to: "codex", goal, origin: "human_typed", idempotencyKey: key }).task;
 
+test("concurrent Codex dispatchers inject a task once", async () => {
+  const store = newStore();
+  seedCodex(store);
+  const task = typed(store);
+  let calls = 0;
+  const deps = fakeDeps({ runCodex: async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return { code: 0, stderr: "" };
+  } });
+  const results = await Promise.all([deliverToCodex(store, task.id, deps), deliverToCodex(store, task.id, deps)]);
+  assert.equal(calls, 1);
+  assert.deepEqual(results.map((result) => result.state).sort(), ["queued", "skipped"]);
+  assert.equal(store.getTask(task.id)?.delivery?.attempts, 1);
+});
+
+test("an ambiguous Codex dispatch failure is not injected again", async () => {
+  const store = newStore();
+  seedCodex(store);
+  const task = typed(store);
+  let calls = 0;
+  const deps = fakeDeps({ runCodex: async () => { calls += 1; throw new Error("response lost"); } });
+  assert.equal((await deliverToCodex(store, task.id, deps)).state, "failed");
+  assert.equal(store.getTask(task.id)?.delivery?.state, "uncertain");
+  assert.deepEqual(store.claimInboxTasks("codex", THREAD, [task.id]), [], "inbox fallback must not replay an ambiguous push");
+  assert.equal((await deliverToCodex(store, task.id, deps)).state, "skipped");
+  assert.equal(calls, 1);
+  const tail = [
+    { type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: queueMarker(task.id) }] } },
+    { type: "event_msg", payload: { type: "task_complete", last_agent_message: "Finished once" } },
+  ].map((item) => JSON.stringify(item)).join("\n");
+  assert.equal(collectCodexResults(store, { readRolloutTail: () => tail }), 1);
+  assert.equal(store.getTask(task.id)?.delivery?.state, "done", "observed rollout completion reconciles the lost response without replay");
+});
+
 test("only tasks a human typed or approved may be queued; everything else is never pushed", () => {
   assert.equal(canQueue({ origin: "human_typed", approval: "not_needed" }), true);
   assert.equal(canQueue({ origin: "agent_initiated", approval: "approved" }), true);

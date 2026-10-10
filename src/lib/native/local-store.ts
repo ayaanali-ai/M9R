@@ -5,8 +5,8 @@
  *
  * Local first: nothing here needs the network or an account (design section 1, principle 7).
  */
-import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
 import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
@@ -202,7 +202,6 @@ export function handleForProvider(provider: string): string {
 }
 
 const LOCK_WAIT_MS = 3000;
-const LOCK_STALE_MS = 15_000;
 const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 export interface LocalStoreDeps {
@@ -217,21 +216,46 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
   const lockPath = join(root, "state.lock");
   const maxStateBytes = Math.min(MAX_LOCAL_STATE_BYTES, Math.max(1, Math.floor(deps.maxStateBytes ?? MAX_LOCAL_STATE_BYTES)));
 
-  function acquire(): void {
+  function acquire(): string {
     mkdirSync(root, { recursive: true });
     const deadline = Date.now() + LOCK_WAIT_MS;
-    for (;;) {
-      try {
-        mkdirSync(lockPath);
-        return;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const nonce = randomUUID();
+    const ownerName = `owner-${nonce}.json`;
+    const pending = `${lockPath}.pending-${nonce}`;
+    mkdirSync(pending);
+    try {
+      writeFileSync(join(pending, ownerName), JSON.stringify({ pid: process.pid, nonce }), { flag: "wx" });
+      for (;;) {
         try {
-          if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) { rmSync(lockPath, { recursive: true, force: true }); continue; }
-        } catch { /* lock vanished: retry */ }
-        if (Date.now() > deadline) throw new Error("The M9R local store is busy; try again.");
-        sleepSync(15);
+          // Publish an already populated directory, avoiding an ownerless creation gap.
+          renameSync(pending, lockPath);
+          return ownerName;
+        } catch (error) {
+          if (!existsSync(lockPath)) throw error;
+          try {
+            const files = readdirSync(lockPath);
+            if (files.length === 1 && /^owner-[a-f0-9-]+\.json$/.test(files[0]!)) {
+              const owner = JSON.parse(readFileSync(join(lockPath, files[0]!), "utf8"));
+              if (Number.isSafeInteger(owner.pid) && owner.pid > 0) {
+                let dead = false;
+                try { process.kill(owner.pid, 0); }
+                catch (probeError) { dead = (probeError as NodeJS.ErrnoException).code === "ESRCH"; }
+                if (dead) {
+                  // Delete only the dead owner's unique file, never a replacement owner's lock.
+                  rmSync(join(lockPath, files[0]!));
+                  try { rmdirSync(lockPath); } catch { /* another owner published a populated lock */ }
+                  continue;
+                }
+              }
+            }
+          } catch { /* disappearance or an unknown owner is not permission to steal */ }
+          // Age is not evidence of a crash. Never remove another writer's lock.
+          if (Date.now() > deadline) throw new Error(`The M9R local store is busy at ${lockPath}. Its lock was preserved; check the recorded owner before recovering a crashed writer.`);
+          sleepSync(15);
+        }
       }
+    } finally {
+      if (existsSync(pending)) rmSync(pending, { recursive: true, force: true });
     }
   }
 
@@ -239,18 +263,21 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     if (!existsSync(statePath)) return emptyState();
     const fileBytes = statSync(statePath).size;
     if (fileBytes > maxStateBytes) throw new LocalStateCapacityError(fileBytes, maxStateBytes);
-    try {
-      const parsed = JSON.parse(readFileSync(statePath, "utf8")) as StoreState;
-      return parsed && parsed.version === 1 ? normalizeStoredScopes(root, {
-        ...emptyState(),
-        ...parsed,
-        stageOperations: Array.isArray(parsed.stageOperations) ? parsed.stageOperations : [],
-      }) : emptyState();
-    } catch {
-      // A corrupt file must never brick the agent's prompts: keep it aside and start clean.
-      try { renameSync(statePath, `${statePath}.corrupt-${Date.now()}`); } catch { /* ignore */ }
-      return emptyState();
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(readFileSync(statePath, "utf8")); }
+    catch { throw new Error(`M9R local state at ${statePath} is invalid. The original file was preserved; restore a verified backup before retrying.`); }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`M9R local state at ${statePath} is invalid; the original file was preserved.`);
+    if (parsed.version !== 1) throw new Error(`M9R local state at ${statePath} has an unsupported version (${String(parsed.version)}). Use a compatible runtime; the original file was preserved.`);
+    const defaults = emptyState();
+    for (const [key, value] of Object.entries(defaults)) {
+      const stored = parsed[key];
+      if (stored === undefined) continue; // Fields added to version 1 remain backwards compatible.
+      const valid = Array.isArray(value) ? Array.isArray(stored)
+        : typeof value === "number" ? Number.isSafeInteger(stored) && Number(stored) >= 1
+        : stored !== null && typeof stored === "object" && !Array.isArray(stored);
+      if (!valid) throw new Error(`M9R local state at ${statePath} is invalid (${key}); the original file was preserved.`);
     }
+    return normalizeStoredScopes(root, { ...defaults, ...parsed } as StoreState);
   }
 
 
@@ -260,7 +287,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     if (s.events.length > MAX_EVENTS) s.events = s.events.slice(-MAX_EVENTS);
   };
 
-  /** On Windows a rename over a file another process is reading can fail with EPERM/EBUSY for a moment; retry, then copy. */
+  /** Retry transient Windows sharing errors, but never replace atomic publication with an in-place copy. */
   function renameWithRetry(from: string, to: string): void {
     for (let attempt = 0; attempt < 10; attempt += 1) {
       try { renameSync(from, to); return; } catch (error) {
@@ -269,13 +296,12 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (attempt + 1));
       }
     }
-    copyFileSync(from, to);
-    try { rmSync(from, { force: true }); } catch { /* the temp file is harmless */ }
+    throw new Error(`M9R could not atomically publish local state at ${to}; the previous state and pending snapshot at ${from} were preserved.`);
   }
 
   /** Runs `fn` on the state under the lock and writes the result atomically. */
   function update<T>(fn: (state: StoreState) => T): T {
-    acquire();
+    const ownerName = acquire();
     try {
       const state = readState();
       const out = fn(state);
@@ -287,7 +313,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       renameWithRetry(tmp, statePath);
       return out;
     } finally {
-      rmSync(lockPath, { recursive: true, force: true });
+      rmSync(join(lockPath, ownerName));
+      try { rmdirSync(lockPath); } catch { /* never recursively remove a replacement lock */ }
     }
   }
 
@@ -650,6 +677,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           .sort((a, b) => a.seq - b.seq);
         for (const task of candidates) {
           if (task.seq <= cursor) continue;
+          // A push may already be executing. Inbox fallback must not race or replay it.
+          if (task.delivery?.state === "sending" || task.delivery?.state === "uncertain") continue;
           if (task.approval === "denied" || task.approval === "expired"
             || task.delivery?.state === "queued" || task.delivery?.state === "done" || task.resultSummary
             || at.getTime() - Date.parse(task.createdAt) > maxAge) {
@@ -695,12 +724,27 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
+    /** Claim before any asynchronous provider work. An uncertain send must be reconciled, never replayed. */
+    claimCodexDelivery(id: string): Task | undefined {
+      return update((s) => {
+        const task = s.tasks.find((item) => item.id === id);
+        if (!task || task.to !== "codex" || task.resultSummary || task.deliveredAt || !canQueue(task)) return undefined;
+        if (task.delivery && task.delivery.state !== "failed") return undefined;
+        task.delivery = { state: "sending", attempts: (task.delivery?.attempts ?? 0) + 1, claimedAt: now().toISOString() };
+        return task;
+      });
+    },
+
     /** Records how far native delivery got (queued, failed, done); attempts are counted for the ledger. */
     setDelivery(id: string, patch: Partial<TaskDelivery> & Pick<TaskDelivery, "state">): Task | undefined {
       return update((s) => {
         const t = s.tasks.find((x) => x.id === id);
         if (!t) return undefined;
-        t.delivery = { attempts: 0, ...t.delivery, ...patch };
+        if (t.delivery?.state === "done" || t.resultSummary) return t;
+        t.delivery = { attempts: 0, ...t.delivery, ...patch,
+          ...(patch.error ? { error: redactSecrets(patch.error).slice(0, 500) } : {}) };
+        if (patch.state === "uncertain") pushEvent(s, { kind: "task.delivery_uncertain", taskId: id, handle: t.to,
+          text: `${id} delivery to @${t.to} could not be confirmed; it will not be resent automatically` });
         if (patch.state === "queued" && patch.threadId && !t.deliveredSession) t.deliveredSession = patch.threadId;
         if (patch.state === "queued" && !t.deliveredAt) {
           t.deliveredAt = now().toISOString();
@@ -777,7 +821,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     /** Tasks pushed into a session that have not produced a result yet. */
     awaitingResults(): Task[] {
-      return readState().tasks.filter((t) => t.delivery?.state === "queued" && !t.resultSummary);
+      return readState().tasks.filter((t) => !t.resultSummary && (t.delivery?.state === "queued"
+        || (t.to === "codex" && Boolean(t.delivery?.threadId) && (t.delivery?.state === "sending" || t.delivery?.state === "uncertain"))));
     },
 
     /** Clears items from the overlay's "needs you" list. Never touches approval, delivery or results. */

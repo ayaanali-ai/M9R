@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -144,22 +144,42 @@ test("approvals and results are stored, results are capped and redacted", () => 
   done();
 });
 
-test("a corrupt state file is set aside and the store starts clean instead of breaking prompts", () => {
+test("a corrupt state file fails closed without losing identity or resetting task ids", () => {
   const { root, store, done } = tempStore();
   store.addTask(task());
   writeFileSync(join(root, "state.json"), "{ not json", "utf8");
-  assert.equal(store.tasksFor("claude").length, 0);
-  assert.equal(store.addTask(task()).task.id, "T1");
-  assert.equal(readdirSync(root).some((f) => f.startsWith("state.json.corrupt-")), true);
+  assert.throws(() => store.tasksFor("claude"), /M9R local state.*invalid/);
+  assert.throws(() => store.addTask(task()), /M9R local state.*invalid/);
+  assert.equal(readFileSync(join(root, "state.json"), "utf8"), "{ not json");
   done();
 });
 
-test("a stale lock left by a crashed process does not block the store", () => {
+test("a newer state version is preserved and cannot be overwritten by an older runtime", () => {
+  const { root, store, done } = tempStore();
+  const original = JSON.stringify({ version: 2, identities: [{ secret: "preserve" }] });
+  writeFileSync(join(root, "state.json"), original);
+  assert.throws(() => store.addTask(task()), /unsupported version/);
+  assert.equal(readFileSync(join(root, "state.json"), "utf8"), original);
+  done();
+});
+
+test("an aged lock is preserved instead of stealing ownership from another writer", () => {
   const { root, store, done } = tempStore();
   mkdirSync(join(root, "state.lock"));
+  writeFileSync(join(root, "state.lock", "owner-abc.json"), JSON.stringify({ pid: process.pid, nonce: "live-owner" }));
   const old = new Date(Date.now() - 60_000);
   utimesSync(join(root, "state.lock"), old, old);
-  assert.equal(store.addTask(task()).created, true);
+  assert.throws(() => store.addTask(task()), /lock was preserved/);
+  assert.equal(JSON.parse(readFileSync(join(root, "state.lock", "owner-abc.json"), "utf8")).nonce, "live-owner");
+  done();
+});
+
+test("a lock with a demonstrably dead owner recovers without resetting the state", () => {
+  const { root, store, done } = tempStore();
+  store.addTask(task());
+  mkdirSync(join(root, "state.lock"));
+  writeFileSync(join(root, "state.lock", "owner-abc.json"), JSON.stringify({ pid: 2147483647, nonce: "dead-owner" }));
+  assert.equal(store.addTask(task({ idempotencyKey: "after-crash" })).task.id, "T2");
   done();
 });
 

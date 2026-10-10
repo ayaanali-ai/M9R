@@ -60,6 +60,8 @@ test("desktop stage input derives a private one-shot receipt ID from the MCP req
     const result = await handler({ token: t.codex, taskId: "T1", action: { kind: "cursor", x: 2, y: 3 } }, { requestId: 17 });
     assert.match(receivedOperationId, /^[a-f0-9]{64}$/);
     assert.match(result.content[0]?.text ?? "", /"status":"applied"/);
+    await handler({ token: t.codex, taskId: "T1", operationId: "task1-click1", action: { kind: "cursor", x: 2, y: 3 } }, { requestId: 18 });
+    assert.equal(receivedOperationId, "task1-click1", "an explicit operation identity survives a new MCP request");
   } finally { t.done(); }
 });
 

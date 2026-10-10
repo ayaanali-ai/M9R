@@ -42,6 +42,26 @@ function projectCwdForTask(store: LocalStore, cwd: string | undefined): string |
 
 /** Pushes one task into the target Codex session. Only tasks a human typed or approved are ever pushed. */
 export async function deliverToCodex(store: LocalStore, taskId: string, deps: DeliveryDeps): Promise<DeliveryOutcome> {
+  const candidate = store.getTask(taskId);
+  if (!candidate || candidate.to !== "codex" || candidate.resultSummary) return { state: "skipped", reason: "not a pending Codex task" };
+  if (!canQueue(candidate)) return { state: "skipped", reason: "waiting for approval" };
+  const claimed = store.claimCodexDelivery(taskId);
+  if (!claimed) return { state: "skipped", reason: "not eligible or already claimed for delivery" };
+  let dispatched = false;
+  const guardedDeps: DeliveryDeps = { ...deps, runCodex: async (command, args) => {
+    dispatched = true;
+    return deps.runCodex(command, args);
+  } };
+  try {
+    return await deliverClaimedToCodex(store, taskId, guardedDeps, () => dispatched);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    store.setDelivery(taskId, { state: dispatched ? "uncertain" : "failed", error: reason });
+    return { state: "failed", reason };
+  }
+}
+
+async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: DeliveryDeps, wasDispatched: () => boolean): Promise<DeliveryOutcome> {
   const task = store.getTask(taskId);
   if (!task) return { state: "skipped", reason: "no such task" };
   if (task.to !== "codex") return { state: "skipped", reason: "not addressed to codex" };
@@ -51,9 +71,9 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   // an unknown sender folder too, so those tasks can use the current live Codex identity.
   const taskCwd = projectCwdForTask(store, task.cwd);
 
-  const attempts = (task.delivery?.attempts ?? 0) + 1;
+  const attempts = task.delivery?.attempts ?? 1;
   const fail = (reason: string): DeliveryOutcome => {
-    store.setDelivery(taskId, { state: "failed", attempts, error: reason });
+    store.setDelivery(taskId, { state: wasDispatched() ? "uncertain" : "failed", attempts, error: reason });
     return { state: "failed", reason };
   };
   const queueMessageFor = async (sessionId: string): Promise<string | null> => {
@@ -73,6 +93,7 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
     if (!message) return fail("The target Codex session has no active M9R token; reconnect it before delivery.");
     const command = deps.resolveCodex();
     if (!command) return fail("The codex command was not found on this machine.");
+    store.setDelivery(taskId, { state: "sending", threadId: linked.sessionId });
     const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(linked.sessionId, message)));
     if (!outcome.ok) return fail(outcome.error ?? "codex queue failed");
     store.setDelivery(taskId, { state: "queued", attempts, threadId: linked.sessionId, queuedAt: new Date().toISOString(), error: undefined });
@@ -110,6 +131,7 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   const command = deps.resolveCodex();
   if (!command) return fail("The codex command was not found on this machine.");
 
+  store.setDelivery(taskId, { state: "sending", threadId: endpoint.sessionId });
   const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(endpoint.sessionId, message)));
   if (!outcome.ok) return fail(outcome.error ?? "codex queue failed");
   store.setDelivery(taskId, { state: "queued", attempts, threadId: endpoint.sessionId, queuedAt: new Date().toISOString(), error: undefined });
@@ -145,6 +167,9 @@ export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, 
     const tail = deps.readRolloutTail(threadId);
     if (!tail) continue;
     const result = findQueuedResult(tail, task.id);
+    if (result.seen && task.delivery?.state !== "queued") store.setDelivery(task.id, {
+      state: "queued", threadId, queuedAt: new Date().toISOString(), error: undefined,
+    });
     if (result.done) {
       store.setResult(task.id, resultSummary(task.id, result.message));
       collected += 1;
