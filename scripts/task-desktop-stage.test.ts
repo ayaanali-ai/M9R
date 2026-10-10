@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
-import { resolveUnlistedStageApp } from "../src/lib/native/task-stage-apps";
+import { approveStageApp, resolveUnlistedStageApp } from "../src/lib/native/task-stage-apps";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
 
@@ -19,6 +19,7 @@ function fixture(control = false) {
   const currentDesktopId = "33333333-3333-4333-8333-333333333333";
   const previewCapture = { dataUrl: "data:image/png;base64,eA==", width: 1280, height: 720, capturedAt: new Date(0).toISOString() };
   const driver = {
+    capture: async () => previewCapture,
     captureDesktop: async () => { desktopActions.push({ kind: "capture" }); return previewCapture; },
     moveDesktopCursor: async (_name: string, x: number, y: number) => {
       desktopActions.push({ kind: "cursor", x, y });
@@ -33,11 +34,25 @@ function fixture(control = false) {
         return { ok: true, desktop: { desktopId: "11111111-1111-4111-8111-111111111111", isCurrent: false, returnDesktopId: "22222222-2222-4222-8222-222222222222" } };
       }
       if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: String(request.desktopId) === currentDesktopId } };
+      if (request.op === "presentOwnerWindow") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } };
+      if (request.op === "inspect") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } };
       throw new Error("Unexpected native operation; preparation must not move or activate windows.");
     },
   } });
-  return { root, store, identity, task, service, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, store, identity, task, service, driver, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test("a native target inspection failure is returned immediately instead of becoming an approval wait", async () => {
+  const f = fixture(true);
+  const failure = new Error("get_window_state: native inspection failed");
+  f.driver.describeDesktopTarget = async () => { throw failure; };
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "owner-preview"),
+      (error) => error === failure);
+    assert.equal(f.desktopActions.some((action) => action.kind === "click"), false);
+  } finally { f.cleanup(); }
+});
 
 test("approved task preparation is idempotent and does not expose desktop GUIDs", async () => {
   const f = fixture();
@@ -64,10 +79,21 @@ test("omitted mode stays on the owner's current desktop for preparation and curs
   } finally { f.cleanup(); }
 });
 
-test("an omitted app launch mode cannot spawn a background app window", async () => {
+test("an owner desktop app request reuses personal Chrome without creating another process or desktop", async () => {
   const f = fixture(true);
   try {
-    await assert.rejects(f.service.launch(f.identity.token, f.task.id, "chrome"), /Owner preview controls the desktop already on screen/);
+    const executable = join(f.root, "chrome.exe");
+    writeFileSync(executable, "fixture executable; must never run");
+    approveStageApp(f.root, "chrome", executable, [], { terminal: true, env: {} });
+    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Personal Chrome", width: 1280, height: 720 }];
+    const opened = await f.service.launch(f.identity.token, f.task.id, "chrome");
+    assert.equal(opened.reused, true);
+    const prepared = await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    assert.equal(prepared.hasAnchor, true, "repeat preparation must retain the same live task's selected app");
+    await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview");
+    const next = f.store.addTask({ from: "you", to: "codex", goal: "Next app task", origin: "human_typed", targetSession: "session-one", idempotencyKey: "next-app" }).task;
+    assert.equal((await f.service.prepare(f.identity.token, next.id, "owner-preview")).hasAnchor, false);
+    await assert.rejects(f.service.act(f.identity.token, next.id, { kind: "capture", view: "app" }, "owner-preview"), /selected app/);
     assert.equal(f.creations(), 0, "launch without an explicit background mode must not create a desktop or process");
   } finally { f.cleanup(); }
 });
@@ -89,6 +115,14 @@ test("owner-preview preparation does not create or switch to a background deskto
     assert.equal(prepared.hasAnchor, false);
     assert.equal("roomDesktopId" in prepared, false);
     assert.equal(f.creations(), 0, "preview preparation must not call createDesktop");
+  } finally { f.cleanup(); }
+});
+
+test("app view cannot use another task's stale registered window", async () => {
+  const f = fixture(true);
+  try {
+    await f.service.prepare(f.identity.token, f.task.id);
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }), /no selected application window/);
   } finally { f.cleanup(); }
 });
 

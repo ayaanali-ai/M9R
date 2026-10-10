@@ -113,7 +113,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   );
 
   server.registerTool("m9r_stage_app", {
-    description: "Stage mode defaults to owner-preview: it never launches a separate process, so open visible apps with m9r_stage_action by clicking the desktop, taskbar, or Start icon. Pass mode \"background\" only for an explicitly requested isolated desktop. In background mode, launch an installed app using the owner's active access policy or discard an app owned by this task; preserve the task result first.",
+    description: "Stage mode defaults to owner-preview: open a normal installed app on the current desktop or restore the existing personal browser without an extra browser window or separate profile. Use m9r_stage_action for explicitly requested icon clicks. Pass mode \"background\" only for an explicitly requested isolated desktop. In background mode, launch an installed app using the owner's active access policy or discard an app owned by this task; preserve the task result first.",
     inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), appId: STAGE_APP_REF.optional() },
   }, async ({ token, taskId, operation, mode, appId }) => {
     requireIdentity(token);
@@ -124,16 +124,16 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   });
 
   server.registerTool("m9r_stage_action", {
-    description: "Capture or control this task's desktop; mode defaults to owner-preview and actions use the whole desktop the owner is currently viewing. Click desktop icons, taskbar apps, Start, windows, and controls directly; this never launches a second app window or switches desktops. Pass mode \"background\" only for an explicitly requested isolated desktop. Supports capture, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Capture before each action, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Read the outcome and verify effects; an input acknowledgement alone is not proof of success.",
+    description: "Capture or control this task's desktop; mode defaults to owner-preview and actions use the whole desktop the owner is currently viewing. Click desktop icons, taskbar apps, Start, windows, and controls directly; this never launches a second app window or switches desktops. Pass mode \"background\" only for an explicitly requested isolated desktop. Use action.view \"app\" after m9r_stage_app to operate the selected exact window independently of owner focus; omit view or use \"desktop\" for the whole desktop. Supports capture, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Capture before each action, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Read the outcome and verify effects; an input acknowledgement alone is not proof of success.",
     inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), action: z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("capture") }).strict(),
-      z.object({ kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
-      z.object({ kind: z.enum(["double_click", "right_click"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
-      z.object({ kind: z.literal("type"), text: z.string().min(1).max(500) }).strict(),
-      z.object({ kind: z.literal("scroll"), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), direction: z.enum(["up", "down"]) }).strict(),
-      z.object({ kind: z.literal("drag"), fromX: z.number().int().min(0).max(16383), fromY: z.number().int().min(0).max(16383), toX: z.number().int().min(0).max(16383), toY: z.number().int().min(0).max(16383) }).strict(),
-      z.object({ kind: z.literal("press_key"), key: z.string().min(1).max(20).regex(/^(?:[a-z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Ctrl|Control|Alt|Shift|Meta|Win|Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Insert|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Up|Down|Left|Right|CapsLock|PrintScreen)$/i) }).strict(),
-      z.object({ kind: z.literal("hotkey"), keys: z.array(z.string().min(1).max(20)).min(1).max(4) }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("capture") }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["double_click", "right_click"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("type"), text: z.string().min(1).max(500) }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("scroll"), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), direction: z.enum(["up", "down"]) }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("drag"), fromX: z.number().int().min(0).max(16383), fromY: z.number().int().min(0).max(16383), toX: z.number().int().min(0).max(16383), toY: z.number().int().min(0).max(16383) }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("press_key"), key: z.string().min(1).max(20).regex(/^(?:[a-z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Ctrl|Control|Alt|Shift|Meta|Win|Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Insert|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Up|Down|Left|Right|CapsLock|PrintScreen)$/i) }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("hotkey"), keys: z.array(z.string().min(1).max(20)).min(1).max(4) }).strict(),
     ]) },
   }, async ({ token, taskId, mode, action }) => {
     requireIdentity(token);

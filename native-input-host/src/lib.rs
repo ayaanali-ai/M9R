@@ -25,6 +25,8 @@ pub enum MouseButton {
 mod win32;
 
 mod virtual_desktop;
+#[cfg(windows)]
+mod shell_accessibility;
 
 #[cfg(windows)]
 pub use win32::click_visible_chrome_tab;

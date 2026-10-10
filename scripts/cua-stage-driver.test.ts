@@ -11,11 +11,18 @@ const windowId = "9223372036854775807";
 const imageData = Buffer.from("stage-window-image").toString("base64");
 
 function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
+  let connected: Awaited<ReturnType<NonNullable<CuaStageDriverDependencies["connectRuntime"]>>>;
   return createCuaStageDriverCore({
     ...deps,
-    connectRuntime: deps.connectRuntime ?? (async (sdk) => {
+    connectRuntime: async (sdk) => {
       const driver = sdk.CuaDriver.create(undefined);
-      return { driver, close: async () => driver.shutdown() };
+      connected = deps.connectRuntime ? await deps.connectRuntime(sdk) : { driver, close: async () => driver.shutdown() };
+      return connected;
+    },
+    windowAtPoint: deps.windowAtPoint ?? (async (x, y) => {
+      const { windows } = await connected.driver.listWindows({ onScreenOnly: true });
+      const window = topmostWindowAtScreenPoint(windows.filter((item) => item.pid !== connected.processId), x, y);
+      return { pid: window.pid!, windowId: window.windowId };
     }),
   });
 }
@@ -39,6 +46,27 @@ function withRoot(run: (root: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(fixtureRoot, "m9r-cua-stage-"));
   return run(root).finally(() => rmSync(root, { recursive: true, force: true }));
 }
+
+test("untitled taskbar controls use exact accessibility invocation and overlay-only movement", async () => withRoot(async (root) => {
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await registerOwnerPreview(root, identity);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const control = { label: "Start", pid: 123, windowPid: 123, windowId: "456", rect: { x: 0, y: 0, width: 50, height: 50 }, invoked: false };
+  let invocations = 0;
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls, screenSize: { width: 1, height: 1 }, cursorState: { enabled: true, position: { x: 0, y: 0 } } }) as never,
+    windowAtPoint: async () => ({ pid: 123, windowId: BigInt(456), shell: true }),
+    pointControl: async (_x, _y, expected) => { if (expected) { assert.deepEqual(expected, control); invocations++; } return { ...control, invoked: Boolean(expected) }; } });
+  await driver.captureDesktop("preview", identity);
+  assert.equal((await driver.describeDesktopTarget("preview", 0, 0, identity))?.label, "Start");
+  assert.equal((await driver.clickDesktop("preview", 0, 0, identity)).outcome.status, "unverified");
+  assert.equal(invocations, 1);
+  assert.equal(calls.some((c) => c.method === "getWindowState" || c.method === "click" || c.method === "desktopTarget"), false);
+  const move = calls.find((c) => c.method === "callTool")?.value as { name: string; args: Record<string, unknown> };
+  assert.equal(move.name, "move_cursor");
+  assert.equal(move.args.scope, "window");
+  await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No agent input window/);
+}));
 
 function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies["stage"]> {
   return {
@@ -78,6 +106,7 @@ function makeSdk(options: {
   desktopMetadata?: Record<string, unknown>;
   sessionStateError?: Error;
   escalationError?: Error;
+  windowStateError?: Error;
   calls: Array<{ method: string; value?: unknown }>;
 }) {
   const actionResult = options.actionResult ?? { effect: 0, route: 1, summary: "action confirmed" };
@@ -87,6 +116,7 @@ function makeSdk(options: {
     async setAgentCursorMotion(input: unknown) { options.calls.push({ method: "setAgentCursorMotion", value: input }); return { isError: false }; },
     async getWindowState(input: unknown) {
       options.calls.push({ method: "getWindowState", value: input });
+      if (options.windowStateError) throw options.windowStateError;
       return options.state ?? {
         pid: 4321,
         windowId: BigInt(windowId),
@@ -124,9 +154,11 @@ function makeSdk(options: {
     },
     async setAgentCursorEnabled(input: unknown) { options.calls.push({ method: "setAgentCursorEnabled", value: input }); return { isError: false }; },
     async moveCursor(input: unknown) { options.calls.push({ method: "moveCursor", value: input }); return { isError: false }; },
+    async callTool(name: string, argumentsJson: string) { options.calls.push({ method: "callTool", value: { name, args: JSON.parse(argumentsJson) } }); return { isError: false }; },
     async getAgentCursorState() {
       options.calls.push({ method: "getAgentCursorState" });
-      const lastMove = [...options.calls].reverse().find((call) => call.method === "moveCursor")?.value as {
+      const latest = [...options.calls].reverse().find((call) => call.method === "moveCursor" || call.method === "callTool");
+      const lastMove = (latest?.method === "callTool" ? (latest.value as { args: unknown }).args : latest?.value) as {
         x?: number; y?: number; target?: { input?: { pid?: number; windowId?: bigint } };
       } | undefined;
       const windowTarget = lastMove?.target?.input;
@@ -228,13 +260,8 @@ test("maps app screenshot pixels to desktop screen points before moving and veri
 
   const result = await driver.moveCursor("stage", 42, 24);
   assert.deepEqual(result.cursor, { x: 42, y: 24, screenX: 184, screenY: 98, enabled: true, visible: true });
-  const target = calls.find((call) => call.method === "windowTarget")?.value as { pid: number; windowId: bigint };
-  assert.equal(target.pid, 4321);
-  assert.equal(target.windowId, BigInt(windowId));
-  const move = calls.find((call) => call.method === "moveCursor")?.value as { x: number; y: number; target: unknown };
-  assert.equal(move.x, 42, "window-targeted overlay movement uses the window screenshot's pixel coordinates");
-  assert.equal(move.y, 24, "window-targeted overlay movement uses the window screenshot's pixel coordinates");
-  assert.ok(move.target);
+  const move = (calls.find((call) => call.method === "callTool")?.value as { args: Record<string, unknown> }).args;
+  assert.deepEqual({ x: move.x, y: move.y, scope: move.scope }, { x: 184, y: 98, scope: "window" });
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession", "shutdown"]);
 }));
 
@@ -266,13 +293,12 @@ test("owner preview captures the whole current desktop and binds visible cursor 
   assert.ok(calls.some((call) => call.method === "windowTarget"), "desktop input resolves to one exact HWND");
   const clickInput = calls.find((call) => call.method === "click")?.value as Record<string, unknown>;
   assert.equal(clickInput.deliveryMode, 0, "owner-preview routes clicks to the exact window in the background");
-  const cursorMove = calls.find((call) => call.method === "moveCursor")?.value as { x?: number; y?: number };
-  assert.deepEqual({ x: cursorMove.x, y: cursorMove.y }, { x: 100, y: 50 }, "the visible overlay uses the exact window screenshot coordinate space");
+  const cursorMove = (calls.find((call) => call.method === "callTool")?.value as { args: { x?: number; y?: number } }).args;
+  assert.deepEqual({ x: cursorMove.x, y: cursorMove.y }, { x: 960, y: 540 }, "the visible overlay uses physical screen coordinates");
   const windowTarget = clickInput.target as { input?: { pid?: number; windowId?: bigint } };
   assert.deepEqual(windowTarget.input, { pid: 4321, windowId: BigInt(windowId) });
-  const cursorInput = calls.find((call) => call.method === "moveCursor")?.value as { target?: { input?: unknown }; x?: number; y?: number };
-  assert.deepEqual(cursorInput.target?.input, { pid: 4321, windowId: BigInt(windowId) }, "the visible cursor is an exact-window overlay cursor");
-  assert.deepEqual({ x: cursorInput.x, y: cursorInput.y }, { x: 100, y: 50 }, "overlay coordinates use the exact window screenshot, not desktop or physical-pointer coordinates");
+  const cursorInput = (calls.find((call) => call.method === "callTool")?.value as { args: Record<string, unknown> }).args;
+  assert.equal(cursorInput.scope, "window", "the overlay protocol scope never selects the real OS pointer");
   const clickPosition = clickInput.position as { inner?: { x?: number; y?: number } };
   assert.deepEqual(clickPosition.inner, { x: 100, y: 50 }, "captured desktop pixels map into exact-window screenshot pixels");
   assert.equal(clickInput.count, 2);
@@ -306,6 +332,44 @@ test("owner-preview excludes the daemon's unlabeled overlay before snapshot and 
   assert.ok(snapshots.length > 0);
   assert.ok(snapshots.every((call) => (call.value as { pid: number }).pid === 4321));
   assert.equal(calls.some((call) => call.method === "desktopTarget"), false);
+  await driver.shutdown();
+}));
+
+test("desktop target description prefers the native control name over OCR, including money controls", async () => withRoot(async (root) => {
+  await registerOwnerPreview(root);
+  for (const label of ["Start", "Pay now"]) {
+    const calls: Array<{ method: string; value?: unknown }> = [];
+    const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls,
+      windows: [{ pid: 4321, windowId: BigInt(windowId), appName: "Explorer", title: "Desktop",
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 }, isOnScreen: true, zIndex: BigInt(1) }],
+      state: { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+        windowBounds: { x: 0, y: 0, width: 1920, height: 1080 }, images: [{ mimeType: "image/png", dataBase64: imageData }],
+        elements: [{ label: "Window", role: "Window", enabled: true, frame: { x: 0, y: 0, w: 1920, h: 1080 } },
+          { label, role: "Button", enabled: true, frame: { x: 950, y: 530, w: 40, h: 40 } }] },
+    }) as never });
+    const identity = { handle: "codex", sessionId: "desktop-session" };
+    await driver.captureDesktop("preview", identity);
+    assert.equal((await driver.describeDesktopTarget("preview", 0, 0, identity))?.label, label);
+    assert.equal(calls.some((call) => call.method === "parseVisualRegions"), false);
+    const snapshot = calls.find((call) => call.method === "getWindowState")?.value as { includeAccessibilityTree: boolean; maxElements: number };
+    assert.equal(snapshot.includeAccessibilityTree, true);
+    assert.equal(snapshot.maxElements, 512);
+    await driver.shutdown();
+  }
+}));
+
+test("desktop target description preserves native inspection failures", async () => withRoot(async (root) => {
+  await registerOwnerPreview(root);
+  const failure = new Error("get_window_state: target unavailable");
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, windowStateError: failure,
+    windows: [{ pid: 4321, windowId: BigInt(windowId), appName: "Explorer", title: "Desktop",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 }, isOnScreen: true, zIndex: BigInt(1) }],
+  }) as never });
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await driver.captureDesktop("preview", identity);
+  await assert.rejects(driver.describeDesktopTarget("preview", 0, 0, identity), (error) => error === failure);
+  assert.equal(calls.some((call) => call.method === "parseVisualRegions"), false);
   await driver.shutdown();
 }));
 
@@ -413,6 +477,34 @@ test("owner-preview does not retain a keyboard target after an unconfirmed backg
   await driver.shutdown();
 }));
 
+test("owner-preview types to a reinspected accessibility field without relying on click focus", async () => withRoot(async (root) => {
+  await registerOwnerPreview(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const field = { elementToken: "snapshot:field", label: "Text editor", role: "Document", enabled: true,
+    actions: ["set_value"], frame: { x: 0, y: 0, w: 1920, h: 1080 } };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls,
+    actionResult: { effect: 3, route: 1, summary: "click remains unverified" },
+    windows: [{ pid: 4321, windowId: BigInt(12345), appName: "notepad.exe", title: "Untitled - Notepad",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 }, isOnScreen: true, zIndex: BigInt(1) }],
+    state: { pid: 4321, windowId: BigInt(12345), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+      windowBounds: { x: 0, y: 0, width: 1920, height: 1080 }, elements: [field],
+      images: [{ mimeType: "image/png", dataBase64: imageData }] },
+  }) as never });
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await driver.captureDesktop("preview", identity);
+  assert.equal((await driver.clickDesktop("preview", 0, 0, identity)).outcome.status, "suspected-noop");
+  await driver.typeTextDesktop("preview", "hello", identity);
+  const sent = calls.find((call) => call.method === "callTool" && (call.value as { name: string }).name === "type_text")?.value as { args: Record<string, unknown> };
+  assert.equal(sent.args.element_token, "snapshot:field");
+  assert.equal(sent.args.delivery_mode, "background");
+  assert.equal(sent.args.pid, 4321);
+  assert.equal(calls.some((call) => call.method === "typeText"), false);
+  field.label = "Different editor";
+  await assert.rejects(driver.typeTextDesktop("preview", "must not write", identity), /text field changed/);
+  assert.equal(calls.filter((call) => call.method === "callTool" && (call.value as { name: string }).name === "type_text").length, 1);
+  await driver.shutdown();
+}));
+
 test("owner-preview scroll and drag use the exact window under the cursor", async () => withRoot(async (root) => {
   await registerOwnerPreview(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
@@ -484,7 +576,7 @@ test("shows a distinct agent label on each native cursor and configures adaptive
     dwellAfterClickMs: 100,
     idleHideMs: 60_000,
   })));
-  assert.equal(calls.filter((call) => call.method === "moveCursor").length, 2);
+  assert.equal(calls.filter((call) => call.method === "callTool").length, 2);
   for (const identity of identities) await driver.closeAgentCursor(identity);
 }));
 

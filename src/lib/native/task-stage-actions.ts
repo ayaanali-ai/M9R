@@ -1,7 +1,7 @@
 import { createCuaStageDriver, type CuaAgentCursorIdentity, type CuaStageTargetDescription } from "./cua-stage-driver";
 import { classifyWebActionRisk } from "./risk-core";
 
-export type TaskStageAction =
+type TaskStageActionBody =
   | { kind: "capture" }
   | { kind: "click" | "cursor"; x: number; y: number }
   | { kind: "double_click" | "right_click"; x: number; y: number }
@@ -10,6 +10,7 @@ export type TaskStageAction =
   | { kind: "drag"; fromX: number; fromY: number; toX: number; toY: number }
   | { kind: "press_key"; key: string }
   | { kind: "hotkey"; keys: string[] };
+export type TaskStageAction = TaskStageActionBody & { view?: "desktop" | "app" };
 
 const KEY_NAMES = new Set([
   "Ctrl", "Control", "Alt", "Shift", "Meta", "Win", "Enter", "Return", "Escape", "Esc", "Tab", "Space",
@@ -30,8 +31,9 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     type: ["text"], scroll: ["x", "y", "direction"], drag: ["fromX", "fromY", "toX", "toY"], press_key: ["key"], hotkey: ["keys"] };
   if (typeof action.kind !== "string" || !Object.hasOwn(fields, action.kind)) throw new Error("Unsupported stage action.");
   const required = fields[action.kind]!;
-  if (Object.keys(action).some((key) => key !== "kind" && !required.includes(key))
+  if (Object.keys(action).some((key) => key !== "kind" && key !== "view" && !required.includes(key))
     || required.some((key) => !Object.hasOwn(action, key))) throw new Error("Invalid stage action fields.");
+  if (action.view !== undefined && action.view !== "desktop" && action.view !== "app") throw new Error("Invalid stage action view.");
   for (const key of ["x", "y", "fromX", "fromY", "toX", "toY"]) {
     if (key in action && (!Number.isSafeInteger(action[key]) || (action[key] as number) < 0 || (action[key] as number) > 16383)) {
       throw new Error("Invalid stage action coordinates.");
@@ -48,9 +50,10 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
 
 export async function runTaskStageAction(driver: ReturnType<typeof createCuaStageDriver>, name: string, action: TaskStageAction,
   identity: CuaAgentCursorIdentity, mode: "background" | "owner-preview" = "owner-preview") {
-  const capture = () => mode === "owner-preview" ? driver.captureDesktop(name, identity) : driver.capture(name, identity);
-  const cursor = (x: number, y: number) => mode === "owner-preview" ? driver.moveDesktopCursor(name, x, y, identity) : driver.moveCursor(name, x, y, identity);
-  const click = (x: number, y: number, options: { button?: "left" | "right"; count?: 1 | 2 } = {}) => mode === "owner-preview"
+  const desktopWide = mode === "owner-preview" && action.view !== "app";
+  const capture = () => desktopWide ? driver.captureDesktop(name, identity) : driver.capture(name, identity);
+  const cursor = (x: number, y: number) => desktopWide ? driver.moveDesktopCursor(name, x, y, identity) : driver.moveCursor(name, x, y, identity);
+  const click = (x: number, y: number, options: { button?: "left" | "right"; count?: 1 | 2 } = {}) => desktopWide
     ? driver.clickDesktop(name, x, y, identity, options) : driver.click(name, x, y, identity, options);
   switch (action.kind) {
     case "capture": return { capture: await capture() };
@@ -58,13 +61,13 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "click": return click(action.x, action.y);
     case "double_click": return click(action.x, action.y, { count: 2 });
     case "right_click": return click(action.x, action.y, { button: "right" });
-    case "type": return mode === "owner-preview" ? driver.typeTextDesktop(name, action.text, identity) : driver.typeText(name, action.text, identity);
-    case "scroll": return mode === "owner-preview" ? driver.scrollDesktop(name, action.x, action.y, action.direction, identity)
+    case "type": return desktopWide ? driver.typeTextDesktop(name, action.text, identity) : driver.typeText(name, action.text, identity);
+    case "scroll": return desktopWide ? driver.scrollDesktop(name, action.x, action.y, action.direction, identity)
       : driver.scroll(name, action.x, action.y, action.direction, identity);
-    case "drag": return mode === "owner-preview" ? driver.dragDesktop(name, action.fromX, action.fromY, action.toX, action.toY, identity)
+    case "drag": return desktopWide ? driver.dragDesktop(name, action.fromX, action.fromY, action.toX, action.toY, identity)
       : driver.drag(name, action.fromX, action.fromY, action.toX, action.toY, identity);
-    case "press_key": return mode === "owner-preview" ? driver.pressKeyDesktop(name, action.key, identity) : driver.pressKey(name, action.key, identity);
-    case "hotkey": return mode === "owner-preview" ? driver.hotkeyDesktop(name, action.keys, identity) : driver.hotkey(name, action.keys, identity);
+    case "press_key": return desktopWide ? driver.pressKeyDesktop(name, action.key, identity) : driver.pressKey(name, action.key, identity);
+    case "hotkey": return desktopWide ? driver.hotkeyDesktop(name, action.keys, identity) : driver.hotkey(name, action.keys, identity);
   }
 }
 

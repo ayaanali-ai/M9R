@@ -59,7 +59,7 @@ test("task delivery describes both stage modes without silently creating a backg
     assert.match(context, /desktop-wide view/);
     assert.match(context, /same mode on every m9r_stage_action call/);
     assert.match(context, /Use mode "background" only when the task explicitly asks/);
-    assert.match(context, /Do not call m9r_stage_app in owner-preview/);
+    assert.match(context, /Use m9r_stage_app to open a normal installed app/);
     assert.equal(received, undefined);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

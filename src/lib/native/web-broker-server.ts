@@ -9,7 +9,7 @@
  *   an authorized new connection replaces the old one.
  */
 import { execFileSync } from "node:child_process";
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { VerifiedIdentity } from "./identity-core";
@@ -224,7 +224,7 @@ export function applyAgentMcpStoreMutation(
         goal: value.goal,
         fromSession: identity.sessionId,
         origin: "agent_initiated",
-        idempotencyKey: `mcp:${identity.sessionId}:${to}:${value.goal.slice(0, 200)}`,
+        idempotencyKey: `mcp:${identity.sessionId}:${to}:${createHash("sha256").update(value.goal).digest("hex")}`,
       });
       return { status: 200, body: { ok: true, taskId: result.task.id, created: result.created } };
     }
@@ -248,6 +248,10 @@ export function applyAgentMcpStoreMutation(
       if (!existing) return { status: 404, body: { ok: false, error: `No task ${value.taskId} found.` } };
       if (existing.to !== ownHandle && existing.to !== inboxHandle) {
         return { status: 403, body: { ok: false, error: `Task ${value.taskId} was not sent to you; refusing to report a result for it.` } };
+      }
+      const recipientSession = existing.deliveredSession ?? existing.targetSession;
+      if (recipientSession && recipientSession !== identity.sessionId) {
+        return { status: 403, body: { ok: false, error: `Task ${value.taskId} belongs to another session of this agent.` } };
       }
       if (!store.setResult(value.taskId, value.summary)) return { status: 404, body: { ok: false, error: `No task ${value.taskId} found.` } };
       return { status: 200, body: { ok: true } };

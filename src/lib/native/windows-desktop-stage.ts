@@ -48,7 +48,19 @@ interface NativeStageResponse {
   window?: NativeWindowStageInfo;
   desktop?: NativeDesktopStageInfo;
   input?: { childWindowId: string };
+  pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean };
+  control?: NativePointControl;
   windows?: { pid: number; windowId: string; title: string; width: number; height: number }[];
+}
+
+export interface NativePointControl {
+  label: string;
+  pid: number;
+  windowId: string;
+  windowPid: number;
+  rect: { x: number; y: number; width: number; height: number };
+  invoked: boolean;
+  confirmed?: boolean;
 }
 
 interface NativeDesktopStageInfo {
@@ -242,6 +254,39 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     const result = await invokeNative({ op: "inspect", pid, windowId: handle });
     if (!result.ok) throw new Error(result.error ?? "Windows could not inspect that window.");
     return normalizeWindowInfo(result.window);
+  }
+
+  async function windowAtPoint(x: number, y: number): Promise<{ pid: number; windowId: bigint; shell?: boolean; keyboardWindow?: boolean }> {
+    assertWindows();
+    assertOwner();
+    if (![x, y].every((value) => Number.isSafeInteger(value) && value >= -32768 && value <= 32767)) {
+      throw new Error("Invalid desktop hit-test coordinates.");
+    }
+    const result = await invokeNative({ op: "windowAtPoint", x, y });
+    if (!result.ok) throw new Error(result.error ?? "Windows could not identify the input window at that point.");
+    const window = result.pointWindow;
+    if (!window || !Number.isSafeInteger(window.pid) || window.pid < 1
+      || typeof window.windowId !== "string" || !WINDOW_ID_RE.test(window.windowId)) {
+      throw new Error("The Windows hit test returned an invalid window identity.");
+    }
+    const windowId = BigInt(window.windowId);
+    if (windowId <= BigInt(0) || windowId > BigInt("18446744073709551615")) throw new Error("The Windows hit test returned an invalid HWND.");
+    return { pid: window.pid, windowId, shell: window.shell === true, keyboardWindow: window.keyboardWindow === true };
+  }
+
+  async function pointControl(x: number, y: number, expected?: NativePointControl): Promise<NativePointControl> {
+    assertWindows();
+    assertOwner();
+    if (![x, y].every((n) => Number.isSafeInteger(n) && n >= -32768 && n <= 32767)) throw new Error("Invalid accessibility point.");
+    const result = await invokeNative({ op: expected ? "invokePointControl" : "inspectPointControl", x, y,
+      ...(expected ? { label: expected.label, pid: expected.pid, windowId: expected.windowId, windowPid: expected.windowPid } : {}) });
+    if (!result.ok) throw new Error(result.error ?? "Windows accessibility control operation failed.");
+    const control = result.control;
+    if (!control || typeof control.label !== "string" || !control.label.trim() || !Number.isSafeInteger(control.pid) || control.pid < 1
+      || typeof control.windowId !== "string" || !WINDOW_ID_RE.test(control.windowId) || !Number.isSafeInteger(control.windowPid) || control.windowPid < 1
+      || !control.rect || !Object.values(control.rect).every(Number.isFinite) || control.rect.width <= 0 || control.rect.height <= 0
+      || control.invoked !== Boolean(expected)) throw new Error("Windows returned an invalid accessibility control.");
+    return control;
   }
 
   async function register(nameInput: string, pidInput: string, windowIdInput: string): Promise<WindowsStageRecord> {
@@ -571,6 +616,17 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return result.windows;
   }
 
+  async function presentOwnerWindow(name: string, pid: number, windowId: string) {
+    const inspected = await inspectStage(name);
+    if (!inspected.desktop.isCurrent) throw new Error("The owner's desktop changed before application presentation.");
+    const result = await invokeNative({ op: "presentOwnerWindow", pid, windowId, desktopId: inspected.stage.desktopId });
+    if (!result.ok || result.window?.pid !== pid || result.window.windowId !== windowId
+      || result.window.desktopId !== inspected.stage.desktopId || result.window.onCurrentDesktop !== true) {
+      throw new Error(result.error ?? "The requested application window was not presented on the owner's desktop.");
+    }
+    return result.window;
+  }
+
   async function showOwnedWindow(name: string) {
     const inspected = await inspectStage(name);
     if (!inspected.anchor) throw new Error("Stage has no registered owned app.");
@@ -603,7 +659,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, showOwnedWindow, clearOwnedAnchor };
+  return { inspectWindow, windowAtPoint, pointControl, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor };
 }
 
 function parsePid(value: string): number {

@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ActionResult, ActionTarget, ClickPosition as CuaClickPosition, CuaDriverLike, ToolResult } from "@trycua/cua-driver";
 import { startCuaDriverHost, type CuaDriverHostConnection } from "./cua-driver-host";
-import { createWindowsDesktopStageManager, type WindowsStageDependencies } from "./windows-desktop-stage";
+import { createWindowsDesktopStageManager, type WindowsStageDependencies, type NativePointControl } from "./windows-desktop-stage";
 import type { VerifiedIdentity } from "./identity-core";
 
 const CUA_PACKAGE = "@trycua/cua-driver";
@@ -146,6 +146,8 @@ export interface CuaStageDriverDependencies {
   loadSdk?: () => Promise<CuaSdk>;
   connectRuntime?: CuaStageRuntimeConnector;
   now?: () => Date;
+  windowAtPoint?: (x: number, y: number) => Promise<{ pid: number; windowId: bigint; shell?: boolean; keyboardWindow?: boolean }>;
+  pointControl?: (x: number, y: number, expected?: NativePointControl) => Promise<NativePointControl>;
 }
 
 interface CachedDesktopCapture extends CuaDesktopTargetSnapshot {
@@ -159,9 +161,34 @@ interface CachedDesktopCapture extends CuaDesktopTargetSnapshot {
 interface DesktopInputTarget {
   pid: number;
   windowId: bigint;
+  /** An exact accessibility field does not depend on system keyboard focus. */
+  field?: { x: number; y: number; label?: string; role?: string };
 }
 
 type CuaWindowInfo = Awaited<ReturnType<CuaDriverLike["listWindows"]>>["windows"][number];
+type CuaWindowElement = NonNullable<Awaited<ReturnType<CuaDriverLike["getWindowState"]>>["elements"]>[number];
+
+function elementAtScreenPoint(elements: readonly CuaWindowElement[], x: number, y: number) {
+  return elements.filter((element) => {
+    const frame = element.frame;
+    return element.enabled !== false && element.elementToken && frame && frame.w > 0 && frame.h > 0
+      && x >= frame.x && y >= frame.y && x < frame.x + frame.w && y < frame.y + frame.h;
+  }).sort((a, b) => a.frame!.w * a.frame!.h - b.frame!.w * b.frame!.h)[0];
+}
+
+async function typeIntoExactField(driver: CuaDriverLike, selected: DesktopInputTarget, session: string, text: string) {
+  if (!selected.field || !Number.isSafeInteger(Number(selected.windowId))) throw new Error("The selected text field has no representable exact window identity.");
+  const state = await driver.getWindowState({ pid: selected.pid, windowId: selected.windowId, session,
+    includeAccessibilityTree: true, includeScreenshot: false, maxElements: 512, maxDepth: 12, timeoutMs: 1_500 });
+  if (state.pid !== selected.pid || state.windowId !== selected.windowId) throw new Error("The selected text field returned a different application window.");
+  const element = elementAtScreenPoint(state.elements ?? [], selected.field.x, selected.field.y);
+  if (!element?.elementToken || element.label !== selected.field.label || element.role !== selected.field.role
+    || !element.actions?.includes("set_value")) throw new Error("The selected text field changed; no text was sent.");
+  return actionOutcome(await driver.callTool("type_text", JSON.stringify({
+    pid: selected.pid, window_id: Number(selected.windowId), element_token: element.elementToken,
+    text, delivery_mode: "background", session,
+  })), "Cua Driver could not type into the exact accessibility field.");
+}
 
 interface DesktopScreenSize {
   width: number;
@@ -173,6 +200,9 @@ interface ResolvedDesktopPoint {
   screenPoint: { x: number; y: number };
   target: DesktopInputTarget;
   localPoint: { x: number; y: number };
+  shellControl?: NativePointControl;
+  nativeKeyboardWindow?: boolean;
+  element?: CuaWindowElement;
 }
 
 function bundledSdkUrl(): string | null {
@@ -652,31 +682,35 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     for (const key of desktopInputTargets.keys()) if (key.endsWith(suffix)) desktopInputTargets.delete(key);
   }
 
-  async function resolveOwnerWindowPoint(runtime: CuaRuntime, session: AgentCursorSession, screenPoint: { x: number; y: number }) {
-    const listed = await runtime.driver.listWindows({ onScreenOnly: true });
-    // The native daemon's transparent cursor windows cover the desktop. Cua
-    // deliberately refuses targeting its own process, so exclude its known PID
-    // before hit testing rather than relying on localized overlay window titles.
-    const windows = listed.windows.filter((window) => window.pid !== runtime.processId);
-    const selected = topmostWindowAtScreenPoint(windows, screenPoint.x, screenPoint.y);
-    const pid = selected.pid!;
-    const windowId = selected.windowId;
+  async function resolveOwnerWindowPoint(runtime: CuaRuntime, session: AgentCursorSession, screenPoint: { x: number; y: number }, includeAccessibilityTree = false) {
+    // Win32 hit testing respects actual input regions instead of overlapping
+    // rectangles. Shell HWNDs have no titles and are excluded by Cua snapshots.
+    const selected = await (deps.windowAtPoint ?? manager.windowAtPoint)(screenPoint.x, screenPoint.y);
+    if (selected.pid === runtime.processId) throw new Error("The desktop point resolves to the Cua overlay, not an application; no input was sent.");
+    const { pid, windowId } = selected;
+    if (selected.shell) {
+      const shellControl = await (deps.pointControl ?? manager.pointControl)(screenPoint.x, screenPoint.y);
+      if (shellControl.windowPid !== pid || shellControl.windowId !== windowId.toString()) throw new Error("The shell control does not belong to the hit-tested window; no input was sent.");
+      return { target: { pid, windowId }, localPoint: screenPoint, shellControl, nativeKeyboardWindow: selected.keyboardWindow, state: undefined };
+    }
     const state = await runtime.driver.getWindowState({ pid, windowId, session: session.session,
-      includeAccessibilityTree: false, includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, timeoutMs: 1_500 });
+      includeAccessibilityTree, includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, timeoutMs: 1_500,
+      ...(includeAccessibilityTree ? { maxElements: 512, maxDepth: 12 } : {}) });
     const image = imageFromWindowState(state, pid, windowId);
-    const bounds = state.windowBounds ?? selected.bounds;
+    const bounds = state.windowBounds;
     const frame: CuaStageWindowFrame = { ...image,
       ...(bounds ? { windowBounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } } : {}) };
     const localPoint = desktopPointInWindow(screenPoint, frame);
-    return { target: { pid, windowId }, localPoint };
+    return { target: { pid, windowId }, localPoint, state,
+      element: elementAtScreenPoint(state.elements ?? [], screenPoint.x, screenPoint.y) };
   }
 
   async function resolveOwnerDesktopPoint(runtime: CuaRuntime, session: AgentCursorSession, x: number, y: number,
-    capture: CachedDesktopCapture, screen?: DesktopScreenSize): Promise<ResolvedDesktopPoint> {
+    capture: CachedDesktopCapture, screen?: DesktopScreenSize, includeAccessibilityTree = false): Promise<ResolvedDesktopPoint> {
     if (!validPoint(x, y, capture)) throw new Error("Desktop coordinates must fall inside the latest desktop screenshot.");
     const screenSize = screen ?? screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
     const screenPoint = desktopPointOnScreen(x, y, capture, screenSize);
-    const resolved = await resolveOwnerWindowPoint(runtime, session, screenPoint);
+    const resolved = await resolveOwnerWindowPoint(runtime, session, screenPoint, includeAccessibilityTree);
     return { desktopPoint: { x, y }, screenPoint, ...resolved };
   }
 
@@ -714,12 +748,14 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     // Desktop-targeted move_cursor warps the real OS pointer. Keep the visible
     // agent cursor independent by moving its session overlay within the exact
     // window resolved from the desktop screenshot.
-    const target = new runtime.sdk.ActionTarget.Window(point.target);
-    resultError(await runtime.driver.moveCursor({ ...point.localPoint, target, session: session.session }), "Cua Driver could not move the labeled cursor on the owner's desktop.");
+    // The Windows tool consumes screen coordinates in window scope. The SDK's
+    // typed target currently forwards screenshot-local coordinates unchanged;
+    // use its public protocol adapter with an explicit, pointer-safe scope.
+    resultError(await runtime.driver.callTool("move_cursor", JSON.stringify({ scope: "window", x: point.screenPoint.x, y: point.screenPoint.y, session: session.session })), "Cua Driver could not move the labeled desktop cursor.");
     const state = cursorStateFromResult(await runtime.driver.getAgentCursorState({ session: session.session }));
     if (!state.enabled || state.x === undefined || state.y === undefined
       || Math.abs(state.x - point.screenPoint.x) > 1 || Math.abs(state.y - point.screenPoint.y) > 1) {
-      throw new Error("Cua Driver did not confirm the requested desktop cursor position.");
+      throw new Error(`Cua Driver did not confirm the requested desktop cursor position (expected ${point.screenPoint.x},${point.screenPoint.y}; actual ${state.x ?? "missing"},${state.y ?? "missing"}; enabled ${state.enabled}).`);
     }
     if ((await runtime.driver.getSession({ session: session.session })).cursorVisible !== true) {
       throw new Error("Cua Driver moved the cursor but did not confirm its overlay is visible on the owner's desktop.");
@@ -730,10 +766,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   async function moveAndVerifyCursor(input: { driver: CuaDriverLike; sdk: CuaSdk; session: string; pid: number; windowId: bigint }, x: number, y: number, frame: CuaStageWindowFrame) {
     const point = cursorScreenPoint(x, y, frame);
     resultError(await input.driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cua Driver could not enable the agent cursor.");
-    const target = new input.sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId });
-    // Window targets take coordinates from the exact window screenshot; the
-    // cursor-state readback is in desktop screen coordinates.
-    resultError(await input.driver.moveCursor({ x, y, target, session: input.session }), "Cua Driver could not move the agent cursor.");
+    resultError(await input.driver.callTool("move_cursor", JSON.stringify({ scope: "window", x: point.x, y: point.y, session: input.session })), "Cua Driver could not move the agent cursor.");
     const state = cursorStateFromResult(await input.driver.getAgentCursorState({ session: input.session }));
     if (!state.enabled || state.x === undefined || state.y === undefined || Math.abs(state.x - point.x) > 1 || Math.abs(state.y - point.y) > 1) {
       throw new Error("Cua Driver did not confirm the requested agent cursor position on this stage window.");
@@ -772,6 +805,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     windowId: bigint;
     capture: () => Promise<CuaStageWindowFrame>;
     elementAt: (x: number, y: number) => Promise<string | undefined>;
+    elementAtPoint: (x: number, y: number) => Promise<CuaWindowElement | undefined>;
     captureTarget: (x: number, y: number) => Promise<CuaStageTargetDescription | undefined>;
   }) => Promise<T>, cursorIdentity?: CuaAgentCursorIdentity): Promise<T> {
     const { stage, anchor } = await manager.inspectStage(nameInput);
@@ -836,7 +870,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         if (frame && frame.w > 0 && frame.h > 0) description.rect = { x: frame.x, y: frame.y, width: frame.w, height: frame.h };
         return description;
       };
-      return await run({ driver, sdk, session, pid, windowId, capture, captureTarget: describeAt, elementAt });
+      return await run({ driver, sdk, session, pid, windowId, capture, captureTarget: describeAt, elementAt, elementAtPoint: hitTarget });
     } finally {
       if (!persistent && started) {
         try { await driver.endSession({ session }); } catch { /* preserve the primary operation result */ }
@@ -878,11 +912,26 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   async function describeDesktopTarget(name: string, x: number, y: number, cursorIdentity: CuaAgentCursorIdentity): Promise<CuaStageTargetDescription | undefined> {
     return withOwnerDesktop(name, cursorIdentity, async ({ runtime, session, capture }) => {
       if (!validPoint(x, y, capture)) throw new Error("Target coordinates must fall inside the latest desktop screenshot.");
+      const size = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
+      const point = desktopPointOnScreen(x, y, capture, size);
+      const { state, shellControl } = await resolveOwnerWindowPoint(runtime, session, point, true);
+      if (shellControl) return { label: shellControl.label, role: "shell-control", rect: shellControl.rect };
+      // Native controls have meaningful accessibility names even when OCR cannot
+      // describe an icon. Identify the smallest named control before resorting
+      // to visual regions; otherwise a normal Start/taskbar click asks for money
+      // approval merely because an OCR region was absent.
+      const hit = (state?.elements ?? []).filter((element) => {
+        const frame = element.frame;
+        return element.enabled !== false && typeof element.label === "string" && element.label.trim()
+          && frame && frame.w > 0 && frame.h > 0 && point.x >= frame.x && point.y >= frame.y
+          && point.x < frame.x + frame.w && point.y < frame.y + frame.h;
+      }).sort((a, b) => a.frame!.w * a.frame!.h - b.frame!.w * b.frame!.h)[0];
+      if (hit) return { label: hit.label!.replace(/[\r\n\t]+/g, " ").slice(0, 160), role: hit.role?.slice(0, 40),
+        rect: { x: hit.frame!.x, y: hit.frame!.y, width: hit.frame!.w, height: hit.frame!.h } };
       const result = await runtime.driver.parseVisualRegions({
         captureId: capture.captureId,
         options: { kinds: [runtime.sdk.VisualRegionKind.Text, runtime.sdk.VisualRegionKind.Icon], minConfidence: 0.35, maxRegions: 128 },
       });
-      void session;
       return desktopTargetAt(result, x, y);
     });
   }
@@ -904,12 +953,24 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     const result = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       if (!validPoint(x, y, capture)) throw new Error("Click coordinates must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
-      const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture);
+      const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, undefined, true);
       await inspectOwnerDesktop(name, identity);
       await moveOwnerCursor(runtime, session, point);
       await inspectOwnerDesktop(name, identity);
+      if (point.shellControl) {
+        if (options.button === "right" || (options.count ?? 1) !== 1) throw new Error("This shell control supports accessibility activation, not a synthetic double or right click.");
+        const activated = await (deps.pointControl ?? manager.pointControl)(point.screenPoint.x, point.screenPoint.y, point.shellControl);
+        if (activated.confirmed === true && point.nativeKeyboardWindow === true) rememberDesktopInputTarget(name, identity, point.target);
+        // Invocation is acknowledged, but the changed desktop capture proves
+        // whether the app opened. Never bind keyboard input to the taskbar.
+        return { status: "unverified" as const, summary: "Windows acknowledged exact shell control invocation; verify the returned capture." };
+      }
       const target = new runtime.sdk.ActionTarget.Window(point.target);
-      const position = new runtime.sdk.ClickPosition.Coordinates(point.localPoint);
+      const semanticClick = options.button !== "right" && (options.count ?? 1) === 1
+        && point.element?.elementToken && runtime.sdk.ClickPosition.Element;
+      const position = semanticClick
+        ? new runtime.sdk.ClickPosition.Element!({ elementToken: point.element!.elementToken! })
+        : new runtime.sdk.ClickPosition.Coordinates(point.localPoint);
       const button = options.button === "right" ? runtime.sdk.ClickButton.Right : runtime.sdk.ClickButton.Left;
       const outcome = actionOutcome(await runtime.driver.click({ target, position, session: session.session,
         deliveryMode: runtime.sdk.InputDeliveryMode.Background, button, count: options.count ?? 1 }),
@@ -917,7 +978,14 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       // Only a driver-confirmed click can establish where later keyboard input
       // should go. Returning an unverified click is truthful; remembering its
       // HWND would let a follow-up type/hotkey act on an unconfirmed focus.
-      if (outcome.status === "confirmed") rememberDesktopInputTarget(name, identity, point.target);
+      if (point.element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea)$/i.test(point.element.role ?? "")) {
+        // The click remains unverified. Subsequent typing addresses this exact
+        // field explicitly, so it never depends on an unconfirmed focus change.
+        rememberDesktopInputTarget(name, identity, { ...point.target, field: {
+          ...point.screenPoint, label: point.element.label, role: point.element.role,
+        } });
+      }
+      else if (outcome.status === "confirmed") rememberDesktopInputTarget(name, identity, point.target);
       else forgetDesktopInputTarget(name, identity);
       return outcome;
     });
@@ -933,6 +1001,9 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       await inspectOwnerDesktop(name, identity);
       const selected = await verifiedDesktopInputTarget(runtime, name, identity);
       try {
+        if (selected.field) {
+          return await typeIntoExactField(runtime.driver, selected, session.session, text);
+        }
         return actionOutcome(await runtime.driver.typeText({ text, target: new runtime.sdk.ActionTarget.Window(selected), session: session.session }),
           "Cua Driver could not type into the selected background window. No foreground retry was attempted.");
       } catch (error) {
@@ -1074,7 +1145,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function click(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementAt }) => {
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementAtPoint }) => {
       const before = await captureWindow();
       if (!validPoint(x, y, before)) throw new Error("Click coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
@@ -1082,7 +1153,8 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         && await nativeControl(name, "click", { x, y, imageWidth: before.width, imageHeight: before.height })) return { capture: stageCapture(await captureWindow(), now),
         outcome: { status: "unverifiable", summary: "Routed the click to the exact native child control; application effect requires verification." } };
       const target = new sdk.ActionTarget.Window({ pid, windowId });
-      const token = sdk.ClickPosition.Element ? await elementAt(x, y) : undefined;
+      const element = sdk.ClickPosition.Element ? await elementAtPoint(x, y) : undefined;
+      const token = element?.elementToken;
       const result = await driver.click({
         target,
         position: token && sdk.ClickPosition.Element ? new sdk.ClickPosition.Element({ elementToken: token }) : new sdk.ClickPosition.Coordinates({ x, y }),
@@ -1092,6 +1164,13 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         session,
       });
       const outcome = actionOutcome(result, "Cua Driver could not click the registered stage window.");
+      if (cursorIdentity) {
+        forgetDesktopInputTarget(name, cursorIdentity);
+        if (element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea)$/i.test(element.role ?? "")) {
+          const point = cursorScreenPoint(x, y, before);
+          rememberDesktopInputTarget(name, cursorIdentity, { pid, windowId, field: { ...point, label: element.label, role: element.role } });
+        }
+      }
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -1120,6 +1199,12 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     }
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
       await captureWindow();
+      const selected = cursorIdentity ? desktopInputTargets.get(desktopInputKey(name, cursorIdentity)) : undefined;
+      if (selected?.field) {
+        if (selected.pid !== pid || selected.windowId !== windowId) throw new Error("The selected text field belongs to another application window.");
+        const outcome = await typeIntoExactField(driver, selected, session, text);
+        return { capture: stageCapture(await captureWindow(), now), outcome };
+      }
       if (await nativeControl(name, "type", undefined, { text })) return { capture: stageCapture(await captureWindow(), now),
         outcome: { status: "unverifiable", summary: "Posted text to the selected native edit control; application effect requires verification." } };
       const target = new sdk.ActionTarget.Window({ pid, windowId });

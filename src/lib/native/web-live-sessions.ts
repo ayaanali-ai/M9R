@@ -832,6 +832,10 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   const exchanges: number[] = [];
   // Old or malformed tasks remain available in the durable inbox but must never be replayed into a newly started web session.
   const isRoomTask = (t: Task): boolean => {
+    // A shared provider handle is not a runtime identity. Native sessions own
+    // their tasks; only explicitly room-originated work belongs to this relay.
+    if (!normalizeHandle(t.from).startsWith("web-") && !t.fromSession?.startsWith("web-")) return false;
+    if (t.targetSession && !t.targetSession.startsWith("web-")) return false;
     const createdAt = (t as { createdAt?: unknown }).createdAt;
     if (typeof createdAt !== "string") return false;
     const timestamp = Date.parse(createdAt);

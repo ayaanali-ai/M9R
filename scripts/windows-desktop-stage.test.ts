@@ -7,6 +7,22 @@ import { createWindowsDesktopStageManager, formatWindowsStageRoomKeys } from "..
 const stageDesktop = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
 const createdDesktop = "4fc4701b-6c3e-46d1-bba1-e99d993a28a2";
 const ownerDesktop = "c0999999-87d4-4f8b-9fd1-48bc9d8c14ae";
+
+test("shell point inspection and invocation preserve exact control identity without global input", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const control = { label: "Start", pid: 123, windowPid: 123, windowId: "456", rect: { x: 0, y: 0, width: 50, height: 50 }, invoked: false };
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => {
+    requests.push(request);
+    if (request.op === "windowAtPoint") return { ok: true, pointWindow: { pid: 123, windowId: "456", shell: true } };
+    return { ok: true, control: { ...control, invoked: request.op === "invokePointControl" } };
+  } });
+  assert.deepEqual(await manager.windowAtPoint(10, 10), { pid: 123, windowId: BigInt(456), shell: true, keyboardWindow: false });
+  const inspected = await manager.pointControl(10, 10);
+  await manager.pointControl(10, 10, inspected);
+  assert.deepEqual(requests.at(-1), { op: "invokePointControl", x: 10, y: 10, label: "Start", pid: 123, windowPid: 123, windowId: "456" });
+  await assert.rejects(manager.windowAtPoint(NaN, 10), /Invalid/);
+  await assert.rejects(manager.pointControl(0.5, 10), /Invalid/);
+}));
 const anchor = { pid: 4_321, windowId: "9223372036854775807", desktopId: stageDesktop, onCurrentDesktop: false };
 
 test("owned launch discovery accepts hidden windows only from the exact child process", async () => withRoot(async (root) => {

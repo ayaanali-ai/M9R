@@ -149,10 +149,28 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         #[cfg(windows)]
+        Some("presentOwnerWindow") => match platform::present_owner_window(value) {
+            Ok(window) => json!({"ok":true,"requestId":request_id,"window":to_json(window)}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
         Some("input") => match platform::input_window(value) {
             Ok(child) => {
                 json!({"ok":true,"requestId":request_id,"input":{"childWindowId":child.to_string()}})
             }
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("inspectPointControl" | "invokePointControl") => {
+            let invoke = value["op"] == "invokePointControl";
+            match crate::shell_accessibility::control_at_point(value, invoke) {
+                Ok(control) => json!({"ok":true,"requestId":request_id,"control":control}),
+                Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+            }
+        },
+        #[cfg(windows)]
+        Some("windowAtPoint") => match platform::window_at_point(value) {
+            Ok((pid, hwnd, shell, keyboard_window)) => json!({"ok":true,"requestId":request_id,"pointWindow":{"pid":pid,"windowId":hwnd.to_string(),"shell":shell,"keyboardWindow":keyboard_window}}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         Some("currentDesktop") => match current_desktop() {
@@ -466,10 +484,14 @@ mod platform {
         fn IsWindowEnabled(window: Hwnd) -> i32;
         fn GetForegroundWindow() -> Hwnd;
         fn ShowWindow(window: Hwnd, command: i32) -> i32;
+        fn IsWindowVisible(window: Hwnd) -> i32;
+        fn SetWindowPos(window: Hwnd, after: Hwnd, x: i32, y: i32, width: i32, height: i32, flags: u32) -> i32;
         fn EnumWindows(callback: unsafe extern "system" fn(Hwnd, isize) -> i32, parameter: isize) -> i32;
         fn GetWindowTextW(window: Hwnd, buffer: *mut u16, count: i32) -> i32;
         fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
         fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
+        fn WindowFromPoint(point: Point) -> Hwnd;
+        fn GetAncestor(window: Hwnd, flags: u32) -> Hwnd;
         fn ScreenToClient(window: Hwnd, point: *mut Point) -> i32;
         fn ChildWindowFromPointEx(window: Hwnd, point: Point, flags: u32) -> Hwnd;
         fn GetClassNameW(window: Hwnd, buffer: *mut u16, count: i32) -> i32;
@@ -490,6 +512,26 @@ mod platform {
     struct Point {
         x: i32,
         y: i32,
+    }
+
+    pub(super) fn window_at_point(value: &serde_json::Value) -> Result<(u32, usize, bool, bool), &'static str> {
+        let coordinate = |key| value.get(key).and_then(serde_json::Value::as_i64)
+            .and_then(|number| i32::try_from(number).ok()).filter(|number| (-32768..=32767).contains(number));
+        let point = Point { x: coordinate("x").ok_or("invalid screen x coordinate")?,
+            y: coordinate("y").ok_or("invalid screen y coordinate")? };
+        // Native hit testing respects the actual shell/control hit-test regions;
+        // overlapping bounding rectangles include transparent input/overlay windows.
+        let child = unsafe { WindowFromPoint(point) };
+        if child.is_null() { return Err("No input window exists at that screen point"); }
+        let root = unsafe { GetAncestor(child, 2) }; // GA_ROOT, preserving the exact window hierarchy.
+        if root.is_null() || unsafe { IsWindow(root) } == 0 { return Err("The hit-tested window disappeared"); }
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(root, &mut pid); }
+        if pid == 0 { return Err("The hit-tested window has no process identity"); }
+        let mut class_buffer = [0u16; 256];
+        let length = unsafe { GetClassNameW(root, class_buffer.as_mut_ptr(), 256) };
+        let class = String::from_utf16_lossy(&class_buffer[..length.max(0) as usize]);
+        Ok((pid, root as usize, matches!(class.as_str(), "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "Windows.UI.Core.CoreWindow"), class == "Windows.UI.Core.CoreWindow"))
     }
     #[repr(C)]
     struct Rect {
@@ -528,6 +570,30 @@ mod platform {
             return Err("Windows owned-window enumeration failed".into());
         }
         Ok(search.windows)
+    }
+
+    /// Present an exact application requested on the owner's current desktop.
+    /// Show above ordinary windows without stealing keyboard focus or moving
+    /// the hardware pointer. Actual input remains bound to the exact control.
+    pub(super) fn present_owner_window(value: &serde_json::Value) -> Result<WindowDesktop, String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let desktop = super::parse_desktop_id(value)?;
+        let _apartment = ComApartment::initialize()?;
+        let manager = Manager::create()?;
+        let window = validate_window(pid, handle)?;
+        if manager.desktop_id(window)? != desktop || !manager.is_on_current_desktop(window)? {
+            return Err("requested application is not on the owner's current desktop".into());
+        }
+        unsafe { ShowWindow(window, 4); } // SW_SHOWNOACTIVATE, including restore.
+        // HWND_TOP; SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW.
+        if unsafe { SetWindowPos(window, std::ptr::null_mut(), 0, 0, 0, 0, 0x53) } == 0 {
+            return Err("Windows did not present the requested application window".into());
+        }
+        validate_window(pid, handle)?;
+        if unsafe { IsWindowVisible(window) } == 0 || !manager.is_on_current_desktop(window)? {
+            return Err("Windows did not show the requested application window".into());
+        }
+        Ok(WindowDesktop { pid, window_id: handle.to_string(), desktop_id: desktop.as_string(), on_current_desktop: true })
     }
 
     pub(super) fn show_owned_window(value: &serde_json::Value) -> Result<WindowDesktop, String> {
@@ -1082,8 +1148,9 @@ mod platform {
 
     /// Reads the active Windows desktop from the user's foreground window.
     /// This uses the documented public IVirtualDesktopManager API so the
-    /// owner-preview path does not depend on the private immersive-shell
-    /// service used for creating and switching desktops.
+    /// common owner-preview path avoids the private immersive-shell service.
+    /// Shell flyouts (Start/taskbar) have no application virtual-desktop ID;
+    /// for those windows use the version-validated read-only current-ID query.
     pub(super) fn current_desktop() -> Result<DesktopInfo, &'static str> {
         let _apartment = ComApartment::initialize()?;
         let manager = Manager::create()?;
@@ -1107,7 +1174,8 @@ mod platform {
                 });
             }
         }
-        Err("Windows could not stably identify the active desktop from the foreground window")
+        let current = InternalManager::create()?.current_id()?;
+        Ok(DesktopInfo { desktop_id: current, is_current: true, return_desktop_id: None })
     }
 
     pub(super) fn inspect_desktop(target: Guid) -> Result<Option<DesktopInfo>, &'static str> {

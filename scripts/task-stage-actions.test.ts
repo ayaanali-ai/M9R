@@ -59,3 +59,19 @@ test("broker client sends owner-preview when stage mode is omitted", async () =>
     assert.deepEqual(requests.map((request) => request.body.mode), ["owner-preview", "owner-preview", "owner-preview"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("explicit app view targets the selected window while remaining in owner-preview mode", async () => {
+  const calls: string[] = [];
+  const driver = {
+    capture: async () => { calls.push("app capture"); return {}; },
+    click: async () => { calls.push("app click"); return {}; },
+    typeText: async () => { calls.push("app type"); return {}; },
+    captureDesktop: async () => { throw new Error("must not capture the owner's foreground instead"); },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "session" };
+  for (const value of [{ kind: "capture", view: "app" }, { kind: "click", view: "app", x: 20, y: 30 }, { kind: "type", view: "app", text: "hello" }]) {
+    await runTaskStageAction(driver, "preview", parseTaskStageAction(value), identity);
+  }
+  assert.deepEqual(calls, ["app capture", "app click", "app type"]);
+  assert.throws(() => parseTaskStageAction({ kind: "capture", view: "other-user-window" }), /Invalid stage action view/);
+});

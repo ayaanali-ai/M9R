@@ -16,6 +16,8 @@ interface TestRoomTask {
   origin?: string;
   approval: string;
   createdAt?: string;
+  fromSession?: string;
+  targetSession?: string;
   deliveredAt?: string;
   resultSummary?: string;
   answerPushedAt?: string;
@@ -390,8 +392,10 @@ test("a packaged broker starts agents' M9R tools through the engine beside it, n
 
 test("the broker bridge does not replay tasks from before startup, including the old two-second grace and missing timestamps", async () => {
   const tasks: TestRoomTask[] = [
-    { id: "T-old-window", from: "claude", to: "opencode", goal: "stale task inside old grace window", origin: "agent_initiated", approval: "pending", createdAt: new Date(Date.now() - 1_500).toISOString() },
-    { id: "T-no-time", from: "claude", to: "opencode", goal: "legacy task with no timestamp", origin: "agent_initiated", approval: "pending" },
+    { id: "T-native", from: "codex", fromSession: "native-codex-thread", to: "opencode", goal: "native task must not enter the browser worker", origin: "agent_initiated", approval: "approved", createdAt: new Date().toISOString() },
+    { id: "T-native-pinned", from: "web-claude", to: "opencode", targetSession: "native-opencode-session", goal: "explicit native recipient", origin: "agent_initiated", approval: "approved", createdAt: new Date().toISOString() },
+    { id: "T-old-window", from: "claude", fromSession: "web-claude-test", to: "opencode", goal: "stale task inside old grace window", origin: "agent_initiated", approval: "pending", createdAt: new Date(Date.now() - 1_500).toISOString() },
+    { id: "T-no-time", from: "claude", fromSession: "web-claude-test", to: "opencode", goal: "legacy task with no timestamp", origin: "agent_initiated", approval: "pending" },
   ];
   const store = {
     issueIdentity: (handle: string, _p: string, sessionId: string) => ({ token: `tok-${handle}-${sessionId.slice(-4)}` }),
@@ -699,7 +703,7 @@ test("agents in the room message each other directly: the ask reaches the teamma
     authorizeRoomMessage: allowRoomMessage,
   } as never);
   try {
-    tasks.push({ id: "T1", from: "claude", to: "opencode", goal: "Which plan has the API tier?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
+    tasks.push({ id: "T1", from: "claude", fromSession: "web-claude-test", to: "opencode", goal: "Which plan has the API tier?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     await new Promise((r) => setTimeout(r, 1000));
     assert.equal(claude.spawned.length, 1, "the teammate's session was started for the ask");
     assert.match(claude.spawned[0].written.join(""), /@claude messaged you \(T1\)/);
@@ -740,7 +744,7 @@ test("a stopped agent is still woken by a teammate's ask, not just by the owner"
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(sessions.stop("claude"), true);
     assert.equal(sessions.snapshot().find((s) => s.handle === "claude")?.status, "stopped");
-    tasks.push({ id: "T1", from: "opencode", to: "claude", goal: "What did you find?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
+    tasks.push({ id: "T1", from: "opencode", fromSession: "web-opencode-test", to: "claude", goal: "What did you find?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     await new Promise((r) => setTimeout(r, 1000));
     assert.equal(claude.spawned.length, 2, "the stopped agent was started again by the teammate's ask");
     assert.match(claude.spawned[1].written.join(""), /@opencode messaged you \(T1\)/);
@@ -773,7 +777,7 @@ test("Stop All is not undone by an ask that was already queued: the bridge stays
   try {
     sessions.deliver("claude", "get started");
     await new Promise((r) => setTimeout(r, 50));
-    tasks.push({ id: "T1", from: "opencode", to: "claude", goal: "queued right before stop", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
+    tasks.push({ id: "T1", from: "opencode", fromSession: "web-opencode-test", to: "claude", goal: "queued right before stop", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 1800));
     assert.equal(claude.spawned.length, 1, "the halted room does not re-spawn the agent it just stopped");

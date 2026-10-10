@@ -14,11 +14,33 @@ import { createWebBrokerClient } from "@/lib/native/web-broker-client";
 import { brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { createWebAuthority, verifyAudit } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore, renameWithRetry } from "@/lib/native/web-authority-store";
-import { loadOrCreateBrokerKey, startWebBroker, tightenKeyFileAcl } from "@/lib/native/web-broker-server";
+import { applyAgentMcpStoreMutation, loadOrCreateBrokerKey, startWebBroker, tightenKeyFileAcl } from "@/lib/native/web-broker-server";
 import { webExtensionAllowlist, WEB_EXTENSION_ID } from "@/lib/native/web-setup-core";
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<ToolResult> }> };
+
+test("agent message receipts distinguish full goals and results respect the receiving session", () => {
+  const root = mkdtempSync(join(process.cwd(), ".workcache", "m9r-message-scope-"));
+  const store = createLocalStore(root);
+  try {
+    const sender = store.issueIdentity("codex", "codex", "sender");
+    const recipient = store.issueIdentity("claude", "claude", "recipient");
+    const other = store.issueIdentity("claude", "claude", "other-recipient");
+    const prefix = "x".repeat(200);
+    const send = (goal: string) => applyAgentMcpStoreMutation(store, { action: "send", token: sender.token, to: "claude", goal }).body;
+    const first = send(`${prefix} first`);
+    const second = send(`${prefix} second`);
+    assert.equal(first.ok, true);
+    assert.notEqual(first.taskId, second.taskId);
+    assert.equal(send(`${prefix} first`).taskId, first.taskId);
+    store.markDelivered([first.taskId!], "recipient");
+    const result = (token: string) => applyAgentMcpStoreMutation(store, { action: "result", token, taskId: first.taskId, summary: "checked" });
+    assert.equal(result(other.token).status, 403);
+    assert.equal(store.getTask(first.taskId!)?.resultSummary, undefined);
+    assert.equal(result(recipient.token).status, 200);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("task stage app/action routes require loopback key, reject origins and extra target fields", async () => {
   const key = randomBytes(32).toString("hex");
