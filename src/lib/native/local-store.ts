@@ -8,7 +8,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
-import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
+import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
 import { canQueue } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 
@@ -362,10 +362,16 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       update((s) => {
         for (const id of ids) {
           const t = s.tasks.find((x) => x.id === id);
-          if (!t || t.deliveredAt) continue;
-          t.deliveredAt = now().toISOString();
-          if (sessionId) t.deliveredSession = sessionId;
-          pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `@${t.to} received ${id}` });
+          if (!t) continue;
+          const targetSession = t.targetSession;
+          if (targetSession && sessionId && targetSession !== sessionId) continue;
+          const firstDelivery = !t.deliveredAt;
+          if (firstDelivery) t.deliveredAt = now().toISOString();
+          if (firstDelivery) t.deliverySource = "push";
+          // A sender-pinned session is authoritative. Repair older rows where a
+          // hook's incidental deliverySession disagreed with that target.
+          if (sessionId && (!targetSession || targetSession === sessionId)) t.deliveredSession = targetSession ?? sessionId;
+          if (firstDelivery) pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `@${t.to} received ${id}` });
         }
       });
     },
@@ -374,7 +380,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     awaitingAnswerFrom(handle: string, sessionId: string | undefined, withinMs = 60 * 60_000): Task[] {
       const normalizedHandle = normalizeHandle(handle);
       const cutoff = now().getTime() - withinMs;
-      return readState().tasks.filter((t) => normalizeHandle(t.to) === normalizedHandle && t.deliveredAt && !t.resultSummary && (!t.deliveredSession || t.deliveredSession === sessionId) && Date.parse(t.deliveredAt) >= cutoff);
+      return readState().tasks.filter((t) => normalizeHandle(t.to) === normalizedHandle && t.deliveredAt && !t.resultSummary && (!(t.targetSession ?? t.deliveredSession) || (t.targetSession ?? t.deliveredSession) === sessionId) && Date.parse(t.deliveredAt) >= cutoff);
     },
 
     setAnswerPushed(id: string): void {
@@ -539,10 +545,66 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return readState().tasks.filter((t) => normalizeHandle(t.to) === normalizedHandle);
     },
 
-    /** Inbox view for one authenticated provider session. An explicitly targeted task never leaks to another session. */
+    /** Inbox view for one provider session. Once claimed, an untargeted task belongs to that session alone. */
     tasksForSession(handle: string, sessionId: string): Task[] {
       const normalizedHandle = normalizeHandle(handle);
-      return readState().tasks.filter((task) => normalizeHandle(task.to) === normalizedHandle && (!task.targetSession || task.targetSession === sessionId));
+      return readState().tasks.filter((task) => normalizeHandle(task.to) === normalizedHandle && (!(task.targetSession ?? task.deliveredSession) || (task.targetSession ?? task.deliveredSession) === sessionId));
+    },
+
+    /**
+     * Atomically assigns an inbox batch to the provider session that is actually reading it.
+     * The store lock covers ownership checks, delivery receipt, and cursor movement so concurrent
+     * hooks or MCP inbox calls cannot hand the same task to two sessions.
+     */
+    claimInboxTasks(handle: string, sessionId: string, ids: readonly string[], cwd?: string): Task[] {
+      if (!sessionId || ids.length === 0) return [];
+      const wanted = new Set(ids.slice(0, 50));
+      if (wanted.size === 0) return [];
+      const normalizedHandle = normalizeHandle(handle);
+      const folder = projectCwd(root, cwd);
+      return update((s) => {
+        const key = cursorKey(normalizedHandle, sessionId, folder);
+        let cursor = s.cursors[key] ?? 0;
+        const at = now();
+        const maxAge = inboxMaxAgeMs();
+        const claimed: Task[] = [];
+        const candidates = s.tasks
+          .filter((task) => wanted.has(task.id) && normalizeHandle(task.to) === normalizedHandle)
+          .sort((a, b) => a.seq - b.seq);
+        for (const task of candidates) {
+          if (task.seq <= cursor) continue;
+          if (task.approval === "denied" || task.approval === "expired"
+            || task.delivery?.state === "queued" || task.delivery?.state === "done" || task.resultSummary
+            || at.getTime() - Date.parse(task.createdAt) > maxAge) {
+            cursor = Math.max(cursor, task.seq);
+            continue;
+          }
+          // Explicit routing wins over a stale incidental delivery record. Without an
+          // explicit target, the first real inbox read owns the task from then on.
+          const owner = task.targetSession ?? task.deliveredSession;
+          if (owner && owner !== sessionId) {
+            cursor = Math.max(cursor, task.seq);
+            continue;
+          }
+          // The same provider session may have separate cursor scopes for different
+          // projects. A delivery receipt is still a global one-shot fence for the task.
+          // Legacy explicitly-targeted rows with a conflicting deliveredSession are
+          // allowed through once so the intended session can repair the old receipt.
+          if (task.deliveredAt && owner === sessionId && !(task.targetSession === sessionId && task.deliverySource === undefined)) {
+            cursor = Math.max(cursor, task.seq);
+            continue;
+          }
+          const firstDelivery = !task.deliveredAt;
+          task.deliveredAt ??= at.toISOString();
+          task.deliveredSession = task.targetSession ?? sessionId;
+          task.deliverySource = "prompt";
+          cursor = Math.max(cursor, task.seq);
+          claimed.push(task);
+          if (firstDelivery) pushEvent(s, { kind: "task.delivered", taskId: task.id, handle: task.to, text: `${task.id} was read by @${task.to}'s session` });
+        }
+        if (cursor > (s.cursors[key] ?? 0)) s.cursors[key] = cursor;
+        return claimed;
+      });
     },
 
     setApproval(id: string, approval: Approval): Task | undefined {
@@ -565,6 +627,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (patch.state === "queued" && patch.threadId && !t.deliveredSession) t.deliveredSession = patch.threadId;
         if (patch.state === "queued" && !t.deliveredAt) {
           t.deliveredAt = now().toISOString();
+          t.deliverySource = "push";
           pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `${id} pushed into @${t.to}'s session` });
         }
         return t;
@@ -671,15 +734,45 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
+    /** Record an authenticated result once, in the same transaction that checks its session ownership. */
+    recordTaskResult(token: string, id: string, summary: string): { ok: boolean; error?: string; alreadyRecorded?: boolean } {
+      const clean = redactSecrets(summary.trim());
+      if (!clean) return { ok: false, error: "A task result needs a summary." };
+      const bounded = clean.length > MAX_RESULT_SUMMARY_CHARS
+        ? clean.slice(0, MAX_RESULT_SUMMARY_CHARS - TRUNCATION_MARKER.length) + TRUNCATION_MARKER
+        : clean;
+      return update((s) => {
+        const identity = verifyToken(s.identities, token);
+        if (!identity) return { ok: false, error: "This M9R session identity is not active in the owner broker." };
+        const task = s.tasks.find((item) => item.id === id);
+        if (!task) return { ok: false, error: `No task ${id} found.` };
+        const handle = normalizeHandle(identity.handle);
+        const roomHandle = identity.sessionId.startsWith("web-") ? `web-${handle}` : handle;
+        if (normalizeHandle(task.to) !== handle && normalizeHandle(task.to) !== roomHandle) {
+          return { ok: false, error: `Task ${id} was not sent to you (@${handle}), refusing to report a result for it.` };
+        }
+        const owner = task.targetSession ?? task.deliveredSession;
+        if (owner && owner !== identity.sessionId) return { ok: false, error: `Task ${id} belongs to another session of this agent.` };
+        if (!identity.sessionId.startsWith("web-") && (!task.deliveredAt || !owner)) {
+          return { ok: false, error: `Task ${id} has not been delivered to this session.` };
+        }
+        if (task.resultSummary) {
+          if (task.resultSummary === bounded) return { ok: true, alreadyRecorded: true };
+          return { ok: false, error: `Task ${id} already has a recorded result; it was not overwritten.` };
+        }
+        if (task.targetSession && task.targetSession === identity.sessionId) task.deliveredSession = identity.sessionId;
+        if (task.delivery?.state === "queued") task.delivery = { ...task.delivery, state: "done" };
+        task.resultSummary = bounded;
+        pushEvent(s, { kind: "task.result", taskId: id, handle: task.from, text: `${id} finished: ${task.resultSummary.slice(0, 120)}` });
+        return { ok: true };
+      });
+    },
+
     /**
-     * Per session, not per agent: a task addressed to @claude must show in every Claude session that prompts,
-     * not just whichever one happens to prompt first. Keying this by handle alone (the original design) meant
-     * one Claude session's own hook call could silently advance a SHARED cursor and starve every other open
-     * Claude session of ever seeing the notification -- confirmed live 2026-09-22 with several Claude sessions
-     * open at once: a task sent by Codex only ever showed in whichever session's hook fired first, and the
-     * person had to explicitly ask a different session to "check the M9R inbox" to see it at all. A session
-     * with no id (older callers, or an event with no session_id) falls back to the handle-only key so it still
-     * gets a cursor, just not one isolated from other id-less callers.
+     * Inbox cursors are scoped to provider session and project, while task ownership is global to the provider
+     * session that first claims delivery. This keeps parallel sessions from duplicating work and lets each
+     * session advance independently past tasks addressed to someone else. Callers without a session id retain
+     * the handle-only cursor for compatibility, but cannot claim or execute native inbox tasks.
      */
     cursorFor(handle: string, sessionId?: string, cwd?: string): number {
       return readState().cursors[cursorKey(handle, sessionId, projectCwd(root, cwd))] ?? 0;

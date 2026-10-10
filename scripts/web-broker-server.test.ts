@@ -129,6 +129,7 @@ test("restricted agent MCP writes go through the owner broker and are identity-s
     const advanced = await web.advanceAgentInboxCursor!(bob.token, 17);
     assert.equal(advanced.ok, true);
     assert.equal(ctx.store.cursorFor("bob", "session-bob"), 17);
+    ctx.store.markDelivered([sent.taskId!], "session-bob");
 
     const denied = await web.recordAgentTaskResult!(charlie.token, sent.taskId!, "not my task");
     assert.equal(denied.ok, false);
@@ -137,6 +138,9 @@ test("restricted agent MCP writes go through the owner broker and are identity-s
 
     const recorded = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.");
     assert.equal(recorded.ok, true);
+    assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, "Reviewed the diff.");
+    const duplicateResult = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.");
+    assert.equal(duplicateResult.ok, true, "retrying the same successful result is idempotent");
     assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, "Reviewed the diff.");
 
     const extraFieldRejected = await requestOwnerPipe<{ ok: boolean; error?: string }>(ownerPipePath(ctx.root), {
@@ -157,6 +161,33 @@ test("restricted agent MCP writes go through the owner broker and are identity-s
     assert.equal(revoked.ok, false);
     assert.match(revoked.error ?? "", /not active/);
     assert.equal(ctx.store.tasksFrom("alice").length, 1);
+  } finally { await ctx.done(); }
+});
+
+test("owner broker atomically claims a native inbox task for one session", async () => {
+  const ctx = await setup();
+  try {
+    const sender = ctx.store.issueIdentity("codex", "codex", "claim-sender");
+    const first = ctx.store.issueIdentity("claude", "claude-code", "claim-recipient-a");
+    const second = ctx.store.issueIdentity("claude", "claude-code", "claim-recipient-b");
+    const web = createWebBrokerClient({
+      keyPath: brokerKeyPath(ctx.root), ownerPipePath: ownerPipePath(ctx.root), port: ctx.broker.port,
+      fetchImpl: async () => { throw new Error("task-state mutations must stay on the owner pipe"); },
+    });
+    const sent = await web.submitAgentTask!(sender.token, "claude", "continue the T37 diagnosis");
+    assert.equal(sent.ok, true);
+
+    const claimedA = await web.claimAgentInbox!(first.token, [sent.taskId!]);
+    assert.deepEqual(claimedA, { ok: true, taskIds: [sent.taskId!] });
+    const claimedB = await web.claimAgentInbox!(second.token, [sent.taskId!]);
+    assert.deepEqual(claimedB, { ok: true, taskIds: [] });
+
+    const wrong = await web.recordAgentTaskResult!(second.token, sent.taskId!, "wrong session");
+    assert.equal(wrong.ok, false);
+    assert.match(wrong.error ?? "", /belongs to another session/);
+    const right = await web.recordAgentTaskResult!(first.token, sent.taskId!, "diagnosis complete");
+    assert.equal(right.ok, true);
+    assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, "diagnosis complete");
   } finally { await ctx.done(); }
 });
 

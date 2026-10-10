@@ -191,8 +191,7 @@ export function createTaskDesktopStageService(input: {
     const handle = normalizeHandle(identity.handle);
     const addressedHandle = identity.sessionId.startsWith("web-") && !handle.startsWith("web-") ? `web-${handle}` : handle;
     if (!task || normalizeHandle(task.to) !== addressedHandle
-      || (task.targetSession && task.targetSession !== identity.sessionId)
-      || (task.deliveredSession && task.deliveredSession !== identity.sessionId)
+      || ((task.targetSession ?? task.deliveredSession) && (task.targetSession ?? task.deliveredSession) !== identity.sessionId)
       || (task.delivery?.threadId && task.delivery.threadId !== identity.sessionId)) {
       throw new Error("This task does not belong to the requesting agent session.");
     }

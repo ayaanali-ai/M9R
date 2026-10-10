@@ -8,6 +8,7 @@ import { handleHookEvent } from "@/lib/native/hook-handler";
 import { normalizeHandle, renderInboxInjection } from "@/lib/native/inbox-core";
 import { CODEX_WEB_PREFACE, webAgentPrompt } from "@/lib/native/web-live-sessions";
 import { isBrokerAgentPrompt } from "@/lib/native/codex-delivery-core";
+import { applyAgentMcpStoreMutation } from "@/lib/native/web-broker-server";
 
 function tempStore(now?: () => Date) {
   const root = mkdtempSync(join(tmpdir(), "m9r-store-"));
@@ -48,13 +49,16 @@ test("inbox cursors are folder scoped when the same agent session id is observed
   done();
 });
 
-test("hook inbox delivery does not let a same-id session in another folder inherit the first folder's cursor", () => {
+test("an already claimed session does not receive the same task again through another cwd", () => {
   const { store, done } = tempStore();
-  store.addTask(task({ idempotencyKey: "folder-scope-hook" }));
+  const created = store.addTask(task({ idempotencyKey: "folder-scope-hook" }));
   const one = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "same", cwd: "C:\\Work\\One", prompt: "hello" }, ctx(store));
   const two = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "same", cwd: "C:\\Work\\Two", prompt: "hello" }, ctx(store));
   assert.match(ctxOf(one) ?? "", /look at the reconnect bug/);
-  assert.match(ctxOf(two) ?? "", /look at the reconnect bug/);
+  assert.equal(two, null, "the provider session id is the task owner even when its cursor is project-scoped");
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, "same");
+  assert.equal(store.cursorFor("claude", "same", "C:\\Work\\One"), 1);
+  assert.equal(store.cursorFor("claude", "same", "C:\\Work\\Two"), 1, "the second cursor advances past work already delivered to this session");
   done();
 });
 
@@ -96,16 +100,34 @@ test("state survives a new store instance on the same folder, cursors are per se
   done();
 });
 
-test("a task addressed to @claude shows in every open Claude session, not just whichever one prompts first", () => {
+test("an untargeted task is claimed by one Claude session and cannot be answered from a different session", () => {
   const { store, done } = tempStore();
-  store.addTask({ from: "codex", to: "claude", goal: "check the build", origin: "human_typed", idempotencyKey: "k1" });
-  // Session A prompts first and gets shown the task.
-  const a = renderInboxInjection(store.tasksFor("claude"), store.cursorFor("claude", "session-a"));
-  assert.match(a.text, /check the build/);
-  store.setCursor("claude", "session-a", a.newCursor);
-  // Session B, a second open Claude session in a different folder, prompts afterward -- it must still see it.
-  const b = renderInboxInjection(store.tasksFor("claude"), store.cursorFor("claude", "session-b"));
-  assert.match(b.text, /check the build/, "session B's own cursor was never advanced, so it must not have been starved by session A's");
+  const created = store.addTask({ from: "codex", to: "claude", goal: "check the build", origin: "human_typed", idempotencyKey: "k1" });
+  const a = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "session-a", cwd: "/repo", prompt: "hi" }, ctx(store));
+  assert.match(ctxOf(a) ?? "", /check the build/);
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, "session-a");
+  const b = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "session-b", cwd: "/repo", prompt: "hi" }, ctx(store));
+  assert.equal(b, null, "a different provider session must not receive work already claimed by session A");
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, "session-a");
+  done();
+});
+
+test("an explicit target session repairs a stale deliveredSession from an older build", () => {
+  const { root, store, done } = tempStore();
+  const target = store.issueIdentity("claude", "claude-code", "target-session");
+  const task = store.addTask({ from: "codex", to: "claude", goal: "continue the task", origin: "human_typed", targetSession: "target-session", idempotencyKey: "stale-target-delivery" });
+  const state = JSON.parse(readFileSync(join(root, "state.json"), "utf8")) as { tasks: Array<Record<string, unknown>> };
+  state.tasks[0].deliveredAt = new Date().toISOString();
+  state.tasks[0].deliveredSession = "old-session";
+  writeFileSync(join(root, "state.json"), JSON.stringify(state), "utf8");
+
+  assert.equal(store.tasksForSession("claude", "old-session").length, 0);
+  assert.equal(store.tasksForSession("claude", "target-session").length, 1);
+  const claimed = store.claimInboxTasks("claude", "target-session", [task.task.id], "/repo");
+  assert.equal(claimed.length, 1);
+  assert.equal(store.getTask(task.task.id)?.deliveredSession, "target-session");
+  const result = applyAgentMcpStoreMutation(store, { action: "result", token: target.token, taskId: task.task.id, summary: "done" });
+  assert.equal(result.status, 200);
   done();
 });
 
@@ -484,20 +506,39 @@ test("a plain prompt with nothing in the inbox prints nothing, which costs zero 
   done();
 });
 
-test("a pending inbox item is injected once per session at the next prompt, then never again in that same session -- but a different open session of the same agent still sees it", () => {
+test("an inbox item is injected once and remains bound to the session that received it", () => {
   const { store, done } = tempStore();
   store.addTask({ from: "codex", to: "claude", goal: "review lease.ts", origin: "human_typed", idempotencyKey: "a" });
   const first = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "hi" }, ctx(store));
   assert.match(ctxOf(first)!, /M9R inbox \(1 new\)/);
   assert.match(ctxOf(first)!, /T1 from @codex, typed by the user\] review lease\.ts/);
   assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "and again" }, ctx(store)), null);
-  // A second open Claude session must not be starved just because session s1 already saw it -- confirmed live
-  // 2026-09-22: with several Claude sessions open, whichever one prompted first silently ate the notification
-  // for every other one, and the person had to manually ask a different session to check its inbox.
   const otherSession = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s2", cwd: "/repo", prompt: "new window" }, ctx(store));
-  assert.match(ctxOf(otherSession)!, /T1 from @codex, typed by the user\] review lease\.ts/, "a different open session must still see a task it has not itself been shown yet");
-  // But s2 itself must not repeat it a second time either.
-  assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s2", cwd: "/repo", prompt: "and again" }, ctx(store)), null);
+  assert.equal(otherSession, null, "the same task must not be replayed into a second Claude session");
+  done();
+});
+
+test("a Claude tool-result notice does not consume a task before a real prompt can claim it", () => {
+  const { store, done } = tempStore();
+  const created = store.addTask({ from: "codex", to: "claude", goal: "continue the T37 diagnosis", origin: "human_typed", idempotencyKey: "t37-post-tool-notice" });
+  const first = store.issueIdentity("claude", "claude-code", "session-a");
+  const second = store.issueIdentity("claude", "claude-code", "session-b");
+
+  const notice = handleHookEvent({ hook_event_name: "PostToolUse", session_id: "session-a", cwd: "/repo" }, ctx(store));
+  assert.equal(notice, null, "a tool-result hook is not a reliable task-delivery channel");
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, undefined);
+  assert.equal(store.getTask(created.task.id)?.deliveredAt, undefined);
+  assert.equal(store.cursorFor("claude", "session-a", "/repo"), 0);
+
+  const delivered = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "session-b", cwd: "/repo", prompt: "check inbox" }, ctx(store));
+  assert.match(ctxOf(delivered) ?? "", /continue the T37 diagnosis/);
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, "session-b");
+
+  const result = (token: string) => applyAgentMcpStoreMutation(store, {
+    action: "result", token, taskId: created.task.id, summary: "diagnosis complete",
+  });
+  assert.equal(result(first.token).status, 403, "a different provider session cannot report the task result");
+  assert.equal(result(second.token).status, 200, "the session that received the task can report its result");
   done();
 });
 

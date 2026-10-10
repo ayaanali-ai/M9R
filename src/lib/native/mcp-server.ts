@@ -273,7 +273,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const refusedRoomTaskIds = new Set<string>();
       for (;;) {
         const cursor = deps.store.cursorFor(handle, cursorSession);
-        const queuedTasks = deps.store.tasksFor(handle).filter((task) => {
+        const queuedTasks = (inRoom(identity)
+          ? deps.store.tasksFor(handle)
+          : deps.store.tasksForSession(identity.handle, identity.sessionId)).filter((task) => {
           if (!inRoom(identity) || deps.roomStartedAt === undefined) return true;
           const createdAt = typeof task.createdAt === "string" ? Date.parse(task.createdAt) : Number.NaN;
           return Number.isFinite(createdAt) && createdAt >= deps.roomStartedAt;
@@ -290,16 +292,36 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           : queuedTasks;
         const injection = renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000, now: (deps.now ?? (() => new Date()))().getTime() });
         if (injection.text) {
-          const included = authorizedTasks.find((task) => task.seq > cursor && task.seq <= injection.newCursor
-            && ["approved", "not_needed"].includes(task.approval));
-          const stageNotice = included ? await prepareTaskStageNotice(deps.store.root, deps.web, token, identity.handle, included.id) : "";
-          if (deps.web?.advanceAgentInboxCursor) {
-            const saved = await deps.web.advanceAgentInboxCursor(token, injection.newCursor);
-            if (!saved.ok) throw new Error(saved.error ?? "The owner broker could not record which M9R messages were shown.");
-          } else {
-            deps.store.setCursor(handle, cursorSession, injection.newCursor);
+          let delivered = injection;
+          if (!inRoom(identity)) {
+            let claimedIds: string[];
+            if (deps.web?.claimAgentInbox) {
+              const claimed = await deps.web.claimAgentInbox(token, injection.includedIds);
+              if (!claimed.ok) throw new Error(claimed.error ?? "The owner broker could not claim these inbox messages for this session.");
+              claimedIds = claimed.taskIds ?? [];
+            } else {
+              claimedIds = deps.store.claimInboxTasks(identity.handle, identity.sessionId, injection.includedIds).map((task) => task.id);
+            }
+            const claimedSet = new Set(claimedIds);
+            const claimedTasks = authorizedTasks.filter((task) => claimedSet.has(task.id));
+            delivered = renderInboxInjection(claimedTasks, -1, { items: 10, itemChars: 3000, now: (deps.now ?? (() => new Date()))().getTime() });
+            if (!delivered.text) {
+              if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
+              continue;
+            }
           }
-          return { content: [{ type: "text" as const, text: injection.text + (stageNotice ? `\n\n${stageNotice}` : "") }] };
+          const included = authorizedTasks.filter((task) => delivered.includedIds.includes(task.id))
+            .find((task) => ["approved", "not_needed"].includes(task.approval));
+          const stageNotice = included ? await prepareTaskStageNotice(deps.store.root, deps.web, token, identity.handle, included.id) : "";
+          if (inRoom(identity)) {
+            if (deps.web?.advanceAgentInboxCursor) {
+              const saved = await deps.web.advanceAgentInboxCursor(token, delivered.newCursor);
+              if (!saved.ok) throw new Error(saved.error ?? "The owner broker could not record which M9R messages were shown.");
+            } else {
+              deps.store.setCursor(handle, cursorSession, delivered.newCursor);
+            }
+          }
+          return { content: [{ type: "text" as const, text: delivered.text + (stageNotice ? `\n\n${stageNotice}` : "") }] };
         }
         if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
         await sleep(300);
@@ -326,7 +348,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         const recorded = await deps.web.recordAgentTaskResult(token, taskId, summary);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
       } else {
-        deps.store.setResult(taskId, summary);
+        const recorded = deps.store.recordTaskResult(token, taskId, summary);
+        if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
       }
       return { content: [{ type: "text", text: `Recorded result for ${taskId}, visible to @${existing.from} next time they check their results.` }] };
     },

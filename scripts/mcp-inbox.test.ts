@@ -108,13 +108,15 @@ test("an explicit inbox check shows a long message in full, while the automatic 
   t.done();
 });
 
-test("two sessions of the same agent each see a message once, and one session's check does not hide it from the other", async () => {
+test("one task is claimed by one provider session and another session cannot take or answer it", async () => {
   const t = setup();
   const second = t.store.issueIdentity("codex", "codex", "x2").token;
   await t.call("m9r_send", { token: t.claude, to: "codex", goal: "shared finding" });
   assert.match(await t.call("m9r_inbox", { token: t.codex }), /shared finding/);
-  assert.match(await t.call("m9r_inbox", { token: second }), /shared finding/);
   assert.equal(await t.call("m9r_inbox", { token: second }), "Inbox is empty.");
+  await assert.rejects(t.call("m9r_result", { token: second, taskId: "T1", summary: "wrong session" }), /belongs to another session/);
+  assert.match(await t.call("m9r_result", { token: t.codex, taskId: "T1", summary: "right session" }), /Recorded result/);
+  assert.equal(t.store.getTask("T1")?.resultSummary, "right session");
   t.done();
 });
 

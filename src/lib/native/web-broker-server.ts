@@ -149,7 +149,7 @@ export interface WebBrokerServerOptions {
   taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview"): Promise<unknown>;
     launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview"): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
-  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult">;
+  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">;
   /** Dedicated browser transport. Extension connections are disabled on this broker. */
   browserTransport?: BrowserTransport;
   key: string;
@@ -185,16 +185,16 @@ export interface WebBrokerServerOptions {
   ownerPipePath?: string;
 }
 
-type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string; taskId?: string; created?: boolean } };
+type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string; taskId?: string; created?: boolean; taskIds?: string[]; alreadyRecorded?: boolean } };
 
 /**
- * Apply only the three durable MCP writes needed by agent messaging. The
+ * Apply only the narrowly scoped durable MCP mutations needed by agent messaging. The
  * provider MCP process may be sandboxed from ~/.m9r, so the trusted owner
  * broker verifies the same session token and performs these writes under its
  * own user ACL. This is intentionally not a generic store/RPC endpoint.
  */
 export function applyAgentMcpStoreMutation(
-  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult">,
+  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">,
   input: unknown,
 ): AgentMcpStoreResult {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { status: 400, body: { ok: false, error: "request body must be an object" } };
@@ -238,23 +238,30 @@ export function applyAgentMcpStoreMutation(
       return { status: 200, body: { ok: true } };
     }
 
+    if (value.action === "claim_inbox") {
+      if (inRoom || Object.keys(value).some((key) => !["action", "token", "taskIds"].includes(key))
+        || !Array.isArray(value.taskIds) || value.taskIds.length > 50
+        || value.taskIds.some((id) => typeof id !== "string" || !/^T[0-9]{1,12}$/.test(id))) {
+        return { status: 400, body: { ok: false, error: "Invalid native M9R inbox claim." } };
+      }
+      const tasks = store.claimInboxTasks(ownHandle, identity.sessionId, value.taskIds as string[]);
+      return { status: 200, body: { ok: true, taskIds: tasks.map((task) => task.id) } };
+    }
+
     if (value.action === "result") {
       if (Object.keys(value).some((key) => !["action", "token", "taskId", "summary"].includes(key))
         || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
         || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 4_000) {
         return { status: 400, body: { ok: false, error: "Invalid M9R task result." } };
       }
-      const existing = store.getTask(value.taskId);
-      if (!existing) return { status: 404, body: { ok: false, error: `No task ${value.taskId} found.` } };
-      if (existing.to !== ownHandle && existing.to !== inboxHandle) {
-        return { status: 403, body: { ok: false, error: `Task ${value.taskId} was not sent to you; refusing to report a result for it.` } };
+      const recorded = store.recordTaskResult(value.token, value.taskId, value.summary);
+      if (!recorded.ok) {
+        const status = /No task/.test(recorded.error ?? "") ? 404
+          : /belongs to another session|not sent to you|not been delivered/.test(recorded.error ?? "") ? 403
+          : /identity is not active/.test(recorded.error ?? "") ? 403 : 400;
+        return { status, body: { ok: false, error: recorded.error } };
       }
-      const recipientSession = existing.deliveredSession ?? existing.targetSession;
-      if (recipientSession && recipientSession !== identity.sessionId) {
-        return { status: 403, body: { ok: false, error: `Task ${value.taskId} belongs to another session of this agent.` } };
-      }
-      if (!store.setResult(value.taskId, value.summary)) return { status: 404, body: { ok: false, error: `No task ${value.taskId} found.` } };
-      return { status: 200, body: { ok: true } };
+      return { status: 200, body: { ok: true, alreadyRecorded: recorded.alreadyRecorded } };
     }
     return { status: 400, body: { ok: false, error: "Unknown M9R agent-store action." } };
   } catch {

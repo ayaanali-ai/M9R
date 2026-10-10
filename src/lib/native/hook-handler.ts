@@ -279,22 +279,11 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       return null;
     }
 
-    // Claude only, NOT registered by default. Delivers new inbox items at the agent's next tool call with no polling, and
-    // prints nothing when there is nothing new. Measured 2026-09-24 on Claude Code 2.1.278: the agent receives this text
-    // but declines to act on it ("it was inside a tool result"), which is the right behavior for a web agent whose tool
-    // results can carry a page's forged text. So this channel carries information, never a redirect; real interrupts go
-    // through a live session's user-turn input (live-session-core.ts). Registering it would add a hook run to every tool call.
+    // A tool result is not a task-delivery channel: Claude receives that output as tool data,
+    // not as a new user turn, and may not act on it. In particular it must never claim an
+    // inbox task or advance a cursor here. Real inbox delivery happens at UserPromptSubmit.
     if (event === "PostToolUse") {
-      // This informational inbox hook is Claude-only. If an old or manually
-      // copied hook registration fires for another provider, never inject the
-      // same inbox task through a second delivery channel.
-      if (self !== "claude") return null;
-      const cursor = ctx.store.cursorFor(self, input.session_id, projectCwd);
-      const injection = renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { now: now.getTime() });
-      if (!injection.text) return null;
-      ctx.store.setCursor(self, input.session_id, injection.newCursor, projectCwd);
-      ctx.store.markDelivered(injection.includedIds, input.session_id);
-      return out(event, injection.text.replace(/^M9R inbox \(/, "M9R inbox, arrived while you were working ("));
+      return null;
     }
 
     if (event === "UserPromptSubmit") {
@@ -328,17 +317,21 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
 
       // 2b. Anything new in our own inbox, delta-only.
       const cursor = ctx.store.cursorFor(self, input.session_id, cwd);
-      const injection = self === "opencode"
+      const candidates = self === "opencode"
         ? { text: "", includedIds: [] as string[], newCursor: cursor, omitted: 0 }
         : renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { now: now.getTime() });
-      if (injection.text) {
+      if (candidates.text) {
         const codexHasIdentity = self !== "codex" || Boolean(input.session_id && ctx.store.identityTokenFor(self, input.session_id));
         if (!codexHasIdentity) {
           parts.push("M9R is holding incoming work until this Codex session reconnects and receives an active M9R identity. No task details were included.");
         } else {
-          parts.push(injection.text);
-          ctx.store.setCursor(self, input.session_id, injection.newCursor, cwd);
-          ctx.store.markDelivered(injection.includedIds, input.session_id);
+          if (input.session_id) {
+            const claimed = ctx.store.claimInboxTasks(self, input.session_id, candidates.includedIds, cwd);
+            const injection = renderInboxInjection(claimed, -1, { now: now.getTime() });
+            if (injection.text) parts.push(injection.text);
+          } else {
+            parts.push("M9R is holding incoming work because this provider did not include a session id. Reconnect the agent so M9R can deliver the task to the session that will report its result.");
+          }
         }
       }
 

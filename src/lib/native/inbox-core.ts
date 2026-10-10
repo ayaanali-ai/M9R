@@ -46,6 +46,8 @@ export interface Task {
   createdAt: string;
   /** Set when the task was first shown to its target agent. */
   deliveredAt?: string;
+  /** Which trusted path first delivered it. Older persisted tasks have no marker. */
+  deliverySource?: "prompt" | "push";
   resultSummary?: string;
   /** Set when the sender was first shown the result (once). */
   resultShownAt?: string;

@@ -8,6 +8,7 @@ import type { TaskStageMode } from "./task-desktop-stage";
 export interface WebBrokerClient {
   /** Durable task/inbox mutations performed by the owner broker under its own M9R-home ACL. */
   submitAgentTask?(token: string, to: string, goal: string): Promise<{ ok: boolean; taskId?: string; created?: boolean; error?: string }>;
+  claimAgentInbox?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; taskIds?: string[]; error?: string }>;
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
   recordAgentTaskResult?(token: string, taskId: string, summary: string): Promise<{ ok: boolean; error?: string }>;
   taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode): Promise<{ ok: boolean; result?: unknown; error?: string }>;
@@ -117,6 +118,9 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
   return {
     async submitAgentTask(token, to, goal) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "send", token, to, goal } });
+    },
+    async claimAgentInbox(token, taskIds) {
+      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "claim_inbox", token, taskIds } });
     },
     async advanceAgentInboxCursor(token, seq) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "cursor", token, seq } });
