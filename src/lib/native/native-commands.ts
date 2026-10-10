@@ -232,6 +232,10 @@ function pruneRetiredRuntimeFile(target: string): void {
   }
 }
 
+function isRetiredRuntimePath(path: string): boolean {
+  return /\.m9r-retired-[^\\/]+$/i.test(path);
+}
+
 function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> }): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
   if (plan.engine) {
@@ -386,7 +390,10 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   // The hook program goes first, so a hook can never point at a file that is not there yet.
   if (runtime.needed) {
     if (runtime.engine) await stopResidentEngine(io);
-    manifest.runtimeFiles = [...new Set([...(manifest.runtimeFiles ?? []), ...copyRuntime(runtime)])];
+    manifest.runtimeFiles = [...new Set([...(manifest.runtimeFiles ?? []), ...copyRuntime(runtime)])]
+      // Retired images that were unlocked get pruned during copyRuntime. Drop their now-dead ownership
+      // records; keep any image still on disk because a running provider MCP process may have it mapped.
+      .filter((file) => !isRetiredRuntimePath(file) || existsSync(file));
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   for (const f of todo) {

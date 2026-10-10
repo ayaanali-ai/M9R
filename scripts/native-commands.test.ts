@@ -354,6 +354,33 @@ test("with the engine, setup copies it into M9R's folder and the hooks call it (
   s.done();
 });
 
+test("an engine update removes dead retired-image entries from the install ownership manifest", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  writeFileSync(engine, "stand-in engine v1", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+
+  const bin = join(s.p.m9r, "bin");
+  const missingRetired = join(bin, "m9r-engine.exe.m9r-retired-previous-missing");
+  const removableRetired = join(bin, "m9r-engine.exe.m9r-retired-previous-unlocked");
+  writeFileSync(removableRetired, "stale engine image", "utf8");
+  const before = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { runtimeFiles: string[] };
+  before.runtimeFiles.push(missingRetired, removableRetired);
+  writeFileSync(s.p.manifest, JSON.stringify(before, null, 2) + "\n", "utf8");
+  writeFileSync(engine, "stand-in engine v2", "utf8");
+
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const after = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { runtimeFiles: string[] };
+  assert.equal(readFileSync(join(bin, "m9r-engine.exe"), "utf8"), "stand-in engine v2");
+  assert.equal(existsSync(removableRetired), false, "the runtime update prunes an unlocked retired image");
+  assert.equal(after.runtimeFiles.includes(missingRetired), false, "missing retired images are removed from ownership metadata");
+  assert.equal(after.runtimeFiles.includes(removableRetired), false, "pruned retired images are removed from ownership metadata");
+  s.done();
+});
+
 test("with the engine and the native hook side by side, the settings point at the small hook, both are copied, and uninstall removes both", async () => {
   const s = sandbox();
   const engine = join(s.home, "m9r-engine.exe");

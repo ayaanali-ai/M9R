@@ -180,6 +180,7 @@ test("runtime updates replace a Windows-locked engine image without stopping act
   assert.match(nativeSource, /m9r-retired-/);
   assert.match(nativeSource, /manifest\.runtimeFiles = \[\.\.\.new Set\(\[\.\.\.\(manifest\.runtimeFiles \?\? \[\]\)/);
   assert.match(nativeSource, /pruneRetiredRuntimeFile\(file\.to\)/);
+  assert.match(nativeSource, /filter\(\(file\) => !isRetiredRuntimePath\(file\) \|\| existsSync\(file\)\)/);
 });
 
 test("release ZIP contains the built standalone broker", { skip: skipNative }, (t) => {
