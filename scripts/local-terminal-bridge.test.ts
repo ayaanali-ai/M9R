@@ -13,7 +13,7 @@ import {
 } from "../src/lib/local-terminal-bridge-core.ts";
 
 test("source watching excludes generated trees before traversing and retains untracked source", () => {
-  for (const path of [".workcache", ".workcache/checkpoint/src/file.ts", "native-input-host/target", "overlay\\src-tauri\\target\\release", ".test-tmp", "coverage/report.json", "node_modules", ".m9r/runtime/log"]) {
+  for (const path of [".workcache", ".workcache/checkpoint/src/file.ts", ".worktrees/full-checkout", ".release-excluded", ".m9r-web-broker-a12", ".m9r-coordinator-worker-a12", "native-input-host/target", "overlay\\src-tauri\\target\\release", ".test-tmp", "coverage/report.json", "node_modules", ".m9r/runtime/log"]) {
     assert.equal(isIgnoredTerminalWatchPath(path), true, path);
   }
   for (const path of ["", "src/new-file.ts", "untracked/new-feature.ts", "docs/targeting.md", "src/target.ts"]) {

@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { open, readFile, stat, mkdir } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, watch as watchFs } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, relative, resolve, sep } from "node:path";
@@ -466,9 +466,38 @@ async function flushFileWatchEvents(): Promise<void> {
 }
 
 function startFileWatcher(): void {
+  if (process.platform === "win32") {
+    // Windows supports one native recursive directory watch. Registering a
+    // separate watcher for every source file blocks the shared HTTP loop in
+    // large repositories, even after generated trees have been excluded.
+    const watcher = watchFs(repositoryRoot, { recursive: true, persistent: true }, (event, filename) => {
+      if (!filename) return;
+      const path = resolve(repositoryRoot, filename.toString());
+      if (isIgnoredWatchPath(path)) return;
+      void stat(path).then(async (info) => {
+        if (!info.isFile()) return;
+        pendingFileWatchEvents.set(relative(repositoryRoot, path).split(sep).join("/"), {
+          filePath: relative(repositoryRoot, path).split(sep).join("/"),
+          activityKind: event === "rename" ? "create" : "changed",
+          newText: await readWatchedFileText(path),
+        });
+        scheduleFileWatchFlush();
+      }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") return;
+        const filePath = relative(repositoryRoot, path).split(sep).join("/");
+        pendingFileWatchEvents.set(filePath, { filePath, activityKind: "delete", newText: null });
+        scheduleFileWatchFlush();
+      });
+    });
+    watcher.on("error", (error) => process.stderr.write(`M9R source watch failed: ${error.message}\n`));
+    process.once("SIGINT", () => watcher.close());
+    process.once("SIGTERM", () => watcher.close());
+    return;
+  }
   const watcher = chokidar.watch(repositoryRoot, {
     ignored: (path: string) => isIgnoredWatchPath(path),
     ignoreInitial: true,
+    followSymlinks: false,
     persistent: true,
   });
   function relativeWatchPath(absolutePath: string): string {

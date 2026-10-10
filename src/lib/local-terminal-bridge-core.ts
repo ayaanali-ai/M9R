@@ -6,11 +6,13 @@ export { BRIDGE_PROTOCOL_VERSION, DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, MAX_
 const TERMINAL_WATCH_GENERATED_DIRECTORIES = new Set([
   ".git", "node_modules", ".next", ".m9r", "dist", "cli",
   ".workcache", ".test-tmp", ".cache", "target", "coverage",
+  ".worktrees", ".release-excluded", ".wrangler", ".vercel", ".playwright-mcp", ".gstack",
 ]);
 
 /** Exclude generated trees before enumeration, while retaining untracked source. */
 export function isIgnoredTerminalWatchPath(relativePath: string): boolean {
-  return relativePath.split(/[\\/]/).some((segment) => TERMINAL_WATCH_GENERATED_DIRECTORIES.has(segment));
+  return relativePath.split(/[\\/]/).some((segment) => TERMINAL_WATCH_GENERATED_DIRECTORIES.has(segment)
+    || segment.startsWith(".m9r-web-broker-") || segment.startsWith(".m9r-coordinator-worker-"));
 }
 
 export type BridgeClientMessage =
