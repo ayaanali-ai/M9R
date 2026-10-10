@@ -155,6 +155,12 @@ test("standalone broker runs without Node in PATH and rejects owner-pipe mutatio
       await new Promise((resolveWait) => setTimeout(resolveWait, 100));
     }
     assert.equal(health, true, `standalone broker did not become healthy without Node on PATH (exit=${child.exitCode}, signal=${child.signalCode}):\n${childOutput}`);
+    const healthBody = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+    const runtimeManifest = JSON.parse(await readFile(join(root, "engine", "dist", "m9r-build-info.json"), "utf8"));
+    assert.equal(healthBody.runtimeIdentity?.status, "verified", "the running broker must verify its own executable hash");
+    assert.equal(healthBody.runtimeIdentity?.buildId, runtimeManifest.buildId, "the running broker must report the packaged build identity");
+    assert.equal(healthBody.runtimeIdentity?.artifact, "m9r-web-broker.exe");
+    assert.equal(healthBody.runtimeIdentity?.actualSha256, runtimeManifest.artifacts["m9r-web-broker.exe"]);
     const status = await fetch(`http://127.0.0.1:${port}/web/status`);
     assert.equal(status.status, 401);
     const pipeMutation = await ownerRequestRetry(ownerPipePath(home), { method: "POST", path: "/web/shutdown", body: {} });
