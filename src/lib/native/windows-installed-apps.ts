@@ -19,6 +19,7 @@ const APP_ALIASES: Record<string, readonly string[]> = {
 };
 
 const WINDOWS_TERMINAL_NAMES = new Set(["terminal", "windowsterminal", "wt"]);
+const WINDOWS_TERMINAL_REGISTERED_NAME = "Terminal";
 
 function appNameKey(value: string): string {
   return value.toLowerCase().replace(/\.exe$/, "").replace(/[^\p{L}\p{N}]/gu, "");
@@ -30,7 +31,7 @@ export function windowsAppSearchNames(value: string): string[] {
   // Resolve these aliases to the packaged app's exact registered name. The
   // generic "terminal" and "wt" searches also find unrelated registrations,
   // turning one ordinary Windows Terminal request into a false ambiguity.
-  if (WINDOWS_TERMINAL_NAMES.has(key)) return ["Windows Terminal"];
+  if (WINDOWS_TERMINAL_NAMES.has(key)) return [WINDOWS_TERMINAL_REGISTERED_NAME];
   const aliases = APP_ALIASES[key] ?? APP_ALIASES[value.trim().toLowerCase()];
   const candidates = [value.trim(), ...(aliases ?? [])].filter(Boolean);
   return [...new Map(candidates.map((candidate) => [appNameKey(candidate), candidate])).values()];

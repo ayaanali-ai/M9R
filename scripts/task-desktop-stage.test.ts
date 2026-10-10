@@ -52,9 +52,9 @@ test("app names and renderer aliases are targeting references, not an app catalo
 });
 
 test("common terminal and browser names search Windows' friendly installed-app registrations", () => {
-  assert.deepEqual(windowsAppSearchNames("terminal"), ["Windows Terminal"]);
-  assert.deepEqual(windowsAppSearchNames("Windows Terminal"), ["Windows Terminal"]);
-  assert.deepEqual(windowsAppSearchNames("wt"), ["Windows Terminal"]);
+  assert.deepEqual(windowsAppSearchNames("terminal"), ["Terminal"]);
+  assert.deepEqual(windowsAppSearchNames("Windows Terminal"), ["Terminal"]);
+  assert.deepEqual(windowsAppSearchNames("wt"), ["Terminal"]);
   assert.deepEqual(windowsAppSearchNames("Google Chrome"), ["Google Chrome", "chrome"]);
   assert.deepEqual(windowsAppSearchNames("MSI Center"), ["MSI Center"]);
 });
