@@ -19,6 +19,7 @@ $roots = @([Environment]::GetFolderPath('StartMenu'), [Environment]::GetFolderPa
 foreach ($root in $roots) {
   if (-not $root) { continue }
   foreach ($file in @(Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue)) {
+    if ((Key $file.BaseName) -ne $query) { continue }
     $link = $shell.CreateShortcut($file.FullName)
     if ((Key $file.BaseName) -ne $query -and (Key ([IO.Path]::GetFileName($link.TargetPath))) -ne $query) { continue }
     if ($link.TargetPath -match '\.exe$' -and (Test-Path -LiteralPath $link.TargetPath)) {
@@ -41,7 +42,8 @@ foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths',
 foreach ($app in @(Get-StartApps | Where-Object { (Key $_.Name) -eq $query })) {
   if ($app.AppID -notmatch '^([^!]+)!([^!]+)$') { continue }
   $family = $Matches[1]; $id = $Matches[2]
-  $package = Get-AppxPackage | Where-Object PackageFamilyName -eq $family | Select-Object -First 1
+  $packageName = $family.Substring(0, $family.LastIndexOf('_'))
+  $package = Get-AppxPackage -Name $packageName | Where-Object PackageFamilyName -eq $family | Select-Object -First 1
   if (-not $package) { continue }
   $manifest = $package | Get-AppxPackageManifest
   $entry = $manifest.Package.Applications.Application | Where-Object Id -eq $id | Select-Object -First 1
@@ -56,8 +58,8 @@ export async function discoverInstalledWindowsApp(name: string): Promise<Install
   const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const output = await new Promise<string>((resolve, reject) => {
     execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", DISCOVER], {
-      windowsHide: true, timeout: 6_000, maxBuffer: 256 * 1024, env: { ...process.env, M9R_APP_QUERY: name },
-    }, (error, stdout, stderr) => error ? reject(new Error(`Windows app discovery failed: ${(stderr.trim() || error.message.split("\n")[0]).slice(0, 500)}`)) : resolve(stdout));
+      windowsHide: true, timeout: 15_000, maxBuffer: 256 * 1024, env: { ...process.env, M9R_APP_QUERY: name },
+    }, (error, stdout, stderr) => error ? reject(new Error(`Windows app discovery failed: ${error.killed ? "Windows inventory query exceeded its 15-second deadline." : (stderr.trim() || error.message.split("\n")[0]).slice(0, 500)}`)) : resolve(stdout));
   });
   const parsed: unknown = JSON.parse(output.replace(/^\uFEFF/, ""));
   if (!Array.isArray(parsed)) throw new Error("Windows app discovery returned an invalid inventory.");

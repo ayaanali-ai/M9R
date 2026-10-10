@@ -494,14 +494,14 @@ test("owner-preview types to a reinspected accessibility field without relying o
   await driver.captureDesktop("preview", identity);
   assert.equal((await driver.clickDesktop("preview", 0, 0, identity)).outcome.status, "suspected-noop");
   await driver.typeTextDesktop("preview", "hello", identity);
-  const sent = calls.find((call) => call.method === "callTool" && (call.value as { name: string }).name === "type_text")?.value as { args: Record<string, unknown> };
+  const sent = calls.find((call) => call.method === "callTool" && (call.value as { name: string }).name === "set_value")?.value as { args: Record<string, unknown> };
   assert.equal(sent.args.element_token, "snapshot:field");
-  assert.equal(sent.args.delivery_mode, "background");
+  assert.equal(sent.args.value, "hello");
   assert.equal(sent.args.pid, 4321);
   assert.equal(calls.some((call) => call.method === "typeText"), false);
   field.label = "Different editor";
   await assert.rejects(driver.typeTextDesktop("preview", "must not write", identity), /text field changed/);
-  assert.equal(calls.filter((call) => call.method === "callTool" && (call.value as { name: string }).name === "type_text").length, 1);
+  assert.equal(calls.filter((call) => call.method === "callTool" && (call.value as { name: string }).name === "set_value").length, 1);
   await driver.shutdown();
 }));
 

@@ -184,9 +184,9 @@ async function typeIntoExactField(driver: CuaDriverLike, selected: DesktopInputT
   const element = elementAtScreenPoint(state.elements ?? [], selected.field.x, selected.field.y);
   if (!element?.elementToken || element.label !== selected.field.label || element.role !== selected.field.role
     || !element.actions?.includes("set_value")) throw new Error("The selected text field changed; no text was sent.");
-  return actionOutcome(await driver.callTool("type_text", JSON.stringify({
+  return actionOutcome(await driver.callTool("set_value", JSON.stringify({
     pid: selected.pid, window_id: Number(selected.windowId), element_token: element.elementToken,
-    text, delivery_mode: "background", session,
+    value: text, session,
   })), "Cua Driver could not type into the exact accessibility field.");
 }
 
