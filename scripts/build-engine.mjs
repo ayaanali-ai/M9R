@@ -5,15 +5,19 @@
 // Run `npm run build:cli` first; this bundles cli/dist. Output: engine/dist/m9r-engine.exe (or no extension off Windows).
 
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
+import { publishRuntimeBuild, verifyRuntimeBuildManifest, writeRuntimeBuildManifest } from "./engine-build-transaction.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const out = join(root, "engine", "dist");
-const work = join(out, "work");
+const engineDir = join(root, "engine");
+const output = join(engineDir, "dist");
+const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
+const out = join(buildRoot, "artifacts");
+const work = join(buildRoot, "work");
 const overlayExe = join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(root, "cli", "dist", "m9r-web-broker.cjs");
@@ -26,25 +30,21 @@ if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle
 if (process.platform === "win32" && !existsSync(overlayExe)) {
   throw new Error("The Windows desktop pill is missing: build it with `npm --prefix overlay run build` before building the standalone engine.");
 }
-rmSync(work, { recursive: true, force: true });
-for (const name of [exeName, brokerExeName, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native", ...(process.platform === "win32" ? ["m9r-native-input-host.exe"] : [])]) {
-  rmSync(join(out, name), { force: true });
-}
-mkdirSync(work, { recursive: true });
-
 const postjectCli = join(root, "node_modules", "postject", "dist", "cli.js");
 if (!existsSync(postjectCli)) throw new Error("postject is missing; install the locked development dependencies before building the engine.");
+mkdirSync(out, { recursive: true });
+mkdirSync(work, { recursive: true });
 
 function buildSeaExecutable(main, executable, label) {
   const config = join(work, `${label}-sea-config.json`);
   const blob = join(work, `${label}.blob`);
   writeFileSync(config, JSON.stringify({ main, output: blob, disableExperimentalSEAWarning: true }));
   let result = spawnSync(process.execPath, ["--experimental-sea-config", config], { stdio: "inherit" });
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (result.error || result.status !== 0) throw new Error(`Could not create the ${label} SEA blob.`, { cause: result.error });
 
   copyFileSync(process.execPath, executable);
   result = spawnSync(process.execPath, [postjectCli, executable, "NODE_SEA_BLOB", blob, "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2", ...(process.platform === "darwin" ? ["--macho-segment-name", "NODE_SEA"] : [])], { stdio: "inherit" });
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (result.error || result.status !== 0) throw new Error(`Could not inject the ${label} SEA blob.`, { cause: result.error });
 }
 
 // The dispatcher: SEA argv is [exe, exe, ...args]; shift so both programs see the argv they were written for.
@@ -53,6 +53,7 @@ const mcpJs = join(root, "cli", "dist", "m9r-mcp.js").split(String.fromCharCode(
 const devMcpJs = join(root, "cli", "dist", "dev-mcp-server.js").split(String.fromCharCode(92)).join("/");
 const cliJs = join(root, "cli", "dist", "m9r.js").split(String.fromCharCode(92)).join("/");
 const entry = join(work, "entry.mjs");
+try {
 writeFileSync(entry, `
 const args = process.argv.slice(2);
 const isHook = args[0] === "m9r-hook" || args[0] === "hook";
@@ -85,13 +86,13 @@ buildSeaExecutable(brokerBundle, brokerExe, "web-broker");
 // The small native hook (hook/): agents run this, not the big engine, so a cold start can never hit their hook time limit.
 const cargoEnv = { ...process.env, PATH: `${process.env.PATH}${process.platform === "win32" ? ";" : ":"}${join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".cargo", "bin")}` };
 let r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "hook"), env: cargoEnv, stdio: "inherit" });
-if (r.status !== 0) process.exit(r.status ?? 1);
+if (r.error || r.status !== 0) throw new Error("The native hook build failed.", { cause: r.error });
 const shimName = process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native";
 copyFileSync(join(root, "hook", "target", "release", process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook"), join(out, shimName));
 // The visible-tab click path must use trusted OS input. Ship its Windows-only Native Messaging host beside the engine.
 if (process.platform === "win32") {
   r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "native-input-host"), env: cargoEnv, stdio: "inherit" });
-  if (r.status !== 0) process.exit(r.status ?? 1);
+  if (r.error || r.status !== 0) throw new Error("The native input host build failed.", { cause: r.error });
   copyFileSync(join(root, "native-input-host", "target", "release", "m9r-native-input-host.exe"), join(out, "m9r-native-input-host.exe"));
 
   // Keep the JavaScript SDK and native bindings beside the executable, and include
@@ -165,6 +166,17 @@ if (process.platform === "win32") {
   copyFileSync(overlayExe, join(out, "m9r-overlay.exe"));
   console.log(`Packaged Cua Driver ${cuaDriverVersion} Windows standalone host (SHA-256 verified).`);
 }
-console.log(`Built ${exe} (${Math.round(readFileSync(exe).length / 1e6)} MB)`);
-console.log(`Built ${brokerExe} (${Math.round(readFileSync(brokerExe).length / 1e6)} MB)`);
-if (process.platform === "win32") console.log(`Packaged ${join(out, "m9r-overlay.exe")} from the current desktop build.`);
+
+const managedRuntimePaths = [exeName, brokerExeName, shimName,
+  ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "cua-driver-runtime", "m9r-overlay.exe"] : [])];
+writeRuntimeBuildManifest(out);
+const stagedIdentity = verifyRuntimeBuildManifest(out, { exact: true });
+const publishedIdentity = publishRuntimeBuild(out, output, managedRuntimePaths);
+if (publishedIdentity.buildId !== stagedIdentity.buildId) throw new Error("Published runtime identity differs from its staged artifact hashes.");
+console.log(`Built ${join(output, exeName)} (${Math.round(readFileSync(join(output, exeName)).length / 1e6)} MB)`);
+console.log(`Built ${join(output, brokerExeName)} (${Math.round(readFileSync(join(output, brokerExeName)).length / 1e6)} MB)`);
+console.log(`Runtime build identity ${publishedIdentity.buildId} verified across ${Object.keys(publishedIdentity.artifacts).length} files.`);
+if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")} from the current desktop build.`);
+} finally {
+  rmSync(buildRoot, { recursive: true, force: true });
+}

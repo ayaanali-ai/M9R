@@ -14,7 +14,7 @@ export interface WebBrokerClient {
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
   recordAgentTaskResult?(token: string, taskId: string, summary: string): Promise<{ ok: boolean; error?: string }>;
   taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode): Promise<{ ok: boolean; result?: unknown; error?: string }>;
-  taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode): Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string): Promise<{ ok: boolean; result?: unknown; error?: string }>;
   prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
   run(request: WebRequest): Promise<WebResponse>;
   runBatch?(request: WebBatchRequest): Promise<WebBatchResponse>;
@@ -81,6 +81,7 @@ async function taskStageRequest<T extends { ok: boolean; error?: string }>(input
   url: string;
   body: Record<string, unknown>;
   timeoutMs: number;
+  operationId?: string;
 }): Promise<T> {
   let key: string;
   try {
@@ -100,6 +101,10 @@ async function taskStageRequest<T extends { ok: boolean; error?: string }>(input
       signal: AbortSignal.timeout(Math.max(1, Math.min(input.timeoutMs, MAX_STAGE_REQUEST_TIMEOUT_MS))),
     });
   } catch (error) {
+    if (input.operationId && error && typeof error === "object"
+      && ((error as { name?: unknown }).name === "TimeoutError" || (error as { name?: unknown }).name === "AbortError")) {
+      return { ok: false, error: `The desktop-stage request timed out after dispatch; operation ${input.operationId} may have been applied. Do not replay it. Capture the stage and inspect its state before issuing a new action.` } as T;
+    }
     return { ok: false, error: stageTransportFailure(error) } as T;
   }
   let result: unknown;
@@ -138,9 +143,9 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
         url: `${baseUrl}/web/stage/${appId === undefined ? "close" : "launch"}`,
         body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }) }, timeoutMs: 70_000 });
     },
-    async taskStageAction(token, taskId, action, mode = "owner-preview") {
+    async taskStageAction(token, taskId, action, mode = "owner-preview", operationId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, url: `${baseUrl}/web/stage/action`,
-        body: { token, taskId, action, mode }, timeoutMs: 70_000 });
+        body: { token, taskId, action, mode, ...(operationId ? { operationId } : {}) }, timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
     async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, url: `${baseUrl}/web/stage/prepare`,

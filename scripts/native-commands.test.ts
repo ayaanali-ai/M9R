@@ -360,6 +360,7 @@ test("with the engine and the native hook side by side, the settings point at th
   const shim = join(s.home, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native");
   writeFileSync(engine, "stand-in engine", "utf8");
   writeFileSync(shim, "stand-in native hook", "utf8");
+  writeFileSync(join(s.home, "m9r-build-info.json"), "stand-in runtime manifest", "utf8");
   const nativeInputHost = join(s.home, "m9r-native-input-host.exe");
   if (process.platform === "win32") writeFileSync(nativeInputHost, "stand-in trusted input host", "utf8");
   delete s.io.env.M9R_HOOK_ENTRY;
@@ -367,6 +368,7 @@ test("with the engine and the native hook side by side, the settings point at th
   assert.equal(await s.run("setup", ["--yes"]), 0);
   const bin = join(s.p.m9r, "bin");
   assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native"), "utf8"), "stand-in native hook");
+  assert.equal(readFileSync(join(bin, "m9r-build-info.json"), "utf8"), "stand-in runtime manifest");
   if (process.platform === "win32") assert.equal(readFileSync(join(bin, "m9r-native-input-host.exe"), "utf8"), "stand-in trusted input host");
   assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine"), "utf8"), "stand-in engine");
   const settings = readFileSync(s.p.settings, "utf8");
@@ -374,6 +376,7 @@ test("with the engine and the native hook side by side, the settings point at th
   assert.doesNotMatch(settings, /m9r-engine/);
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(existsSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native")), false);
+  assert.equal(existsSync(join(bin, "m9r-build-info.json")), false);
   if (process.platform === "win32") assert.equal(existsSync(join(bin, "m9r-native-input-host.exe")), false);
   s.done();
 });

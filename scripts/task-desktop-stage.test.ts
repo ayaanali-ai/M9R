@@ -132,6 +132,38 @@ test("omitted mode stays on the owner's current desktop for preparation and curs
   } finally { f.cleanup(); }
 });
 
+test("a stage operation id makes a replay return its durable receipt without moving the cursor twice", async () => {
+  const f = fixture(true);
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    const first = await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 88, y: 144 }, "owner-preview", "mcp-test:cursor-1") as {
+      operationReceipt?: { status?: string };
+    };
+    const replay = await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 88, y: 144 }, "owner-preview", "mcp-test:cursor-1") as {
+      operationReceipt?: { status?: string };
+      actionExecuted?: boolean;
+    };
+
+    assert.equal(f.desktopActions.filter((action) => action.kind === "cursor").length, 1);
+    assert.equal(first.operationReceipt?.status, "applied");
+    assert.equal(replay.operationReceipt?.status, "already_applied");
+    assert.equal(replay.actionExecuted, false);
+  } finally { f.cleanup(); }
+});
+
+test("a stage operation id cannot be reused for a different action", async () => {
+  const f = fixture(true);
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 88, y: 144 }, "owner-preview", "mcp-test:conflict");
+    await assert.rejects(
+      f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 89, y: 144 }, "owner-preview", "mcp-test:conflict"),
+      /already belongs to a different stage action/,
+    );
+    assert.equal(f.desktopActions.filter((action) => action.kind === "cursor").length, 1);
+  } finally { f.cleanup(); }
+});
+
 test("an owner desktop app request reuses personal Chrome without creating another process or desktop", async () => {
   const f = fixture(true, (root, appId) => {
     assert.equal(appId, "chrome");

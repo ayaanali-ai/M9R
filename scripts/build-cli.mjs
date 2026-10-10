@@ -8,13 +8,17 @@
 // `npm run build:cli` and by the cli package's `prepack` hook before `npm pack`.
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, cpSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { buildSync } from "esbuild";
+import { publishGeneratedDirectory } from "./engine-build-transaction.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const outDir = resolve(repoRoot, "cli", "dist");
+const cliDir = resolve(repoRoot, "cli");
+const finalOutDir = resolve(cliDir, "dist");
+const outDir = resolve(cliDir, `.dist-stage-${process.pid}-${randomUUID()}`);
 
 const SHEBANG = "#!/usr/bin/env node\n";
 
@@ -30,8 +34,8 @@ function transpile(tsSource) {
 }
 
 function build() {
-  // cli/dist is generated and ignored. Clear it first so deleted source
-  // modules cannot survive into a new tarball as stale release content.
+  // Build into a unique sibling so an interrupted build cannot destroy the
+  // last usable CLI distribution. The completed directory replaces cli/dist.
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
 
@@ -284,7 +288,7 @@ function build() {
 
   // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "local-store", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server"]) {
+  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "local-store", "runtime-build-identity", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source)
       .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
@@ -641,7 +645,12 @@ function build() {
   // compares its own startup-captured value against on every poll cycle.
   writeFileSync(resolve(outDir, "build-info.json"), JSON.stringify({ builtAt: new Date().toISOString() }, null, 2) + "\n");
 
-  console.log(`Built CLI -> ${outDir}`);
+  publishGeneratedDirectory(outDir, finalOutDir);
+  console.log(`Built CLI -> ${finalOutDir}`);
 }
 
-build();
+try {
+  build();
+} finally {
+  rmSync(outDir, { recursive: true, force: true });
+}

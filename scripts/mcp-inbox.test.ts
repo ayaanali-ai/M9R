@@ -42,6 +42,27 @@ test("desktop stage MCP tools default to the current owner desktop", () => {
   } finally { t.done(); }
 });
 
+test("desktop stage input derives a private one-shot receipt ID from the MCP request identity", async () => {
+  let receivedOperationId = "";
+  const web: WebBrokerClient = {
+    taskStageAction: async (_token, _taskId, _action, _mode, operationId) => {
+      receivedOperationId = operationId ?? "";
+      return { ok: true, result: { operationReceipt: { status: "applied" }, actionExecuted: true } };
+    },
+    run: async () => ({ ok: false, error: "unused" }),
+  };
+  const t = setup({ web });
+  try {
+    const handler = (t.server as unknown as ToolServer)._registeredTools["m9r_stage_action"]!.handler as (
+      args: unknown,
+      extra: { requestId: string | number },
+    ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    const result = await handler({ token: t.codex, taskId: "T1", action: { kind: "cursor", x: 2, y: 3 } }, { requestId: 17 });
+    assert.match(receivedOperationId, /^[a-f0-9]{64}$/);
+    assert.match(result.content[0]?.text ?? "", /"status":"applied"/);
+  } finally { t.done(); }
+});
+
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

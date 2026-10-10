@@ -14,6 +14,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { VerifiedIdentity } from "./identity-core";
 import type { LocalStore } from "./local-store";
+import { readRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
 import { dirname } from "node:path";
 import { platform } from "node:os";
 import { WebSocket, WebSocketServer } from "ws";
@@ -29,6 +30,10 @@ import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_EXTENSION_MESSAGE_BYTES = 256 * 1024;
 const LOCAL_AWARE_ROOM_ID = "room-local";
+
+// Capture at process start. Re-reading process.execPath on each health request
+// could hash a replacement file after an update while the old image is still mapped.
+const runtimeIdentityAtProcessStart = readRuntimeBuildIdentity();
 
 /**
  * Windows ignores the 0o600 file mode entirely, so without this any process running as the same OS user -- including a
@@ -147,7 +152,7 @@ function readBody(req: IncomingMessage): Promise<string | null> {
 
 export interface WebBrokerServerOptions {
   /** Owner-hosted, task-authorized desktop preparation; absent means desktop access is unavailable. */
-  taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview"): Promise<unknown>;
+  taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>;
     launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview"): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
   agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">;
@@ -176,6 +181,8 @@ export interface WebBrokerServerOptions {
   ui?: WebUiBridge;
   /** Where the room mode (watch / ask / hands-off) is kept between runs. Defaults to watch. */
   modeFile?: string;
+  /** Test seam for reporting a known process-start identity. Production uses the startup-captured executable identity. */
+  runtimeIdentity?: RuntimeBuildIdentity;
   /** Plain-words `step`/`phase` on presence frames; on by default when `ui` is set. */
   narrate?: boolean;
   /** Called on a real POST /web/shutdown, in addition to closing this HTTP/WS server, so the caller can also stop its own
@@ -530,7 +537,14 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   const server = createServer(async (req, res) => {
     // This is process liveness only. Desktop capture/control is task-scoped and is
     // verified by an actual stage capture; do not imply that liveness proves it.
-    if (req.method === "GET" && req.url === "/health") return reply(res, 200, { ok: true, broker: "alive", desktopStage: "not-probed" });
+    if (req.method === "GET" && req.url === "/health") {
+      return reply(res, 200, {
+        ok: true,
+        broker: "alive",
+        desktopStage: "not-probed",
+        runtimeIdentity: options.runtimeIdentity ?? runtimeIdentityAtProcessStart,
+      });
+    }
     const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
     if (requestUrl.pathname.startsWith("/web/")) {
       if (req.headers.origin !== undefined) return reply(res, 403, { ok: false, error: "browser-originated requests are refused" });
@@ -559,11 +573,17 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
           const body: unknown = JSON.parse(await readBody(req) || "null");
           if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
           const value = body as Record<string, unknown>;
-          if (Object.keys(value).some((key) => !["token", "taskId", "action", "mode"].includes(key))
+          if (Object.keys(value).some((key) => !["token", "taskId", "action", "mode", "operationId"].includes(key))
             || typeof value.token !== "string" || value.token.length > 128
             || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
-            || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
-          return reply(res, 200, { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, value.mode as "background" | "owner-preview" | undefined) });
+            || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")
+            || (value.operationId !== undefined && (typeof value.operationId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.operationId)))) throw new Error("Invalid stage request.");
+          const actionKind = value.action && typeof value.action === "object" && !Array.isArray(value.action)
+            ? (value.action as { kind?: unknown }).kind : undefined;
+          if (actionKind !== "capture" && typeof value.operationId !== "string") {
+            return reply(res, 409, { ok: false, error: "This M9R MCP runtime does not send desktop-operation receipts. Update the M9R engine before sending desktop input; no action was dispatched." });
+          }
+          return reply(res, 200, { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, value.mode as "background" | "owner-preview" | undefined, value.operationId as string | undefined) });
         } catch (error) {
           return replyStageFailure(res, error, "Stage action failed.");
         }

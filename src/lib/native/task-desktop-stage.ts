@@ -232,9 +232,10 @@ export function createTaskDesktopStageService(input: {
     return result;
   }
 
-  async function act(token: string, taskId: string, value: unknown, requestedMode?: TaskStageMode) {
+  async function act(token: string, taskId: string, value: unknown, requestedMode?: TaskStageMode, operationId?: string) {
     const mode = stageMode(requestedMode);
     const action = parseTaskStageAction(value);
+    if (operationId !== undefined && !/^[a-zA-Z0-9._:-]{1,128}$/.test(operationId)) throw new Error("Invalid desktop-stage operation ID.");
     const run = async () => {
       const { name, identity } = authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
@@ -263,10 +264,45 @@ export function createTaskDesktopStageService(input: {
       // The approval wait above can outlast a revocation: recheck before anything executes.
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-      const result = await runTaskStageAction(driver, name, effectiveAction, identity, mode);
-      authorize(token, taskId, mode);
-      if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-      return result;
+      const mutating = action.kind !== "capture";
+      const receiptInput = mutating && operationId ? {
+        handle: identity.handle,
+        sessionId: identity.sessionId,
+        taskId,
+        operationId,
+        fingerprint: createHash("sha256").update(JSON.stringify({ mode, action: effectiveAction })).digest("hex"),
+      } : undefined;
+      if (receiptInput) {
+        const claim = input.store.claimStageOperation(receiptInput);
+        if (claim.state === "conflict") throw new Error("This desktop-stage operation ID already belongs to a different stage action; no input was sent.");
+        if (claim.state === "in_progress") return { operationReceipt: { operationId, status: "in_progress", updatedAt: claim.updatedAt }, actionExecuted: false };
+        if (claim.state === "applied") return { operationReceipt: { operationId, status: "already_applied", updatedAt: claim.updatedAt }, actionExecuted: false };
+        if (claim.state === "uncertain") return { operationReceipt: { operationId, status: "uncertain", updatedAt: claim.updatedAt }, actionExecuted: false,
+          nextStep: "Capture the stage and inspect the current state before issuing a new action." };
+      }
+      let result: unknown;
+      try {
+        result = await runTaskStageAction(driver, name, effectiveAction, identity, mode);
+      } catch (error) {
+        if (receiptInput) {
+          try { input.store.settleStageOperation({ ...receiptInput, state: "uncertain" }); } catch { /* the durable running claim still blocks a replay */ }
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`The desktop input outcome is uncertain; the operation will not be replayed automatically. Capture the stage before issuing a new action. ${detail}`, { cause: error });
+        }
+        throw error;
+      }
+      if (!receiptInput) return result;
+      try {
+        const settled = input.store.settleStageOperation({ ...receiptInput, state: "applied" });
+        return settled
+          ? { ...(result && typeof result === "object" ? result : { result }), operationReceipt: { operationId, status: "applied", driverReturned: true }, actionExecuted: true }
+          : { ...(result && typeof result === "object" ? result : { result }), operationReceipt: { operationId, status: "uncertain", driverReturned: true }, actionExecuted: true,
+            nextStep: "The input was sent, but its receipt could not be finalized; capture and inspect before issuing another action." };
+      } catch (error) {
+        return { ...(result && typeof result === "object" ? result : { result }), operationReceipt: { operationId, status: "uncertain", driverReturned: true }, actionExecuted: true,
+          receiptError: error instanceof Error ? error.message.slice(0, 180) : "The durable operation receipt could not be finalized.",
+          nextStep: "The input was sent; capture and inspect before issuing another action." };
+      }
     };
     const result = pending.then(run, run);
     pending = result.catch(() => undefined);

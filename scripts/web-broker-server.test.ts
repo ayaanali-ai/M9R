@@ -67,6 +67,29 @@ test("task stage app/action routes require loopback key, reject origins and extr
   } finally { await broker.close(); }
 });
 
+test("mutating stage requests require an operation receipt before the broker dispatches input", async () => {
+  const key = randomBytes(32).toString("hex");
+  const operationIds: string[] = [];
+  const broker = await startWebBroker({ key, port: 0, taskStages: {
+    prepare: async () => ({}),
+    act: async (_token, _taskId, _action, _mode, operationId) => { operationIds.push(operationId ?? ""); return { applied: true }; },
+  } });
+  try {
+    const send = (body: Record<string, unknown>) => fetch(`http://127.0.0.1:${broker.port}/web/stage/action`, {
+      method: "POST", headers: { "content-type": "application/json", "x-m9r-key": key }, body: JSON.stringify(body),
+    });
+    const base = { token: "session-token", taskId: "T7", action: { kind: "click", x: 10, y: 20 }, mode: "owner-preview" };
+    const outdated = await send(base);
+    assert.equal(outdated.status, 409);
+    assert.match((await outdated.json() as { error: string }).error, /does not send desktop-operation receipts/);
+    assert.equal(operationIds.length, 0, "an outdated MCP client must not dispatch a mutating action");
+
+    const current = await send({ ...base, operationId: "mcp-request-7" });
+    assert.equal(current.status, 200);
+    assert.deepEqual(operationIds, ["mcp-request-7"]);
+  } finally { await broker.close(); }
+});
+
 test("task stage action responses preserve structured Cua Driver tool failures", async () => {
   const key = randomBytes(32).toString("hex");
   const driverFailure = Object.assign(new Error("DriverError.Tool"), {
@@ -100,7 +123,10 @@ test("health reports broker liveness without claiming desktop readiness", async 
   try {
     const response = await fetch(`http://127.0.0.1:${broker.port}/health`);
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { ok: true, broker: "alive", desktopStage: "not-probed" });
+    const body = await response.json() as { ok: boolean; broker: string; desktopStage: string; runtimeIdentity?: { status?: string; reason?: string } };
+    assert.deepEqual({ ok: body.ok, broker: body.broker, desktopStage: body.desktopStage }, { ok: true, broker: "alive", desktopStage: "not-probed" });
+    assert.equal(body.runtimeIdentity?.status, "unmanaged");
+    assert.equal(body.runtimeIdentity?.reason, "build_manifest_missing");
   } finally { await broker.close(); }
 });
 

@@ -12,8 +12,10 @@
  * time with a clear reason, same discipline as dev-mcp-server.ts.
  */
 
+import { createHash, randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { readRuntimeBuildIdentity } from "./runtime-build-identity";
 import type { LocalStore } from "./local-store";
 import { normalizeHandle, renderInboxInjection, type Task } from "./inbox-core";
 import type { VerifiedIdentity } from "./identity-core";
@@ -41,9 +43,17 @@ export interface McpServerDeps {
 
 const TOKEN_FIELD = { token: z.string().min(1).describe("Your M9R session token, from the line the SessionStart card gave you (\"M9R session token: ...\"). Required on every call.") };
 const STAGE_APP_REF = z.string().min(1).max(1024).refine(isStageAppReference, "Use an installed app name, app id, or absolute .exe path.");
+const runtimeIdentityAtProcessStart = readRuntimeBuildIdentity();
+
+function runtimeServerVersion(): string {
+  return runtimeIdentityAtProcessStart.status === "verified" && runtimeIdentityAtProcessStart.buildId
+    ? `1.0.0+${runtimeIdentityAtProcessStart.buildId.slice(0, 12)}`
+    : `1.0.0+${runtimeIdentityAtProcessStart.status.replaceAll("_", "-")}`;
+}
 
 export function createM9rMcpServer(deps: McpServerDeps): McpServer {
-  const server = new McpServer({ name: "m9r-mcp", version: "1.0.0" });
+  const server = new McpServer({ name: "m9r-mcp", version: runtimeServerVersion() });
+  const operationNamespace = randomUUID();
   const pageNotes = deps.pageNotes ?? createPageNotesStore(deps.store.root);
 
   function requireIdentity(token: string): VerifiedIdentity {
@@ -125,7 +135,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   });
 
   server.registerTool("m9r_stage_action", {
-    description: "Capture or control this task's desktop; mode defaults to owner-preview. After m9r_stage_app selects an app, omitted action.view uses that exact app window; otherwise it uses the owner's current desktop. Set action.view to app or desktop to explicitly choose screenshot coordinates. Desktop icons, taskbar apps, Start, windows, and controls are supported. Pass background mode only for an explicitly requested isolated desktop. Supports capture, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Input remains bound to the exact window and does not activate the app as a fallback. If a target class rejects background input, the action reports the target and fails without sending text; add an accessibility value adapter or app-specific background route for that control. Capture before input, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Verify effects; an input acknowledgement alone is not proof of success.",
+    description: "Capture or control this task's desktop; mode defaults to owner-preview. After m9r_stage_app selects an app, omitted action.view uses that exact app window; otherwise it uses the owner's current desktop. Set action.view to app or desktop to explicitly choose screenshot coordinates. Desktop icons, taskbar apps, Start, windows, and controls are supported. Pass background mode only for an explicitly requested isolated desktop. Supports capture, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Mutating inputs carry a durable one-shot receipt: if the receipt says already_applied, in_progress, or uncertain, do not repeat the action; capture and inspect first. Input remains bound to the exact window and does not activate the app as a fallback. If a target class rejects background input, the action reports the target and fails without sending text; add an accessibility value adapter or app-specific background route for that control. Capture before input, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Verify effects; a driver receipt alone is not proof of the application state.",
     inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), action: z.discriminatedUnion("kind", [
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("capture") }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
@@ -135,10 +145,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("drag"), fromX: z.number().int().min(0).max(16383), fromY: z.number().int().min(0).max(16383), toX: z.number().int().min(0).max(16383), toY: z.number().int().min(0).max(16383) }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("press_key"), key: z.string().min(1).max(20).regex(/^(?:[a-z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Ctrl|Control|Alt|Shift|Meta|Win|Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Insert|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Up|Down|Left|Right|CapsLock|PrintScreen)$/i) }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("hotkey"), keys: z.array(z.string().min(1).max(20)).min(1).max(4) }).strict(),
-    ]) },
-  }, async ({ token, taskId, mode, action }) => {
+  ]) },
+  }, async ({ token, taskId, mode, action }, extra) => {
     requireIdentity(token);
-    const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(token, taskId, action, mode)
+    const operationId = createHash("sha256").update(`${operationNamespace}\0${String(extra.requestId)}`).digest("hex");
+    const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(token, taskId, action, mode, operationId)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
     const capture = (response.result as { capture?: { dataUrl?: string } } | undefined)?.capture;
     const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [

@@ -5,6 +5,7 @@
  *
  * Local first: nothing here needs the network or an account (design section 1, principle 7).
  */
+import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
@@ -39,6 +40,8 @@ export interface EventRecord {
 }
 
 const MAX_EVENTS = 500;
+/** Keep receipts for recent stage actions so an MCP retry cannot repeat an OS input. */
+const MAX_STAGE_OPERATION_RECEIPTS = 10_000;
 /** Hard ceiling for the complete local snapshot, including extensible cursor and rule maps. */
 export const MAX_LOCAL_STATE_BYTES = 16 * 1024 * 1024;
 /** Keep each rewritten local state file within a predictable task count when user work can be retired safely. */
@@ -63,6 +66,26 @@ export class LocalTaskCapacityError extends Error {
   }
 }
 
+export interface StageOperationInput {
+  handle: string;
+  sessionId: string;
+  taskId: string;
+  operationId: string;
+  fingerprint: string;
+}
+
+export type StageOperationClaim = { state: "claimed" | "in_progress" | "applied" | "uncertain" | "conflict"; updatedAt?: string };
+
+interface StageOperationRecord {
+  key: string;
+  handle: string;
+  sessionId: string;
+  taskId: string;
+  fingerprint: string;
+  state: "running" | "applied" | "uncertain";
+  updatedAt: string;
+}
+
 interface StoreState {
   version: 1;
   nextTaskNo: number;
@@ -80,6 +103,8 @@ interface StoreState {
   nextLinkNo: number;
   /** P1 identity: one token per session, issued at SessionStart. See identity-core.ts. */
   identities: IdentityToken[];
+  /** Durable one-shot receipts for mutating desktop-stage operations. */
+  stageOperations: StageOperationRecord[];
 }
 
 export interface SessionLink {
@@ -91,7 +116,11 @@ export interface SessionLink {
   updatedAt: string;
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [] });
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [] });
+
+const stageOperationKey = (input: StageOperationInput): string => createHash("sha256")
+  .update(JSON.stringify([normalizeHandle(input.handle), input.sessionId, input.taskId, input.operationId]))
+  .digest("hex");
 
 const normalizeSessionFolder = (cwd?: string): string => {
   const value = cwd?.trim();
@@ -212,7 +241,11 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     if (fileBytes > maxStateBytes) throw new LocalStateCapacityError(fileBytes, maxStateBytes);
     try {
       const parsed = JSON.parse(readFileSync(statePath, "utf8")) as StoreState;
-      return parsed && parsed.version === 1 ? normalizeStoredScopes(root, { ...emptyState(), ...parsed }) : emptyState();
+      return parsed && parsed.version === 1 ? normalizeStoredScopes(root, {
+        ...emptyState(),
+        ...parsed,
+        stageOperations: Array.isArray(parsed.stageOperations) ? parsed.stageOperations : [],
+      }) : emptyState();
     } catch {
       // A corrupt file must never brick the agent's prompts: keep it aside and start clean.
       try { renameSync(statePath, `${statePath}.corrupt-${Date.now()}`); } catch { /* ignore */ }
@@ -320,6 +353,48 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return [...new Set([...seen, ...Object.values(KNOWN_PROVIDER_HANDLES)])];
     },
 
+    /** Atomically claims an operation before OS input is sent; the same request cannot be replayed. */
+    claimStageOperation(input: StageOperationInput): StageOperationClaim {
+      const handle = normalizeHandle(input.handle);
+      if (!handle || !input.sessionId || !/^T[0-9]{1,12}$/.test(input.taskId)
+        || !/^[a-zA-Z0-9._:-]{1,128}$/.test(input.operationId) || !/^[a-f0-9]{64}$/.test(input.fingerprint)) {
+        throw new Error("Invalid desktop-stage operation receipt identity.");
+      }
+      const key = stageOperationKey({ ...input, handle });
+      return update((s) => {
+        const existing = s.stageOperations.find((record) => record.key === key);
+        if (existing) {
+          if (existing.fingerprint !== input.fingerprint) return { state: "conflict" };
+          return {
+            state: existing.state === "running" ? "in_progress" : existing.state,
+            updatedAt: existing.updatedAt,
+          };
+        }
+        if (!s.tasks.some((task) => task.id === input.taskId)) throw new Error("The task for this desktop-stage operation no longer exists.");
+        if (s.stageOperations.length >= MAX_STAGE_OPERATION_RECEIPTS) {
+          throw new Error(`The desktop-stage operation receipt store is at capacity (${MAX_STAGE_OPERATION_RECEIPTS}); no input was sent.`);
+        }
+        const updatedAt = now().toISOString();
+        s.stageOperations.push({ key, handle, sessionId: input.sessionId, taskId: input.taskId,
+          fingerprint: input.fingerprint, state: "running", updatedAt });
+        return { state: "claimed", updatedAt };
+      });
+    },
+
+    /** Records whether a claimed input returned or became ambiguous after dispatch. */
+    settleStageOperation(input: StageOperationInput & { state: "applied" | "uncertain" }): boolean {
+      const key = stageOperationKey(input);
+      return update((s) => {
+        const record = s.stageOperations.find((candidate) => candidate.key === key);
+        if (!record || record.fingerprint !== input.fingerprint) return false;
+        if (record.state === input.state) return true;
+        if (record.state !== "running") return false;
+        record.state = input.state;
+        record.updatedAt = now().toISOString();
+        return true;
+      });
+    },
+
     /** Same idempotency key for the same recipient returns the existing task, so a repeated send delivers once. */
     addTask(input: NewTaskInput): { task: Task; created: boolean } {
       const scopedCwd = projectCwd(root, input.cwd);
@@ -342,6 +417,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         });
         if (retainedTasks.length >= MAX_STORED_TASKS) throw new LocalTaskCapacityError(retainedTasks.length);
         s.tasks = retainedTasks;
+        const retainedTaskIds = new Set(retainedTasks.map((task) => task.id));
+        s.stageOperations = s.stageOperations.filter((operation) => retainedTaskIds.has(operation.taskId));
         const seq = (s.nextSeq[normalizedInput.to] ?? 0) + 1;
         s.nextSeq[normalizedInput.to] = seq;
         const id = `T${s.nextTaskNo}`;

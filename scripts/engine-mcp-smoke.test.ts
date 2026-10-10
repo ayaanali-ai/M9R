@@ -4,7 +4,7 @@
 // "M9R browser tools are unavailable" as a result. This runs the real built exe through a real MCP handshake and
 // confirms the web tools are actually present, not just that the process didn't crash.
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import test from "node:test";
@@ -29,9 +29,14 @@ test("the built engine exe's `mcp` subcommand completes a real MCP handshake and
       name: string;
       inputSchema?: { properties?: Record<string, { pattern?: string; description?: string; enum?: string[]; default?: string }> };
     };
-    const messages = out.trim().split("\n").map((line) => { try { return JSON.parse(line) as { id?: number; result?: { tools?: ToolInfo[] } }; } catch { return null; } }).filter((m): m is NonNullable<typeof m> => Boolean(m));
+    const messages = out.trim().split("\n").map((line) => { try { return JSON.parse(line) as { id?: number; result?: { serverInfo?: { version?: string }; tools?: ToolInfo[] } }; } catch { return null; } }).filter((m): m is NonNullable<typeof m> => Boolean(m));
     const initResult = messages.find((m) => m.id === 1);
     assert.ok(initResult, `no response to initialize (stderr: ${err.slice(0, 500)})`);
+    const runtimeManifest = JSON.parse(readFileSync(join(process.cwd(), "engine", "dist", "m9r-build-info.json"), "utf8")) as { buildId?: string };
+    const expectedBuildId = runtimeManifest.buildId ?? "";
+    assert.match(expectedBuildId, /^[a-f0-9]{64}$/, "the engine package must carry its full artifact manifest");
+    assert.equal(initResult.result?.serverInfo?.version, `1.0.0+${expectedBuildId.slice(0, 12)}`,
+      "the running MCP engine identity must match the manifest packaged beside the executable");
     const toolsResult = messages.find((m) => m.id === 2);
     assert.ok(toolsResult?.result?.tools, "no response to tools/list");
     const names = toolsResult.result!.tools!.map((t) => t.name);
@@ -54,7 +59,7 @@ test("the built engine exe's `mcp` subcommand completes a real MCP handshake and
         ["background", "owner-preview"],
         `${toolName} must expose both background and owner-preview modes`,
       );
-      assert.equal(stageTool.inputSchema?.properties?.mode?.default, "background");
+      assert.equal(stageTool.inputSchema?.properties?.mode?.default, "owner-preview");
     }
   } finally {
     child.kill();

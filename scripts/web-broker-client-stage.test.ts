@@ -18,6 +18,26 @@ test("distinguishes a request timeout from an unreachable broker", async () => w
   assert.equal(result?.error, "The local M9R desktop-stage request timed out before the broker responded.");
 }));
 
+test("a dispatched stage timeout identifies the operation and directs verification instead of replay", async () => withKey(async (keyPath) => {
+  const operationId = "mcp-operation-123";
+  const client = createWebBrokerClient({ keyPath, fetchImpl: async () => { throw new DOMException("deadline", "TimeoutError"); } });
+  const result = await client.taskStageAction?.("session-token", "T4", { kind: "click", x: 1, y: 2 }, "owner-preview", operationId);
+  assert.equal(result?.ok, false);
+  assert.match(result?.error ?? "", new RegExp(operationId));
+  assert.match(result?.error ?? "", /Do not replay it/);
+  assert.match(result?.error ?? "", /Capture the stage and inspect/);
+}));
+
+test("stage action forwards its operation ID to the owner broker", async () => withKey(async (keyPath) => {
+  let requestBody: Record<string, unknown> | undefined;
+  const client = createWebBrokerClient({ keyPath, fetchImpl: async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  } });
+  await client.taskStageAction?.("session-token", "T4", { kind: "type", text: "hello" }, "owner-preview", "mcp-operation-456");
+  assert.equal(requestBody?.operationId, "mcp-operation-456");
+}));
+
 test("uses the requested deadline for slow desktop-stage broker operations", async () => withKey(async (keyPath) => {
   const deadlines: number[] = [];
   const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
