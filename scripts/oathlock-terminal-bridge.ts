@@ -9,7 +9,7 @@ import process from "node:process";
 import * as pty from "node-pty";
 import chokidar from "chokidar";
 import { WebSocket, WebSocketServer } from "ws";
-import { BRIDGE_PROTOCOL_VERSION, DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, MAX_BRIDGE_MESSAGE_BYTES, authorizeUpgrade, parseClientMessage } from "../src/lib/local-terminal-bridge-core";
+import { BRIDGE_PROTOCOL_VERSION, DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, MAX_BRIDGE_MESSAGE_BYTES, authorizeUpgrade, parseClientMessage, isIgnoredTerminalWatchPath } from "../src/lib/local-terminal-bridge-core";
 import { createTerminalSessionManager, type PtyFactory } from "../src/lib/local-terminal-session-manager";
 import { parseResidentActivityLine, residentActivityJournalPath } from "../src/lib/resident-activity-journal";
 import { isTerminalProvider, type TerminalProvider } from "../src/lib/local-terminal-protocol";
@@ -407,10 +407,8 @@ async function checkReconnectRequest(): Promise<void> {
  * and covers the case that actually matters (build output and dependency
  * trees, not a project's own bespoke ignore rules).
  */
-const FILE_WATCH_IGNORE_SEGMENTS = new Set([".git", "node_modules", ".next", ".m9r", "dist", "cli"]);
 function isIgnoredWatchPath(absolutePath: string): boolean {
-  const rel = relative(repositoryRoot, absolutePath);
-  return rel.split(sep).some((segment) => FILE_WATCH_IGNORE_SEGMENTS.has(segment));
+  return isIgnoredTerminalWatchPath(relative(repositoryRoot, absolutePath));
 }
 
 /** Binary/huge files never get their content read into newText -- Live Code

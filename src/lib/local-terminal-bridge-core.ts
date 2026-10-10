@@ -3,6 +3,16 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { BRIDGE_PROTOCOL_VERSION, MAX_BRIDGE_MESSAGE_BYTES, MAX_TERMINAL_INPUT_BYTES, isTerminalProvider, type TerminalProvider } from "@/lib/local-terminal-protocol";
 export { BRIDGE_PROTOCOL_VERSION, DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, MAX_BRIDGE_MESSAGE_BYTES, MAX_TERMINAL_INPUT_BYTES, PROVIDER_LAUNCHERS, isTerminalProvider, type TerminalProvider } from "@/lib/local-terminal-protocol";
 
+const TERMINAL_WATCH_GENERATED_DIRECTORIES = new Set([
+  ".git", "node_modules", ".next", ".m9r", "dist", "cli",
+  ".workcache", ".test-tmp", ".cache", "target", "coverage",
+]);
+
+/** Exclude generated trees before enumeration, while retaining untracked source. */
+export function isIgnoredTerminalWatchPath(relativePath: string): boolean {
+  return relativePath.split(/[\\/]/).some((segment) => TERMINAL_WATCH_GENERATED_DIRECTORIES.has(segment));
+}
+
 export type BridgeClientMessage =
   | { type: "list" }
   | { type: "spawn"; provider: TerminalProvider; cwd: string; cols: number; rows: number }
