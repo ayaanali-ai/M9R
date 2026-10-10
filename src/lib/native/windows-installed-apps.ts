@@ -45,6 +45,36 @@ function Key([string] $value) { ($value.ToLowerInvariant() -replace '\.exe$', ''
 $queryKeys = @((ConvertFrom-Json -InputObject $env:M9R_APP_QUERY_NAMES) | ForEach-Object { Key ([string] $_) })
 function Matches([string] $value) { $queryKeys -contains (Key $value) }
 $found = @()
+foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths')) {
+  foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+    if (Matches $key.PSChildName) {
+      $target = $key.GetValue('')
+      if ($target -and (Test-Path -LiteralPath $target)) { $found += @{ executable = $target; args = @() } }
+    }
+  }
+}
+if ($found.Count -gt 0) {
+  ConvertTo-Json -InputObject @($found) -Compress -Depth 3
+  exit 0
+}
+# Packaged apps have exact registered names and stable activation IDs. Resolve
+# those first; a successful package match makes a recursive shortcut walk both
+# slower and more likely to produce duplicate launch routes.
+foreach ($app in @(Get-StartApps | Where-Object { Matches $_.Name })) {
+  if ($app.AppID -notmatch '^([^!]+)!([^!]+)$') { continue }
+  $family = $Matches[1]; $id = $Matches[2]
+  $packageName = $family.Substring(0, $family.LastIndexOf('_'))
+  $package = Get-AppxPackage -Name $packageName | Where-Object PackageFamilyName -eq $family | Select-Object -First 1
+  if (-not $package) { continue }
+  $manifest = $package | Get-AppxPackageManifest
+  $entry = $manifest.Package.Applications.Application | Where-Object Id -eq $id | Select-Object -First 1
+  if (-not $entry.Executable) { continue }
+  $found += @{ executable = (Join-Path $env:SystemRoot 'explorer.exe'); args = @('shell:AppsFolder\' + $app.AppID); windowExecutable = [IO.Path]::GetFileName($entry.Executable) }
+}
+if ($found.Count -gt 0) {
+  ConvertTo-Json -InputObject @($found) -Compress -Depth 3
+  exit 0
+}
 $shell = New-Object -ComObject WScript.Shell
 $roots = @([Environment]::GetFolderPath('StartMenu'), [Environment]::GetFolderPath('CommonStartMenu'), [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('CommonDesktopDirectory'))
 foreach ($root in $roots) {
@@ -58,27 +88,6 @@ foreach ($root in $roots) {
       } else { $found += @{ executable = $link.TargetPath; args = @() } }
     }
   }
-}
-foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths')) {
-  foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
-    if (Matches $key.PSChildName) {
-      $target = $key.GetValue('')
-      if ($target -and (Test-Path -LiteralPath $target)) { $found += @{ executable = $target; args = @() } }
-    }
-  }
-}
-# Packaged apps must be activated through their registered identity, rather
-# than executing a private binary from WindowsApps directly.
-foreach ($app in @(Get-StartApps | Where-Object { Matches $_.Name })) {
-  if ($app.AppID -notmatch '^([^!]+)!([^!]+)$') { continue }
-  $family = $Matches[1]; $id = $Matches[2]
-  $packageName = $family.Substring(0, $family.LastIndexOf('_'))
-  $package = Get-AppxPackage -Name $packageName | Where-Object PackageFamilyName -eq $family | Select-Object -First 1
-  if (-not $package) { continue }
-  $manifest = $package | Get-AppxPackageManifest
-  $entry = $manifest.Package.Applications.Application | Where-Object Id -eq $id | Select-Object -First 1
-  if (-not $entry.Executable) { continue }
-  $found += @{ executable = (Join-Path $env:SystemRoot 'explorer.exe'); args = @('shell:AppsFolder\' + $app.AppID); windowExecutable = [IO.Path]::GetFileName($entry.Executable) }
 }
 ConvertTo-Json -InputObject @($found) -Compress -Depth 3
 `;
