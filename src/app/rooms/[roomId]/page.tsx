@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { use, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { createClient } from "@/lib/supabase/browser";
 import { ensureGuestSession } from "@/lib/rooms/ensure-guest-session";
@@ -204,6 +205,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const [guestName, setGuestName] = useState("");
   const [guestEmail, setGuestEmail] = useState("");
   const [guestBusy, setGuestBusy] = useState(false);
+  const [guestAgeConfirmed, setGuestAgeConfirmed] = useState(false);
   const tasks = useMemo(() => projectRoomTasks(events), [events]);
   const handoffs = useMemo(() => projectRoomHandoffs(events), [events]);
   const artifacts = useMemo(() => projectRoomArtifacts(events), [events]);
@@ -344,7 +346,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     event.preventDefault();
     const displayName = guestName.trim();
     const email = guestEmail.trim();
-    if (!displayName || !email || guestBusy) return;
+    if (!displayName || !email || guestBusy || !guestAgeConfirmed) return;
     setGuestBusy(true);
     setError(null);
     try {
@@ -691,7 +693,19 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
               <label>Your email
                 <input type="email" value={guestEmail} onChange={(event) => setGuestEmail(event.target.value)} maxLength={320} required autoComplete="email" style={{ display: "block", width: "100%", marginTop: 4 }} />
               </label>
-              <button className={styles.primaryButton} type="submit" disabled={guestBusy || !guestName.trim() || !guestEmail.trim()}>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: "0.8rem" }}>
+                <input
+                  type="checkbox"
+                  checked={guestAgeConfirmed}
+                  onChange={(event) => setGuestAgeConfirmed(event.target.checked)}
+                  style={{ marginTop: 3 }}
+                />
+                <span>
+                  I am 18 or older and agree to the <Link href="/terms">Terms of Service</Link> and{" "}
+                  <Link href="/privacy">Privacy Policy</Link>.
+                </span>
+              </label>
+              <button className={styles.primaryButton} type="submit" disabled={guestBusy || !guestName.trim() || !guestEmail.trim() || !guestAgeConfirmed}>
                 {guestBusy ? "Joining…" : "Continue to the room"}
               </button>
             </form>

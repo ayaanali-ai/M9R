@@ -303,6 +303,34 @@ test("buildAgentViews keeps two same-provider connections as distinct agents", (
   assert.notEqual(views[0].label, views[1].label);
 });
 
+test("buildAgentViews shows \"My\" for the viewer's own connection and the owner's name for someone else's", () => {
+  const connections: WsConnection[] = [
+    { id: "conn-codex-mine", workspace_id: "ws-1", agent_kind: "codex", repo_hint: "repo-a", last_seen_at: now, liveness: "active", owner_user_id: "user-viewer", owner_label: "Ayaan" },
+    { id: "conn-codex-theirs", workspace_id: "ws-1", agent_kind: "codex", repo_hint: "repo-b", last_seen_at: now, liveness: "active", owner_user_id: "user-other", owner_label: "Priya" },
+  ];
+  const views = buildAgentViews({
+    connections,
+    runs: [],
+    sessions: [],
+    reviewRules: [],
+    activeRules: [],
+    viewerUserId: "user-viewer",
+  }).filter((view) => view.connected);
+  const mine = views.find((view) => view.connectionId === "conn-codex-mine");
+  const theirs = views.find((view) => view.connectionId === "conn-codex-theirs");
+  assert.equal(mine?.label, "My Codex");
+  assert.equal(theirs?.label, "Priya's Codex");
+});
+
+test("buildAgentViews falls back to the owner's name (not \"My\") when no viewer is known", () => {
+  const connections: WsConnection[] = [
+    { id: "conn-codex-a", workspace_id: "ws-1", agent_kind: "codex", repo_hint: "repo-a", last_seen_at: now, liveness: "active", owner_user_id: "user-viewer", owner_label: "Ayaan" },
+    { id: "conn-codex-b", workspace_id: "ws-1", agent_kind: "codex", repo_hint: "repo-b", last_seen_at: now, liveness: "active", owner_user_id: "user-other", owner_label: "Priya" },
+  ];
+  const views = buildAgentViews({ connections, runs: [], sessions: [], reviewRules: [], activeRules: [] }).filter((view) => view.connected);
+  assert.ok(views.every((view) => !view.label.startsWith("My")));
+});
+
 test("Run B readiness is blocked with no active rules", () => {
   const views = buildAgentViews({ connections: [], runs: [], sessions: [], reviewRules: [], activeRules: [] });
   const v = views[0];

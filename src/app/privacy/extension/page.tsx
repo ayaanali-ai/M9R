@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
-import Nav from "@/components/Nav";
-import Footer from "@/components/Footer";
+import Link from "next/link";
+import ReferencePage from "@/components/reference/ReferencePage";
+import { LegalDocument, LegalLinks } from "@/components/reference/LegalDocument";
 import { CONTACT_EMAIL, CONTACT_MAILTO } from "@/lib/contact";
 
 export const metadata: Metadata = {
@@ -24,31 +25,14 @@ const sections = [
 
 export default function ExtensionPrivacyPage() {
   return (
-    <div className="lp lp-page">
-      <div className="lp-atmos" aria-hidden />
-      <Nav />
-      <main className="lp-page-main lp-page-main--narrow">
-        <header className="lp-page-head">
-          <div className="lp-ph-eyebrow lp-ph-eyebrow--steel"><span className="lp-tick" aria-hidden />Privacy record</div>
-          <h1 className="lp-h-page">Browser extension privacy</h1>
-          <p className="lp-updated">Effective · September 26, 2026</p>
-        </header>
-        <div className="lp-letter" style={{ paddingBottom: 72 }}>
-          <section className="lp-clause">
-            <div className="lp-clause-no">Contact</div>
-            <h2>Questions</h2>
-            <p>Privacy questions about the extension can be sent to <a href={CONTACT_MAILTO}>{CONTACT_EMAIL}</a>. The broader <a href="/privacy">M9R privacy policy</a> covers accounts and the website.</p>
-          </section>
-          {sections.map(([title, body], index) => (
-            <section key={title} className="lp-clause">
-              <div className="lp-clause-no">§ {String(index + 1).padStart(2, "0")}</div>
-              <h2>{title}</h2>
-              <p>{body}</p>
-            </section>
-          ))}
-        </div>
-      </main>
-      <Footer />
-    </div>
+    <ReferencePage title={<>Extension<br />privacy</>} intro="What the M9R Web Presence browser extension handles, what it stores, and what it never does.">
+      <LegalDocument
+        name="Browser extension privacy"
+        effective="Effective September 26, 2026"
+        notice={{ label: "Contact", title: "Questions", body: <p>Privacy questions about the extension can be sent to <a href={CONTACT_MAILTO}>{CONTACT_EMAIL}</a>. The broader <Link href="/privacy">M9R privacy policy</Link> covers accounts and the website.</p> }}
+        sections={sections.map(([title, body]) => ({ title, body }))}
+      />
+      <LegalLinks current="/privacy/extension" />
+    </ReferencePage>
   );
 }

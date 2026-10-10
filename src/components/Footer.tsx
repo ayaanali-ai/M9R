@@ -8,7 +8,6 @@ const sections = [
     links: [
       { href: "/", label: "Overview" },
       { href: "/agents", label: "Connect your agent" },
-      { href: "/roadmap", label: "Roadmap" },
       { href: "/auth", label: "Enter workspace" },
       { href: "/pricing", label: "Pricing" },
     ],

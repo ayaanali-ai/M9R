@@ -17,7 +17,7 @@
 import { createRequire } from "node:module";
 import { mkdir, mkdtemp, readFile, writeFile, access, unlink, chmod, rm, readdir, rename, rmdir, lstat, stat } from "node:fs/promises";
 import { connect } from "node:net";
-import { spawn, execFile } from "node:child_process";
+import { spawn, execFile, spawnSync } from "node:child_process";
 import { createReadStream, existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { emitKeypressEvents } from "node:readline";
@@ -557,6 +557,48 @@ function probeTerminalRuntimePort(): Promise<boolean> {
 }
 
 /**
+ * The port probe above only proves the `terminal runtime` PARENT process is
+ * still bound to its port -- confirmed live (2026-10-10): that parent can sit
+ * "healthy" on this probe for 8+ hours while every one of its per-provider
+ * bridge children crash-loops underneath it on a build error, because the
+ * parent process itself never dies; only its children do, over and over.
+ * The port probe cannot see that at all. This checks the one place that
+ * actually reflects per-provider health: each provider's own bridge log
+ * (services/mission-bridge writes "Mission ACP Bridge is running locally"
+ * on a real start, and "[supervisor] child exited with code N" on a crash --
+ * see bridge-runtime.ts / scripts/build-cli.mjs's supervisor wrapper). A
+ * provider is unhealthy here if its log's last line is a crash with no
+ * later success line after it. A provider with no local.json (never
+ * connected on this machine) is skipped, not reported unhealthy, same
+ * posture as connectedLocalProviders() in oathlock-terminal-bridge.ts.
+ */
+async function connectedProviderBridgesAreHealthy(repositoryRoot: string): Promise<{ healthy: boolean; detail: string }> {
+  const providers = ["claude-code", "codex", "opencode"] as const;
+  const unhealthy: string[] = [];
+  for (const provider of providers) {
+    const tokenPath = join(repositoryRoot, ".m9r", "agents", provider, "local.json");
+    if (!existsSync(tokenPath)) continue; // never connected here -- not this watchdog's concern
+    const logPath = join(repositoryRoot, ".m9r", "runtime", "mission-bridge-logs", `${provider}.log`);
+    if (!existsSync(logPath)) continue; // bridge has never attempted a start yet
+    let tail = "";
+    try {
+      const raw = await readFile(logPath, "utf8");
+      tail = raw.slice(-4_000); // last few log entries is enough to see the most recent outcome
+    } catch {
+      continue; // unreadable log is a logging problem, not evidence of a dead bridge
+    }
+    const lastRunningAt = [...tail.matchAll(/\[([0-9T:.Z-]+)\]\s+Mission ACP Bridge is running locally/g)].pop()?.[1];
+    const lastCrashAt = [...tail.matchAll(/\[([0-9T:.Z-]+)\]\s+\[supervisor\] child exited with code/g)].pop()?.[1];
+    if (lastCrashAt && (!lastRunningAt || lastCrashAt > lastRunningAt)) {
+      unhealthy.push(`${provider} (last crash ${lastCrashAt}${lastRunningAt ? `, last running ${lastRunningAt}` : ", never started"})`);
+    }
+  }
+  return unhealthy.length > 0
+    ? { healthy: false, detail: unhealthy.join("; ") }
+    : { healthy: true, detail: "" };
+}
+
+/**
  * Option B from the reliability discussion: a second, near-zero-cost process
  * that notices `oathlock terminal runtime` died mid-session and relaunches
  * it, instead of waiting for the next Windows login (the existing HKCU
@@ -600,8 +642,10 @@ async function runWatchdog(): Promise<number> {
 
   const PROBE_INTERVAL_MS = 15_000;
   const FAILURE_THRESHOLD = 3; // ~45s unreachable before relaunching.
+  const BRIDGE_FAILURE_THRESHOLD = 2; // ~30s of confirmed crash-looping before killing and relaunching.
   const POST_RELAUNCH_GRACE_MS = 20_000; // give a fresh runtime time to bind before probing again.
   let consecutiveFailures = 0;
+  let bridgeFailures = 0;
   let stopped = false;
   const cleanup = async () => {
     stopped = true;
@@ -624,9 +668,7 @@ async function runWatchdog(): Promise<number> {
       process.exit(0);
     }
     const alive = await probeTerminalRuntimePort();
-    if (alive) {
-      consecutiveFailures = 0;
-    } else {
+    if (!alive) {
       consecutiveFailures += 1;
       if (shouldRelaunch(consecutiveFailures, FAILURE_THRESHOLD)) {
         await watchdogLog(`runtime unreachable after ${consecutiveFailures} probes -- relaunching.`);
@@ -635,14 +677,58 @@ async function runWatchdog(): Promise<number> {
         await new Promise((r) => setTimeout(r, POST_RELAUNCH_GRACE_MS));
         continue;
       }
+      await new Promise((r) => setTimeout(r, PROBE_INTERVAL_MS));
+      continue;
+    }
+    consecutiveFailures = 0;
+    // Confirmed live (2026-10-10): the port probe alone stayed "healthy" for
+    // 8+ hours while every connected provider's bridge crash-looped on a bad
+    // build underneath it. A port that answers is not proof the thing it's
+    // supposed to be doing is actually happening.
+    const bridgeHealth = await connectedProviderBridgesAreHealthy(process.cwd());
+    if (!bridgeHealth.healthy) {
+      bridgeFailures += 1;
+      await watchdogLog(`provider bridge(s) unhealthy (probe ${bridgeFailures}/${BRIDGE_FAILURE_THRESHOLD}): ${bridgeHealth.detail}`);
+      if (shouldRelaunch(bridgeFailures, BRIDGE_FAILURE_THRESHOLD)) {
+        let killed = false;
+        try {
+          const pidText = (await readFile(terminalRuntimePidPath(process.cwd()), "utf8")).trim();
+          const pid = Number(pidText);
+          if (pid && isPidAlive(pid)) {
+            spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+            killed = true;
+          }
+        } catch { /* no PID file yet (pre-upgrade runtime) -- fall through and relaunch alongside it */ }
+        await watchdogLog(`provider bridge(s) stayed unhealthy after ${bridgeFailures} probes -- ${killed ? "killed the stuck runtime and " : ""}relaunching.`);
+        spawnDetachedOathlockCommand(["terminal", "runtime"]);
+        bridgeFailures = 0;
+        await new Promise((r) => setTimeout(r, POST_RELAUNCH_GRACE_MS));
+        continue;
+      }
+    } else {
+      bridgeFailures = 0;
     }
     await new Promise((r) => setTimeout(r, PROBE_INTERVAL_MS));
   }
   return 0;
 }
 
+/** Written by every startTerminalRuntime() start, so the watchdog can find and
+ *  kill the exact stuck parent process when the port probe alone can't tell
+ *  (the parent stays bound to its port even while every bridge child it
+ *  supervises is crash-looping underneath it -- see
+ *  connectedProviderBridgesAreHealthy()'s own comment). Fuzzy command-line
+ *  matching was the alternative; a PID file keeps this exact and testable. */
+function terminalRuntimePidPath(repositoryRoot: string): string {
+  return join(repositoryRoot, ".m9r", "terminal-runtime.pid");
+}
+
 async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Promise<number> {
   const localOnly = options.localOnly === true;
+  try {
+    await mkdir(join(process.cwd(), ".m9r"), { recursive: true });
+    await writeFile(terminalRuntimePidPath(process.cwd()), String(process.pid));
+  } catch { /* best effort -- the watchdog falls back to the port probe alone if this is missing */ }
   if (localOnly) process.env.M9R_LOCAL_ONLY = "1";
   if (!localOnly) {
     const { startNativeEventSync } = await import("../src/lib/native-event-sync");

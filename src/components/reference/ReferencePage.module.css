@@ -1,0 +1,82 @@
+/* Secondary marketing and legal pages (how it works, docs, FAQ, open core, support, policies). Shell, fonts and
+   windows come from ReferenceHome.module.css; page intro comes from ReferencePricing.module.css.
+   Only document-specific pieces live here. */
+.content{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:32px;align-items:stretch;margin-top:72px}
+.panel{min-width:0}
+.wide{grid-column:1/-1}
+.narrow{max-width:920px;margin-inline:auto;width:100%}
+
+.body>p+p{margin-top:16px}
+.body>p.small{font-size:19px;line-height:27px;color:#444}
+.body p a,.body li a{text-decoration:underline;text-underline-offset:.14em}
+.body p a:hover,.body li a:hover{color:#00e}
+.body code{font:.82em/1 StudyPixel,Arial,sans-serif;-webkit-font-smoothing:none;background:#e8e8e8;padding:2px 5px 1px;box-shadow:inset 1px 1px gray,inset -1px -1px #fff;word-break:break-word}
+.body .heading{font:italic 400 52px/54px StudyInstrument,serif;margin:0 0 18px;color:#000}
+.body .links{display:flex;flex-wrap:wrap;gap:12px 28px;align-items:center;margin-top:24px}
+
+.command{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px 12px;margin-top:24px;padding:14px 14px 14px 18px;background:#000;box-shadow:inset 1px 1px gray,inset -1px -1px #fff,inset 2px 2px #0a0a0a}
+.command code{font:20px/28px StudyPixel,Arial,sans-serif;background:none;box-shadow:none;padding:0;color:#f3dd9d;overflow-wrap:anywhere}
+.command .copy{font-size:13px;min-height:28px;padding:0 14px;margin:0}
+.copyStatus{grid-column:1/-1;font:13px/16px StudyPixel,Arial,sans-serif;color:#c4b9b3;min-height:0}
+.copyStatus:empty{display:none}
+.pre{display:block;margin-top:20px;padding:16px 18px;background:#000;color:#f3dd9d;font:20px/30px StudyPixel,Arial,sans-serif;white-space:pre-wrap;box-shadow:inset 1px 1px gray,inset -1px -1px #fff,inset 2px 2px #0a0a0a}
+
+.steps{list-style:none;padding:0;margin:8px 0 0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px 40px}
+.steps h3{font:italic 400 30px/34px StudyInstrument,serif;margin:0 0 6px;color:#000}
+.steps p{font-size:21px!important;line-height:29px!important}
+
+.faq{margin-top:4px}
+.faq details{border-top:1px solid #a0a0a0}
+.faq details:last-child{border-bottom:1px solid #a0a0a0}
+.faq summary{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px 0;cursor:pointer;list-style:none;font:italic 400 34px/40px StudyInstrument,serif;color:#000}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary:focus-visible{outline:2px solid navy;outline-offset:4px}
+.faq details>p{padding:0 0 24px;max-width:38em}
+.faq details>p+p{margin-top:-8px}
+.mark{flex:none;width:28px;height:26px;display:grid;place-items:center;background:silver;font:bold 18px/1 Arial,sans-serif;color:#222;box-shadow:inset -1px -1px #0a0a0a,inset 1px 1px #fff,inset -2px -2px gray,inset 2px 2px #dfdfdf}
+.mark:before{content:"+"}
+.faq details[open] .mark:before{content:"\2212"}
+.faq details[open] .mark{box-shadow:inset -1px -1px #fff,inset 1px 1px #0a0a0a,inset -2px -2px #dfdfdf,inset 2px 2px gray}
+
+.body .list{margin:14px 0 0;padding-left:1.1em;list-style:square}
+.body .list li{font-size:22px;line-height:31px;color:#111}
+.body .list li+li{margin-top:10px}
+.body .list li::marker{color:navy}
+.body>p+.list,.body>.list+p{margin-top:16px}
+.body p.measure{max-width:34em}
+.body h3.sub{font:italic 400 30px/34px StudyInstrument,serif;margin:28px 0 0;color:#000}
+
+/* Long-form legal documents (terms, privacy, acceptable use). */
+.legal{grid-column:1/-1;display:grid;grid-template-columns:268px minmax(0,1fr);gap:32px;align-items:start}
+.toc{position:sticky;top:112px;max-height:calc(100dvh - 136px);display:flex;flex-direction:column}
+.toc .tocBody{flex:1;min-height:0;overflow:auto;padding:12px 10px 14px}
+.tocList{list-style:none;padding:0;margin:0}
+.tocList a{display:flex;gap:8px;padding:5px 8px;font:17px/22px StudyGaramond,serif;color:#111}
+.tocList a:hover{background:navy;color:#fff}
+.body .tocList a{text-decoration:none}
+.tocList a:focus-visible{outline:1px dotted #000;outline-offset:-2px}
+.num{flex:none;min-width:1.5em;font:600 14px/22px StudyHaas,sans-serif;color:#666;font-variant-numeric:tabular-nums}
+.tocList a:hover .num{color:#c8d4ff}
+.tocMobile{display:none}
+.legal .body{padding:40px 56px 48px}
+.legal .clause p,.legal .clause li,.legal .notice p:not(:first-child){font-size:22px;line-height:33px;max-width:34em}
+.clause{padding:28px 0 30px;border-top:1px solid #a0a0a0;scroll-margin-top:120px}
+.legal .clause h2{display:flex;align-items:baseline;gap:12px;font:italic 400 38px/42px StudyInstrument,serif;color:#000;margin:0 0 14px}
+.clause h2 .num{min-width:0;font-size:16px;line-height:1;color:#777}
+.clause>p+p,.clause>p+ul,.clause>ul+p{margin-top:14px}
+.legal .caps p{font-size:18px;line-height:30px;letter-spacing:.01em}
+.notice{margin:6px 0 30px;padding:20px 24px 24px;background:#ffffe1;box-shadow:inset 1px 1px gray,inset -1px -1px #fff,inset 2px 2px #0a0a0a;scroll-margin-top:120px}
+.legal .notice h2{font:italic 400 32px/36px StudyInstrument,serif;color:#000;margin:0 0 10px}
+.tocMobile summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0;cursor:pointer;list-style:none;font:italic 400 28px/32px StudyInstrument,serif;color:#000}
+.tocMobile summary::-webkit-details-marker{display:none}
+.tocMobile summary:focus-visible{outline:2px solid navy;outline-offset:4px}
+.tocMobile[open] .mark:before{content:"\2212"}
+.tocMobile[open] .mark{box-shadow:inset -1px -1px #fff,inset 1px 1px #0a0a0a,inset -2px -2px #dfdfdf,inset 2px 2px gray}
+.tocMobile .tocList{padding-bottom:14px}
+
+@media(max-width:1180px){.legal{grid-template-columns:224px minmax(0,1fr);gap:24px}.legal .body{padding:34px 36px 40px}.tocList a{font-size:16px;line-height:21px;padding:5px 6px}}
+@media(max-width:900px){.legal{grid-template-columns:1fr;gap:0}.toc{display:none}.tocMobile{display:block;border-top:1px solid #a0a0a0;border-bottom:1px solid #a0a0a0;margin:4px 0 24px}.legal .body{padding:26px 22px 30px}.legal .clause p,.legal .clause li,.legal .notice p:not(:first-child),.body .list li{font-size:20px;line-height:30px}.legal .clause h2{font-size:30px;line-height:34px}.legal .caps p{font-size:16px;line-height:26px}.notice{padding:16px 16px 20px}.legal .notice h2{font-size:28px;line-height:32px}}
+@media(max-width:639px){.legal .clause p,.legal .clause li,.legal .notice p:not(:first-child),.body .list li{font-size:19px;line-height:29px}.legal .clause h2{font-size:27px;line-height:31px;gap:10px}.clause{padding:22px 0 24px}.tocList a{font-size:18px;line-height:24px;padding:6px 4px}}
+
+@media(max-width:900px){.content{grid-template-columns:1fr;margin-top:48px;gap:28px}.body .heading{font-size:42px;line-height:44px}.steps{grid-template-columns:1fr}}
+@media(max-width:639px){.content{margin-top:36px}.body .heading{font-size:36px;line-height:38px}.faq summary{font-size:26px;line-height:31px;padding:16px 0}.command{grid-template-columns:1fr;padding:12px}.command code{font-size:16px;line-height:24px}.command .copy{justify-self:start}.pre{font-size:16px;line-height:25px;padding:12px}.body>p.small{font-size:17px;line-height:24px}}
