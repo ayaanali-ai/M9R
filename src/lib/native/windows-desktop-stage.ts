@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { renameStateFile } from "./atomic-file";
 import { isAgentContext } from "./approval-core";
 import { defaultStoreRoot } from "./local-store";
 
@@ -48,7 +49,7 @@ interface NativeStageResponse {
   window?: NativeWindowStageInfo;
   desktop?: NativeDesktopStageInfo;
   input?: { childWindowId: string };
-  pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean };
+  pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
   control?: NativePointControl;
   windows?: { pid: number; windowId: string; title: string; width: number; height: number }[];
 }
@@ -212,7 +213,7 @@ function writeRegistryWhileLocked(root: string, registry: StageRegistry): void {
   const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
   try {
     writeFileSync(temporary, `${JSON.stringify(registry, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    renameSync(temporary, target);
+    renameStateFile(temporary, target);
   } catch (error) {
     try { unlinkSync(temporary); } catch { /* preserve the original write error */ }
     throw error;
@@ -256,7 +257,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return normalizeWindowInfo(result.window);
   }
 
-  async function windowAtPoint(x: number, y: number): Promise<{ pid: number; windowId: bigint; shell?: boolean; keyboardWindow?: boolean }> {
+  async function windowAtPoint(x: number, y: number): Promise<{ pid: number; windowId: bigint; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } }> {
     assertWindows();
     assertOwner();
     if (![x, y].every((value) => Number.isSafeInteger(value) && value >= -32768 && value <= 32767)) {
@@ -271,7 +272,12 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     }
     const windowId = BigInt(window.windowId);
     if (windowId <= BigInt(0) || windowId > BigInt("18446744073709551615")) throw new Error("The Windows hit test returned an invalid HWND.");
-    return { pid: window.pid, windowId, shell: window.shell === true, keyboardWindow: window.keyboardWindow === true };
+    const screenOrigin = window.screenOrigin;
+    if (window.shell === true && (!screenOrigin || !Number.isSafeInteger(screenOrigin.x) || !Number.isSafeInteger(screenOrigin.y))) {
+      throw new Error("The Windows hit test did not return the shell window origin required for window-scoped cursor placement.");
+    }
+    return { pid: window.pid, windowId, shell: window.shell === true, keyboardWindow: window.keyboardWindow === true,
+      ...(screenOrigin ? { screenOrigin } : {}) };
   }
 
   async function pointControl(x: number, y: number, expected?: NativePointControl): Promise<NativePointControl> {

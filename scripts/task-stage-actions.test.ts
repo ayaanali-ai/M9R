@@ -33,12 +33,12 @@ test("owner-preview actions route through desktop-wide driver methods", async ()
   const identity = { handle: "codex", sessionId: "session" };
 
   await runTaskStageAction(driver, "preview", { kind: "double_click", x: 12, y: 18 }, identity, "owner-preview");
-  await runTaskStageAction(driver, "preview", parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "foreground" }), identity, "owner-preview");
+  await runTaskStageAction(driver, "preview", parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK" }), identity, "owner-preview");
   await runTaskStageAction(driver, "preview", { kind: "hotkey", keys: ["Control", "L"] }, identity, "owner-preview");
   await runTaskStageAction(driver, "preview", { kind: "cursor", x: 30, y: 45 }, identity);
   assert.deepEqual(calls.map((call) => call.method), ["clickDesktop", "typeTextDesktop", "hotkeyDesktop", "moveDesktopCursor"]);
   assert.deepEqual(calls[0]?.args, ["preview", 12, 18, identity, { count: 2 }]);
-  assert.deepEqual(calls[1]?.args, ["preview", "echo M9R_TERM_OK", identity, "foreground"]);
+  assert.deepEqual(calls[1]?.args, ["preview", "echo M9R_TERM_OK", identity]);
   assert.deepEqual(calls[3]?.args, ["preview", 30, 45, identity]);
 });
 

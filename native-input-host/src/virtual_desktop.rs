@@ -170,7 +170,7 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
         },
         #[cfg(windows)]
         Some("windowAtPoint") => match platform::window_at_point(value) {
-            Ok((pid, hwnd, shell, keyboard_window)) => json!({"ok":true,"requestId":request_id,"pointWindow":{"pid":pid,"windowId":hwnd.to_string(),"shell":shell,"keyboardWindow":keyboard_window}}),
+            Ok((pid, hwnd, shell, keyboard_window, origin_x, origin_y)) => json!({"ok":true,"requestId":request_id,"pointWindow":{"pid":pid,"windowId":hwnd.to_string(),"shell":shell,"keyboardWindow":keyboard_window,"screenOrigin":{"x":origin_x,"y":origin_y}}}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         Some("currentDesktop") => match current_desktop() {
@@ -305,6 +305,11 @@ mod platform {
     type HResult = i32;
     type Hwnd = *mut c_void;
     type Interface = *mut c_void;
+
+    const SW_SHOWNOACTIVATE: i32 = 4;
+    const SW_SHOWNA: i32 = 8;
+    const SWP_NOSIZE_NOMOVE_NOACTIVATE_SHOWWINDOW: u32 = 0x53;
+    const SWP_NOZORDER: u32 = 0x04;
 
     #[repr(C)]
     struct VirtualDesktopManagerVTable {
@@ -486,9 +491,9 @@ mod platform {
         fn ShowWindow(window: Hwnd, command: i32) -> i32;
         fn ShowWindowAsync(window: Hwnd, command: i32) -> i32;
         fn IsIconic(window: Hwnd) -> i32;
-        fn GetWindowPlacement(window: Hwnd, placement: *mut WindowPlacement) -> i32;
         fn IsWindowVisible(window: Hwnd) -> i32;
         fn SetWindowPos(window: Hwnd, after: Hwnd, x: i32, y: i32, width: i32, height: i32, flags: u32) -> i32;
+        fn FlashWindowEx(info: *const FlashWindowInfo) -> i32;
         fn EnumWindows(callback: unsafe extern "system" fn(Hwnd, isize) -> i32, parameter: isize) -> i32;
         fn GetWindowTextW(window: Hwnd, buffer: *mut u16, count: i32) -> i32;
         fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
@@ -517,7 +522,7 @@ mod platform {
         y: i32,
     }
 
-    pub(super) fn window_at_point(value: &serde_json::Value) -> Result<(u32, usize, bool, bool), &'static str> {
+    pub(super) fn window_at_point(value: &serde_json::Value) -> Result<(u32, usize, bool, bool, i32, i32), &'static str> {
         let coordinate = |key| value.get(key).and_then(serde_json::Value::as_i64)
             .and_then(|number| i32::try_from(number).ok()).filter(|number| (-32768..=32767).contains(number));
         let point = Point { x: coordinate("x").ok_or("invalid screen x coordinate")?,
@@ -528,13 +533,17 @@ mod platform {
         if child.is_null() { return Err("No input window exists at that screen point"); }
         let root = unsafe { GetAncestor(child, 2) }; // GA_ROOT, preserving the exact window hierarchy.
         if root.is_null() || unsafe { IsWindow(root) } == 0 { return Err("The hit-tested window disappeared"); }
+        let mut bounds = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { GetWindowRect(root, &mut bounds) } == 0 || bounds.right <= bounds.left || bounds.bottom <= bounds.top {
+            return Err("Windows could not read the hit-tested window bounds");
+        }
         let mut pid = 0;
         unsafe { GetWindowThreadProcessId(root, &mut pid); }
         if pid == 0 { return Err("The hit-tested window has no process identity"); }
         let mut class_buffer = [0u16; 256];
         let length = unsafe { GetClassNameW(root, class_buffer.as_mut_ptr(), 256) };
         let class = String::from_utf16_lossy(&class_buffer[..length.max(0) as usize]);
-        Ok((pid, root as usize, matches!(class.as_str(), "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "Windows.UI.Core.CoreWindow"), class == "Windows.UI.Core.CoreWindow"))
+        Ok((pid, root as usize, matches!(class.as_str(), "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "Windows.UI.Core.CoreWindow"), class == "Windows.UI.Core.CoreWindow", bounds.left, bounds.top))
     }
     #[repr(C)]
     struct Rect {
@@ -545,13 +554,12 @@ mod platform {
     }
 
     #[repr(C)]
-    struct WindowPlacement {
-        length: u32,
+    struct FlashWindowInfo {
+        size: u32,
+        window: Hwnd,
         flags: u32,
-        show_command: u32,
-        minimum: Point,
-        maximum: Point,
-        normal: Rect,
+        count: u32,
+        timeout_ms: u32,
     }
 
     /// Launch discovery must include hidden top-level windows. Cua's user-facing
@@ -597,23 +605,26 @@ mod platform {
         if manager.desktop_id(window)? != desktop || !manager.is_on_current_desktop(window)? {
             return Err("requested application is not on the owner's current desktop".into());
         }
-        // SW_SHOWNOACTIVATE restores even an already-maximized window to its
-        // normal rectangle. Preserve visible window state; restore only an
-        // actually minimized window. Async avoids waiting on another app's UI thread.
-        let mut command = 8; // SW_SHOWNA preserves a visible window's size.
-        if unsafe { IsIconic(window) } != 0 {
-            let mut placement: WindowPlacement = unsafe { std::mem::zeroed() };
-            placement.length = std::mem::size_of::<WindowPlacement>() as u32;
-            if unsafe { GetWindowPlacement(window, &mut placement) } == 0 {
-                return Err("Windows could not read the requested window's restore state".into());
-            }
-            command = if placement.flags & 2 != 0 { 3 } else { 4 }; // WPF_RESTORETOMAXIMIZED
-        }
+        // Keep an existing window's size and restore minimized windows without
+        // activation. Never use SW_SHOWMAXIMIZED here; it activates the app.
+        let command = if unsafe { IsIconic(window) } != 0 { SW_SHOWNOACTIVATE } else { SW_SHOWNA };
         unsafe { ShowWindowAsync(window, command); }
-        // HWND_TOP; SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW.
-        if unsafe { SetWindowPos(window, std::ptr::null_mut(), 0, 0, 0, 0, 0x53) } == 0 {
+        // Keep the current app above the requested app. Do not pass HWND_TOP:
+        // that was the regression which shoved owner-preview windows over the
+        // user's active app despite SWP_NOACTIVATE. If this app is already
+        // foreground, preserve its existing order instead of self-inserting.
+        let foreground = unsafe { GetForegroundWindow() };
+        let (after, flags) = if !foreground.is_null() && foreground != window {
+            (foreground, SWP_NOSIZE_NOMOVE_NOACTIVATE_SHOWWINDOW)
+        } else {
+            (std::ptr::null_mut(), SWP_NOSIZE_NOMOVE_NOACTIVATE_SHOWWINDOW | SWP_NOZORDER)
+        };
+        if unsafe { SetWindowPos(window, after, 0, 0, 0, 0, flags) } == 0 {
             return Err("Windows did not present the requested application window".into());
         }
+        let flash = FlashWindowInfo { size: std::mem::size_of::<FlashWindowInfo>() as u32,
+            window, flags: 0x2, count: 3, timeout_ms: 0 }; // FLASHW_TRAY; signal the user without activation.
+        unsafe { FlashWindowEx(&flash); }
         validate_window(pid, handle)?;
         if unsafe { IsWindowVisible(window) } == 0 || !manager.is_on_current_desktop(window)? {
             return Err("Windows did not show the requested application window".into());

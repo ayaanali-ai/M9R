@@ -41,36 +41,44 @@ test("Windows optional frame-valid flag accepts matching PNG metadata and reject
   await assert.rejects(driver({ images: [{ mimeType: "image/png", dataBase64: imageData }] }).capture("stage"), /matching PNG dimensions/);
 }));
 
-test("foreground type delivery is an explicit retry after background refusal for the same exact window", async () => withRoot(async (root) => {
+test("background text refusal is reported without activating the window or retrying through global input", async () => withRoot(async (root) => {
   await registerStage(root, "4567");
   const identity = { handle: "codex", sessionId: "terminal-session" };
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driverError = new Error("Background delivery is not available for target window class 'CASCADIA_HOSTING_WINDOW_CLASS' on this event kind (text_input).");
-  const state = { pid: 4321, windowId: 4567n, screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+  const state = { pid: 4321, windowId: BigInt(4567), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
     windowBounds: { x: 100, y: 50, width: 400, height: 200 },
     images: [{ mimeType: "image/png", dataBase64: imageData }] };
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state,
     typeTextError: driverError,
-    callToolResult: { isError: false, action: { effect: "confirmed", route: "global_input", summary: "foreground text delivered" } },
   }) as never });
 
-  await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity, "foreground"), /only after.*background.*refusal/i);
-  await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity), /Background delivery is not available/);
-  await assert.rejects(driver.typeText("stage", "different command", identity, "foreground"), /only after.*background.*refusal/i);
-  assert.equal(calls.some((item) => item.method === "callTool"), false, "foreground retry cannot change the refused text");
-  assert.deepEqual(parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "foreground" }),
-    { kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "foreground" });
-  assert.throws(() => parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "sideways" }), /Invalid stage text delivery mode/);
+  await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity),
+    /Background delivery is not available.*No text was sent.*will not activate the window as a fallback/i);
+  assert.throws(() => parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "foreground" }), /Invalid stage action fields/);
+  assert.equal(calls.some((item) => item.method === "callTool"), false, "background refusal never retries with global foreground input");
+}));
 
-  const retried = await driver.typeText("stage", "echo M9R_TERM_OK", identity, "foreground");
-  assert.equal(retried.outcome.status, "confirmed");
-  const call = calls.find((item) => item.method === "callTool")?.value as { name: string; args: Record<string, unknown> };
-  assert.equal(call.name, "type_text");
-  assert.deepEqual(call.args.target, { kind: "window", pid: 4321, window_id: 4567 });
-  assert.equal(call.args.text, "echo M9R_TERM_OK");
-  assert.equal(call.args.delivery_mode, "foreground");
-  assert.equal(typeof call.args.session, "string");
-  await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity, "foreground"), /only after.*background.*refusal/i);
+test("owner-preview clears its remembered app target after background text is refused", async () => withRoot(async (root) => {
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await registerOwnerPreview(root, identity);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const windows = [{ pid: 4321, windowId: BigInt(windowId), appName: "notepad.exe", title: "Untitled - Notepad",
+    bounds: { x: 0, y: 0, width: 1920, height: 1080 }, isOnScreen: true, zIndex: BigInt(1) }];
+  const backgroundError = new Error("Background delivery is not available for target window class 'CASCADIA_HOSTING_WINDOW_CLASS' on this event kind (text_input).");
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls, windows, typeTextError: backgroundError,
+      state: { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+        windowBounds: { x: 0, y: 0, width: 1920, height: 1080 }, images: [{ mimeType: "image/png", dataBase64: imageData }] },
+    }) as never,
+    windowAtPoint: async () => ({ pid: 4321, windowId: BigInt(windowId) }),
+  });
+
+  await driver.captureDesktop("preview", identity);
+  await driver.clickDesktop("preview", 0, 0, identity);
+  await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No text was sent.*will not activate the window as a fallback/);
+  await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No agent input window is selected yet/);
+  assert.equal(calls.some((call) => call.method === "callTool"), false, "no foreground or generic-input retry is attempted");
 }));
 
 function withRoot(run: (root: string) => Promise<void>): Promise<void> {
@@ -80,27 +88,28 @@ function withRoot(run: (root: string) => Promise<void>): Promise<void> {
   return run(root).finally(() => rmSync(root, { recursive: true, force: true }));
 }
 
-test("untitled taskbar controls use exact accessibility invocation and overlay-only movement", async () => withRoot(async (root) => {
+test("untitled taskbar controls use exact accessibility invocation and the overlay-only shell cursor scope", async () => withRoot(async (root) => {
   const identity = { handle: "codex", sessionId: "desktop-session" };
   await registerOwnerPreview(root, identity);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const control = { label: "Start", pid: 123, windowPid: 123, windowId: "456", rect: { x: 0, y: 0, width: 50, height: 50 }, invoked: false };
   let invocations = 0;
   const driver = createCuaStageDriver({ stage: stageDependencies(root),
-    loadSdk: async () => makeSdk({ calls, screenSize: { width: 1, height: 1 }, cursorState: { enabled: true, position: { x: 0, y: 0 } } }) as never,
-    windowAtPoint: async () => ({ pid: 123, windowId: BigInt(456), shell: true }),
+    loadSdk: async () => makeSdk({ calls, screenSize: { width: 1, height: 1 },
+      state: { screenshotWidth: 1, screenshotHeight: 1, windowBounds: { x: 0, y: 0, width: 1, height: 1 } } }) as never,
+    windowAtPoint: async () => ({ pid: 123, windowId: BigInt(456), shell: true, screenOrigin: { x: 0, y: 0 } }),
     pointControl: async (_x, _y, expected) => { if (expected) { assert.deepEqual(expected, control); invocations++; } return { ...control, invoked: Boolean(expected) }; } });
   await driver.captureDesktop("preview", identity);
   assert.equal((await driver.describeDesktopTarget("preview", 0, 0, identity))?.label, "Start");
   assert.equal((await driver.clickDesktop("preview", 0, 0, identity)).outcome.status, "unverified");
   assert.equal(invocations, 1);
   assert.equal(calls.some((c) => c.method === "getWindowState" || c.method === "click"), false);
-  const move = calls.find((c) => c.method === "moveCursor")?.value as {
-    x: number; y: number; target: { input?: { displayId?: string } }; session: string;
-  };
-  assert.deepEqual({ x: move.x, y: move.y, displayId: move.target.input?.displayId }, { x: 0, y: 0, displayId: "primary" });
-  assert.equal(typeof move.session, "string");
-  assert.equal(calls.some((c) => c.method === "callTool"), false, "the cursor uses the typed session API without generic tool or physical-pointer input");
+  const cursorCall = calls.find((c) => c.method === "callTool")?.value as { name: string; args: Record<string, unknown> };
+  assert.equal(cursorCall.name, "move_cursor");
+  assert.deepEqual({ scope: cursorCall.args.scope, x: cursorCall.args.x, y: cursorCall.args.y }, { scope: "window", x: 0, y: 0 });
+  assert.equal(typeof cursorCall.args.session, "string");
+  assert.equal(calls.some((c) => c.method === "desktopTarget"), false, "a desktop target would move the owner's physical pointer");
+  assert.equal(calls.some((c) => c.method === "moveCursor"), false, "the shell uses the overlay-only route because Cua omits shell HWNDs");
   await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No agent input window/);
 }));
 

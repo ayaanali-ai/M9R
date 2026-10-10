@@ -21,7 +21,6 @@ const SESSION_PREFIX = "m9r-stage-";
 
 type WindowTargetFactory = {
   Window: new (input: { pid: number; windowId: bigint }) => ActionTarget;
-  Desktop: new (input: { displayId: string }) => ActionTarget;
 };
 
 type CuaSdk = {
@@ -53,15 +52,6 @@ interface AgentCursorSession {
   session: string;
   sessionTag: string;
 }
-
-interface ForegroundTypeRetry {
-  pid: number;
-  windowId: string;
-  textDigest: string;
-  expiresAt: number;
-}
-
-const FOREGROUND_TYPE_RETRY_TTL_MS = 60_000;
 
 interface CuaRuntime {
   sdk: CuaSdk;
@@ -155,7 +145,7 @@ export interface CuaStageDriverDependencies {
   loadSdk?: () => Promise<CuaSdk>;
   connectRuntime?: CuaStageRuntimeConnector;
   now?: () => Date;
-  windowAtPoint?: (x: number, y: number) => Promise<{ pid: number; windowId: bigint; shell?: boolean; keyboardWindow?: boolean }>;
+  windowAtPoint?: (x: number, y: number) => Promise<{ pid: number; windowId: bigint; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } }>;
   pointControl?: (x: number, y: number, expected?: NativePointControl) => Promise<NativePointControl>;
 }
 
@@ -535,7 +525,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   const agentSessions = new Map<string, AgentCursorSession>();
   const desktopCaptures = new Map<string, CachedDesktopCapture>();
   const desktopInputTargets = new Map<string, DesktopInputTarget>();
-  const foregroundTypeRetries = new Map<string, ForegroundTypeRetry>();
   let agentRuntimePromise: Promise<CuaRuntime> | undefined;
 
   async function createRuntime(): Promise<CuaRuntime> {
@@ -683,72 +672,23 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return `${name}\0${agentCursorDetails(identity).key}`;
   }
 
-  function clearForegroundTypeRetry(name: string, identity: CuaAgentCursorIdentity): void {
-    foregroundTypeRetries.delete(desktopInputKey(name, identity));
-  }
-
-  function rememberForegroundTypeRetry(name: string, identity: CuaAgentCursorIdentity, pid: number, windowId: string, text: string): void {
-    const key = desktopInputKey(name, identity);
-    foregroundTypeRetries.delete(key);
-    foregroundTypeRetries.set(key, { pid, windowId, textDigest: createHash("sha256").update(text).digest("hex"),
-      expiresAt: now().getTime() + FOREGROUND_TYPE_RETRY_TTL_MS });
-    while (foregroundTypeRetries.size > 128) foregroundTypeRetries.delete(foregroundTypeRetries.keys().next().value!);
-  }
-
-  function consumeForegroundTypeRetry(name: string, identity: CuaAgentCursorIdentity | undefined, pid: number, windowId: string, text: string): string {
-    if (!identity) throw new Error("Foreground typing is allowed only after a background refusal for this exact window and agent identity.");
-    const key = desktopInputKey(name, identity);
-    const retry = foregroundTypeRetries.get(key);
-    if (retry?.expiresAt && retry.expiresAt <= now().getTime()) foregroundTypeRetries.delete(key);
-    if (!retry || retry.expiresAt <= now().getTime() || retry.pid !== pid || retry.windowId !== windowId
-      || retry.textDigest !== createHash("sha256").update(text).digest("hex")) {
-      throw new Error("Foreground typing is allowed only after a background refusal for this exact window and agent identity.");
-    }
-    foregroundTypeRetries.delete(key);
-    return key;
-  }
-
   function isBackgroundDeliveryUnavailable(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error);
     return /background delivery is not available for target window class/i.test(message);
   }
 
   async function deliverTextToExactWindow(input: {
-    name: string;
-    identity?: CuaAgentCursorIdentity;
     runtime: CuaRuntime;
     session: string;
     pid: number;
     windowId: string | bigint;
     text: string;
-    deliveryMode?: "background" | "foreground";
     selected?: DesktopInputTarget;
     nativeInput?: () => Promise<boolean>;
   }): Promise<CuaStageActionOutcome> {
     const windowId = input.windowId.toString();
-    const retryKey = input.deliveryMode === "foreground"
-      ? consumeForegroundTypeRetry(input.name, input.identity, input.pid, windowId, input.text)
-      : input.identity ? desktopInputKey(input.name, input.identity) : undefined;
-    if (input.deliveryMode !== "foreground" && retryKey) foregroundTypeRetries.delete(retryKey);
-
     if (input.selected?.field) {
-      const outcome = await typeIntoExactField(input.runtime.driver, input.selected, input.session, input.text);
-      if (retryKey) foregroundTypeRetries.delete(retryKey);
-      return outcome;
-    }
-
-    if (input.deliveryMode === "foreground") {
-      const numericWindowId = Number(windowId);
-      if (!Number.isSafeInteger(numericWindowId) || numericWindowId < 1) {
-        throw new Error("The exact window handle cannot be represented safely for foreground typing; no text was sent.");
-      }
-      const outcome = actionOutcome(await input.runtime.driver.callTool("type_text", JSON.stringify({
-        text: input.text,
-        target: { kind: "window", pid: input.pid, window_id: numericWindowId },
-        session: input.session,
-        delivery_mode: "foreground",
-      })), "Cua Driver could not type into the exact foreground window.");
-      return outcome;
+      return typeIntoExactField(input.runtime.driver, input.selected, input.session, input.text);
     }
 
     if (input.nativeInput && await input.nativeInput()) {
@@ -762,8 +702,9 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         session: input.session,
       }), "Cua Driver could not type into the selected background window.");
     } catch (error) {
-      if (input.identity && isBackgroundDeliveryUnavailable(error)) {
-        rememberForegroundTypeRetry(input.name, input.identity, input.pid, windowId, input.text);
+      if (isBackgroundDeliveryUnavailable(error)) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`${reason} No text was sent and the stage will not activate the window as a fallback. This target needs an accessibility value adapter or an app-specific background input route.`);
       }
       throw error;
     }
@@ -771,13 +712,11 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
 
   function forgetDesktopInputTarget(name: string, identity: CuaAgentCursorIdentity): void {
     desktopInputTargets.delete(desktopInputKey(name, identity));
-    clearForegroundTypeRetry(name, identity);
   }
 
   function forgetAgentDesktopInputTargets(identity: CuaAgentCursorIdentity): void {
     const suffix = `\0${agentCursorDetails(identity).key}`;
     for (const key of desktopInputTargets.keys()) if (key.endsWith(suffix)) desktopInputTargets.delete(key);
-    for (const key of foregroundTypeRetries.keys()) if (key.endsWith(suffix)) foregroundTypeRetries.delete(key);
   }
 
   async function resolveOwnerWindowPoint(runtime: CuaRuntime, session: AgentCursorSession, screenPoint: { x: number; y: number }, includeAccessibilityTree = false) {
@@ -787,9 +726,14 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     if (selected.pid === runtime.processId) throw new Error("The desktop point resolves to the Cua overlay, not an application; no input was sent.");
     const { pid, windowId } = selected;
     if (selected.shell) {
+      const origin = selected.screenOrigin;
+      if (!origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) {
+        throw new Error("Windows did not return the shell window origin; the stage cannot position its labeled cursor without moving the owner's pointer.");
+      }
       const shellControl = await (deps.pointControl ?? manager.pointControl)(screenPoint.x, screenPoint.y);
       if (shellControl.windowPid !== pid || shellControl.windowId !== windowId.toString()) throw new Error("The shell control does not belong to the hit-tested window; no input was sent.");
-      return { target: { pid, windowId }, localPoint: screenPoint, shellControl, nativeKeyboardWindow: selected.keyboardWindow, state: undefined };
+      return { target: { pid, windowId }, localPoint: { x: screenPoint.x - origin.x, y: screenPoint.y - origin.y },
+        shellControl, nativeKeyboardWindow: selected.keyboardWindow, state: undefined };
     }
     const state = await runtime.driver.getWindowState({ pid, windowId, session: session.session,
       includeAccessibilityTree, includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, timeoutMs: 1_500,
@@ -843,16 +787,18 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
 
   async function moveOwnerCursor(runtime: CuaRuntime, session: AgentCursorSession, point: ResolvedDesktopPoint): Promise<CuaStageCursorProof> {
     resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not enable the desktop agent cursor.");
-    // The typed API moves this session's synthetic cursor. For app windows its
-    // coordinates are local to that exact window snapshot; for shell surfaces
-    // absent from Cua's window snapshots, use the captured desktop coordinate
-    // space. Never use the legacy generic tool adapter, which can move the
-    // owner's physical pointer and does not honor the SDK's coordinate contract.
-    const target = point.shellControl
-      ? new runtime.sdk.ActionTarget.Desktop({ displayId: "primary" })
-      : new runtime.sdk.ActionTarget.Window(point.target);
-    const position = point.shellControl ? point.desktopPoint : point.localPoint;
-    resultError(await runtime.driver.moveCursor({ ...position, target, session: session.session }), "Cua Driver could not move the labeled desktop cursor.");
+    if (point.shellControl) {
+      // The Windows shell HWND is not exposed by Cua's window inventory, so it
+      // cannot be represented by ActionTarget.Window. Its documented window
+      // scope moves only this agent's overlay in screen coordinates; Desktop
+      // scope would move the owner's physical pointer and is never used.
+      resultError(await runtime.driver.callTool("move_cursor", JSON.stringify({
+        scope: "window", x: point.screenPoint.x, y: point.screenPoint.y, session: session.session,
+      })), "Cua Driver could not move the labeled shell overlay cursor.");
+    } else {
+      const target = new runtime.sdk.ActionTarget.Window(point.target);
+      resultError(await runtime.driver.moveCursor({ ...point.localPoint, target, session: session.session }), "Cua Driver could not move the labeled cursor on the exact window.");
+    }
     const state = cursorStateFromResult(await runtime.driver.getAgentCursorState({ session: session.session }));
     if (!state.enabled || state.x === undefined || state.y === undefined
       || Math.abs(state.x - point.screenPoint.x) > 1 || Math.abs(state.y - point.screenPoint.y) > 1) {
@@ -1051,7 +997,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function clickDesktop(name: string, x: number, y: number, identity: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}) {
-    clearForegroundTypeRetry(name, identity);
     const result = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       if (!validPoint(x, y, capture)) throw new Error("Click coordinates must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
@@ -1095,7 +1040,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return { capture: await captureOwnerDesktop(name, identity, true), outcome: result };
   }
 
-  async function typeTextDesktop(name: string, text: string, identity: CuaAgentCursorIdentity, deliveryMode?: "background" | "foreground") {
+  async function typeTextDesktop(name: string, text: string, identity: CuaAgentCursorIdentity) {
     if (typeof text !== "string" || text.length < 1 || text.length > MAX_TEXT_ACTION_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
       throw new Error(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
     }
@@ -1103,10 +1048,10 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       await inspectOwnerDesktop(name, identity);
       const selected = await verifiedDesktopInputTarget(runtime, name, identity);
       try {
-        return await deliverTextToExactWindow({ name, identity, runtime, session: session.session, pid: selected.pid,
-          windowId: selected.windowId, selected, text, deliveryMode });
+        return await deliverTextToExactWindow({ runtime, session: session.session, pid: selected.pid,
+          windowId: selected.windowId, selected, text });
       } catch (error) {
-        if (!isBackgroundDeliveryUnavailable(error)) forgetDesktopInputTarget(name, identity);
+        forgetDesktopInputTarget(name, identity);
         throw error;
       }
     });
@@ -1115,7 +1060,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function scrollDesktop(name: string, x: number, y: number, direction: "up" | "down", identity: CuaAgentCursorIdentity) {
-    clearForegroundTypeRetry(name, identity);
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       if (!validPoint(x, y, capture)) throw new Error("Scroll coordinates must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
@@ -1136,7 +1080,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function dragDesktop(name: string, fromX: number, fromY: number, toX: number, toY: number, identity: CuaAgentCursorIdentity) {
-    clearForegroundTypeRetry(name, identity);
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       if (!validPoint(fromX, fromY, capture) || !validPoint(toX, toY, capture)) throw new Error("Both drag points must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
@@ -1162,7 +1105,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function pressKeyDesktop(name: string, key: string, identity: CuaAgentCursorIdentity) {
-    clearForegroundTypeRetry(name, identity);
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session }) => {
       await inspectOwnerDesktop(name, identity);
       const selected = await verifiedDesktopInputTarget(runtime, name, identity);
@@ -1179,7 +1121,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function hotkeyDesktop(name: string, keys: string[], identity: CuaAgentCursorIdentity) {
-    clearForegroundTypeRetry(name, identity);
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session }) => {
       await inspectOwnerDesktop(name, identity);
       const selected = await verifiedDesktopInputTarget(runtime, name, identity);
@@ -1250,7 +1191,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function click(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}): Promise<CuaStageActionProof> {
-    if (cursorIdentity) clearForegroundTypeRetry(name, cursorIdentity);
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementAtPoint }) => {
       const before = await captureWindow();
       if (!validPoint(x, y, before)) throw new Error("Click coordinates must fall inside the current stage window snapshot.");
@@ -1282,7 +1222,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function pressKey(name: string, key: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
-    if (cursorIdentity) clearForegroundTypeRetry(name, cursorIdentity);
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
       await captureWindow();
       const result = await driver.pressKey({ key, target: new sdk.ActionTarget.Window({ pid, windowId }), session });
@@ -1292,7 +1231,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function hotkey(name: string, keys: string[], cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
-    if (cursorIdentity) clearForegroundTypeRetry(name, cursorIdentity);
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
       await captureWindow();
       const result = await driver.hotkey({ keys, target: new sdk.ActionTarget.Window({ pid, windowId }), session });
@@ -1301,7 +1239,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     }, cursorIdentity);
   }
 
-  async function typeText(name: string, text: string, cursorIdentity?: CuaAgentCursorIdentity, deliveryMode?: "background" | "foreground"): Promise<CuaStageActionProof> {
+  async function typeText(name: string, text: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
     if (typeof text !== "string" || text.length < 1 || text.length > MAX_TEXT_ACTION_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
       throw new Error(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
     }
@@ -1311,15 +1249,13 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       if (selected?.field) {
         if (selected.pid !== pid || selected.windowId !== windowId) throw new Error("The selected text field belongs to another application window.");
       }
-      const outcome = await deliverTextToExactWindow({ name, identity: cursorIdentity, runtime: { sdk, driver }, session, pid, windowId,
-        text, deliveryMode, selected,
-        nativeInput: deliveryMode === "foreground" ? undefined : () => nativeControl(name, "type", undefined, { text }) });
+      const outcome = await deliverTextToExactWindow({ runtime: { sdk, driver }, session, pid, windowId,
+        text, selected, nativeInput: () => nativeControl(name, "type", undefined, { text }) });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
 
   async function scroll(name: string, x: number, y: number, direction: "up" | "down", cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
-    if (cursorIdentity) clearForegroundTypeRetry(name, cursorIdentity);
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
       const before = await captureWindow();
       if (!validPoint(x, y, before)) throw new Error("Scroll coordinates must fall inside the current stage window snapshot.");
@@ -1342,7 +1278,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function drag(name: string, fromX: number, fromY: number, toX: number, toY: number, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
-    if (cursorIdentity) clearForegroundTypeRetry(name, cursorIdentity);
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
       const before = await captureWindow();
       if (!validPoint(fromX, fromY, before) || !validPoint(toX, toY, before)) {
@@ -1386,7 +1321,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     const sessions = [...agentSessions.values()];
     agentSessions.clear();
     desktopInputTargets.clear();
-    foregroundTypeRetries.clear();
     if (!runtimePromise) return;
     try {
       const runtime = await runtimePromise;

@@ -13,10 +13,10 @@ test("shell point inspection and invocation preserve exact control identity with
   const control = { label: "Start", pid: 123, windowPid: 123, windowId: "456", rect: { x: 0, y: 0, width: 50, height: 50 }, invoked: false };
   const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => {
     requests.push(request);
-    if (request.op === "windowAtPoint") return { ok: true, pointWindow: { pid: 123, windowId: "456", shell: true } };
+    if (request.op === "windowAtPoint") return { ok: true, pointWindow: { pid: 123, windowId: "456", shell: true, screenOrigin: { x: -100, y: 25 } } };
     return { ok: true, control: { ...control, invoked: request.op === "invokePointControl" } };
   } });
-  assert.deepEqual(await manager.windowAtPoint(10, 10), { pid: 123, windowId: BigInt(456), shell: true, keyboardWindow: false });
+  assert.deepEqual(await manager.windowAtPoint(10, 10), { pid: 123, windowId: BigInt(456), shell: true, keyboardWindow: false, screenOrigin: { x: -100, y: 25 } });
   const inspected = await manager.pointControl(10, 10);
   await manager.pointControl(10, 10, inspected);
   assert.deepEqual(requests.at(-1), { op: "invokePointControl", x: 10, y: 10, label: "Start", pid: 123, windowPid: 123, windowId: "456" });

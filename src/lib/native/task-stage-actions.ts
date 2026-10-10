@@ -5,7 +5,7 @@ type TaskStageActionBody =
   | { kind: "capture" }
   | { kind: "click" | "cursor"; x: number; y: number }
   | { kind: "double_click" | "right_click"; x: number; y: number }
-  | { kind: "type"; text: string; deliveryMode?: "background" | "foreground" }
+  | { kind: "type"; text: string }
   | { kind: "scroll"; x: number; y: number; direction: "up" | "down" }
   | { kind: "drag"; fromX: number; fromY: number; toX: number; toY: number }
   | { kind: "press_key"; key: string }
@@ -28,7 +28,7 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid stage action.");
   const action = value as Record<string, unknown>;
   const fields: Record<string, string[]> = { capture: [], click: ["x", "y"], double_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
-    type: ["text", "deliveryMode"], scroll: ["x", "y", "direction"], drag: ["fromX", "fromY", "toX", "toY"], press_key: ["key"], hotkey: ["keys"] };
+    type: ["text"], scroll: ["x", "y", "direction"], drag: ["fromX", "fromY", "toX", "toY"], press_key: ["key"], hotkey: ["keys"] };
   if (typeof action.kind !== "string" || !Object.hasOwn(fields, action.kind)) throw new Error("Unsupported stage action.");
   const allowedFields = fields[action.kind]!;
   const requiredFields = action.kind === "type" ? ["text"] : allowedFields;
@@ -42,8 +42,6 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   }
   if (action.kind === "type" && (typeof action.text !== "string" || !action.text.length || action.text.length > 500
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(action.text))) throw new Error("Invalid stage input text.");
-  if (action.kind === "type" && action.deliveryMode !== undefined
-    && action.deliveryMode !== "background" && action.deliveryMode !== "foreground") throw new Error("Invalid stage text delivery mode.");
   if (action.kind === "scroll" && action.direction !== "up" && action.direction !== "down") throw new Error("Invalid scroll direction.");
   if (action.kind === "press_key" && !validKey(action.key)) throw new Error("Invalid key name.");
   if (action.kind === "hotkey" && (!Array.isArray(action.keys) || action.keys.length < 1 || action.keys.length > 4
@@ -64,8 +62,8 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "click": return click(action.x, action.y);
     case "double_click": return click(action.x, action.y, { count: 2 });
     case "right_click": return click(action.x, action.y, { button: "right" });
-    case "type": return desktopWide ? driver.typeTextDesktop(name, action.text, identity, action.deliveryMode)
-      : driver.typeText(name, action.text, identity, action.deliveryMode);
+    case "type": return desktopWide ? driver.typeTextDesktop(name, action.text, identity)
+      : driver.typeText(name, action.text, identity);
     case "scroll": return desktopWide ? driver.scrollDesktop(name, action.x, action.y, action.direction, identity)
       : driver.scroll(name, action.x, action.y, action.direction, identity);
     case "drag": return desktopWide ? driver.dragDesktop(name, action.fromX, action.fromY, action.toX, action.toY, identity)

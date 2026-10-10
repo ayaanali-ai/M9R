@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { renameStateFile } from "./atomic-file";
 import { isAgentContext } from "./approval-core";
 import { normalizeHandle } from "./inbox-core";
 import type { LocalStore } from "./local-store";
@@ -63,8 +64,13 @@ export function setTaskStagePermission(root: string, handle: string, enabled: bo
     if (handles.length > 16) throw new Error("At most 16 agents may use task stages.");
     const sortedModes: Record<string, TaskStageAccessMode> = {};
     for (const key of Object.keys(modes).sort()) sortedModes[key] = modes[key]!;
-    writeFileSync(temporary, JSON.stringify({ version: 1, handles: handles.sort(), controlHandles: controlHandles.sort(), ...(Object.keys(sortedModes).length ? { modes: sortedModes } : {}) }) + "\n", { mode: 0o600, flag: "wx" });
-    renameSync(temporary, file);
+    const serializedPolicy = JSON.stringify({ version: 1, handles: handles.sort(), controlHandles: controlHandles.sort(), ...(Object.keys(sortedModes).length ? { modes: sortedModes } : {}) }) + "\n";
+    // Repeated grants are common during task setup. Avoid replacing an identical
+    // policy file: on Windows, a needless rename can collide with a short-lived
+    // reader and fail with EPERM.
+    if (existsSync(file) && readFileSync(file, "utf8") === serializedPolicy) return { handles };
+    writeFileSync(temporary, serializedPolicy, { mode: 0o600, flag: "wx" });
+    renameStateFile(temporary, file);
     return { handles };
   } finally {
     rmSync(temporary, { force: true });

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { renameStateFile } from "../src/lib/native/atomic-file";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
 import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageWindowMatchesApp, type StageAppLaunchSpec } from "../src/lib/native/task-stage-apps";
@@ -43,6 +44,27 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   } });
   return { root, store, identity, task, service, driver, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test("state file replacement retries transient Windows sharing errors, but surfaces persistent failures", () => {
+  let calls = 0;
+  const waits: number[] = [];
+  renameStateFile("stage.tmp", "stage.json", {
+    platform: "win32",
+    rename: () => {
+      calls += 1;
+      if (calls < 3) throw Object.assign(new Error("temporary sharing lock"), { code: "EPERM" });
+    },
+    wait: (milliseconds) => waits.push(milliseconds),
+  });
+  assert.equal(calls, 3);
+  assert.deepEqual(waits, [10, 30]);
+
+  assert.throws(() => renameStateFile("stage.tmp", "stage.json", {
+    platform: "win32",
+    rename: () => { throw Object.assign(new Error("missing source"), { code: "ENOENT" }); },
+    wait: () => assert.fail("permanent failures must not be retried"),
+  }), /missing source/);
+});
 
 test("app names and renderer aliases are targeting references, not an app catalog", () => {
   for (const value of ["terminal", "MSI Center", "Microsoft PowerPoint", "C:\\Windows\\System32\\cmd.exe"]) assert.equal(isStageAppReference(value), true);
