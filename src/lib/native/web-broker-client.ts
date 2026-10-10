@@ -5,6 +5,8 @@ import { requestOwnerPipe } from "./owner-pipe";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import type { TaskStageMode } from "./task-desktop-stage";
 
+const MAX_STAGE_REQUEST_TIMEOUT_MS = 70_000;
+
 export interface WebBrokerClient {
   /** Durable task/inbox mutations performed by the owner broker under its own M9R-home ACL. */
   submitAgentTask?(token: string, to: string, goal: string): Promise<{ ok: boolean; taskId?: string; created?: boolean; error?: string }>;
@@ -92,7 +94,10 @@ async function taskStageRequest<T extends { ok: boolean; error?: string }>(input
       method: "POST",
       headers: { "content-type": "application/json", "x-m9r-key": key },
       body: JSON.stringify(input.body),
-      signal: AbortSignal.timeout(Math.max(1, Math.min(input.timeoutMs, 15_000))),
+      // Stage launch/actions may legitimately take longer than ordinary broker
+      // RPCs while a native window is starting and being attached. Keep a hard
+      // ceiling, but honor the deadline each stage method selected.
+      signal: AbortSignal.timeout(Math.max(1, Math.min(input.timeoutMs, MAX_STAGE_REQUEST_TIMEOUT_MS))),
     });
   } catch (error) {
     return { ok: false, error: stageTransportFailure(error) } as T;

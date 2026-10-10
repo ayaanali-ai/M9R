@@ -18,6 +18,31 @@ test("distinguishes a request timeout from an unreachable broker", async () => w
   assert.equal(result?.error, "The local M9R desktop-stage request timed out before the broker responded.");
 }));
 
+test("uses the requested deadline for slow desktop-stage broker operations", async () => withKey(async (keyPath) => {
+  const deadlines: number[] = [];
+  const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+  Object.defineProperty(AbortSignal, "timeout", {
+    configurable: true,
+    value: (milliseconds: number) => {
+      deadlines.push(milliseconds);
+      return new AbortController().signal;
+    },
+  });
+
+  try {
+    const client = createWebBrokerClient({
+      keyPath,
+      fetchImpl: async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    });
+    await client.taskStageApp?.("session-token", "T42", "wt");
+    await client.taskStageAction?.("session-token", "T42", { kind: "capture" });
+    await client.prepareTaskStage?.("session-token", "T42", "owner-preview", 42_000);
+    assert.deepEqual(deadlines, [70_000, 70_000, 42_000]);
+  } finally {
+    if (descriptor) Object.defineProperty(AbortSignal, "timeout", descriptor);
+  }
+}));
+
 test("reports a missing broker key without exposing the key path", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-stage-client-"));
   try {
