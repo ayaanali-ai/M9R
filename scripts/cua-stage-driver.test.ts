@@ -56,7 +56,10 @@ test("foreground type delivery is an explicit retry after background refusal for
 
   await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity, "foreground"), /only after.*background.*refusal/i);
   await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity), /Background delivery is not available/);
-  assert.equal(parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "foreground" }).deliveryMode, "foreground");
+  await assert.rejects(driver.typeText("stage", "different command", identity, "foreground"), /only after.*background.*refusal/i);
+  assert.equal(calls.some((item) => item.method === "callTool"), false, "foreground retry cannot change the refused text");
+  assert.deepEqual(parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "foreground" }),
+    { kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "foreground" });
   assert.throws(() => parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "sideways" }), /Invalid stage text delivery mode/);
 
   const retried = await driver.typeText("stage", "echo M9R_TERM_OK", identity, "foreground");
@@ -67,6 +70,7 @@ test("foreground type delivery is an explicit retry after background refusal for
   assert.equal(call.args.text, "echo M9R_TERM_OK");
   assert.equal(call.args.delivery_mode, "foreground");
   assert.equal(typeof call.args.session, "string");
+  await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity, "foreground"), /only after.*background.*refusal/i);
 }));
 
 function withRoot(run: (root: string) => Promise<void>): Promise<void> {
