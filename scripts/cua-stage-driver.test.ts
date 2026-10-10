@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { createCuaStageDriver as createCuaStageDriverCore, topmostWindowAtScreenPoint, type CuaStageDriverDependencies } from "../src/lib/native/cua-stage-driver";
 import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
+import { parseTaskStageAction } from "../src/lib/native/task-stage-actions";
 
 const desktopId = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
 const windowId = "9223372036854775807";
@@ -38,6 +39,34 @@ test("Windows optional frame-valid flag accepts matching PNG metadata and reject
   await assert.rejects(driver({ screenshotFrameValid: false }).capture("stage"), /valid stage window snapshot/);
   await assert.rejects(driver({ screenshotWidth: 2 }).capture("stage"), /matching PNG dimensions/);
   await assert.rejects(driver({ images: [{ mimeType: "image/png", dataBase64: imageData }] }).capture("stage"), /matching PNG dimensions/);
+}));
+
+test("foreground type delivery is an explicit retry after background refusal for the same exact window", async () => withRoot(async (root) => {
+  await registerStage(root, "4567");
+  const identity = { handle: "codex", sessionId: "terminal-session" };
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driverError = new Error("Background delivery is not available for target window class 'CASCADIA_HOSTING_WINDOW_CLASS' on this event kind (text_input).");
+  const state = { pid: 4321, windowId: 4567n, screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state,
+    typeTextError: driverError,
+    callToolResult: { isError: false, action: { effect: "confirmed", route: "global_input", summary: "foreground text delivered" } },
+  }) as never });
+
+  await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity, "foreground"), /only after.*background.*refusal/i);
+  await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity), /Background delivery is not available/);
+  assert.equal(parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "foreground" }).deliveryMode, "foreground");
+  assert.throws(() => parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "sideways" }), /Invalid stage text delivery mode/);
+
+  const retried = await driver.typeText("stage", "echo M9R_TERM_OK", identity, "foreground");
+  assert.equal(retried.outcome.status, "confirmed");
+  const call = calls.find((item) => item.method === "callTool")?.value as { name: string; args: Record<string, unknown> };
+  assert.equal(call.name, "type_text");
+  assert.deepEqual(call.args.target, { kind: "window", pid: 4321, window_id: 4567 });
+  assert.equal(call.args.text, "echo M9R_TERM_OK");
+  assert.equal(call.args.delivery_mode, "foreground");
+  assert.equal(typeof call.args.session, "string");
 }));
 
 function withRoot(run: (root: string) => Promise<void>): Promise<void> {
@@ -86,9 +115,9 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
   };
 }
 
-async function registerStage(root: string): Promise<void> {
+async function registerStage(root: string, registeredWindowId = windowId): Promise<void> {
   const manager = createWindowsDesktopStageManager(stageDependencies(root));
-  await manager.register("stage", "4321", windowId);
+  await manager.register("stage", "4321", registeredWindowId);
 }
 
 async function registerOwnerPreview(root: string, identity = { handle: "codex", sessionId: "desktop-session" }): Promise<void> {
@@ -110,6 +139,8 @@ function makeSdk(options: {
   sessionStateError?: Error;
   escalationError?: Error;
   windowStateError?: Error;
+  typeTextError?: Error;
+  callToolResult?: Record<string, unknown>;
   calls: Array<{ method: string; value?: unknown }>;
 }) {
   const actionResult = options.actionResult ?? { effect: 0, route: 1, summary: "action confirmed" };
@@ -157,7 +188,10 @@ function makeSdk(options: {
     },
     async setAgentCursorEnabled(input: unknown) { options.calls.push({ method: "setAgentCursorEnabled", value: input }); return { isError: false }; },
     async moveCursor(input: unknown) { options.calls.push({ method: "moveCursor", value: input }); return { isError: false }; },
-    async callTool(name: string, argumentsJson: string) { options.calls.push({ method: "callTool", value: { name, args: JSON.parse(argumentsJson) } }); return { isError: false }; },
+    async callTool(name: string, argumentsJson: string) {
+      options.calls.push({ method: "callTool", value: { name, args: JSON.parse(argumentsJson) } });
+      return options.callToolResult ?? { isError: false };
+    },
     async getAgentCursorState() {
       options.calls.push({ method: "getAgentCursorState" });
       const latest = [...options.calls].reverse().find((call) => call.method === "moveCursor" || call.method === "callTool");
@@ -184,7 +218,7 @@ function makeSdk(options: {
     async click(input: unknown) { options.calls.push({ method: "click", value: input }); return actionResult; },
     async pressKey(input: unknown) { options.calls.push({ method: "pressKey", value: input }); return toolResult; },
     async hotkey(input: unknown) { options.calls.push({ method: "hotkey", value: input }); return toolResult; },
-    async typeText(input: unknown) { options.calls.push({ method: "typeText", value: input }); return toolResult; },
+    async typeText(input: unknown) { options.calls.push({ method: "typeText", value: input }); if (options.typeTextError) throw options.typeTextError; return toolResult; },
     async scroll(input: unknown) { options.calls.push({ method: "scroll", value: input }); return toolResult; },
     async drag(input: unknown) { options.calls.push({ method: "drag", value: input }); return toolResult; },
     async endSession(input: unknown) { options.calls.push({ method: "endSession", value: input }); },
