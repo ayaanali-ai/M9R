@@ -173,6 +173,10 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
       else throw new Error("The bundled runtime contains an unsupported file type.");
     };
     for (const name of ["m9r-overlay.exe", "m9r-web-broker.exe", "cua-driver-runtime", "THIRD_PARTY_NOTICES.txt"]) {
+      // The standalone installer owns the web broker's hash manifest and has
+      // an authenticated stop/replace/start lifecycle. A plain engine setup
+      // must not overwrite that image behind the installer's ownership record.
+      if (name === "m9r-web-broker.exe" && existsSync(join(nativePaths(io).m9r, "web-broker-install.json"))) continue;
       const source = join(dirname(engine), name);
       if (existsSync(source)) collect(source, join(targetDir, name));
     }

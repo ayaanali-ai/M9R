@@ -7,7 +7,7 @@ import { renameStateFile } from "../src/lib/native/atomic-file";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
 import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageWindowMatchesApp, type StageAppLaunchSpec } from "../src/lib/native/task-stage-apps";
-import { windowsAppSearchNames } from "../src/lib/native/windows-installed-apps";
+import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT } from "../src/lib/native/windows-installed-apps";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
 
@@ -79,6 +79,10 @@ test("common terminal and browser names search Windows' friendly installed-app r
   assert.deepEqual(windowsAppSearchNames("wt"), ["Terminal"]);
   assert.deepEqual(windowsAppSearchNames("Google Chrome"), ["Google Chrome", "chrome"]);
   assert.deepEqual(windowsAppSearchNames("MSI Center"), ["MSI Center"]);
+});
+
+test("Windows app discovery searches pinned taskbar shortcuts", () => {
+  assert.ok(WINDOWS_APP_DISCOVERY_SCRIPT.includes("User Pinned\\TaskBar"));
 });
 
 test("app launches use the task project cwd and never inherit Windows System32", () => {

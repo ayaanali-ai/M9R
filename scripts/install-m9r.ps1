@@ -158,6 +158,21 @@ function Read-ManagedWebBrokerManifest($Paths) {
     return $manifest
 }
 
+function Test-EngineRuntimeOwnsWebBroker($Paths) {
+    $engineManifestPath = Join-Path $Paths.M9rRoot 'install-manifest.json'
+    if (-not (Test-Path -LiteralPath $engineManifestPath -PathType Leaf)) { return $false }
+    try { $engineManifest = Get-Content -LiteralPath $engineManifestPath -Raw | ConvertFrom-Json }
+    catch { throw "The M9R runtime ownership record is unreadable at $engineManifestPath; review it before continuing." }
+    if ($engineManifest.version -ne 1 -or $null -eq $engineManifest.runtimeFiles) { return $false }
+    $expectedPath = [IO.Path]::GetFullPath($Paths.Target)
+    foreach ($recordedPath in @($engineManifest.runtimeFiles)) {
+        try { $resolvedPath = [IO.Path]::GetFullPath([string]$recordedPath) }
+        catch { continue }
+        if ([string]::Equals($resolvedPath, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
 function Assert-ManagedWebBrokerInstallable([string]$SourcePath) {
     if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { throw "The standalone web broker is missing from the verified package: $SourcePath" }
     $paths = Get-ManagedWebBrokerPaths
@@ -169,16 +184,24 @@ function Assert-ManagedWebBrokerInstallable([string]$SourcePath) {
             # installer owns the broker's separate manifest, so claim an identical companion instead of
             # treating our own freshly copied file as an unrelated user binary.
             $currentHash = (Get-FileHash -LiteralPath $paths.Target -Algorithm SHA256).Hash
-            if (-not [string]::Equals($currentHash, $sourceHash, [StringComparison]::OrdinalIgnoreCase)) {
+            $engineOwnsBroker = Test-EngineRuntimeOwnsWebBroker $paths
+            if (-not [string]::Equals($currentHash, $sourceHash, [StringComparison]::OrdinalIgnoreCase) -and -not $engineOwnsBroker) {
                 throw "Refusing to overwrite an unowned file at $($paths.Target)."
+            }
+            if ($engineOwnsBroker -and -not [string]::Equals($currentHash, $sourceHash, [StringComparison]::OrdinalIgnoreCase)) {
+                Write-Host 'The broker hash differs from this package, but its exact path is recorded by the M9R runtime manifest; the verified installer will refresh it after consent.' -ForegroundColor Yellow
             }
             return
         }
         $currentHash = (Get-FileHash -LiteralPath $paths.Target -Algorithm SHA256).Hash
         $matchesRecorded = [string]::Equals($currentHash, [string]$manifest.sha256, [StringComparison]::OrdinalIgnoreCase)
         $matchesVerifiedPackage = [string]::Equals($currentHash, $sourceHash, [StringComparison]::OrdinalIgnoreCase)
-        if (-not $matchesRecorded -and -not $matchesVerifiedPackage) {
+        $engineOwnsBroker = Test-EngineRuntimeOwnsWebBroker $paths
+        if (-not $matchesRecorded -and -not $matchesVerifiedPackage -and -not $engineOwnsBroker) {
             throw "The installed web broker matches neither its M9R ownership record nor the verified package at $($paths.Target); it was not overwritten."
+        }
+        if ($engineOwnsBroker -and -not $matchesRecorded -and -not $matchesVerifiedPackage) {
+            Write-Host 'The broker hash differs from its standalone ownership record, but its exact path is recorded by the M9R runtime manifest; the verified installer will refresh it after consent.' -ForegroundColor Yellow
         }
     }
 }

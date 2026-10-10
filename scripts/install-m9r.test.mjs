@@ -264,6 +264,23 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
     for (const [path, contents] of originalFiles) assert.equal(readFileSync(path, "utf8"), contents, `${path} must be restored exactly`);
   });
 
+  await t.test("a broker replaced by engine setup can be refreshed from a verified package", () => {
+    const profile = makeProfile(join(temp, "stale-broker-record-case"));
+    const firstInstall = runPowerShell(installer, ["-PackagePath", zipPath, "-NoAutostart", "-NoLaunch"], { input: "y\n", env: profile.env });
+    assert.equal(firstInstall.status, 0, firstInstall.stderr || firstInstall.stdout);
+    const installedBroker = join(profile.m9rHome, "bin", "m9r-web-broker.exe");
+    const runtimeManifest = JSON.parse(readFileSync(join(profile.m9rHome, "install-manifest.json"), "utf8"));
+    assert.ok(runtimeManifest.runtimeFiles.some((path) => canonicalPath(path) === canonicalPath(installedBroker)));
+
+    writeFileSync(installedBroker, Buffer.concat([readFileSync(installedBroker), Buffer.from("engine-updated-companion")]));
+    const refreshed = runPowerShell(installer, ["-PackagePath", zipPath, "-NoAutostart", "-NoLaunch"], { input: "y\n", env: profile.env });
+    assert.equal(refreshed.status, 0, refreshed.stderr || refreshed.stdout);
+    assert.match(refreshed.stdout, /exact path is recorded by the M9R runtime manifest/i);
+    assert.deepEqual(readFileSync(installedBroker), readFileSync(join(engineDist, "m9r-web-broker.exe")));
+    const ownership = JSON.parse(readFileSync(join(profile.m9rHome, "web-broker-install.json"), "utf8"));
+    assert.equal(ownership.sha256, createHash("sha256").update(readFileSync(installedBroker)).digest("hex"));
+  });
+
   await t.test("uninstall preserves a web broker changed after installation", () => {
     const profile = makeProfile(join(temp, "modified-broker-case"));
     const installed = runPowerShell(installer, ["-PackagePath", zipPath, "-NoAutostart", "-NoLaunch"], { input: "y\n", env: profile.env });

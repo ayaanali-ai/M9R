@@ -464,9 +464,14 @@ test("Windows setup installs the pill, broker, and Driver runtime together and s
     assert.match(autostartCalls.at(-1)!, /m9r-overlay\.exe/);
     assert.equal(readFileSync(join(s.p.m9r, "bin", "m9r-web-broker.exe"), "utf8"), "m9r-web-broker.exe");
     assert.equal(readFileSync(join(s.p.m9r, "bin", "cua-driver-runtime", "node_modules", "driver", "driver.node"), "utf8"), "driver fixture");
+    const brokerPath = join(s.p.m9r, "bin", "m9r-web-broker.exe");
+    writeFileSync(join(s.p.m9r, "web-broker-install.json"), JSON.stringify({ version: 1, path: brokerPath, sha256: "f".repeat(64) }));
+    writeFileSync(join(s.home, "m9r-web-broker.exe"), "new broker from a later engine build", "utf8");
     assert.equal(await s.run("setup", ["--yes"]), 0);
+    assert.equal(readFileSync(brokerPath, "utf8"), "m9r-web-broker.exe", "native setup leaves the installer-owned broker for its authenticated updater");
     assert.match(s.out.at(-2) ?? s.out.join("\n"), /Already set up|M9R/);
     assert.equal(await s.run("uninstall", ["--yes"]), 0);
+    assert.equal(existsSync(brokerPath), true, "engine uninstall leaves the separately managed broker for its owner manifest");
     assert.equal(existsSync(join(s.p.m9r, "bin", "m9r-overlay.exe")), false);
     assert.equal(existsSync(join(s.p.m9r, "bin", "cua-driver-runtime", "node_modules", "driver", "driver.node")), false);
   } finally { s.done(); }

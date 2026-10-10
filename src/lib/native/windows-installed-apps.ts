@@ -39,7 +39,7 @@ export function windowsAppSearchNames(value: string): string[] {
 
 // Read Windows' own registrations and user shortcuts. The requested name is
 // data in an environment variable, never interpolated into PowerShell code.
-const DISCOVER = String.raw`
+export const WINDOWS_APP_DISCOVERY_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 function Key([string] $value) { ($value.ToLowerInvariant() -replace '\.exe$', '' -replace '[^\p{L}\p{N}]', '') }
 $queryKeys = @((ConvertFrom-Json -InputObject $env:M9R_APP_QUERY_NAMES) | ForEach-Object { Key ([string] $_) })
@@ -76,7 +76,9 @@ if ($found.Count -gt 0) {
   exit 0
 }
 $shell = New-Object -ComObject WScript.Shell
-$roots = @([Environment]::GetFolderPath('StartMenu'), [Environment]::GetFolderPath('CommonStartMenu'), [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('CommonDesktopDirectory'))
+$roots = @()
+if ($env:APPDATA) { $roots += Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar' }
+$roots += @([Environment]::GetFolderPath('StartMenu'), [Environment]::GetFolderPath('CommonStartMenu'), [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('CommonDesktopDirectory'))
 foreach ($root in $roots) {
   if (-not $root) { continue }
   foreach ($file in @(Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue)) {
@@ -96,7 +98,7 @@ export async function discoverInstalledWindowsApp(name: string): Promise<Install
   if (process.platform !== "win32") return undefined;
   const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const output = await new Promise<string>((resolve, reject) => {
-    execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", DISCOVER], {
+    execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_APP_DISCOVERY_SCRIPT], {
       windowsHide: true, timeout: 15_000, maxBuffer: 256 * 1024,
       env: { ...process.env, M9R_APP_QUERY_NAMES: JSON.stringify(windowsAppSearchNames(name)) },
     }, (error, stdout, stderr) => error ? reject(new Error(`Windows app discovery failed: ${error.killed ? "Windows inventory query exceeded its 15-second deadline." : (stderr.trim() || error.message.split("\n")[0]).slice(0, 500)}`)) : resolve(stdout));
