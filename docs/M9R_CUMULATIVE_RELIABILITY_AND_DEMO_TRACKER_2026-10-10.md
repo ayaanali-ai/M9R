@@ -294,6 +294,15 @@ This tracker is the working plan until all required demo gates are accepted. Roa
 
 ## Source records
 
+### 2026-10-10 desktop transport follow-up (steps 1–3; acceptance remains open)
+
+- Preserved local checkpoint `22f9053d`; its clean archived source passed 161 focused regressions. No runtime installation or pill restart occurred for this checkpoint.
+- Confirmed a transport inconsistency: agent task-state writes use the owner named pipe, while desktop prepare/app/action required the owner key and HTTP. Desktop operations now use that same local pipe when configured, with shared identity/task validation and no HTTP fallback. Owner approval endpoints remain unavailable through the agent pipe.
+- Pipe responses support bounded captures up to 4 MiB, retain 64 KiB request limits, and allow a bounded desktop deadline. Additional socket chunks cannot dispatch an in-flight request twice.
+- Windows lock publication retries transient sharing errors within its existing deadline without deleting another writer's lock or replacing atomic state publication.
+- Verification: 51 broker/transport tests, 77 state/delivery tests, and 4 pipe tests passed; the latter includes extra-chunk one-shot dispatch and desktop requests with unavailable HTTP/key access. These are fixture regressions, not live cursor acceptance.
+- After the owner restarted Codex, this chat's M9R connection still returned `Transport closed`. Existing broker HTTP health and read-only named-pipe probes did not yield a healthy response. Process probes disagree, so no crash or sole underlying cause is claimed. Clean build verification and installed-runtime recovery remain required before task-ready sign-off.
+
 - Owner audit attachment received 2026-10-10: nine findings F1–F9 and their proposed fixes.
 - docs/M9R_AUDIT_CHECKPOINT_2026-10-07.md, including the 2026-10-09 T26/T27 addenda, seven-step cumulative order, demo gates, and carried-forward requirements.
 - docs/M9R_CUA_WAVE_PLAN.md, current roadmap status record dated 2026-10-07.

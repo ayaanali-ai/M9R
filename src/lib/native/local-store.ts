@@ -231,7 +231,14 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           renameSync(pending, lockPath);
           return ownerName;
         } catch (error) {
-          if (!existsSync(lockPath)) throw error;
+          if (!existsSync(lockPath)) {
+            const code = (error as NodeJS.ErrnoException).code;
+            // Windows can temporarily retain a directory handle after release.
+            // Retry publication, never remove a directory or replace its owner.
+            if (!["EPERM", "EACCES", "EBUSY"].includes(code ?? "") || Date.now() > deadline) throw error;
+            sleepSync(15);
+            continue;
+          }
           try {
             const files = readdirSync(lockPath);
             if (files.length === 1 && /^owner-[a-f0-9-]+\.json$/.test(files[0]!)) {

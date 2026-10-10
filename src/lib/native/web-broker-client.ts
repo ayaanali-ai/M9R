@@ -82,7 +82,17 @@ async function taskStageRequest<T extends { ok: boolean; error?: string }>(input
   body: Record<string, unknown>;
   timeoutMs: number;
   operationId?: string;
+  ownerPipePath?: string;
 }): Promise<T> {
+  if (input.ownerPipePath) {
+    const result = await requestOwnerPipe<T>(input.ownerPipePath, {
+      method: "POST", path: new URL(input.url).pathname, body: input.body,
+    }, input.timeoutMs);
+    if (result && typeof result === "object" && typeof result.ok === "boolean") return result;
+    return { ok: false, error: input.operationId
+      ? `The desktop-stage IPC response was lost; operation ${input.operationId} may have been applied. Do not replay it. Capture the stage and inspect its state.`
+      : "The local desktop-stage IPC endpoint did not return a valid response. No HTTP fallback was attempted." } as T;
+  }
   let key: string;
   try {
     key = readFileSync(input.keyPath, "utf8").trim();
@@ -139,16 +149,16 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary } });
     },
     async taskStageApp(token, taskId, appId, mode = "owner-preview") {
-      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath,
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,
         url: `${baseUrl}/web/stage/${appId === undefined ? "close" : "launch"}`,
         body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }) }, timeoutMs: 70_000 });
     },
     async taskStageAction(token, taskId, action, mode = "owner-preview", operationId) {
-      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, url: `${baseUrl}/web/stage/action`,
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/action`,
         body: { token, taskId, action, mode, ...(operationId ? { operationId } : {}) }, timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
     async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000) {
-      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, url: `${baseUrl}/web/stage/prepare`,
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/prepare`,
         body: { token, taskId, mode }, timeoutMs });
     },
     async run(request) {

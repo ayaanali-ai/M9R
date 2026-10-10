@@ -522,14 +522,53 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (!persist()) return ownerReply(false, { error: "could not persist web authority state" });
     return ownerReply(true, { revoked });
   };
+  const agentStagePaths = new Set(["/web/stage/prepare", "/web/stage/launch", "/web/stage/close", "/web/stage/action"]);
+  // Both transports share validation and the task service's identity/approval checks.
+  // The local pipe does not grant access to owner approval or authority mutations.
+  const handleAgentStage = async (path: string, body: unknown) => {
+    try {
+      if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
+      const value = body as Record<string, unknown>;
+      const extraFields = path.endsWith("/launch") ? ["appId"] : path.endsWith("/action") ? ["action", "operationId"] : [];
+      const fields = ["token", "taskId", "mode", ...extraFields];
+      if (!agentStagePaths.has(path) || Object.keys(value).some((key) => !fields.includes(key))
+        || typeof value.token !== "string" || value.token.length > 128
+        || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
+        || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
+      const mode = value.mode as "background" | "owner-preview" | undefined;
+      const unavailable = () => ({ status: 503, body: { ok: false, error: "Task stage operations are unavailable on this broker." } });
+      if (!options.taskStages) return unavailable();
+      if (path.endsWith("/prepare")) return { status: 200, body: { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, mode) } };
+      if (path.endsWith("/launch")) {
+        if (!isStageAppReference(value.appId)) throw new Error("Invalid stage request.");
+        if (!options.taskStages.launch) return unavailable();
+        return { status: 200, body: { ok: true, result: await options.taskStages.launch(value.token, value.taskId, value.appId, mode) } };
+      }
+      if (path.endsWith("/close")) {
+        if (!options.taskStages.closeApp) return unavailable();
+        return { status: 200, body: { ok: true, result: await options.taskStages.closeApp(value.token, value.taskId, mode) } };
+      }
+      if (value.operationId !== undefined && (typeof value.operationId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.operationId))) throw new Error("Invalid stage request.");
+      const kind = value.action && typeof value.action === "object" && !Array.isArray(value.action) ? (value.action as { kind?: unknown }).kind : undefined;
+      if (kind !== "capture" && typeof value.operationId !== "string") return { status: 409, body: { ok: false,
+        error: "This M9R MCP runtime does not send desktop-operation receipts. Update the M9R engine before sending desktop input; no action was dispatched." } };
+      if (!options.taskStages.act) return unavailable();
+      return { status: 200, body: { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, mode, value.operationId as string | undefined) } };
+    } catch (error) {
+      const body = stageFailure(error, "Stage request failed.");
+      return { status: body.driverError ? 502 : 403, body };
+    }
+  };
   const ownerServer = options.ownerPipePath ? await startOwnerPipe({
     path: options.ownerPipePath,
+    requestTimeoutMs: (request) => request.method === "POST" && agentStagePaths.has(request.path) ? 70_000 : 2_000,
     handle: (request) => {
       if (request.method === "GET") return handleOwnerRequest(request);
       if (request.method === "POST" && request.path === "/web/mcp/store") {
         if (!options.agentMcpStore) return { ok: false, error: "Owner-brokered M9R task state writes are unavailable." };
         return applyAgentMcpStoreMutation(options.agentMcpStore, request.body).body;
       }
+      if (request.method === "POST" && agentStagePaths.has(request.path)) return handleAgentStage(request.path, request.body).then((result) => result.body);
       return ownerReply(false, { error: "the local pipe only accepts read-only status and authenticated agent task-state operations" });
     },
   }) : null;
@@ -549,59 +588,12 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (requestUrl.pathname.startsWith("/web/")) {
       if (req.headers.origin !== undefined) return reply(res, 403, { ok: false, error: "browser-originated requests are refused" });
       if (!sameSecret(req.headers["x-m9r-key"] as string | undefined, options.key)) return reply(res, 401, { ok: false, error: "missing or wrong key" });
-      if (req.method === "POST" && ["/web/stage/launch", "/web/stage/close"].includes(requestUrl.pathname)) {
-        const launch = requestUrl.pathname === "/web/stage/launch";
-        if (launch ? !options.taskStages?.launch : !options.taskStages?.closeApp) return reply(res, 503, { ok: false, error: "Task stage applications are unavailable on this broker." });
-        try {
-          const body: unknown = JSON.parse(await readBody(req) || "null");
-          if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
-          const value = body as Record<string, unknown>;
-          const fields = launch ? ["token", "taskId", "appId", "mode"] : ["token", "taskId", "mode"];
-          if (Object.keys(value).some((key) => !fields.includes(key)) || typeof value.token !== "string" || value.token.length > 128
-            || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
-            || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")
-            || launch && !isStageAppReference(value.appId)) throw new Error("Invalid stage request.");
-          const result = launch
-            ? await options.taskStages!.launch!(value.token, value.taskId, value.appId as string, value.mode as "background" | "owner-preview" | undefined)
-            : await options.taskStages!.closeApp!(value.token, value.taskId, value.mode as "background" | "owner-preview" | undefined);
-          return reply(res, 200, { ok: true, result });
-        } catch (error) { return replyStageFailure(res, error, "Stage app request failed."); }
-      }
-      if (req.method === "POST" && requestUrl.pathname === "/web/stage/action") {
-        if (!options.taskStages?.act) return reply(res, 503, { ok: false, error: "Task stage control is unavailable on this broker." });
-        try {
-          const body: unknown = JSON.parse(await readBody(req) || "null");
-          if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
-          const value = body as Record<string, unknown>;
-          if (Object.keys(value).some((key) => !["token", "taskId", "action", "mode", "operationId"].includes(key))
-            || typeof value.token !== "string" || value.token.length > 128
-            || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
-            || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")
-            || (value.operationId !== undefined && (typeof value.operationId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.operationId)))) throw new Error("Invalid stage request.");
-          const actionKind = value.action && typeof value.action === "object" && !Array.isArray(value.action)
-            ? (value.action as { kind?: unknown }).kind : undefined;
-          if (actionKind !== "capture" && typeof value.operationId !== "string") {
-            return reply(res, 409, { ok: false, error: "This M9R MCP runtime does not send desktop-operation receipts. Update the M9R engine before sending desktop input; no action was dispatched." });
-          }
-          return reply(res, 200, { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, value.mode as "background" | "owner-preview" | undefined, value.operationId as string | undefined) });
-        } catch (error) {
-          return replyStageFailure(res, error, "Stage action failed.");
-        }
-      }
-      if (req.method === "POST" && requestUrl.pathname === "/web/stage/prepare") {
-        if (!options.taskStages) return reply(res, 503, { ok: false, error: "Task stages are unavailable on this broker." });
-        try {
-          const body: unknown = JSON.parse(await readBody(req) || "null");
-          if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
-          const value = body as Record<string, unknown>;
-          if (Object.keys(value).some((key) => !["token", "taskId", "mode"].includes(key))
-            || typeof value.token !== "string" || value.token.length > 128
-            || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
-            || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
-          return reply(res, 200, { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, value.mode as "background" | "owner-preview" | undefined) });
-        } catch (error) {
-          return replyStageFailure(res, error, "Stage preparation failed.");
-        }
+      if (req.method === "POST" && agentStagePaths.has(requestUrl.pathname)) {
+        let body: unknown;
+        try { body = JSON.parse(await readBody(req) || "null"); }
+        catch (error) { return replyStageFailure(res, error, "Invalid stage JSON."); }
+        const result = await handleAgentStage(requestUrl.pathname, body);
+        return reply(res, result.status, result.body);
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/status") {
         return reply(res, 200, { ok: true, broker: "ready", browserTransport: options.browserTransport ? "agent-chrome" : "extension", browserReady: options.browserTransport?.ready() ?? (!!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN), extensionConnected: !!extension && extension.readyState === WebSocket.OPEN, extensionReady: !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN });

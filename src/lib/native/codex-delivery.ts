@@ -12,7 +12,7 @@ import { windowsFileHolders, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
 import { defaultStoreRoot } from "./local-store";
 import { createWebBrokerClient } from "./web-broker-client";
-import { brokerKeyPath } from "./web-broker-paths";
+import { brokerKeyPath, ownerPipePath } from "./web-broker-paths";
 import { prepareTaskStageNotice } from "./task-stage-notice";
 
 export interface DeliveryDeps {
@@ -234,7 +234,7 @@ export function readRolloutTailFor(threadId: string, env: Record<string, string 
 
 export function realDeps(env: Record<string, string | undefined> = process.env): DeliveryDeps {
   const root = defaultStoreRoot(homedir(), env);
-  const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
+  const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
   return {
     prepareTaskStage: (token, taskId) => prepareTaskStageNotice(root, web, token, "codex", taskId),
     requireTargetIdentity: true,
