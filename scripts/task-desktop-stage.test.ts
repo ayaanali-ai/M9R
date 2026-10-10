@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
-import { approveStageApp, resolveUnlistedStageApp } from "../src/lib/native/task-stage-apps";
+import { approveStageApp, resolveUnlistedStageApp, isStageAppReference, stageWindowMatchesApp } from "../src/lib/native/task-stage-apps";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
 
@@ -41,6 +41,13 @@ function fixture(control = false) {
   } });
   return { root, store, identity, task, service, driver, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test("app names and renderer aliases are targeting references rather than catalog restrictions", () => {
+  for (const value of ["terminal", "MSI Center", "Microsoft PowerPoint", "C:\\Windows\\System32\\cmd.exe"]) assert.equal(isStageAppReference(value), true);
+  for (const value of ["cmd && echo bad", "chrome\n--flag", "", "cmd;whoami"]) assert.equal(isStageAppReference(value), false);
+  assert.equal(stageWindowMatchesApp({ pid: 1, windowId: "2", appName: "WindowsTerminal.exe", title: "Windows PowerShell" }, { executable: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", args: [] }), true);
+  assert.equal(stageWindowMatchesApp({ pid: 1, windowId: "2", appName: "Other.exe", title: "Windows PowerShell" }, { executable: "powershell.exe", args: [] }), false);
+});
 
 test("a native target inspection failure is returned immediately instead of becoming an approval wait", async () => {
   const f = fixture(true);
@@ -90,6 +97,10 @@ test("an owner desktop app request reuses personal Chrome without creating anoth
     assert.equal(opened.reused, true);
     const prepared = await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
     assert.equal(prepared.hasAnchor, true, "repeat preparation must retain the same live task's selected app");
+    await f.service.act(f.identity.token, f.task.id, { kind: "capture" }, "owner-preview");
+    assert.equal(f.desktopActions.length, 0, "omitted view follows the selected app, not a conflicting desktop mapping");
+    await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "desktop" }, "owner-preview");
+    assert.equal(f.desktopActions.length, 1);
     await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview");
     const next = f.store.addTask({ from: "you", to: "codex", goal: "Next app task", origin: "human_typed", targetSession: "session-one", idempotencyKey: "next-app" }).task;
     assert.equal((await f.service.prepare(f.identity.token, next.id, "owner-preview")).hasAnchor, false);
@@ -321,7 +332,7 @@ test("unlisted app resolution is broker-fixed: well-known ids probe install root
     const resolved = resolveUnlistedStageApp(exe, { allowAbsolutePath: true, env });
     assert.equal(resolved.wellKnown, false);
     assert.deepEqual(resolved.args, []);
-    assert.match(resolved.sha256, /^[a-f0-9]{64}$/);
+    assert.equal(resolved.sha256, undefined, "full access does not hash or catalog an installed app");
     assert.throws(() => resolveUnlistedStageApp(join(root, "app.txt"), { allowAbsolutePath: true, env }), /not installed or could not be resolved/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

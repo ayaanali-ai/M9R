@@ -664,7 +664,12 @@ test("lists only eligible visible app windows and keeps the result local and bou
     { pid: 7777, windowId: "106", appName: "browser.exe", title: "A private title", width: 900, height: 700 },
   ]);
   assert.deepEqual(calls.find((call) => call.method === "listWindows")?.value, { onScreenOnly: true });
-  assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession", "shutdown"]);
+  assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession"]);
+  const all = await driver.listVisibleWindows({ onScreenOnly: false });
+  assert.ok(all.some((window) => window.windowId === "102"), "restoration discovery includes windows outside the visible screen");
+  assert.equal(calls.filter((call) => call.method === "shutdown").length, 0, "launch polling must keep its host alive");
+  await driver.shutdown();
+  assert.equal(calls.filter((call) => call.method === "shutdown").length, 1);
 }));
 
 test("targets click at exact window-local coordinates with background-only delivery", async () => withRoot(async (root) => {

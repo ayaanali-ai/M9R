@@ -20,6 +20,7 @@ import type { VerifiedIdentity } from "./identity-core";
 import type { WebBatchRequest, WebRequest } from "./web-broker-core";
 import type { WebBrokerClient } from "./web-broker-client";
 import { createPageNotesStore, type PageNotesStore } from "./page-notes-store";
+import { isStageAppReference } from "./task-stage-apps";
 import type { NetworkCoreClient } from "./network-core-client";
 import { registerNetworkCoreTools } from "./network-core-mcp-tools";
 import { pushCloudNote } from "./cloud-memory";
@@ -39,7 +40,7 @@ export interface McpServerDeps {
 }
 
 const TOKEN_FIELD = { token: z.string().min(1).describe("Your M9R session token, from the line the SessionStart card gave you (\"M9R session token: ...\"). Required on every call.") };
-const STAGE_APP_REF = z.string().min(1).max(1024).refine((value) => /^[a-z][a-z0-9_-]{0,39}$/.test(value) || /^(?:[A-Za-z]:[\\/]|\\\\).+\.exe$/i.test(value), "Use an app id or an absolute .exe path.");
+const STAGE_APP_REF = z.string().min(1).max(1024).refine(isStageAppReference, "Use an installed app name, app id, or absolute .exe path.");
 
 export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const server = new McpServer({ name: "m9r-mcp", version: "1.0.0" });
@@ -124,7 +125,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   });
 
   server.registerTool("m9r_stage_action", {
-    description: "Capture or control this task's desktop; mode defaults to owner-preview and actions use the whole desktop the owner is currently viewing. Click desktop icons, taskbar apps, Start, windows, and controls directly; this never launches a second app window or switches desktops. Pass mode \"background\" only for an explicitly requested isolated desktop. Use action.view \"app\" after m9r_stage_app to operate the selected exact window independently of owner focus; omit view or use \"desktop\" for the whole desktop. Supports capture, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Capture before each action, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Read the outcome and verify effects; an input acknowledgement alone is not proof of success.",
+    description: "Capture or control this task's desktop; mode defaults to owner-preview. After m9r_stage_app selects an app, omitted action.view uses that exact app window; otherwise it uses the owner's current desktop. Set action.view to app or desktop to explicitly choose screenshot coordinates. Desktop icons, taskbar apps, Start, windows, and controls are supported. Pass background mode only for an explicitly requested isolated desktop. Supports capture, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Capture before input, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Verify effects; an input acknowledgement alone is not proof of success.",
     inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), action: z.discriminatedUnion("kind", [
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("capture") }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),

@@ -21,6 +21,7 @@ import type { BrowserTransport } from "./agent-chrome";
 import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
 import { createWebBroker, ROOM_MODES, type RoomMode, type StageApprovalRequest, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
+import { isStageAppReference } from "./task-stage-apps";
 import { startOwnerPipe, type OwnerPipeRequest } from "./owner-pipe";
 import { isUiMessage, type UiState, type WebUiBridge } from "./web-ui-bridge";
 import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, type ProtocolMessageType } from "../../../packages/web-protocol-placeholder/src/index";
@@ -545,7 +546,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
           if (Object.keys(value).some((key) => !fields.includes(key)) || typeof value.token !== "string" || value.token.length > 128
             || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
             || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")
-            || launch && (typeof value.appId !== "string" || !/^[a-z][a-z0-9_-]{0,39}$/.test(value.appId))) throw new Error("Invalid stage request.");
+            || launch && !isStageAppReference(value.appId)) throw new Error("Invalid stage request.");
           const result = launch
             ? await options.taskStages!.launch!(value.token, value.taskId, value.appId as string, value.mode as "background" | "owner-preview" | undefined)
             : await options.taskStages!.closeApp!(value.token, value.taskId, value.mode as "background" | "owner-preview" | undefined);

@@ -131,11 +131,11 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
     async taskStageApp(token, taskId, appId, mode = "owner-preview") {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath,
         url: `${baseUrl}/web/stage/${appId === undefined ? "close" : "launch"}`,
-        body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }) }, timeoutMs: 15_000 });
+        body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }) }, timeoutMs: 70_000 });
     },
     async taskStageAction(token, taskId, action, mode = "owner-preview") {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, url: `${baseUrl}/web/stage/action`,
-        body: { token, taskId, action, mode }, timeoutMs: 15_000 });
+        body: { token, taskId, action, mode }, timeoutMs: 70_000 });
     },
     async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, url: `${baseUrl}/web/stage/prepare`,

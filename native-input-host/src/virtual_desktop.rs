@@ -484,6 +484,9 @@ mod platform {
         fn IsWindowEnabled(window: Hwnd) -> i32;
         fn GetForegroundWindow() -> Hwnd;
         fn ShowWindow(window: Hwnd, command: i32) -> i32;
+        fn ShowWindowAsync(window: Hwnd, command: i32) -> i32;
+        fn IsIconic(window: Hwnd) -> i32;
+        fn GetWindowPlacement(window: Hwnd, placement: *mut WindowPlacement) -> i32;
         fn IsWindowVisible(window: Hwnd) -> i32;
         fn SetWindowPos(window: Hwnd, after: Hwnd, x: i32, y: i32, width: i32, height: i32, flags: u32) -> i32;
         fn EnumWindows(callback: unsafe extern "system" fn(Hwnd, isize) -> i32, parameter: isize) -> i32;
@@ -541,6 +544,16 @@ mod platform {
         bottom: i32,
     }
 
+    #[repr(C)]
+    struct WindowPlacement {
+        length: u32,
+        flags: u32,
+        show_command: u32,
+        minimum: Point,
+        maximum: Point,
+        normal: Rect,
+    }
+
     /// Launch discovery must include hidden top-level windows. Cua's user-facing
     /// window inventory is not an ownership handshake for a hidden new process.
     pub(super) fn list_owned_windows(value: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
@@ -584,7 +597,19 @@ mod platform {
         if manager.desktop_id(window)? != desktop || !manager.is_on_current_desktop(window)? {
             return Err("requested application is not on the owner's current desktop".into());
         }
-        unsafe { ShowWindow(window, 4); } // SW_SHOWNOACTIVATE, including restore.
+        // SW_SHOWNOACTIVATE restores even an already-maximized window to its
+        // normal rectangle. Preserve visible window state; restore only an
+        // actually minimized window. Async avoids waiting on another app's UI thread.
+        let mut command = 8; // SW_SHOWNA preserves a visible window's size.
+        if unsafe { IsIconic(window) } != 0 {
+            let mut placement: WindowPlacement = unsafe { std::mem::zeroed() };
+            placement.length = std::mem::size_of::<WindowPlacement>() as u32;
+            if unsafe { GetWindowPlacement(window, &mut placement) } == 0 {
+                return Err("Windows could not read the requested window's restore state".into());
+            }
+            command = if placement.flags & 2 != 0 { 3 } else { 4 }; // WPF_RESTORETOMAXIMIZED
+        }
+        unsafe { ShowWindowAsync(window, command); }
         // HWND_TOP; SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW.
         if unsafe { SetWindowPos(window, std::ptr::null_mut(), 0, 0, 0, 0, 0x53) } == 0 {
             return Err("Windows did not present the requested application window".into());

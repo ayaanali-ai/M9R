@@ -17,11 +17,13 @@ import {
   selectPersonalBrowserWindow,
   selectExistingPersonalBrowserWindow,
   stageBrowserKind,
+  stageWindowMatchesApp,
   type ApprovedStageApp,
   type BrowserLaunchMode,
 } from "./task-stage-apps";
 import type { ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
+import { discoverInstalledWindowsApp } from "./windows-installed-apps";
 
 export const TASK_STAGE_POLICY_FILE = "task-stage-policy.json";
 export type TaskStageMode = "background" | "owner-preview";
@@ -255,8 +257,19 @@ export function createTaskDesktopStageService(input: {
     const run = async () => {
       const { name, identity } = authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
-      const inspected = await manager.inspectStage(name);
-      if (action.view === "app" && (ownedApps.get(name)?.taskId !== taskId || !inspected.anchor)) {
+      let inspected = await manager.inspectStage(name);
+      const selected = ownedApps.get(name);
+      // The selected app is the default target after launch. Explicit desktop
+      // actions detach only the view anchor; the selected app remains available.
+      const effectiveAction: typeof action = { ...action, view: action.view ?? (selected?.taskId === taskId ? "app" : "desktop") };
+      if (mode === "owner-preview" && effectiveAction.view === "desktop" && inspected.anchor) {
+        await manager.adoptCurrentDesktop(name);
+        inspected = await manager.inspectStage(name);
+      } else if (mode === "owner-preview" && effectiveAction.view === "app" && !inspected.anchor && selected?.taskId === taskId) {
+        await manager.attachWindow(name, String(selected.pid), selected.windowId);
+        inspected = await manager.inspectStage(name);
+      }
+      if (effectiveAction.view === "app" && (selected?.taskId !== taskId || !inspected.anchor)) {
         throw new Error("This task has no selected application window. Open the requested app before using the app view.");
       }
       if (mode === "owner-preview" && !inspected.desktop.isCurrent) throw new Error("The owner-visible preview stage is not on the owner's current desktop.");
@@ -264,12 +277,12 @@ export function createTaskDesktopStageService(input: {
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
       if (action.kind === "click" || action.kind === "double_click" || action.kind === "right_click") {
-        await moneyGate(name, identity, action.x, action.y, action.view === "app" ? "background" : mode);
+        await moneyGate(name, identity, action.x, action.y, effectiveAction.view === "app" ? "background" : mode);
       }
       // The approval wait above can outlast a revocation: recheck before anything executes.
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-      const result = await runTaskStageAction(driver, name, action, identity, mode);
+      const result = await runTaskStageAction(driver, name, effectiveAction, identity, mode);
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
       return result;
@@ -314,7 +327,14 @@ export function createTaskDesktopStageService(input: {
     const run = async () => {
       const { name, identity } = authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
-      const target = resolveLaunchTarget(root, readPolicy(), identity.handle, appId);
+      let target: StageLaunchTarget;
+      try { target = resolveLaunchTarget(root, readPolicy(), identity.handle, appId); }
+      catch (error) {
+        if (stageAccessMode(readPolicy(), identity.handle) !== "full") throw error;
+        const installed = await discoverInstalledWindowsApp(appId);
+        if (!installed) throw error;
+        target = { app: installed };
+      }
       let approved: ApprovedStageApp;
       if (!target.needsApproval) {
         approved = target.app;
@@ -362,9 +382,8 @@ export function createTaskDesktopStageService(input: {
           const windows = await driver.listVisibleWindows({ onScreenOnly: false });
           // Windows packaged apps may delegate to another PID. Select the new
           // exact window of the resolved executable, never the launcher stub.
-          const filename = basename(approved.executable).toLowerCase();
           const matches = windows.filter((window) => !beforeKeys.has(`${window.pid}:${window.windowId}`)
-            && basename(window.appName).toLowerCase() === filename);
+            && stageWindowMatchesApp(window, approved));
           if (matches.length > 1) throw new Error("The requested application opened multiple windows; select the intended window before continuing.");
           if (matches.length === 1) {
             await manager.presentOwnerWindow(name, matches[0]!.pid, matches[0]!.windowId);

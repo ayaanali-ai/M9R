@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writ
 import { basename, isAbsolute, join } from "node:path";
 import { isAgentContext } from "./approval-core";
 
-export interface ApprovedStageApp { executable: string; args: string[]; sha256: string }
+export interface ApprovedStageApp { executable: string; args: string[]; sha256?: string; windowExecutable?: string }
 export type BrowserLaunchMode = "personal" | "isolated";
 
 /** The browser executable family that the stage broker knows how to attach. */
@@ -56,6 +56,18 @@ export function stageBrowserKind(executable: string): StageBrowserKind | undefin
   return undefined;
 }
 
+/** Match Windows' renderer HWND, including the normal terminal host for console apps. */
+export function stageWindowMatchesApp(candidate: BrowserWindowCandidate, app: ApprovedStageApp): boolean {
+  const key = (value: string) => basename(value).toLowerCase().replace(/\.exe$/, "");
+  const expected = key(app.windowExecutable ?? app.executable);
+  const actual = key(candidate.appName);
+  if (expected === actual) return true;
+  if (!["windowsterminal", "openconsole", "conhost"].includes(actual)) return false;
+  if (expected === "powershell" || expected === "pwsh") return /powershell/i.test(candidate.title);
+  if (expected === "cmd") return /(?:command prompt|cmd\.exe)/i.test(candidate.title);
+  return false;
+}
+
 function browserWindowMatches(candidate: BrowserWindowCandidate, kind: StageBrowserKind): boolean {
   const app = `${candidate.appName} ${candidate.title}`;
   if (kind === "chrome") return /(?:^|[\\/ _])(?:chrome|google chrome|chrome_widgetwin_1)(?:\.exe)?(?:$|[\\/ _])/.test(app.toLowerCase())
@@ -98,6 +110,11 @@ export function selectExistingPersonalBrowserWindow(
 }
 const CATALOG = "task-stage-apps.json";
 const APP_ID = /^[a-z][a-z0-9_-]{0,39}$/;
+export function isStageAppReference(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 1024
+    && !/[\u0000-\u001f\u007f]/.test(value)
+    && (/^[\p{L}\p{N}][\p{L}\p{N} ._()+-]{0,159}$/u.test(value) || (isAbsolute(value) && /\.exe$/i.test(value)));
+}
 
 export function listApprovedStageApps(root: string): string[] {
   const file = join(root, CATALOG);
@@ -118,7 +135,7 @@ export function readApprovedStageApp(root: string, id: string): ApprovedStageApp
   const app = catalog.version === 1 && catalog.apps && Object.hasOwn(catalog.apps, id) ? catalog.apps[id] : undefined;
   if (!app || !isAbsolute(app.executable) || !/\.exe$/i.test(app.executable) || !Array.isArray(app.args)
     || app.args.length > 16 || app.args.some((arg) => typeof arg !== "string" || arg.length > 2048 || /[\u0000\r\n]/.test(arg))
-    || !/^[a-f0-9]{64}$/.test(app.sha256)) throw new Error("This app has not been approved for task stages.");
+    || !/^[a-f0-9]{64}$/.test(app.sha256 ?? "")) throw new Error("This app has not been approved for task stages.");
   if (!statSync(app.executable).isFile() || statSync(app.executable).size > 256 * 1024 * 1024) throw new Error("The approved app exceeds its supported size or is not a file.");
   if (createHash("sha256").update(readFileSync(app.executable)).digest("hex") !== app.sha256) throw new Error("The approved app changed; owner review is required again.");
   return app;
@@ -186,11 +203,13 @@ function wellKnownCandidates(id: string, roots: string[]): string[] {
 }
 
 function pathCandidates(id: string, env: Record<string, string | undefined>): string[] {
-  if (!APP_ID.test(id)) return [];
+  if (!/^[a-z][a-z0-9_-]{0,80}(?:\.exe)?$/i.test(id)) return [];
   const pathValue = env.Path ?? env.PATH ?? "";
   const dirs = pathValue.split(/[;]/).map((value) => value.trim()).filter(Boolean);
   const systemRoot = env.SystemRoot?.trim() || env.WINDIR?.trim();
   if (systemRoot) dirs.push(join(systemRoot, "System32"));
+  const localAppData = env.LOCALAPPDATA ?? env.LocalAppData;
+  if (localAppData) dirs.push(join(localAppData, "Microsoft", "WindowsApps"));
   const names = id.toLowerCase().endsWith(".exe") ? [id] : [id, `${id}.exe`];
   return [...new Set(dirs.flatMap((dir) => names.map((name) => join(dir, name))))];
 }
@@ -198,14 +217,20 @@ function pathCandidates(id: string, env: Record<string, string | undefined>): st
 export function resolveUnlistedStageApp(appId: string, input: { allowAbsolutePath: boolean; env?: Record<string, string | undefined>; exists?: (path: string) => boolean } = { allowAbsolutePath: false }): ResolvedUnlistedApp {
   const env = input.env ?? process.env;
   const exists = input.exists ?? existsSync;
+  const aliases: Record<string, string> = { terminal: "wt", "windows terminal": "wt", "google chrome": "chrome", "microsoft edge": "msedge", "file explorer": "explorer", "windows powershell": "powershell" };
+  appId = aliases[appId.trim().toLowerCase()] ?? appId.trim();
+  if (appId === "powershell" && (env.SystemRoot ?? env.WINDIR)) {
+    const candidate = join((env.SystemRoot ?? env.WINDIR)!, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    if (exists(candidate)) return { ...readApprovedStageAppShape(candidate), wellKnown: true };
+  }
   const wellKnown = wellKnownCandidates(appId, programRoots(env));
   for (const candidate of wellKnown) {
     if (!exists(candidate)) continue;
-    return { ...readApprovedStageAppShape(candidate), wellKnown: true };
+    return { ...readApprovedStageAppShape(candidate), ...(appId === "wt" ? { windowExecutable: "WindowsTerminal.exe" } : {}), wellKnown: true };
   }
   for (const candidate of pathCandidates(appId, env)) {
     if (!exists(candidate)) continue;
-    return { ...readApprovedStageAppShape(candidate), wellKnown: true };
+    return { ...readApprovedStageAppShape(candidate), ...(appId === "wt" ? { windowExecutable: "WindowsTerminal.exe" } : {}), wellKnown: true };
   }
   if (wellKnown.length > 0) throw new Error(`The ${appId} browser is not installed at any of its standard locations or PATH.`);
   // Absolute paths are a full-mode-only escape hatch; request mode resolves well-known ids alone.
@@ -216,6 +241,8 @@ export function resolveUnlistedStageApp(appId: string, input: { allowAbsolutePat
 }
 
 function readApprovedStageAppShape(executable: string): ApprovedStageApp {
-  if (!statSync(executable).isFile() || statSync(executable).size > 256 * 1024 * 1024) throw new Error("The app exceeds its supported size or is not a file.");
-  return { executable, args: [], sha256: createHash("sha256").update(readFileSync(executable)).digest("hex") };
+  if (!statSync(executable).isFile()) throw new Error("The installed app is not a file.");
+  // Full access resolves an installed executable, not a catalog approval.
+  // Hashing every binary here blocks the broker and rejects app aliases.
+  return { executable, args: [] };
 }

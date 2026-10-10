@@ -1094,7 +1094,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
 
   async function listWindowOptions(ownedPid?: number, onScreenOnly = ownedPid === undefined): Promise<CuaStageWindowOption[]> {
     if (ownedPid !== undefined && (!Number.isSafeInteger(ownedPid) || ownedPid < 1)) throw new Error("Invalid owned application process.");
-    const runtime = await createRuntime();
+    const runtime = await agentRuntime();
     const { sdk, driver } = runtime;
     const session = safeSessionName(ownedPid === undefined ? "owner-visible" : `owned-${ownedPid}`);
     let started = false;
@@ -1105,9 +1105,10 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       return result.windows
         .filter((window) => Number.isSafeInteger(window.pid) && (window.pid ?? 0) > 0 && window.pid !== process.pid
           && typeof window.windowId === "bigint" && window.windowId > BigInt(0)
-          && (ownedPid === undefined ? window.isOnScreen === true : window.pid === ownedPid) && window.minimized !== true
+          && (ownedPid === undefined ? (!onScreenOnly || window.isOnScreen === true) : window.pid === ownedPid)
+          && (!onScreenOnly || window.minimized !== true)
           && Number.isFinite(window.bounds.width) && Number.isFinite(window.bounds.height)
-          && window.bounds.width >= 80 && window.bounds.height >= 60
+          && (window.minimized === true && !onScreenOnly || window.bounds.width >= 80 && window.bounds.height >= 60)
           && typeof window.title === "string" && window.title.trim().length > 0
           && !/m9r[- ]overlay/i.test(`${window.appName} ${window.title}`)
           && !/^m9r(?: overlay)?$/i.test(window.title.trim()))
@@ -1124,7 +1125,8 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       if (started) {
         try { await driver.endSession({ session }); } catch { /* preserve the primary operation result */ }
       }
-      await disposeRuntime(runtime);
+      // Window enumeration shares the broker's host. Closing it on every
+      // launch poll repeatedly cold-started Cua and exceeded the RPC deadline.
     }
   }
 
