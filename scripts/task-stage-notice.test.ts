@@ -19,7 +19,7 @@ test("task delivery describes both stage modes without silently creating a backg
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     received = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { token?: string; taskId?: string };
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: true, stage: { name: STAGE, controlEnabled: false, approvedApps: [] } }));
+    response.end(JSON.stringify({ ok: true, stage: { name: STAGE, controlEnabled: false } }));
   });
 
   try {

@@ -4,12 +4,11 @@ import { join } from "node:path";
 import { ownedBrowserLaunch, selectPersonalBrowserWindow } from "../src/lib/native/task-stage-apps";
 
 test("personal browser launch uses the user's profile and asks Chrome for a new window", () => {
-  const app = { executable: join("browser", "chrome.exe"), args: [], sha256: "unchanged" };
+  const app = { executable: join("browser", "chrome.exe"), args: [] };
   const first = ownedBrowserLaunch("root", "preview-agent-0123456789abcdef01234567", app);
   const second = ownedBrowserLaunch("root", "preview-agent-1123456789abcdef01234567", app);
   assert.deepEqual(first.args, ["--new-window"]);
   assert.deepEqual(second.args, ["--new-window"]);
-  assert.equal(first.sha256, app.sha256);
   assert.deepEqual(app.args, []);
   const explicit = { ...app, args: ["--owner-configured"] };
   assert.equal(ownedBrowserLaunch("root", "agent-0123456789abcdef01234567", explicit), explicit);
@@ -17,7 +16,7 @@ test("personal browser launch uses the user's profile and asks Chrome for a new 
 });
 
 test("isolated browser mode remains an explicit opt-in", () => {
-  const app = { executable: join("browser", "chrome.exe"), args: [], sha256: "unchanged" };
+  const app = { executable: join("browser", "chrome.exe"), args: [] };
   const isolated = ownedBrowserLaunch("root", "agent-0123456789abcdef01234567", app, { mode: "isolated" });
   assert.match(isolated.args[0]!, /stage-browser-profiles/);
   assert.equal(isolated.args.at(-1), "about:blank");

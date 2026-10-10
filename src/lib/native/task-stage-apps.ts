@@ -1,10 +1,9 @@
-import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
-import { isAgentContext } from "./approval-core";
 
-export interface ApprovedStageApp { executable: string; args: string[]; sha256?: string; windowExecutable?: string }
+export interface StageAppLaunchSpec { executable: string; args: string[]; windowExecutable?: string }
 export type BrowserLaunchMode = "personal" | "isolated";
 
 /** The browser executable family that the stage broker knows how to attach. */
@@ -25,9 +24,9 @@ export interface BrowserWindowCandidate {
 export function ownedBrowserLaunch(
   root: string,
   stageName: string,
-  app: ApprovedStageApp,
+  app: StageAppLaunchSpec,
   options: { mode?: BrowserLaunchMode; startUrl?: string } = {},
-): ApprovedStageApp {
+): StageAppLaunchSpec {
   if (!/^(?:preview-)?agent-[a-f0-9]{24}$/.test(stageName)) throw new Error("Invalid browser stage name.");
   if (app.args.length || !/^(?:chrome|msedge)\.exe$/i.test(basename(app.executable))) return app;
   const mode = options.mode ?? "personal";
@@ -57,7 +56,7 @@ export function stageBrowserKind(executable: string): StageBrowserKind | undefin
 }
 
 /** Match Windows' renderer HWND, including the normal terminal host for console apps. */
-export function stageWindowMatchesApp(candidate: BrowserWindowCandidate, app: ApprovedStageApp): boolean {
+export function stageWindowMatchesApp(candidate: BrowserWindowCandidate, app: StageAppLaunchSpec): boolean {
   const key = (value: string) => basename(value).toLowerCase().replace(/\.exe$/, "");
   const expected = key(app.windowExecutable ?? app.executable);
   const actual = key(candidate.appName);
@@ -108,74 +107,50 @@ export function selectExistingPersonalBrowserWindow(
   if (matches.length > 1) throw new Error(`Personal ${kind === "chrome" ? "Chrome" : "Edge"} has multiple visible windows; owner selection is required.`);
   return matches[0];
 }
-const CATALOG = "task-stage-apps.json";
-const APP_ID = /^[a-z][a-z0-9_-]{0,39}$/;
 export function isStageAppReference(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 1024
     && !/[\u0000-\u001f\u007f]/.test(value)
     && (/^[\p{L}\p{N}][\p{L}\p{N} ._()+-]{0,159}$/u.test(value) || (isAbsolute(value) && /\.exe$/i.test(value)));
 }
 
-export function listApprovedStageApps(root: string): string[] {
-  const file = join(root, CATALOG);
-  if (!existsSync(file)) return [];
-  if (statSync(file).size > 65536) throw new Error("Stage app catalog exceeds its size limit.");
-  const catalog = JSON.parse(readFileSync(file, "utf8")) as { version?: unknown; apps?: Record<string, unknown> };
-  if (catalog.version !== 1 || !catalog.apps || Array.isArray(catalog.apps) || typeof catalog.apps !== "object") throw new Error("Invalid stage app catalog.");
-  const ids = Object.keys(catalog.apps);
-  if (ids.length > 16 || ids.some((id) => !APP_ID.test(id))) throw new Error("Invalid stage app catalog.");
-  return ids.sort();
+/**
+ * Resolve an app's starting directory without inheriting a service cwd such as
+ * C:\\Windows\\System32. Prefer the task's project, then configured project
+ * root, and finally the user's home directory.
+ */
+export function stageAppLaunchCwd(
+  taskCwd?: string,
+  options: { env?: Record<string, string | undefined>; fallback?: string; isDirectory?: (path: string) => boolean } = {},
+): string {
+  const env = options.env ?? process.env;
+  const isDirectory = options.isDirectory ?? ((path: string) => {
+    try { return statSync(path).isDirectory(); } catch { return false; }
+  });
+  const candidates = [taskCwd, env.M9R_PROJECT_ROOT, env.M9R_AGENT_FOLDER, options.fallback ?? homedir()];
+  for (const candidate of candidates) {
+    const value = candidate?.trim();
+    if (!value || !isAbsolute(value) || /^(?:[a-z]:[\\/]+windows|[a-z]:[\\/]+winnt)[\\/]+(?:system32|syswow64)(?:[\\/]|$)/i.test(value)) continue;
+    if (isDirectory(value)) return value;
+  }
+  return homedir();
 }
 
-export function readApprovedStageApp(root: string, id: string): ApprovedStageApp {
-  if (!APP_ID.test(id)) throw new Error("Invalid stage app identifier.");
-  const file = join(root, CATALOG);
-  if (!existsSync(file) || statSync(file).size > 65536) throw new Error("No approved stage app catalog is available.");
-  const catalog = JSON.parse(readFileSync(file, "utf8")) as { version?: unknown; apps?: Record<string, ApprovedStageApp> };
-  const app = catalog.version === 1 && catalog.apps && Object.hasOwn(catalog.apps, id) ? catalog.apps[id] : undefined;
-  if (!app || !isAbsolute(app.executable) || !/\.exe$/i.test(app.executable) || !Array.isArray(app.args)
-    || app.args.length > 16 || app.args.some((arg) => typeof arg !== "string" || arg.length > 2048 || /[\u0000\r\n]/.test(arg))
-    || !/^[a-f0-9]{64}$/.test(app.sha256 ?? "")) throw new Error("This app has not been approved for task stages.");
-  if (!statSync(app.executable).isFile() || statSync(app.executable).size > 256 * 1024 * 1024) throw new Error("The approved app exceeds its supported size or is not a file.");
-  if (createHash("sha256").update(readFileSync(app.executable)).digest("hex") !== app.sha256) throw new Error("The approved app changed; owner review is required again.");
-  return app;
-}
-
-/** Only the owner supplies executable paths and fixed arguments; agents select an app ID. */
-export function approveStageApp(root: string, id: string, executable: string, args: string[], context: { terminal: boolean; env: Record<string, string | undefined> }) {  if (!context.terminal || isAgentContext(context.env)) throw new Error("Only the owner can approve stage applications.");
-  if (!APP_ID.test(id) || !isAbsolute(executable) || !/\.exe$/i.test(executable) || !statSync(executable).isFile() || statSync(executable).size > 256 * 1024 * 1024
-    || args.length > 16 || args.some((arg) => typeof arg !== "string" || arg.length > 2048 || /[\u0000\r\n]/.test(arg))) throw new Error("Invalid stage application.");
-  mkdirSync(root, { recursive: true });
-  const file = join(root, CATALOG), lock = `${file}.lock`, temp = `${file}.${process.pid}.tmp`;
-  mkdirSync(lock);
-  try {
-    if (existsSync(file) && statSync(file).size > 65536) throw new Error("Stage app catalog exceeds its size limit.");
-    const catalog = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) as { version: number; apps: Record<string, ApprovedStageApp> } : { version: 1, apps: {} };
-    if (catalog.version !== 1 || !catalog.apps || Object.keys(catalog.apps).length >= 16 && !Object.hasOwn(catalog.apps, id)) throw new Error("Invalid or full stage app catalog.");
-    catalog.apps[id] = { executable, args, sha256: createHash("sha256").update(readFileSync(executable)).digest("hex") };
-    writeFileSync(temp, JSON.stringify(catalog) + "\n", { mode: 0o600, flag: "wx" });
-    renameSync(temp, file);
-  } finally { rmSync(temp, { force: true }); rmSync(lock, { recursive: true, force: true }); }
-}
-
-export function launchApprovedStageApp(app: ApprovedStageApp, options: { windowsHide?: boolean } = {}): ChildProcess {
+export function launchStageApp(app: StageAppLaunchSpec, options: { windowsHide?: boolean; cwd?: string } = {}): ChildProcess {
   // No shell, model-provided arguments, inherited stdin, or agent subprocess.
   // Owner-preview must create the GUI on the interactive desktop so Windows
   // attaches a virtual-desktop application view to the exact HWND. Background
   // stages keep the hidden launch behavior and move the owned window before it
   // is shown on the agent's stage.
-  return spawn(app.executable, app.args, { shell: false, windowsHide: options.windowsHide ?? true, stdio: "ignore" });
+  return spawn(app.executable, app.args, { shell: false, windowsHide: options.windowsHide ?? true, cwd: stageAppLaunchCwd(options.cwd), stdio: "ignore" });
 }
 
 /**
- * Broker-resolved executables for full/request access modes. An agent names an id (or, in full mode
- * only, an absolute path) and the broker resolves it to an exact file, so agent input can never
- * smuggle in arguments, flags, or a shell. Launched with fixed empty args and hash-recorded at launch
- * time, under the same exact-process custody as catalog apps. Full mode also searches PATH and the
- * Windows system directory, so ordinary installed tools never need catalog entries.
+ * An agent names an installed app, and the broker resolves it to an exact executable without
+ * accepting agent-supplied flags or shell syntax. Local apps are resolved from standard install
+ * roots, PATH, Windows registrations, and Start menu shortcuts.
  */
-export interface ResolvedUnlistedApp extends ApprovedStageApp {
-  /** False when the agent named an absolute path (full mode only); always audited at launch. */
+export interface ResolvedUnlistedApp extends StageAppLaunchSpec {
+  /** False when the agent named an absolute path; always audited at launch. */
   wellKnown: boolean;
 }
 
@@ -221,28 +196,26 @@ export function resolveUnlistedStageApp(appId: string, input: { allowAbsolutePat
   appId = aliases[appId.trim().toLowerCase()] ?? appId.trim();
   if (appId === "powershell" && (env.SystemRoot ?? env.WINDIR)) {
     const candidate = join((env.SystemRoot ?? env.WINDIR)!, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-    if (exists(candidate)) return { ...readApprovedStageAppShape(candidate), wellKnown: true };
+    if (exists(candidate)) return { ...resolvedStageAppShape(candidate), wellKnown: true };
   }
   const wellKnown = wellKnownCandidates(appId, programRoots(env));
   for (const candidate of wellKnown) {
     if (!exists(candidate)) continue;
-    return { ...readApprovedStageAppShape(candidate), ...(appId === "wt" ? { windowExecutable: "WindowsTerminal.exe" } : {}), wellKnown: true };
+    return { ...resolvedStageAppShape(candidate), ...(appId === "wt" ? { windowExecutable: "WindowsTerminal.exe" } : {}), wellKnown: true };
   }
   for (const candidate of pathCandidates(appId, env)) {
     if (!exists(candidate)) continue;
-    return { ...readApprovedStageAppShape(candidate), ...(appId === "wt" ? { windowExecutable: "WindowsTerminal.exe" } : {}), wellKnown: true };
+    return { ...resolvedStageAppShape(candidate), ...(appId === "wt" ? { windowExecutable: "WindowsTerminal.exe" } : {}), wellKnown: true };
   }
-  if (wellKnown.length > 0) throw new Error(`The ${appId} browser is not installed at any of its standard locations or PATH.`);
-  // Absolute paths are a full-mode-only escape hatch; request mode resolves well-known ids alone.
+  if (wellKnown.length > 0) throw new Error(`The app "${appId}" is not installed at any of its standard locations or PATH.`);
+  // Absolute paths are accepted only when explicitly supplied as a bounded app reference.
   if (input.allowAbsolutePath && isAbsolute(appId) && /\.exe$/i.test(appId) && exists(appId)) {
-    return { ...readApprovedStageAppShape(appId), wellKnown: false };
+    return { ...resolvedStageAppShape(appId), wellKnown: false };
   }
   throw new Error(`The app "${appId}" is not installed or could not be resolved on this machine.`);
 }
 
-function readApprovedStageAppShape(executable: string): ApprovedStageApp {
+function resolvedStageAppShape(executable: string): StageAppLaunchSpec {
   if (!statSync(executable).isFile()) throw new Error("The installed app is not a file.");
-  // Full access resolves an installed executable, not a catalog approval.
-  // Hashing every binary here blocks the broker and rejects app aliases.
   return { executable, args: [] };
 }

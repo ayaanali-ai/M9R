@@ -61,10 +61,13 @@ test("untitled taskbar controls use exact accessibility invocation and overlay-o
   assert.equal((await driver.describeDesktopTarget("preview", 0, 0, identity))?.label, "Start");
   assert.equal((await driver.clickDesktop("preview", 0, 0, identity)).outcome.status, "unverified");
   assert.equal(invocations, 1);
-  assert.equal(calls.some((c) => c.method === "getWindowState" || c.method === "click" || c.method === "desktopTarget"), false);
-  const move = calls.find((c) => c.method === "callTool")?.value as { name: string; args: Record<string, unknown> };
-  assert.equal(move.name, "move_cursor");
-  assert.equal(move.args.scope, "window");
+  assert.equal(calls.some((c) => c.method === "getWindowState" || c.method === "click"), false);
+  const move = calls.find((c) => c.method === "moveCursor")?.value as {
+    x: number; y: number; target: { input?: { displayId?: string } }; session: string;
+  };
+  assert.deepEqual({ x: move.x, y: move.y, displayId: move.target.input?.displayId }, { x: 0, y: 0, displayId: "primary" });
+  assert.equal(typeof move.session, "string");
+  assert.equal(calls.some((c) => c.method === "callTool"), false, "the cursor uses the typed session API without generic tool or physical-pointer input");
   await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No agent input window/);
 }));
 
@@ -249,7 +252,7 @@ test("captures only the registered window and reliably closes the Cua session", 
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession", "shutdown"]);
 }));
 
-test("maps app screenshot pixels to desktop screen points before moving and verifying Cua's ghost cursor", async () => withRoot(async (root) => {
+test("moves and verifies Cua's ghost cursor through the typed exact-window API", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({
@@ -260,8 +263,13 @@ test("maps app screenshot pixels to desktop screen points before moving and veri
 
   const result = await driver.moveCursor("stage", 42, 24);
   assert.deepEqual(result.cursor, { x: 42, y: 24, screenX: 184, screenY: 98, enabled: true, visible: true });
-  const move = (calls.find((call) => call.method === "callTool")?.value as { args: Record<string, unknown> }).args;
-  assert.deepEqual({ x: move.x, y: move.y, scope: move.scope }, { x: 184, y: 98, scope: "window" });
+  const move = calls.find((call) => call.method === "moveCursor")?.value as {
+    x: number; y: number; target: { input?: { pid?: number; windowId?: bigint } }; session: string;
+  };
+  assert.deepEqual({ x: move.x, y: move.y }, { x: 42, y: 24 }, "cursor coordinates remain in the exact window screenshot space");
+  assert.deepEqual(move.target.input, { pid: 4321, windowId: BigInt(windowId) });
+  assert.equal(typeof move.session, "string");
+  assert.equal(calls.some((call) => call.method === "callTool"), false, "cursor motion uses the public typed driver method");
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession", "shutdown"]);
 }));
 
@@ -293,12 +301,15 @@ test("owner preview captures the whole current desktop and binds visible cursor 
   assert.ok(calls.some((call) => call.method === "windowTarget"), "desktop input resolves to one exact HWND");
   const clickInput = calls.find((call) => call.method === "click")?.value as Record<string, unknown>;
   assert.equal(clickInput.deliveryMode, 0, "owner-preview routes clicks to the exact window in the background");
-  const cursorMove = (calls.find((call) => call.method === "callTool")?.value as { args: { x?: number; y?: number } }).args;
-  assert.deepEqual({ x: cursorMove.x, y: cursorMove.y }, { x: 960, y: 540 }, "the visible overlay uses physical screen coordinates");
+  const cursorMove = calls.find((call) => call.method === "moveCursor")?.value as {
+    x: number; y: number; target: { input?: { pid?: number; windowId?: bigint } }; session: string;
+  };
+  assert.deepEqual({ x: cursorMove.x, y: cursorMove.y }, { x: 100, y: 50 }, "screen point maps into the exact window screenshot coordinates");
+  assert.deepEqual(cursorMove.target.input, { pid: 4321, windowId: BigInt(windowId) });
+  assert.equal(typeof cursorMove.session, "string");
   const windowTarget = clickInput.target as { input?: { pid?: number; windowId?: bigint } };
   assert.deepEqual(windowTarget.input, { pid: 4321, windowId: BigInt(windowId) });
-  const cursorInput = (calls.find((call) => call.method === "callTool")?.value as { args: Record<string, unknown> }).args;
-  assert.equal(cursorInput.scope, "window", "the overlay protocol scope never selects the real OS pointer");
+  assert.equal(calls.some((call) => call.method === "callTool"), false, "cursor movement never uses an untyped protocol scope");
   const clickPosition = clickInput.position as { inner?: { x?: number; y?: number } };
   assert.deepEqual(clickPosition.inner, { x: 100, y: 50 }, "captured desktop pixels map into exact-window screenshot pixels");
   assert.equal(clickInput.count, 2);
@@ -576,7 +587,8 @@ test("shows a distinct agent label on each native cursor and configures adaptive
     dwellAfterClickMs: 100,
     idleHideMs: 60_000,
   })));
-  assert.equal(calls.filter((call) => call.method === "callTool").length, 2);
+  assert.equal(calls.filter((call) => call.method === "moveCursor").length, 2);
+  assert.equal(calls.some((call) => call.method === "callTool"), false);
   for (const identity of identities) await driver.closeAgentCursor(identity);
 }));
 

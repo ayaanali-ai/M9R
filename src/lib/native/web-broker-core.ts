@@ -753,6 +753,33 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (tabs?.size === 0) tabsByActor.delete(actorKey);
   }
 
+  function normalizedPageUrl(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    try {
+      const url = new URL(value);
+      url.hash = "";
+      return url.toString().replace(/\/+$/, "");
+    } catch {
+      return undefined;
+    }
+  }
+
+  let implicitOpenTabSequence = 0;
+  function freshOpenTabName(request: WebRequest, crossOwner: boolean): string {
+    const agent = request.agent.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 12) || "agent";
+    const suffix = (++implicitOpenTabSequence).toString(36);
+    const base = `open-${agent}-${suffix}`.slice(0, 40);
+    const namespace = (name: string) => crossOwner ? `${request.owner}/${name}` : name;
+    const taken = (name: string) => {
+      const tab = namespace(name);
+      return tabUrls.has(tab) || openedBy.has(tab) || activeClaims(tab).length > 0
+        || [...tabsByActor.values()].some((tabs) => tabs.has(tab));
+    };
+    let candidate = base;
+    for (let ordinal = 2; taken(candidate); ordinal += 1) candidate = `${base.slice(0, 36)}-${ordinal}`;
+    return candidate;
+  }
+
   function resolveTab(request: WebRequest): { tab: string; actorKey: string; publicName: string } | { error: string } {
     const crossOwner = request.owner !== undefined && request.owner !== deps.ownerId;
     const actorKey = actorTabsKey(request);
@@ -760,6 +787,20 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (request.tab !== undefined) return { tab: namespace(request.tab), actorKey, publicName: request.tab };
 
     const openTabs = [...(tabsByActor.get(actorKey) ?? [])];
+    // An implicit open starts in a fresh tab unless the exact page is already
+    // owned by this actor. This keeps localhost/task context intact while still
+    // letting a follow-up read/click use the tab that open successfully focused.
+    if (request.action === "open") {
+      if (openTabs.length === 0) {
+        const initial = namespace(request.agent);
+        return { tab: initial, actorKey, publicName: request.agent };
+      }
+      const requestedUrl = normalizedPageUrl(request.url);
+      const existingPage = requestedUrl ? openTabs.find((tab) => normalizedPageUrl(tabUrls.get(tab)) === requestedUrl) : undefined;
+      if (existingPage) return { tab: existingPage, actorKey, publicName: crossOwner ? existingPage.slice(request.owner!.length + 1) : existingPage };
+      const fresh = freshOpenTabName(request, crossOwner);
+      return { tab: namespace(fresh), actorKey, publicName: fresh };
+    }
     // m9r_web_switch picks the tab later tab-less calls use; listing tabs never needs a choice.
     const focused = focusedTabByActor.get(actorKey);
     if (openTabs.length > 1 && focused && openTabs.includes(focused)) return { tab: focused, actorKey, publicName: crossOwner ? focused.slice(request.owner!.length + 1) : focused };
@@ -770,7 +811,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
     }
     // Nothing of its own yet: work on the page the room is already on (one shared tab) instead of starting a private one.
     // Opening still starts the agent's own tab, and several shared tabs still need a choice.
-    if (request.action !== "open" && request.action !== "tabs" && !crossOwner && tabUrls.size === 1) {
+    if (request.action !== "tabs" && !crossOwner && tabUrls.size === 1) {
       const [shared] = [...tabUrls.keys()];
       return { tab: shared, actorKey, publicName: shared };
     }
@@ -1238,7 +1279,9 @@ export function createWebBroker(deps: WebBrokerDeps) {
     } else if (response.ok && entry.action !== "tabs") {
       rememberTab(entry.actorTabsKey, entry.tab);
       if (entry.action === "open") openedBy.set(entry.tab, entry.actorTabsKey);
-      if (entry.action === "switch") focusedTabByActor.set(entry.actorTabsKey, entry.tab);
+      if ((entry.action === "open" && entry.request?.tab === undefined) || entry.action === "switch") {
+        focusedTabByActor.set(entry.actorTabsKey, entry.tab);
+      }
     }
     else if (entry.addedOpenCandidate || /tab .* is not open/i.test(response.error ?? "")) forgetTab(entry.actorTabsKey, entry.tab);
     if (/tab .* is not open/i.test(response.error ?? "")) tabUrls.delete(entry.tab);

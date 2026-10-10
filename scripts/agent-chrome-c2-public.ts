@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { launchAgentChrome, changeApprovedSite } from "../src/lib/native/agent-chrome";
+import { launchAgentChrome } from "../src/lib/native/agent-chrome";
 import { agentChromePageSource } from "../src/lib/native/agent-chrome-cli";
 import { startWebBroker } from "../src/lib/native/web-broker-server";
 
@@ -11,7 +11,6 @@ async function run(kind: "type" | "drag") {
   const root = resolve(`.m9r/c2-public-${kind}`);
   mkdirSync(root, { recursive: true });
   const url = `https://www.selenium.dev/selenium/web/${kind === "type" ? "formPage.html" : "mouse_interaction.html"}`;
-  changeApprovedSite(root, url, true);
   const browser = await launchAgentChrome({ root, pageActionsSource: agentChromePageSource() });
   const key = randomBytes(32).toString("hex");
   const broker = await startWebBroker({ key, port: 0, browserTransport: browser, timeoutMs: 30000 });

@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
-import { launchAgentChrome, changeApprovedSite } from "../src/lib/native/agent-chrome";
+import { launchAgentChrome } from "../src/lib/native/agent-chrome";
 import { agentChromePageSource } from "../src/lib/native/agent-chrome-cli";
 import { startWebBroker } from "../src/lib/native/web-broker-server";
 
@@ -20,7 +20,6 @@ const fixture = createServer((_req, res) => {
 });
 await new Promise<void>(done => fixture.listen(0, "127.0.0.1", done));
 const url = `http://127.0.0.1:${(fixture.address() as { port: number }).port}/`;
-changeApprovedSite(root, url, true);
 let browser: Awaited<ReturnType<typeof launchAgentChrome>> | undefined;
 let broker: Awaited<ReturnType<typeof startWebBroker>> | undefined;
 try {

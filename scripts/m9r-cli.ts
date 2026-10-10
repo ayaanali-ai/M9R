@@ -2895,15 +2895,7 @@ async function runWebCli(args: string[]): Promise<number> {
   if (args[0] === "chrome") return (await import("../src/lib/native/agent-chrome-cli")).runAgentChromeCli(args.slice(1));
   if (args[0] === "broker-update") return runManagedBrokerUpdate(args.slice(1));
   if (args[0] === "stage") {
-    if (args[1] === "approve-app") {
-      const { approveStageApp } = await import("../src/lib/native/task-stage-apps");
-      if (args.length !== 4) throw new Error("Usage: m9r web stage approve-app <app-id> <absolute-executable-path>");
-      approveStageApp(defaultStoreRoot(homedir(), process.env), args[2]!, args[3]!, [], {
-        terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY), env: process.env,
-      });
-      process.stdout.write(JSON.stringify({ ok: true, appId: args[2] }) + "\n");
-      return 0;
-    }
+    if (args[1] === "approve-app") throw new Error("Per-app catalog approvals are retired. Resolve installed apps by name; grant computer control once per agent.");
     if (["allow-agent", "allow-control", "allow-full", "revoke-agent"].includes(args[1] ?? "")) {
       const { setTaskStagePermission } = await import("../src/lib/native/task-desktop-stage");
       const policy = setTaskStagePermission(defaultStoreRoot(homedir(), process.env), args[2] ?? "", args[1] !== "revoke-agent", {

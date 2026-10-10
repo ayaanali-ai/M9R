@@ -745,13 +745,16 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
 
   async function moveOwnerCursor(runtime: CuaRuntime, session: AgentCursorSession, point: ResolvedDesktopPoint): Promise<CuaStageCursorProof> {
     resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not enable the desktop agent cursor.");
-    // Desktop-targeted move_cursor warps the real OS pointer. Keep the visible
-    // agent cursor independent by moving its session overlay within the exact
-    // window resolved from the desktop screenshot.
-    // The Windows tool consumes screen coordinates in window scope. The SDK's
-    // typed target currently forwards screenshot-local coordinates unchanged;
-    // use its public protocol adapter with an explicit, pointer-safe scope.
-    resultError(await runtime.driver.callTool("move_cursor", JSON.stringify({ scope: "window", x: point.screenPoint.x, y: point.screenPoint.y, session: session.session })), "Cua Driver could not move the labeled desktop cursor.");
+    // The typed API moves this session's synthetic cursor. For app windows its
+    // coordinates are local to that exact window snapshot; for shell surfaces
+    // absent from Cua's window snapshots, use the captured desktop coordinate
+    // space. Never use the legacy generic tool adapter, which can move the
+    // owner's physical pointer and does not honor the SDK's coordinate contract.
+    const target = point.shellControl
+      ? new runtime.sdk.ActionTarget.Desktop({ displayId: "primary" })
+      : new runtime.sdk.ActionTarget.Window(point.target);
+    const position = point.shellControl ? point.desktopPoint : point.localPoint;
+    resultError(await runtime.driver.moveCursor({ ...position, target, session: session.session }), "Cua Driver could not move the labeled desktop cursor.");
     const state = cursorStateFromResult(await runtime.driver.getAgentCursorState({ session: session.session }));
     if (!state.enabled || state.x === undefined || state.y === undefined
       || Math.abs(state.x - point.screenPoint.x) > 1 || Math.abs(state.y - point.screenPoint.y) > 1) {
@@ -766,7 +769,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   async function moveAndVerifyCursor(input: { driver: CuaDriverLike; sdk: CuaSdk; session: string; pid: number; windowId: bigint }, x: number, y: number, frame: CuaStageWindowFrame) {
     const point = cursorScreenPoint(x, y, frame);
     resultError(await input.driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cua Driver could not enable the agent cursor.");
-    resultError(await input.driver.callTool("move_cursor", JSON.stringify({ scope: "window", x: point.x, y: point.y, session: input.session })), "Cua Driver could not move the agent cursor.");
+    resultError(await input.driver.moveCursor({ x, y, target: new input.sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId }), session: input.session }), "Cua Driver could not move the agent cursor.");
     const state = cursorStateFromResult(await input.driver.getAgentCursorState({ session: input.session }));
     if (!state.enabled || state.x === undefined || state.y === undefined || Math.abs(state.x - point.x) > 1 || Math.abs(state.y - point.y) > 1) {
       throw new Error("Cua Driver did not confirm the requested agent cursor position on this stage window.");

@@ -10,7 +10,6 @@ import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desk
 import { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService, setTaskStagePermission } from "../src/lib/native/task-desktop-stage";
-import { approveStageApp } from "../src/lib/native/task-stage-apps";
 
 type FixtureState = { pid: number; windowId: string; clicks: number; text: string; scroll: number; drags: number };
 
@@ -198,9 +197,12 @@ async function main() {
     const proofIdentity = taskStore.issueIdentity("proof-agent", "custom", "step3-proof-session");
     const { task: proofTask } = taskStore.addTask({ from: "you", to: "proof-agent", goal: "Exercise the owned desktop app", origin: "human_typed", idempotencyKey: "stage-proof", targetSession: "step3-proof-session" });
     const appStatePath = join(folder, "task-app.json");
-    approveStageApp(taskRoot, "fixture", executable, [appStatePath, "M9R broker-owned task app"], { terminal: true, env: process.env });
     setTaskStagePermission(taskRoot, "proof-agent", true, { terminal: true, env: process.env }, true);
-    const taskService = createTaskDesktopStageService({ store: taskStore, stage: { ...stage, root: taskRoot } });
+    const taskService = createTaskDesktopStageService({ store: taskStore, stage: { ...stage, root: taskRoot },
+      resolveStageAppForTest: (appId) => {
+        if (appId !== "fixture") throw new Error(`Unexpected proof app: ${appId}`);
+        return { executable, args: [appStatePath, "M9R broker-owned task app"] };
+      } });
     taskManager = createWindowsDesktopStageManager({ ...stage, root: taskRoot });
     const activeTaskManager = taskManager;
     const checkTaskDesktop = async (phase: string) => {

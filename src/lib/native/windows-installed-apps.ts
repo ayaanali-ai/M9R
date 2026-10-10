@@ -7,21 +7,47 @@ export interface InstalledWindowsApp {
   windowExecutable?: string;
 }
 
+const APP_ALIASES: Record<string, readonly string[]> = {
+  terminal: ["terminal", "Windows Terminal", "wt"],
+  "windows terminal": ["terminal", "Windows Terminal", "wt"],
+  wt: ["terminal", "Windows Terminal", "wt"],
+  chrome: ["chrome", "Google Chrome"],
+  "google chrome": ["chrome", "Google Chrome"],
+  edge: ["edge", "Microsoft Edge", "msedge"],
+  "microsoft edge": ["edge", "Microsoft Edge", "msedge"],
+  explorer: ["explorer", "File Explorer", "Windows Explorer"],
+  "file explorer": ["explorer", "File Explorer", "Windows Explorer"],
+  powershell: ["powershell", "Windows PowerShell", "PowerShell"],
+  "windows powershell": ["powershell", "Windows PowerShell", "PowerShell"],
+};
+
+function appNameKey(value: string): string {
+  return value.toLowerCase().replace(/\.exe$/, "").replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+/** Windows registers friendly app names differently from common task phrasing. */
+export function windowsAppSearchNames(value: string): string[] {
+  const key = appNameKey(value.trim());
+  const aliases = APP_ALIASES[key] ?? APP_ALIASES[value.trim().toLowerCase()];
+  const candidates = [value.trim(), ...(aliases ?? [])].filter(Boolean);
+  return [...new Map(candidates.map((candidate) => [appNameKey(candidate), candidate])).values()];
+}
+
 // Read Windows' own registrations and user shortcuts. The requested name is
 // data in an environment variable, never interpolated into PowerShell code.
 const DISCOVER = String.raw`
 $ErrorActionPreference = 'Stop'
 function Key([string] $value) { ($value.ToLowerInvariant() -replace '\.exe$', '' -replace '[^\p{L}\p{N}]', '') }
-$query = Key $env:M9R_APP_QUERY
+$queryKeys = @((ConvertFrom-Json -InputObject $env:M9R_APP_QUERY_NAMES) | ForEach-Object { Key ([string] $_) })
+function Matches([string] $value) { $queryKeys -contains (Key $value) }
 $found = @()
 $shell = New-Object -ComObject WScript.Shell
 $roots = @([Environment]::GetFolderPath('StartMenu'), [Environment]::GetFolderPath('CommonStartMenu'), [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('CommonDesktopDirectory'))
 foreach ($root in $roots) {
   if (-not $root) { continue }
   foreach ($file in @(Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue)) {
-    if ((Key $file.BaseName) -ne $query) { continue }
     $link = $shell.CreateShortcut($file.FullName)
-    if ((Key $file.BaseName) -ne $query -and (Key ([IO.Path]::GetFileName($link.TargetPath))) -ne $query) { continue }
+    if (-not (Matches $file.BaseName) -and -not (Matches ([IO.Path]::GetFileName($link.TargetPath)))) { continue }
     if ($link.TargetPath -match '\.exe$' -and (Test-Path -LiteralPath $link.TargetPath)) {
       if ($link.Arguments) {
         $found += @{ executable = (Join-Path $env:SystemRoot 'explorer.exe'); args = @($file.FullName); windowExecutable = [IO.Path]::GetFileName($link.TargetPath) }
@@ -31,7 +57,7 @@ foreach ($root in $roots) {
 }
 foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths')) {
   foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
-    if ((Key $key.PSChildName) -eq $query) {
+    if (Matches $key.PSChildName) {
       $target = $key.GetValue('')
       if ($target -and (Test-Path -LiteralPath $target)) { $found += @{ executable = $target; args = @() } }
     }
@@ -39,7 +65,7 @@ foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths',
 }
 # Packaged apps must be activated through their registered identity, rather
 # than executing a private binary from WindowsApps directly.
-foreach ($app in @(Get-StartApps | Where-Object { (Key $_.Name) -eq $query })) {
+foreach ($app in @(Get-StartApps | Where-Object { Matches $_.Name })) {
   if ($app.AppID -notmatch '^([^!]+)!([^!]+)$') { continue }
   $family = $Matches[1]; $id = $Matches[2]
   $packageName = $family.Substring(0, $family.LastIndexOf('_'))
@@ -58,7 +84,8 @@ export async function discoverInstalledWindowsApp(name: string): Promise<Install
   const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const output = await new Promise<string>((resolve, reject) => {
     execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", DISCOVER], {
-      windowsHide: true, timeout: 15_000, maxBuffer: 256 * 1024, env: { ...process.env, M9R_APP_QUERY: name },
+      windowsHide: true, timeout: 15_000, maxBuffer: 256 * 1024,
+      env: { ...process.env, M9R_APP_QUERY_NAMES: JSON.stringify(windowsAppSearchNames(name)) },
     }, (error, stdout, stderr) => error ? reject(new Error(`Windows app discovery failed: ${error.killed ? "Windows inventory query exceeded its 15-second deadline." : (stderr.trim() || error.message.split("\n")[0]).slice(0, 500)}`)) : resolve(stdout));
   });
   const parsed: unknown = JSON.parse(output.replace(/^\uFEFF/, ""));

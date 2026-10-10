@@ -5,11 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
-import { approveStageApp, resolveUnlistedStageApp, isStageAppReference, stageWindowMatchesApp } from "../src/lib/native/task-stage-apps";
+import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageWindowMatchesApp, type StageAppLaunchSpec } from "../src/lib/native/task-stage-apps";
+import { windowsAppSearchNames } from "../src/lib/native/windows-installed-apps";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
 
-function fixture(control = false) {
+function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec) {
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "session-one");
@@ -26,7 +27,8 @@ function fixture(control = false) {
       return { capture: previewCapture, outcome: { status: "confirmed" as const } };
     },
   } as unknown as ReturnType<typeof createCuaStageDriver>;
-  const service = createTaskDesktopStageService({ store, readPolicy: () => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) }), driver, stage: {
+  const service = createTaskDesktopStageService({ store, readPolicy: () => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) }), driver,
+    ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage: {
     platform: "win32", env: {}, invokeNative: async (request) => {
       if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentDesktopId, isCurrent: true } };
       if (request.op === "createDesktop") {
@@ -42,11 +44,28 @@ function fixture(control = false) {
   return { root, store, identity, task, service, driver, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-test("app names and renderer aliases are targeting references rather than catalog restrictions", () => {
+test("app names and renderer aliases are targeting references, not an app catalog", () => {
   for (const value of ["terminal", "MSI Center", "Microsoft PowerPoint", "C:\\Windows\\System32\\cmd.exe"]) assert.equal(isStageAppReference(value), true);
   for (const value of ["cmd && echo bad", "chrome\n--flag", "", "cmd;whoami"]) assert.equal(isStageAppReference(value), false);
   assert.equal(stageWindowMatchesApp({ pid: 1, windowId: "2", appName: "WindowsTerminal.exe", title: "Windows PowerShell" }, { executable: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", args: [] }), true);
   assert.equal(stageWindowMatchesApp({ pid: 1, windowId: "2", appName: "Other.exe", title: "Windows PowerShell" }, { executable: "powershell.exe", args: [] }), false);
+});
+
+test("common terminal and browser names search Windows' friendly installed-app registrations", () => {
+  assert.deepEqual(windowsAppSearchNames("terminal"), ["terminal", "Windows Terminal", "wt"]);
+  assert.deepEqual(windowsAppSearchNames("Windows Terminal"), ["Windows Terminal", "terminal", "wt"]);
+  assert.deepEqual(windowsAppSearchNames("Google Chrome"), ["Google Chrome", "chrome"]);
+  assert.deepEqual(windowsAppSearchNames("MSI Center"), ["MSI Center"]);
+});
+
+test("app launches use the task project cwd and never inherit Windows System32", () => {
+  const home = join(tmpdir(), "m9r-app-home");
+  const project = join(home, "project");
+  const isDirectory = (path: string) => path === home || path === project;
+  assert.equal(stageAppLaunchCwd(project, { env: { M9R_PROJECT_ROOT: home }, fallback: home, isDirectory }), project);
+  assert.equal(stageAppLaunchCwd("relative-project", { env: { M9R_PROJECT_ROOT: home }, fallback: home, isDirectory }), home);
+  assert.equal(stageAppLaunchCwd("C:\\Windows\\System32", { env: { M9R_PROJECT_ROOT: "C:\\Windows\\System32" }, fallback: home, isDirectory }), home);
+  assert.equal(stageAppLaunchCwd(undefined, { env: {}, fallback: home, isDirectory }), home);
 });
 
 test("a native target inspection failure is returned immediately instead of becoming an approval wait", async () => {
@@ -87,11 +106,11 @@ test("omitted mode stays on the owner's current desktop for preparation and curs
 });
 
 test("an owner desktop app request reuses personal Chrome without creating another process or desktop", async () => {
-  const f = fixture(true);
+  const f = fixture(true, (root, appId) => {
+    assert.equal(appId, "chrome");
+    return { executable: join(root, "chrome.exe"), args: [] };
+  });
   try {
-    const executable = join(f.root, "chrome.exe");
-    writeFileSync(executable, "fixture executable; must never run");
-    approveStageApp(f.root, "chrome", executable, [], { terminal: true, env: {} });
     f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Personal Chrome", width: 1280, height: 720 }];
     const opened = await f.service.launch(f.identity.token, f.task.id, "chrome");
     assert.equal(opened.reused, true);
@@ -299,28 +318,28 @@ test("revoking control while the owner decides stops the click even after approv
   } finally { f.cleanup(); }
 });
 
-test("access modes round-trip through the owner-only policy; ordinary grants are full by default", async () => {
+test("enabled agents use any installed app; legacy access modes do not restore per-app gates", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-stage-modes-"));
   try {
     setTaskStagePermission(root, "codex", true, { terminal: true, env: {} }, true, "full");
-    assert.deepEqual(readTaskStagePolicy(root), { handles: ["codex"], controlHandles: ["codex"], modes: { codex: "full" } });
+    assert.deepEqual(readTaskStagePolicy(root), { handles: ["codex"], controlHandles: ["codex"] });
     assert.equal(stageAccessMode(readTaskStagePolicy(root), "codex"), "full");
-    // Re-granting without a mode clears overrides and returns the handle to full access.
+    // Re-granting without a legacy mode preserves unrestricted app access.
     setTaskStagePermission(root, "codex", true, { terminal: true, env: {} }, true);
     assert.deepEqual(readTaskStagePolicy(root), { handles: ["codex"], controlHandles: ["codex"] });
     assert.equal(stageAccessMode(readTaskStagePolicy(root), "codex"), "full");
     setTaskStagePermission(root, "codex", true, { terminal: true, env: {} }, true, "request");
-    assert.equal(stageAccessMode(readTaskStagePolicy(root), "codex"), "request");
+    assert.equal(stageAccessMode(readTaskStagePolicy(root), "codex"), "full");
     setTaskStagePermission(root, "codex", false, { terminal: true, env: {} });
     assert.deepEqual(readTaskStagePolicy(root), { handles: [] });
     assert.equal(stageAccessMode(readTaskStagePolicy(root), "codex"), "scoped");
-    assert.equal(stageAccessMode({ handles: ["codex"], modes: { codex: "scoped" } }, "codex"), "scoped");
+    assert.equal(stageAccessMode({ handles: ["codex"], modes: { codex: "scoped" } }, "codex"), "full");
     assert.throws(() => setTaskStagePermission(root, "codex", true, { terminal: true, env: {} }, true, "everything" as never), /Invalid stage access mode/);
     assert.throws(() => setTaskStagePermission(root, "codex", true, { terminal: true, env: { OPENCODE: "1" } }, true, "full"), /Only the owner/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("unlisted app resolution is broker-fixed: well-known ids probe install roots, absolute paths need full mode", async () => {
+test("installed app resolution probes standard locations and explicitly supplied executable paths", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-stage-resolve-"));
   try {
     const exe = join(root, "app.exe");
@@ -328,16 +347,16 @@ test("unlisted app resolution is broker-fixed: well-known ids probe install root
     const env = { ProgramFiles: root, "ProgramFiles(x86)": root, LocalAppData: root };
     assert.throws(() => resolveUnlistedStageApp("chrome", { allowAbsolutePath: true, env, exists: () => false }), /not installed at any of its standard locations/);
     assert.throws(() => resolveUnlistedStageApp("notepad", { allowAbsolutePath: true, env }), /not installed or could not be resolved/);
-    assert.throws(() => resolveUnlistedStageApp(exe, { allowAbsolutePath: false, env }), /not installed or could not be resolved/, "request mode never takes agent-named paths");
+    assert.throws(() => resolveUnlistedStageApp(exe, { allowAbsolutePath: false, env }), /not installed or could not be resolved/, "the broker controls whether absolute paths are resolved");
     const resolved = resolveUnlistedStageApp(exe, { allowAbsolutePath: true, env });
     assert.equal(resolved.wellKnown, false);
     assert.deepEqual(resolved.args, []);
-    assert.equal(resolved.sha256, undefined, "full access does not hash or catalog an installed app");
+    assert.equal(resolved.executable, exe, "direct app resolution does not require a catalog entry or hash");
     assert.throws(() => resolveUnlistedStageApp(join(root, "app.txt"), { allowAbsolutePath: true, env }), /not installed or could not be resolved/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("launch decisions: catalog flows, full resolves unlisted, request holds, scoped refuses", async () => {
+test("an enabled agent resolves any named or absolute app without per-app approval", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-stage-launch-"));
   try {
     const exe = join(root, "toollauncher.exe");
@@ -346,22 +365,20 @@ test("launch decisions: catalog flows, full resolves unlisted, request holds, sc
     const full = { handles: ["codex"], controlHandles: ["codex"], modes: { codex: "full" as const } };
     const scoped = { handles: ["codex"], controlHandles: ["codex"], modes: { codex: "scoped" as const } };
     const request = { handles: ["codex"], controlHandles: ["codex"], modes: { codex: "request" as const } };
-    const decided = resolveLaunchTarget(root, full, "codex", exe);
+    const decided = resolveLaunchTarget(full, "codex", exe);
     assert.equal(decided.app.executable, exe);
-    assert.equal(decided.needsApproval, undefined);
-    assert.throws(() => resolveLaunchTarget(root, scoped, "codex", exe), /not been approved/);
-    // Request mode never takes agent-named paths, even for existing files.
-    assert.throws(() => resolveLaunchTarget(root, request, "codex", exe), /not installed or could not be resolved/);
-    // But it holds broker-resolved browsers for the owner: fake an installed Chrome.
+    assert.deepEqual(resolveLaunchTarget(scoped, "codex", exe).app, decided.app);
+    assert.deepEqual(resolveLaunchTarget(request, "codex", exe).app, decided.app);
+    // Legacy policy modes are read for migration but never restore app-level gates.
     mkdirSync(join(root, "Google", "Chrome", "Application"), { recursive: true });
     writeFileSync(chromeExe, "fake chrome bytes");
     const installed = (p: string) => p === chromeExe;
-    const held = resolveLaunchTarget(root, request, "codex", "chrome", { env: { ProgramFiles: root }, exists: installed });
+    const held = resolveLaunchTarget(request, "codex", "chrome", { env: { ProgramFiles: root }, exists: installed });
     assert.equal(held.app.executable, chromeExe);
-    assert.match(held.needsApproval!.step, /Launching/);
-    assert.equal(held.needsApproval!.targetLabel, chromeExe);
-    const direct = resolveLaunchTarget(root, full, "codex", "chrome", { env: { ProgramFiles: root }, exists: installed });
+    assert.equal("needsApproval" in held, false);
+    const direct = resolveLaunchTarget(full, "codex", "chrome", { env: { ProgramFiles: root }, exists: installed });
     assert.equal(direct.app.executable, chromeExe);
-    assert.equal(direct.needsApproval, undefined);
+    assert.equal("needsApproval" in direct, false);
+    assert.throws(() => resolveLaunchTarget({ handles: [] }, "codex", exe), /not been granted task-stage access/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

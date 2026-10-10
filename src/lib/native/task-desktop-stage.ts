@@ -9,16 +9,15 @@ import { createCuaStageDriver, type CuaAgentCursorIdentity } from "./cua-stage-d
 import { parseTaskStageAction, runTaskStageAction, stageClickNeedsApproval } from "./task-stage-actions";
 import type { StageApprovalRequest } from "./web-broker-core";
 import {
-  launchApprovedStageApp,
-  listApprovedStageApps,
+  launchStageApp,
   ownedBrowserLaunch,
-  readApprovedStageApp,
   resolveUnlistedStageApp,
   selectPersonalBrowserWindow,
   selectExistingPersonalBrowserWindow,
+  stageAppLaunchCwd,
   stageBrowserKind,
   stageWindowMatchesApp,
-  type ApprovedStageApp,
+  type StageAppLaunchSpec,
   type BrowserLaunchMode,
 } from "./task-stage-apps";
 import type { ChildProcess } from "node:child_process";
@@ -28,11 +27,7 @@ import { discoverInstalledWindowsApp } from "./windows-installed-apps";
 export const TASK_STAGE_POLICY_FILE = "task-stage-policy.json";
 export type TaskStageMode = "background" | "owner-preview";
 
-/**
- * Per-agent access mode. An enabled handle defaults to `full`: ordinary desktop apps are resolved
- * without a per-app catalog approval. `scoped` and `request` remain explicit opt-ins for owners who
- * want the legacy catalog or an approval-on-launch policy. The money carve-out holds in every mode.
- */
+/** Legacy policy values are parsed for migration but ignored for enabled agents. */
 export type TaskStageAccessMode = "full" | "scoped" | "request";
 const ACCESS_MODES: readonly TaskStageAccessMode[] = ["full", "scoped", "request"];
 
@@ -58,14 +53,11 @@ export function setTaskStagePermission(root: string, handle: string, enabled: bo
     const controlHandles = (policy.controlHandles ?? []).filter((value) => value !== handle);
     const modes = { ...(policy.modes ?? {}) } as Record<string, TaskStageAccessMode>;
     delete modes[handle];
-    // Deterministic mapping: each grant writes the full triple, so the file always says what it means.
-    // allow-agent -> full without control; allow-control -> full with control; allow-full -> full with control.
-    // Explicit scoped/request choices are persisted; the ordinary owner grant intentionally has no
-    // catalog gate so a user's installed apps are usable without editing a list.
+    // App catalog/request modes are legacy. Keep reading them so existing policy
+    // files migrate safely, but new grants only store agent access and control.
     if (enabled) {
       handles.push(handle);
       if (control || policy.controlHandles?.includes(handle)) controlHandles.push(handle);
-      if (mode !== undefined && mode !== "scoped") modes[handle] = mode;
       if (mode === "full" && !controlHandles.includes(handle)) controlHandles.push(handle);
     }
     if (handles.length > 16) throw new Error("At most 16 agents may use task stages.");
@@ -108,37 +100,19 @@ export function readTaskStagePolicy(root: string): { handles: string[]; controlH
   return { handles, ...(Array.isArray(policy.controlHandles) && policy.controlHandles.length ? { controlHandles: [...new Set(policy.controlHandles as string[])] } : {}), ...(modes && Object.keys(modes).length ? { modes } : {}) };
 }
 
-/** Effective access mode. An enabled handle without an explicit mode is unrestricted for ordinary app launches. */
+/** Enabled agents can resolve any installed app; the owner grant is per agent, never per app. */
 export function stageAccessMode(policy: { handles: string[]; modes?: Record<string, TaskStageAccessMode> }, handle: string): TaskStageAccessMode {
   const normalized = normalizeHandle(handle);
   if (!policy.handles.includes(normalized)) return "scoped";
-  const mode = policy.modes?.[normalized];
-  return mode === "scoped" || mode === "request" ? mode : "full";
+  return "full";
 }
 
-export interface StageLaunchTarget {
-  app: ApprovedStageApp;
-  /** Set when the owner's yes is required before spawning (request mode, unlisted app). */
-  needsApproval?: { step: string; targetLabel: string };
-}
+export interface StageLaunchTarget { app: StageAppLaunchSpec }
 
-/**
- * Pure launch decision: catalog hit, unrestricted broker resolution, or an explicit request-mode
- * hold. Scoped misses refuse exactly as before. No process is started here; launch() owns spawning
- * and custody.
- */
-export function resolveLaunchTarget(root: string, policy: { handles: string[]; modes?: Record<string, TaskStageAccessMode> }, handle: string, appId: string, opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean } = {}): StageLaunchTarget {
-  try {
-    return { app: readApprovedStageApp(root, appId) };
-  } catch {
-    const access = stageAccessMode(policy, handle);
-    // Catalog miss: full mode resolves broker-fixed ids (and absolute paths, audited); request mode
-    // holds the same resolution for the owner; scoped keeps the historical refusal.
-    if (access === "scoped") throw new Error("This app has not been approved for task stages.");
-    const resolved = resolveUnlistedStageApp(appId, { allowAbsolutePath: access === "full", ...(opts.env ? { env: opts.env } : {}), ...(opts.exists ? { exists: opts.exists } : {}) });
-    if (access === "full") return { app: resolved };
-    return { app: resolved, needsApproval: { step: `Launching ${appId} on the stage`, targetLabel: resolved.executable } };
-  }
+/** Resolve an installed executable after the one-time agent computer-control grant. */
+export function resolveLaunchTarget(policy: { handles: string[]; modes?: Record<string, TaskStageAccessMode> }, handle: string, appId: string, opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean } = {}): StageLaunchTarget {
+  if (stageAccessMode(policy, handle) !== "full") throw new Error("This agent has not been granted task-stage access.");
+  return { app: resolveUnlistedStageApp(appId, { allowAbsolutePath: true, ...(opts.env ? { env: opts.env } : {}), ...(opts.exists ? { exists: opts.exists } : {}) }) };
 }
 
 /** This service belongs to the owner-launched broker, never an agent's MCP child process. */
@@ -148,6 +122,8 @@ export function createTaskDesktopStageService(input: {
   readPolicy?: () => { handles: string[]; controlHandles?: string[]; modes?: Record<string, TaskStageAccessMode> };
   /** Test seam: replaces the Cua driver (production always constructs the real one). */
   driver?: ReturnType<typeof createCuaStageDriver>;
+  /** Test seam for harmless local fixtures with fixed launch arguments. */
+  resolveStageAppForTest?: (appId: string) => StageAppLaunchSpec;
   /** Owner-selected browser policy. Personal profile is the safe product default. */
   browserLaunchMode?: BrowserLaunchMode;
   /**
@@ -243,8 +219,7 @@ export function createTaskDesktopStageService(input: {
       // Return opaque coordination IDs only, never desktop GUIDs or owner-window identifiers.
       return { name, mode, agent: normalizeHandle(identity.handle), sessionTag, taskId, hasAnchor: Boolean(assignedStage?.anchor),
         ...(mode === "background" && assignedStage ? { roomDesktopId: assignedStage.roomDesktopId } : {}),
-        controlEnabled: readPolicy().controlHandles?.includes(normalizeHandle(identity.handle)) === true,
-        ...(mode === "background" ? { approvedApps: listApprovedStageApps(root) } : {}) };
+        controlEnabled: readPolicy().controlHandles?.includes(normalizeHandle(identity.handle)) === true };
     };
     const result = pending.then(run, run);
     pending = result.catch(() => undefined);
@@ -325,37 +300,21 @@ export function createTaskDesktopStageService(input: {
   async function launch(token: string, taskId: string, appId: string, requestedMode?: TaskStageMode) {
     const mode = stageMode(requestedMode);
     const run = async () => {
-      const { name, identity } = authorize(token, taskId, mode);
+      const { name, identity, task } = authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
       let target: StageLaunchTarget;
-      try { target = resolveLaunchTarget(root, readPolicy(), identity.handle, appId); }
-      catch (error) {
-        if (stageAccessMode(readPolicy(), identity.handle) !== "full") throw error;
-        const installed = await discoverInstalledWindowsApp(appId);
-        if (!installed) throw error;
-        target = { app: installed };
-      }
-      let approved: ApprovedStageApp;
-      if (!target.needsApproval) {
-        approved = target.app;
+      if (input.resolveStageAppForTest) {
+        target = { app: input.resolveStageAppForTest(appId) };
       } else {
-        const approvals = input.approvals?.();
-        if (!approvals) throw new Error(`Launching ${target.needsApproval.targetLabel} needs owner approval, and this broker has no approval route attached; the app was not started.`);
-        const allowed = await approvals.requestApproval({
-          action: "launch",
-          risk: "launch",
-          agent: normalizeHandle(identity.handle),
-          provider: identity.provider,
-          sessionId: identity.sessionId,
-          step: target.needsApproval.step,
-          targetLabel: target.needsApproval.targetLabel,
-          timeoutMs: 55_000,
-        });
-        if (!allowed) throw new Error(`The owner did not approve launching ${appId}; the app was not started.`);
-        authorize(token, taskId, mode);
-        if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-        approved = target.app;
+        try { target = resolveLaunchTarget(readPolicy(), identity.handle, appId); }
+        catch (error) {
+          if (stageAccessMode(readPolicy(), identity.handle) !== "full") throw error;
+          const installed = await discoverInstalledWindowsApp(appId);
+          if (!installed) throw error;
+          target = { app: installed };
+        }
       }
+      const approved = target.app;
       if (mode === "owner-preview") {
         await manager.adoptCurrentDesktop(name);
         const before = await driver.listVisibleWindows({ onScreenOnly: false });
@@ -372,7 +331,7 @@ export function createTaskDesktopStageService(input: {
         // Normal profile, normal executable, fixed owner-resolved arguments.
         // Never manufacture --new-window, --user-data-dir or about:blank here.
         const beforeKeys = new Set(before.map((window) => `${window.pid}:${window.windowId}`));
-        const child = launchApprovedStageApp(kind ? { ...approved, args: [] } : approved, { windowsHide: false });
+        const child = launchStageApp(kind ? { ...approved, args: [] } : approved, { windowsHide: false, cwd: stageAppLaunchCwd(task.cwd) });
         let launchError: Error | undefined;
         child.on("error", (error) => { launchError = error; });
         for (let attempt = 0; attempt < 60; attempt++) {
@@ -420,7 +379,7 @@ export function createTaskDesktopStageService(input: {
       const beforeBrowserWindows = personalBrowser
         ? new Set((await driver.listVisibleWindows({ onScreenOnly: false })).map((window) => `${window.pid}:${window.windowId}`))
         : undefined;
-      const child = launchApprovedStageApp(ownedBrowserLaunch(root, name, approved, { mode: browserLaunchMode }), { windowsHide: true });
+      const child = launchStageApp(ownedBrowserLaunch(root, name, approved, { mode: browserLaunchMode }), { windowsHide: true, cwd: stageAppLaunchCwd(task.cwd) });
       let spawnError: Error | undefined;
       child?.on("error", (error) => { spawnError = error; });
       try {

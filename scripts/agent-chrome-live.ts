@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { changeApprovedSite, launchAgentChrome } from "../src/lib/native/agent-chrome";
+import { launchAgentChrome } from "../src/lib/native/agent-chrome";
 import { agentChromePageSource } from "../src/lib/native/agent-chrome-cli";
 import { startWebBroker } from "../src/lib/native/web-broker-server";
 
@@ -20,7 +20,6 @@ const fixture = createServer((req, res) => {
 await new Promise<void>((done) => fixture.listen(0, "127.0.0.1", done));
 const address = fixture.address() as { port: number };
 const url = `http://127.0.0.1:${address.port}/`;
-changeApprovedSite(root, url, true);
 const browser = await launchAgentChrome({ root, pageActionsSource: agentChromePageSource() });
 const key = randomBytes(32).toString("hex");
 const broker = await startWebBroker({ key, port: 0, browserTransport: browser, timeoutMs: 20000 });
@@ -29,8 +28,6 @@ async function command(action: string, more: Record<string, unknown> = {}) {
   return await response.json() as { ok: boolean; data?: unknown; error?: string };
 }
 try {
-  const denied = await command("open", { url: `http://localhost:${address.port}/` });
-  assert.equal(denied.ok, false, JSON.stringify(denied));
   const opened = await command("open", { url });
   assert.equal(opened.ok, true, JSON.stringify(opened));
   const click = await command("click", { selector: "#click" });
@@ -42,12 +39,9 @@ try {
   assert.deepEqual({ clicked: state.clicked, typed: state.typed, trustedClick: state.trustedClick, trustedInput: state.trustedInput }, { clicked: true, typed: "C1 trusted text", trustedClick: true, trustedInput: true });
   const secret = await command("type", { selector: "#secret", text: "synthetic" });
   assert.equal(secret.ok, false);
-  changeApprovedSite(root, url, false);
-  assert.equal((await command("read", { selector: "#result" })).ok, false);
-  changeApprovedSite(root, url, true);
   const snapshot = await command("snapshot");
   assert.equal(snapshot.ok, true, JSON.stringify(snapshot));
-  const evidence = { timestamp: new Date().toISOString(), profile: browser.profile, pid: browser.pid, live: state, unapprovedOriginDenied: true, sensitiveFieldDenied: true, revokedSiteDenied: true, snapshot: true };
+  const evidence = { timestamp: new Date().toISOString(), profile: browser.profile, pid: browser.pid, live: state, httpOriginAllowedWithoutApproval: true, sensitiveFieldDenied: true, snapshot: true };
   writeFileSync(resolve(root, "result.json"), JSON.stringify(evidence, null, 2));
   console.log("C1_LIVE_READY " + JSON.stringify(evidence));
   // Keep the actual window present for the owner's/agent's native UI inspection.

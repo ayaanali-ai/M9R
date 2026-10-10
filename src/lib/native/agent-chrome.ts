@@ -21,6 +21,20 @@ export function approvedSite(value: string): string {
   return url.origin;
 }
 
+/** Validate a page URL and any explicit cross-owner grant scope; the owner's own agent has no site allowlist. */
+export function validateAgentChromeUrl(value: string, scope: { expectOrigin?: string; expectPathPrefix?: string } = {}): string {
+  const origin = approvedSite(value);
+  if (scope.expectOrigin && origin !== scope.expectOrigin) throw new Error("The page left the granted site.");
+  if (scope.expectPathPrefix) {
+    const prefix = scope.expectPathPrefix;
+    const path = new URL(value).pathname;
+    if (prefix !== "/" && path !== prefix && !path.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`)) {
+      throw new Error("The page left the granted path.");
+    }
+  }
+  return origin;
+}
+
 /** A fixed private subtree, never a caller-selected Chrome user-data directory. Reject linked directories. */
 export function agentChromePaths(root: string) {
   const absolute = resolve(root);
@@ -33,32 +47,7 @@ export function agentChromePaths(root: string) {
   if (lstatSync(profile).isSymbolicLink() || realpathSync(profile).toLowerCase() !== profile.toLowerCase()) {
     throw new Error("The agent Chrome profile must not be a link.");
   }
-  return { root: absolute, profile, sites: join(absolute, "approved-sites.json"), lock: join(absolute, "chrome-launch.lock") };
-}
-
-export function readApprovedSites(root: string): string[] {
-  const path = agentChromePaths(root).sites;
-  try {
-    if (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) throw new Error("Invalid site settings file.");
-    const state: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (!Array.isArray(state) || state.length > 256 || state.some((site) => typeof site !== "string" || approvedSite(site) !== site)) {
-      throw new Error("Invalid approved-site settings; refusing browser access.");
-    }
-    return state as string[];
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-}
-
-/** Called only by the human CLI approval flow. The transport has no grant-writing command. */
-export function changeApprovedSite(root: string, site: string, approved: boolean): string[] {
-  const origin = approvedSite(site);
-  const sites = readApprovedSites(root).filter((entry) => entry !== origin);
-  if (approved) sites.push(origin);
-  if (sites.length > 256) throw new Error("Too many approved sites.");
-  writeFileSync(agentChromePaths(root).sites, JSON.stringify(sites.sort(), null, 2) + "\n", { mode: 0o600 });
-  return sites;
+  return { root: absolute, profile, lock: join(absolute, "chrome-launch.lock") };
 }
 
 function findChrome(): string {
@@ -277,14 +266,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
     }
     async function location(tab: Tab): Promise<string> { return String(await evaluate(tab, "location.href")); }
     function allowed(url: string, command: Command) {
-      const origin = approvedSite(url);
-      if (!readApprovedSites(paths.root).includes(origin)) throw new Error("Site not approved. Ask the owner to run: m9r web chrome approve <site-url>.");
-      if (command.expectOrigin && origin !== command.expectOrigin) throw new Error("The page left the granted site.");
-      if (command.expectPathPrefix) {
-        const prefix = command.expectPathPrefix;
-        const path = new URL(url).pathname;
-        if (prefix !== "/" && path !== prefix && !path.startsWith(prefix.endsWith("/") ? prefix : prefix + "/")) throw new Error("The page left the granted path.");
-      }
+      validateAgentChromeUrl(url, command);
       if (closed || stopped) throw new Error("Agent Chrome work was stopped.");
     }
     async function pageAction(tab: Tab, expression: string): Promise<PageResult> {
@@ -320,7 +302,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
               lastReady = state.ready;
               navigationCommitted = !navigation.loaderId || tree.frameTree.frame.loaderId === navigation.loaderId;
               if (navigationCommitted && state.url !== "about:blank" && ["interactive", "complete"].includes(state.ready)) { allowed(state.url, command); url = state.url; loaded = true; break; }
-            } catch (error) { if (/Site not approved|granted|stopped/.test(String(error))) throw error; }
+            } catch (error) { if (/granted|stopped/.test(String(error))) throw error; }
             await delay(50);
           }
           if (!loaded) throw new Error(`The approved page did not finish loading (document: ${lastReady}, navigation committed: ${navigationCommitted}).`);

@@ -57,6 +57,31 @@ test("an agent can omit tab after opening its only named tab", async () => {
   assert.deepEqual(await read, { ok: true, data: "Example Domain" });
 });
 
+test("an unrelated tabless open creates a fresh tab and focuses it for the next action", async () => {
+  const { broker, sent } = harness();
+  const local = broker.submit(req("codex", "open", { url: "http://localhost:3000/", tab: "local-work" }));
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "http://localhost:3000", url: "http://localhost:3000/" });
+  assert.equal((await local).ok, true);
+
+  const external = broker.submit(req("codex", "open", { url: "https://youtube.com/" }));
+  assert.equal(sent.length, 2);
+  assert.notEqual(sent[1].tab, "local-work", "a new URL must not commandeer the existing task tab");
+  const openedTab = String(sent[1].tab);
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, origin: "https://youtube.com", url: "https://youtube.com/" });
+  assert.equal((await external).ok, true);
+
+  const read = broker.submit(req("codex", "read", { selector: "h1" }));
+  assert.equal(sent[2].tab, openedTab, "tabless continuation follows the tab just opened");
+  broker.onExtensionMessage({ type: "result", id: "c3", ok: true, data: "YouTube" });
+  assert.deepEqual(await read, { ok: true, data: "YouTube" });
+
+  const tabs = await broker.submit(req("codex", "tabs"));
+  assert.equal(tabs.ok, true);
+  assert.deepEqual((tabs.data as Array<{ tab: string; url?: string }>).map(({ tab, url }) => [tab, url]).sort(), [
+    ["local-work", "http://localhost:3000/"], [openedTab, "https://youtube.com/"],
+  ].sort());
+});
+
 test("an agent with no tab of its own works on the one page the room already has open", async () => {
   const { broker, sent } = harness();
   const opened = broker.submit(req("claude", "open", { url: "https://example.com/", tab: "research" }));
