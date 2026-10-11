@@ -61,6 +61,18 @@ impl Guid {
             self.data4[7]
         )
     }
+
+    fn require_nonzero(self) -> Result<Self, &'static str> {
+        if self.data1 == 0
+            && self.data2 == 0
+            && self.data3 == 0
+            && self.data4 == [0; 8]
+        {
+            Err("virtual desktop id is empty")
+        } else {
+            Ok(self)
+        }
+    }
 }
 
 fn parse_window_identity(value: &Value) -> Result<(u32, usize), &'static str> {
@@ -95,6 +107,7 @@ fn parse_desktop_id(value: &Value) -> Result<Guid, &'static str> {
         .get("desktopId")
         .and_then(Value::as_str)
         .and_then(Guid::parse)
+        .and_then(|desktop_id| desktop_id.require_nonzero().ok())
         .ok_or("invalid desktopId")
 }
 
@@ -904,7 +917,7 @@ mod platform {
             if result < 0 {
                 return Err("could not read the window's virtual desktop id");
             }
-            Ok(desktop)
+            desktop.require_nonzero()
         }
 
         fn is_on_current_desktop(&self, window: Hwnd) -> Result<bool, &'static str> {
@@ -1153,7 +1166,7 @@ mod platform {
         if status < 0 {
             return Err("Windows could not read a virtual desktop id");
         }
-        Ok(id)
+        id.require_nonzero()
     }
 
     pub(super) fn create_desktop() -> Result<DesktopInfo, &'static str> {
@@ -1325,6 +1338,15 @@ mod tests {
     fn parses_and_formats_virtual_desktop_guids() {
         let parsed = Guid::parse("{A5CD92FF-29BE-454C-8D04-D82879FB3F1B}").unwrap();
         assert_eq!(parsed.as_string(), "a5cd92ff-29be-454c-8d04-d82879fb3f1b");
+    }
+
+    #[test]
+    fn rejects_zero_virtual_desktop_ids() {
+        let zero = "00000000-0000-0000-0000-000000000000";
+        assert!(super::parse_desktop_id(&json!({ "desktopId": zero })).is_err());
+
+        let valid = "a5cd92ff-29be-454c-8d04-d82879fb3f1b";
+        assert!(super::parse_desktop_id(&json!({ "desktopId": valid })).is_ok());
     }
 
     #[test]
