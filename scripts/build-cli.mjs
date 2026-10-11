@@ -645,6 +645,11 @@ function build() {
   // compares its own startup-captured value against on every poll cycle.
   writeFileSync(resolve(outDir, "build-info.json"), JSON.stringify({ builtAt: new Date().toISOString() }, null, 2) + "\n");
 
+  // Validate the generated native setup dependency graph before publishing.
+  // A missing generated module must fail this build, not the subsequent SEA
+  // packaging or a user's first setup command. No verification bundle ships.
+  buildSync({ entryPoints: [resolve(outDir, "native-commands.js")], bundle: true,
+    platform: "node", format: "esm", write: false, logLevel: "warning" });
   publishGeneratedDirectory(outDir, finalOutDir);
   console.log(`Built CLI -> ${finalOutDir}`);
 }
