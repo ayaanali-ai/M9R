@@ -6,6 +6,7 @@ import test from "node:test";
 import { renameStateFile } from "../src/lib/native/atomic-file";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
+import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
 import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageWindowMatchesApp, type StageAppLaunchSpec } from "../src/lib/native/task-stage-apps";
 import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT } from "../src/lib/native/windows-installed-apps";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
@@ -83,6 +84,57 @@ test("common terminal and browser names search Windows' friendly installed-app r
 
 test("Windows app discovery searches pinned taskbar shortcuts", () => {
   assert.ok(WINDOWS_APP_DISCOVERY_SCRIPT.includes("User Pinned\\TaskBar"));
+});
+
+test("owner-preview repairs a saved zero desktop ID and refuses zero IDs from the native helper", async () => {
+  const testTemp = join(process.cwd(), ".test-tmp");
+  mkdirSync(testTemp, { recursive: true });
+  const root = mkdtempSync(join(testTemp, "m9r-zero-desktop-id-"));
+  const stageName = "preview-agent-test";
+  const emptyId = "00000000-0000-0000-0000-000000000000";
+  const currentId = "33333333-3333-4333-8333-333333333333";
+  const roomDesktopId = "44444444-4444-4444-8444-444444444444";
+  writeFileSync(join(root, "windows-stages.json"), JSON.stringify({
+    version: 3,
+    stages: [{
+      name: stageName,
+      desktopId: emptyId,
+      roomDesktopId,
+      returnToDesktopId: null,
+      anchor: null,
+      roomWindowId: null,
+      agentAssignment: { handle: "codex", sessionTag: "12345678" },
+      registeredAt: "2026-10-06T19:12:50.290Z",
+    }],
+  }));
+  let reportedDesktopId = currentId;
+  const manager = createWindowsDesktopStageManager({
+    platform: "win32",
+    root,
+    env: {},
+    terminal: true,
+    invokeNative: async (request) => {
+      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: reportedDesktopId, isCurrent: true } };
+      if (request.op === "inspect") return { ok: true, window: {
+        pid: Number(request.pid), windowId: String(request.windowId), desktopId: reportedDesktopId, onCurrentDesktop: true,
+      } };
+      throw new Error("Unexpected native operation.");
+    },
+  });
+
+  try {
+    const adopted = await manager.adoptCurrentDesktop(stageName);
+    assert.equal(adopted.desktopId, currentId, "a valid current desktop repairs the legacy zero mapping");
+    assert.equal(adopted.agentAssignment?.sessionTag, "12345678", "repair preserves the agent assignment");
+    assert.equal(adopted.roomDesktopId, roomDesktopId, "repair preserves the room coordination identity");
+
+    reportedDesktopId = emptyId;
+    await assert.rejects(manager.adoptCurrentDesktop(stageName), /invalid desktop result/);
+    await assert.rejects(manager.inspectWindow("123", "456"), /invalid window result/);
+    assert.equal(manager.list()[0]?.desktopId, currentId, "invalid native data must not overwrite the repaired mapping");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("app launches use the task project cwd and never inherit Windows System32", () => {

@@ -12,6 +12,7 @@ const MAX_STAGES = 16;
 const MAX_NATIVE_RESPONSE_BYTES = 32 * 1024;
 const OWNER_PREVIEW_STAGE_PREFIX = "preview-agent-";
 const DESKTOP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EMPTY_DESKTOP_ID_RE = /^00000000-0000-0000-0000-000000000000$/i;
 const WINDOW_ID_RE = /^(?:0[xX][0-9a-f]+|[0-9]+)$/;
 const MACHINE_ID_FILE = "windows-stage-machine-id";
 
@@ -86,6 +87,10 @@ function normalizedName(value: string): string {
     throw new Error("Stage names must be 1–40 lowercase letters, numbers, hyphens, or underscores, and start with a letter or number.");
   }
   return name;
+}
+
+function isNonzeroDesktopId(value: unknown): value is string {
+  return typeof value === "string" && DESKTOP_ID_RE.test(value) && !EMPTY_DESKTOP_ID_RE.test(value);
 }
 
 function parseRegistry(raw: string): StageRegistry {
@@ -224,7 +229,7 @@ function normalizeWindowInfo(value: unknown): NativeWindowStageInfo {
   if (!value || typeof value !== "object") throw new Error("The native Windows stage helper returned no window result.");
   const item = value as Partial<NativeWindowStageInfo>;
   if (!Number.isInteger(item.pid) || (item.pid ?? 0) < 1 || typeof item.windowId !== "string" || !WINDOW_ID_RE.test(item.windowId)
-      || typeof item.desktopId !== "string" || !DESKTOP_ID_RE.test(item.desktopId) || typeof item.onCurrentDesktop !== "boolean") {
+      || !isNonzeroDesktopId(item.desktopId) || typeof item.onCurrentDesktop !== "boolean") {
     throw new Error("The native Windows stage helper returned an invalid window result.");
   }
   return { pid: item.pid!, windowId: item.windowId, desktopId: item.desktopId.toLowerCase(), onCurrentDesktop: item.onCurrentDesktop };
@@ -413,9 +418,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   function normalizeDesktopInfo(value: unknown): NativeDesktopStageInfo {
     if (!value || typeof value !== "object") throw new Error("The native Windows stage helper returned no desktop result.");
     const item = value as Partial<NativeDesktopStageInfo>;
-    if (typeof item.desktopId !== "string" || !DESKTOP_ID_RE.test(item.desktopId) || typeof item.isCurrent !== "boolean"
+    if (!isNonzeroDesktopId(item.desktopId) || typeof item.isCurrent !== "boolean"
         || (item.returnDesktopId !== undefined && item.returnDesktopId !== null
-          && (typeof item.returnDesktopId !== "string" || !DESKTOP_ID_RE.test(item.returnDesktopId)))) {
+          && !isNonzeroDesktopId(item.returnDesktopId))) {
       throw new Error("The native Windows stage helper returned an invalid desktop result.");
     }
     return {
