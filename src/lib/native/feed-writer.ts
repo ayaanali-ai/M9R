@@ -4,7 +4,8 @@
  * turn running) on a timer, off the UI path. Writes are atomic (temp file, then rename) and happen only when the content
  * changed, so the overlay never sees a half file and is not woken for nothing.
  */
-import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync, rmSync, rmdirSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { claudeTranscriptPath, lastClaudeActivity, lastCodexActivity } from "./session-activity-core";
@@ -146,7 +147,10 @@ export async function runFeed(options: FeedRunOptions): Promise<Feed | null> {
     if (busy) return;
     busy = true;
     try {
-      if (reprobe) probes = await probe(createLocalStore(options.root), deps);
+      if (reprobe) {
+        try { probes = await probe(createLocalStore(options.root), deps); }
+        catch { probes = {}; /* stale successful activity is not current evidence */ }
+      }
       const wrote = await feedPass(options.root, deps, probes);
       if (wrote) { last = wrote; options.onWrite?.(wrote); }
     } catch { /* a bad pass must never stop the feed; the next one retries */ } finally { busy = false; }
@@ -169,16 +173,38 @@ export const feedPath = (root: string) => join(root, FEED_FILE);
 export const feedExists = (root: string) => existsSync(feedPath(root));
 
 const lockPath = (root: string) => join(root, "feed.lock");
-const pidAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; } };
+const pidAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code !== "ESRCH"; } };
 
 /** Only one watcher may write the feed (the overlay starts one, and a person may too). Returns a release function, or null when another one is running. */
 export function acquireFeedLock(root: string, pid = process.pid): (() => void) | null {
   mkdirSync(root, { recursive: true });
   const path = lockPath(root);
-  try {
+  if (existsSync(path)) try {
     const other = Number(readFileSync(path, "utf8").trim());
-    if (Number.isInteger(other) && other > 0 && other !== pid && pidAlive(other)) return null;
-  } catch { /* no lock, or unreadable: take it */ }
-  writeFileSync(path, String(pid));
-  return () => { try { if (Number(readFileSync(path, "utf8").trim()) === pid) rmSync(path, { force: true }); } catch { /* already gone */ } };
+    if (!Number.isInteger(other) || other <= 0 || pidAlive(other)) return null;
+  } catch { return null; /* unreadable legacy ownership is not permission to steal */ }
+  const directory = `${path}.owner`;
+  const ownerName = `owner-${randomUUID()}.json`;
+  const pending = `${directory}.pending-${randomUUID()}`;
+  mkdirSync(pending);
+  try {
+    writeFileSync(join(pending, ownerName), JSON.stringify({ pid }), { flag: "wx" });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        renameSync(pending, directory);
+        return () => { try { rmSync(join(directory, ownerName)); rmdirSync(directory); } catch { /* never remove a successor's ownership file */ } };
+      } catch {
+        if (!existsSync(directory)) continue;
+        try {
+          const files = readdirSync(directory);
+          if (files.length !== 1 || !/^owner-[a-f0-9-]+\.json$/.test(files[0]!)) return null;
+          const owner = JSON.parse(readFileSync(join(directory, files[0]!), "utf8"));
+          if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0 || pidAlive(owner.pid)) return null;
+          rmSync(join(directory, files[0]!));
+          try { rmdirSync(directory); } catch { return null; }
+        } catch { return null; }
+      }
+    }
+    return null;
+  } finally { if (existsSync(pending)) rmSync(pending, { recursive: true, force: true }); }
 }

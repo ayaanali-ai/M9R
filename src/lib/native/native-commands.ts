@@ -31,6 +31,7 @@ import {
   type McpServerSpec,
 } from "./install-core";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
+import { hasPendingRuntimeTransaction, installRuntimeTransaction, recoverRuntimeTransactions } from "./runtime-install-transaction";
 import { createPageNotesStore } from "./page-notes-store";
 import { projectRoomId } from "./project-room";
 import { DEFAULT_CLOUD_URL, clearCloudConfig, cloudUrlProblem, loadCloudConfig, pullCloudNotes, pushCloudNote, saveCloudConfig } from "./cloud-memory";
@@ -180,7 +181,7 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
       const source = join(dirname(engine), name);
       if (existsSync(source)) collect(source, join(targetDir, name));
     }
-    return { needed: !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)) || (!!nativeInputHost && !sameFile(nativeInputHost.from, nativeInputHost.to)) || companions.some((file) => !sameFile(file.from, file.to)), sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim, nativeInputHost, companions };
+    return { needed: hasPendingRuntimeTransaction(targetDir) || !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)) || (!!nativeInputHost && !sameFile(nativeInputHost.from, nativeInputHost.to)) || companions.some((file) => !sameFile(file.from, file.to)), sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim, nativeInputHost, companions };
   }
   const sourceDir = hookSourceDir(io.env);
   if (io.env.M9R_HOOK_ENTRY?.trim()) return { needed: false, sourceDir, targetDir, missingSource: [] };
@@ -239,13 +240,10 @@ function isRetiredRuntimePath(path: string): boolean {
 function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> }): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
   if (plan.engine) {
-    const written: string[] = [];
-    for (const file of [plan.engine, ...(plan.shim ? [plan.shim] : []), ...(plan.nativeInputHost ? [plan.nativeInputHost] : []), ...(plan.companions ?? [])]) {
-      mkdirSync(dirname(file.to), { recursive: true });
-      pruneRetiredRuntimeFile(file.to);
-      written.push(...replaceRuntimeFile(file.from, file.to));
-      written.push(file.to);
-    }
+    recoverRuntimeTransactions(plan.targetDir, replaceRuntimeFile);
+    const files = [plan.engine, ...(plan.shim ? [plan.shim] : []), ...(plan.nativeInputHost ? [plan.nativeInputHost] : []), ...(plan.companions ?? [])];
+    const written = installRuntimeTransaction(plan.targetDir, files, replaceRuntimeFile);
+    for (const file of files) pruneRetiredRuntimeFile(file.to);
     return written;
   }
   const written: string[] = [];

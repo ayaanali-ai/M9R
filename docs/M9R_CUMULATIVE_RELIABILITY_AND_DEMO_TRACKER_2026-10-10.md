@@ -114,7 +114,7 @@ The order below is cumulative and remains fixed. The nine attachment findings ar
 
 **Acceptance:** A real provider task opens or restores the requested visible app/window, uses its actual window, performs and verifies a harmless multi-step task, shows the correct agent cursor, and leaves the owner's physical pointer and unrelated windows alone. Repeat on varied apps and natural paraphrases.
 
-**Current status:** OPEN. Synthetic cursor and fixture proofs are not a real provider task. User-observed physical mouse movement and failed T38–T46 tasks remain unresolved acceptance evidence.
+**Current status:** PARTIAL implementation; live acceptance OPEN. Bounded accessible targets and screenshot fallback exist and pass fixture checks. User-observed physical mouse movement and failed T38–T46 tasks remain unresolved acceptance evidence.
 
 ### Step 4 — Live pill dictation
 
@@ -302,6 +302,16 @@ This tracker is the working plan until all required demo gates are accepted. Roa
 - Windows lock publication retries transient sharing errors within its existing deadline without deleting another writer's lock or replacing atomic state publication.
 - Verification: 51 broker/transport tests, 77 state/delivery tests, and 4 pipe tests passed; the latter includes extra-chunk one-shot dispatch and desktop requests with unavailable HTTP/key access. These are fixture regressions, not live cursor acceptance.
 - After the owner restarted Codex, this chat's M9R connection still returned `Transport closed`. Existing broker HTTP health and read-only named-pipe probes did not yield a healthy response. Process probes disagree, so no crash or sole underlying cause is claimed. Clean build verification and installed-runtime recovery remain required before task-ready sign-off.
+
+### 2026-10-10 update, capture, and activity follow-up
+
+- Local transport checkpoint: `d3f93406`. The clean overlay build from `22f9053d` completed; no overlay/pill source changed between these two commits. This does not yet mean the full new runtime is built or installed.
+- F9 implementation: engine setup now stages and verifies all planned runtime files, preserves the prior set and a transaction journal, verifies installed hashes, and restores already-replaced files after any component failure. It is a quiesced file transaction, not an atomic directory switch. Broker ownership, complete manifest parity, configuration failure recovery, power-loss recovery, and real installed rollback acceptance still require verification.
+- F3 implementation: exact-window accessibility capture is bounded to 200 elements and retains a screenshot-only fallback on structure failure. It never switches windows, activates foreground input, or moves the owner pointer as a fallback. The 35 driver checks passed, including this fallback; the broader stage/MCP/identity subset passed 84 checks.
+- F6 implementation: feed leadership no longer uses a read-then-write file race. Ownership is published as a populated directory; duplicate watchers in one process are refused, live/unknown owners are preserved, and only demonstrably dead owners are recovered. Failed activity probes discard prior successful activity instead of displaying it as fresh. Corrupt local state remains preserved rather than silently resetting the roster. The 20 feed/activity checks passed.
+- Runtime transaction tests: a third-component failure restored both prior components and removed the newly introduced component; missing/invalid sources cannot partially apply. Both checks passed, along with all 32 native setup checks. The combined installer/build/native/transaction suite passed 49 checks, including consent decline, package SHA rejection, install/uninstall, and broker ownership preservation. Packaged installer checks used the previously available engine distribution; rerun against the new committed package before accepting its live installation.
+- Owner reported Claude may be updating/restarting the live runtime for T47. Codex is preparing source/builds and withholding overlapping live runtime changes until that work is coordinated. T47 remains excluded from Codex implementation ownership.
+- Follow-up: interrupted `applying`/`rollback_failed` journals now require verified prior hashes before recovery; duplicate or redirected destinations are rejected. Setup treats pending recovery as work even when installed hashes match. The combined capture/feed/setup/recovery suite passed 85 checks outside the Windows sandbox; the sandbox run was denied temporary-directory renames and is not counted as a product regression pass. TypeScript verification passed. Recovery remains source/fixture verified, not accepted on the owner's live installation.
 
 - Owner audit attachment received 2026-10-10: nine findings F1–F9 and their proposed fixes.
 - docs/M9R_AUDIT_CHECKPOINT_2026-10-07.md, including the 2026-10-09 T26/T27 addenda, seven-step cumulative order, demo gates, and carried-forward requirements.

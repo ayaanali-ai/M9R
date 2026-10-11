@@ -52,6 +52,19 @@ test("app captures expose bounded accessibility targets in screenshot coordinate
   assert.deepEqual((await driver.capture("stage")).controls, [{ label: "Search field", role: "Edit", rect: { x: 10, y: 10, width: 100, height: 20 } }]);
 }));
 
+test("accessibility failure retains the same exact-window screenshot route", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, accessibilityError: new Error("custom UI tree unavailable") }) as never });
+  assert.equal((await driver.capture("stage")).width, 200);
+  const requests = calls.filter((call) => call.method === "getWindowState").map((call) => call.value as Record<string, unknown>);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0]!.includeAccessibilityTree, true);
+  assert.equal(requests[1]!.includeAccessibilityTree, false);
+  assert.equal(requests[0]!.windowId, requests[1]!.windowId);
+  assert.equal(calls.some((call) => call.method === "click" || call.method === "callTool"), false);
+}));
+
 test("stage key parsing accepts the case-insensitive names advertised by MCP", () => {
   assert.deepEqual(parseTaskStageAction({ kind: "press_key", key: "enter" }), { kind: "press_key", key: "Enter" });
   assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["ctrl", "l"] }), { kind: "hotkey", keys: ["Ctrl", "l"] });
@@ -168,6 +181,7 @@ function makeSdk(options: {
   sessionStateError?: Error;
   escalationError?: Error;
   windowStateError?: Error;
+  accessibilityError?: Error;
   typeTextError?: Error;
   callToolResult?: Record<string, unknown>;
   calls: Array<{ method: string; value?: unknown }>;
@@ -179,6 +193,7 @@ function makeSdk(options: {
     async setAgentCursorMotion(input: unknown) { options.calls.push({ method: "setAgentCursorMotion", value: input }); return { isError: false }; },
     async getWindowState(input: unknown) {
       options.calls.push({ method: "getWindowState", value: input });
+      if (options.accessibilityError && (input as { includeAccessibilityTree?: boolean }).includeAccessibilityTree) throw options.accessibilityError;
       if (options.windowStateError) throw options.windowStateError;
       return options.state ?? {
         pid: 4321,

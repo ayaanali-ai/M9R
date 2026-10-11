@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -99,7 +99,7 @@ test("seq only moves when something changed, and a ping fires once per new item,
   assert.equal(restarted.seq, 2);
 });
 
-test("the writer writes an atomic feed for a real task, writes nothing when nothing changed, and survives a corrupt state file", async () => {
+test("the writer writes an atomic feed and preserves corrupt state without inventing an empty roster", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-feed-"));
   const store = createLocalStore(root);
   store.registerEndpoint({ provider: "codex", sessionId: S1, cwd: "C:/p" });
@@ -115,8 +115,8 @@ test("the writer writes an atomic feed for a real task, writes nothing when noth
   assert.equal(await runFeed({ root, deps }), null, "unchanged: no rewrite, so the overlay is not woken");
 
   writeFileSync(join(root, "state.json"), "{ this is not json", "utf8");
-  const after = await feedPass(root, deps, {});
-  assert.ok(after === null || after.version === 1, "a corrupt store is set aside and the feed carries on");
+  await assert.rejects(feedPass(root, deps, {}), /original file was preserved/);
+  assert.equal(readFileSync(join(root, "state.json"), "utf8"), "{ this is not json");
   assert.ok(JSON.parse(readFileSync(join(root, "feed.json"), "utf8")).version === 1);
 });
 
@@ -185,12 +185,34 @@ test("only one feed watcher may run: a live holder blocks a second, a dead one i
   const root = mkdtempSync(join(tmpdir(), "m9r-lock-"));
   const release = acquireFeedLock(root, process.pid);
   assert.ok(release);
+  assert.equal(acquireFeedLock(root, process.pid), null, "two watchers in one process cannot both acquire ownership");
   assert.equal(acquireFeedLock(root, process.pid + 1), null, "a live holder blocks another writer");
   release?.();
   const again = acquireFeedLock(root, process.pid + 1);
   assert.ok(again, "released lock can be taken");
+  again?.();
   writeFileSync(join(root, "feed.lock"), "999999999");
   assert.ok(acquireFeedLock(root, process.pid), "a lock left by a dead process is taken over");
+});
+
+test("a failed refresh cannot keep reporting the previous working probe", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-feed-refresh-"));
+  const store = createLocalStore(root);
+  store.registerEndpoint({ provider: "codex", sessionId: S1, cwd: "C:/p" });
+  const controller = new AbortController();
+  const seen: Feed[] = [];
+  let refreshes = 0;
+  const timeout = setTimeout(() => controller.abort(), 1000);
+  try {
+    await runFeed({ root, watch: true, probeEveryMs: 20, signal: controller.signal,
+      deps: { now: () => NOW, claudeSessions: () => { if (++refreshes > 1) throw new Error("probe unavailable"); return []; },
+        liveness: async () => ({ [S1]: "live" as const }), readRolloutTail: () => JSON.stringify({ payload: { type: "task_started" } }) },
+      onWrite: (feed) => { seen.push(feed); if (seen.length > 1) controller.abort(); },
+    });
+    assert.equal(seen[0]?.agents.find((agent) => agent.handle === "codex")?.state, "open_working");
+    assert.notEqual(seen.at(-1)?.agents.find((agent) => agent.handle === "codex")?.state, "open_working");
+    assert.ok(seen.length > 1);
+  } finally { clearTimeout(timeout); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("an answer already shown to the agent that asked leaves the pill after ten minutes; one never shown stays for hours", () => {

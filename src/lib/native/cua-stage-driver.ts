@@ -875,15 +875,25 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         started = true;
       }
       const capture = async () => {
-        const state = await driver.getWindowState({
+        const request = {
           pid,
           windowId,
           session,
           includeAccessibilityTree: true,
           includeScreenshot: true,
           maxImageDimension: MAX_IMAGE_DIMENSION,
+          maxElements: 200,
+          maxDepth: 12,
           timeoutMs: 1_500,
-        });
+        };
+        let state: Awaited<ReturnType<CuaDriverLike["getWindowState"]>>;
+        try { state = await driver.getWindowState(request); }
+        catch (structureError) {
+          // Some custom interfaces do not provide a usable accessibility tree.
+          // Keep the same exact-window screenshot route; never change input/focus.
+          try { state = await driver.getWindowState({ ...request, includeAccessibilityTree: false }); }
+          catch (captureError) { throw new AggregateError([structureError, captureError], "Exact-window structure and screenshot capture both failed."); }
+        }
         const image = imageFromWindowState(state, pid, windowId);
         const bounds = state.windowBounds;
         const controls: CuaStageTargetDescription[] = [];
@@ -1162,7 +1172,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   async function listWindowOptions(ownedPid?: number, onScreenOnly = ownedPid === undefined): Promise<CuaStageWindowOption[]> {
     if (ownedPid !== undefined && (!Number.isSafeInteger(ownedPid) || ownedPid < 1)) throw new Error("Invalid owned application process.");
     const runtime = await agentRuntime();
-    const { sdk, driver } = runtime;
+    const { driver } = runtime;
     const session = safeSessionName(ownedPid === undefined ? "owner-visible" : `owned-${ownedPid}`);
     let started = false;
     try {
