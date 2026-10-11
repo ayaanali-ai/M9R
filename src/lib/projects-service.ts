@@ -186,20 +186,34 @@ export async function resolveActiveOrDefaultProjectId(
   await ensureUserRow(db, user);
 
   // 1. Honour the active-workspace cookie when it points at a workspace we can
-  // access -- own it, or be a member of it (projects SELECT RLS already
-  // allows both, so this plain select proves access either way).
+  // access -- own it, or be a member of it. Projects SELECT RLS already proves
+  // this for a user-scoped client, but some callers pass the service-role
+  // client (which bypasses RLS entirely), so this re-checks ownership/membership
+  // explicitly here too -- safe regardless of which client was handed in.
   const activeId = await getActiveProjectId();
   if (activeId) {
     const { data: accessible, error: activeError } = await db
       .from("projects")
-      .select("id")
+      .select("id, owner_id")
       .eq("id", activeId)
       .is("deleted_at", null)
       .maybeSingle();
     if (activeError) {
       throw new ProjectsServiceError("Failed to verify the active workspace.", "ACTIVE_PROJECT_LOOKUP_FAILED", 500);
     }
-    if (accessible?.id) return accessible.id as string;
+    if (accessible?.id) {
+      const isOwner = accessible.owner_id === user.id;
+      const isMember = isOwner ? true : await (async () => {
+        const { data: member, error: memberError } = await db.rpc("is_workspace_member", {
+          target_workspace_id: accessible.id,
+          target_user_id: user.id,
+        });
+        if (memberError) throw new ProjectsServiceError("Failed to verify workspace membership.", "ACTIVE_PROJECT_LOOKUP_FAILED", 500);
+        return member === true;
+      })();
+      if (isOwner || isMember) return accessible.id as string;
+      // Active id exists but this user has no access to it -- treat as stale, fall through.
+    }
     // Active id is stale (deleted/no longer accessible) — fall through.
   }
 
