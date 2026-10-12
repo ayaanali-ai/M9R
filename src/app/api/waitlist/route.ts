@@ -20,11 +20,16 @@ function waitlistService(): WaitlistService | null {
 export async function POST(request: Request) {
   let body: unknown;
   try { body = await request.json(); } catch { return NextResponse.json({ ok: false, error: "Enter a valid email address." }, { status: 400 }); }
-  const { email, agents } = (body ?? {}) as { email?: unknown; agents?: unknown };
+  const { name, email, agents } = (body ?? {}) as { name?: unknown; email?: unknown; agents?: unknown };
+  if (typeof name !== "string" || name.trim().length === 0) {
+    return NextResponse.json({ ok: false, error: "Enter your name." }, { status: 400 });
+  }
   const init = {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: typeof email === "string" ? email : "", agents: Array.isArray(agents) ? agents.slice(0, 8) : [] }),
+    // name is forwarded to the m9r-launch Worker's /api/waitlist; that Worker's own schema/storage/email
+    // template must also be updated to accept and keep it, which is out of this repo (see file header).
+    body: JSON.stringify({ name: name.trim().slice(0, 200), email: typeof email === "string" ? email : "", agents: Array.isArray(agents) ? agents.slice(0, 8) : [] }),
   };
   try {
     const service = waitlistService();

@@ -39,10 +39,18 @@ try {
 }
 
 console.log("Building OpenNext Cloudflare worker...");
-const openNextResult = spawnSync("npx", ["opennextjs-cloudflare", "build", "--skip-typecheck"], { 
-  stdio: "inherit", 
+// OpenNext's own build internally re-invokes `npm run build` (see scripts/build.mjs), which has a
+// recursion guard keyed on M9R_OPENNEXT_INNER so that inner call does a plain `next build` instead of
+// calling opennextjs-cloudflare again. This script calls opennextjs-cloudflare directly (not through
+// `npm run build`), so without setting the flag here too, OpenNext's internal `npm run build` call
+// lands in build.mjs with no inner flag set, which re-triggers the whole OpenNext build a second,
+// nested time -- confirmed live 2026-10-11: two full build passes, the second one writing
+// `.open-next/cloudflare/next-env.mjs` without the first pass's output ever being cleared, which
+// crashed `wrangler versions upload` with duplicate `production`/`development`/`test` exports.
+const openNextResult = spawnSync("npx", ["opennextjs-cloudflare", "build", "--skip-typecheck"], {
+  stdio: "inherit",
   shell: true,
-  env: process.env
+  env: { ...process.env, M9R_OPENNEXT_INNER: "1" }
 });
 
 process.exit(openNextResult.status ?? 0);
