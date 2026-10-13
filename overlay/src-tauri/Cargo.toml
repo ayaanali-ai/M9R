@@ -20,8 +20,20 @@ tauri-build = { version = "2", features = [] }
 # `cargo build --release` is always correct, regardless of who builds it or with what command.
 tauri = { version = "2", features = ["tray-icon", "devtools", "custom-protocol"] }
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+# Registers a PermissionRequested handler so the pill's own WebView2 window auto-approves microphone access for
+# hold-to-talk; see allow_microphone_permission in main.rs for why this is needed. Versions match what tauri/wry
+# already resolve (see Cargo.lock) so this does not pull in a second copy.
+webview2-com = "0.38"
+# "Media_SpeechRecognition" is Windows' own on-device dictation (native_dictation.rs) -- WebView2 cannot run the
+# Web Speech API's cloud recognizer, confirmed live 2026-10-10 (onerror "network" on every attempt). On-device
+# recognition has no per-use cost. "Globalization" is required by SpeechRecognizer's language APIs;
+# "Win32_System_WinRT" is RoInitialize, needed once on the thread that owns the recognizer.
+windows = { version = "0.61", features = ["Media_SpeechRecognition", "Globalization", "Win32_System_WinRT"] }
 
 [profile.release]
 opt-level = "s"

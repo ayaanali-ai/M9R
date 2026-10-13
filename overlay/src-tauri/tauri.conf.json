@@ -28,6 +28,18 @@
         "skipTaskbar": true,
         "focus": false,
         "visible": false
+      },
+      {
+        "label": "workspace",
+        "title": "M9R",
+        "url": "https://m9r.dev/dashboard/agents",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true,
+        "decorations": true,
+        "visible": false
       }
     ],
     "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" }
