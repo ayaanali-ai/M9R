@@ -3,11 +3,17 @@
 // the window, tray, and local UI events; it never changes either source file.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod native_dictation;
+
 use std::{
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::{Duration, Instant, SystemTime},
 };
 
@@ -28,10 +34,12 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 const TOGGLE_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT).union(Modifiers::SHIFT);
 const TOGGLE_HOTKEY_CODE: Code = Code::KeyM;
 const TOGGLE_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+M";
-/// A scaffold only: press/release is surfaced to the UI, but no audio device or transcription provider is opened.
-const HOLD_TO_TALK_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT).union(Modifiers::SHIFT);
-const HOLD_TO_TALK_HOTKEY_CODE: Code = Code::Space;
-const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+Space";
+/// Hold Alt+M to open the message pill and dictate into its draft field.
+const HOLD_TO_TALK_HOTKEY_MODS: Modifiers = Modifiers::ALT;
+const HOLD_TO_TALK_HOTKEY_CODE: Code = Code::KeyM;
+const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Alt+M";
+/// Private single-instance handoff used by the installer to close the running pill cleanly.
+const UPDATE_SHUTDOWN_ARGUMENT: &str = "--m9r-update-shutdown";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HoldToTalkEvent {
@@ -66,22 +74,26 @@ impl HoldToTalkState {
 
 /// The engine child the overlay started, so quitting the overlay stops it too.
 static ENGINE: Mutex<Option<Child>> = Mutex::new(None);
+static ENGINE_STOPPING: AtomicBool = AtomicBool::new(false);
 
 const PILL: &str = "pill";
+/// The real, live M9R workspace (agents, missions, memory, approvals, rooms) embedded as
+/// an ordinary native window -- the same data the web app already serves, not a reimplementation.
+const WORKSPACE: &str = "workspace";
 const COLLAPSED_W: f64 = 220.0;
 const TOP_MARGIN: f64 = 8.0;
 
 // ── One-pill window (default; M9R_PILL_NEXT=0 for the older overlay UI) ───────────────────────────────────────────────────────────────
 // The new pill UI draws its own island inside a fixed, transparent, top-centre window and tells this side three things:
 // where the island is (so everything around it stays click-through), when it has folded away (the window shrinks to a
-// wake strip), and when it needs the keyboard (the message field). The old overlay UI does not use any of this.
+// wake handle), and when it needs the keyboard (the message field). The old overlay UI does not use any of this.
 
 /// The new UI's panel width (its `PANEL_W`); the island is centred in it, and tall enough for its largest view.
 const NEXT_W: f64 = 720.0;
 const NEXT_H: f64 = 320.0;
-/// The strip the folded-away island leaves behind so the pointer can wake it (the UI draws the same 240 x 6 strip).
+/// The folded-away island leaves behind a small hit-testable handle so the pointer can wake it.
 const WAKE_W: f64 = 240.0;
-const WAKE_H: f64 = 6.0;
+const WAKE_H: f64 = 10.0;
 /// Margin around the island that still counts as over it, matching the UI.
 const HIT_MARGIN: f64 = 14.0;
 
@@ -89,6 +101,41 @@ fn next_mode() -> bool {
     // The one pill is the default; M9R_PILL_NEXT=0 starts the older overlay UI instead.
     std::env::var("M9R_PILL_NEXT").as_deref() != Ok("0")
 }
+
+/// WebView2 does not show its own permission prompt for an unhandled `getUserMedia` request from a window this
+/// small and chromeless (220x36, no decorations) -- there is nowhere for its default infobar to render, so the
+/// request is left pending and the page sees it as a silent, permanent "not-allowed". Confirmed live 2026-10-10:
+/// holding Alt+M opened the message view, but no Windows mic prompt ever appeared and the listening meter never
+/// moved. Registering our own `PermissionRequested` handler and auto-approving the microphone (our own first-party
+/// pill content, never third-party pages) is the standard fix; everything else stays default-denied.
+#[cfg(windows)]
+fn allow_microphone_permission(window: &WebviewWindow) {
+    use webview2_com::{
+        Microsoft::Web::WebView2::Win32::{COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_ALLOW},
+        PermissionRequestedEventHandler,
+    };
+    let result = window.with_webview(|webview| unsafe {
+        let Ok(core) = webview.controller().CoreWebView2() else { return };
+        let handler = PermissionRequestedEventHandler::create(Box::new(|_sender, args| {
+            if let Some(args) = args {
+                let mut kind = COREWEBVIEW2_PERMISSION_KIND_MICROPHONE;
+                kind.0 = 0;
+                if args.PermissionKind(&mut kind).is_ok() && kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE {
+                    let _ = args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
+                }
+            }
+            Ok(())
+        }));
+        let mut token: i64 = 0;
+        let _ = core.add_PermissionRequested(&handler, &mut token);
+    });
+    if let Err(e) = result {
+        eprintln!("M9R: could not install the microphone permission handler ({e})");
+    }
+}
+
+#[cfg(not(windows))]
+fn allow_microphone_permission(_window: &WebviewWindow) {}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct IslandRect {
@@ -123,7 +170,7 @@ struct NextPill {
 
 static NEXT: Mutex<NextPill> = Mutex::new(NextPill { rect: IslandRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, collapsed: false });
 
-/// The size the window should have: the whole panel, or just the wake strip while the island is folded away.
+/// The size the window should have: the whole panel, or just the wake handle while the island is folded away.
 fn next_window_size(collapsed: bool) -> (f64, f64) {
     if collapsed { (WAKE_W, WAKE_H) } else { (NEXT_W, NEXT_H) }
 }
@@ -147,13 +194,10 @@ fn spawn_heartbeat(app: AppHandle) {
     std::thread::spawn(move || loop {
         if let Some(_window) = app.get_webview_window(PILL) {
             let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-            // `window.is_visible()` reflects whether the OS window exists at all, which is true almost
-            // constantly now that the overlay autostarts in the background -- even collapsed to its tiny
-            // wake strip, which the owner cannot actually see. That permanently told the broker "I'm
-            // showing," suppressing the in-page pill on every website, all the time. "Visible" for this
-            // one-pill-at-a-time handoff has to mean the island is actually expanded, not that its window
-            // happens to exist.
-            let visible = !NEXT.lock().map(|n| n.collapsed).unwrap_or(false);
+            // `window.is_visible()` reports the native wake-handle window, which remains visible even when the
+            // shared island has collapsed. The broker should yield to the browser shell only
+            // while the actual pill is expanded, otherwise the browser shell is suppressed forever after startup.
+            let visible = !NEXT.lock().map(|next| next.collapsed).unwrap_or(false);
             let path = heartbeat_path();
             // Write beside, then rename, so the broker never reads half a file.
             let tmp = path.with_extension("json.tmp");
@@ -173,7 +217,7 @@ fn pill_set_rect(x: f64, y: f64, width: f64, height: f64) -> Result<(), String> 
     Ok(())
 }
 
-/// The island folded away (the window becomes the wake strip) or came back. Keeps the window's centre and top edge.
+/// The island folded away (the window becomes the visible wake handle) or came back. Keeps its centre and top edge.
 #[tauri::command]
 fn pill_set_collapsed(window: WebviewWindow, collapsed: bool) -> Result<(), String> {
     {
@@ -190,7 +234,7 @@ fn pill_set_collapsed(window: WebviewWindow, collapsed: bool) -> Result<(), Stri
     let cx = pos.x + size.width as i32 / 2;
     window.set_size(LogicalSize::new(w, h)).map_err(|e| e.to_string())?;
     window.set_position(PhysicalPosition::new(cx - (w * scale).round() as i32 / 2, pos.y)).map_err(|e| e.to_string())?;
-    // The wake strip must receive the pointer; everything else about click-through is decided by the watcher below.
+    // The wake handle must receive the pointer; everything else about click-through is decided by the watcher below.
     if collapsed {
         let _ = window.set_ignore_cursor_events(false);
     }
@@ -205,6 +249,23 @@ fn pill_set_focus(window: WebviewWindow, focused: bool) -> Result<(), String> {
         window.set_focus().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Opens the Windows microphone privacy page after speech recognition reports denied permission.
+#[tauri::command]
+fn open_microphone_settings() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe")
+            .arg("ms-settings:privacy-microphone")
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("Could not open Windows microphone settings: {error}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Microphone settings are only available from the Windows desktop pill.".to_string())
+    }
 }
 
 /// Makes the transparent area around the island click-through, so the pill never blocks the page or app underneath. The
@@ -397,19 +458,21 @@ fn m9r_home() -> PathBuf {
     })
 }
 
-/// The self-contained M9R engine (no Node needed): `M9R_ENGINE`, else the copy `m9r-cli setup` installed, else one next to this program.
+/// The self-contained engine: explicit override, matching adjacent runtime, then user-wide installation.
 fn find_engine() -> Option<PathBuf> {
     let name = if cfg!(windows) { "m9r-engine.exe" } else { "m9r-engine" };
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(p) = std::env::var("M9R_ENGINE") {
         candidates.push(p.into());
     }
-    candidates.push(m9r_home().join("bin").join(name));
+    // A released overlay and its adjacent engine are updated together. An older
+    // user-wide installation must not override that matching runtime.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join(name));
         }
     }
+    candidates.push(m9r_home().join("bin").join(name));
     candidates.into_iter().find(|p| p.is_file())
 }
 
@@ -420,7 +483,11 @@ fn spawn_engine_supervisor() {
     if std::env::var("M9R_FEED").is_ok() || std::env::var("M9R_NO_ENGINE").is_ok() {
         return;
     }
+    ENGINE_STOPPING.store(false, Ordering::SeqCst);
     std::thread::spawn(|| loop {
+        if ENGINE_STOPPING.load(Ordering::SeqCst) {
+            return;
+        }
         let mut wait = Duration::from_secs(5);
         if let Some(engine) = find_engine() {
             let mut cmd = Command::new(engine);
@@ -434,6 +501,13 @@ fn spawn_engine_supervisor() {
             if let Ok(child) = cmd.spawn() {
                 *ENGINE.lock().unwrap() = Some(child);
                 loop {
+                    if ENGINE_STOPPING.load(Ordering::SeqCst) {
+                        if let Some(mut child) = ENGINE.lock().unwrap().take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        return;
+                    }
                     std::thread::sleep(Duration::from_secs(2));
                     let mut guard = ENGINE.lock().unwrap();
                     match guard.as_mut().map(|c| c.try_wait()) {
@@ -450,6 +524,9 @@ fn spawn_engine_supervisor() {
             }
         } else {
             wait = Duration::from_secs(30);
+        }
+        if ENGINE_STOPPING.load(Ordering::SeqCst) {
+            return;
         }
         std::thread::sleep(wait);
     });
@@ -475,6 +552,112 @@ fn engine_call(engine: &PathBuf, args: &[&str]) -> Result<String, String> {
 
 fn plain_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn engine_stage_call_with_input(engine: &PathBuf, args: &[String], input: Option<String>) -> Result<serde_json::Value, String> {
+    let mut cmd = Command::new(engine);
+    cmd.args(args)
+        .env("M9R_DESKTOP_PILL_OWNER_ACTION", "1")
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    if let Some(input) = input {
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(error) = stdin.write_all(input.as_bytes()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+        }
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.stdout.len() > 4 * 1024 * 1024 {
+        return Err("The desktop stage response exceeded the safe local UI size.".into());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        return Err(format!("{}{}", stdout, String::from_utf8_lossy(&out.stderr)).trim().to_string());
+    }
+    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|_| "The desktop stage command returned invalid JSON.".to_string())?;
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err("The desktop stage command did not confirm success.".into());
+    }
+    Ok(value)
+}
+
+/// Local pill actions reuse the same stage registry and Windows checks as `m9r web stage`.
+#[tauri::command]
+async fn desktop_stage_action(
+    action: String,
+    name: Option<String>,
+    x: Option<u32>,
+    y: Option<u32>,
+    pid: Option<u32>,
+    window_id: Option<String>,
+    text: Option<String>,
+    direction: Option<String>,
+    from_x: Option<u32>,
+    from_y: Option<u32>,
+    to_x: Option<u32>,
+    to_y: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let needs_name = matches!(action.as_str(), "create" | "activate" | "return" | "capture" | "cursor" | "windows" | "attach" | "click" | "type" | "scroll" | "drag" | "allow-agent" | "allow-control" | "revoke-agent");
+    let needs_xy = matches!(action.as_str(), "cursor" | "click" | "scroll");
+    let needs_attach = action == "attach";
+    let needs_text = action == "type";
+    let needs_direction = action == "scroll";
+    let needs_drag = action == "drag";
+    if !matches!(action.as_str(), "list" | "create" | "activate" | "return" | "capture" | "cursor" | "windows" | "attach" | "click" | "type" | "scroll" | "drag" | "allow-agent" | "allow-control" | "revoke-agent") {
+        return Err("Unsupported desktop stage action".into());
+    }
+    if needs_name != name.is_some() || name.as_deref().is_some_and(|value| !plain_id(value))
+        || needs_xy != (x.is_some() && y.is_some()) || x.is_some() != y.is_some()
+        || needs_attach != pid.is_some() || needs_attach != window_id.is_some()
+        || window_id.as_deref().is_some_and(|value| !valid_window_id(value))
+        || needs_text != text.is_some() || text.as_deref().is_some_and(|value| value.chars().count() > 500)
+        || needs_direction != direction.is_some() || direction.as_deref().is_some_and(|value| value != "up" && value != "down")
+        || needs_drag != (from_x.is_some() && from_y.is_some() && to_x.is_some() && to_y.is_some())
+        || (!needs_drag && (from_x.is_some() || from_y.is_some() || to_x.is_some() || to_y.is_some()))
+        || [x, y, from_x, from_y, to_x, to_y].into_iter().flatten().any(|value| value > 99_999)
+        || pid.is_some_and(|value| value == 0) {
+        return Err("Invalid desktop stage action arguments".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    let engine_action = if action == "attach" { "attach-window" } else { action.as_str() };
+    let mut args = vec!["web".to_string(), "stage".to_string(), engine_action.to_string()];
+    if let Some(name) = name { args.push(name); }
+    if let (Some(x), Some(y)) = (x, y) { args.extend([x.to_string(), y.to_string()]); }
+    if needs_attach {
+        args.extend([pid.unwrap().to_string(), window_id.unwrap()]);
+    }
+    if needs_text {
+        args.push("--stdin-json".into());
+    }
+    if let Some(direction) = direction { args.push(direction); }
+    if let (Some(from_x), Some(from_y), Some(to_x), Some(to_y)) = (from_x, from_y, to_x, to_y) {
+        args.extend([from_x.to_string(), from_y.to_string(), to_x.to_string(), to_y.to_string()]);
+    }
+    args.push("--json".into());
+    let input = text.map(|text| serde_json::json!({ "text": text }).to_string());
+    tauri::async_runtime::spawn_blocking(move || engine_stage_call_with_input(&engine, &args, input))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn valid_window_id(value: &str) -> bool {
+    let parsed = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse::<u64>().ok()
+    };
+    parsed.is_some_and(|handle| handle > 0)
 }
 
 /// Sessions M9R knows for one agent (`@codex`, `@claude`, ...), for the pill's link picker.
@@ -690,7 +873,7 @@ fn spawn_fullscreen_watcher(app: AppHandle) {
 }
 
 /// Shows the pill if hidden, hides it if shown. The one manual control the person has over it, reachable from the tray
-/// menu and from a global hotkey (Alt+Shift+M) so it works even if the tray icon is tucked into Windows' overflow drawer,
+/// menu and from a global hotkey (Ctrl+Alt+Shift+M) so it works even if the tray icon is tucked into Windows' overflow drawer,
 /// which is where a new icon lands by default and easy to never notice.
 fn toggle_pill(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(PILL) {
@@ -702,10 +885,32 @@ fn toggle_pill(app: &AppHandle) {
     }
 }
 
+/// Shows and focuses the real workspace window, reusing the one created at startup (defined in
+/// tauri.conf.json, same pattern as the pill) rather than ever building a second instance of it.
+fn show_workspace(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(WORKSPACE) {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
 fn stop_engine() {
+    ENGINE_STOPPING.store(true, Ordering::SeqCst);
     if let Some(mut child) = ENGINE.lock().unwrap().take() {
         let _ = child.kill();
+        let _ = child.wait();
     }
+}
+
+fn has_update_shutdown_argument(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == UPDATE_SHUTDOWN_ARGUMENT)
+}
+
+fn shutdown_pill(app: &AppHandle) {
+    let _ = fs::remove_file(heartbeat_path());
+    stop_engine();
+    app.exit(0);
 }
 
 /// Watches both source files (a quarter-second poll: no extra dependency) and emits a merged view when either changes.
@@ -758,6 +963,18 @@ fn main() {
     let hold_to_talk_state = std::sync::Arc::new(Mutex::new(HoldToTalkState::default()));
     let handler_hold_to_talk_state = hold_to_talk_state.clone();
     tauri::Builder::default()
+        // Register first: duplicate launches must exit before starting another
+        // heartbeat writer, tray, hotkey handler, or engine supervisor.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if has_update_shutdown_argument(&args) {
+                shutdown_pill(app);
+            } else {
+                // The app already runs persistently in the background (tray + hidden pill), so a
+                // second launch is always a deliberate click on the app's icon -- the same gesture
+                // every other installed app treats as "open it," not "flash the pill."
+                show_workspace(app);
+            }
+        }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
@@ -767,20 +984,37 @@ fn main() {
                         let pressed = event.state() == ShortcutState::Pressed;
                         let transition = handler_hold_to_talk_state.lock().unwrap().transition(pressed);
                         if let Some(transition) = transition {
-                            // This is only an input-state hook for a future provider/privacy contract. It deliberately
-                            // does not open a microphone, record audio, or start transcription.
+                            if transition == HoldToTalkEvent::Pressed {
+                                if let Some(window) = app.get_webview_window(PILL) {
+                                    let _ = window.show();
+                                }
+                                #[cfg(windows)]
+                                native_dictation::start();
+                            } else {
+                                #[cfg(windows)]
+                                native_dictation::stop();
+                            }
                             let _ = app.emit("hold-to-talk", transition.as_str());
                         }
                     }
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, save_memory, list_sessions, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus, open_microphone_settings])
         .setup(move |app| {
+            // If no pill instance exists, the installer handoff can start this process. Exit
+            // before creating the tray, heartbeat, feed watcher, or engine supervisor.
+            if has_update_shutdown_argument(&std::env::args().collect::<Vec<_>>()) {
+                shutdown_pill(app.handle());
+                return Ok(());
+            }
             let window = app.get_webview_window(PILL).expect("pill window");
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
             let _ = window.set_focusable(false);
             let _ = window.set_always_on_top(true);
+            allow_microphone_permission(&window);
+            #[cfg(windows)]
+            native_dictation::init(app.handle().clone());
             if next_mode() {
                 // The one-pill UI ships inside the overlay's bundle under /pill-next; the window is its fixed panel.
                 let _ = window.set_size(LogicalSize::new(NEXT_W, NEXT_H));
@@ -802,24 +1036,22 @@ fn main() {
                 window.open_devtools();
             }
 
-            let show = MenuItem::with_id(app, "toggle", &format!("Show / hide ({TOGGLE_HOTKEY_LABEL})"), true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open_workspace", "Open M9R", true, None::<&str>)?;
+            let show = MenuItem::with_id(app, "toggle", &format!("Show / hide pill ({TOGGLE_HOTKEY_LABEL})"), true, None::<&str>)?;
             let dnd = CheckMenuItem::with_id(app, "dnd", "Do not disturb", true, false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &dnd, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &show, &dnd, &quit])?;
             let mut tray = TrayIconBuilder::new().tooltip("M9R").menu(&menu);
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
             tray.on_menu_event(move |app, event| match event.id.as_ref() {
+                "open_workspace" => show_workspace(app),
                 "toggle" => toggle_pill(app),
                 "dnd" => {
                     let _ = app.emit("dnd", dnd.is_checked().unwrap_or(false));
                 }
-                "quit" => {
-                    let _ = fs::remove_file(heartbeat_path());
-                    stop_engine();
-                    app.exit(0)
-                }
+                "quit" => shutdown_pill(app),
                 _ => {}
             })
             .build(app)?;
@@ -835,16 +1067,33 @@ fn main() {
                 Err(e) => eprintln!("M9R: could not register global hotkey {TOGGLE_HOTKEY_LABEL} ({e}); use the tray menu's Show/hide instead"),
             }
             match app.global_shortcut().register(hold_to_talk_shortcut) {
-                Ok(()) => eprintln!("M9R: registered hold-to-talk scaffold {HOLD_TO_TALK_HOTKEY_LABEL} (no audio capture)"),
-                Err(e) => eprintln!("M9R: could not register hold-to-talk scaffold {HOLD_TO_TALK_HOTKEY_LABEL} ({e})"),
+                Ok(()) => eprintln!("M9R: registered dictation hotkey {HOLD_TO_TALK_HOTKEY_LABEL}"),
+                Err(e) => eprintln!("M9R: could not register dictation hotkey {HOLD_TO_TALK_HOTKEY_LABEL} ({e})"),
             }
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::Moved(pos) = event {
-                if let Ok(size) = window.outer_size() {
-                    save_position(window.app_handle(), pos.x + size.width as i32 / 2, pos.y);
+            match event {
+                WindowEvent::Moved(pos) => {
+                    // Position persistence is pill-specific framing; the workspace window is an
+                    // ordinary resizable app window with no saved-position concept.
+                    if window.label() == PILL {
+                        if let Ok(size) = window.outer_size() {
+                            save_position(window.app_handle(), pos.x + size.width as i32 / 2, pos.y);
+                        }
+                    }
                 }
+                WindowEvent::CloseRequested { api, .. } => {
+                    if window.label() == PILL {
+                        shutdown_pill(window.app_handle());
+                    } else {
+                        // Closing the workspace window should hide it, not quit the whole app or
+                        // destroy the window -- "Open M9R" from the tray must keep working after.
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())
@@ -853,7 +1102,17 @@ fn main() {
 
 #[cfg(test)]
 mod one_pill_window_tests {
-    use super::{heartbeat_json, next_window_size, IslandRect, HIT_MARGIN, NEXT_H, NEXT_W, WAKE_H, WAKE_W};
+    use super::{has_update_shutdown_argument, heartbeat_json, next_window_size, IslandRect, HIT_MARGIN, NEXT_H, NEXT_W, UPDATE_SHUTDOWN_ARGUMENT, WAKE_H, WAKE_W};
+
+    #[test]
+    fn only_the_private_installer_argument_requests_shutdown() {
+        assert!(has_update_shutdown_argument(&[
+            "m9r-overlay.exe".into(),
+            UPDATE_SHUTDOWN_ARGUMENT.into(),
+        ]));
+        assert!(!has_update_shutdown_argument(&["m9r-overlay.exe".into()]));
+        assert!(!has_update_shutdown_argument(&["m9r-overlay.exe".into(), "--quit".into()]));
+    }
 
     #[test]
     fn the_heartbeat_is_the_json_the_broker_reads() {
@@ -899,7 +1158,15 @@ mod one_pill_window_tests {
 
 #[cfg(test)]
 mod hold_to_talk_tests {
-    use super::{parse_mentions, HoldToTalkEvent, HoldToTalkState};
+    use super::{parse_mentions, HoldToTalkEvent, HoldToTalkState, HOLD_TO_TALK_HOTKEY_CODE, HOLD_TO_TALK_HOTKEY_LABEL, HOLD_TO_TALK_HOTKEY_MODS};
+    use tauri_plugin_global_shortcut::{Code, Modifiers};
+
+    #[test]
+    fn hold_to_talk_shortcut_is_alt_m() {
+        assert_eq!(HOLD_TO_TALK_HOTKEY_LABEL, "Alt+M");
+        assert_eq!(HOLD_TO_TALK_HOTKEY_CODE, Code::KeyM);
+        assert_eq!(HOLD_TO_TALK_HOTKEY_MODS, Modifiers::ALT);
+    }
 
     #[test]
     fn mentions_pick_recipients_and_leave_the_message() {
