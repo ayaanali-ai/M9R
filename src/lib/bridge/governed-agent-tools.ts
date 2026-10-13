@@ -130,7 +130,10 @@ export async function ripgrepSearch(root: string, pattern: string, path: string,
   const resolved = resolveWithin(root, path);
   const args = ["--line-number", "--with-filename", "--max-count", String(maxMatches), "--glob", "!node_modules", "--glob", "!.git"];
   if (caseInsensitive) args.push("--ignore-case");
-  args.push(pattern, resolved);
+  // "--" ends option parsing: without it, a model-controlled pattern like "--pre=x.cmd" is read by
+  // ripgrep as its own preprocessor flag, running an arbitrary program once per searched file --
+  // a sandbox escape out of this governed tool into real code execution on the host.
+  args.push("--", pattern, resolved);
   const output = await new Promise<string>((resolvePromise, rejectPromise) => {
     const child = spawn("rg", args, { cwd: root });
     let stdout = "";
