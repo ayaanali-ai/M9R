@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildQueueMessage } from "../src/lib/native/codex-delivery-core.ts";
-import { handleHookEvent } from "../src/lib/native/hook-handler.ts";
+import { handleHookEvent, routeTypedMentions } from "../src/lib/native/hook-handler.ts";
 import { createLocalStore, handleForProvider } from "../src/lib/native/local-store.ts";
 import { resolveHookSessionMetadata } from "../src/lib/native/task-execution-context.ts";
 
@@ -23,6 +23,7 @@ for (const provider of ["local-open-weight-model", "arbitrary-provider", "claude
       const session = "session-owned-by-provider";
       const identity = store.issueIdentity(handle, provider, session);
       store.registerEndpoint({ provider, sessionId: session, cwd: "C:/project" });
+      store.registerEndpoint({ provider: "another-agent", sessionId: "teammate-session", cwd: "C:/project" });
       const task = store.addTask({ from: "owner", to: handle, targetSession: session,
         goal: "Read this and do not dispatch @another-agent.", origin: "human_typed", idempotencyKey: "plain-task" }).task;
       store.setDelivery(task.id, { state: "sending", threadId: session });
@@ -31,6 +32,9 @@ for (const provider of ["local-open-weight-model", "arbitrary-provider", "claude
       const context = output?.hookSpecificOutput.additionalContext ?? "";
       assert.ok(context.includes(`[M9R ${task.id}]`), "task correlation belongs in hidden hook context");
       assert.ok(context.includes(identity.token), "context must supply the exact authenticated session credential");
+      assert.deepEqual(routeTypedMentions({ session_id: session, cwd: "C:/project", prompt: task.goal },
+        { provider, store, pathExists: () => false }), { acks: [], tasks: [] },
+        "a hook-free adapter must not reinterpret a delivered task's mentions as fresh owner instructions");
       assert.equal(store.tasksFrom(handle).length, 0, "delivered task mentions cannot become fresh outbound work");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
