@@ -41,3 +41,24 @@ test("deferred recovery does not replay uncertain input or bypass approval", asy
     assert.deepEqual(sent, []);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("drain waits for the registered adapter's in-flight send", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-delivery-pump-"));
+  try {
+    const store = createLocalStore(root);
+    const task = store.addTask({ from: "owner", to: "local-model", goal: "work", origin: "human_typed", idempotencyKey: "drain" }).task;
+    store.setDelivery(task.id, { state: "deferred", threadId: "session" });
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const pump = createTaskDeliveryPump(store, new Map([["local-model", () => pending]]));
+    const sending = pump.tick();
+    let drained = false;
+    const drain = pump.drain().then(() => { drained = true; });
+    await Promise.resolve();
+    assert.equal(drained, false);
+    release();
+    await sending;
+    await drain;
+    assert.equal(drained, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

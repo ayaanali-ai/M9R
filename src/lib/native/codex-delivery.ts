@@ -14,6 +14,15 @@ import { defaultStoreRoot } from "./local-store";
 import { createWebBrokerClient } from "./web-broker-client";
 import { brokerKeyPath, ownerPipePath } from "./web-broker-paths";
 import { prepareTaskStageNotice } from "./task-stage-notice";
+import { sessionHasUnfinishedDelivery } from "./task-delivery-pump";
+
+class DeferredDelivery extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super("Waiting for the preceding task in the selected session to finish.");
+    this.sessionId = sessionId;
+  }
+}
 
 export interface DeliveryDeps {
   prepareTaskStage?(token: string, taskId: string): Promise<string>;
@@ -30,6 +39,7 @@ export interface DeliveryDeps {
 export type DeliveryOutcome =
   | { state: "queued"; threadId: string }
   | { state: "failed"; reason: string }
+  | { state: "deferred"; reason: string }
   | { state: "skipped"; reason: string };
 
 /** A task launched by M9R itself can inherit ~/.m9r/bin as process.cwd(); that is install state, never a project. */
@@ -55,6 +65,10 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   try {
     return await deliverClaimedToCodex(store, taskId, guardedDeps, () => dispatched);
   } catch (error) {
+    if (!dispatched && error instanceof DeferredDelivery) {
+      store.setDelivery(taskId, { state: "deferred", threadId: error.sessionId, error: undefined });
+      return { state: "deferred", reason: error.message };
+    }
     const reason = error instanceof Error ? error.message : String(error);
     store.setDelivery(taskId, { state: dispatched ? "uncertain" : "failed", error: reason });
     return { state: "failed", reason };
@@ -80,8 +94,14 @@ async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: De
     if (!deps.requireTargetIdentity) return buildQueueMessage(task);
     const token = store.identityTokenFor("codex", sessionId);
     if (!token) return null;
-    const stageNotice = deps.prepareTaskStage ? await deps.prepareTaskStage(token, taskId).catch(() => "M9R task stage preparation failed; no desktop control was granted.") : "";
-    return buildQueueMessage(task, token) + (stageNotice ? `\n\n${stageNotice}` : "");
+    if (!store.bindTaskToSession(taskId, token)) {
+      const owner = task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId;
+      if ((!owner || owner === sessionId) && sessionHasUnfinishedDelivery(store, "codex", sessionId, taskId)) throw new DeferredDelivery(sessionId);
+      throw new Error("This task's session ownership is ambiguous; no additional prompt was pushed.");
+    }
+    // Authentication and task binding are supplied through the trusted hook
+    // context; the real user turn contains only the owner's task.
+    return buildQueueMessage(task);
   };
   const everySession = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
 
@@ -113,7 +133,7 @@ async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: De
   }
   // Asking the machine costs about a second, so only when there is a choice to make and nobody pinned one.
   const liveness = !task.targetSession && known.length > 1 && deps.sessionLiveness ? await deps.sessionLiveness(known.map((s) => s.sessionId)).catch(() => undefined) : undefined;
-  const choice = pickSession(known, { pinned: task.targetSession, senderCwd: taskCwd, now: new Date(), liveness });
+  const choice = pickSession(known, { pinned: task.targetSession ?? task.delivery?.threadId, senderCwd: taskCwd, now: new Date(), liveness });
   if (choice.kind === "none") return fail(task.targetSession
     ? (deps.requireTargetIdentity ? `No Codex session with an active M9R identity matches "${task.targetSession}". Start or reconnect that session, then retry.` : `No Codex session matches "${task.targetSession}"; start that session, then retry.`)
     : (deps.requireTargetIdentity ? "No Codex session with an active M9R identity is known. Start Codex with M9R enabled so it receives a SessionStart card, then retry." : "No Codex session is known. Start Codex, then retry."));

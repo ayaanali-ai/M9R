@@ -12,6 +12,7 @@ import { collectCodexResults, deliverToCodex, pushAnswerToCodex, realDeps, spawn
 import { createWebBrokerClient } from "./web-broker-client";
 import { brokerKeyPath } from "./web-broker-paths";
 import { prepareHookInboxTaskStageNotice } from "./task-stage-notice";
+import { resolveHookSessionMetadata } from "./task-execution-context";
 
 export interface HookRequest {
   event: string;
@@ -109,6 +110,8 @@ export async function runHookRequest(req: HookRequest, runnerEntry: string, base
   const store = createLocalStore(root);
   const deps = realDeps(env);
   const input: HookInput = { ...(req.input ?? {}) };
+  const sessionMetadata = resolveHookSessionMetadata(store, req.provider, handleForProvider(req.provider), input);
+  input.session_id = sessionMetadata.sessionId;
   if (!input.hook_event_name && req.event) input.hook_event_name = req.event;
   const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
   // Task-stage setup is opt-in and local. Keep it below the provider's hook budget; if the broker is slow,
@@ -129,6 +132,7 @@ export async function runHookRequest(req: HookRequest, runnerEntry: string, base
     store,
     rawPayload: req.rawPayload,
     strictTargetIdentity: true,
+    sessionMetadataVerified: sessionMetadata.verified,
     // Opt-in, bounded local evidence for the phantom mention bug. The raw provider payload is
     // needed to compare what the hook received with the user's visible prompt; never print it.
     captureMentionInput: (parsed, targets, rawPayload) => {

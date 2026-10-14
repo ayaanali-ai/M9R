@@ -8,6 +8,7 @@ import { collectCodexResults, deliverToCodex, findRolloutFile, type DeliveryDeps
 import { renderInboxInjection, renderResultsInjection } from "../src/lib/native/inbox-core";
 import { handleHookEvent } from "../src/lib/native/hook-handler";
 import { createLocalStore } from "../src/lib/native/local-store";
+import { createTaskDeliveryPump } from "../src/lib/native/task-delivery-pump";
 
 const THREAD = "01a0bf78-e44a-7801-8e67-681a53f0ab68";
 const newStore = () => createLocalStore(mkdtempSync(join(tmpdir(), "m9r-n2-")));
@@ -28,6 +29,25 @@ function seedCodex(store: ReturnType<typeof newStore>) {
 }
 const typed = (store: ReturnType<typeof newStore>, goal = "Review lease.ts", key = "k1") =>
   store.addTask({ from: "claude", to: "codex", goal, origin: "human_typed", idempotencyKey: key }).task;
+
+test("a busy target defers the next plain task and the shared pump resumes it without a resend", async () => {
+  const store = newStore();
+  seedCodex(store);
+  store.issueIdentity("codex", "codex", THREAD);
+  const first = typed(store, "same task", "first"), second = typed(store, "same task", "second");
+  const deps = fakeDeps({ requireTargetIdentity: true });
+  assert.equal((await deliverToCodex(store, first.id, deps)).state, "queued");
+  assert.equal((await deliverToCodex(store, second.id, deps)).state, "deferred");
+  assert.equal(store.getTask(second.id)?.delivery?.threadId, THREAD);
+  const pump = createTaskDeliveryPump(store, new Map([["codex", (id: string) => deliverToCodex(store, id, deps)]]));
+  await pump.tick();
+  assert.equal(deps.calls.length, 1);
+  store.setResult(first.id, "completed");
+  await Promise.all([pump.tick(), pump.tick()]);
+  assert.equal(deps.calls.length, 2);
+  assert.equal(store.getTask(second.id)?.delivery?.state, "queued");
+  assert.equal(store.getTask(second.id)?.deliveredSession, THREAD);
+});
 
 test("concurrent Codex dispatchers inject a task once", async () => {
   const store = newStore();
@@ -72,9 +92,9 @@ test("only tasks a human typed or approved may be queued; everything else is nev
   assert.equal(canQueue({ origin: "agent_initiated", approval: "expired" }), false);
 });
 
-test("the queue message carries the marker and the goal, and the arguments are a plain array", () => {
+test("the visible queue message contains only the task, and the arguments are a plain array", () => {
   const msg = buildQueueMessage({ id: "T7", from: "claude", goal: "Review lease.ts" });
-  assert.ok(msg.startsWith(queueMarker("T7")));
+  assert.equal(msg, "Review lease.ts");
   assert.match(msg, /Review lease\.ts/);
   assert.deepEqual(queueArgs(THREAD, "a \"quoted\" message"), ["queue", "--thread", THREAD, "--message", "a \"quoted\" message"]);
   assert.equal(isThreadId(THREAD), true);
@@ -122,7 +142,7 @@ test("a typed task is pushed once with the real thread id, and marked delivered"
   assert.equal(deps.calls.length, 1, "a duplicate dispatch never queues a second prompt");
 });
 
-test("strict production delivery refuses missing identity and carries the existing token into the queued task", async () => {
+test("strict production delivery refuses missing identity and supplies credentials through internal context", async () => {
   const store = newStore();
   seedCodex(store);
   const task = typed(store, "Review only the changed files", "strict-identity");
@@ -137,7 +157,10 @@ test("strict production delivery refuses missing identity and carries the existi
   assert.deepEqual(queued, { state: "queued", threadId: THREAD });
   const message = strictDeps.calls[0]?.[strictDeps.calls[0].indexOf("--message") + 1] ?? "";
   assert.match(message, /Review only the changed files/);
-  assert.ok(message.includes(token), "Codex can call its governed MCP tools from the queued turn");
+  assert.ok(!message.includes(token), "the visible task must not expose credentials");
+  const hidden = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: message },
+    { provider: "codex", store, strictTargetIdentity: true, readIndex: () => null });
+  assert.ok(hidden?.hookSpecificOutput.additionalContext.includes(token), "the receiving session gets its credential through internal context");
   assert.equal(store.verifyIdentity(token)?.sessionId, THREAD, "delivery does not revoke the existing token");
   assert.doesNotMatch(message, /Task from @claude|surrounding chat/i);
 });
@@ -403,7 +426,8 @@ test("an older inbox item is not mixed into a prompt M9R pushed; it waits for th
   const ctx = { provider: "codex", store, pathExists: () => false, readIndex: () => null };
   handleHookEvent({ hook_event_name: "SessionStart", session_id: THREAD, cwd: "C:/p" }, ctx);
   const pushed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: buildQueueMessage(pushedTask) }, ctx);
-  assert.equal(pushed, null, "the pushed prompt gets nothing added");
+  assert.ok(pushed?.hookSpecificOutput.additionalContext.includes(queueMarker(pushedTask.id)), "the task receives only its internal binding");
+  assert.ok(!pushed?.hookSpecificOutput.additionalContext.includes(waiting.goal), "older inbox work is not mixed into the pushed task");
   const real = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "what next?" }, ctx);
   assert.match(real?.hookSpecificOutput.additionalContext ?? "", /Older item that fell back to the inbox/, "it arrives at the user's own next prompt");
 });

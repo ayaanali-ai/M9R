@@ -7,6 +7,7 @@
  */
 import { posix, win32 } from "node:path";
 import type { Task } from "./inbox-core";
+import { taskCorrelationMarker, visibleTaskText } from "./task-execution-context";
 
 /** A task may be pushed only when a human typed it or approved it. Everything else stays in the inbox. */
 export function canQueue(task: Pick<Task, "origin" | "approval">): boolean {
@@ -14,8 +15,8 @@ export function canQueue(task: Pick<Task, "origin" | "approval">): boolean {
   return task.approval === "approved" || task.approval === "not_needed";
 }
 
-/** Marker Codex sees in the queued prompt; the result reader finds the turn by it. */
-export const queueMarker = (taskId: string) => `[M9R ${taskId}]`;
+/** Internal context marker used by legacy rollout reconciliation, never visible task text. */
+export const queueMarker = taskCorrelationMarker;
 
 /**
  * The prompt the broker builds for a web-room agent (webAgentPrompt) lists its teammates as @handles and carries its session token.
@@ -30,9 +31,10 @@ export const isBrokerAgentPrompt = (prompt: string) => /You are @[a-z0-9-]+, an 
 export const isM9rPushedPrompt = (prompt: string) => /^\s*\[M9R T\d+\]/.test(prompt) || isBrokerAgentPrompt(prompt);
 
 export function buildQueueMessage(task: Pick<Task, "id" | "from" | "goal">, sessionToken?: string): string {
-  // The marker is transport metadata used to correlate the answer. The body is only the task text; never forward the
+  // Correlation belongs in the trusted adapter context. The body is only the task text; never forward the
   // sender's surrounding prompt, chat transcript, routing explanation, or unrelated context into the target session.
-  return `${queueMarker(task.id)}\n${task.goal}${sessionToken ? `\n\nM9R session token for governed MCP tools: ${sessionToken}\nUse this token for M9R tool calls in this session. Do not include it in replies, files, or messages.` : ""}`;
+  void sessionToken;
+  return visibleTaskText(task);
 }
 
 /**

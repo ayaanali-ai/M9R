@@ -39,6 +39,8 @@ export interface FeedRunOptions {
   deps?: FeedDeps;
   /** Hook-free Codex mentions: read new Codex prompts while watching (see codex-watch.ts). */
   codexWatcher?: CodexWatcher;
+  /** Shared scheduling over registered provider adapters; no input replay. */
+  deliveryPump?: { tick(): Promise<void>; drain?(): Promise<void> };
   onWrite?: (feed: Feed) => void;
   /** Stops watch mode when aborted. */
   signal?: AbortSignal;
@@ -163,7 +165,15 @@ export async function runFeed(options: FeedRunOptions): Promise<Feed | null> {
     if (watcher) safely(() => watcher.refresh());
     const codexRead = watcher ? setInterval(() => safely(() => { watcher.tick(); }), 1500) : undefined;
     const codexFind = watcher ? setInterval(() => safely(() => watcher.refresh()), 10_000) : undefined;
-    const stop = () => { clearInterval(poll); clearInterval(slow); if (codexRead) clearInterval(codexRead); if (codexFind) clearInterval(codexFind); resolve(); };
+    const deliveryTimer = options.deliveryPump ? setInterval(() => { void options.deliveryPump!.tick().catch(() => {}); }, 1500) : undefined;
+    const stop = () => {
+      clearInterval(poll); clearInterval(slow);
+      if (codexRead) clearInterval(codexRead);
+      if (codexFind) clearInterval(codexFind);
+      if (deliveryTimer) clearInterval(deliveryTimer);
+      // Keep the feed owner held until its actual adapter send has settled.
+      void Promise.resolve(options.deliveryPump?.drain?.()).then(resolve);
+    };
     if (options.signal?.aborted) stop(); else options.signal?.addEventListener("abort", stop, { once: true });
   });
   return last;

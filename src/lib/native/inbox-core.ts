@@ -69,7 +69,7 @@ export interface Task {
 
 export interface TaskDelivery {
   /** `sending` is a one-time claim; `queued` is provider acceptance, never proof the agent started work. */
-  state: "sending" | "queued" | "uncertain" | "failed" | "done";
+  state: "sending" | "queued" | "uncertain" | "failed" | "done" | "deferred";
   attempts: number;
   threadId?: string;
   claimedAt?: string;
