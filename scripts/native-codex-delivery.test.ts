@@ -127,6 +127,20 @@ test("the rollout reader finds the answer to a marked task, not an earlier or la
   assert.match(resultSummary("T5", ""), /without a final message/);
 });
 
+test("legacy result reconciliation never borrows a later prompt's answer", () => {
+  const tail = [
+    JSON.stringify({ type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: "[M9R T9] original task" }] } }),
+    JSON.stringify({ type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: "a different question" }] } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "answer to that different question" } }),
+  ].join("\n");
+  assert.deepEqual(findQueuedResult(tail, "T9"), { seen: true, done: false });
+  const quoted = [
+    JSON.stringify({ type: "response_item", payload: { role: "tool", content: [{ type: "output_text", text: "[M9R T9] quoted diagnostic" }] } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "an unrelated answer" } }),
+  ].join("\n");
+  assert.deepEqual(findQueuedResult(quoted, "T9"), { seen: false, done: false });
+});
+
 test("a typed task is pushed once with the real thread id, and marked delivered", async () => {
   const store = newStore(); seedCodex(store);
   const t = typed(store);
@@ -203,7 +217,7 @@ test("a pushed task is not injected again by Codex's own hook, and its answer re
   assert.equal(renderInboxInjection(store.tasksFor("codex"), 0).text, "", "the pushed prompt is the delivery; no second copy");
 
   assert.equal(collectCodexResults(store, { readRolloutTail: () => "no marker here" }), 0);
-  const tail = `${queueMarker(t.id)} Task\n${JSON.stringify({ payload: { type: "task_complete", last_agent_message: "Reviewed: one race in renew()." } })}`;
+  const tail = `${JSON.stringify({ type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: `${queueMarker(t.id)} Task` }] } })}\n${JSON.stringify({ payload: { type: "task_complete", last_agent_message: "Reviewed: one race in renew()." } })}`;
   assert.equal(collectCodexResults(store, { readRolloutTail: () => tail }), 1);
   assert.equal(store.getTask(t.id)?.delivery?.state, "done");
   const shown = renderResultsInjection(store.tasksFrom("claude"), "claude");
@@ -211,6 +225,21 @@ test("a pushed task is not injected again by Codex's own hook, and its answer re
   store.markResultShown(shown.ids);
   assert.equal(renderResultsInjection(store.tasksFrom("claude"), "claude").text, "");
   assert.equal(collectCodexResults(store, { readRolloutTail: () => tail }), 0, "nothing left to collect");
+});
+
+test("new internal-context deliveries require an authenticated task result, not inferred conversation completion", async () => {
+  const store = newStore(); seedCodex(store);
+  const identity = store.issueIdentity("codex", "codex", THREAD);
+  const task = typed(store);
+  await deliverToCodex(store, task.id, fakeDeps({ requireTargetIdentity: true }));
+  const tail = [
+    JSON.stringify({ type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: `${queueMarker(task.id)} quoted context` }] } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "unrelated final answer" } }),
+  ].join("\n");
+  assert.equal(collectCodexResults(store, { readRolloutTail: () => tail }), 0);
+  assert.equal(store.getTask(task.id)?.resultSummary, undefined);
+  assert.equal(store.recordTaskResult(identity.token, task.id, "actual task outcome").ok, true);
+  assert.equal(store.getTask(task.id)?.resultSummary, "actual task outcome");
 });
 
 test("typing @codex in Claude dispatches the push exactly once, and the result comes back at Claude's next prompt", () => {
@@ -451,6 +480,7 @@ test("Claude's finished turn answers the task it was shown, and the answer is pu
   const { pushAnswerToCodex } = await import("../src/lib/native/codex-delivery");
   const store = newStore();
   store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/p" });
+  store.issueIdentity("claude", "claude-code", "cc-1");
   const asked = store.addTask({ from: "codex", to: "claude", goal: "Summarise a.txt", origin: "human_typed", idempotencyKey: "rev1", cwd: "C:/p", fromSession: A }).task;
   const answered: string[] = [];
   const ctx = { provider: "claude-code", store, pathExists: () => false, readIndex: () => null, lastAnswer: () => "It says: PURPLE-ELEPHANT-42.", answerBack: (id: string) => answered.push(id) };
@@ -460,15 +490,16 @@ test("Claude's finished turn answers the task it was shown, and the answer is pu
   // Claude sees it at its next prompt...
   handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", cwd: "C:/p", prompt: "go" }, ctx);
   assert.equal(store.getTask(asked.id)?.deliveredSession, "cc-1");
-  // ...and its finished turn is the answer.
-  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-1" }, ctx);
+  // ...and its adapter's explicit task reference binds the final answer.
+  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-1", task_id: asked.id }, ctx);
   assert.deepEqual(answered, [asked.id]);
   assert.equal(store.getTask(asked.id)?.resultSummary, "It says: PURPLE-ELEPHANT-42.");
   // A different Claude session's finished turn is not its answer.
   const other = newStore();
+  other.issueIdentity("claude", "claude-code", "cc-OTHER");
   const t2 = other.addTask({ from: "codex", to: "claude", goal: "x", origin: "human_typed", idempotencyKey: "rev2", fromSession: A }).task;
   handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", prompt: "go" }, { ...ctx, store: other });
-  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-OTHER" }, { ...ctx, store: other, answerBack: (id: string) => answered.push("WRONG" + id) });
+  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-OTHER", task_id: t2.id }, { ...ctx, store: other, answerBack: (id: string) => answered.push("WRONG" + id) });
   assert.equal(other.getTask(t2.id)?.resultSummary, undefined);
 
   const deps = fakeDeps();

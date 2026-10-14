@@ -25,7 +25,7 @@ export function resolveHookSessionMetadata(store: LocalStore, provider: string, 
 }
 
 export function renderTaskExecutionContext(task: Pick<Task, "id">, handle: string, identityToken: string): string {
-  return `${taskCorrelationMarker(task.id)}\n${renderSessionCard({ handle, others: [], pendingCount: 0, awaitingApproval: 0, identityToken })}\nThis internal reference binds the approved task in the user message. Record its actual outcome through M9R; keep internal identifiers and credentials out of replies.`;
+  return `${taskCorrelationMarker(task.id)}\n${renderSessionCard({ handle, others: [], pendingCount: 0, awaitingApproval: 0, identityToken })}\nThis internal reference binds the approved task in the user message. Call m9r_result for this task with its actual outcome; a completed turn alone does not record the result. Do not claim success without observed evidence. Keep internal identifiers and credentials out of replies.`;
 }
 
 /**

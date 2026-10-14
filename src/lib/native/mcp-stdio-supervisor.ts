@@ -15,7 +15,10 @@ export interface McpSupervisorOptions {
   handshakeTimeoutMs?: number;
   shutdownTimeoutMs?: number;
   maxMessageBytes?: number;
-  onEvent?: (event: { kind: "ready" | "lost" | "recovery-exhausted"; generation: number; exitCode?: number | null; workerPid?: number }) => void;
+  /** Trusted installation metadata only, never a revision supplied by a tool request. */
+  workerRevision?: () => string | undefined;
+  refreshEveryMs?: number;
+  onEvent?: (event: { kind: "ready" | "lost" | "recovery-exhausted" | "refresh"; generation: number; exitCode?: number | null; workerPid?: number }) => void;
 }
 
 /**
@@ -44,12 +47,14 @@ export function runMcpStdioSupervisor(options: McpSupervisorOptions) {
   let cancelHandshake: (() => void) | undefined;
   let serverRequestSequence = 0;
   let inputBuffer = "";
+  let loadedRevision: string | undefined;
+  let refreshing = false;
   let finishClosed!: () => void;
   const closed = new Promise<void>(resolve => { finishClosed = resolve; });
   // Pipe reads may split a Unicode character between buffers. Decode streams,
   // not individual chunks, so arbitrary provider names and tool text survive.
   options.input.setEncoding("utf8");
-  const event = (kind: "ready" | "lost" | "recovery-exhausted", exitCode?: number | null, workerPid?: number) => {
+  const event = (kind: "ready" | "lost" | "recovery-exhausted" | "refresh", exitCode?: number | null, workerPid?: number) => {
     try { options.onEvent?.({ kind, generation, ...(exitCode !== undefined ? { exitCode } : {}), ...(workerPid !== undefined ? { workerPid } : {}) }); } catch { /* Diagnostics cannot break the transport. */ }
   };
   function parseMessage(line: string): Message {
@@ -98,6 +103,7 @@ export function runMcpStdioSupervisor(options: McpSupervisorOptions) {
   }
 
   async function connectAttempt() {
+    const startingRevision = options.workerRevision?.();
     const worker = options.spawnWorker();
     if (!worker.stdin || !worker.stdout) throw new Error("Worker must expose pipe transports");
     worker.stdout.setEncoding("utf8");
@@ -153,6 +159,7 @@ export function runMcpStdioSupervisor(options: McpSupervisorOptions) {
           settled = true; clearTimeout(timer);
           cancelHandshake = undefined;
           initialProtocol = message.result.protocolVersion;
+          loadedRevision = startingRevision;
           if (!initializationAnswered) {
             initializationAnswered = true;
             const result = { ...message.result, capabilities: { ...message.result.capabilities } };
@@ -269,9 +276,25 @@ export function runMcpStdioSupervisor(options: McpSupervisorOptions) {
   options.input.on("error", () => { void stop(); });
   options.output.on("error", () => { void stop(); });
 
+  const refreshTimer = options.workerRevision ? setInterval(() => {
+    if (stopping || refreshing || connecting || !child || !initialized || pending.size || serverRequests.size) return;
+    let revision: string | undefined;
+    try { revision = options.workerRevision?.(); } catch { return; }
+    if (!revision || revision === loadedRevision) return;
+    refreshing = true;
+    const worker = child;
+    // Closing only an idle, owned worker preserves active provider work. New
+    // requests wait behind the existing confirmed-retirement barrier.
+    child = undefined;
+    event("refresh", undefined, worker.pid);
+    retiring = stopWorker(worker);
+    void ensureConnected().catch(() => {}).finally(() => { refreshing = false; });
+  }, options.refreshEveryMs ?? 1500) : undefined;
+
   function stop(): Promise<void> {
     if (stopPromise) return stopPromise;
     stopping = true;
+    if (refreshTimer) clearInterval(refreshTimer);
     cancelHandshake?.();
     stopPromise = (async () => {
       if (child) { const worker = child; child = undefined; await stopWorker(worker); }

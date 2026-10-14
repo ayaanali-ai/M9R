@@ -106,3 +106,20 @@ test("ordinary prompt recovery does not undo an explicit identity revocation", (
     assert.equal(store.identityTokenFor("local-model", "session"), null);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("a provider Stop event cannot report the same unrelated final answer for every waiting task", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-task-context-"));
+  try {
+    const store = createLocalStore(root);
+    store.issueIdentity("local-model", "local-model", "session");
+    const tasks = ["first", "second"].map(key => store.addTask({ from: "owner", to: "local-model", goal: key,
+      origin: "human_typed", idempotencyKey: key }).task);
+    for (const task of tasks) store.setDelivery(task.id, { state: "queued", threadId: "session" });
+    const context = { provider: "local-model", store, lastAnswer: () => "an unrelated answer" };
+    handleHookEvent({ hook_event_name: "Stop", session_id: "session" }, context);
+    assert.ok(tasks.every(task => !store.getTask(task.id)?.resultSummary), "a turn ending is not task-correlated success evidence");
+    handleHookEvent({ hook_event_name: "Stop", session_id: "session", task_id: tasks[0].id }, context);
+    assert.equal(store.getTask(tasks[0].id)?.resultSummary, "an unrelated answer");
+    assert.equal(store.getTask(tasks[1].id)?.resultSummary, undefined, "only the adapter's explicit task reference may be answered");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

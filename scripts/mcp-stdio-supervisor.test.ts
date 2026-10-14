@@ -25,13 +25,15 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
  } else if (m.method === 'tools/call' && m.params.name === 'crash_after_effect') {
   fs.appendFileSync(process.argv[1], 'effect\n');
   process.exit(12);
+ } else if (m.method === 'tools/call' && m.params.name === 'slow_read') {
+  setTimeout(() => console.log(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{client}})), 150);
  } else if (m.id !== undefined) {
   console.log(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{tools:[],client,lastRoots}}));
  }
 });
 `;
 
-function harness(spawnWorker: () => ReturnType<typeof spawn>, attempts = 3) {
+function harness(spawnWorker: () => ReturnType<typeof spawn>, attempts = 3, workerRevision?: () => string) {
   const input = new PassThrough();
   const output = new PassThrough();
   const messages: any[] = [];
@@ -46,7 +48,7 @@ function harness(spawnWorker: () => ReturnType<typeof spawn>, attempts = 3) {
     }
   });
   const runtime = runMcpStdioSupervisor({ input, output, spawnWorker, maxAttempts: attempts,
-    retryDelayMs: 5, handshakeTimeoutMs: 500, shutdownTimeoutMs: 500 });
+    retryDelayMs: 5, handshakeTimeoutMs: 500, shutdownTimeoutMs: 500, workerRevision, refreshEveryMs: 10 });
   const send = (message: any) => input.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
   const response = async (id: number, timeoutMs = 3000) => {
     const deadline = Date.now() + timeoutMs;
@@ -59,6 +61,43 @@ function harness(spawnWorker: () => ReturnType<typeof spawn>, attempts = 3) {
   };
   return { runtime, send, response, messages, input, output };
 }
+
+test("a healthy worker adopts an updated trusted runtime revision without closing the provider pipe", async () => {
+  let revision = "first";
+  let starts = 0;
+  const h = harness(() => { starts++; return spawn(process.execPath, ["-e", fixture], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true }); }, 3, () => revision);
+  try {
+    h.send({ id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "arbitrary-local-provider", version: "1" } } });
+    await h.response(1);
+    h.send({ method: "notifications/initialized" });
+    revision = "second";
+    const deadline = Date.now() + 3000;
+    while (starts < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(starts, 2, "healthy old code must refresh automatically, not wait for a crash or owner restart");
+    h.send({ id: 2, method: "tools/list" });
+    assert.equal((await h.response(2)).result.client.name, "arbitrary-local-provider");
+    assert.equal(h.output.destroyed, false);
+  } finally { await h.runtime.stop(); }
+});
+
+test("an update waits for an in-flight tool response before retiring the private worker", async () => {
+  let revision = "first";
+  let starts = 0;
+  const h = harness(() => { starts++; return spawn(process.execPath, ["-e", fixture], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true }); }, 3, () => revision);
+  try {
+    h.send({ id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "local-provider", version: "1" } } });
+    await h.response(1);
+    h.send({ method: "notifications/initialized" });
+    h.send({ id: 2, method: "tools/call", params: { name: "slow_read", arguments: {} } });
+    revision = "second";
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(starts, 1, "the active request must not be interrupted by a file update");
+    assert.equal((await h.response(2)).result.client.name, "local-provider");
+    const deadline = Date.now() + 3000;
+    while (starts < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(starts, 2);
+  } finally { await h.runtime.stop(); }
+});
 
 test("provider metadata survives a multibyte UTF-8 frame split across pipe chunks", async () => {
   const h = harness(() => spawn(process.execPath, ["-e", fixture], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true }));

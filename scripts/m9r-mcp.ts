@@ -6,7 +6,10 @@
  */
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { runMcpStdioSupervisor } from "@/lib/native/mcp-stdio-supervisor";
+import { hasPendingRuntimeTransaction } from "@/lib/native/runtime-install-transaction";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { createM9rMcpServer } from "@/lib/native/mcp-server";
 import { createNetworkCoreClient, parseNetworkCredentials } from "@/lib/native/network-core-client";
@@ -17,9 +20,18 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 async function main(): Promise<void> {
   if (process.env.M9R_MCP_WORKER !== "1") {
+    const packaged = /m9r-engine(?:\.exe)?$/i.test(process.execPath);
+    const executableDirectory = dirname(process.execPath);
+    const workerRevision = packaged ? () => {
+      if (hasPendingRuntimeTransaction(executableDirectory)) return undefined;
+      try {
+        const manifest = JSON.parse(readFileSync(join(executableDirectory, "m9r-build-info.json"), "utf8"));
+        return typeof manifest.buildId === "string" && /^[a-f0-9]{64}$/.test(manifest.buildId) ? manifest.buildId : undefined;
+      } catch { return undefined; }
+    } : undefined;
     const args = /m9r-engine(?:\.exe)?$/i.test(process.execPath)
       ? ["mcp"] : [...process.execArgv, ...process.argv.slice(1)];
-    const runtime = runMcpStdioSupervisor({ input: process.stdin, output: process.stdout,
+    const runtime = runMcpStdioSupervisor({ input: process.stdin, output: process.stdout, workerRevision,
       spawnWorker: () => spawn(process.execPath, args, {
         stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
         env: { ...process.env, M9R_MCP_WORKER: "1" },

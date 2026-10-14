@@ -101,6 +101,7 @@ async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: De
     }
     // Authentication and task binding are supplied through the trusted hook
     // context; the real user turn contains only the owner's task.
+    store.setDelivery(taskId, { state: "sending", threadId: sessionId, correlation: "internal-context" });
     return buildQueueMessage(task);
   };
   const everySession = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
@@ -182,6 +183,7 @@ export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps:
 export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, "readRolloutTail">): number {
   let collected = 0;
   for (const task of store.awaitingResults()) {
+    if (task.delivery?.correlation === "internal-context") continue;
     const threadId = task.delivery?.threadId;
     if (!threadId) continue;
     const tail = deps.readRolloutTail(threadId);

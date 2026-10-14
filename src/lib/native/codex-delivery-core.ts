@@ -171,15 +171,22 @@ export function findQueuedResult(tailText: string, taskId: string): RolloutResul
   let seen = false;
   let answer: string | undefined;
   for (const line of tailText.split(/\r?\n/)) {
+    let row: { type?: string; payload?: { role?: string; phase?: string; type?: string; message?: string; content?: Array<{ text?: string }>; last_agent_message?: unknown } };
+    try { row = JSON.parse(line); } catch { continue; }
+    if (!row || typeof row !== "object") continue;
+    const payload = row.payload;
+    const userTexts = payload?.role === "user" && Array.isArray(payload.content) ? payload.content.flatMap(part => part && typeof part.text === "string" ? [part.text] : [])
+      : row.type === "event_msg" && payload?.type === "user_message" && typeof payload.message === "string" ? [payload.message] : [];
+    const markedUserPrompt = userTexts.some(text => text.trimStart().startsWith(marker));
     if (!seen) {
-      if (line.includes(marker)) seen = true;
+      if (markedUserPrompt) seen = true;
       continue;
     }
-    if (line.includes('"role":"user"') && !line.includes(marker)) {
+    if (userTexts.length && !markedUserPrompt) {
       if (answer !== undefined) return { seen: true, done: true, message: answer };
-      continue;
+      return { seen: true, done: false };
     }
-    if (line.includes('"role":"assistant"') && line.includes("output_text")) {
+    if (payload?.role === "assistant" && (!payload.phase || payload.phase === "final" || payload.phase === "final_answer")) {
       const text = assistantText(line);
       if (text) answer = text;
       continue;

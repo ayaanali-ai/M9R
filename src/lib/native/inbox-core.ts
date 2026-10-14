@@ -77,6 +77,8 @@ export interface TaskDelivery {
   uncertainAt?: string;
   failedAt?: string;
   error?: string;
+  /** New adapters report an exact task outcome; marker inference is legacy-only. */
+  correlation?: "internal-context";
 }
 
 export interface NewTaskInput {
