@@ -2,7 +2,9 @@ import type { LocalStore } from "./local-store";
 import { canQueue } from "./codex-delivery-core";
 
 export function sessionHasUnfinishedDelivery(store: LocalStore, handle: string, sessionId: string, exceptTaskId: string): boolean {
+  const goal = store.getTask(exceptTaskId)?.goal;
   return store.tasksFor(handle).some(task => task.id !== exceptTaskId && !task.resultSummary
+    && task.goal === goal
     && (task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId) === sessionId
     && ["sending", "queued", "uncertain"].includes(task.delivery?.state ?? ""));
 }

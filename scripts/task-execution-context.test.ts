@@ -82,6 +82,10 @@ test("direct task binding serializes identical tasks for any provider and refuse
     assert.equal(store.bindTaskToSession(first.id, identity.token), true);
     assert.equal(store.bindTaskToSession(first.id, other.token), false);
     assert.equal(store.bindTaskToSession(second.id, identity.token), false);
+    const independent = store.addTask({ from: "owner", to: "local-model", goal: "unrelated approved work",
+      origin: "human_typed", idempotencyKey: "independent" }).task;
+    assert.equal(store.bindTaskToSession(independent.id, identity.token), true,
+      "an unanswered historical task must not permanently block unrelated work with unambiguous context");
     store.setResult(first.id, "completed");
     assert.equal(store.bindTaskToSession(second.id, identity.token), true);
   } finally { rmSync(root, { recursive: true, force: true }); }
