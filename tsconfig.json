@@ -35,7 +35,8 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
-    "**/*.mts"
+    "**/*.mts",
+    "pill/src/**/*.d.ts"
   ],
   "exclude": [
     "services/network-core",
@@ -49,7 +50,6 @@
     "node_modules",
     "extensions",
     "overlay",
-    "pill/src",
     "pill/vite.config.ts",
     "runleak-analyzer-mvp"
   ]
