@@ -275,6 +275,7 @@ export default async function AgentsDashboardPage() {
     activeRules,
     unassignedCandidates: legacyRules,
     includeDisconnectedDescriptors: false,
+    viewerUserId: user?.id ?? null,
   });
   // Was the only unguarded fetch on this force-dynamic page -- every other
   // query here already degrades to a safe empty state on failure (see

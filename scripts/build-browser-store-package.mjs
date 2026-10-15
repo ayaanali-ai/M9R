@@ -99,10 +99,10 @@ export function validateStoreManifest(manifest) {
   if (typeof manifest.description !== "string" || manifest.description.trim().length === 0 || manifest.description.length > 132) fail("description must be 1-132 characters");
   if (manifest.content_scripts !== undefined) fail("static content scripts are not allowed in the store build");
   if (manifest.externally_connectable !== undefined) fail("externally_connectable is not part of the store build");
-  if (JSON.stringify(manifest.permissions) !== JSON.stringify(["tabs", "scripting", "alarms", "storage", "nativeMessaging", "search"])) fail("permissions must remain the reviewed minimum set");
+  if (JSON.stringify(manifest.permissions) !== JSON.stringify(["tabs", "scripting", "alarms", "storage", "search"])) fail("permissions must remain the reviewed minimum set");
   if (JSON.stringify(manifest.host_permissions) !== JSON.stringify(["http://*/*", "https://*/*"])) fail("required host access must remain limited to HTTP/HTTPS sites");
   if (manifest.optional_host_permissions !== undefined) fail("site access must not require per-site prompts");
-  if (manifest.optional_permissions !== undefined && JSON.stringify(manifest.optional_permissions) !== JSON.stringify(["debugger"])) fail("the only optional permission is debugger, for opt-in quiet mode");
+  if (manifest.optional_permissions !== undefined && JSON.stringify(manifest.optional_permissions) !== JSON.stringify(["debugger"])) fail("the only optional permission is debugger, for independent browser input");
   if (manifest.chrome_url_overrides !== undefined) fail("the store build must not override Chrome's New Tab page");
   // The overlay embeds the pill as an extension frame inside pages, so a page's scripts cannot read what the owner types. That requires exactly
   // the one-pill bundle folder and the static provider badges to be web-accessible. Nothing else may be.

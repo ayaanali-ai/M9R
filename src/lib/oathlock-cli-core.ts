@@ -3320,6 +3320,9 @@ Usage:
   m9r-cli bootstrap remove                  Remove only the M9R-managed block (user content preserved)
   m9r-cli connect [--agents claude-code,codex,opencode]
                                          Detect installed agents and start one human-approved connection
+  m9r-cli web setup [--agents claude-code,codex,opencode] [--yes]
+                                         Install the managed browser extension and local broker (Windows)
+  m9r-cli web uninstall                    Remove the managed browser extension, broker, and provider entries
   m9r-cli opencode sessions               List local OpenCode sessions with their project folders
   m9r-cli opencode send --folder <path> --session <id> --text <message>
                                          Send only to that explicitly selected local session
@@ -3413,7 +3416,7 @@ Environment:
 /** Adapts the CLI's dependencies for the native front-door commands; undefined without a home directory (tests). */
 function nativeIo(deps: CliDeps): NativeIo {
   const homeDir = deps.env.USERPROFILE ?? deps.env.HOME ?? "";
-  return { env: deps.env, homeDir, out: (l) => deps.out(l), err: (l) => deps.err(l), confirm: deps.confirm };
+  return { env: deps.env, homeDir, cwd: deps.cwd, out: (l) => deps.out(l), err: (l) => deps.err(l), confirm: deps.confirm };
 }
 
 /** Run the CLI. Returns a process exit code. */

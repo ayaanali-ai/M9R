@@ -76,6 +76,8 @@ export default function AuthForm({
   // Which OAuth provider is mid-redirect (null = none), so we can show a spinner.
   const [oauthBusy, setOauthBusy] = useState<OAuthProvider | null>(null);
   const [notice, setNotice] = useState<Notice | null>(initialNotice);
+  const [ageConfirmed, setAgeConfirmed] = useState(false);
+  const ageGateId = useId();
 
   const passwordIsValid = passwordChecks.every(({ test }) => test(password));
   const namesProvided = firstName.trim().length > 0 && lastName.trim().length > 0;
@@ -95,6 +97,10 @@ export default function AuthForm({
    */
   async function signInWithProvider(provider: OAuthProvider) {
     if (busy || oauthBusy) return;
+    if (mode === "signup" && !ageConfirmed) {
+      setNotice({ tone: "error", text: "Confirm you're 18 or older to create an account." });
+      return;
+    }
     const supabase = createClient();
     if (!configured || !supabase) {
       setNotice({ tone: "error", text: "Sign-in is temporarily unavailable. Please try again shortly." });
@@ -139,6 +145,11 @@ export default function AuthForm({
 
     if (mode === "signup" && !namesProvided) {
       setNotice({ tone: "error", text: "Enter your first and last name to continue." });
+      return;
+    }
+
+    if (mode === "signup" && !ageConfirmed) {
+      setNotice({ tone: "error", text: "Confirm you're 18 or older to create an account." });
       return;
     }
 
@@ -339,13 +350,29 @@ export default function AuthForm({
         </header>
       )}
 
+      {mode === "signup" && (
+        <label className="auth-switch-copy text-[10px]" htmlFor={ageGateId} style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", cursor: "pointer" }}>
+          <input
+            id={ageGateId}
+            type="checkbox"
+            checked={ageConfirmed}
+            onChange={(event) => setAgeConfirmed(event.target.checked)}
+            style={{ marginTop: "0.15rem" }}
+          />
+          <span>
+            I am 18 or older and agree to the <Link href="/terms">Terms of Service</Link> and{" "}
+            <Link href="/privacy">Privacy Policy</Link>.
+          </span>
+        </label>
+      )}
+
       {/* --- Social sign-in — fast, one-click ----------------------------- */}
       <div className="auth-oauth-grid">
         <button
           type="button"
           className="auth-oauth-btn"
           onClick={() => signInWithProvider("google")}
-          disabled={busy || oauthBusy !== null}
+          disabled={busy || oauthBusy !== null || (mode === "signup" && !ageConfirmed)}
         >
           {oauthBusy === "google" ? <span className="auth-spinner" aria-hidden /> : <GoogleMark />}
           <span>{`${oauthLabelPrefix} Google`.trim()}</span>
@@ -354,7 +381,7 @@ export default function AuthForm({
           type="button"
           className="auth-oauth-btn"
           onClick={() => signInWithProvider("github")}
-          disabled={busy || oauthBusy !== null}
+          disabled={busy || oauthBusy !== null || (mode === "signup" && !ageConfirmed)}
         >
           {oauthBusy === "github" ? <span className="auth-spinner" aria-hidden /> : <GitHubMark />}
           <span>{`${oauthLabelPrefix} GitHub`.trim()}</span>
@@ -492,7 +519,7 @@ export default function AuthForm({
 
         <button
           type="submit"
-          disabled={busy || !email || !password || (mode === "signup" && !namesProvided)}
+          disabled={busy || !email || !password || (mode === "signup" && (!namesProvided || !ageConfirmed))}
           className="auth-submit"
         >
           {busy && <span className="auth-spinner" aria-hidden="true" />}
@@ -507,13 +534,6 @@ export default function AuthForm({
           </span>
         </button>
       </form>
-
-      {mode === "signup" && (
-        <p className="auth-switch-copy text-[10px]">
-          By creating an account, you agree to the <Link href="/terms">Terms of Service</Link> and
-          acknowledge the <Link href="/privacy">Privacy Policy</Link>.
-        </p>
-      )}
 
       <p className="auth-switch-copy">
         {mode === "login" ? "New to M9R?" : "Already have an account?"}{" "}

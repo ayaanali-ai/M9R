@@ -41,6 +41,13 @@ import { MissionRelayClient } from "../../../src/lib/mission/mission-relay-clien
 import { compareWorkspaceCursor, cursorIsAfter, decodeWorkspaceCursor, encodeWorkspaceCursor, workspaceCursorFromMessage } from "../../../src/lib/mission/workspace-cursor";
 import { isAgentAvailabilityNoticeBody } from "../../../src/lib/conversation-routing";
 import { migrateLegacyM9rDirectory, normalizeLegacyM9rEnvironment } from "../../../src/lib/native/m9r-compatibility";
+import {
+  detectProviderUsageLimitCooldownUntil,
+  PROVIDER_USAGE_LIMIT_FALLBACK_COOLDOWN_MS,
+} from "../../../src/lib/native/provider-cooldown-core";
+
+export const WORKSPACE_USAGE_LIMIT_FALLBACK_COOLDOWN_MS = PROVIDER_USAGE_LIMIT_FALLBACK_COOLDOWN_MS;
+export const detectUsageLimitCooldownUntil = detectProviderUsageLimitCooldownUntil;
 
 /**
  * Confirmed live tonight: three real agents, given a task with an explicit
@@ -227,38 +234,6 @@ export const WORKSPACE_LOOP_NUDGE_THRESHOLD = 5;
  * inUsageLimitCooldown: refuse delivery at the code level, not a prompt).
  */
 export const WORKSPACE_LOOP_HARD_STOP_THRESHOLD = WORKSPACE_LOOP_NUDGE_THRESHOLD + 5;
-
-/**
- * Fallback cooldown when a provider reports a usage-limit/quota failure with
- * no parseable reset time. Live-caught: this reason string reaches this
- * bridge only via postTurnFallbackOnce's mechanical fallback path -- the
- * provider rejected the request before any prompt content (including the
- * loop nudge above) was ever processed, so no prompt-level nudge can affect
- * it. Only refusing to re-deliver messages to that provider until this
- * passes actually stops the retry.
- */
-export const WORKSPACE_USAGE_LIMIT_FALLBACK_COOLDOWN_MS = 30 * 60_000;
-
-/**
- * Parses a provider's own stated reset time out of its failure reason (e.g.
- * "...or try again at Sep 14th, 2026 4:46 PM.") when present and in the
- * future; falls back to a fixed cooldown otherwise. Returns null when the
- * reason doesn't look like a usage-limit/quota failure at all -- an
- * unrelated failure (a real bug, a transient network error) must not be
- * silenced the same way; those should keep retrying normally.
- */
-export function detectUsageLimitCooldownUntil(reason: string, nowMs = Date.now()): number | null {
-  if (!/usage limit|quota|rate limit/i.test(reason)) return null;
-  const match = reason.match(/try again at ([^.()]+)/i);
-  if (match) {
-    // Date.parse rejects ordinal day suffixes ("Sep 14th, 2026") outright --
-    // and that's the exact real format a Codex usage-limit error uses.
-    const withoutOrdinals = match[1].trim().replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, "$1");
-    const parsed = Date.parse(withoutOrdinals);
-    if (Number.isFinite(parsed) && parsed > nowMs) return parsed;
-  }
-  return nowMs + WORKSPACE_USAGE_LIMIT_FALLBACK_COOLDOWN_MS;
-}
 
 /**
  * Deliberately a nudge, not a block: a hard count-based circuit breaker risks

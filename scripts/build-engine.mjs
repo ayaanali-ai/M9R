@@ -4,39 +4,55 @@
 // jobs: `m9r-engine m9r-hook <Event> <provider>` is what agents run per prompt, anything else is the CLI (`feed --watch`, ...).
 // Run `npm run build:cli` first; this bundles cli/dist. Output: engine/dist/m9r-engine.exe (or no extension off Windows).
 
-import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
+import { publishRuntimeBuild, verifyRuntimeBuildManifest, writeRuntimeBuildManifest } from "./engine-build-transaction.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const out = join(root, "engine", "dist");
-const work = join(out, "work");
+// Windows ships libarchive-based bsdtar at System32\\tar.exe. A bare tar.exe can
+// resolve to Git for Windows' GNU tar, which treats a C:\\ path as a remote host
+// and cannot reliably inspect or extract the verified ZIP on this build path.
+const systemTarExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+const engineDir = join(root, "engine");
+const output = join(engineDir, "dist");
+const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
+const out = join(buildRoot, "artifacts");
+const work = join(buildRoot, "work");
+const overlayExe = join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(root, "cli", "dist", "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";
+const cuaDriverVersion = "0.34.0";
+const cuaDriverArchiveSha256 = "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b408608b0ea4423a8b888";
+const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua-driver-rs-v${cuaDriverVersion}/cua-driver-rs-${cuaDriverVersion}-windows-x86_64-binary.zip`;
 
 if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle)) throw new Error("cli/dist is missing: run `npm run build:cli` first.");
+if (process.platform === "win32" && !existsSync(overlayExe)) {
+  throw new Error("The Windows desktop pill is missing: build it with `npm --prefix overlay run build` before building the standalone engine.");
+}
 rmSync(work, { recursive: true, force: true });
 for (const name of [exeName, brokerExeName, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native", ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "m9r-overlay.exe"] : [])]) {
   rmSync(join(out, name), { force: true });
 }
-mkdirSync(work, { recursive: true });
-
 const postjectCli = join(root, "node_modules", "postject", "dist", "cli.js");
 if (!existsSync(postjectCli)) throw new Error("postject is missing; install the locked development dependencies before building the engine.");
+mkdirSync(out, { recursive: true });
+mkdirSync(work, { recursive: true });
 
 function buildSeaExecutable(main, executable, label) {
   const config = join(work, `${label}-sea-config.json`);
   const blob = join(work, `${label}.blob`);
   writeFileSync(config, JSON.stringify({ main, output: blob, disableExperimentalSEAWarning: true }));
   let result = spawnSync(process.execPath, ["--experimental-sea-config", config], { stdio: "inherit" });
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (result.error || result.status !== 0) throw new Error(`Could not create the ${label} SEA blob.`, { cause: result.error });
 
   copyFileSync(process.execPath, executable);
   result = spawnSync(process.execPath, [postjectCli, executable, "NODE_SEA_BLOB", blob, "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2", ...(process.platform === "darwin" ? ["--macho-segment-name", "NODE_SEA"] : [])], { stdio: "inherit" });
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (result.error || result.status !== 0) throw new Error(`Could not inject the ${label} SEA blob.`, { cause: result.error });
 }
 
 // The dispatcher: SEA argv is [exe, exe, ...args]; shift so both programs see the argv they were written for.
@@ -45,6 +61,7 @@ const mcpJs = join(root, "cli", "dist", "m9r-mcp.js").split(String.fromCharCode(
 const devMcpJs = join(root, "cli", "dist", "dev-mcp-server.js").split(String.fromCharCode(92)).join("/");
 const cliJs = join(root, "cli", "dist", "m9r.js").split(String.fromCharCode(92)).join("/");
 const entry = join(work, "entry.mjs");
+try {
 writeFileSync(entry, `
 const args = process.argv.slice(2);
 const isHook = args[0] === "m9r-hook" || args[0] === "hook";
@@ -77,25 +94,97 @@ buildSeaExecutable(brokerBundle, brokerExe, "web-broker");
 // The small native hook (hook/): agents run this, not the big engine, so a cold start can never hit their hook time limit.
 const cargoEnv = { ...process.env, PATH: `${process.env.PATH}${process.platform === "win32" ? ";" : ":"}${join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".cargo", "bin")}` };
 let r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "hook"), env: cargoEnv, stdio: "inherit" });
-if (r.status !== 0) process.exit(r.status ?? 1);
+if (r.error || r.status !== 0) throw new Error("The native hook build failed.", { cause: r.error });
 const shimName = process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native";
 copyFileSync(join(root, "hook", "target", "release", process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook"), join(out, shimName));
 // The visible-tab click path must use trusted OS input. Ship its Windows-only Native Messaging host beside the engine.
 if (process.platform === "win32") {
   r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "native-input-host"), env: cargoEnv, stdio: "inherit" });
-  if (r.status !== 0) process.exit(r.status ?? 1);
+  if (r.error || r.status !== 0) throw new Error("The native input host build failed.", { cause: r.error });
   copyFileSync(join(root, "native-input-host", "target", "release", "m9r-native-input-host.exe"), join(out, "m9r-native-input-host.exe"));
 
-  // The pill overlay was never part of this pipeline before: a stale, manually-built copy could sit in
-  // %USERPROFILE%\.m9r\bin forever since no release or install step ever replaced it. Build and ship it
-  // like every other managed binary so a real install/reinstall actually updates what the user sees.
-  r = spawnSync("npm", ["run", "build"], { cwd: join(root, "overlay"), env: cargoEnv, stdio: "inherit", shell: true });
-  if (r.status !== 0) process.exit(r.status ?? 1);
-  copyFileSync(join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe"), join(out, "m9r-overlay.exe"));
+  // Keep the JavaScript SDK and native bindings beside the executable, and include
+  // Cua's separately built DPI-aware Windows daemon. M9R must use the daemon path
+  // for the OS cursor overlay; the in-process Node runtime is DPI-virtualized on
+  // scaled Windows displays.
+  const cuaRuntimeRoot = join(out, "cua-driver-runtime");
+  const cuaRuntime = join(cuaRuntimeRoot, "node_modules");
+  rmSync(cuaRuntimeRoot, { recursive: true, force: true });
+  for (const packageName of [
+    "@trycua/cua-driver",
+    "@trycua/cua-driver-win32-x64-msvc",
+    "@ubjs/core",
+    "@ubjs/node",
+    "@ubjs/node-win32-x64-msvc",
+  ]) {
+    const source = join(root, "node_modules", packageName);
+    if (!existsSync(source)) throw new Error(`Cua Driver release dependency is missing: ${packageName}. Install the locked root dependencies first.`);
+    const destination = join(cuaRuntime, packageName);
+    mkdirSync(dirname(destination), { recursive: true });
+    cpSync(source, destination, { recursive: true });
+  }
+  const driverDll = join(cuaRuntime, "@trycua", "cua-driver-win32-x64-msvc", "cua_driver_sdk.dll");
+  const driverAddon = join(cuaRuntime, "@trycua", "cua-driver-win32-x64-msvc", "cua_driver_node_runtime.node");
+  const ubjsAddon = join(cuaRuntime, "@ubjs", "node-win32-x64-msvc", "uniffi-runtime-napi.win32-x64-msvc.node");
+  for (const required of [driverDll, driverAddon, ubjsAddon]) {
+    if (!existsSync(required)) throw new Error(`Cua Driver release binary is missing: ${required}`);
+  }
+
+  const installedDriverPackage = JSON.parse(readFileSync(join(cuaRuntime, "@trycua", "cua-driver", "package.json"), "utf8"));
+  if (installedDriverPackage.version !== cuaDriverVersion) {
+    throw new Error(`The JavaScript Cua Driver package is ${installedDriverPackage.version}; the Windows runtime is pinned to ${cuaDriverVersion}.`);
+  }
+
+  const archiveRoot = join(root, ".workcache", "cua-driver-release", cuaDriverVersion);
+  const archivePath = join(archiveRoot, `cua-driver-rs-${cuaDriverVersion}-windows-x86_64-binary.zip`);
+  mkdirSync(archiveRoot, { recursive: true });
+  if (!existsSync(archivePath)) {
+    console.log(`Downloading pinned Cua Driver ${cuaDriverVersion} Windows daemon...`);
+    const response = await fetch(cuaDriverArchiveUrl, { redirect: "follow" });
+    if (!response.ok) throw new Error(`Could not download Cua Driver ${cuaDriverVersion} (${response.status} ${response.statusText}).`);
+    writeFileSync(archivePath, Buffer.from(await response.arrayBuffer()));
+  }
+  const archiveHash = createHash("sha256").update(readFileSync(archivePath)).digest("hex");
+  if (archiveHash !== cuaDriverArchiveSha256) {
+    throw new Error(`Cua Driver ${cuaDriverVersion} Windows archive checksum mismatch: ${archiveHash}. Refusing to package an unverified daemon.`);
+  }
+  const expectedEntries = ["cua-driver.exe", "cua-cursor-theme.exe", "cua-driver-uia.exe", "cua_driver_sdk.dll", "cua_driver_node_runtime.node", "cua_driver_abi.h"];
+  const archiveEntries = spawnSync(systemTarExe, ["-tf", archivePath], { encoding: "utf8", windowsHide: true });
+  if (archiveEntries.status !== 0) throw new Error(`Could not list the verified Cua Driver archive: ${archiveEntries.stderr || archiveEntries.stdout}`);
+  const entries = archiveEntries.stdout.trim().split(/\r?\n/).filter(Boolean).sort();
+  if (JSON.stringify(entries) !== JSON.stringify([...expectedEntries].sort())) {
+    throw new Error(`Cua Driver ${cuaDriverVersion} archive contents changed; review before packaging. Found: ${entries.join(", ")}`);
+  }
+  const extractedRoot = join(work, `cua-driver-${cuaDriverVersion}-windows`);
+  rmSync(extractedRoot, { recursive: true, force: true });
+  mkdirSync(extractedRoot, { recursive: true });
+  const extraction = spawnSync(systemTarExe, ["-xf", archivePath, "-C", extractedRoot], { stdio: "inherit", windowsHide: true });
+  if (extraction.status !== 0) throw new Error(`Could not extract verified Cua Driver ${cuaDriverVersion} Windows files.`);
+  const binaryRoot = join(cuaRuntimeRoot, "bin");
+  mkdirSync(binaryRoot, { recursive: true });
+  for (const asset of expectedEntries) {
+    const source = join(extractedRoot, asset);
+    if (!existsSync(source)) throw new Error(`Verified Cua Driver archive is missing ${asset}.`);
+    copyFileSync(source, join(binaryRoot, asset));
+  }
+
+  // Keep engine/dist as the single runtime source used by local setup and release packaging.
+  // The release workflow builds the pill before this script, so this copy cannot silently retain
+  // a previous overlay when a new desktop build has been produced.
+  copyFileSync(overlayExe, join(out, "m9r-overlay.exe"));
+  console.log(`Packaged Cua Driver ${cuaDriverVersion} Windows standalone host (SHA-256 verified).`);
 }
-console.log(`Built ${exe} (${Math.round(readFileSync(exe).length / 1e6)} MB)`);
-console.log(`Built ${brokerExe} (${Math.round(readFileSync(brokerExe).length / 1e6)} MB)`);
-if (process.platform === "win32") {
-  const overlayExe = join(out, "m9r-overlay.exe");
-  console.log(`Built ${overlayExe} (${Math.round(readFileSync(overlayExe).length / 1e6)} MB)`);
+
+const managedRuntimePaths = [exeName, brokerExeName, shimName,
+  ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "cua-driver-runtime", "m9r-overlay.exe"] : [])];
+writeRuntimeBuildManifest(out);
+const stagedIdentity = verifyRuntimeBuildManifest(out, { exact: true });
+const publishedIdentity = publishRuntimeBuild(out, output, managedRuntimePaths);
+if (publishedIdentity.buildId !== stagedIdentity.buildId) throw new Error("Published runtime identity differs from its staged artifact hashes.");
+console.log(`Built ${join(output, exeName)} (${Math.round(readFileSync(join(output, exeName)).length / 1e6)} MB)`);
+console.log(`Built ${join(output, brokerExeName)} (${Math.round(readFileSync(join(output, brokerExeName)).length / 1e6)} MB)`);
+console.log(`Runtime build identity ${publishedIdentity.buildId} verified across ${Object.keys(publishedIdentity.artifacts).length} files.`);
+if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")} from the current desktop build.`);
+} finally {
+  rmSync(buildRoot, { recursive: true, force: true });
 }

@@ -173,6 +173,23 @@ test("OpenCode JSONC merge uses legacy or v2 layout without rewriting unrelated 
   assert.match(uninstalled, /"github"/);
 });
 
+test("OpenCode setup explicitly loads the M9R identity plugin beside the active config", () => {
+  const original = `{
+  // keep the user's existing plugin path
+  "plugin": ["./plugins"],
+  "mcp": {},
+}`;
+  const installed = mergeOpenCodeWebMcp(original, "legacy", command, true);
+  const normalized = installed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1");
+  const parsed = JSON.parse(normalized) as { plugin: string[] };
+  assert.deepEqual(parsed.plugin, ["./plugins", "./plugins/m9r-identity.js"]);
+  assert.equal(mergeOpenCodeWebMcp(installed, "legacy", command, true), installed);
+  const removed = removeOpenCodeWebMcp(installed, "legacy", true);
+  const removedParsed = JSON.parse(removed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1")) as { plugin: string[]; mcp?: Record<string, unknown> };
+  assert.deepEqual(removedParsed.plugin, ["./plugins"]);
+  assert.deepEqual(removedParsed.mcp, {});
+});
+
 test("invalid OpenCode JSONC is refused rather than replaced or truncated", () => {
   assert.throws(() => mergeOpenCodeWebMcp("{ broken", "servers", command), /invalid|parse/i);
 });
@@ -221,6 +238,28 @@ test("extension refresh updates only files still matching the prior install hash
   assert.equal(webExtensionFileAction({ currentHash: "old", installedHash: "old", desiredHash: "old" }), "unchanged");
   assert.equal(webExtensionFileAction({ currentHash: "old", installedHash: "old" }), "delete");
   assert.equal(webExtensionFileAction({ currentHash: "user", installedHash: "old" }), "preserve");
+});
+
+test("extension-only refresh removes unchanged files retired by the package and releases changed ones", () => {
+  const plan = planManagedWebExtensionRefresh({
+    sourceFiles: [{ relativePath: "manifest.json", desiredHash: "new-manifest" }],
+    installedFiles: [
+      { relativePath: "manifest.json", installedHash: "old-manifest" },
+      { relativePath: "newtab.html", installedHash: "old-newtab" },
+      { relativePath: "newtab.css", installedHash: "old-css" },
+    ],
+    currentHashes: new Map([
+      ["manifest.json", "old-manifest"],
+      ["newtab.html", "old-newtab"],
+      ["newtab.css", "user-edited-css"],
+    ]),
+  });
+
+  assert.deepEqual(plan.map(({ relativePath, action }) => [relativePath, action]), [
+    ["manifest.json", "write"],
+    ["newtab.html", "delete"],
+    ["newtab.css", "preserve"],
+  ]);
 });
 
 test("extension-only refresh updates owned files and leaves user edits and untracked files alone", () => {

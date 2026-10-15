@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isRoomStageResourceKey } from "./room-coordination";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EVENT_KINDS = new Set([
@@ -52,6 +53,27 @@ function normalizedPayload(kind: string, input: unknown): Record<string, unknown
   const source = record(input);
   if (!source) return null;
   const payload: Record<string, unknown> = {};
+
+  if (kind === "share" && source.type === "desktop.stage.transition.reported") {
+    if (Object.keys(source).some((key) => !["type", "action", "fromResourceKey", "toResourceKey"].includes(key))) return null;
+    const action = source.action;
+    const fromResourceKey = source.fromResourceKey;
+    const toResourceKey = source.toResourceKey;
+    const validFrom = fromResourceKey === undefined || isRoomStageResourceKey(fromResourceKey);
+    const validTo = toResourceKey === undefined || isRoomStageResourceKey(toResourceKey);
+    if (!validFrom || !validTo) return null;
+    if (action === "entered" && (fromResourceKey !== undefined || toResourceKey === undefined)) return null;
+    if (action === "left" && (fromResourceKey === undefined || toResourceKey !== undefined)) return null;
+    if (action === "moved" && (fromResourceKey === undefined || toResourceKey === undefined || fromResourceKey === toResourceKey)) return null;
+    if (!["entered", "left", "moved"].includes(String(action))) return null;
+    return {
+      type: "desktop.stage.transition.reported",
+      action,
+      source: "member-reported",
+      ...(typeof fromResourceKey === "string" ? { fromResourceKey } : {}),
+      ...(typeof toResourceKey === "string" ? { toResourceKey } : {}),
+    };
+  }
 
   if (["post", "ask", "reply"].includes(kind)) {
     const text = boundedText(source.text, 4_000);

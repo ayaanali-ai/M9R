@@ -57,6 +57,31 @@ test("an agent can omit tab after opening its only named tab", async () => {
   assert.deepEqual(await read, { ok: true, data: "Example Domain" });
 });
 
+test("an unrelated tabless open creates a fresh tab and focuses it for the next action", async () => {
+  const { broker, sent } = harness();
+  const local = broker.submit(req("codex", "open", { url: "http://localhost:3000/", tab: "local-work" }));
+  broker.onExtensionMessage({ type: "result", id: "c1", ok: true, origin: "http://localhost:3000", url: "http://localhost:3000/" });
+  assert.equal((await local).ok, true);
+
+  const external = broker.submit(req("codex", "open", { url: "https://youtube.com/" }));
+  assert.equal(sent.length, 2);
+  assert.notEqual(sent[1].tab, "local-work", "a new URL must not commandeer the existing task tab");
+  const openedTab = String(sent[1].tab);
+  broker.onExtensionMessage({ type: "result", id: "c2", ok: true, origin: "https://youtube.com", url: "https://youtube.com/" });
+  assert.equal((await external).ok, true);
+
+  const read = broker.submit(req("codex", "read", { selector: "h1" }));
+  assert.equal(sent[2].tab, openedTab, "tabless continuation follows the tab just opened");
+  broker.onExtensionMessage({ type: "result", id: "c3", ok: true, data: "YouTube" });
+  assert.deepEqual(await read, { ok: true, data: "YouTube" });
+
+  const tabs = await broker.submit(req("codex", "tabs"));
+  assert.equal(tabs.ok, true);
+  assert.deepEqual((tabs.data as Array<{ tab: string; url?: string }>).map(({ tab, url }) => [tab, url]).sort(), [
+    ["local-work", "http://localhost:3000/"], [openedTab, "https://youtube.com/"],
+  ].sort());
+});
+
 test("an agent with no tab of its own works on the one page the room already has open", async () => {
   const { broker, sent } = harness();
   const opened = broker.submit(req("claude", "open", { url: "https://example.com/", tab: "research" }));
@@ -906,4 +931,49 @@ test("shared-tab awareness reports changes once and omits passive reads", async 
  const passive=broker.submit(req("claude","read",{tab:"shared",selector:"h1"}));
  broker.onExtensionMessage({type:"result",id:String(sent.at(-1)!.id),ok:true,data:"Title"});await passive;
  assert.equal((await broker.submit(req("codex","tabs"))).room,undefined);
+});
+
+test("stage money approvals surface in the pill list and resolve only on an explicit decision", async () => {
+  const { broker } = harness({ approvalEnabled: true });
+  const waiting = broker.requestStageApproval({ agent: "codex", provider: "codex", sessionId: "s1", step: "Clicking \u201CPay $49\u201D on the stage", targetLabel: "Pay $49" });
+  await new Promise((r) => setTimeout(r, 5));
+  const pending = broker.pendingApprovals();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].actor, "codex");
+  assert.equal(pending[0].action, "click");
+  assert.equal(pending[0].targetLabel, "Pay $49");
+  assert.equal(broker.decideApproval(pending[0].id, "approve"), true);
+  assert.equal(await waiting, true, "an explicit approve lets the stage click proceed");
+  assert.equal(broker.pendingApprovals().length, 0);
+});
+
+test("stage money approvals fail closed on deny, timeout, and missing authority", async () => {
+  const { broker } = harness({ approvalEnabled: true });
+  const denied = broker.requestStageApproval({ agent: "codex", provider: "codex", sessionId: "s1", step: "Clicking", timeoutMs: 60_000 });
+  await new Promise((r) => setTimeout(r, 5));
+  const entry = broker.pendingApprovals()[0];
+  assert.equal(broker.decideApproval(entry.id, "deny"), true);
+  assert.equal(await denied, false, "deny never executes the stage click");
+  assert.equal(broker.decideApproval(entry.id, "approve"), false, "a decided entry cannot be decided again");
+
+  const { broker: timing } = harness({ approvalEnabled: true });
+  const timed = timing.requestStageApproval({ agent: "codex", provider: "codex", sessionId: "s1", step: "Clicking", timeoutMs: 1_000 });
+  assert.equal(await timed, false, "an unanswered owner hold expires to a denial");
+  assert.equal(timing.pendingApprovals().length, 0);
+
+  const { broker: noAuth } = harness();
+  assert.equal(await noAuth.requestStageApproval({ agent: "codex", provider: "codex", sessionId: "s1", step: "Clicking" }), false);
+  assert.equal(noAuth.pendingApprovals().length, 0, "without an audit trail nothing is held");
+});
+
+test("stage launch holds surface with the launch action and resolve on decision", async () => {
+  const { broker } = harness({ approvalEnabled: true });
+  const waiting = broker.requestStageApproval({ action: "launch", risk: "launch", agent: "codex", provider: "codex", sessionId: "s1", step: "Launching chrome on the stage", targetLabel: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", timeoutMs: 60_000 });
+  await new Promise((r) => setTimeout(r, 5));
+  const pending = broker.pendingApprovals();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].action, "launch");
+  assert.equal(pending[0].targetLabel, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe");
+  assert.equal(broker.decideApproval(pending[0].id, "approve"), true);
+  assert.equal(await waiting, true);
 });

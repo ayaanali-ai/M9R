@@ -71,8 +71,8 @@ test("the delivery worker only downgrades unconfirmed rows and is gated on a ser
   assert.doesNotMatch(route, /authenticateAgent/);
 });
 
-test("vercel.json schedules the sweep worker at the honest Hobby-compatible daily cadence", async () => {
-  const raw = await readFile(new URL("../vercel.json", import.meta.url), "utf8");
-  const config = JSON.parse(raw) as { crons?: Array<{ path?: string; schedule?: string }> };
-  assert.ok(config.crons?.some((c) => c.path === "/api/internal/work-signal-sweep" && c.schedule === "0 3 * * *"));
+test("Cloudflare scheduler declares the work-signal sweep cadence", async () => {
+  const raw = await readFile(new URL("../services/cron-scheduler/wrangler.jsonc", import.meta.url), "utf8");
+  const config = JSON.parse(raw) as { triggers?: { crons?: string[] } };
+  assert.ok(config.triggers?.crons?.includes("0 3 * * *"));
 });

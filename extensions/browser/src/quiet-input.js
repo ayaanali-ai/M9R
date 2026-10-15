@@ -26,11 +26,11 @@
     const idleMs = Number.isFinite(options.idleMs) && options.idleMs >= 0 ? options.idleMs : IDLE_DETACH_MS;
     const setTimer = options.setTimeout || setTimeout;
     const clearTimer = options.clearTimeout || clearTimeout;
-    const sessions = new Map(); // tabId -> { attached, cancelled, timer, queue }
+    const sessions = new Map(); // tabId -> { attached, cancelled, stopped, timer, queue }
 
     function session(tabId) {
       let s = sessions.get(tabId);
-      if (!s) { s = { attached: false, cancelled: false, timer: null, queue: Promise.resolve() }; sessions.set(tabId, s); }
+      if (!s) { s = { attached: false, cancelled: false, stopped: false, timer: null, queue: Promise.resolve() }; sessions.set(tabId, s); }
       return s;
     }
 
@@ -56,6 +56,7 @@
 
     async function ensureAttached(tabId) {
       const s = session(tabId);
+      if (s.stopped) throw refusal("stopped_by_owner", "The owner stopped browser input");
       if (s.cancelled) throw refusal("debugger_cancelled", "The owner cancelled the browser's debugging banner on this tab; quiet input is off for it until re-enabled");
       if (s.attached) return s;
       listen();
@@ -77,19 +78,17 @@
     function run(tabId, work) {
       const s = session(tabId);
       const next = s.queue.then(async () => {
-        const attempt = async () => {
+        try {
           await ensureAttached(tabId);
           if (s.timer !== null) { clearTimer(s.timer); s.timer = null; }
-          return work();
-        };
-        try {
-          return await attempt();
+          return await work();
         } catch (error) {
-          // Something detached us without telling the worker (tab navigated to an unattachable page and back, DevTools took over):
-          // forget the stale attachment and try once more; a real refusal from attach still surfaces with its own code.
+          // Input commands are not safe to replay: Chrome may have applied the
+          // click/text before its reply was lost. Fail truthfully and leave any
+          // retry decision to the caller instead of duplicating a side effect.
           if (error && !error.code && /not attached|detached|no target with given id/i.test(String(error.message))) {
             s.attached = false;
-            return await attempt();
+            throw refusal("input_outcome_unknown", "Chrome disconnected during browser input; the action may have landed. M9R did not replay it to avoid duplicating the action");
           }
           throw error;
         } finally {
@@ -109,11 +108,28 @@
       const buttons = button === "left" ? 1 : button === "right" ? 2 : 4;
       const count = request.clickCount === 2 ? 2 : 1;
       return run(tabId, async () => {
-        if (typeof request.beforePress === "function") await request.beforePress();
         await send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
         for (let c = 1; c <= count; c += 1) {
-          await send(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, buttons, clickCount: c });
-          await send(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount: c });
+          // Recheck the live tab, grant, and target after the cursor reaches the
+          // page and immediately before each press. A redirect or target swap
+          // during cursor travel must cancel the click.
+          if (typeof request.beforePress === "function") await request.beforePress();
+          try {
+            await send(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, buttons, clickCount: c });
+          } catch (error) {
+            // The press may have reached Chrome even if its reply was lost.
+            // Release is safe cleanup; a second press would duplicate the action.
+            await send(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount: c }).catch(() => undefined);
+            throw error;
+          }
+          try {
+            await send(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount: c });
+          } catch (error) {
+            // Best-effort release only; never repeat the press if Chrome loses
+            // its reply after the click may already have taken effect.
+            await send(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount: c }).catch(() => undefined);
+            throw error;
+          }
         }
         return { route: "quiet", trusted: true };
       });
@@ -159,10 +175,24 @@
       return released;
     }
 
+    async function closeAll() {
+      await Promise.all([...sessions.keys()].map((tabId) => detach(tabId)));
+    }
+
+    async function stopAll() {
+      const tabIds = [...sessions.keys()];
+      for (const tabId of tabIds) session(tabId).stopped = true;
+      await Promise.all(tabIds.map((tabId) => detach(tabId)));
+    }
+
+    function resumeAll() {
+      for (const s of sessions.values()) s.stopped = false;
+    }
+
     /** Owner re-enables a tab after cancelling the banner. */
     function reset(tabId) { const s = sessions.get(tabId); if (s) s.cancelled = false; }
 
-    return { click, insertText, detach, adoptAndRelease, reset, _sessions: sessions };
+    return { click, insertText, detach, closeAll, stopAll, resumeAll, adoptAndRelease, reset, _sessions: sessions };
   }
 
   root.M9RQuietInput = { create, IDLE_DETACH_MS, ALLOWED_METHODS: [...ALLOWED] };

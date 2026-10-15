@@ -4,20 +4,19 @@ import { runInNewContext } from "node:vm";
 import test from "node:test";
 
 const background = readFileSync(new URL("../extensions/browser/src/background.js", import.meta.url), "utf8");
-const nativeInputClient = readFileSync(new URL("../extensions/browser/src/native-input-client.js", import.meta.url), "utf8");
 const quietInput = readFileSync(new URL("../extensions/browser/src/quiet-input.js", import.meta.url), "utf8");
 
-function createHarness(settings: { completeOnCreate?: boolean; autoNativeProgress?: boolean } = {}) {
+function createHarness(settings: { completeOnCreate?: boolean; quietModeEnabled?: boolean; debuggerGranted?: boolean; debuggerAttachError?: string } = {}) {
   const session: Record<string, unknown> = {};
   const tabs = new Map<number, { id: number; url: string; status: string }>();
   const created: number[] = [];
   const updated: number[] = [];
   const replies: Array<Record<string, unknown>> = [];
   const pageMessages: Array<Record<string, unknown>> = [];
-  const eventOrder: Array<{ kind: "page" | "native"; message: Record<string, unknown> }> = [];
-  const nativeInputMessages: Array<Record<string, unknown>> = [];
+  const eventOrder: Array<{ kind: "page" | "debugger"; message?: Record<string, unknown>; method?: string; tabId?: number; params?: Record<string, unknown> }> = [];
+  const debuggerCalls: Array<{ method: string; tabId: number; params?: Record<string, unknown> }> = [];
   const sockets: Array<{ onopen?: () => void; onmessage?: (event: { data: string }) => void; readyState: number; send(payload: string): void; close(): void; receive(payload: Record<string, unknown>): void }> = [];
-  const nativePorts: Array<{ emit(message: Record<string, unknown>): void; disconnectCalls(): number }> = [];
+  const debuggerTabs = new Set<number>();
   const listeners = new Set<(tabId: number, info: { status?: string }) => void>();
   let nextTabId = 1;
   let activeTabId: number | null = null;
@@ -25,7 +24,9 @@ function createHarness(settings: { completeOnCreate?: boolean; autoNativeProgres
   let currentTarget = createPageTarget();
   let hitTarget = currentTarget;
   let permissionAllowed = true;
-  let pointerArrivalHook: (() => void) | null = null;
+  let quietModeEnabled = settings.quietModeEnabled === true;
+  let debuggerGranted = settings.debuggerGranted === true;
+  let mouseMoveHook: ((tabId: number) => void) | null = null;
   let runtimeMessageListener: ((message: Record<string, unknown>, sender: { url?: string }, sendResponse: (response: Record<string, unknown>) => void) => void) | null = null;
   let sessionReads = 0;
   let clearedLoadTimers = 0;
@@ -55,51 +56,53 @@ function createHarness(settings: { completeOnCreate?: boolean; autoNativeProgres
     close() { this.readyState = 3; }
   }
 
-  function connectNative() {
-    let onMessage: ((message: Record<string, unknown>) => void) | undefined;
-    let onDisconnect: (() => void) | undefined;
-    let disconnected = false;
-    let disconnectCount = 0;
-    const port = {
-      onMessage: { addListener(listener: (message: Record<string, unknown>) => void) { onMessage = listener; } },
-      onDisconnect: { addListener(listener: () => void) { onDisconnect = listener; } },
-      postMessage(message: Record<string, unknown>) {
-        nativeInputMessages.push(message);
-        eventOrder.push({ kind: "native", message });
-        if (message.type === "click") {
-          if (settings.autoNativeProgress !== false) {
-            queueMicrotask(() => onMessage?.({ type: "progress", requestId: message.requestId, x: 50, y: 40, phase: "arrived", sequence: 1 }));
-          }
-        } else if (message.type === "progressAck") {
-          queueMicrotask(() => onMessage?.({ type: "result", requestId: message.requestId, ok: true, arrivalSequence: message.sequence }));
-        }
-      },
-      disconnect() {
-        disconnectCount++;
-        disconnected = true;
-        onDisconnect?.();
-      },
-    };
-    nativePorts.push({
-      emit(message) { if (!disconnected) onMessage?.(message); },
-      disconnectCalls() { return disconnectCount; },
-    });
-    return port;
-  }
+  const debuggerDetachListeners = new Set<(source: { tabId: number }, reason: string) => void>();
 
   const chrome = {
     alarms: { create() {}, onAlarm: { addListener() {} } },
     runtime: {
+      id: "test-extension",
       getURL: (path: string) => `chrome-extension://test/${path}`,
       onMessage: { addListener(listener: typeof runtimeMessageListener) { runtimeMessageListener = listener; } },
-      connectNative,
     },
-    permissions: { contains: async () => permissionAllowed },
+    permissions: { async contains(query: { origins?: string[]; permissions?: string[] }) {
+      if (query.permissions?.includes("debugger")) return debuggerGranted;
+      return query.origins ? permissionAllowed : true;
+    } },
     storage: {
       session: {
         async get(key: string) { sessionReads++; return { [key]: session[key] }; },
         async set(values: Record<string, unknown>) { Object.assign(session, values); },
       },
+      local: {
+        async get(key: string) { return { [key]: key === "m9rQuietMode" ? quietModeEnabled : undefined }; },
+        async set(values: Record<string, unknown>) { if (typeof values.m9rQuietMode === "boolean") quietModeEnabled = values.m9rQuietMode; },
+      },
+    },
+    debugger: {
+      onDetach: {
+        addListener(listener: (source: { tabId: number }, reason: string) => void) { debuggerDetachListeners.add(listener); },
+        removeListener(listener: (source: { tabId: number }, reason: string) => void) { debuggerDetachListeners.delete(listener); },
+      },
+      async attach(target: { tabId: number }) {
+        debuggerCalls.push({ method: "attach", tabId: target.tabId });
+        eventOrder.push({ kind: "debugger", method: "attach", tabId: target.tabId });
+        if (settings.debuggerAttachError) throw new Error(settings.debuggerAttachError);
+        debuggerTabs.add(target.tabId);
+      },
+      async detach(target: { tabId: number }) {
+        debuggerTabs.delete(target.tabId);
+        debuggerCalls.push({ method: "detach", tabId: target.tabId });
+        eventOrder.push({ kind: "debugger", method: "detach", tabId: target.tabId });
+        for (const listener of [...debuggerDetachListeners]) listener(target, "canceled_by_owner");
+      },
+      async sendCommand(target: { tabId: number }, method: string, params: Record<string, unknown>) {
+        debuggerCalls.push({ method, tabId: target.tabId, params });
+        eventOrder.push({ kind: "debugger", method, tabId: target.tabId, params });
+        if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") mouseMoveHook?.(target.tabId);
+        return {};
+      },
+      async getTargets() { return [...debuggerTabs].map((tabId) => ({ tabId, attached: true, extensionId: "test-extension" })); },
     },
     scripting: { async executeScript(details: { func?: (...args: unknown[]) => unknown; args?: unknown[] }) {
       return typeof details.func === "function" ? [{ result: details.func(...(details.args ?? [])) }] : [];
@@ -142,10 +145,6 @@ function createHarness(settings: { completeOnCreate?: boolean; autoNativeProgres
       async sendMessage(_id: number, message: Record<string, unknown>) {
         pageMessages.push(message);
         eventOrder.push({ kind: "page", message });
-        if (message.type === "m9r-native-pointer" && message.phase === "arrived") {
-          pointerArrivalHook?.();
-          return { painted: true };
-        }
         return undefined;
       },
     },
@@ -190,9 +189,7 @@ function createHarness(settings: { completeOnCreate?: boolean; autoNativeProgres
       } }),
       m9rPageDialogGuard: () => ({ ok: true }),
     };
-    // background.js imports this helper in the real MV3 worker before using it.
     // The other imported dependencies are purpose-built harness fakes below.
-    runInNewContext(nativeInputClient, context);
     runInNewContext(quietInput, context);
     runInNewContext(background, context);
     return context as typeof context & { handle(command: Record<string, unknown>): Promise<void> };
@@ -206,9 +203,9 @@ function createHarness(settings: { completeOnCreate?: boolean; autoNativeProgres
   }
 
   return {
-    created, updated, replies, pageMessages, eventOrder, nativeInputMessages, nativePorts, session, sockets,
+    created, updated, replies, pageMessages, eventOrder, debuggerCalls, session, sockets,
     sessionReads: () => sessionReads, clearedLoadTimers: () => clearedLoadTimers, startWorker, finishLoads,
-    onPointerArrival(callback: () => void) { pointerArrivalHook = callback; },
+    onMouseMove(callback: (tabId: number) => void) { mouseMoveHook = callback; },
     sendRuntimeMessage(message: Record<string, unknown>, senderUrl: string) {
       let response: Record<string, unknown> | undefined;
       runtimeMessageListener?.(message, { url: senderUrl }, (value) => { response = value; });
@@ -223,6 +220,8 @@ function createHarness(settings: { completeOnCreate?: boolean; autoNativeProgres
     coverTarget() { hitTarget = createPageTarget(); },
     setActiveTab(id: number | null) { activeTabId = id; },
     setPermissionAllowed(value: boolean) { permissionAllowed = value; },
+    setDebuggerGranted(value: boolean) { debuggerGranted = value; },
+    setQuietMode(value: boolean) { quietModeEnabled = value; },
   };
 }
 
@@ -295,141 +294,120 @@ test("extension stop-all blocks broker commands until the server reports a fresh
   assert.equal(h.replies.at(-1)?.ok, true);
 });
 
-test("a native click's live cursor is driven by OS pointer progress without a preliminary target glide", async () => {
+test("the extension has no browser-click route that drives the physical mouse", () => {
+  assert.doesNotMatch(background, /M9RNativeInputClient|nativeInput\.click|m9r-native-pointer/);
+});
+
+test("browser clicks fail clearly when independent input is disabled and never move the owner mouse", async () => {
   const h = createHarness({ completeOnCreate: true });
   const worker = h.startWorker();
-  const identity = { agent: "codex", provider: "codex-cli", sessionId: "native-click-session" };
+  const identity = { agent: "codex", provider: "codex-cli", sessionId: "no-independent-input" };
+  await worker.handle({ id: "open-disabled-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/", presence: identity });
+  await worker.handle({ id: "disabled-click", type: "command", action: "click", tab: "shared", selector: "#continue", expectOrigin: "https://example.test", presence: identity });
+
+  const result = h.replies.find((reply) => reply.id === "disabled-click");
+  assert.equal(result?.ok, false);
+  assert.match(String(result?.error), /quiet_input_required.*will not move your physical mouse/);
+  assert.equal(h.debuggerCalls.some((call) => call.method.startsWith("Input.")), false, "no browser input is attempted without the explicit permission");
+  assert.equal(h.pageMessages.some((message) => message.type === "presence" && message.action === "click"), false, "the overlay does not pretend a blocked click happened");
+});
+
+test("browser clicks fail closed if Chrome has not granted debugger permission", async () => {
+  const h = createHarness({ completeOnCreate: true, quietModeEnabled: true, debuggerGranted: false });
+  const worker = h.startWorker();
+  const identity = { agent: "codex", provider: "codex-cli", sessionId: "debugger-permission-missing" };
+  await worker.handle({ id: "open-no-debugger-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/", presence: identity });
+  await worker.handle({ id: "no-debugger-click", type: "command", action: "click", tab: "shared", selector: "#continue", expectOrigin: "https://example.test", presence: identity });
+
+  const result = h.replies.find((reply) => reply.id === "no-debugger-click");
+  assert.equal(result?.ok, false);
+  assert.match(String(result?.error), /quiet_input_required/);
+  assert.equal(h.debuggerCalls.some((call) => call.method.startsWith("Input.")), false);
+});
+
+test("an enabled browser click uses Chrome input and the labeled page cursor, without native mouse input", async () => {
+  const h = createHarness({ completeOnCreate: true, quietModeEnabled: true, debuggerGranted: true });
+  const worker = h.startWorker();
+  const identity = { agent: "codex", provider: "codex-cli", sessionId: "quiet-click-session" };
   await worker.handle({ id: "open-click-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/", presence: identity });
-  await worker.handle({
-    id: "trusted-click", type: "command", action: "click", tab: "shared", selector: "#continue",
-    expectOrigin: "https://example.test", presence: { ...identity, action: "click", step: "Clicking" },
-  });
+  await worker.handle({ id: "quiet-click", type: "command", action: "click", tab: "shared", selector: "#continue", expectOrigin: "https://example.test", presence: { ...identity, action: "click", step: "Clicking" } });
 
-  const clickAnnouncementIndex = h.eventOrder.findIndex((entry) => entry.kind === "page" && entry.message.type === "presence" && entry.message.action === "click");
-  const clickAnnouncement = h.eventOrder[clickAnnouncementIndex]?.message;
-  const nativeClickIndex = h.eventOrder.findIndex((entry) => entry.kind === "native" && entry.message.type === "click");
-  const firstPointerIndex = h.eventOrder.findIndex((entry) => entry.kind === "page" && entry.message.type === "m9r-native-pointer");
-  assert.ok(clickAnnouncementIndex >= 0, "the overlay receives the current action label");
-  assert.equal(clickAnnouncement?.target, null, "native pointer motion, not an overlay target glide, must move the visible cursor");
-  assert.ok(nativeClickIndex > clickAnnouncementIndex, `the overlay actor is established before native movement begins; order=${JSON.stringify(h.eventOrder)} replies=${JSON.stringify(h.replies)}`);
-  assert.ok(firstPointerIndex > nativeClickIndex, "subsequent drawn cursor points follow OS pointer progress");
-  assert.ok(h.nativeInputMessages.some((message) => message.type === "progressAck"), "the click waits for visible arrival acknowledgement");
+  const result = h.replies.find((reply) => reply.id === "quiet-click");
+  const inputs = h.debuggerCalls.filter((call) => call.method === "Input.dispatchMouseEvent");
+  const clickAnnouncement = h.eventOrder.findIndex((entry) => entry.kind === "page" && entry.message?.type === "presence" && entry.message.action === "click");
+  const firstInput = h.eventOrder.findIndex((entry) => entry.kind === "debugger" && entry.method === "Input.dispatchMouseEvent");
+  assert.equal(result?.ok, true, JSON.stringify(result));
+  assert.deepEqual(inputs.map((call) => call.params?.type), ["mouseMoved", "mousePressed", "mouseReleased"]);
+  assert.ok(clickAnnouncement >= 0, "the page displays the agent action label");
+  assert.ok(firstInput > clickAnnouncement, "the page label is established before the click moves");
+  assert.equal(inputs.every((call) => call.tabId === h.created[0]), true, "all input is targeted at the named tab");
+  assert.equal(h.pageMessages.some((message) => message.type === "m9r-native-pointer"), false);
 });
 
-test("a trusted click is cancelled when the page redirects during pointer arrival", async () => {
-  const h = createHarness({ completeOnCreate: true });
+test("target, URL, path, and site-grant changes during cursor travel block the click", async () => {
+  const mutations: Array<{ name: string; change(h: ReturnType<typeof createHarness>): void }> = [
+    { name: "redirect", change: (h) => h.setLocation("https://example.test/login") },
+    { name: "replace target", change: (h) => h.replaceTarget() },
+    { name: "cover target", change: (h) => h.coverTarget() },
+    { name: "revoke site grant", change: (h) => h.setPermissionAllowed(false) },
+  ];
+
+  for (const mutation of mutations) {
+    const h = createHarness({ completeOnCreate: true, quietModeEnabled: true, debuggerGranted: true });
+    const worker = h.startWorker();
+    const identity = { agent: "codex", provider: "codex-cli", sessionId: `quiet-${mutation.name.replace(/\W/g, "-")}` };
+    await worker.handle({ id: "open-race-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/checkout", presence: identity });
+    h.onMouseMove(() => mutation.change(h));
+    await worker.handle({ id: "racing-click", type: "command", action: "click", tab: "shared", selector: "#continue", expectOrigin: "https://example.test", expectPathPrefix: "/checkout", presence: identity });
+
+    assert.equal(h.debuggerCalls.some((call) => call.method === "Input.dispatchMouseEvent" && call.params?.type === "mousePressed"), false, `${mutation.name} must cancel before press`);
+    assert.equal(h.replies.find((reply) => reply.id === "racing-click")?.ok, false, `${mutation.name} must return a failure`);
+  }
+});
+
+test("a browser click remains bound to its tab if the owner switches tabs mid-move", async () => {
+  const h = createHarness({ completeOnCreate: true, quietModeEnabled: true, debuggerGranted: true });
   const worker = h.startWorker();
-  const identity = { agent: "codex", provider: "codex-cli", sessionId: "redirect-click" };
-  await worker.handle({ id: "open-redirect-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/checkout", presence: identity });
-  h.onPointerArrival(() => h.setLocation("https://example.test/login"));
+  const identity = { agent: "codex", provider: "codex-cli", sessionId: "tab-bound-click" };
+  await worker.handle({ id: "open-tab-bound", type: "command", action: "open", tab: "shared", url: "https://example.test/", presence: identity });
+  h.onMouseMove(() => h.setActiveTab(null));
+  await worker.handle({ id: "tab-bound-click", type: "command", action: "click", tab: "shared", selector: "#continue", expectOrigin: "https://example.test", presence: identity });
 
-  await worker.handle({
-    id: "redirected-click", type: "command", action: "click", tab: "shared", selector: "#continue",
-    expectOrigin: "https://example.test", expectPathPrefix: "/checkout", presence: identity,
-  });
-
-  assert.equal(h.nativeInputMessages.some((message) => message.type === "progressAck"), false, "a redirected page must not receive the planned click");
-  assert.equal(h.nativePorts[0]?.disconnectCalls(), 1, "failed final validation disconnects the native host before mouse-down");
-  assert.notEqual(h.replies.find((reply) => reply.id === "redirected-click")?.ok, true);
+  const targetTabId = h.created[0];
+  const presses = h.debuggerCalls.filter((call) => call.method === "Input.dispatchMouseEvent" && call.params?.type === "mousePressed");
+  assert.equal(h.replies.find((reply) => reply.id === "tab-bound-click")?.ok, true);
+  assert.equal(presses.length, 1);
+  assert.equal(presses[0].tabId, targetTabId, "input stays on the exact requested Chrome tab, not the new foreground tab");
 });
 
-test("a trusted click is cancelled when its target is replaced during pointer arrival", async () => {
-  const h = createHarness({ completeOnCreate: true });
-  const worker = h.startWorker();
-  const identity = { agent: "codex", provider: "codex-cli", sessionId: "replacement-click" };
-  await worker.handle({ id: "open-replacement-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/checkout", presence: identity });
-  h.onPointerArrival(() => h.replaceTarget());
-
-  await worker.handle({
-    id: "replaced-target-click", type: "command", action: "click", tab: "shared", selector: "#continue",
-    expectOrigin: "https://example.test", expectPathPrefix: "/checkout", presence: identity,
-  });
-
-  assert.equal(h.nativeInputMessages.some((message) => message.type === "progressAck"), false, "a replacement element at the planned point must not be clicked");
-  assert.equal(h.nativePorts[0]?.disconnectCalls(), 1, "target replacement cancels the host request");
-  assert.notEqual(h.replies.find((reply) => reply.id === "replaced-target-click")?.ok, true);
-});
-
-test("a trusted click is cancelled when another element covers the planned point during pointer arrival", async () => {
-  const h = createHarness({ completeOnCreate: true });
-  const worker = h.startWorker();
-  const identity = { agent: "codex", provider: "codex-cli", sessionId: "covered-click" };
-  await worker.handle({ id: "open-covered-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/checkout", presence: identity });
-  h.onPointerArrival(() => h.coverTarget());
-
-  await worker.handle({
-    id: "covered-click", type: "command", action: "click", tab: "shared", selector: "#continue",
-    expectOrigin: "https://example.test", expectPathPrefix: "/checkout", presence: identity,
-  });
-
-  assert.equal(h.nativeInputMessages.some((message) => message.type === "progressAck"), false, "the final DOM hit test must reject an overlay at the OS pointer");
-  assert.equal(h.nativePorts[0]?.disconnectCalls(), 1);
-  assert.notEqual(h.replies.find((reply) => reply.id === "covered-click")?.ok, true);
-});
-
-test("a trusted click is cancelled if Chrome revokes site permission during pointer arrival", async () => {
-  const h = createHarness({ completeOnCreate: true });
-  const worker = h.startWorker();
-  const identity = { agent: "codex", provider: "codex-cli", sessionId: "revoked-click" };
-  await worker.handle({ id: "open-revoked-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/checkout", presence: identity });
-  h.onPointerArrival(() => h.setPermissionAllowed(false));
-
-  await worker.handle({
-    id: "revoked-click", type: "command", action: "click", tab: "shared", selector: "#continue",
-    expectOrigin: "https://example.test", expectPathPrefix: "/checkout", presence: identity,
-  });
-
-  assert.equal(h.nativeInputMessages.some((message) => message.type === "progressAck"), false, "revoked site access must block the final acknowledgment");
-  assert.equal(h.nativePorts[0]?.disconnectCalls(), 1);
-  assert.notEqual(h.replies.find((reply) => reply.id === "revoked-click")?.ok, true);
-});
-
-test("a trusted click is cancelled if its tab stops being the active visible tab during pointer arrival", async () => {
-  const h = createHarness({ completeOnCreate: true });
-  const worker = h.startWorker();
-  const identity = { agent: "codex", provider: "codex-cli", sessionId: "inactive-click" };
-  await worker.handle({ id: "open-inactive-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/checkout", presence: identity });
-  h.onPointerArrival(() => h.setActiveTab(null));
-
-  await worker.handle({
-    id: "inactive-click", type: "command", action: "click", tab: "shared", selector: "#continue",
-    expectOrigin: "https://example.test", expectPathPrefix: "/checkout", presence: identity,
-  });
-
-  assert.equal(h.nativeInputMessages.some((message) => message.type === "progressAck"), false, "a tab switch during cursor travel must cancel the click");
-  assert.equal(h.nativePorts[0]?.disconnectCalls(), 1);
-  assert.notEqual(h.replies.find((reply) => reply.id === "inactive-click")?.ok, true);
-});
-
-test("Stop-All disconnects an active native click while the OS pointer is still moving", async () => {
-  const h = createHarness({ completeOnCreate: true, autoNativeProgress: false });
+test("Stop-All cancels a click after cursor movement but before the page receives a press", async () => {
+  const h = createHarness({ completeOnCreate: true, quietModeEnabled: true, debuggerGranted: true });
   const worker = h.startWorker();
   h.sockets[0].onopen?.();
   await new Promise((resolve) => setTimeout(resolve, 1));
-  for (let attempt = 0; attempt < 100 && !h.replies.some((reply) => reply.type === "ready"); attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 1));
-  }
+  for (let attempt = 0; attempt < 100 && !h.replies.some((reply) => reply.type === "ready"); attempt++) await new Promise((resolve) => setTimeout(resolve, 1));
   h.sockets[0].receive({ type: "broker-state", stopped: false });
-  const identity = { agent: "codex", provider: "codex-cli", sessionId: "stop-during-move" };
-  await worker.handle({ id: "open-moving-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/checkout", presence: identity });
-  const click = worker.handle({
-    id: "moving-click", type: "command", action: "click", tab: "shared", selector: "#continue",
-    expectOrigin: "https://example.test", expectPathPrefix: "/checkout", presence: identity,
-  });
-  for (let attempt = 0; attempt < 100 && !h.nativeInputMessages.some((message) => message.type === "click"); attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 1));
-  }
-  const requestId = h.nativeInputMessages.find((message) => message.type === "click")?.requestId;
-  assert.equal(typeof requestId, "string", "the click should be moving through the native host");
-  h.nativePorts[0].emit({ type: "progress", requestId, x: 20, y: 25, phase: "moving", sequence: 1 });
+  const identity = { agent: "codex", provider: "codex-cli", sessionId: "stop-during-quiet-move" };
+  await worker.handle({ id: "open-stop-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/", presence: identity });
+  let stopResponse: Record<string, unknown> | undefined;
+  h.onMouseMove(() => { stopResponse = h.sendRuntimeMessage({ type: "m9r-owner-stop-all" }, "chrome-extension://test/permission.html?panel=1"); });
+  await worker.handle({ id: "stop-during-click", type: "command", action: "click", tab: "shared", selector: "#continue", expectOrigin: "https://example.test", presence: identity });
 
-  const stopResponse = h.sendRuntimeMessage({ type: "m9r-owner-stop-all" }, "chrome-extension://test/permission.html?panel=1");
   assert.equal(stopResponse?.ok, true);
-  h.nativePorts[0].emit({ type: "progress", requestId, x: 50, y: 40, phase: "arrived", sequence: 2 });
-  await click;
+  assert.equal(h.debuggerCalls.some((call) => call.method === "Input.dispatchMouseEvent" && call.params?.type === "mousePressed"), false);
+  assert.ok(h.debuggerCalls.some((call) => call.method === "detach"), "Stop-All detaches the debugger route");
+  assert.equal(h.replies.find((reply) => reply.id === "stop-during-click")?.ok, false);
+  assert.ok(h.replies.some((reply) => reply.type === "stop-all"));
+});
 
-  assert.equal(h.nativePorts[0].disconnectCalls(), 1, "Stop-All must close the native connection immediately");
-  assert.ok(h.replies.some((reply) => reply.type === "stop-all"), "the panel's Stop-All request still reaches the broker");
-  assert.equal(h.nativeInputMessages.some((message) => message.type === "progressAck"), false, "the host cannot cross its mouse-down gate after Stop-All");
-  assert.notEqual(h.replies.find((reply) => reply.id === "moving-click")?.ok, true);
+test("an occupied Chrome debugger produces a clear refusal and never falls back", async () => {
+  const h = createHarness({ completeOnCreate: true, quietModeEnabled: true, debuggerGranted: true, debuggerAttachError: "Another debugger is already attached to the tab" });
+  const worker = h.startWorker();
+  const identity = { agent: "codex", provider: "codex-cli", sessionId: "devtools-open" };
+  await worker.handle({ id: "open-devtools-tab", type: "command", action: "open", tab: "shared", url: "https://example.test/", presence: identity });
+  await worker.handle({ id: "devtools-click", type: "command", action: "click", tab: "shared", selector: "#continue", expectOrigin: "https://example.test", presence: identity });
+
+  assert.equal(h.replies.find((reply) => reply.id === "devtools-click")?.ok, false);
+  assert.match(String(h.replies.find((reply) => reply.id === "devtools-click")?.error), /devtools_open/);
+  assert.equal(h.debuggerCalls.some((call) => call.method.startsWith("Input.")), false);
 });

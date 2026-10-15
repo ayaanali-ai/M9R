@@ -22,6 +22,7 @@ create index workspace_memory_recent on public.workspace_memory_notes(workspace_
 alter table public.workspace_memory_notes enable row level security;
 grant select on public.workspace_memory_notes to authenticated;
 grant all on public.workspace_memory_notes to service_role;
+drop policy if exists "members read permitted shared notes" on public.workspace_memory_notes;
 create policy "members read permitted shared notes" on public.workspace_memory_notes for select to authenticated using (
   exists (select 1 from public.projects p where p.id = workspace_id and
     (p.owner_id = auth.uid() or exists (select 1 from public.workspace_members m where m.workspace_id = p.id and m.user_id = auth.uid())))

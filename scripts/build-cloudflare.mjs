@@ -1,56 +1,35 @@
-import { spawnSync } from "child_process";
-import { readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 
-// Set MISSION_RELAY_PUBLIC_URL in process.env so both builds inherit it. This hard-failed the whole
-// deploy when Cloudflare's dashboard "Build variables" came back empty for a run -- confirmed live,
-// a run with every earlier build succeeding suddenly had none configured, with no code change of ours
-// involved. The same fallback already exists in wrangler.jsonc's runtime vars and in build.mjs; use it
-// here too instead of depending on CI-time dashboard state that can apparently reset on its own.
-if (!process.env.MISSION_RELAY_PUBLIC_URL) {
-  console.warn("MISSION_RELAY_PUBLIC_URL was not set by the build environment; falling back to wss://m9r-relay.m9r.workers.dev (matches wrangler.jsonc).");
-  process.env.MISSION_RELAY_PUBLIC_URL = "wss://m9r-relay.m9r.workers.dev";
-}
-process.env.CLOUDFLARE_BUILD = "true";
+const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+const relayUrl = process.env.MISSION_RELAY_PUBLIC_URL ?? config.vars?.MISSION_RELAY_PUBLIC_URL;
 
-console.log("Building Next.js app for Cloudflare (with typecheck ignored)...");
-console.log("MISSION_RELAY_PUBLIC_URL:", process.env.MISSION_RELAY_PUBLIC_URL);
-
-const buildResult = spawnSync("npx", ["next", "build", "--webpack"], { 
-  stdio: "inherit", 
-  shell: true,
-  env: process.env
-});
-
-console.log("Build exit code:", buildResult.status);
-if (buildResult.status) process.exit(buildResult.status);
-
-console.log("Fixing Next.js 16.3.4 validator.ts syntax error...");
-const validatorPath = join(process.cwd(), ".next", "dev", "types", "validator.ts");
-try {
-  const content = readFileSync(validatorPath, "utf8");
-  const fixed = content.replace(/^ype __Unused = __Check$/gm, "type __Unused = __Check");
-  if (content !== fixed) {
-    writeFileSync(validatorPath, fixed, "utf8");
-    console.log("Fixed generated validator.ts (missing 't' in 'type')");
-  }
-} catch (e) {
-  if (e.code !== "ENOENT") throw e;
+if (!relayUrl || !/^wss:\/\//.test(relayUrl)) {
+  console.error("MISSION_RELAY_PUBLIC_URL must be a public wss:// URL.");
+  process.exit(1);
 }
 
-console.log("Building OpenNext Cloudflare worker...");
-// OpenNext's own build internally re-invokes `npm run build` (see scripts/build.mjs), which has a
-// recursion guard keyed on M9R_OPENNEXT_INNER so that inner call does a plain `next build` instead of
-// calling opennextjs-cloudflare again. This script calls opennextjs-cloudflare directly (not through
-// `npm run build`), so without setting the flag here too, OpenNext's internal `npm run build` call
-// lands in build.mjs with no inner flag set, which re-triggers the whole OpenNext build a second,
-// nested time -- confirmed live 2026-10-11: two full build passes, the second one writing
-// `.open-next/cloudflare/next-env.mjs` without the first pass's output ever being cleared, which
-// crashed `wrangler versions upload` with duplicate `production`/`development`/`test` exports.
-const openNextResult = spawnSync("npx", ["opennextjs-cloudflare", "build", "--skip-typecheck"], {
+const env = {
+  ...process.env,
+  CLOUDFLARE_BUILD: "true",
+  MISSION_RELAY_PUBLIC_URL: relayUrl,
+  // OpenNext invokes the package build internally. Keep that nested build on the
+  // plain Next path instead of recursively starting a second OpenNext build.
+  M9R_OPENNEXT_INNER: "1",
+};
+
+console.log("Building the Cloudflare Worker with the supported OpenNext build pipeline.");
+console.log("Next.js uses the package build script (Turbopack); relay URL comes from Wrangler public vars.");
+
+const result = spawnSync("npx", ["opennextjs-cloudflare", "build"], {
   stdio: "inherit",
-  shell: true,
-  env: { ...process.env, M9R_OPENNEXT_INNER: "1" }
+  shell: process.platform === "win32",
+  env,
 });
 
-process.exit(openNextResult.status ?? 0);
+if (result.error) {
+  console.error("Could not start the OpenNext build:", result.error.message);
+  process.exit(1);
+}
+
+process.exit(result.status ?? 1);

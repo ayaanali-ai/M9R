@@ -1,9 +1,21 @@
 import { readFileSync } from "node:fs";
 import type { WebBatchRequest, WebBatchResponse, WebRequest, WebResponse } from "./web-broker-core";
 import type { WebAgentMessage } from "./web-broker-core";
+import { requestOwnerPipe } from "./owner-pipe";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
+import type { TaskStageMode } from "./task-desktop-stage";
+
+const MAX_STAGE_REQUEST_TIMEOUT_MS = 70_000;
 
 export interface WebBrokerClient {
+  /** Durable task/inbox mutations performed by the owner broker under its own M9R-home ACL. */
+  submitAgentTask?(token: string, to: string, goal: string): Promise<{ ok: boolean; taskId?: string; created?: boolean; error?: string }>;
+  claimAgentInbox?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; taskIds?: string[]; error?: string }>;
+  advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
+  recordAgentTaskResult?(token: string, taskId: string, summary: string): Promise<{ ok: boolean; error?: string }>;
+  taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode): Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string): Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
   run(request: WebRequest): Promise<WebResponse>;
   runBatch?(request: WebBatchRequest): Promise<WebBatchResponse>;
   notifyMessage?(message: WebAgentMessage): Promise<boolean>;
@@ -19,13 +31,136 @@ export interface WebBrokerClient {
 export interface WebBrokerClientOptions {
   keyPath: string;
   port?: number;
+  ownerPipePath?: string;
   fetchImpl?: typeof fetch;
+}
+
+function stageTransportFailure(error: unknown): string {
+  if (error && typeof error === "object") {
+    const value = error as { name?: unknown; message?: unknown; cause?: { code?: unknown } };
+    if (value.name === "TimeoutError" || value.name === "AbortError") {
+      return "The local M9R desktop-stage request timed out before the broker responded.";
+    }
+    switch (value.cause?.code) {
+      case "ECONNREFUSED": return "The local M9R web broker refused the desktop-stage request.";
+      case "ECONNRESET": return "The local M9R web broker closed the desktop-stage request before replying.";
+      case "EACCES": case "EPERM": return "Windows denied the local desktop-stage broker connection.";
+    }
+    if (typeof value.message === "string" && value.message.trim()) {
+      return `The local M9R desktop-stage request failed: ${value.message.trim().slice(0, 180)}`;
+    }
+  }
+  return "The local M9R desktop-stage request failed with an unknown transport error.";
+}
+
+async function agentStoreRequest<T extends { ok: boolean; error?: string }>(input: {
+  ownerPipePath?: string;
+  body: Record<string, unknown>;
+}): Promise<T> {
+  if (!input.ownerPipePath) {
+    return { ok: false, error: "The owner broker task-state pipe is not configured; no M9R task state was changed." } as T;
+  }
+  try {
+    const result: unknown = await requestOwnerPipe(input.ownerPipePath, {
+      method: "POST",
+      path: "/web/mcp/store",
+      body: input.body,
+    }, 3_000);
+    if (!result || typeof result !== "object" || typeof (result as { ok?: unknown }).ok !== "boolean") {
+      return { ok: false, error: "The owner broker did not return a valid M9R state response; no task was accepted." } as T;
+    }
+    return result as T;
+  } catch {
+    return { ok: false, error: "The owner broker could not receive this M9R state write; no task was accepted." } as T;
+  }
+}
+
+async function taskStageRequest<T extends { ok: boolean; error?: string }>(input: {
+  fetchImpl: typeof fetch;
+  keyPath: string;
+  url: string;
+  body: Record<string, unknown>;
+  timeoutMs: number;
+  operationId?: string;
+  ownerPipePath?: string;
+}): Promise<T> {
+  if (input.ownerPipePath) {
+    const result = await requestOwnerPipe<T>(input.ownerPipePath, {
+      method: "POST", path: new URL(input.url).pathname, body: input.body,
+    }, input.timeoutMs);
+    if (result && typeof result === "object" && typeof result.ok === "boolean") return result;
+    return { ok: false, error: input.operationId
+      ? `The desktop-stage IPC response was lost; operation ${input.operationId} may have been applied. Do not replay it. Capture the stage and inspect its state.`
+      : "The local desktop-stage IPC endpoint did not return a valid response. No HTTP fallback was attempted." } as T;
+  }
+  let key: string;
+  try {
+    key = readFileSync(input.keyPath, "utf8").trim();
+  } catch {
+    return { ok: false, error: "The local M9R desktop-stage broker key could not be read." } as T;
+  }
+  let response: Response;
+  try {
+    response = await input.fetchImpl(input.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-m9r-key": key },
+      body: JSON.stringify(input.body),
+      // Stage launch/actions may legitimately take longer than ordinary broker
+      // RPCs while a native window is starting and being attached. Keep a hard
+      // ceiling, but honor the deadline each stage method selected.
+      signal: AbortSignal.timeout(Math.max(1, Math.min(input.timeoutMs, MAX_STAGE_REQUEST_TIMEOUT_MS))),
+    });
+  } catch (error) {
+    if (input.operationId && error && typeof error === "object"
+      && ((error as { name?: unknown }).name === "TimeoutError" || (error as { name?: unknown }).name === "AbortError")) {
+      return { ok: false, error: `The desktop-stage request timed out after dispatch; operation ${input.operationId} may have been applied. Do not replay it. Capture the stage and inspect its state before issuing a new action.` } as T;
+    }
+    return { ok: false, error: stageTransportFailure(error) } as T;
+  }
+  let result: unknown;
+  try {
+    result = await response.json();
+  } catch {
+    return { ok: false, error: `The local M9R web broker returned invalid JSON (HTTP ${response.status}).` } as T;
+  }
+  if (!result || typeof result !== "object" || typeof (result as { ok?: unknown }).ok !== "boolean") {
+    return { ok: false, error: `The local M9R web broker returned an invalid stage response (HTTP ${response.status}).` } as T;
+  }
+  if (!response.ok && (result as { ok: boolean }).ok) {
+    return { ok: false, error: `The local M9R web broker rejected the stage request (HTTP ${response.status}).` } as T;
+  }
+  return result as T;
 }
 
 export function createWebBrokerClient(options: WebBrokerClientOptions): WebBrokerClient {
   const doFetch = options.fetchImpl ?? fetch;
   const baseUrl = `http://127.0.0.1:${options.port ?? DEFAULT_BROKER_PORT}`;
   return {
+    async submitAgentTask(token, to, goal) {
+      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "send", token, to, goal } });
+    },
+    async claimAgentInbox(token, taskIds) {
+      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "claim_inbox", token, taskIds } });
+    },
+    async advanceAgentInboxCursor(token, seq) {
+      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "cursor", token, seq } });
+    },
+    async recordAgentTaskResult(token, taskId, summary) {
+      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary } });
+    },
+    async taskStageApp(token, taskId, appId, mode = "owner-preview") {
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,
+        url: `${baseUrl}/web/stage/${appId === undefined ? "close" : "launch"}`,
+        body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }) }, timeoutMs: 70_000 });
+    },
+    async taskStageAction(token, taskId, action, mode = "owner-preview", operationId) {
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/action`,
+        body: { token, taskId, action, mode, ...(operationId ? { operationId } : {}) }, timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
+    },
+    async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000) {
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/prepare`,
+        body: { token, taskId, mode }, timeoutMs });
+    },
     async run(request) {
       let key: string;
       try {

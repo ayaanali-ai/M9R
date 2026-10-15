@@ -23,7 +23,7 @@ function mockAgent(partial: Partial<AgentView> & Pick<AgentView, "key" | "label"
     initial: partial.label[0] ?? "A",
     connectionId: `mock-${partial.key}`,
     workspaceId: "mock-workspace",
-    setupCommand: "npx m9r-cli init",
+    setupCommand: "npx m9r-cli connect",
     connected: true,
     connectionStatus: "active",
     liveness: "active",

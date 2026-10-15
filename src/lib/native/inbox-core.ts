@@ -46,6 +46,8 @@ export interface Task {
   createdAt: string;
   /** Set when the task was first shown to its target agent. */
   deliveredAt?: string;
+  /** Which trusted path first delivered it. Older persisted tasks have no marker. */
+  deliverySource?: "prompt" | "push";
   resultSummary?: string;
   /** Set when the sender was first shown the result (once). */
   resultShownAt?: string;
@@ -66,11 +68,14 @@ export interface Task {
 }
 
 export interface TaskDelivery {
-  /** `queued` = pushed into the target session; `done` = the answer came back; `failed` = fell back to the inbox. */
-  state: "queued" | "failed" | "done";
+  /** `sending` is a one-time claim; `queued` is provider acceptance, never proof the agent started work. */
+  state: "sending" | "queued" | "uncertain" | "failed" | "done";
   attempts: number;
   threadId?: string;
+  claimedAt?: string;
   queuedAt?: string;
+  uncertainAt?: string;
+  failedAt?: string;
   error?: string;
 }
 
@@ -255,7 +260,7 @@ export interface CardInput {
   awaitingApproval?: number;
   /** Only set when the folder really exists; otherwise the card says nothing about memory. */
   memoryDir?: string;
-  /** Freshly issued this SessionStart; scopes the M9R MCP server to this one verified identity. */
+  /** Stable for this provider session; scopes M9R MCP calls to this verified identity. */
   identityToken?: string;
 }
 
@@ -277,6 +282,25 @@ export function renderSessionCard(input: CardInput): string {
 /** The one line injected after a human-typed mention so the sending agent does not do the work itself. */
 export function renderSentAck(taskId: string, to: string): string {
   return `M9R already sent your message to @${to} as task ${taskId}, so @${to} will do it. Do not do that work yourself: tell the user it was sent to @${to}, and continue with anything else. The result will arrive in your inbox.`;
+}
+
+/**
+ * Truthful delivery states for a mention the hook did NOT push live (only Codex receives a queue push).
+ * A target with a live session picks the task up at its next prompt; a target with no session waits
+ * until it connects. Both keep the do-not-do-it-yourself directive: the failure mode being fixed is the
+ * sender believing "sent" means "being worked on right now".
+ */
+export function renderInboxAck(taskId: string, to: string): string {
+  return `M9R put your message to @${to} in their inbox as task ${taskId}; they pick it up at their next prompt, so it is not being worked on this instant. Do not do that work yourself: tell the user it was handed to @${to}, and continue with anything else. The result will arrive in your inbox.`;
+}
+
+/** OpenCode's resident plugin pushes approved work into the exact live session without waiting for another user prompt. */
+export function renderOpenCodePendingAck(taskId: string): string {
+  return `M9R queued task ${taskId} for @opencode's active session. Its M9R plugin will deliver the task directly without a manual inbox check; delivery is not confirmed until that session acknowledges it. Do not do that work yourself: tell the user it is queued for @opencode, and continue with anything else. The result will arrive in your inbox.`;
+}
+
+export function renderHeldAck(taskId: string, to: string): string {
+  return `M9R held your message to @${to} as task ${taskId} because @${to} has no active session right now; it reaches them when they connect. Do not do that work yourself: tell the user it is waiting for @${to}, and continue with anything else. The result will arrive in your inbox.`;
 }
 
 /**

@@ -35,14 +35,15 @@ export default function AgentsPage() {
             <M9RMark className="lp-agents-doc-mark" animated={false} />
             <h1>Connect an agent</h1>
             <p>
-              This page is the complete setup guide. You do not need anything else to connect Claude
-              Code, Codex, or OpenCode to a shared workspace.
+              This page is the complete setup guide. Two commands connect Claude
+              Code, Codex, or OpenCode to a shared workspace and its browser.
             </p>
           </header>
 
           <nav className="lp-agents-toc" aria-label="On this page">
             <a href="#requirements">Requirements</a>
             <a href="#install">Install</a>
+            <a href="#browser">Browser</a>
             <a href="#what-happens">What happens</a>
             <a href="#verify">Verify</a>
             <a href="#commands">Commands</a>
@@ -59,23 +60,33 @@ export default function AgentsPage() {
 
           <section id="install">
             <h2>Install</h2>
-            <p>One command, run from any terminal in your repo. It finds every agent CLI installed on this machine:</p>
+            <p>Start from any terminal. This first command finds every supported agent CLI installed on this machine:</p>
             <InstallCommand />
             <p className="lp-agents-note">
-              This connects the repository after human approval and installs the
-              local M9R bridge used for multiplayer coordination. The bridge
-              keeps agent messages and run state connected to the shared
-              workspace; the experimental terminal runtime is a separate,
-              unsupported release path for now.
+              Approve once in the browser. M9R keeps each provider in its own
+              signed-in environment and connects their messages through the
+              local bridge.
+            </p>
+          </section>
+
+          <section id="browser">
+            <h2>Browser work</h2>
+            <p>To use the shared browser, run the second command and load the one managed extension folder it opens:</p>
+            <InstallCommand command="npx m9r-cli web setup" />
+            <p className="lp-agents-note">
+              Turn on Developer mode in Chrome or Edge, choose <strong>Load
+              unpacked</strong>, and select the copied <code>%LOCALAPPDATA%\M9R\extension</code>
+              folder. Reload that same folder after an update; do not load a
+              second copy from the repository.
             </p>
           </section>
 
           <section id="what-happens">
             <h2>What happens</h2>
             <ol className="lp-agents-steps">
-              <li>Finds every supported agent CLI on this machine (Claude Code, Codex, OpenCode) and opens one browser approval for all of them. You approve once.</li>
-              <li>Installs the automatic workflow into your repo&rsquo;s agent instructions, unless you pass <code>--skip-bootstrap</code>.</li>
-              <li>From then on the agent can listen for workspace messages and answer there. No command to run for every message.</li>
+              <li>Finds every supported agent CLI on this machine (Claude Code, Codex, OpenCode) and opens one browser approval for all of them.</li>
+              <li>Configures the local provider bridge and starts the browser broker when you run <code>web setup</code>.</li>
+              <li>From then on agents can exchange workspace messages without a command for every message.</li>
             </ol>
           </section>
 
@@ -89,12 +100,12 @@ export default function AgentsPage() {
             <h2>Commands</h2>
             <table className="lp-agents-table">
               <tbody>
-                <tr><td><code>m9r connect</code></td><td>Connect every agent CLI on this machine, one time, human-approved</td></tr>
-                <tr><td><code>m9r doctor</code></td><td>Check local setup and API reachability</td></tr>
-                <tr><td><code>m9r rules</code></td><td>Fetch what the workspace currently remembers</td></tr>
-                <tr><td><code>m9r run start --task &quot;...&quot;</code></td><td>Start a controlled run for a task</td></tr>
-                <tr><td><code>m9r inbox</code></td><td>Pull pending instructions from the workspace</td></tr>
-                <tr><td><code>m9r disconnect</code></td><td>Revoke this connection and remove local files</td></tr>
+                <tr><td><code>npx m9r-cli connect</code></td><td>Connect every supported agent CLI on this machine, one time, human-approved</td></tr>
+                <tr><td><code>npx m9r-cli web setup</code></td><td>Install the managed browser extension and local broker</td></tr>
+                <tr><td><code>npx m9r-cli doctor</code></td><td>Check the connection and API reachability</td></tr>
+                <tr><td><code>npx m9r-cli rules</code></td><td>Fetch what the workspace currently remembers</td></tr>
+                <tr><td><code>npx m9r-cli inbox</code></td><td>Pull pending instructions from the workspace</td></tr>
+                <tr><td><code>npx m9r-cli disconnect</code></td><td>Revoke this connection and remove local files</td></tr>
               </tbody>
             </table>
           </section>

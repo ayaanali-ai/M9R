@@ -50,11 +50,10 @@ export function agentKeyForKind(kind: string | null | undefined): AgentKindKey {
   return slug || "other";
 }
 
-/** The exact setup command to connect a given agent kind (PowerShell form). */
+/** The exact public setup command to connect a given agent kind. */
 export function setupCommandFor(kind: string): string {
   const safeKind = kind.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 40) || "other";
-  const command = `$env:M9R_AGENT_KIND="${kind}"; npx m9r-cli init`;
-  return command.replace(kind, safeKind);
+  return `npx m9r-cli connect --agents ${safeKind}`;
 }
 
 export function agentLabel(kind: AgentKindKey): string {
@@ -620,6 +619,16 @@ export function buildAgentViews(input: {
   unassignedCandidates?: WsRule[];
   /** The live Watchfloor passes false so users only see agents they actually connected. */
   includeDisconnectedDescriptors?: boolean;
+  /**
+   * The signed-in viewer's own user id, same value as agent_connections.created_by
+   * for a connection they own. This page is rendered per-request for one signed-in
+   * user, so the perspective flip happens here rather than client-side: a
+   * connection's owner sees "My Codex", not "Ayaan's Codex" pointed back at
+   * themselves -- the same you/them split the chat transcript already applies to
+   * human senders (ConversationPanel.tsx's isViewer), now applied to whose agent
+   * this is, not just who sent a given message.
+   */
+  viewerUserId?: string | null;
 }): AgentView[] {
   const connections = [...input.connections];
   const kindCounts = new Map<AgentKindKey, number>();
@@ -728,14 +737,16 @@ export function buildAgentViews(input: {
     // to the id-based form only when no owner could be resolved (an older
     // row, or a workspace-scoped connection with no recorded creator).
     const sameKindOwnerCount = conn ? kindOwnerCounts.get(`${key}::${conn.owner_label ?? conn.id}`) ?? 1 : 1;
+    const isViewerOwned = Boolean(conn?.owner_user_id) && Boolean(input.viewerUserId) && conn?.owner_user_id === input.viewerUserId;
+    const ownerQualifier = isViewerOwned ? "My" : conn?.owner_label ? `${conn.owner_label}'s` : null;
     const displayLabel = conn && (kindCounts.get(key) ?? 0) > 1
-      ? conn.owner_label
+      ? ownerQualifier
         ? sameKindOwnerCount > 1
           // Same kind AND same owner still collide (e.g. one person's two
           // Codex connections) -- owner-qualify AND disambiguate by id, so
           // two rows never render as the identical string.
-          ? `${conn.owner_label}'s ${connectionLabel} · ${shortIdentity(conn.id)}`
-          : `${conn.owner_label}'s ${connectionLabel}`
+          ? `${ownerQualifier} ${connectionLabel} · ${shortIdentity(conn.id)}`
+          : `${ownerQualifier} ${connectionLabel}`
         : `${connectionLabel} · ${shortIdentity(conn.id)}`
       : connectionLabel;
     return {

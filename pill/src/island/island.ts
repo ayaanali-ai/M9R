@@ -83,11 +83,14 @@ export class Island {
       decide: (d) => this.decide(d),
       send: (text) => this.transport.send(text),
       canAllowForADay: () => this.transport.capabilities?.allowForADay === true,
-      dictation: this.transport.capabilities?.dictation ? () => browserSpeechEnv(() => this.transport.openMicSetup?.()) : undefined,
+      dictation: this.transport.capabilities?.dictation
+        ? () => this.transport.createDictationEnvironment?.() ?? browserSpeechEnv(() => this.transport.openMicSetup?.())
+        : undefined,
       saveMemory: this.transport.capabilities?.saveMemory && this.transport.saveMemory ? (text) => this.transport.saveMemory!(text) : undefined,
       linking: this.transport.capabilities?.linkSessions && this.transport.listSessions && this.transport.linkSession
         ? { list: (handle) => this.transport.listSessions!(handle), link: (offer, session) => this.transport.linkSession!(offer, session) }
         : undefined,
+      desktopStages: this.transport.desktopStages,
       toggleSound: () => {
         State.settings.soundEnabled = !State.settings.soundEnabled;
         Sound.setEnabled(State.settings.soundEnabled);
@@ -122,14 +125,26 @@ export class Island {
     this.applyGeometry();
   }
 
-  private decide(d: "allow" | "deny" | "allow_day") {
+  private deciding = false;
+
+  private async decide(d: "allow" | "deny" | "allow_day") {
     const req = State.pendingApproval;
-    if (!req) return;
-    Sound.play(d === "deny" ? "blip" : "approve");
+    if (!req || this.deciding) return;
+    this.deciding = true;
     const decision: Decision = d;
-    void this.transport.decide(req.id, decision);
-    // Optimistic: the next snapshot confirms. Keep the owner's place if more approvals wait.
-    State.approvals = State.approvals.filter((a) => a.id !== req.id);
+    State.setDecisionError(req.id, null);
+    try {
+      await this.transport.decide(req.id, decision);
+      Sound.play(d === "deny" ? "blip" : "approve");
+    } catch (error) {
+      State.setDecisionError(req.id, String(error instanceof Error ? error.message : error).slice(0, 300));
+      Sound.play("error");
+      return;
+    } finally {
+      this.deciding = false;
+    }
+    // Keep the approval until the transport accepts the owner's decision.
+    State.resolveApproval(req.id);
     if (State.approvals.length === 0) {
       State.isPinned = false;
       this.fsm.pinned = false;
@@ -203,6 +218,7 @@ export class Island {
   private setMode(mode: IslandMode) {
     const prev = State.mode;
     if (mode === prev) return;
+    if (prev === "expanded" && mode !== "expanded") this.views.get(State.view)?.deactivate?.();
     State.mode = mode;
     if (mode === "expanded") Sound.play("open");
     if (prev === "expanded") {
@@ -216,7 +232,9 @@ export class Island {
   }
 
   expand(view: IslandViewName) {
+    if (State.view !== view) this.views.get(State.view)?.deactivate?.();
     State.view = view;
+    this.views.get(view)?.activate?.();
     if (State.mode !== "expanded") this.setMode("expanded");
     else this.animateGeometry(false);
     State.lastActivity = performance.now();
@@ -225,15 +243,18 @@ export class Island {
   }
 
   setView(view: IslandViewName) {
+    if (State.view !== view) this.views.get(State.view)?.deactivate?.();
     if (State.mode !== "expanded") {
       this.fsm.forceHome();
       State.view = view;
+      this.views.get(view)?.activate?.();
       this.animateGeometry(false);
       State.notify();
       return;
     }
     const grew = VIEW_LAYOUTS[view].height >= VIEW_LAYOUTS[State.view].height;
     State.view = view;
+    this.views.get(view)?.activate?.();
     State.lastActivity = performance.now();
     this.animateGeometry(!grew);
     State.notify();
@@ -458,7 +479,7 @@ export class Island {
     this.markSize.target = p.diameter;
     this.markEl.style.opacity = p.opacity > 0 ? "1" : "0";
 
-    if (State.mode === "expanded") {
+    if (State.mode === "expanded" && p.opacity > 0) {
       const d = p.diameter;
       const color = botGlowColor(State.effectiveState);
       this.markGlow.style.display = "block";

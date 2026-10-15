@@ -1,9 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import { use, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { createClient } from "@/lib/supabase/browser";
 import { ensureGuestSession } from "@/lib/rooms/ensure-guest-session";
 import { projectRoomArtifacts } from "@/lib/rooms/room-artifacts";
+import { isRoomStageResourceKey } from "@/lib/rooms/room-coordination";
+import RoomLiveView from "./RoomLiveView";
 import styles from "../room-url.module.css";
 
 type RoomView = { room: { id: string; name: string; status: string }; membership: { status: string } };
@@ -183,6 +186,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const [sending, setSending] = useState(false);
   const [coordinationBusy, setCoordinationBusy] = useState<string | null>(null);
   const [selectedSeatId, setSelectedSeatId] = useState("");
+  const [stageResourceKey, setStageResourceKey] = useState("");
+  const [stageFromKey, setStageFromKey] = useState("");
+  const [stageToKey, setStageToKey] = useState("");
+  const [stageTransitionAction, setStageTransitionAction] = useState<"entered" | "left" | "moved">("entered");
   const [handoffRecipients, setHandoffRecipients] = useState<Record<string, string>>({});
   const [handoffContexts, setHandoffContexts] = useState<Record<string, string>>({});
   const [handoffResponses, setHandoffResponses] = useState<Record<string, string>>({});
@@ -198,6 +205,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const [guestName, setGuestName] = useState("");
   const [guestEmail, setGuestEmail] = useState("");
   const [guestBusy, setGuestBusy] = useState(false);
+  const [guestAgeConfirmed, setGuestAgeConfirmed] = useState(false);
   const tasks = useMemo(() => projectRoomTasks(events), [events]);
   const handoffs = useMemo(() => projectRoomHandoffs(events), [events]);
   const artifacts = useMemo(() => projectRoomArtifacts(events), [events]);
@@ -338,7 +346,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     event.preventDefault();
     const displayName = guestName.trim();
     const email = guestEmail.trim();
-    if (!displayName || !email || guestBusy) return;
+    if (!displayName || !email || guestBusy || !guestAgeConfirmed) return;
     setGuestBusy(true);
     setError(null);
     try {
@@ -546,6 +554,67 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     }
   }
 
+  async function changeStageLease(resourceKey: string, action: "acquire" | "release", preempt = false) {
+    const key = resourceKey.trim();
+    if (!isRoomStageResourceKey(key)) {
+      setEventError("Paste a desktop or window key printed by `m9r web stage room-keys <name>`.");
+      return;
+    }
+    if (coordinationBusy) return;
+    setCoordinationBusy(`stage:${key}`);
+    setEventError(null);
+    try {
+      const response = await fetch(`/api/rooms/${roomId}/leases`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action,
+          clientEventId: crypto.randomUUID(),
+          resourceKey: key,
+          actorSeatId: selectedSeatId || null,
+          ttlMs: action === "acquire" ? 30_000 : undefined,
+          preempt,
+        }),
+      });
+      const data = await response.json().catch(() => ({})) as { error?: string; reason?: string };
+      if (!response.ok || data.reason === "lease_held") {
+        setEventError(data.error ?? "Another participant currently holds this stage lease.");
+      } else if (!response.ok) {
+        setEventError(data.error ?? "The stage lease was not changed.");
+      }
+      await Promise.all([loadCoordination(), loadRoomEvents()]);
+    } catch {
+      setEventError("The room could not be reached. The stage lease may have changed; refresh before acting.");
+    } finally {
+      setCoordinationBusy(null);
+    }
+  }
+
+  async function reportStageTransition(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const fromResourceKey = stageFromKey.trim();
+    const toResourceKey = stageToKey.trim();
+    if ((stageTransitionAction !== "entered" && !isRoomStageResourceKey(fromResourceKey))
+      || (stageTransitionAction !== "left" && !isRoomStageResourceKey(toResourceKey))) {
+      setEventError("Use the opaque desktop/window keys printed by the local `room-keys` command.");
+      return;
+    }
+    if (stageTransitionAction === "moved" && fromResourceKey === toResourceKey) {
+      setEventError("A moved report needs two different stage keys.");
+      return;
+    }
+    const payload = {
+      type: "desktop.stage.transition.reported",
+      action: stageTransitionAction,
+      ...(stageTransitionAction !== "entered" ? { fromResourceKey } : {}),
+      ...(stageTransitionAction !== "left" ? { toResourceKey } : {}),
+    };
+    if (await appendEvent("share", payload)) {
+      if (stageTransitionAction !== "entered") setStageFromKey("");
+      if (stageTransitionAction !== "left") setStageToKey("");
+    }
+  }
+
   async function changeHandoff(
     action: "propose" | "accept" | "decline" | "counter" | "cancel" | "complete",
     task: RoomTask,
@@ -624,7 +693,19 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
               <label>Your email
                 <input type="email" value={guestEmail} onChange={(event) => setGuestEmail(event.target.value)} maxLength={320} required autoComplete="email" style={{ display: "block", width: "100%", marginTop: 4 }} />
               </label>
-              <button className={styles.primaryButton} type="submit" disabled={guestBusy || !guestName.trim() || !guestEmail.trim()}>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: "0.8rem" }}>
+                <input
+                  type="checkbox"
+                  checked={guestAgeConfirmed}
+                  onChange={(event) => setGuestAgeConfirmed(event.target.checked)}
+                  style={{ marginTop: 3 }}
+                />
+                <span>
+                  I am 18 or older and agree to the <Link href="/terms">Terms of Service</Link> and{" "}
+                  <Link href="/privacy">Privacy Policy</Link>.
+                </span>
+              </label>
+              <button className={styles.primaryButton} type="submit" disabled={guestBusy || !guestName.trim() || !guestEmail.trim() || !guestAgeConfirmed}>
                 {guestBusy ? "Joining…" : "Continue to the room"}
               </button>
             </form>
@@ -715,7 +796,56 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
                 </select>
               </label>
             )}
-            <p className={styles.muted}>Presence is live-only. Page data, browser cursors, and local credentials are not included.</p>
+            <p className={styles.muted}>Presence is live-only. Room presence does not include page data, browser cursors, or local credentials.</p>
+          </div>
+
+          <RoomLiveView roomId={roomId} displayName={currentMember?.displayName ?? "Room member"} />
+
+          <div className={styles.panel}>
+            <h2 style={{ marginTop: 0 }}>Desktop stage coordination</h2>
+            <p className={styles.muted}>Run <code>m9r web stage room-keys &lt;name&gt;</code> on the computer that owns the stage, then share the printed key here. A room lease is a 30-second coordination lock only: it does not let another member see or control that computer. Stage changes below are member-reported, not machine-verified.</p>
+            <label htmlFor="room-stage-resource">Desktop or window key
+              <input id="room-stage-resource" value={stageResourceKey} onChange={(event) => setStageResourceKey(event.target.value)} maxLength={180} autoComplete="off" spellCheck={false} style={{ display: "block", width: "100%", marginTop: 4, fontFamily: "ui-monospace, monospace" }} />
+            </label>
+            {(() => {
+              const key = stageResourceKey.trim();
+              const lease = isRoomStageResourceKey(key) ? leases.find((item) => item.resource_key === key) : undefined;
+              const activeLease = leaseIsActive(lease) ? lease : undefined;
+              const holder = activeLease ? leaseActorId(activeLease) : null;
+              const ownerMayPreempt = isRoomOwner && !selectedSeatId && Boolean(holder && holder !== currentActorId);
+              const busy = coordinationBusy === `stage:${key}`;
+              return (
+                <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                  <p aria-live="polite">{activeLease ? `Coordination lock held by ${actorLabel(holder!, members)} until ${new Date(activeLease.expires_at).toLocaleTimeString()}.` : "No active coordination lock for this key."}</p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    {holder === currentActorId ? (
+                      <button disabled={coordinationBusy !== null} onClick={() => void changeStageLease(key, "release")}>Release stage lock</button>
+                    ) : ownerMayPreempt ? (
+                      <button disabled={coordinationBusy !== null} onClick={() => void changeStageLease(key, "acquire", true)}>Take over stage lock</button>
+                    ) : !holder ? (
+                      <button disabled={coordinationBusy !== null || !isRoomStageResourceKey(key)} onClick={() => void changeStageLease(key, "acquire")}>Claim stage for 30 seconds</button>
+                    ) : <button disabled>Held by another participant</button>}
+                  </div>
+                </div>
+              );
+            })()}
+            <form onSubmit={(event) => void reportStageTransition(event)} style={{ display: "grid", gap: 8, marginTop: 16 }}>
+              <h3 style={{ margin: 0 }}>Report a stage transition</h3>
+              <label>Transition
+                <select value={stageTransitionAction} onChange={(event) => setStageTransitionAction(event.target.value as "entered" | "left" | "moved")} style={{ display: "block", marginTop: 4 }}>
+                  <option value="entered">Entered a stage</option>
+                  <option value="left">Left a stage</option>
+                  <option value="moved">Moved between stages</option>
+                </select>
+              </label>
+              {stageTransitionAction !== "entered" && <label>From key
+                <input value={stageFromKey} onChange={(event) => setStageFromKey(event.target.value)} maxLength={180} autoComplete="off" spellCheck={false} style={{ display: "block", width: "100%", marginTop: 4, fontFamily: "ui-monospace, monospace" }} />
+              </label>}
+              {stageTransitionAction !== "left" && <label>To key
+                <input value={stageToKey} onChange={(event) => setStageToKey(event.target.value)} maxLength={180} autoComplete="off" spellCheck={false} style={{ display: "block", width: "100%", marginTop: 4, fontFamily: "ui-monospace, monospace" }} />
+              </label>}
+              <button disabled={sending} type="submit" style={{ justifySelf: "start", padding: "6px 12px" }}>Record member-reported transition</button>
+            </form>
           </div>
 
           <div className={styles.panel}>
@@ -854,7 +984,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             <h2 style={{ marginTop: 0 }}>Activity</h2>
             <p className={styles.muted}>Messages and goals persist for admitted room members. Do not send passwords, tokens, private page contents, or local file contents.</p>
             <ol aria-live="polite" aria-relevant="additions" style={{ maxHeight: 360, overflow: "auto", paddingLeft: 24 }}>
-              {events.filter((event) => ["post", "ask", "reply", "task", "handoff", "artifact"].includes(event.kind)).map((event) => {
+              {events.filter((event) => ["post", "ask", "reply", "task", "handoff", "artifact", "share"].includes(event.kind)).map((event) => {
                 const actor = event.actor_seat_id ? actorLabel(`seat:${event.actor_seat_id}`, members)
                   : event.actor_user_id === currentUserId ? "You" : personName(event.actor_user_id, members);
                 const payload = event.payload ?? {};
@@ -862,7 +992,11 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
                 const taskLabel = event.kind === "task" ? `${String(payload.type ?? "updated")} goal: ${String(payload.title ?? payload.taskId ?? "room task")}` : null;
                 const handoffLabel = event.kind === "handoff" ? `${String(payload.type ?? "handoff")} handoff${typeof payload.context === "string" ? `: ${payload.context}` : ""}` : null;
                 const artifactLabel = event.kind === "artifact" ? `${String(payload.type ?? "updated")} artifact: ${String(payload.title ?? payload.artifactId ?? "shared document")}` : null;
-                return <li key={event.id} style={{ marginBottom: 10 }}><strong>{actor}</strong>{eventText ? `: ${eventText}` : taskLabel ? ` — ${taskLabel}` : handoffLabel ? ` — ${handoffLabel}` : artifactLabel ? ` — ${artifactLabel}` : ` — ${event.kind}`}<time className={styles.muted} style={{ display: "block" }} dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString()}</time></li>;
+                const stageAction = event.kind === "share" && payload.type === "desktop.stage.transition.reported" ? String(payload.action ?? "reported a transition") : null;
+                const stageKind = typeof payload.fromResourceKey === "string" ? payload.fromResourceKey.split(":", 1)[0]
+                  : typeof payload.toResourceKey === "string" ? payload.toResourceKey.split(":", 1)[0] : "desktop";
+                const stageLabel = stageAction ? `${stageAction} ${stageKind} stage (member-reported)` : null;
+                return <li key={event.id} style={{ marginBottom: 10 }}><strong>{actor}</strong>{eventText ? `: ${eventText}` : taskLabel ? ` — ${taskLabel}` : handoffLabel ? ` — ${handoffLabel}` : artifactLabel ? ` — ${artifactLabel}` : stageLabel ? ` — ${stageLabel}` : ` — ${event.kind}`}<time className={styles.muted} style={{ display: "block" }} dateTime={event.created_at}>{new Date(event.created_at).toLocaleTimeString()}</time></li>;
               })}
               {events.length === 0 && <li>No shared activity yet.</li>}
             </ol>

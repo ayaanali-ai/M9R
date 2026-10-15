@@ -12,6 +12,10 @@ class FakeRecognition implements RecognitionLike {
   stop() { this.stopped += 1; this.onend?.(); }
 }
 
+class FailingRecognition extends FakeRecognition {
+  override start() { throw new Error("microphone blocked"); }
+}
+
 function setup(over: Partial<SpeechEnv> = {}) {
   const log: string[] = [];
   const timers: Array<{ fn: () => void; ms: number; id: number }> = [];
@@ -93,4 +97,14 @@ test("recognizer errors end listening with a readable notice; 'no speech' is not
   await c.dictation.start();
   FakeRecognition.last!.onerror!({ error: "not-allowed" });
   assert.ok(c.log.includes("setup"));
+});
+
+test("a synchronous recognizer start failure clears the hold and gives the owner a visible notice", async () => {
+  const { dictation, log } = setup({ Recognition: FailingRecognition });
+  await dictation.start();
+  assert.equal(dictation.listening, false);
+  assert.deepEqual(log.slice(-2), [
+    "listening:false",
+    "notice:true:Couldn't start speech recognition. Check microphone access and try again.",
+  ]);
 });

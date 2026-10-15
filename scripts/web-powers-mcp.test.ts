@@ -6,6 +6,10 @@ import { createM9rMcpServer } from "../src/lib/native/mcp-server.ts";
 import type { LocalStore } from "../src/lib/native/local-store";
 import type { WebRequest } from "../src/lib/native/web-broker-core";
 
+const VALID_TEST_TOKEN = "v".repeat(32);
+const WEB_SESSION_A_TOKEN = "web-session-A".padEnd(32, "a");
+const WEB_SESSION_B_TOKEN = "web-session-B".padEnd(32, "b");
+
 const powerNames = [
   "m9r_web_scroll", "m9r_web_wait", "m9r_web_back", "m9r_web_forward", "m9r_web_tabs", "m9r_web_switch", "m9r_web_do",
   "m9r_web_close", "m9r_web_press", "m9r_web_select", "m9r_web_find", "m9r_web_hover", "m9r_web_screenshot", "m9r_web_extract",
@@ -18,7 +22,7 @@ test("MCP exposes all browser powers and binds each call to the verified caller"
   const requests: WebRequest[] = [];
   const store = {
     root: "C:/tmp/m9r-web-powers-test",
-    verifyIdentity: (token: string) => token === "valid-test-token" ? { handle: "claude", provider: "claude-code", sessionId: "session-1" } : null,
+    verifyIdentity: (token: string) => token === VALID_TEST_TOKEN ? { handle: "claude", provider: "claude-code", sessionId: "session-1" } : null,
   } as unknown as LocalStore;
   const server = createM9rMcpServer({
     store,
@@ -33,7 +37,7 @@ test("MCP exposes all browser powers and binds each call to the verified caller"
   const names = tools.tools.map((tool) => tool.name);
   for (const name of powerNames) assert.ok(names.includes(name), `missing MCP tool ${name}`);
 
-  const response = await client.callTool({ name: "m9r_web_scroll", arguments: { token: "valid-test-token", tab: "research", by: 240 } });
+  const response = await client.callTool({ name: "m9r_web_scroll", arguments: { token: VALID_TEST_TOKEN, tab: "research", by: 240 } });
   assert.equal(requests.length, 1);
   assert.deepEqual(requests[0], {
     agent: "claude", provider: "claude-code", sessionId: "session-1", action: "scroll", tab: "research",
@@ -59,9 +63,9 @@ test("snapshot refs map into the protected broker selector slot without changing
   t.after(async () => { await client.close(); await server.close(); });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-  await client.callTool({ name: "m9r_web_snapshot", arguments: { token: "valid", tab: "research", query: "search", limit: 150 } });
+  await client.callTool({ name: "m9r_web_snapshot", arguments: { token: VALID_TEST_TOKEN, tab: "research", query: "search", limit: 150 } });
   assert.deepEqual(requests[0], { agent: "codex", provider: "codex", sessionId: "session-ref", action: "snapshot", tab: "research", args: { query: "search", limit: 150 } });
-  await client.callTool({ name: "m9r_web_click", arguments: { token: "valid", tab: "research", ref: "e0123456789abcdef01234567_12" } });
+  await client.callTool({ name: "m9r_web_click", arguments: { token: VALID_TEST_TOKEN, tab: "research", ref: "e0123456789abcdef01234567_12" } });
   assert.equal(requests[1]?.selector, "@m9r-ref:e0123456789abcdef01234567_12");
   assert.equal(requests[1]?.action, "click");
 });
@@ -80,7 +84,7 @@ test("m9r_web_press exposes the page-change result and the no-change hint to the
   t.after(async () => { await client.close(); await server.close(); });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-  const response = await client.callTool({ name: "m9r_web_press", arguments: { token: "valid", tab: "research", key: "Enter" } });
+  const response = await client.callTool({ name: "m9r_web_press", arguments: { token: VALID_TEST_TOKEN, tab: "research", key: "Enter" } });
   const content = response.content as Array<{ type: string; text?: string }>;
   assert.match(content[0]?.text ?? "", /"pageChanged":false/);
   assert.match(content[0]?.text ?? "", /Nothing visibly changed after Enter/);
@@ -108,7 +112,7 @@ test("m9r_web_do sends one ordered batch request and returns the broker result",
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
   const response = await client.callTool({ name: "m9r_web_do", arguments: {
-    token: "valid", tab: "research", includePageState: true,
+    token: VALID_TEST_TOKEN, tab: "research", includePageState: true,
     steps: [{ action: "open", url: "https://example.test/" }, { action: "click", ref: "e0123456789abcdef01234567_1" }],
   } });
   assert.equal(batches.length, 1);
@@ -146,13 +150,13 @@ test("a web-room agent's inbox cursor survives a fresh respawn (a new session ID
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
   // First worker (session A) already saw both messages, including the ancient one, and its cursor advanced.
-  const first = await client.callTool({ name: "m9r_inbox", arguments: { token: "web-session-A" } });
+  const first = await client.callTool({ name: "m9r_inbox", arguments: { token: WEB_SESSION_A_TOKEN } });
   const firstText = (first.content as Array<{ text?: string }>)[0]?.text ?? "";
   assert.match(firstText, /old stop-all relic/);
   assert.match(firstText, /real, current question/);
 
   // A brand-new process for the same agent (session B) must NOT see that ancient relic resurface.
-  const second = await client.callTool({ name: "m9r_inbox", arguments: { token: "web-session-B" } });
+  const second = await client.callTool({ name: "m9r_inbox", arguments: { token: WEB_SESSION_B_TOKEN } });
   const secondText = (second.content as Array<{ text?: string }>)[0]?.text ?? "";
   assert.equal(secondText, "Inbox is empty.", "a fresh respawn's cursor must not reset to zero and re-show old delivered tasks");
 });

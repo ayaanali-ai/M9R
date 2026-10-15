@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { readFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { after as afterTests, test } from "node:test";
+import { readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { DeliveryLedger, type LedgerEntry } from "@/lib/bridge/delivery-ledger";
 import { RESTART_INTERRUPTED_EVENT, RESTART_INTERRUPTED_NOTE, classifyRestartRecovery, restartInterruptedNotice } from "@/lib/bridge/restart-recovery";
 import { deriveDelivery } from "@/lib/delivery-state";
@@ -11,6 +10,13 @@ const STARTED = 1_000_000;
 const before = STARTED - 5_000;
 const after = STARTED + 5_000;
 const entry = (state: LedgerEntry["state"], at: number, note?: string): LedgerEntry => ({ messageId: "m1", provider: "claude-code", state, at, ...(note ? { note } : {}) });
+const recoveryFixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures", "restart-recovery");
+mkdirSync(recoveryFixtureRoot, { recursive: true });
+const recoveryFixtureDirectories: string[] = [];
+
+afterTests(() => {
+  for (const directory of recoveryFixtureDirectories) rmSync(directory, { recursive: true, force: true });
+});
 
 test("no ledger entry means run: today's behavior, including a missing or deleted ledger", () => {
   assert.equal(classifyRestartRecovery(null, STARTED), "run");
@@ -50,7 +56,9 @@ test("the notice tells the human what happened and what to do, and contains no @
 });
 
 test("the restart-interrupted note survives a restart in the ledger and drives the decision end to end", () => {
-  const path = join(mkdtempSync(join(tmpdir(), "m9r-recovery-")), "ledger.jsonl");
+  const root = mkdtempSync(join(recoveryFixtureRoot, "m9r-recovery-"));
+  recoveryFixtureDirectories.push(root);
+  const path = join(root, "ledger.jsonl");
   const firstProcess = new DeliveryLedger(path, () => before);
   firstProcess.record("m1", "claude-code", "delivered_to_node", before);
   firstProcess.record("m1", "claude-code", "delivered_to_session", before);

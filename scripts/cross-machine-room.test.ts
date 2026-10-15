@@ -84,12 +84,31 @@ test("room activity is durable and ordered while presence stays ephemeral and ro
   assert.match(migration, /quiet until admission/i);
 });
 
+test("live tab sharing is opt-in, read-only, bounded, and restricted to active room members", () => {
+  const liveView = read("src/app/rooms/[roomId]/RoomLiveView.tsx");
+  const migration = read("supabase/migrations/20261004042347_room_live_tab_broadcast.sql");
+  assert.match(liveView, /getDisplayMedia/);
+  assert.match(liveView, /surface !== "browser"/);
+  assert.match(liveView, /FRAME_INTERVAL_MS = 333/);
+  assert.match(liveView, /MAX_FRAME_BYTES = 30 \* 1024/);
+  assert.match(liveView, /MAX_STREAM_MS = 5 \* 60_000/);
+  assert.match(liveView, /event: "screen-frame"/);
+  assert.match(liveView, /visibilitychange/);
+  assert.match(liveView, /Frames are not saved in room history/);
+  assert.match(migration, /extension = 'broadcast'/);
+  assert.match(migration, /m9r-room-live:/);
+  assert.match(migration, /m\.user_id = \(select auth\.uid\(\)\) and m\.status = 'active'/);
+  assert.doesNotMatch(migration, /insert into public\.m9r_room_events/i);
+});
+
 test("room members, leases, and handoffs expose authenticated, state-checked APIs", () => {
   const members = read("src/app/api/rooms/[roomId]/members/route.ts");
   const leases = read("src/app/api/rooms/[roomId]/leases/route.ts");
   const handoffs = read("src/app/api/rooms/[roomId]/handoffs/route.ts");
   const events = read("src/app/api/rooms/[roomId]/events/route.ts");
   const migration = read("supabase/migrations/20260928020000_room_leases.sql");
+  const stageLeaseMigration = read("supabase/migrations/20261005010000_room_stage_leases.sql");
+  const roomPage = read("src/app/rooms/[roomId]/page.tsx");
   assert.match(members, /eq\("status", "active"\)/);
   assert.match(members, /agent_label/);
   assert.match(leases, /normalizeRoomLeaseRequest/);
@@ -101,6 +120,11 @@ test("room members, leases, and handoffs expose authenticated, state-checked API
   assert.match(migration, /recipient actor.*answer|handoff recipient must answer in turn/i);
   assert.match(migration, /room\.lease\.handoff/);
   assert.match(migration, /'assigneeActorId', recipient_id/);
+  assert.match(stageLeaseMigration, /desktop:\[0-9a-f\]/i);
+  assert.match(stageLeaseMigration, /window:\[0-9a-f\]/i);
+  assert.match(roomPage, /Desktop stage coordination/);
+  assert.match(roomPage, /member-reported/);
+  assert.match(roomPage, /m9r web stage room-keys/);
 });
 
 test("generic room event writes cannot forge authority decisions or machine-action receipts", () => {
@@ -165,9 +189,9 @@ test("room creation requires a workspace host session while room links keep anon
   assert.match(create, /from\("m9r_rooms"\)/);
   assert.match(create, /parseRoomName/);
   assert.doesNotMatch(createPage, /ensureGuestSession/);
-  assert.match(createPage, /data\.user\.is_anonymous \? "guest" : "ready"/);
+  assert.match(createPage, /if \(data\.user\.is_anonymous\)/);
   assert.match(createPage, /signOut\(\{ scope: "local" \}\)/);
-  assert.match(createPage, /Room hosts need an M9R account/);
+  assert.match(createPage, /You need an M9R account to open your room/);
   // A brand-new visitor with no session at all gets AuthSessionMissingError from getUser() (it always round-trips to
   // the auth server, unlike getSession()) -- confirmed live on every first visit to this page -- and that must read
   // as the normal signed-out state, not an "unavailable"/reload-the-page failure shown to literally every new visitor.

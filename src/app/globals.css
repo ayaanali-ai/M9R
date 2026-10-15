@@ -7948,7 +7948,7 @@ details.wf-fold > div { padding: 0.25rem 0.8rem 0.8rem; }
    padding, border, line-height, white-space wrapping) or the highlighted
    span drifts out from under the real caret/text sitting above it. The
    textarea's own background stays transparent so this shows through. */
-.wf-chat-mention-highlight-backdrop { position: absolute; inset: 0; z-index: 0; min-height: 54px; padding: 0; margin: 0; border: 0; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word; font: inherit; font-size: 13px; line-height: normal; color: transparent; pointer-events: none; }
+.wf-chat-mention-highlight-backdrop { position: absolute; inset: 0; z-index: 0; min-height: 54px; padding: 0; margin: 0; border: 0; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word; font: inherit; font-size: 13px; line-height: inherit; color: transparent; pointer-events: none; }
 /* No longer a visible boxed pill over the raw "@handle" text -- the mention
    chip row above the field now carries that signal (real mark + rebranded
    label, not a colored span repeating the raw handle). Stacking both was

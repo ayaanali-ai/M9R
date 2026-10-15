@@ -6,6 +6,7 @@ import { chmodSync, existsSync, rmSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 
 const MAX_FRAME_BYTES = 64 * 1024;
+const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 export interface OwnerPipeRequest {
   method: "GET" | "POST";
@@ -16,10 +17,12 @@ export interface OwnerPipeRequest {
 export interface OwnerPipeOptions {
   path: string;
   handle(request: OwnerPipeRequest): unknown | Promise<unknown>;
+  requestTimeoutMs?(request: OwnerPipeRequest): number;
 }
 
 function writeJson(socket: Socket, value: unknown): void {
-  socket.end(`${JSON.stringify(value)}\n`);
+  const encoded = JSON.stringify(value);
+  socket.end(`${Buffer.byteLength(encoded, "utf8") <= MAX_RESPONSE_BYTES ? encoded : JSON.stringify({ ok: false, error: "owner pipe response is too large; verify the operation before replay" })}\n`);
 }
 
 export async function startOwnerPipe(options: OwnerPipeOptions): Promise<Server> {
@@ -27,6 +30,7 @@ export async function startOwnerPipe(options: OwnerPipeOptions): Promise<Server>
   const server = createServer((socket) => {
     let buffer = "";
     let finished = false;
+    let dispatched = false;
     const finish = (value: unknown) => {
       if (finished) return;
       finished = true;
@@ -35,7 +39,7 @@ export async function startOwnerPipe(options: OwnerPipeOptions): Promise<Server>
     socket.setTimeout(2_000, () => finish({ ok: false, error: "owner pipe request timed out" }));
     socket.on("error", () => undefined);
     socket.on("data", (chunk) => {
-      if (finished) return;
+      if (finished || dispatched) return;
       buffer += chunk.toString("utf8");
       if (Buffer.byteLength(buffer, "utf8") > MAX_FRAME_BYTES) {
         finish({ ok: false, error: "owner pipe request is too large" });
@@ -49,7 +53,9 @@ export async function startOwnerPipe(options: OwnerPipeOptions): Promise<Server>
           finish({ ok: false, error: "invalid owner pipe request" });
           return;
         }
-        Promise.resolve(options.handle(parsed)).then(finish, () => finish({ ok: false, error: "owner pipe request failed" }));
+        dispatched = true;
+        socket.setTimeout(Math.min(70_000, Math.max(2_000, options.requestTimeoutMs?.(parsed) ?? 2_000)));
+        Promise.resolve(options.handle(parsed)).then(finish, () => finish({ ok: false, error: "owner pipe request failed; verify the operation before replay" }));
       } catch {
         finish({ ok: false, error: "invalid owner pipe JSON" });
       }
@@ -83,9 +89,9 @@ export function requestOwnerPipe<T = unknown>(path: string, request: OwnerPipeRe
     socket.on("error", () => done(null));
     socket.on("data", (chunk) => {
       buffer += chunk.toString("utf8");
+      if (Buffer.byteLength(buffer, "utf8") > MAX_RESPONSE_BYTES) { done(null); return; }
       const newline = buffer.indexOf("\n");
       if (newline < 0) {
-        if (Buffer.byteLength(buffer, "utf8") > MAX_FRAME_BYTES) done(null);
         return;
       }
       try { done(JSON.parse(buffer.slice(0, newline)) as T); }

@@ -4,7 +4,7 @@ import { authorizedStaticBearer } from "@/lib/request-security";
 
 /**
  * Flags idle "waiting" sessions for archive proposal across every workspace
- * (see vercel.json crons). Before this, that flagging only ran as a side
+ * (the Cloudflare cron scheduler). Before this, that flagging only ran as a side
  * effect of GET /api/dashboard/live-sessions, so a workspace with nobody
  * currently viewing the dashboard never got its idle sessions flagged.
  * Gated on CRON_SECRET, not an agent bearer token -- same convention as

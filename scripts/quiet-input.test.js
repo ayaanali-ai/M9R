@@ -27,8 +27,11 @@ function harness({ attachError, targets = [], idleMs = 50 } = {}) {
       attach: async (target, version) => { calls.push(["attach", target.tabId, version]); if (attachError) throw new Error(attachError); },
       detach: async (target) => { calls.push(["detach", target.tabId]); },
       sendCommand: async (target, method, params) => {
-        if (state.dropNext && method === "Input.dispatchMouseEvent") { state.dropNext = false; throw new Error("Debugger is not attached to the tab with id: " + target.tabId); }
         calls.push([method, target.tabId, params]);
+        if (state.dropNext && ((method === "Input.dispatchMouseEvent" && params.type === "mousePressed") || method === "Input.insertText")) {
+          state.dropNext = false;
+          throw new Error("Debugger is not attached to the tab with id: " + target.tabId);
+        }
         return {};
       },
       getTargets: async () => targets,
@@ -77,13 +80,14 @@ test("double click sends two press/release pairs with clickCount 1 then 2; right
   assert.equal(last[2].buttons, 2);
 });
 
-test("beforePress runs after attach and can veto the click, which sends no mouse event", async () => {
+test("beforePress runs after cursor movement and can veto before any press", async () => {
   const { quiet, calls } = harness();
   await assert.rejects(
     quiet.click(4, { x: 9, y: 9, beforePress: async () => { throw Object.assign(new Error("stopped"), { code: "stopped_by_owner" }); } }),
     (error) => error.code === "stopped_by_owner",
   );
-  assert.equal(names(calls).includes("Input.dispatchMouseEvent"), false);
+  const mouseEvents = calls.filter((call) => call[0] === "Input.dispatchMouseEvent").map((call) => call[2].type);
+  assert.deepEqual(mouseEvents, ["mouseMoved"]);
 });
 
 test("attach failures map to stable refusal codes and never fall back", async () => {
@@ -143,19 +147,34 @@ test("a closed tab drops its session", async () => {
   assert.equal(quiet._sessions.has(6), false);
 });
 
-test("a stale attachment (dropped behind the worker's back) is re-attached once and the click still lands", async () => {
+test("a lost press reply is not replayed because the click may already have landed", async () => {
   const { quiet, calls, state, timers } = harness();
   await quiet.click(9, { x: 1, y: 1 });
   state.dropNext = true;
-  const result = await quiet.click(9, { x: 2, y: 2 });
+  await assert.rejects(quiet.click(9, { x: 2, y: 2 }), (error) => error.code === "input_outcome_unknown");
+  const attemptedClick = calls.filter((call) => call[0] === "Input.dispatchMouseEvent" && call[2].x === 2);
+  assert.deepEqual(attemptedClick.map((call) => call[2].type), ["mouseMoved", "mousePressed", "mouseReleased"], "one press and a safe release are sent, with no replayed press");
+  assert.equal(names(calls).filter((name) => name === "attach").length, 1, "the uncertain input is not automatically retried after reattaching");
+  assert.equal(timers.filter((timer) => !timer.cleared).length, 0, "a disconnected session has no new idle timer");
+});
+
+test("Stop-All blocks queued quiet input until the owner resumes it", async () => {
+  const { quiet, calls } = harness();
+  await quiet.click(11, { x: 1, y: 1 });
+  await quiet.stopAll();
+  const inputCount = calls.filter((call) => String(call[0]).startsWith("Input.")).length;
+  await assert.rejects(quiet.click(11, { x: 2, y: 2 }), (error) => error.code === "stopped_by_owner");
+  assert.equal(calls.filter((call) => String(call[0]).startsWith("Input.")).length, inputCount, "no queued click is dispatched while stopped");
+  quiet.resumeAll();
+  const result = await quiet.click(11, { x: 3, y: 3 });
   assert.equal(result.route, "quiet");
-  assert.equal(names(calls).filter((n) => n === "attach").length, 2, "attached again after the drop");
-  assert.equal(calls.filter((c) => c[0] === "Input.dispatchMouseEvent" && c[2].type === "mouseReleased" && c[2].x === 2).length, 1);
-  const live = timers.filter((t) => !t.cleared);
-  assert.equal(live.length, 1, "exactly one idle timer is armed after the retry");
-  live[0].fn();
-  await new Promise((r) => setImmediate(r));
-  assert.equal(names(calls).at(-1), "detach", "the idle timer still detaches after a retry");
+});
+
+test("a lost text-insertion reply is not replayed", async () => {
+  const { quiet, calls, state } = harness();
+  state.dropNext = true;
+  await assert.rejects(quiet.insertText(12, "hello"), (error) => error.code === "input_outcome_unknown");
+  assert.equal(calls.filter((call) => call[0] === "Input.insertText").length, 1);
 });
 
 test("a veto from beforePress is surfaced as is and is not retried", async () => {

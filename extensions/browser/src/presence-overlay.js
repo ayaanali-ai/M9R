@@ -5,6 +5,8 @@
   const EDGE = 10;
   const MESSAGE_TTL_MS = 4000;
   const FRAME_AUTH_TIMEOUT_MS = 1000;
+  const FRAME_HEALTH_TIMEOUT_MS = 1000;
+  const MAX_FRAME_AUTH_RETRIES = 3;
   const IDLE_AFTER_MS = 4000;
   // Without a roster from the broker there is no "session ended" signal; an agent silent this long is taken as gone.
   const ORPHAN_AFTER_MS = 90000;
@@ -190,9 +192,9 @@
     function highlightRect(agent, now) {
       const selected = elementRect(resolveTarget(agent));
       if (selected) return selected;
-      if (agent.nativePoint && typeof doc.elementFromPoint === "function") {
+      if (agent.pagePoint && typeof doc.elementFromPoint === "function") {
         let hit = null;
-        try { hit = doc.elementFromPoint(agent.nativePoint.x, agent.nativePoint.y); } catch { /* A page may reject hit-testing during navigation. */ }
+        try { hit = doc.elementFromPoint(agent.pagePoint.x, agent.pagePoint.y); } catch { /* A page may reject hit-testing during navigation. */ }
         if (hit && typeof hit.closest === "function") {
           try { hit = hit.closest("button,a,input,textarea,select,[role='button'],[contenteditable='true']") || hit; } catch { /* Keep the exact hit target. */ }
         }
@@ -234,7 +236,7 @@
 
     function destination(agent, now) {
       if (agent.docked) return dockPoint(agent);
-      if (agent.nativePoint) return agent.nativePoint;
+      if (agent.pagePoint) return agent.pagePoint;
       const el = resolveTarget(agent);
       // When the page cannot resolve the selector (a control in a shadow root or a replaced node), the extension still measured
       // the element; travel to that spot so the cursor never stays put while the click happens somewhere else.
@@ -259,7 +261,6 @@
       const vh = view.innerHeight;
       let keepFrame = false;
       for (const agent of agents.values()) {
-        if (agent.nativePointerLive) keepFrame = true;
         const dest = destination(agent, now);
         let x = dest.x;
         let y = dest.y;
@@ -306,7 +307,7 @@
         agent.el.classList.toggle("flip-x", cx > vw - 300);
         agent.el.classList.toggle("flip-y", cy > vh - 110);
         const activeRect = highlightRect(agent, now);
-        const showFocus = activeRect && (agent.targetActive || agent.nativePointerLive || agent.focusUntil > now || agent.claimedUntil > now);
+        const showFocus = activeRect && (agent.targetActive || agent.focusUntil > now || agent.claimedUntil > now);
         agent.focus.classList.toggle("on", !!showFocus);
         agent.focus.classList.toggle("claimed", agent.claimedUntil > now && !(agent.focusUntil > now));
         if (showFocus) {
@@ -351,7 +352,7 @@
         const idle = !agent.glide && now - agent.lastSeen > IDLE_AFTER_MS && !(agent.typingUntil > now) && !isWorking(agent);
         agent.el.classList.toggle("idle", idle);
         agent.miniCaret.hidden = !typing;
-        if (agent.nativePointerLive || agent.typingUntil > now || agent.focusUntil > now || agent.claimedUntil > now || now - agent.lastActionAt <= 3200) keepFrame = true;
+        if (agent.typingUntil > now || agent.focusUntil > now || agent.claimedUntil > now || now - agent.lastActionAt <= 3200) keepFrame = true;
       }
       if (keepFrame) loop = view.requestAnimationFrame(frameTick);
     }
@@ -370,37 +371,6 @@
         const done = () => { view.clearTimeout(timer); resolve(); };
         if (!agent || !agent.glide) { view.setTimeout(done, DWELL_MS); return; }
         (agent.glide.waiters || (agent.glide.waiters = [])).push(done);
-      });
-    }
-
-    function nativePointer(agentId, x, y, active) {
-      const agent = agents.get(String(agentId || "").slice(0, 64));
-      if (!agent || !Number.isFinite(x) || !Number.isFinite(y)) return Promise.resolve(false);
-      agent.lastSeen = Date.now();
-      agent.lastActionAt = agent.lastSeen;
-      agent.docked = false;
-      agent.el.classList.remove("parked");
-      agent.glide = null;
-      agent.pendingClick = false;
-      agent.point = { x, y };
-      if (active) {
-        agent.nativePoint = { x, y };
-        agent.nativePointerLive = true;
-        agent.targetActive = true;
-      } else {
-        agent.nativePoint = null;
-        agent.nativePointerLive = false;
-        agent.targetActive = false;
-        agent.focusUntil = Math.max(agent.focusUntil, Date.now() + FOCUS_FADE_MS);
-        agent.selector = null;
-        agent.targetEl = null;
-        agent.hintRect = null;
-      }
-      kick();
-      // Wait for the position update to cross a rendered frame. The trusted OS
-      // input host uses this acknowledgment before pressing the mouse button.
-      return new Promise((resolve) => {
-        view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve(true)));
       });
     }
 
@@ -556,8 +526,7 @@
       const verb = verbOf(msg);
 
       if (phase === "start" && !isAgentMessage) {
-        agent.nativePoint = exactPoint;
-        agent.nativePointerLive = false;
+        agent.pagePoint = exactPoint;
         agent.hintRect = hint ? { x: hint.x, y: hint.y, width: Number(hint.width) || 0, height: Number(hint.height) || 0, at: now } : null;
         agent.targetActive = Boolean(selector || agent.hintRect || exactPoint);
         agent.focusUntil = 0;
@@ -684,8 +653,14 @@
         // invalidates the port that is already carrying the shared UI.
         if (state.ready && state.port && state.box.isConnected && state.frame.isConnected) {
           layout(state);
+          probeFramePort(state);
           continue;
         }
+        if (host.dataset && host.dataset[state.failureKey] === "authentication-timeout") {
+          layout(state); // A terminal retry failure needs a page reload, not another automatic retry loop.
+          continue;
+        }
+        clearFrameHealthTimer(state);
         clearFrameAuthTimer(state);
         closeFramePort(state);
         state.ready = false;
@@ -706,12 +681,17 @@
         }
         layout(state);
         state.frame.src = state.src;
+        scheduleFrameAuthRetry(state); // A missing load event must not strand resume in an unbounded wait.
       }
     }
 
     function suspend() {
       if (destroyed) return;
       for (const state of frames.values()) {
+        if (state.loadGuard) {
+          view.clearTimeout(state.loadGuard);
+          state.loadGuard = 0;
+        }
         clearFrameAuthTimer(state);
         closeFramePort(state);
         state.ready = false;
@@ -757,13 +737,14 @@
       shadow.appendChild(box);
       let nonce = "";
       try { nonce = new URL(src, doc.baseURI).searchParams.get("n") || ""; } catch {}
-      const state = { kind, box, frame, src, nonce, port: null, size: { w: defaults.w, h: defaults.h }, pos: null, shown: true, defaults, ready: false, pending: new Map(), setFrameStage, loadCount: 0, authCount: 0, retryCount: 0 };
+      const state = { kind, box, frame, src, nonce, port: null, size: { w: defaults.w, h: defaults.h }, pos: null, shown: true, defaults, ready: false, pending: new Map(), setFrameStage, loadCount: 0, authCount: 0, retryCount: 0, healthProbeId: "", healthProbeSeq: 0, healthTimer: 0 };
       const traceKey = `m9r${kind === "pill" ? "Pill" : "Composer"}Lifecycle`;
       const trace = (stage) => {
         if (!host.dataset) return;
         host.dataset[traceKey] = `${host.dataset[traceKey] || ""}${stage};`.slice(-96);
       };
       state.trace = trace;
+      state.failureKey = `m9r${kind === "pill" ? "Pill" : "Composer"}Failure`;
       setFrameStage("mounted");
       // The thread pill rides the dock track when the dock module is loaded; otherwise it keeps its old free position.
       state.dock = kind === "pill" && !!global.M9RDock && !Number.isFinite(defaults.top);
@@ -783,8 +764,42 @@
         // In that ordering, tearing down the newly transferred port here races a valid
         // handshake and can leave the frame waiting on a retry against about:blank.
         // A ready cross-origin frame has already proven its current document with the
-        // tab nonce, so keep its channel and let subsequent navigation events re-auth.
-        if (state.ready && !frame.contentDocument) return;
+        // tab nonce, so keep its channel. Chrome may deliver the old about:blank load
+        // after that proof; defer a page-origin load briefly so the real extension
+        // document can replace the stale WindowProxy before deciding to re-auth.
+        if (state.ready) {
+          if (!frame.contentDocument) return;
+          let documentUrl = "";
+          try { documentUrl = String(frame.contentDocument.URL || frame.contentDocument.location?.href || ""); } catch {}
+          // Chrome can expose the parent page's URL (or no URL) for the trailing
+          // about:blank load in the isolated world even though the authenticated
+          // extension document still owns the WindowProxy. The frame lives in a
+          // closed shadow root, so the page cannot navigate it behind our back;
+          // preserve the proven channel for that browser-only representation.
+          const pageUrl = typeof view.location?.href === "string" ? view.location.href : "";
+          if (pageUrl && (!documentUrl || documentUrl === pageUrl)) return;
+          // In Chrome's extension isolated world, contentDocument can be readable
+          // even for the authenticated extension page. Its URL is the stronger
+          // signal than the truthiness check above; keep the private port alive
+          // across that document's late load event.
+          if (documentUrl.startsWith(`${extensionOrigin}/`)) return;
+          if (documentUrl === "about:blank") {
+            if (!state.loadGuard) {
+              state.loadGuard = view.setTimeout(() => {
+                state.loadGuard = 0;
+                if (destroyed || frames.get(kind) !== state || !host.isConnected || !frame.isConnected || !state.ready || !frame.contentDocument) return;
+                state.ready = false;
+                clearFrameAuthTimer(state);
+                closeFramePort(state);
+                setFrameStage("authenticating");
+                layout(state);
+                scheduleFrameAuthRetry(state);
+                trace("G");
+              }, 50);
+            }
+            return;
+          }
+        }
         clearFrameAuthTimer(state);
         // An about:blank load may precede the extension document, and the frame may
         // announce itself before its load event. Every load invalidates the old port
@@ -834,6 +849,58 @@
       state.port = null;
     }
 
+    function clearFrameHealthTimer(state) {
+      if (state.healthTimer) {
+        try { view.clearTimeout(state.healthTimer); } catch {}
+      }
+      state.healthTimer = 0;
+      state.healthProbeId = "";
+    }
+
+    function recoverFrameAfterHealthFailure(state, probeId) {
+      if (destroyed || state.healthProbeId !== probeId || frames.get(state.kind) !== state || !state.frame.isConnected) return;
+      clearFrameHealthTimer(state);
+      state.ready = false;
+      closeFramePort(state);
+      state.pending.clear(); // Never replay stale UI commands into a replacement document.
+      state.setFrameStage("retrying");
+      if (host.dataset) host.dataset[state.failureKey] = "port-unresponsive";
+      state.trace("Q");
+      layout(state);
+      retryFrame(state);
+    }
+
+    function probeFramePort(state) {
+      if (destroyed || !state.ready || !state.port || state.healthProbeId) return;
+      const probeId = `${Date.now().toString(36)}-${++state.healthProbeSeq}`;
+      state.healthProbeId = probeId;
+      state.healthTimer = view.setTimeout(() => recoverFrameAfterHealthFailure(state, probeId), FRAME_HEALTH_TIMEOUT_MS);
+      try {
+        state.port.postMessage({ m9r: "host", nonce: state.nonce, kind: "health-ping", probeId });
+      } catch {
+        recoverFrameAfterHealthFailure(state, probeId);
+      }
+    }
+
+    function onFramePortMessage(state, event) {
+      const data = event && event.data;
+      if (!data || data.m9r !== "frame" || data.nonce !== state.nonce || data.kind !== "health-pong" || data.probeId !== state.healthProbeId) return;
+      clearFrameHealthTimer(state);
+      state.trace("P");
+    }
+
+    function failFrameAuthentication(state) {
+      clearFrameAuthTimer(state);
+      clearFrameHealthTimer(state);
+      state.ready = false;
+      closeFramePort(state);
+      state.pending.clear();
+      state.setFrameStage("failed");
+      if (host.dataset) host.dataset[state.failureKey] = "authentication-timeout";
+      state.trace("F");
+      layout(state);
+    }
+
     function clearFrameAuthTimer(state) {
       if (!state.authTimer) return;
       try { view.clearTimeout(state.authTimer); } catch {}
@@ -845,21 +912,33 @@
       state.authTimer = view.setTimeout(() => {
         state.authTimer = 0;
         if (destroyed || state.ready || !host.isConnected || !state.frame.isConnected || frames.get(state.kind) !== state) return;
-        // A load event has no origin. Until the frame proves its extension origin with its nonce,
-        // keep it hidden and retry the known extension URL rather than leaving an orphan page mounted.
-        state.setFrameStage("retrying");
-        state.retryCount++;
-        if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Retries`] = String(state.retryCount);
-        if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Recipient`] = state.frame.contentDocument ? "page-origin" : "cross-origin";
-        if (host.dataset) {
-          const key = `m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`;
-          host.dataset[key] = `${host.dataset[key] || ""}R${state.retryCount}${state.frame.contentDocument ? "P" : "X"};`.slice(-96);
+        if (state.retryCount >= MAX_FRAME_AUTH_RETRIES) {
+          failFrameAuthentication(state);
+          return;
         }
-        closeFramePort(state);
-        const retryUrl = new URL(state.src);
-        retryUrl.searchParams.set("m9r_retry", String(state.retryCount));
-        state.frame.src = retryUrl.href;
+        retryFrame(state);
       }, FRAME_AUTH_TIMEOUT_MS);
+    }
+
+    function retryFrame(state) {
+      if (destroyed || frames.get(state.kind) !== state || !host.isConnected || !state.frame.isConnected) return;
+      if (state.retryCount >= MAX_FRAME_AUTH_RETRIES) {
+        failFrameAuthentication(state);
+        return;
+      }
+      state.retryCount++;
+      state.setFrameStage("retrying");
+      if (host.dataset) {
+        host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Retries`] = String(state.retryCount);
+        host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Recipient`] = state.frame.contentDocument ? "page-origin" : "cross-origin";
+        const key = `m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`;
+        host.dataset[key] = `${host.dataset[key] || ""}R${state.retryCount}${state.frame.contentDocument ? "P" : "X"};`.slice(-96);
+      }
+      closeFramePort(state);
+      const retryUrl = new URL(state.src);
+      retryUrl.searchParams.set("m9r_retry", String(state.retryCount));
+      state.frame.src = retryUrl.href;
+      scheduleFrameAuthRetry(state); // Also covers a trusted URL assignment that never produces a load event.
     }
 
     function postToFrame(state, payload) {
@@ -910,7 +989,7 @@
       bottom = Math.min(Math.max(bottom, 4), Math.max(4, vh - h - 4));
       state.box.style.cssText = `left:${left}px;bottom:${bottom}px;width:${w / zoomK}px;height:${h / zoomK}px;transform:scale(${zoomK});transform-origin:0 100%`;
       state.box.classList.add("ready");
-      state.box.classList.toggle("hidden", !state.shown || !state.ready);
+      state.box.classList.toggle("hidden", !state.shown || !state.ready || state.suppressed === true);
       state.shownAt = { left, bottom, w, h };
     }
 
@@ -986,7 +1065,7 @@
         sp.l.setTarget(left); sp.t.setTarget(top); sp.r.setTarget(left + w); sp.b.setTarget(top + h);
       }
       state.box.classList.add("ready");
-      state.box.classList.toggle("hidden", !state.shown || !state.ready);
+      state.box.classList.toggle("hidden", !state.shown || !state.ready || state.suppressed === true);
       applyDock(state);
       if (!Object.values(sp).every((s) => s.settled()) && !dockLoop) {
         dockLast = 0;
@@ -1031,11 +1110,18 @@
       else dockLast = 0;
     }
 
-    function frameFor(source) {
+    function frameFor(source, nonce) {
       if (!host.isConnected) return null;
       for (const state of frames.values()) {
         if (state.box.isConnected && state.frame.isConnected && state.frame.contentWindow === source) return state;
       }
+      // Chrome can expose a different WindowProxy wrapper for a cross-world iframe
+      // message than the wrapper returned by iframe.contentWindow. The extension
+      // origin and the per-frame nonce have already been checked by the caller, so
+      // accept a single connected frame with that nonce instead of stranding the UI.
+      if (typeof nonce !== "string" || !nonce) return null;
+      const matches = [...frames.values()].filter((state) => state.box.isConnected && state.frame.isConnected && state.nonce === nonce);
+      if (matches.length === 1) return matches[0];
       return null;
     }
 
@@ -1046,7 +1132,7 @@
         if (host.dataset) host.dataset.m9rFrameHandshake = "origin-mismatch";
         return;
       }
-      const state = frameFor(event.source);
+      const state = frameFor(event.source, data.nonce);
       if (!state) {
         if (host.dataset) host.dataset.m9rFrameHandshake = "source-mismatch";
         return;
@@ -1059,6 +1145,10 @@
         if (typeof global.MessageChannel !== "function") return;
         const channel = new global.MessageChannel();
         state.port = channel.port1;
+        state.port.onmessage = (message) => onFramePortMessage(state, message);
+        state.port.onmessageerror = () => {
+          if (state.healthProbeId) recoverFrameAfterHealthFailure(state, state.healthProbeId);
+        };
         try {
           state.frame.contentWindow.postMessage({ m9r: "host-port", nonce: state.nonce }, extensionOrigin, [channel.port2]);
         } catch {
@@ -1070,6 +1160,8 @@
         state.ready = true;
         state.setFrameStage("ready");
         state.authCount++;
+        state.retryCount = 0;
+        if (host.dataset) host.dataset[state.failureKey] = "";
         if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Auths`] = String(state.authCount);
         if (host.dataset) host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`] = `${host.dataset[`m9r${state.kind === "pill" ? "Pill" : "Composer"}Lifecycle`] || ""}A${state.authCount}${state.frame.contentDocument ? "P" : "X"};`.slice(-96);
         if (host.dataset) host.dataset.m9rFrameHandshake = "ready";
@@ -1104,8 +1196,9 @@
         if (storage && state.shownAt) void storage.set({ [POSITION_KEYS[state.kind]]: { left: state.shownAt.left, bottom: state.shownAt.bottom } }).catch(() => {});
       } else if (data.kind === "hotkey") {
         if (options && typeof options.onHotkey === "function" && (data.key === "m" || data.key === "n")) options.onHotkey(data.key, data.down === true);
-      } else if (data.kind === "suppress" && Number.isFinite(state.defaults.top)) {
-        // The desktop pill started or stopped. Only a change arrives, so a shortcut that brought this pill back stays.
+      } else if (data.kind === "suppress") {
+        // The desktop pill started or stopped. This applies to both the retired top-notch layout and the current
+        // edge-docked one-pill layout; the browser shell must yield to the desktop shell in either mode.
         state.suppressed = data.on === true;
         layout(state);
       } else if (data.kind === "focus-composer") {
@@ -1121,7 +1214,7 @@
     // The new pill carries its own message view, so it is mounted without a separate message bar and the shortcuts open that view.
     function openPillMessage() {
       const pill = frames.get("pill");
-      if (!pill || !Number.isFinite(pill.defaults.top)) return false;
+      if (!pill) return false;
       pill.shown = true;
       pill.suppressed = false;
       layout(pill);
@@ -1157,7 +1250,7 @@
       if (!state) {
         // The new pill listens in its own message view.
         const pill = frames.get("pill");
-        if (!pill || !Number.isFinite(pill.defaults.top)) return;
+        if (!pill) return;
         if (active) { pill.shown = true; pill.suppressed = false; layout(pill); }
         postToFrame(pill, { kind: "talk", active: !!active });
         return;
@@ -1208,6 +1301,11 @@
       attempt(() => view.removeEventListener("resize", onResize));
       attempt(() => view.removeEventListener("scroll", onScroll, true));
       for (const state of frames.values()) {
+        if (state.loadGuard) {
+          attempt(() => view.clearTimeout(state.loadGuard));
+          state.loadGuard = 0;
+        }
+        clearFrameHealthTimer(state);
         clearFrameAuthTimer(state);
         attempt(() => state.frame.removeEventListener("load", state.onLoad));
         attempt(() => closeFramePort(state));
@@ -1240,7 +1338,7 @@
     }
 
     const api = {
-      update, remove, leave, stop, resume, destroy, snapshot, isDoneVisible, syncAgents, nativePointer,
+      update, remove, leave, stop, resume, destroy, snapshot, isDoneVisible, syncAgents,
       mountFrame, showComposer, toggleComposer, togglePill, talk, whenArrived, setZoom, suspend,
     };
     view.__m9rPresenceOverlayInstance = api;

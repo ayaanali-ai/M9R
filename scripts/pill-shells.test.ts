@@ -30,7 +30,7 @@ test("browser ui-state becomes a snapshot: agents with their recent actions, app
     ],
     approvals: [{ id: "p1", agent: "codex", provider: "codex", text: "Click “Post” on the composer", site: "x.com", action: "post" }],
   });
-  assert.deepEqual(snap.agents.map((a) => [a.handle, a.provider, a.state]), [["claude", "claude", "working"], ["codex", "codex", "waiting"], ["weird", "agent", "idle"]]);
+  assert.deepEqual(snap.agents.map((a) => [a.handle, a.provider, a.state]), [["claude", "claude", "working"], ["codex", "codex", "waiting"], ["weird", "agent", "unknown"]]);
   assert.deepEqual(snap.agents[0].activity, ["Opened example.com", "Found three plans.", "Reading the pricing table"], "start markers are dropped, the live line is last");
   assert.deepEqual(snap.agents[1].activity, ["Clicked Buy"]);
   assert.deepEqual(snap.approvals, [{ id: "p1", agent: "codex", title: "post", detail: "Click “Post” on the composer  ·  x.com" }]);
@@ -42,7 +42,7 @@ test("malformed ui-state degrades to an empty snapshot instead of throwing", () 
   assert.deepEqual(fromUiState({ agents: null, thread: "x", approvals: 3 } as never), { agents: [], approvals: [], thread: [] });
 });
 
-test("the desktop feed becomes a snapshot: states, queued asks as activity, approvals and answers", () => {
+test("the desktop feed keeps provider activity separate from queued asks, approvals and answers", () => {
   const snap = fromFeed({
     agents: [{ handle: "claude", state: "open_working" }, { handle: "codex", state: "open_idle" }, { handle: "opencode", state: "offline" }],
     inProgress: [{ taskId: "T5", from: "claude", to: "codex", goal: "review the diff", state: "working" }],
@@ -53,7 +53,7 @@ test("the desktop feed becomes a snapshot: states, queued asks as activity, appr
     ],
     web: [{ at: "2026-10-02T19:00:00Z", agent: "claude", kind: "action", text: "Opened x.com" }, { at: "2026-10-02T18:59:00Z", agent: "claude", kind: "worker", text: "run ended" }],
   });
-  assert.deepEqual(snap.agents.map((a) => [a.handle, a.state]), [["claude", "working"], ["codex", "working"], ["opencode", "stopped"]], "an agent with a working task counts as working");
+  assert.deepEqual(snap.agents.map((a) => [a.handle, a.state]), [["claude", "working"], ["codex", "idle"], ["opencode", "stopped"]], "a waiting assignment does not claim the provider is working");
   assert.deepEqual(snap.agents[0].activity, ["Opened x.com"], "worker lines are not activity");
   assert.deepEqual(snap.agents[1].activity, ["@claude asked: review the diff"]);
   assert.deepEqual(snap.approvals, [{ id: "T6", agent: "opencode", title: "@claude asks @opencode", detail: "read secrets.txt" }]);
@@ -85,20 +85,30 @@ test("extension transport sends the exact commands the service worker validates,
   await assert.rejects(transport.send("x"), /not connected/);
 });
 
-test("extension transport delivers only ui-state messages from the port, converted", () => {
+test("extension transport reports broker state and ignores stale snapshots while offline", () => {
   const got: unknown[] = [];
   let onMessage: (m: unknown) => void = () => {};
+  let onDisconnect: () => void = () => {};
   const transport = createExtensionTransport({
     id: "ext",
-    connect: () => ({ onMessage: { addListener: (fn) => { onMessage = fn; } }, onDisconnect: { addListener() {} } }),
+    connect: () => ({ onMessage: { addListener: (fn) => { onMessage = fn; } }, onDisconnect: { addListener: (fn) => { onDisconnect = fn; } } }),
     sendMessage: async () => ({ ok: true }),
   });
-  transport.subscribe((s) => got.push(s));
+  const stop = transport.subscribe((s) => got.push(s));
+  assert.equal((got.at(-1) as { connection?: string }).connection, "connecting");
   onMessage({ type: "m9r-broker", connected: true });
+  assert.equal((got.at(-1) as { connection?: string }).connection, "connecting");
   onMessage(null);
   onMessage({ type: "ui-state", agents: [{ id: "claude", provider: "claude", state: "idle" }], thread: [], approvals: [] });
-  assert.equal(got.length, 1);
-  assert.equal((got[0] as { agents: unknown[] }).agents.length, 1);
+  assert.equal((got.at(-1) as { connection?: string }).connection, "connected");
+  assert.equal((got.at(-1) as { agents: unknown[] }).agents.length, 1);
+  onMessage({ type: "m9r-broker", connected: false });
+  assert.equal((got.at(-1) as { connection?: string }).connection, "disconnected");
+  onMessage({ type: "ui-state", agents: [{ id: "claude", provider: "claude", state: "working" }], thread: [], approvals: [] });
+  assert.equal((got.at(-1) as { connection?: string }).connection, "disconnected", "late state cannot restore stale working status");
+  onDisconnect();
+  assert.equal((got.at(-1) as { connection?: string }).connection, "disconnected");
+  stop?.();
 });
 
 test("desktop transport maps decisions and typed messages onto the overlay's commands", async () => {
@@ -172,11 +182,14 @@ test("the page frame answers the host's hello, then reports exactly the island's
   assert.deepEqual(sent, [{ m9r: "frame", nonce, kind: "size", w: 240, h: 6 }]);
 
   let onmessage: ((m: unknown) => void) | null = null;
-  const port = { start() {}, close() {}, set onmessage(fn: (m: unknown) => void) { onmessage = fn; } };
+  const replies: unknown[] = [];
+  const port = { start() {}, close() {}, postMessage(message: unknown) { replies.push(message); }, set onmessage(fn: (m: unknown) => void) { onmessage = fn; } };
   deliver({ m9r: "host-port", nonce }, parent, [port]);
   onmessage!({ data: { m9r: "host", nonce, kind: "open-message" } });
   onmessage!({ data: { m9r: "host", nonce: "c".repeat(32), kind: "open-message" } });
+  onmessage!({ data: { m9r: "host", nonce, kind: "health-ping", probeId: "probe-1" } });
   assert.deepEqual(commands, ["open-message"], "only commands carrying this frame's nonce are honoured");
+  assert.deepEqual(replies, [{ m9r: "frame", nonce, kind: "health-pong", probeId: "probe-1" }], "a live frame acknowledges its private-port health probe");
 });
 
 test("the desktop transport forwards the island's window hooks to the overlay commands", async () => {
@@ -191,6 +204,27 @@ test("the desktop transport forwards the island's window hooks to the overlay co
     ["pill_set_collapsed", { collapsed: true }],
     ["pill_set_focus", { focused: true }],
   ], "a rejected rectangle does not throw into the UI");
+});
+
+test("desktop dictation uses the WebView permission flow and opens Windows settings only after denial", () => {
+  const oldWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const recognizer = class {} as unknown as new () => import("../pill/src/core/speech").RecognitionLike;
+  const calls: string[] = [];
+  try {
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { SpeechRecognition: recognizer } });
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: { language: "en-US" } });
+    const transport = createDesktopTransport(async (command) => { calls.push(command); return ""; });
+    assert.equal(transport.capabilities?.dictation, true);
+    const speech = transport.createDictationEnvironment!();
+    assert.equal(speech.Recognition, recognizer);
+    assert.equal(speech.micIsOn, undefined, "the desktop lets the WebView request permission on the Alt+M press");
+    speech.openMicSetup();
+    assert.deepEqual(calls, ["open_microphone_settings"]);
+  } finally {
+    if (oldWindow) Object.defineProperty(globalThis, "window", oldWindow); else Reflect.deleteProperty(globalThis, "window");
+    if (oldNavigator) Object.defineProperty(globalThis, "navigator", oldNavigator); else Reflect.deleteProperty(globalThis, "navigator");
+  }
 });
 
 test("the browser shell carries the desktop-pill flag, and the frame asks its page to step aside only when it changes", () => {

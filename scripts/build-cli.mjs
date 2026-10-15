@@ -8,13 +8,17 @@
 // `npm run build:cli` and by the cli package's `prepack` hook before `npm pack`.
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, cpSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { buildSync } from "esbuild";
+import { publishGeneratedDirectory } from "./engine-build-transaction.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const outDir = resolve(repoRoot, "cli", "dist");
+const cliDir = resolve(repoRoot, "cli");
+const finalOutDir = resolve(cliDir, "dist");
+const outDir = resolve(cliDir, `.dist-stage-${process.pid}-${randomUUID()}`);
 
 const SHEBANG = "#!/usr/bin/env node\n";
 
@@ -30,8 +34,8 @@ function transpile(tsSource) {
 }
 
 function build() {
-  // cli/dist is generated and ignored. Clear it first so deleted source
-  // modules cannot survive into a new tarball as stale release content.
+  // Build into a unique sibling so an interrupted build cannot destroy the
+  // last usable CLI distribution. The completed directory replaces cli/dist.
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
 
@@ -284,7 +288,7 @@ function build() {
 
   // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "local-store", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "vendor-launch-core", "claude-session-id-core", "live-session-core", "provider-usage-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server"]) {
+  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "local-store", "runtime-install-transaction", "runtime-build-identity", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source)
       .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
@@ -345,6 +349,8 @@ function build() {
   );
   const workspaceResultIdempotencyTs = readFileSync(resolve(repoRoot, "src/lib/bridge/workspace-result-idempotency.ts"), "utf8");
   writeFileSync(resolve(outDir, "workspace-result-idempotency.js"), transpile(workspaceResultIdempotencyTs));
+  const providerCooldownCoreTs = readFileSync(resolve(repoRoot, "src/lib/native/provider-cooldown-core.ts"), "utf8");
+  writeFileSync(resolve(outDir, "provider-cooldown-core.js"), transpile(providerCooldownCoreTs));
   const bridgeRuntimeTs = readFileSync(resolve(repoRoot, "services/mission-bridge/src/bridge-runtime.ts"), "utf8");
   const bridgeRuntimeJs = transpile(bridgeRuntimeTs)
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/bridge-protocol['"]/g, '"./bridge-protocol.js"')
@@ -364,6 +370,7 @@ function build() {
     .replace('"../../../src/lib/mission/workspace-cursor"', '"./workspace-cursor.js"')
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/workspace-prompt-queue['"]/g, '"./workspace-prompt-queue.js"')
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/workspace-result-idempotency['"]/g, '"./workspace-result-idempotency.js"')
+    .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/native\/provider-cooldown-core['"]/g, '"./provider-cooldown-core.js"')
     // Dynamic import (inside ensureTerminalPane), not a static one -- this
     // one was missing from the rewrite list entirely. Confirmed live: the
     // packaged CLI crashed every provider the moment M9R_TERMINAL_PANES
@@ -503,7 +510,13 @@ function build() {
   // 4. Entry — rewrite the "@/lib/oathlock-cli-core" alias to a relative import,
   //    then prepend the shebang so it runs as a bin.
   const entryTs = readFileSync(resolve(repoRoot, "scripts/m9r-cli.ts"), "utf8");
-  let entryJs = transpile(entryTs).replace(
+  let entryJs = transpile(entryTs)
+    .replace(/['"]\.\.\/src\/lib\/native\/agent-chrome-cli['"]/g, '"./agent-chrome-cli.js"')
+    .replace(/['"]\.\.\/src\/lib\/native\/windows-desktop-stage['"]/g, '"./windows-desktop-stage.js"')
+    .replace(/['"]\.\.\/src\/lib\/native\/cua-stage-driver['"]/g, '"./cua-stage-driver.js"')
+    .replace(/['"]\.\.\/src\/lib\/native\/task-desktop-stage['"]/g, '"./task-desktop-stage.js"')
+    .replace(/['"]\.\.\/src\/lib\/native\/task-stage-apps['"]/g, '"./task-stage-apps.js"')
+    .replace(
     /["']@\/lib\/oathlock-cli-core["']/g,
     '"./oathlock-cli-core.js"',
   );
@@ -609,7 +622,7 @@ function build() {
 
   // Leaf modules that several compiled files import through the app's `@/` alias. Without this pass the packaged CLI
   // crashes on start with ERR_MODULE_NOT_FOUND ("Cannot find package '@/lib'").
-  for (const [source, name] of [["src/lib/native/m9r-compatibility.ts", "m9r-compatibility"], ["src/lib/terminal-config.ts", "terminal-config"], ["packages/web-protocol-placeholder/src/index.ts", "web-protocol-placeholder"]]) {
+  for (const [source, name] of [["src/lib/native/m9r-compatibility.ts", "m9r-compatibility"], ["src/lib/native/broker-update-record.ts", "broker-update-record"], ["src/lib/terminal-config.ts", "terminal-config"], ["packages/web-protocol-placeholder/src/index.ts", "web-protocol-placeholder"]]) {
     writeFileSync(resolve(outDir, `${name}.js`), transpile(readFileSync(resolve(repoRoot, source), "utf8")));
   }
   for (const file of readdirSync(outDir)) {
@@ -632,7 +645,17 @@ function build() {
   // compares its own startup-captured value against on every poll cycle.
   writeFileSync(resolve(outDir, "build-info.json"), JSON.stringify({ builtAt: new Date().toISOString() }, null, 2) + "\n");
 
-  console.log(`Built CLI -> ${outDir}`);
+  // Validate the generated native setup dependency graph before publishing.
+  // A missing generated module must fail this build, not the subsequent SEA
+  // packaging or a user's first setup command. No verification bundle ships.
+  buildSync({ entryPoints: [resolve(outDir, "native-commands.js")], bundle: true,
+    platform: "node", format: "esm", write: false, logLevel: "warning" });
+  publishGeneratedDirectory(outDir, finalOutDir);
+  console.log(`Built CLI -> ${finalOutDir}`);
 }
 
-build();
+try {
+  build();
+} finally {
+  rmSync(outDir, { recursive: true, force: true });
+}

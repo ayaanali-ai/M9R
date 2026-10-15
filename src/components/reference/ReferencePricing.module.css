@@ -1,0 +1,37 @@
+/* Pricing page: extends the homepage's ReferenceHome system (same fonts, backdrop,
+   Win95 windows, gold buttons). Only pricing-specific pieces live here. */
+.page{min-height:100dvh}
+.main{max-width:1240px;margin:0 auto;padding:208px 40px 140px;position:relative;z-index:2}
+.intro{text-align:center}
+.intro h1{font:100px/85px StudyArray;letter-spacing:-.02em;margin:0;animation:pricingAppear 1s both}
+.intro p{font:italic 40px/52px StudyInstrument,serif;margin:22px auto 0;max-width:22em;animation:pricingAppear 1s .15s both}
+
+.toggleRow{display:flex;align-items:center;justify-content:center;gap:16px;margin:64px 0 40px;font:22px/28px StudyGaramond,serif;color:#f0ebea}
+.toggle{display:inline-flex;gap:2px;padding:3px;background:silver;box-shadow:inset -1px -1px #0a0a0a,inset 1px 1px #dfdfdf,inset -2px -2px gray,inset 2px 2px #fff}
+.toggle button{font:14px/1 StudyPixel,Arial,sans-serif;-webkit-font-smoothing:none;color:#222;background:silver;border:0;border-radius:0;padding:9px 16px 8px;min-height:32px;box-shadow:inset -1px -1px #0a0a0a,inset 1px 1px #fff,inset -2px -2px gray,inset 2px 2px #dfdfdf}
+.toggle button[aria-pressed=true]{background:#dfdfdf;box-shadow:inset -1px -1px #fff,inset 1px 1px #0a0a0a,inset -2px -2px #dfdfdf,inset 2px 2px gray;padding:10px 15px 7px 17px}
+
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:32px;align-items:stretch}
+.plan{height:100%}
+.planBody{display:flex;flex-direction:column}
+.planBody>p:not(:first-child){font-size:21px;line-height:29px}
+.planName{font:italic 400 52px/52px StudyInstrument,serif;margin:0 0 20px;color:#000}
+.price{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 12px;margin:0 0 6px!important}
+.amount{font:600 76px/1 StudyHaas,sans-serif;letter-spacing:-.02em;color:#000;font-variant-numeric:tabular-nums}
+.unit{font:italic 22px/28px StudyInstrument,serif;color:#333}
+.planBody>p.aside{font:15px/22px StudyPixel,Arial,sans-serif;color:#555;margin:0 0 18px;min-height:22px}
+.planBody>p.price+p:not(.aside){margin-top:12px}
+.planBody :global(a),.planBody button{align-self:flex-start}
+.planBody div{margin-top:auto;padding-top:28px}
+.planBody button:disabled{filter:grayscale(.5) brightness(.95);cursor:progress}
+.planBody>p.fine{font-size:17px;line-height:24px;color:#444;margin-top:16px}
+.planBody>p.error{font-size:17px;line-height:24px;color:#a10000;margin-top:14px}
+
+.note{font:20px/28px StudyGaramond,serif;color:#f0ebea;text-shadow:0 2px 10px #000;text-align:center;max-width:44em;margin:56px auto 0}
+
+@keyframes pricingAppear{from{opacity:0;filter:blur(8px);translate:0 30px}to{opacity:1;filter:blur(0);translate:0 0}}
+@media(min-width:1101px){.planName{min-height:104px}}
+@media(max-width:1100px){.grid{grid-template-columns:1fr;max-width:640px;margin:0 auto}}
+@media(max-width:1023px){.intro h1{font-size:80px;line-height:75px}}
+@media(max-width:639px){.main{padding:132px 16px 90px}.intro h1{font-size:49px;line-height:44px}.intro p{font-size:26px;line-height:34px}.toggleRow{flex-direction:column;gap:10px;margin:40px 0 28px;font-size:19px}.planName{font-size:42px;line-height:44px}.amount{font-size:60px}.note{font-size:17px;line-height:24px}}
+@media(prefers-reduced-motion:reduce){.intro h1,.intro p{animation:none}}

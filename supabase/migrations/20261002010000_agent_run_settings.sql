@@ -19,5 +19,6 @@ alter table public.channel_agent_settings enable row level security;
 grant select on public.channel_agent_settings to authenticated;
 grant all on public.channel_agent_settings to service_role;
 -- API performs connection ownership + channel visibility checks before writing.
+drop policy if exists "visible channel settings" on public.channel_agent_settings;
 create policy "visible channel settings" on public.channel_agent_settings for select to authenticated
 using (exists (select 1 from public.agent_conversations c where c.id = conversation_id and c.workspace_id = channel_agent_settings.workspace_id));
