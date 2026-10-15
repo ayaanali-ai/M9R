@@ -49,6 +49,7 @@
     "node_modules",
     "extensions",
     "overlay",
+    "pill/src",
     "pill/vite.config.ts",
     "runleak-analyzer-mvp"
   ]

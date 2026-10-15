@@ -16,5 +16,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - run: npm --prefix pill ci
       - run: npm run typecheck
+      - run: npm --prefix pill run typecheck
       - run: npm run lint
