@@ -243,7 +243,9 @@ export function createTaskDesktopStageService(input: {
       const selected = ownedApps.get(name);
       // The selected app is the default target after launch. Explicit desktop
       // actions detach only the view anchor; the selected app remains available.
-      const effectiveAction: typeof action = { ...action, view: action.view ?? (selected?.taskId === taskId ? "app" : "desktop") };
+      const effectiveAction: typeof action = action.kind === "read_structure"
+        ? action
+        : { ...action, view: action.view ?? (selected?.taskId === taskId ? "app" : "desktop") };
       if (mode === "owner-preview" && effectiveAction.view === "desktop" && inspected.anchor) {
         await manager.adoptCurrentDesktop(name);
         inspected = await manager.inspectStage(name);
@@ -264,7 +266,7 @@ export function createTaskDesktopStageService(input: {
       // The approval wait above can outlast a revocation: recheck before anything executes.
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-      const mutating = action.kind !== "capture";
+      const mutating = action.kind !== "capture" && action.kind !== "read_structure";
       const receiptInput = mutating && operationId ? {
         handle: identity.handle,
         sessionId: identity.sessionId,

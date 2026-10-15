@@ -3,6 +3,7 @@ import { classifyWebActionRisk } from "./risk-core";
 
 type TaskStageActionBody =
   | { kind: "capture" }
+  | { kind: "read_structure"; view: "app" }
   | { kind: "click" | "cursor"; x: number; y: number }
   | { kind: "double_click" | "right_click"; x: number; y: number }
   | { kind: "type"; text: string }
@@ -28,14 +29,15 @@ function validKey(value: unknown): value is string {
 export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid stage action.");
   const action = value as Record<string, unknown>;
-  const fields: Record<string, string[]> = { capture: [], click: ["x", "y"], double_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
+  const fields: Record<string, string[]> = { capture: [], read_structure: [], click: ["x", "y"], double_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
     type: ["text"], scroll: ["x", "y", "direction"], drag: ["fromX", "fromY", "toX", "toY"], press_key: ["key"], hotkey: ["keys"] };
   if (typeof action.kind !== "string" || !Object.hasOwn(fields, action.kind)) throw new Error("Unsupported stage action.");
   const allowedFields = fields[action.kind]!;
-  const requiredFields = action.kind === "type" ? ["text"] : allowedFields;
+  const requiredFields = action.kind === "type" ? ["text"] : action.kind === "read_structure" ? ["view"] : allowedFields;
   if (Object.keys(action).some((key) => key !== "kind" && key !== "view" && !allowedFields.includes(key))
     || requiredFields.some((key) => !Object.hasOwn(action, key))) throw new Error("Invalid stage action fields.");
   if (action.view !== undefined && action.view !== "desktop" && action.view !== "app") throw new Error("Invalid stage action view.");
+  if (action.kind === "read_structure" && action.view !== "app") throw new Error("Structure observation requires the exact app view.");
   for (const key of ["x", "y", "fromX", "fromY", "toX", "toY"]) {
     if (key in action && (!Number.isSafeInteger(action[key]) || (action[key] as number) < 0 || (action[key] as number) > 16383)) {
       throw new Error("Invalid stage action coordinates.");
@@ -61,6 +63,9 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     ? driver.clickDesktop(name, x, y, identity, options) : driver.click(name, x, y, identity, options);
   switch (action.kind) {
     case "capture": return { capture: await capture() };
+    case "read_structure":
+      if (!desktopWide) return driver.readStructure(name, identity);
+      throw new Error("Structure-first observation requires one exact app window; desktop-wide observation remains visual.");
     case "cursor": return cursor(action.x, action.y);
     case "click": return click(action.x, action.y);
     case "double_click": return click(action.x, action.y, { count: 2 });

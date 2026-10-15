@@ -331,6 +331,87 @@ test("captures only the registered window and reliably closes the Cua session", 
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession", "shutdown"]);
 }));
 
+test("reads the exact app accessibility tree without exposing driver metadata", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const structure = await createCuaStageDriver({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls, state: {
+      pid: 4321,
+      windowId: BigInt(windowId),
+      appName: "notepad.exe",
+      windowTitle: "Untitled",
+      elementsComplete: true,
+      elements: [
+        { elementIndex: BigInt(1), depth: 0, role: "Document", label: "Editor", elementToken: "driver-token-root", actions: ["focus"] },
+        { elementIndex: BigInt(2), parentIndex: BigInt(1), depth: 1, role: "Edit", label: "Document", elementToken: "driver-token-edit", enabled: true, actions: ["click", "set_value"] },
+      ],
+      screenshotFrameValid: true,
+      screenshotWidth: 200,
+      screenshotHeight: 100,
+      windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+      images: [{ mimeType: "image/png", dataBase64: imageData }],
+    } }) as never,
+    now: () => new Date("2026-10-05T12:00:00.000Z"),
+  }).readStructure("stage");
+  assert.equal(structure.status, "complete");
+  assert.equal(structure.appName, "notepad.exe");
+  assert.equal(structure.windowTitle, "Untitled");
+  assert.deepEqual(structure.elements[1], {
+    ref: "driver-token-edit", parentRef: "driver-token-root", depth: 1, role: "Edit", label: "Document", enabled: true,
+    actions: ["click", "set_value"], canReplaceValue: true,
+  });
+  assert.equal("pid" in structure, false);
+  assert.equal("windowId" in structure, false);
+  assert.equal(structure.fallbackCapture, undefined);
+  assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "getWindowState", "endSession", "shutdown"].includes(method)),
+    ["startSession", "getWindowState", "endSession", "shutdown"]);
+}));
+
+test("returns a same-capture visual fallback when the exact app tree is incomplete", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const structure = await createCuaStageDriver({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls, state: {
+      pid: 4321,
+      windowId: BigInt(windowId),
+      appName: "custom-app.exe",
+      windowTitle: "Partial tree",
+      elementsComplete: false,
+      elements: [{ elementIndex: BigInt(1), depth: 0, role: "Window", label: "Partial tree", elementToken: "partial-root" }],
+      screenshotFrameValid: true,
+      screenshotWidth: 200,
+      screenshotHeight: 100,
+      windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+      images: [{ mimeType: "image/png", dataBase64: imageData }],
+    } }) as never,
+    now: () => new Date("2026-10-05T12:00:00.000Z"),
+  }).readStructure("stage");
+  assert.equal(structure.status, "partial");
+  assert.equal(structure.elements[0]?.ref, "partial-root");
+  assert.equal(structure.fallbackCapture?.dataUrl, `data:image/png;base64,${imageData}`);
+  assert.equal(calls.filter((call) => call.method === "getWindowState").length, 1, "a partial tree keeps its same-call screenshot fallback");
+}));
+
+test("uses one bounded exact-window screenshot fallback when accessibility is unavailable", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const structure = await createCuaStageDriver({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls, accessibilityError: new Error("UIA unavailable") }) as never,
+    now: () => new Date("2026-10-05T12:00:00.000Z"),
+  }).readStructure("stage");
+  assert.equal(structure.status, "unavailable");
+  assert.equal(structure.elements.length, 0);
+  assert.equal(structure.fallbackCapture?.dataUrl, `data:image/png;base64,${imageData}`);
+  const requests = calls.filter((call) => call.method === "getWindowState").map((call) => call.value as Record<string, unknown>);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0]!.includeAccessibilityTree, true);
+  assert.equal(requests[1]!.includeAccessibilityTree, false);
+  assert.equal(requests[0]!.windowId, requests[1]!.windowId);
+}));
+
 test("moves and verifies Cua's ghost cursor through the typed exact-window API", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];

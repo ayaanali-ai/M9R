@@ -10,11 +10,26 @@ import { createWebBrokerClient } from "../src/lib/native/web-broker-client";
 test("desktop action parser accepts common pointer and keyboard actions but rejects malformed key input", () => {
   assert.deepEqual(parseTaskStageAction({ kind: "double_click", x: 24, y: 68 }), { kind: "double_click", x: 24, y: 68 });
   assert.deepEqual(parseTaskStageAction({ kind: "right_click", x: 24, y: 68 }), { kind: "right_click", x: 24, y: 68 });
+  assert.deepEqual(parseTaskStageAction({ kind: "read_structure", view: "app" }), { kind: "read_structure", view: "app" });
   assert.deepEqual(parseTaskStageAction({ kind: "press_key", key: "Enter" }), { kind: "press_key", key: "Enter" });
   assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L"] }), { kind: "hotkey", keys: ["Control", "L"] });
   assert.throws(() => parseTaskStageAction({ kind: "press_key", key: "not-a-key" }), /Invalid key/);
   assert.throws(() => parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L", "Shift", "F2", "F3"] }), /1–4/);
   assert.throws(() => parseTaskStageAction({ kind: "click", x: 1, y: 2, hwnd: "123" }), /Invalid stage action fields/);
+});
+
+test("structure observation is app-window-only and does not use desktop coordinates", async () => {
+  const calls: string[] = [];
+  const driver = {
+    readStructure: async (...args: unknown[]) => { calls.push(JSON.stringify(args)); return { status: "complete", capturedAt: new Date(0).toISOString(), elements: [] }; },
+    captureDesktop: async () => { throw new Error("desktop-wide structure is not allowed"); },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "session" };
+  const structure = await runTaskStageAction(driver, "preview", { kind: "read_structure", view: "app" }, identity, "owner-preview");
+  assert.equal((structure as { status: string }).status, "complete");
+  assert.deepEqual(calls, [["preview", identity]].map((value) => JSON.stringify(value)));
+  assert.throws(() => parseTaskStageAction({ kind: "read_structure" }), /Invalid stage action fields/);
+  assert.throws(() => parseTaskStageAction({ kind: "read_structure", view: "desktop" }), /exact app view/);
 });
 
 test("owner-preview actions route through desktop-wide driver methods", async () => {

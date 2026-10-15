@@ -100,6 +100,31 @@ export interface CuaStageCapture {
   controls?: CuaStageTargetDescription[];
 }
 
+/**
+ * Structure-first observation returned by the exact-window Cua route.
+ * Element refs are driver-owned opaque tokens; the provider-neutral computer
+ * use layer remaps them before exposing an observation to an agent.
+ */
+export interface CuaStageStructure {
+  status: "complete" | "partial" | "unavailable";
+  capturedAt: string;
+  appName?: string;
+  windowTitle?: string;
+  elements: Array<{
+    ref: string;
+    parentRef?: string;
+    depth?: number;
+    role?: string;
+    label?: string;
+    enabled?: boolean;
+    selected?: boolean;
+    actions?: string[];
+    canReplaceValue?: boolean;
+  }>;
+  /** Same-call visual fallback when the accessibility tree is incomplete. */
+  fallbackCapture?: CuaStageCapture;
+}
+
 /** Private handle to one immutable desktop image; only the broker uses this to bind a click to its capture. */
 export interface CuaDesktopTargetSnapshot extends CuaStageTargetDescription {
   captureId: string;
@@ -435,7 +460,7 @@ function desktopPointInWindow(screenPoint: { x: number; y: number }, frame: CuaS
   return { x: localX, y: localY };
 }
 
-function stageCapture(capture: { dataUrl: string; width: number; height: number; controls?: CuaStageTargetDescription[] }, now: () => Date): CuaStageCapture {
+function stageCapture(capture: { dataUrl: string; width: number; height: number; controls?: CuaStageTargetDescription[]; capturedAt?: string }, now: () => Date): CuaStageCapture {
   return { dataUrl: capture.dataUrl, width: capture.width, height: capture.height,
     ...(capture.controls ? { controls: capture.controls } : {}),
     capturedAt: "capturedAt" in capture && typeof capture.capturedAt === "string" ? capture.capturedAt : now().toISOString() };
@@ -855,6 +880,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     pid: number;
     windowId: bigint;
     capture: () => Promise<CuaStageWindowFrame>;
+    readStructure: () => Promise<CuaStageStructure>;
     elementAt: (x: number, y: number) => Promise<string | undefined>;
     elementAtPoint: (x: number, y: number) => Promise<CuaWindowElement | undefined>;
     captureTarget: (x: number, y: number) => Promise<CuaStageTargetDescription | undefined>;
@@ -922,6 +948,60 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
           ...(bounds ? { windowBounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } } : {}),
         };
       };
+      const readStructure = async (): Promise<CuaStageStructure> => {
+        const request = {
+          pid,
+          windowId,
+          session,
+          includeAccessibilityTree: true,
+          includeScreenshot: true,
+          maxImageDimension: MAX_IMAGE_DIMENSION,
+          maxElements: 512,
+          maxDepth: 24,
+          timeoutMs: 1_500,
+        };
+        let state: Awaited<ReturnType<CuaDriverLike["getWindowState"]>>;
+        let accessibilityAvailable = true;
+        try {
+          state = await driver.getWindowState(request);
+        } catch {
+          accessibilityAvailable = false;
+          // A tree failure must not turn into an unbounded retry loop. One
+          // exact-window screenshot is the documented visual fallback.
+          state = await driver.getWindowState({ ...request, includeAccessibilityTree: false });
+        }
+        const fallback = imageFromWindowState(state, pid, windowId);
+        const byIndex = new Map((state.elements ?? []).map((element) => [element.elementIndex.toString(), element]));
+        const elements = (state.elements ?? []).flatMap((element) => {
+          if (!element.elementToken) return [];
+          const actions = Array.isArray(element.actions)
+            ? element.actions.filter((action): action is string => typeof action === "string" && action.length > 0)
+                .slice(0, 16).map((action) => action.slice(0, 40))
+            : [];
+          const parent = element.parentIndex === undefined ? undefined : byIndex.get(element.parentIndex.toString());
+          return [{
+            ref: element.elementToken,
+            ...(parent?.elementToken ? { parentRef: parent.elementToken } : {}),
+            ...(Number.isSafeInteger(element.depth) && element.depth >= 0 ? { depth: element.depth } : {}),
+            ...(typeof element.role === "string" && element.role ? { role: element.role.slice(0, 80) } : {}),
+            ...(typeof element.label === "string" && element.label.trim() ? { label: element.label.replace(/[\r\n\t]+/g, " ").slice(0, 160) } : {}),
+            ...(typeof element.enabled === "boolean" ? { enabled: element.enabled } : {}),
+            ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
+            ...(actions.length ? { actions } : {}),
+            ...(actions.includes("set_value") ? { canReplaceValue: true } : {}),
+          }];
+        });
+        const hasTree = Array.isArray(state.elements);
+        const status = !accessibilityAvailable ? "unavailable" : !hasTree || state.truncated === true || state.elementsComplete === false || state.degraded === true ? "partial" : "complete";
+        return {
+          status,
+          capturedAt: now().toISOString(),
+          ...(typeof state.appName === "string" ? { appName: state.appName.slice(0, 120) } : {}),
+          ...(typeof state.windowTitle === "string" ? { windowTitle: state.windowTitle.slice(0, 240) } : {}),
+          elements,
+          ...(status !== "complete" ? { fallbackCapture: stageCapture({ ...fallback, capturedAt: now().toISOString() }, now) } : {}),
+        };
+      };
       const hitTarget = async (x: number, y: number) => {
         const state = await driver.getWindowState({ pid, windowId, session, includeAccessibilityTree: true,
           includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, timeoutMs: 1500 });
@@ -950,7 +1030,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         if (frame && frame.w > 0 && frame.h > 0) description.rect = { x: frame.x, y: frame.y, width: frame.w, height: frame.h };
         return description;
       };
-      return await run({ driver, sdk, session, pid, windowId, capture, captureTarget: describeAt, elementAt, elementAtPoint: hitTarget });
+      return await run({ driver, sdk, session, pid, windowId, capture, readStructure, captureTarget: describeAt, elementAt, elementAtPoint: hitTarget });
     } finally {
       if (!persistent && started) {
         try { await driver.endSession({ session }); } catch { /* preserve the primary operation result */ }
@@ -961,6 +1041,10 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
 
   async function capture(name: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageCapture> {
     return withRegisteredWindow(name, async ({ capture: captureWindow }) => stageCapture(await captureWindow(), now), cursorIdentity);
+  }
+
+  async function readStructure(name: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageStructure> {
+    return withRegisteredWindow(name, async ({ readStructure: read }) => read(), cursorIdentity);
   }
 
   async function moveCursor(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity): Promise<{ capture: CuaStageCapture; cursor: CuaStageCursorProof }> {
@@ -1364,7 +1448,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     } catch { /* the runtime never initialized */ }
   }
 
-  return { capture, describeTarget, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, drag,
+  return { capture, readStructure, describeTarget, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, drag,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown };
 }
