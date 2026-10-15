@@ -62,21 +62,18 @@ export default function RoomLiveView({ roomId, displayName }: { roomId: string; 
   const componentActiveRef = useRef(false);
   const membershipInvalidRef = useRef(false);
   const stopRef = useRef<() => void>(() => {});
+  const [supabase] = useState(() => createClient());
   const [connected, setConnected] = useState(false);
   const [starting, setStarting] = useState(false);
   const [sharing, setSharing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() => supabase ? null : "Live view is unavailable because Supabase is not configured.");
   const [frames, setFrames] = useState<Record<string, LiveFrame>>({});
 
   useEffect(() => {
     let disposed = false;
     componentActiveRef.current = true;
     membershipInvalidRef.current = false;
-    const supabase = createClient();
-    if (!supabase) {
-      setError("Live view is unavailable because Supabase is not configured.");
-      return;
-    }
+    if (!supabase) return;
     const channel = supabase.channel(`m9r-room-live:${roomId}`, {
       config: { private: true, broadcast: { ack: true, self: false } },
     });
@@ -148,7 +145,7 @@ export default function RoomLiveView({ roomId, displayName }: { roomId: string; 
       channelRef.current = null;
       void supabase.removeChannel(channel);
     };
-  }, [roomId]);
+  }, [roomId, supabase]);
 
   const stopSharing = useCallback(() => {
     const stream = mediaRef.current;

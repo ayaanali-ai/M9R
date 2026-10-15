@@ -276,7 +276,7 @@ test("requires an interactive owner terminal and rejects agent initiated stage c
 
 test("refuses stale anchors, desktop id drift, and failed post-move verification", async () => withRoot(async (root) => {
   let anchorDesktop = stageDesktop;
-  let targetDesktop = ownerDesktop;
+  const targetDesktop = ownerDesktop;
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {},
     invokeNative: async (request) => {

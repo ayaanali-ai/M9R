@@ -92,7 +92,7 @@ export function fromFeed(feed: Feed): PillSnapshot {
     const mine = assigned.map((p) => clip(`@${p.from} asked: ${p.goal}`, 140));
     // Web events arrive newest first; show them oldest first like the other shell does.
     const acted = web.filter((w) => w.agent === handle && (w.kind === "action" || w.kind === "message")).slice(0, 8).reverse().map((w) => clip(w.text, 140));
-    let state: AgentRunState = FEED_STATES[String(a.state)] ?? "unknown";
+    const state: AgentRunState = FEED_STATES[String(a.state)] ?? "unknown";
     // What the agent is doing right now, read from its own transcript. Last, so it is the line the ticker highlights.
     const doing = typeof (a as FeedAgent).doing === "string" ? clip((a as FeedAgent).doing as string, 140) : "";
     const task = doing || "";

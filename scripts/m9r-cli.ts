@@ -1843,7 +1843,7 @@ async function startManagedBrokerAfterUpdate(target: NonNullable<Awaited<ReturnT
     const liveImage = await readManagedBrokerProcessState(target.brokerPath);
     if (liveImage.processes.length) throw new Error("A broker process is still present but could not be authenticated; refusing to replace its running task.");
   }
-  let currentTask = await inspectLocalBrokerTask(WEB_TASK_NAME);
+  const currentTask = await inspectLocalBrokerTask(WEB_TASK_NAME);
   if (!currentTask || !localBrokerTaskDefinitionOwned(currentTask, target.taskDefinitionHash, target.taskActionHash)) {
     throw new Error("The M9R broker task changed before restart; it was not started.");
   }

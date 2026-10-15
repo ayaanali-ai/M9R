@@ -3,7 +3,7 @@ import { ApiError, asObject, hashText, json, normalizeSlug, parseCursor, parseLi
 import type { AgentScope, Env, NetworkRole } from "./types";
 
 type SqlValue = string | number | null | ArrayBuffer;
-interface Row extends Record<string, SqlValue> {}
+type Row = Record<string, SqlValue>;
 interface AgentRow extends Row {
   agent_id: string; member_id: string; handle: string; provider: string; door: string;
   scopes_json: string; status: string; credential_hash: string | null; last_seen_at: string | null;
