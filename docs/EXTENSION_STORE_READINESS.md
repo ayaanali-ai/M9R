@@ -1,14 +1,24 @@
-# Browser extension store readiness — 2026-09-23
+# Browser extension store readiness
 
 This is a policy and packaging readiness review for the current M9R dev extension, not a legal opinion or a prediction of store acceptance. Store rules and forms change; re-check each primary source immediately before submission.
 
-## Current extension versus a real-site release
+## Current permission model checked 2026-10-09
+
+- Both `extensions/browser/manifest.json` and `extensions/browser/store-assets/manifest.template.json` require `http://*/*` and `https://*/*` host access. The development manifest also declares static content scripts for those sites; the store template omits static content scripts. Neither manifest uses `optional_host_permissions` today.
+- The extension popup reports whether Chrome currently allows all ordinary sites. It does not request host permission site by site. The owner can restrict the extension in Chrome's **Site access** controls; when access is withheld, M9R refuses browser actions. M9R cannot silently override Chrome's choice.
+- The owner's own connected agents do not need a per-site M9R grant. Cross-owner agents still require a separate M9R owner grant with site/action scope; that is a trust boundary, distinct from Chrome host access.
+- Requiring all HTTP/HTTPS sites removes M9R's per-site prompt after install but creates a broad permission disclosure. Chrome Web Store policy requires the narrowest permissions necessary. A broad permission is not an automatic rejection, but it needs a strong product-purpose justification and accurate disclosure, and approval cannot be promised. The current manifest should not be described as store-ready.
+- For the unpacked/demo build, choosing **On all sites** once in Chrome is the low-friction path. For a store release, decide deliberately between the broad install-time permission and a user-initiated optional-access flow; optional access still requires informed user consent and does not guarantee review approval. The user preference is to avoid repeated per-site prompts.
+
+The sections below include earlier design and packaging notes. Where they conflict with the manifest state above, they describe superseded plans rather than current behavior.
+
+## Earlier development manifest versus a real-site release (superseded)
 
 The current `extensions/browser/manifest.json` is explicitly a localhost development build. It declares `tabs`, `scripting`, and `alarms`, grants `http://localhost/*` and `http://127.0.0.1/*`, and injects packaged content scripts only on those local origins. That is appropriate for the current test page, but it cannot act on normal HTTPS sites.
 
 For a real-site release, the extension needs host access for the page in which it will read or act. Chrome documents `scripting` plus host permission (or temporary `activeTab` access) for injecting code. Because M9R acts from an owner-authorized agent flow rather than only a click on the current tab, the practical design is declared optional HTTP/HTTPS host patterns and a user-initiated per-site runtime request when the owner creates/approves a grant. The manifest can declare `optional_host_permissions: ["https://*/*", "http://*/*"]`; after the owner chooses `https://shop.example`, request only `https://shop.example/*` with `chrome.permissions.request`. Chrome ignores paths in requested origin patterns, so this is origin/site permission, not path-level isolation. M9R's own grant check must continue enforcing action, origin, expiry, and any future path scope. [Chrome scripting permission requirements](https://developer.chrome.com/docs/extensions/reference/api/scripting), [Chrome optional permission API](https://developer.chrome.com/docs/extensions/reference/api/permissions)
 
-The current development manifest now declares optional HTTP/HTTPS site hosts while retaining required localhost access for its local demo. After `m9r-cli web approve` persists a cross-owner grant, the broker notifies the connected extension; the extension opens a per-grant consent page and asks Chrome for exactly that origin from a user click. If no extension is connected at approval, active grants are offered when its authorized socket reconnects. A denial is reported to the local broker and revokes that grant. Before every browser action, the extension checks `chrome.permissions.contains`; it also rechecks the grant's origin/path and the broker independently enforces the same path boundary. The toolbar popup can separately grant the active site to the browser owner's own agents. This is a development implementation, not a reviewed or packaged store release.
+At the time this section was written, the development manifest declared optional HTTP/HTTPS site hosts. The current manifests instead require all HTTP/HTTPS hosts, as documented above. The cross-owner grant design described here remains separate from Chrome host access; the current owner's own agents do not need a per-site M9R grant.
 
 ### Consent prompt copy
 

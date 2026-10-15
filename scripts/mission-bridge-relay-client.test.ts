@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { workspaceResultIdempotencyKey } from "../src/lib/bridge/workspace-result-idempotency.ts";
 
 const source = readFileSync("services/mission-bridge/src/bridge-runtime.ts", "utf8");
 const conversationSource = readFileSync("src/lib/conversation-service.ts", "utf8");
@@ -65,7 +66,12 @@ test("workspace result delivery cannot advance the source cursor before durable 
 });
 
 test("workspace result idempotency is scoped to the durable provider connection", () => {
-  assert.match(source, /function workspaceResultIdempotencyKey\(parentMessageId: string\)/);
-  assert.match(source, /ownConnectionId \?\? `\$\{config\.localProvider/);
-  assert.match(source, /result:\$\{parentMessageId\}:\$\{identity\}/);
+  assert.match(source, /const idempotencyKey = workspaceResultIdempotencyKey\(\{/);
+  assert.match(source, /identity: ownConnectionId \?\? `\$\{config\.localProvider/);
+  const base = { parentMessageId: "msg-1", body: "result", outcome: "ok" as const };
+  const first = workspaceResultIdempotencyKey({ ...base, identity: "codex-connection" });
+  assert.equal(first, workspaceResultIdempotencyKey({ ...base, identity: "codex-connection" }), "retry of same logical output is stable");
+  assert.notEqual(first, workspaceResultIdempotencyKey({ ...base, identity: "opencode-connection" }), "different provider connections are isolated");
+  assert.notEqual(first, workspaceResultIdempotencyKey({ ...base, identity: "codex-connection", body: "changed output" }), "changed output is not suppressed as a retry");
+  assert.ok(first.length <= 256, "relay idempotency key stays within its bounded schema");
 });

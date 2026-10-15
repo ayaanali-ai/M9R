@@ -8,6 +8,9 @@ description = "M9R Chrome Native Messaging host for foreground, visible-tab poin
 [dependencies]
 serde_json = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging"] }
+
 [profile.release]
 opt-level = "z"
 lto = true

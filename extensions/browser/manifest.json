@@ -10,7 +10,6 @@
     "alarms",
     "storage",
     "tabGroups",
-    "nativeMessaging",
     "search"
   ],
   "optional_permissions": [

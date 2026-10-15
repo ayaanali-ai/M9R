@@ -16,7 +16,7 @@ test("newToken makes distinct, sufficiently long tokens", () => {
   const a = newToken();
   const b = newToken();
   assert.notEqual(a, b);
-  assert.ok(a.length >= 30);
+  assert.equal(a.length, 32);
 });
 
 test("issueIdentity/verifyToken: a fresh token verifies, a wrong or revoked one does not", () => {
@@ -72,7 +72,38 @@ test("m9r_whoami refuses an invalid token and answers with the verified identity
   const ok = await callTool(server, "m9r_whoami", { token: issued.token });
   assert.match(ok.content[0].text, /@claude/);
 
-  await assert.rejects(() => callTool(server, "m9r_whoami", { token: "garbage" }), /invalid or has been revoked/);
+  await assert.rejects(() => callTool(server, "m9r_whoami", { token: "garbage" }), /token is malformed: received 7 characters/);
+  const unknownToken = newToken();
+  await assert.rejects(() => callTool(server, "m9r_whoami", { token: unknownToken }), (error: unknown) => {
+    assert.match(String(error), /not active in the configured M9R store/);
+    assert.match(String(error), /synchronize M9R_HOME/);
+    assert.ok(!String(error).includes(unknownToken), "the rejected token must not be echoed");
+    return true;
+  });
+  done();
+});
+
+test("desktop stage tools identify a truncated token before broker dispatch", async () => {
+  const { store, done } = tempStore();
+  const issued = store.issueIdentity("codex", "codex", "s1");
+  let brokerCalls = 0;
+  const server = createM9rMcpServer({
+    store,
+    web: {
+      prepareTaskStage: async () => { brokerCalls += 1; return { ok: true, stage: { name: "preview-agent-test" } }; },
+      run: async () => { throw new Error("unexpected broker request"); },
+    },
+  });
+
+  await assert.rejects(
+    () => callTool(server, "m9r_stage_prepare", { token: issued.token.slice(1), taskId: "T1", mode: "owner-preview" }),
+    /token is malformed: received 31 characters; expected a 32-character base64url token/,
+  );
+  assert.equal(brokerCalls, 0, "malformed credentials must be rejected before broker dispatch");
+
+  const accepted = await callTool(server, "m9r_stage_prepare", { token: issued.token, taskId: "T1", mode: "owner-preview" });
+  assert.match(accepted.content[0].text, /"ok":true/);
+  assert.equal(brokerCalls, 1);
   done();
 });
 

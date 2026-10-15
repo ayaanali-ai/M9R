@@ -26,6 +26,10 @@ test("Claude hands profile enables only the requested local tool set plus M9R", 
   const plan = buildVendorLaunchPlan({ ...config, profile: "hands" });
   assert.deepEqual(plan.args.slice(plan.args.indexOf("--tools"), plan.args.indexOf("--tools") + 2), ["--tools", "Bash,Read,Edit,Glob,Grep"]);
   assert.ok(plan.args.includes("mcp__m9r"));
+  assert.match(plan.promptFileContent ?? "", /For a local desktop task, use that task's desktop and OS input route/);
+  assert.match(plan.promptFileContent ?? "", /Use m9r_web_\* only when the owner explicitly asks for an M9R shared browser/);
+  assert.match(plan.promptFileContent ?? "", /Never open a separate browser window\/profile or switch to the M9R shared browser/);
+  assert.doesNotMatch(plan.promptFileContent ?? "", /M9R is your only browser\/web interaction layer/);
 });
 
 test("Claude resume passes a validated session id as an explicit CLI argument", () => {
@@ -52,6 +56,8 @@ test("Codex hands profile stays workspace-write and does not re-enable web searc
   assert.ok(plan.args.includes("workspace-write"));
   assert.ok(plan.args.includes('web_search="disabled"'));
   assert.equal(plan.args.includes("shell_tool"), false);
+  assert.match(plan.stdinPrompt ?? "", /For a local desktop task, use that task's desktop and OS input route/);
+  assert.match(plan.stdinPrompt ?? "", /Use m9r_web_\* only when the owner explicitly asks for an M9R shared browser/);
 });
 
 test("launcher blocks either API key unless the user explicitly overrides", () => {

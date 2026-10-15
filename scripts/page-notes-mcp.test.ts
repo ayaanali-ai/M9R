@@ -41,7 +41,7 @@ test("m9r_note refuses invalid identity and missing append fields", async () => 
     const server = createM9rMcpServer({ store: createLocalStore(root) });
     const tool = (server as unknown as ToolServer)._registeredTools.m9r_note;
     assert.ok(tool);
-    await assert.rejects(tool.handler({ token: "invalid", action: "list", room: "repo" }), /invalid or has been revoked/);
+    await assert.rejects(tool.handler({ token: "invalid", action: "list", room: "repo" }), /token is malformed/);
     const response = await tool.handler({ token: createLocalStore(root).issueIdentity("codex", "codex", "s").token, action: "append", room: "repo" });
     assert.equal(response.isError, true);
     assert.match(response.content[0].text, /text and source are required/);

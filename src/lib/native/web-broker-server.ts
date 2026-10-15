@@ -2,21 +2,27 @@
  * Local transport for the web broker (spike). Three doors:
  * - POST /cmd from the M9R MCP tools, allowed only with the owner-scoped key in ~/.m9r/web-broker.key. Requests that
  *   carry an Origin header are refused, so a web page cannot drive the browser through this port.
- * - a local named pipe/Unix socket with read-only status access; it is not an approval or mutation path.
+ * - a local named pipe/Unix socket for read-only status plus narrowly scoped, session-token-authorized agent task
+ *   mutations; owner approvals, authority changes, and arbitrary store writes are never accepted on this pipe.
  * - a WebSocket at /ext for the browser extension, allowed only from a chrome-extension:// origin and either a
  *   listed extension id or an explicit development-only opt-in when no ids are configured. One extension at a time:
  *   an authorized new connection replaces the old one.
  */
 import { execFileSync } from "node:child_process";
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { VerifiedIdentity } from "./identity-core";
+import type { LocalStore } from "./local-store";
+import { readRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
 import { dirname } from "node:path";
 import { platform } from "node:os";
 import { WebSocket, WebSocketServer } from "ws";
+import type { BrowserTransport } from "./agent-chrome";
 import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
-import { createWebBroker, ROOM_MODES, type RoomMode, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
+import { createWebBroker, ROOM_MODES, type RoomMode, type StageApprovalRequest, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
+import { isStageAppReference } from "./task-stage-apps";
 import { startOwnerPipe, type OwnerPipeRequest } from "./owner-pipe";
 import { isUiMessage, type UiState, type WebUiBridge } from "./web-ui-bridge";
 import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, type ProtocolMessageType } from "../../../packages/web-protocol-placeholder/src/index";
@@ -24,6 +30,10 @@ import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_EXTENSION_MESSAGE_BYTES = 256 * 1024;
 const LOCAL_AWARE_ROOM_ID = "room-local";
+
+// Capture at process start. Re-reading process.execPath on each health request
+// could hash a replacement file after an update while the old image is still mapped.
+const runtimeIdentityAtProcessStart = readRuntimeBuildIdentity();
 
 /**
  * Windows ignores the 0o600 file mode entirely, so without this any process running as the same OS user -- including a
@@ -93,6 +103,33 @@ function reply(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+function stageFailure(error: unknown, fallback: string): Record<string, unknown> {
+  if (typeof error === "object" && error !== null && "inner" in error) {
+    const inner = (error as { inner?: unknown }).inner;
+    if (typeof inner === "object" && inner !== null) {
+      const detail = inner as Record<string, unknown>;
+      if (typeof detail.tool === "string" && typeof detail.message === "string" && typeof detail.errorCode === "string") {
+        const tool = detail.tool.slice(0, 120);
+        const message = detail.message.slice(0, 2_000);
+        const errorCode = detail.errorCode.slice(0, 120);
+        return {
+          ok: false,
+          error: `${tool} (${errorCode}): ${message}`,
+          driverError: { tool, errorCode, message },
+        };
+      }
+    }
+  }
+  return { ok: false, error: error instanceof Error ? error.message : fallback };
+}
+
+function replyStageFailure(res: ServerResponse, error: unknown, fallback: string): void {
+  const body = stageFailure(error, fallback);
+  // A native execution failure is not a rejection of the caller's credentials.
+  // Keep genuine stage authorization refusals on the existing forbidden route.
+  reply(res, body.driverError ? 502 : 403, body);
+}
+
 function readBody(req: IncomingMessage): Promise<string | null> {
   return new Promise((resolve) => {
     let size = 0;
@@ -114,6 +151,13 @@ function readBody(req: IncomingMessage): Promise<string | null> {
 }
 
 export interface WebBrokerServerOptions {
+  /** Owner-hosted, task-authorized desktop preparation; absent means desktop access is unavailable. */
+  taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>;
+    launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview"): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown> };
+  /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
+  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">;
+  /** Dedicated browser transport. Extension connections are disabled on this broker. */
+  browserTransport?: BrowserTransport;
   key: string;
   port?: number;
   host?: string;
@@ -137,17 +181,103 @@ export interface WebBrokerServerOptions {
   ui?: WebUiBridge;
   /** Where the room mode (watch / ask / hands-off) is kept between runs. Defaults to watch. */
   modeFile?: string;
+  /** Test seam for reporting a known process-start identity. Production uses the startup-captured executable identity. */
+  runtimeIdentity?: RuntimeBuildIdentity;
   /** Plain-words `step`/`phase` on presence frames; on by default when `ui` is set. */
   narrate?: boolean;
   /** Called on a real POST /web/shutdown, in addition to closing this HTTP/WS server, so the caller can also stop its own
    * timers, sessions and exit the process. Without this the server socket closes but the process (and any interval it
    * started that isn't unref'd) keeps running. */
-  onShutdownRequested?: () => void;
+  onShutdownRequested?: () => void | Promise<void>;
   /** When set, this local endpoint exposes read-only status; mutations use the broker-key HTTP API after CLI confirmation. */
   ownerPipePath?: string;
 }
 
-export async function startWebBroker(options: WebBrokerServerOptions): Promise<{ port: number; close: () => Promise<void> }> {
+type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string; taskId?: string; created?: boolean; taskIds?: string[]; alreadyRecorded?: boolean } };
+
+/**
+ * Apply only the narrowly scoped durable MCP mutations needed by agent messaging. The
+ * provider MCP process may be sandboxed from ~/.m9r, so the trusted owner
+ * broker verifies the same session token and performs these writes under its
+ * own user ACL. This is intentionally not a generic store/RPC endpoint.
+ */
+export function applyAgentMcpStoreMutation(
+  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">,
+  input: unknown,
+): AgentMcpStoreResult {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { status: 400, body: { ok: false, error: "request body must be an object" } };
+  const value = input as Record<string, unknown>;
+  if (typeof value.token !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(value.token)) return { status: 400, body: { ok: false, error: "M9R session token is malformed." } };
+  let identity: VerifiedIdentity | null;
+  try { identity = store.verifyIdentity(value.token); }
+  catch { return { status: 503, body: { ok: false, error: "M9R identity state could not be read by the owner broker." } }; }
+  if (!identity) return { status: 403, body: { ok: false, error: "This M9R session identity is not active in the owner broker." } };
+  const inRoom = identity.sessionId.startsWith("web-");
+  const ownHandle = identity.handle.toLowerCase();
+  const inboxHandle = inRoom ? `web-${ownHandle}` : ownHandle;
+
+  try {
+    if (value.action === "send") {
+      if (Object.keys(value).some((key) => !["action", "token", "to", "goal"].includes(key))
+        || typeof value.to !== "string" || typeof value.goal !== "string" || value.goal.trim().length < 1 || value.goal.length > 4_000) {
+        return { status: 400, body: { ok: false, error: "Invalid M9R task message." } };
+      }
+      const to = value.to.replace(/^@+/, "").trim().toLowerCase();
+      if (!/^[a-z][a-z0-9_-]{0,39}$/.test(to) || to === "you") return { status: 400, body: { ok: false, error: "Recipient must be a valid M9R agent handle." } };
+      const taskTo = inRoom && !to.startsWith("web-") ? `web-${to}` : to;
+      const taskFrom = inboxHandle;
+      const result = store.addTask({
+        to: taskTo,
+        from: taskFrom,
+        goal: value.goal,
+        fromSession: identity.sessionId,
+        origin: "agent_initiated",
+        idempotencyKey: `mcp:${identity.sessionId}:${to}:${createHash("sha256").update(value.goal).digest("hex")}`,
+      });
+      return { status: 200, body: { ok: true, taskId: result.task.id, created: result.created } };
+    }
+
+    if (value.action === "cursor") {
+      if (Object.keys(value).some((key) => !["action", "token", "seq"].includes(key))
+        || !Number.isSafeInteger(value.seq) || (value.seq as number) < 0) {
+        return { status: 400, body: { ok: false, error: "Invalid M9R inbox cursor." } };
+      }
+      store.setCursor(inboxHandle, inRoom ? undefined : identity.sessionId, value.seq as number);
+      return { status: 200, body: { ok: true } };
+    }
+
+    if (value.action === "claim_inbox") {
+      if (inRoom || Object.keys(value).some((key) => !["action", "token", "taskIds"].includes(key))
+        || !Array.isArray(value.taskIds) || value.taskIds.length > 50
+        || value.taskIds.some((id) => typeof id !== "string" || !/^T[0-9]{1,12}$/.test(id))) {
+        return { status: 400, body: { ok: false, error: "Invalid native M9R inbox claim." } };
+      }
+      const tasks = store.claimInboxTasks(ownHandle, identity.sessionId, value.taskIds as string[]);
+      return { status: 200, body: { ok: true, taskIds: tasks.map((task) => task.id) } };
+    }
+
+    if (value.action === "result") {
+      if (Object.keys(value).some((key) => !["action", "token", "taskId", "summary"].includes(key))
+        || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
+        || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 4_000) {
+        return { status: 400, body: { ok: false, error: "Invalid M9R task result." } };
+      }
+      const recorded = store.recordTaskResult(value.token, value.taskId, value.summary);
+      if (!recorded.ok) {
+        const status = /No task/.test(recorded.error ?? "") ? 404
+          : /belongs to another session|not sent to you|not been delivered/.test(recorded.error ?? "") ? 403
+          : /identity is not active/.test(recorded.error ?? "") ? 403 : 400;
+        return { status, body: { ok: false, error: recorded.error } };
+      }
+      return { status: 200, body: { ok: true, alreadyRecorded: recorded.alreadyRecorded } };
+    }
+    return { status: 400, body: { ok: false, error: "Unknown M9R agent-store action." } };
+  } catch {
+    return { status: 503, body: { ok: false, error: "The owner broker could not update M9R task state; the task was not accepted." } };
+  }
+}
+
+export async function startWebBroker(options: WebBrokerServerOptions): Promise<{ port: number; close: () => Promise<void>; requestStageApproval: (request: StageApprovalRequest) => Promise<boolean> }> {
   const host = options.host ?? "127.0.0.1";
   const allowed = (options.allowedExtensionIds ?? []).filter(Boolean);
   const allowAnyExtension = allowed.length === 0 && (options.allowAnyExtension === true || process.env.M9R_ALLOW_ANY_EXTENSION === "1");
@@ -216,6 +346,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   }
 
   function waitForExtensionReady(timeoutMs: number): Promise<boolean> {
+    if (options.browserTransport) return Promise.resolve(options.browserTransport.ready());
     if (extension && extension === readyExtension && extension.readyState === WebSocket.OPEN) return Promise.resolve(true);
     return new Promise((resolve) => {
       const settle = (ready: boolean) => {
@@ -238,8 +369,10 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   let roomMode: RoomMode = "watch";
   try { if (options.modeFile) { const saved = readFileSync(options.modeFile, "utf8").trim() as RoomMode; if (ROOM_MODES.includes(saved)) roomMode = saved; } } catch { /* no saved mode yet */ }
   const broker = createWebBroker({
+    oneWriterPerTab: !!options.browserTransport,
     roomMode: () => roomMode,
     send: (message) => {
+      if (options.browserTransport) return options.browserTransport.send(message);
       if (!extension || extension !== readyExtension || extension.readyState !== WebSocket.OPEN) return false;
       extension.send(JSON.stringify(message));
       return true;
@@ -255,6 +388,9 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     onActivity: options.ui ? (activity) => options.ui!.onActivity(activity) : undefined,
   });
   options.ui?.attachBroker(broker);
+  const unsubscribeBrowser = options.browserTransport?.subscribe(
+    (message) => broker.onExtensionMessage(message), () => broker.onExtensionClosed(),
+  );
 
   const ownerOnlyPaths = new Set([
     "/web/mode", "/web/shutdown", "/web/approve", "/web/deny", "/web/revoke", "/web/revoke-all",
@@ -270,6 +406,23 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         typeof memberOwner !== "string" || !/^[A-Za-z0-9_.-]{1,80}$/.test(memberOwner)) return null;
     const principalId = `agent:${memberOwner}/${agent}`;
     return principalId.length <= 128 ? principalId : null;
+  }
+  function scheduleShutdown(): void {
+    setTimeout(() => {
+      if (!options.onShutdownRequested) {
+        void closeServer();
+        return;
+      }
+      try {
+        // The process owner must finish draining its desktop/session resources before the
+        // listener closes. Otherwise health disappears while the process is still alive,
+        // and an updater can mistake an early HTTP close for a completed shutdown.
+        void Promise.resolve(options.onShutdownRequested()).then(() => closeServer()).catch(() => undefined);
+      } catch {
+        // Leave the broker available if the owner's shutdown hook cannot start; callers
+        // will time out safely instead of replacing a live image.
+      }
+    }, 0);
   }
   function decideDisclosure(requestId: string, decision: "approve" | "deny"): { ok: true; receiptId: string } | { ok: false; error: string } {
     const open = protocolLedger.pendingDisclosures(LOCAL_AWARE_ROOM_ID).find((frame) => frame.payload.request_id === requestId);
@@ -331,7 +484,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     }
     if (request.path === "/web/shutdown") {
       if (request.method !== "POST") return ownerReply(false, { error: "shutdown requires POST" });
-      setTimeout(() => { options.onShutdownRequested?.(); void closeServer(); }, 0);
+      scheduleShutdown();
       return ownerReply(true, { stopped: true });
     }
     if (!authority) return ownerReply(false, { error: "web authority is not configured" });
@@ -369,21 +522,81 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (!persist()) return ownerReply(false, { error: "could not persist web authority state" });
     return ownerReply(true, { revoked });
   };
+  const agentStagePaths = new Set(["/web/stage/prepare", "/web/stage/launch", "/web/stage/close", "/web/stage/action"]);
+  // Both transports share validation and the task service's identity/approval checks.
+  // The local pipe does not grant access to owner approval or authority mutations.
+  const handleAgentStage = async (path: string, body: unknown) => {
+    try {
+      if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
+      const value = body as Record<string, unknown>;
+      const extraFields = path.endsWith("/launch") ? ["appId"] : path.endsWith("/action") ? ["action", "operationId"] : [];
+      const fields = ["token", "taskId", "mode", ...extraFields];
+      if (!agentStagePaths.has(path) || Object.keys(value).some((key) => !fields.includes(key))
+        || typeof value.token !== "string" || value.token.length > 128
+        || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
+        || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
+      const mode = value.mode as "background" | "owner-preview" | undefined;
+      const unavailable = () => ({ status: 503, body: { ok: false, error: "Task stage operations are unavailable on this broker." } });
+      if (!options.taskStages) return unavailable();
+      if (path.endsWith("/prepare")) return { status: 200, body: { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, mode) } };
+      if (path.endsWith("/launch")) {
+        if (!isStageAppReference(value.appId)) throw new Error("Invalid stage request.");
+        if (!options.taskStages.launch) return unavailable();
+        return { status: 200, body: { ok: true, result: await options.taskStages.launch(value.token, value.taskId, value.appId, mode) } };
+      }
+      if (path.endsWith("/close")) {
+        if (!options.taskStages.closeApp) return unavailable();
+        return { status: 200, body: { ok: true, result: await options.taskStages.closeApp(value.token, value.taskId, mode) } };
+      }
+      if (value.operationId !== undefined && (typeof value.operationId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.operationId))) throw new Error("Invalid stage request.");
+      const kind = value.action && typeof value.action === "object" && !Array.isArray(value.action) ? (value.action as { kind?: unknown }).kind : undefined;
+      if (kind !== "capture" && typeof value.operationId !== "string") return { status: 409, body: { ok: false,
+        error: "This M9R MCP runtime does not send desktop-operation receipts. Update the M9R engine before sending desktop input; no action was dispatched." } };
+      if (!options.taskStages.act) return unavailable();
+      return { status: 200, body: { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, mode, value.operationId as string | undefined) } };
+    } catch (error) {
+      const body = stageFailure(error, "Stage request failed.");
+      return { status: body.driverError ? 502 : 403, body };
+    }
+  };
   const ownerServer = options.ownerPipePath ? await startOwnerPipe({
     path: options.ownerPipePath,
-    handle: (request) => request.method === "GET"
-      ? handleOwnerRequest(request)
-      : ownerReply(false, { error: "owner pipe is read-only; mutations require the authenticated loopback API" }),
+    requestTimeoutMs: (request) => request.method === "POST" && agentStagePaths.has(request.path) ? 70_000 : 2_000,
+    handle: (request) => {
+      if (request.method === "GET") return handleOwnerRequest(request);
+      if (request.method === "POST" && request.path === "/web/mcp/store") {
+        if (!options.agentMcpStore) return { ok: false, error: "Owner-brokered M9R task state writes are unavailable." };
+        return applyAgentMcpStoreMutation(options.agentMcpStore, request.body).body;
+      }
+      if (request.method === "POST" && agentStagePaths.has(request.path)) return handleAgentStage(request.path, request.body).then((result) => result.body);
+      return ownerReply(false, { error: "the local pipe only accepts read-only status and authenticated agent task-state operations" });
+    },
   }) : null;
 
   const server = createServer(async (req, res) => {
-    if (req.method === "GET" && req.url === "/health") return reply(res, 200, { ok: true });
+    // This is process liveness only. Desktop capture/control is task-scoped and is
+    // verified by an actual stage capture; do not imply that liveness proves it.
+    if (req.method === "GET" && req.url === "/health") {
+      return reply(res, 200, {
+        ok: true,
+        broker: "alive",
+        desktopStage: "not-probed",
+        runtimeIdentity: options.runtimeIdentity ?? runtimeIdentityAtProcessStart,
+      });
+    }
     const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
     if (requestUrl.pathname.startsWith("/web/")) {
       if (req.headers.origin !== undefined) return reply(res, 403, { ok: false, error: "browser-originated requests are refused" });
       if (!sameSecret(req.headers["x-m9r-key"] as string | undefined, options.key)) return reply(res, 401, { ok: false, error: "missing or wrong key" });
+      if (req.method === "POST" && agentStagePaths.has(requestUrl.pathname)) {
+        let body: unknown;
+        try { body = JSON.parse(await readBody(req) || "null"); }
+        catch (error) { return replyStageFailure(res, error, "Invalid stage JSON."); }
+        const result = await handleAgentStage(requestUrl.pathname, body);
+        return reply(res, result.status, result.body);
+      }
       if (req.method === "GET" && requestUrl.pathname === "/web/status") {
-        return reply(res, 200, { ok: true, broker: "ready", extensionConnected: !!extension && extension.readyState === WebSocket.OPEN, extensionReady: !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN });
+        return reply(res, 200, { ok: true, broker: "ready", browserTransport: options.browserTransport ? "agent-chrome" : "extension", browserReady: options.browserTransport?.ready() ?? (!!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN), extensionConnected: !!extension && extension.readyState === WebSocket.OPEN, extensionReady: !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN });
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/agents") {
         return reply(res, 200, { ok: true, agents: options.ui?.roster?.() ?? [] });
@@ -401,7 +614,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       }
       if (req.method === "POST" && requestUrl.pathname === "/web/shutdown") {
         reply(res, 200, { ok: true, stopped: true });
-        setTimeout(() => { options.onShutdownRequested?.(); void closeServer(); }, 0);
+        scheduleShutdown();
         return;
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/feed") return reply(res, 200, broker.feedSnapshot());
@@ -598,7 +811,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     const origin = String(req.headers.origin ?? "");
     const candidateId = origin.startsWith("chrome-extension://") ? origin.slice("chrome-extension://".length).replace(/\/$/, "") : "";
     const id = candidateId && !/[/?#]/.test(candidateId) ? candidateId : "";
-    const permitted = req.url === "/ext" && id !== "" && (allowed.length > 0 ? allowed.includes(id) : allowAnyExtension);
+    const permitted = !options.browserTransport && req.url === "/ext" && id !== "" && (allowed.length > 0 ? allowed.includes(id) : allowAnyExtension);
     if (!permitted) {
       socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
       socket.destroy();
@@ -676,18 +889,19 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (closePromise) return closePromise;
     closePromise = new Promise<void>((resolve) => {
       settleReadyWaiters(false);
+      unsubscribeBrowser?.();
       extension?.close();
       sockets.close();
       const ownerClosed = ownerServer
         ? new Promise<void>((done) => ownerServer.close(() => done()))
         : Promise.resolve();
       const httpClosed = new Promise<void>((done) => server.close(() => done()));
-      void Promise.all([ownerClosed, httpClosed]).then(() => resolve());
+      void Promise.allSettled([ownerClosed, httpClosed, options.browserTransport?.close()]).then(() => resolve());
       (ownerServer as (typeof ownerServer) & { closeAllConnections?: () => void } | null)?.closeAllConnections?.();
       server.closeAllConnections();
     });
     return closePromise;
   };
   closeServer = close;
-  return { port, close };
+  return { port, close, requestStageApproval: (request) => broker.requestStageApproval(request) };
 }

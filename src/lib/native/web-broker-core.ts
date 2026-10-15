@@ -31,6 +31,8 @@ export interface WebRequest {
   tab?: string;
   url?: string;
   selector?: string;
+  /** Destination for drag gestures; validated by web-powers-core. */
+  endSelector?: string;
   /** Untrusted, optional visible-control label used only for risk classification and owner review. */
   targetLabel?: string;
   /** Optional stable parent-form selector used only to coordinate field claims. */
@@ -112,6 +114,22 @@ export interface WebBatchResponse {
 export type RoomMode = "watch" | "ask" | "hands-off";
 export const ROOM_MODES: readonly RoomMode[] = ["watch", "ask", "hands-off"];
 
+export interface StageApprovalRequest {
+  agent: string;
+  provider: string;
+  sessionId: string;
+  /** Short owner-facing step text, shown in the pill approvals thread. */
+  step: string;
+  /** What the click target calls itself (accessibility label), when known. */
+  targetLabel?: string;
+  /** Audited action name and pill verb source. Defaults to click; stage launches pass launch. */
+  action?: string;
+  /** Audit category. Defaults to money; stage launches pass their own name. */
+  risk?: string;
+  /** Upper bound on the wait. Stage callers keep this below their own transport timeout so a slow owner resolves to a clean denial, not a lost proof. */
+  timeoutMs?: number;
+}
+
 /**
  * watch: agents act freely on the shared page; only things that leave it (post, message, buy, upload, download, and send/delete-like
  * controls) ask. ask: every risky action asks. hands-off: nothing asks except money and secrets.
@@ -132,6 +150,8 @@ export function autoAllowedInMode(mode: RoomMode, request: { action: string; sel
 
 export interface WebBrokerDeps {
   send(message: unknown): boolean;
+  /** CDP input owns one pointer/focus per tab: serialize every writer through a tab lane. */
+  oneWriterPerTab?: boolean;
   /** Current room mode; absent means every risky action asks (the original behavior). */
   roomMode?(): RoomMode;
   ownerId?: string;
@@ -409,6 +429,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
     expiresAt: number;
     resolve: (response: WebResponse) => void;
     timer: ReturnType<typeof setTimeout>;
+    /** Stage-control path: the entry carries no dispatchable WebRequest, so the decision goes to this continuation instead of resolve(). */
+    onDecision?: (decision: "approve" | "deny") => void;
   }
   interface DoneNoticeAckEntry {
     tab: string;
@@ -534,7 +556,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
     const id = turnParticipantId(actor, request);
     if (!lane.participants.has(id)) {
       lane.participants.set(id, turnParticipant(actor, request));
-      lane.scheduler.register(id, { burstSize: request.provider.toLowerCase().includes("codex") ? 4 : 1 });
+      lane.scheduler.register(id, { burstSize: (request.provider ?? "").toLowerCase().includes("codex") ? 4 : 1 });
     }
     return id;
   }
@@ -567,7 +589,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
       provider: claim.provider,
       sessionId: claim.sessionId,
     });
-    lane.scheduler.register(claim.participantId, { burstSize: claim.provider.toLowerCase().includes("codex") ? 4 : 1 });
+    lane.scheduler.register(claim.participantId, { burstSize: (claim.provider ?? "").toLowerCase().includes("codex") ? 4 : 1 });
     const inFlight = [...pending.entries()].filter(([, entry]) => entry.claimKey === key);
     lane.activeParticipantId = inFlight.length > 0 ? claim.participantId : null;
     lane.scheduler.setPending(claim.participantId, inFlight.length > 0);
@@ -731,6 +753,33 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (tabs?.size === 0) tabsByActor.delete(actorKey);
   }
 
+  function normalizedPageUrl(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    try {
+      const url = new URL(value);
+      url.hash = "";
+      return url.toString().replace(/\/+$/, "");
+    } catch {
+      return undefined;
+    }
+  }
+
+  let implicitOpenTabSequence = 0;
+  function freshOpenTabName(request: WebRequest, crossOwner: boolean): string {
+    const agent = request.agent.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 12) || "agent";
+    const suffix = (++implicitOpenTabSequence).toString(36);
+    const base = `open-${agent}-${suffix}`.slice(0, 40);
+    const namespace = (name: string) => crossOwner ? `${request.owner}/${name}` : name;
+    const taken = (name: string) => {
+      const tab = namespace(name);
+      return tabUrls.has(tab) || openedBy.has(tab) || activeClaims(tab).length > 0
+        || [...tabsByActor.values()].some((tabs) => tabs.has(tab));
+    };
+    let candidate = base;
+    for (let ordinal = 2; taken(candidate); ordinal += 1) candidate = `${base.slice(0, 36)}-${ordinal}`;
+    return candidate;
+  }
+
   function resolveTab(request: WebRequest): { tab: string; actorKey: string; publicName: string } | { error: string } {
     const crossOwner = request.owner !== undefined && request.owner !== deps.ownerId;
     const actorKey = actorTabsKey(request);
@@ -738,6 +787,20 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (request.tab !== undefined) return { tab: namespace(request.tab), actorKey, publicName: request.tab };
 
     const openTabs = [...(tabsByActor.get(actorKey) ?? [])];
+    // An implicit open starts in a fresh tab unless the exact page is already
+    // owned by this actor. This keeps localhost/task context intact while still
+    // letting a follow-up read/click use the tab that open successfully focused.
+    if (request.action === "open") {
+      if (openTabs.length === 0) {
+        const initial = namespace(request.agent);
+        return { tab: initial, actorKey, publicName: request.agent };
+      }
+      const requestedUrl = normalizedPageUrl(request.url);
+      const existingPage = requestedUrl ? openTabs.find((tab) => normalizedPageUrl(tabUrls.get(tab)) === requestedUrl) : undefined;
+      if (existingPage) return { tab: existingPage, actorKey, publicName: crossOwner ? existingPage.slice(request.owner!.length + 1) : existingPage };
+      const fresh = freshOpenTabName(request, crossOwner);
+      return { tab: namespace(fresh), actorKey, publicName: fresh };
+    }
     // m9r_web_switch picks the tab later tab-less calls use; listing tabs never needs a choice.
     const focused = focusedTabByActor.get(actorKey);
     if (openTabs.length > 1 && focused && openTabs.includes(focused)) return { tab: focused, actorKey, publicName: crossOwner ? focused.slice(request.owner!.length + 1) : focused };
@@ -748,7 +811,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
     }
     // Nothing of its own yet: work on the page the room is already on (one shared tab) instead of starting a private one.
     // Opening still starts the agent's own tab, and several shared tabs still need a choice.
-    if (request.action !== "open" && request.action !== "tabs" && !crossOwner && tabUrls.size === 1) {
+    if (request.action !== "tabs" && !crossOwner && tabUrls.size === 1) {
       const [shared] = [...tabUrls.keys()];
       return { tab: shared, actorKey, publicName: shared };
     }
@@ -852,12 +915,13 @@ export function createWebBroker(deps: WebBrokerDeps) {
     const siteJump = request.action === "open" && !crossOwner ? sameSiteJumpProblem(request.url) : null;
     if (siteJump) return Promise.resolve(fail(siteJump));
 
-    const requestedScope = scopeFor(request);
+    const scope = scopeFor(request);
+    const requestedScope: WebClaimScope | null = scope && deps.oneWriterPerTab ? { kind: "tab", key: "*" } : scope;
     if (requestedScope && !(request.action === "open" && !crossOwner)) {
       const activeLane = [...turnLanes.values()].find((lane) => lane.tab === tab && lane.key !== turnContext?.laneKey && turnLaneIsBusy(lane) && scopesOverlap(lane.scope, requestedScope));
       const activeLaneClaim = activeLane ? claims.get(activeLane.key) : undefined;
       const mayShareActiveClaim = activeLaneClaim?.agent !== actor && activeLaneClaim?.sharedWith.has(actor) === true;
-      if (activeLane && !mayShareActiveClaim) return queueTurnRequest(activeLane, request, actor);
+      if (activeLane && (deps.oneWriterPerTab || !mayShareActiveClaim)) return queueTurnRequest(activeLane, request, actor);
     }
     let claimHolder: Claim | undefined;
     let commandClaimKey: string | undefined;
@@ -911,6 +975,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
       url: request.url,
       selector: request.selector,
       text: request.text,
+      ...(request.endSelector ? { endSelector: request.endSelector } : {}),
       ...(request.args ? { args: request.args } : {}),
       ...powerFields,
       expectOrigin,
@@ -957,9 +1022,12 @@ export function createWebBroker(deps: WebBrokerDeps) {
         participantId: turnContext?.participantId ?? participantId,
         ...(turnContext ? { turnLaneKey: turnContext.laneKey, turnToken: turnContext.token } : {}),
       });
+      if (deps.oneWriterPerTab && claimHolder && !turnContext) turnLaneForClaim(tab, claimHolder);
       if (!deps.send(message)) {
         clearTimeout(timer);
+        const entry = pending.get(id);
         pending.delete(id);
+        if (entry?.turnLaneKey && entry.turnToken) completeTurnLane(entry.turnLaneKey, entry.turnToken);
         if (addedOpenCandidate) forgetTab(actorKey, tab);
         resolve(fail("no browser extension is connected"));
       } else {
@@ -1058,12 +1126,76 @@ export function createWebBroker(deps: WebBrokerDeps) {
       entry.resolve(fail("approval decision could not be persisted; the action was refused"));
       return false;
     }
+    if (entry.onDecision) {
+      entry.onDecision(decision);
+      return true;
+    }
     if (decision === "deny") {
       entry.resolve(fail("owner denied the browser action"));
       return true;
     }
     void dispatch(entry.request).then(entry.resolve);
     return true;
+  }
+
+  /**
+   * Owner hold for stage-control actions the standing policy never auto-allows (money clicks).
+   * The entry surfaces in the same pill approval list as web actions -- no pill changes needed --
+   * and resolves true only on an explicit owner approve. Deny and timeout both resolve false.
+   */
+  function requestStageApproval(request: StageApprovalRequest): Promise<boolean> {
+    if (stopState.state === "stopped") return Promise.resolve(false);
+    const id = newId();
+    const createdAt = now();
+    const waitMs = Math.min(10 * 60_000, Math.max(1_000, request.timeoutMs ?? approvalTimeoutMs));
+    let resolveDecision: (approved: boolean) => void = () => {};
+    const decided = new Promise<boolean>((resolve) => { resolveDecision = resolve; });
+    const audit = (kind: "action.requested" | "action.timed_out" | "action.approved" | "action.denied", detail: string): boolean => {
+      try {
+        deps.authority?.recordActionDecision(kind, request.agent, { action: request.action ?? "click", detail });
+        deps.onAuthorityChange?.();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!deps.authority) return Promise.resolve(false);
+    // The stage money carve-out arrives as money; unlisted-app launches arrive under their own name.
+    const risk = request.risk ?? "money";
+    if (!audit("action.requested", risk)) return Promise.resolve(false);
+    const syntheticRequest: WebRequest = {
+      agent: request.agent,
+      provider: request.provider,
+      sessionId: request.sessionId,
+      // Carried through to the pill verbatim (narrateStep takes any action string); the WebAction cast
+      // only satisfies the dispatchable-request shape, which stage entries never dispatch through.
+      action: (request.action ?? "click") as WebRequest["action"],
+      ...(request.targetLabel ? { targetLabel: request.targetLabel } : {}),
+    };
+    const timer = setTimeout(() => {
+      if (!approvals.delete(id)) return;
+      audit("action.timed_out", risk);
+      emit({ kind: "approvals-changed" });
+      resolveDecision(false);
+    }, waitMs);
+    approvals.set(id, {
+      id,
+      actor: request.agent,
+      request: syntheticRequest,
+      risk,
+      createdAt,
+      expiresAt: createdAt + waitMs,
+      resolve: () => {},
+      timer,
+      // decideApproval already audited, emitted, cleared the timer, and removed the entry above.
+      onDecision: (decision) => {
+        resolveDecision(decision === "approve");
+      },
+    });
+    advanceFeed();
+    emit({ kind: "approval", id, agent: request.agent, provider: request.provider, step: request.step });
+    void decided.then(() => emit({ kind: "approvals-changed" }));
+    return decided;
   }
 
   function onExtensionMessage(raw: unknown): void {
@@ -1147,7 +1279,9 @@ export function createWebBroker(deps: WebBrokerDeps) {
     } else if (response.ok && entry.action !== "tabs") {
       rememberTab(entry.actorTabsKey, entry.tab);
       if (entry.action === "open") openedBy.set(entry.tab, entry.actorTabsKey);
-      if (entry.action === "switch") focusedTabByActor.set(entry.actorTabsKey, entry.tab);
+      if ((entry.action === "open" && entry.request?.tab === undefined) || entry.action === "switch") {
+        focusedTabByActor.set(entry.actorTabsKey, entry.tab);
+      }
     }
     else if (entry.addedOpenCandidate || /tab .* is not open/i.test(response.error ?? "")) forgetTab(entry.actorTabsKey, entry.tab);
     if (/tab .* is not open/i.test(response.error ?? "")) tabUrls.delete(entry.tab);
@@ -1440,5 +1574,5 @@ export function createWebBroker(deps: WebBrokerDeps) {
     };
   }
 
-  return { submit, submitBatch, pendingApprovals, decideApproval, onExtensionMessage, onExtensionClosed, currentClaims, notifyAgentMessage, markAgentDone, noteOwnerUrls, setMessageTextVisibility, stopAll, feedSnapshot };
+  return { submit, submitBatch, pendingApprovals, decideApproval, requestStageApproval, onExtensionMessage, onExtensionClosed, currentClaims, notifyAgentMessage, markAgentDone, noteOwnerUrls, setMessageTextVisibility, stopAll, feedSnapshot };
 }

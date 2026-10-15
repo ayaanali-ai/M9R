@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
-import Nav from "@/components/Nav";
-import Footer from "@/components/Footer";
-import ScrollReveal from "@/components/ScrollReveal";
+import ReferencePage, { Panel } from "@/components/reference/ReferencePage";
+import { LegalLinks } from "@/components/reference/LegalDocument";
+import d from "@/components/reference/ReferencePage.module.css";
 import { CONTACT_EMAIL, CONTACT_MAILTO } from "@/lib/contact";
 
 export const metadata: Metadata = {
@@ -11,8 +11,8 @@ export const metadata: Metadata = {
 
 const live = [
   {
-    title: "Redaction runs before storage, everywhere",
-    desc: "Evidence submissions, run activity, PR/commit content, and workspace rules all pass through the same redaction path before they're written. It always runs.",
+    title: "Redaction runs before storage on the main record paths",
+    desc: "Evidence submissions, run activity, PR/commit content, workspace rules, captured agent sessions, and shared memory notes pass through the same redaction path before they're written. Live workspace chat messages and file attachments are stored as sent and are not redacted today.",
   },
   {
     title: "Secret redaction (CLI + server)",
@@ -34,103 +34,94 @@ const live = [
     title: "Rate limiting on covered endpoints",
     desc: "Application-level rate limits apply to sensitive API routes. Edge firewall and bot controls are operated separately and may vary by deployment.",
   },
+  {
+    title: "Workspace isolation in the database",
+    desc: "Workspace tables use database row-level security, so a signed-in user's queries only return rows for workspaces they own or belong to.",
+  },
+  {
+    title: "Provider API keys are stored encrypted",
+    desc: "Model-provider API keys you add are stored in Supabase Vault through server-only functions and are never returned to the browser.",
+  },
+  {
+    title: "Payments handled by Stripe",
+    desc: "Checkout, card details, and the billing portal are hosted by Stripe. M9R stores subscription identifiers and status, not card numbers, and verifies the signature on every billing webhook.",
+  },
+  {
+    title: "Guardrails on browser and desktop control",
+    desc: "Agent control of your browser and computer runs locally, over a connection limited to your own machine. Site access is granted per site and limited by action, path, and time; agents' cursors and status are shown on screen; tasks that look risky wait for a person's approval; and there is a stop control. The extension refuses targeted reads or typing on password, payment-card, and one-time-code fields.",
+  },
 ];
 
 const planned = [
-  "User-initiated deletion of uploaded runs",
-  "Account deletion on request",
+  "Self-service account deletion (today it is handled on request by email)",
+  "Self-service deletion of runs, evidence, and conversation history",
+  "Redaction for live workspace chat messages and attachments",
   "Broader bot protection on public endpoints",
 ];
 
-/** Ranged defense-style section header (01 // LABEL). */
-function Range({ no, label }: { no: string; label: string }) {
-  return (
-    <div className="lp-range">
-      <span className="lp-range-no">{no}</span>
-      <span className="lp-range-bar" aria-hidden />
-      {label}
-    </div>
-  );
-}
+const limits = [
+  "Browser and desktop control acts with your own permissions. Risk checks are pattern-based heuristics, not a sandbox, and can miss a harmful action or let one through.",
+  "Anything an agent reads or sees on your screen is sent to that agent's AI provider and handled under the provider's terms.",
+  "The local connection between the browser extension and the M9R app is not encrypted. Do not run M9R's local components on shared or untrusted computers.",
+];
 
 export default function SecurityPage() {
   return (
-    <div className="lp lp-page">
-      <ScrollReveal />
-      <div className="lp-atmos" aria-hidden />
-      <Nav />
-      <main className="lp-page-main lp-page-main--narrow">
-        <header className="lp-page-head">
-          <div className="lp-ph-eyebrow lp-ph-eyebrow--steel">
-            <span className="lp-tick" aria-hidden />
-            Security
-          </div>
-          <h1 className="lp-h-page">Security &amp; Data Handling</h1>
-          <p className="lp-lede-page">
-            M9R treats agent activity, evidence, and connection tokens as sensitive. Redaction
-            runs before storage across the product, and the local CLI redacts secrets from anything
-            it prints. Do not submit API keys, secrets, private keys, customer PII, PHI, payment
-            data, or other regulated sensitive data through any channel or evidence submission.
-          </p>
-        </header>
+    <ReferencePage title={<>Security &amp;<br />data handling</>} intro="M9R treats agent activity, evidence, and connection tokens as sensitive.">
+      <Panel title="Overview" heading="Before you submit anything." status="Read before connecting agents" wide>
+        <p className={d.measure}>
+          Redaction runs before storage on the main record paths, and the local CLI redacts secrets from
+          anything it prints. Do not submit API keys, secrets, private keys, customer PII, PHI, payment
+          data, or other regulated sensitive data through any channel or evidence submission.
+        </p>
+      </Panel>
 
-        {/* Live today */}
-        <section className="lp-doc-section lp-reveal" style={{ borderTop: 0, paddingBottom: 8 }}>
-          <Range no="01" label="Live today" />
-          <div style={{ marginTop: 22, display: "flex", flexDirection: "column", gap: 14 }}>
-            {live.map((item) => (
-              <div key={item.title} className="lp-doc">
-                <div className="lp-doc-title">
-                  <span className="lp-dot" aria-hidden />
-                  {item.title}
-                </div>
-                <p>{item.desc}</p>
-              </div>
-            ))}
-          </div>
-        </section>
+      <Panel title="Live today" heading="Live today." status={`${live.length} controls in place`} wide>
+        <ul className={d.steps} style={{ marginTop: 20 }}>
+          {live.map((item) => (
+            <li key={item.title}>
+              <h3>{item.title}</h3>
+              <p>{item.desc}</p>
+            </li>
+          ))}
+        </ul>
+      </Panel>
 
-        {/* Planned */}
-        <section className="lp-doc-section lp-reveal" style={{ borderTop: 0, paddingBottom: 8 }}>
-          <Range no="02" label="Planned, not yet implemented" />
-          <div className="lp-doc" style={{ marginTop: 22 }}>
-            <ul className="lp-list lp-list--planned">
-              {planned.map((p) => (
-                <li key={p}>{p}</li>
-              ))}
-            </ul>
-          </div>
-        </section>
+      <Panel title="Planned" heading="Planned, not yet implemented." status="Not live yet">
+        <ul className={d.list}>
+          {planned.map((p) => (
+            <li key={p}>{p}</li>
+          ))}
+        </ul>
+      </Panel>
 
-        {/* Do not submit */}
-        <section className="lp-doc-section lp-reveal" style={{ borderTop: 0, paddingTop: 0, paddingBottom: 8 }}>
-          <div className="lp-warn">
-            <h2>Do not submit</h2>
-            <p>
-              API keys, secrets, private keys, customer PII, PHI, payment data, or regulated
-              sensitive data, in messages, evidence submissions, or any other channel.
-            </p>
-          </div>
-        </section>
+      <Panel title="Known limits" heading="Known limits." status="Heuristics, not a sandbox">
+        <ul className={d.list}>
+          {limits.map((l) => (
+            <li key={l}>{l}</li>
+          ))}
+        </ul>
+      </Panel>
 
-        {/* Compliance disclaimer + contact */}
-        <section className="lp-doc-section lp-reveal" style={{ borderTop: 0, paddingTop: 0, paddingBottom: 96 }}>
-          <div className="lp-legalese" style={{ fontSize: 12.5, lineHeight: 1.7, color: "var(--lp-muted)" }}>
-            <p>
-              M9R does not claim SOC 2, HIPAA, GDPR, or enterprise compliance. The product is
-              early. We will only add a security claim here once it is implemented and verifiable.
-            </p>
-            <p style={{ marginTop: 10 }}>
-              Contact:{" "}
-              <a href={CONTACT_MAILTO} style={{ color: "var(--lp-oxblood-lit)" }}>
-                {CONTACT_EMAIL}
-              </a>
-            </p>
-          </div>
-        </section>
-      </main>
-      <Footer />
-    </div>
+      <Panel title="Warning" heading="Do not submit." status="One exception: provider API keys">
+        <p>
+          API keys, secrets, private keys, customer PII, PHI, payment data, or regulated
+          sensitive data, in messages, evidence submissions, or any other channel. The one
+          exception is a provider API key entered in M9R&apos;s dedicated credential settings.
+        </p>
+      </Panel>
+
+      <Panel title="Compliance" heading="No compliance claims." status={CONTACT_EMAIL}>
+        <p>
+          M9R does not claim SOC 2, HIPAA, GDPR, or enterprise compliance. The product is
+          early. We will only add a security claim here once it is implemented and verifiable.
+        </p>
+        <p>
+          Contact: <a href={CONTACT_MAILTO}>{CONTACT_EMAIL}</a>
+        </p>
+      </Panel>
+
+      <LegalLinks current="/security" />
+    </ReferencePage>
   );
 }
-

@@ -77,7 +77,7 @@ export default function SettingsView({ email, userId, username, billingEnabled }
           <>
             <section className="ol-panel p-4" aria-labelledby="connect-agent-title">
               <h2 id="connect-agent-title" className="text-base font-semibold">Connect an agent</h2>
-              <p className="mt-1 text-sm">Run this in your project terminal with Node.js and npm installed, then approve the connection in your browser.</p>
+              <p className="mt-1 text-sm">Run this from any terminal with Node.js and npm installed, then approve the connection in your browser.</p>
               <code className="ol-mono mt-2 block rounded border p-2">npx m9r-cli connect</code>
               <p className="mt-2 text-sm">For browser actions, run <code>npx m9r-cli web setup</code> afterward and follow the extension installation instructions.</p>
             </section>

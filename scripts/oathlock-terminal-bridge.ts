@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { open, readFile, stat, mkdir } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, watch as watchFs } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, relative, resolve, sep } from "node:path";
@@ -9,7 +9,7 @@ import process from "node:process";
 import * as pty from "node-pty";
 import chokidar from "chokidar";
 import { WebSocket, WebSocketServer } from "ws";
-import { BRIDGE_PROTOCOL_VERSION, DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, MAX_BRIDGE_MESSAGE_BYTES, authorizeUpgrade, parseClientMessage } from "../src/lib/local-terminal-bridge-core";
+import { BRIDGE_PROTOCOL_VERSION, DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, MAX_BRIDGE_MESSAGE_BYTES, authorizeUpgrade, parseClientMessage, isIgnoredTerminalWatchPath } from "../src/lib/local-terminal-bridge-core";
 import { createTerminalSessionManager, type PtyFactory } from "../src/lib/local-terminal-session-manager";
 import { parseResidentActivityLine, residentActivityJournalPath } from "../src/lib/resident-activity-journal";
 import { isTerminalProvider, type TerminalProvider } from "../src/lib/local-terminal-protocol";
@@ -407,10 +407,8 @@ async function checkReconnectRequest(): Promise<void> {
  * and covers the case that actually matters (build output and dependency
  * trees, not a project's own bespoke ignore rules).
  */
-const FILE_WATCH_IGNORE_SEGMENTS = new Set([".git", "node_modules", ".next", ".m9r", "dist", "cli"]);
 function isIgnoredWatchPath(absolutePath: string): boolean {
-  const rel = relative(repositoryRoot, absolutePath);
-  return rel.split(sep).some((segment) => FILE_WATCH_IGNORE_SEGMENTS.has(segment));
+  return isIgnoredTerminalWatchPath(relative(repositoryRoot, absolutePath));
 }
 
 /** Binary/huge files never get their content read into newText -- Live Code
@@ -468,9 +466,38 @@ async function flushFileWatchEvents(): Promise<void> {
 }
 
 function startFileWatcher(): void {
+  if (process.platform === "win32") {
+    // Windows supports one native recursive directory watch. Registering a
+    // separate watcher for every source file blocks the shared HTTP loop in
+    // large repositories, even after generated trees have been excluded.
+    const watcher = watchFs(repositoryRoot, { recursive: true, persistent: true }, (event, filename) => {
+      if (!filename) return;
+      const path = resolve(repositoryRoot, filename.toString());
+      if (isIgnoredWatchPath(path)) return;
+      void stat(path).then(async (info) => {
+        if (!info.isFile()) return;
+        pendingFileWatchEvents.set(relative(repositoryRoot, path).split(sep).join("/"), {
+          filePath: relative(repositoryRoot, path).split(sep).join("/"),
+          activityKind: event === "rename" ? "create" : "changed",
+          newText: await readWatchedFileText(path),
+        });
+        scheduleFileWatchFlush();
+      }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") return;
+        const filePath = relative(repositoryRoot, path).split(sep).join("/");
+        pendingFileWatchEvents.set(filePath, { filePath, activityKind: "delete", newText: null });
+        scheduleFileWatchFlush();
+      });
+    });
+    watcher.on("error", (error) => process.stderr.write(`M9R source watch failed: ${error.message}\n`));
+    process.once("SIGINT", () => watcher.close());
+    process.once("SIGTERM", () => watcher.close());
+    return;
+  }
   const watcher = chokidar.watch(repositoryRoot, {
     ignored: (path: string) => isIgnoredWatchPath(path),
     ignoreInitial: true,
+    followSymlinks: false,
     persistent: true,
   });
   function relativeWatchPath(absolutePath: string): string {

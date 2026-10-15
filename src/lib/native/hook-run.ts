@@ -11,6 +11,7 @@ import { handleHookEvent, type HookInput } from "./hook-handler";
 import { collectCodexResults, deliverToCodex, pushAnswerToCodex, realDeps, spawnDeliveryRunner } from "./codex-delivery";
 import { createWebBrokerClient } from "./web-broker-client";
 import { brokerKeyPath } from "./web-broker-paths";
+import { prepareHookInboxTaskStageNotice } from "./task-stage-notice";
 
 export interface HookRequest {
   event: string;
@@ -110,6 +111,19 @@ export async function runHookRequest(req: HookRequest, runnerEntry: string, base
   const input: HookInput = { ...(req.input ?? {}) };
   if (!input.hook_event_name && req.event) input.hook_event_name = req.event;
   const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
+  // Task-stage setup is opt-in and local. Keep it below the provider's hook budget; if the broker is slow,
+  // the normal inbox path still succeeds and the agent can prepare the stage through MCP on its next check.
+  const stageNotice = await prepareHookInboxTaskStageNotice({
+    root,
+    store,
+    web,
+    handle: handleForProvider(req.provider),
+    event: input.hook_event_name ?? req.event,
+    sessionId: input.session_id,
+    cwd: input.cwd,
+    prompt: input.prompt,
+    timeoutMs: 2_000,
+  });
   const result = handleHookEvent(input, {
     provider: req.provider,
     store,
@@ -139,5 +153,6 @@ export async function runHookRequest(req: HookRequest, runnerEntry: string, base
   if ((input.hook_event_name ?? req.event) === "Stop" && input.session_id) {
     try { await web.markDone?.(handleForProvider(req.provider), req.provider, input.session_id); } catch { /* best effort; never fail a provider turn because the optional overlay could not be updated */ }
   }
+  if (stageNotice && result) result.hookSpecificOutput.additionalContext += `\n\n${stageNotice}`;
   return result ? JSON.stringify(result) : "";
 }

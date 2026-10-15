@@ -7,11 +7,16 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
 import { windowsFileHolders, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
+import { defaultStoreRoot } from "./local-store";
+import { createWebBrokerClient } from "./web-broker-client";
+import { brokerKeyPath, ownerPipePath } from "./web-broker-paths";
+import { prepareTaskStageNotice } from "./task-stage-notice";
 
 export interface DeliveryDeps {
+  prepareTaskStage?(token: string, taskId: string): Promise<string>;
   resolveCodex(): CodexCommand | null;
   runCodex(command: CodexCommand, args: string[]): Promise<{ code: number | null; stderr: string; spawnError?: string }>;
   /** Last bytes of the rollout file for a thread, or null when it cannot be found. */
@@ -27,34 +32,68 @@ export type DeliveryOutcome =
   | { state: "failed"; reason: string }
   | { state: "skipped"; reason: string };
 
+/** A task launched by M9R itself can inherit ~/.m9r/bin as process.cwd(); that is install state, never a project. */
+function projectCwdForTask(store: LocalStore, cwd: string | undefined): string | undefined {
+  if (!cwd) return undefined;
+  const root = normCwd(store.root);
+  const candidate = normCwd(cwd);
+  return isWindowsSystemCwd(cwd) || (root && (candidate === root || candidate.startsWith(`${root}/`))) ? undefined : cwd;
+}
+
 /** Pushes one task into the target Codex session. Only tasks a human typed or approved are ever pushed. */
 export async function deliverToCodex(store: LocalStore, taskId: string, deps: DeliveryDeps): Promise<DeliveryOutcome> {
+  const candidate = store.getTask(taskId);
+  if (!candidate || candidate.to !== "codex" || candidate.resultSummary) return { state: "skipped", reason: "not a pending Codex task" };
+  if (!canQueue(candidate)) return { state: "skipped", reason: "waiting for approval" };
+  const claimed = store.claimCodexDelivery(taskId);
+  if (!claimed) return { state: "skipped", reason: "not eligible or already claimed for delivery" };
+  let dispatched = false;
+  const guardedDeps: DeliveryDeps = { ...deps, runCodex: async (command, args) => {
+    dispatched = true;
+    return deps.runCodex(command, args);
+  } };
+  try {
+    return await deliverClaimedToCodex(store, taskId, guardedDeps, () => dispatched);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    store.setDelivery(taskId, { state: dispatched ? "uncertain" : "failed", error: reason });
+    return { state: "failed", reason };
+  }
+}
+
+async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: DeliveryDeps, wasDispatched: () => boolean): Promise<DeliveryOutcome> {
   const task = store.getTask(taskId);
   if (!task) return { state: "skipped", reason: "no such task" };
   if (task.to !== "codex") return { state: "skipped", reason: "not addressed to codex" };
   if (!canQueue(task)) return { state: "skipped", reason: "waiting for approval" };
   if (task.delivery?.state === "queued" || task.delivery?.state === "done") return { state: "skipped", reason: "already pushed" };
+  // Old task records may already have captured the engine install directory. Treat that path as
+  // an unknown sender folder too, so those tasks can use the current live Codex identity.
+  const taskCwd = projectCwdForTask(store, task.cwd);
 
-  const attempts = (task.delivery?.attempts ?? 0) + 1;
+  const attempts = task.delivery?.attempts ?? 1;
   const fail = (reason: string): DeliveryOutcome => {
-    store.setDelivery(taskId, { state: "failed", attempts, error: reason });
+    store.setDelivery(taskId, { state: wasDispatched() ? "uncertain" : "failed", attempts, error: reason });
     return { state: "failed", reason };
   };
-  const queueMessageFor = (sessionId: string): string | null => {
+  const queueMessageFor = async (sessionId: string): Promise<string | null> => {
     if (!deps.requireTargetIdentity) return buildQueueMessage(task);
     const token = store.identityTokenFor("codex", sessionId);
-    return token ? buildQueueMessage(task, token) : null;
+    if (!token) return null;
+    const stageNotice = deps.prepareTaskStage ? await deps.prepareTaskStage(token, taskId).catch(() => "M9R task stage preparation failed; no desktop control was granted.") : "";
+    return buildQueueMessage(task, token) + (stageNotice ? `\n\n${stageNotice}` : "");
   };
   const everySession = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
 
   // Rule 1: an explicit link the person made (or M9R made from one clear match) always wins, even over folder or recency.
-  const linked = task.fromSession && !task.targetSession ? store.linkedSession(task.from, task.fromSession, "codex", task.cwd) : undefined;
+  const linked = task.fromSession && !task.targetSession ? store.linkedSession(task.from, task.fromSession, "codex", taskCwd) : undefined;
   const linkedTargets = linked ? everySession.filter((session) => session.sessionId === linked.sessionId && (!linked.cwd || normCwd(session.cwd) === normCwd(linked.cwd))) : [];
   if (linked && linkedTargets.length === 1 && isThreadId(linked.sessionId)) {
-    const message = queueMessageFor(linked.sessionId);
+    const message = await queueMessageFor(linked.sessionId);
     if (!message) return fail("The target Codex session has no active M9R token; reconnect it before delivery.");
     const command = deps.resolveCodex();
     if (!command) return fail("The codex command was not found on this machine.");
+    store.setDelivery(taskId, { state: "sending", threadId: linked.sessionId });
     const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(linked.sessionId, message)));
     if (!outcome.ok) return fail(outcome.error ?? "codex queue failed");
     store.setDelivery(taskId, { state: "queued", attempts, threadId: linked.sessionId, queuedAt: new Date().toISOString(), error: undefined });
@@ -65,33 +104,34 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   // the sender: it could be another project, or an old thread, and a clean new session must never lose its task to one. Only an explicit
   // `--session`, or a sender with no known folder, may reach any session.
   let known = everySession;
-  if (task.cwd && !task.targetSession) {
-    const exact = everySession.filter((s) => normCwd(s.cwd) === normCwd(task.cwd));
+  if (taskCwd && !task.targetSession) {
+    const exact = everySession.filter((s) => normCwd(s.cwd) === normCwd(taskCwd));
     known = exact;
     if (known.length === 0 && everySession.length > 0) return fail(deps.requireTargetIdentity
-      ? `No Codex session with an active M9R identity is open in ${task.cwd}. Start or reconnect Codex so its M9R SessionStart card is present, then retry.`
-      : `No Codex session is open in ${task.cwd}; it will show at the next prompt in whichever session you use. Send one message explicitly to aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
+      ? `No Codex session with an active M9R identity is open in ${taskCwd}. Start or reconnect Codex so its M9R SessionStart card is present, then retry.`
+      : `No Codex session is open in ${taskCwd}; it will show at the next prompt in whichever session you use. Send one message explicitly to aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
   }
   // Asking the machine costs about a second, so only when there is a choice to make and nobody pinned one.
   const liveness = !task.targetSession && known.length > 1 && deps.sessionLiveness ? await deps.sessionLiveness(known.map((s) => s.sessionId)).catch(() => undefined) : undefined;
-  const choice = pickSession(known, { pinned: task.targetSession, senderCwd: task.cwd, now: new Date(), liveness });
+  const choice = pickSession(known, { pinned: task.targetSession, senderCwd: taskCwd, now: new Date(), liveness });
   if (choice.kind === "none") return fail(task.targetSession
     ? (deps.requireTargetIdentity ? `No Codex session with an active M9R identity matches "${task.targetSession}". Start or reconnect that session, then retry.` : `No Codex session matches "${task.targetSession}"; start that session, then retry.`)
     : (deps.requireTargetIdentity ? "No Codex session with an active M9R identity is known. Start Codex with M9R enabled so it receives a SessionStart card, then retry." : "No Codex session is known. Start Codex, then retry."));
   if (choice.kind === "ambiguous") return fail(`${choice.sessions.length} Codex sessions are open here and M9R cannot tell which you mean, so it will show at the next prompt in whichever you use. To aim it: m9r-cli sessions, then m9r-cli send @codex --session <id> "..."`);
   // Rule 2: exactly one candidate was just resolved for a sender with a known session: remember it as an auto-link for next time.
   if (task.fromSession) store.setLink(
-    { handle: task.from, sessionId: task.fromSession, cwd: task.cwd },
+    { handle: task.from, sessionId: task.fromSession, cwd: taskCwd },
     { handle: "codex", sessionId: choice.session.sessionId, cwd: choice.session.cwd },
     "auto",
   );
   const endpoint = choice.session;
   if (!isThreadId(endpoint.sessionId)) return fail("The Codex session id looks wrong; open Codex again and retry.");
-  const message = queueMessageFor(endpoint.sessionId);
+  const message = await queueMessageFor(endpoint.sessionId);
   if (!message) return fail("The target Codex session has no active M9R token; reconnect it before delivery.");
   const command = deps.resolveCodex();
   if (!command) return fail("The codex command was not found on this machine.");
 
+  store.setDelivery(taskId, { state: "sending", threadId: endpoint.sessionId });
   const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(endpoint.sessionId, message)));
   if (!outcome.ok) return fail(outcome.error ?? "codex queue failed");
   store.setDelivery(taskId, { state: "queued", attempts, threadId: endpoint.sessionId, queuedAt: new Date().toISOString(), error: undefined });
@@ -104,8 +144,9 @@ export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps:
   if (!task || !task.resultSummary) return { state: "skipped", reason: "no answer yet" };
   if (task.from !== "codex" || !isThreadId(task.fromSession)) return { state: "skipped", reason: "the asker is not a Codex session we can push into" };
   if (task.answerPushedAt) return { state: "skipped", reason: "already sent back" };
+  const taskCwd = projectCwdForTask(store, task.cwd);
   const sessions = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
-  const askerSessions = sessions.filter((session) => session.sessionId === task.fromSession && (!task.cwd || normCwd(session.cwd) === normCwd(task.cwd)));
+  const askerSessions = sessions.filter((session) => session.sessionId === task.fromSession && (!taskCwd || normCwd(session.cwd) === normCwd(taskCwd)));
   if (askerSessions.length !== 1) return { state: "failed", reason: askerSessions.length === 0 ? "the originating Codex session is no longer registered in its folder" : "the originating Codex session is ambiguous; no answer was pushed" };
   const command = deps.resolveCodex();
   if (!command) return { state: "failed", reason: "The codex command was not found on this machine." };
@@ -126,6 +167,9 @@ export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, 
     const tail = deps.readRolloutTail(threadId);
     if (!tail) continue;
     const result = findQueuedResult(tail, task.id);
+    if (result.seen && task.delivery?.state !== "queued") store.setDelivery(task.id, {
+      state: "queued", threadId, queuedAt: new Date().toISOString(), error: undefined,
+    });
     if (result.done) {
       store.setResult(task.id, resultSummary(task.id, result.message));
       collected += 1;
@@ -189,7 +233,10 @@ export function readRolloutTailFor(threadId: string, env: Record<string, string 
 }
 
 export function realDeps(env: Record<string, string | undefined> = process.env): DeliveryDeps {
+  const root = defaultStoreRoot(homedir(), env);
+  const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
   return {
+    prepareTaskStage: (token, taskId) => prepareTaskStageNotice(root, web, token, "codex", taskId),
     requireTargetIdentity: true,
     resolveCodex: () => resolveCodexCommand({
       platform: process.platform,

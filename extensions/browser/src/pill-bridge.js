@@ -227,7 +227,17 @@
   }
   function siteOrigins(origins) {
     const skipLocal = hasStaticInjection();
-    return (origins || []).filter((o) => /^https?:\/\//.test(o) && !(skipLocal && LOCAL_ORIGINS.includes(o))).sort();
+    let staticMatches = [];
+    try {
+      staticMatches = (chrome.runtime.getManifest?.().content_scripts || [])
+        .filter((script) => CONTENT_JS.every((file) => script.js?.includes(file)))
+        .flatMap((script) => script.matches || []);
+    } catch { /* unavailable manifest: retain the existing loopback safeguard */ }
+    return (origins || []).filter((o) => {
+      if (!/^https?:\/\//.test(o) || (skipLocal && LOCAL_ORIGINS.includes(o))) return false;
+      const scheme = o.startsWith("https:") ? "https" : "http";
+      return !staticMatches.includes(o) && !staticMatches.includes(`${scheme}://*/*`) && !staticMatches.includes("<all_urls>");
+    }).sort();
   }
 
   function syncSiteScripts() {

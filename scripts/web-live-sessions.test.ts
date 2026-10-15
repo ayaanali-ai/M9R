@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createOpenCodeAcpRuntime } from "@/lib/native/web-opencode-acp";
@@ -17,6 +16,8 @@ interface TestRoomTask {
   origin?: string;
   approval: string;
   createdAt?: string;
+  fromSession?: string;
+  targetSession?: string;
   deliveredAt?: string;
   resultSummary?: string;
   answerPushedAt?: string;
@@ -25,9 +26,12 @@ interface TestRoomTask {
 
 const line = (v: unknown) => `${JSON.stringify(v)}\n`;
 const allowRoomMessage = async () => ({ ok: true as const });
+const fixtureRoot = join(process.cwd(), ".workcache", "web-live-session-tests");
+mkdirSync(fixtureRoot, { recursive: true });
+const makeFixture = (prefix: string) => mkdtempSync(join(fixtureRoot, prefix));
 
 test("OpenCode resolver finds the executable behind an npm PATH entry without APPDATA", () => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-opencode-path-"));
+  const root = makeFixture("m9r-opencode-path-");
   try {
     const npmPrefix = join(root, "npm");
     const executable = join(npmPrefix, "node_modules", "opencode-ai", "bin", "opencode.exe");
@@ -56,7 +60,7 @@ function fakeClaude() {
 }
 
 function setup(extra: Partial<Parameters<typeof createWebLiveSessions>[0]> = {}) {
-  const root = mkdtempSync(join(tmpdir(), "m9r-live-"));
+  const root = makeFixture("m9r-live-");
   const identities: Array<{ handle: string; provider: string; sessionId: string }> = [];
   const revoked: string[] = [];
   const events: SessionEvent[] = [];
@@ -176,6 +180,76 @@ test("codex is a per-message worker that resumes its thread; a new message mid-r
   } finally { t.done(); }
 });
 
+test("Codex usage-limit failures persist a cooldown and are not reinjected until the provider reset time", () => {
+  let clock = new Date("2026-10-09T21:00:00.000Z");
+  const workers: Array<{ out(text: string): void; err(text: string): void; exit(code: number): void }> = [];
+  const spawnWorker = (): WorkerProcess => {
+    const emitter = new EventEmitter();
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    workers.push({
+      out: (text) => stdout.emit("data", Buffer.from(text)),
+      err: (text) => stderr.emit("data", Buffer.from(text)),
+      exit: (code) => emitter.emit("exit", code),
+    });
+    return {
+      stdout: stdout as never,
+      stderr: stderr as never,
+      on: (event: string, listener: (...args: unknown[]) => void) => emitter.on(event, listener),
+      kill: () => undefined,
+    } as never;
+  };
+  const t = setup({
+    agents: [{ handle: "codex", provider: "codex", folder: process.cwd() }],
+    spawnWorker,
+    codexCli: () => "C:/codex.js",
+    now: () => new Date(clock),
+  });
+  const store = {
+    issueIdentity: (_handle: string, _provider: string, sessionId: string) => ({ token: `token-${sessionId}` }),
+    revokeIdentity: () => undefined,
+  };
+  let restarted: ReturnType<typeof createWebLiveSessions> | undefined;
+  try {
+    assert.deepEqual(t.sessions.deliver("codex", "open a page"), { ok: true, mode: "started" });
+    workers[0].out(line({ type: "turn.failed", error: { message: "You've hit your usage limit; try again at Oct 9th, 2026 10:00 PM UTC." } }));
+    workers[0].exit(1);
+
+    const snapshotPath = join(t.root, "web-sessions", "codex", "provider-cooldown.json");
+    const persisted = JSON.parse(readFileSync(snapshotPath, "utf8")) as { version: number; provider: string; until: number };
+    assert.deepEqual(persisted, { version: 1, provider: "codex", until: Date.parse("2026-10-09T22:00:00.000Z") });
+    assert.equal(t.sessions.snapshot()[0].status, "failed");
+    assert.match(t.sessions.snapshot()[0].doing, /Codex paused until 2026-10-09T22:00:00.000Z/);
+    assert.ok(t.events.some((event) => event.kind === "system" && /will not send another task/.test(event.text)));
+    assert.ok(!t.events.some((event) => event.kind === "system" && /You've hit your usage limit/.test(event.text)), "raw provider error text is not copied into the pill");
+
+    t.sessions.close();
+    restarted = createWebLiveSessions({
+      agents: [{ handle: "codex", provider: "codex", folder: process.cwd() }],
+      storeRoot: t.root,
+      repoRoot: process.cwd(),
+      brokerPort: 47998,
+      store,
+      env: {},
+      now: () => new Date(clock),
+      spawnWorker,
+      codexCli: () => "C:/codex.js",
+    });
+    assert.equal(restarted.snapshot()[0].status, "failed", "the quota pause survives broker/session-manager restart");
+    const blocked = restarted.deliver("codex", "repeat the page search");
+    assert.equal(blocked.ok, false);
+    assert.match((blocked as { error: string }).error, /paused until 2026-10-09T22:00:00.000Z/);
+    assert.equal(workers.length, 1, "a blocked repeat never starts another Codex worker");
+
+    clock = new Date("2026-10-09T22:00:00.001Z");
+    assert.deepEqual(restarted.deliver("codex", "a new owner task"), { ok: true, mode: "started" });
+    assert.equal(workers.length, 2, "a new task can run after the provider reset time");
+  } finally {
+    restarted?.close();
+    t.done();
+  }
+});
+
 test("OpenCode keeps one ACP process/session across turns, streams Done, and carries scoped room memory", async () => {
   const prompts: string[] = [];
   const runtimes: Array<{ close(): void; cancelTurn(): Promise<void> }> = [];
@@ -274,7 +348,7 @@ test("a new OpenCode message cancels the active turn and continues in the same p
 });
 
 test("agents.json: valid entries load, bad ones are skipped with a reason; defaults when absent", () => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-agents-"));
+  const root = makeFixture("m9r-agents-");
   try {
     const d = loadAgentsConfig(root, { env: {}, cwd: root, detect: { codex: () => true, opencode: () => false } });
     assert.deepEqual(d.agents.map((a) => [a.handle, a.provider, a.folder]), [["claude", "claude-code", root], ["codex", "codex", root]]);
@@ -297,7 +371,7 @@ test("agents.json: valid entries load, bad ones are skipped with a reason; defau
 });
 
 test("web MCP config carries the broker-room start time used to suppress stale inbox replay", () => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-web-mcp-config-"));
+  const root = makeFixture("m9r-web-mcp-config-");
   const roomStartedAt = 1_790_769_600_000;
   try {
     const { configPath } = writeWebMcpConfig(root, { repoRoot: root, storeRoot: root, brokerPort: 47821, roomStartedAt });
@@ -318,8 +392,10 @@ test("a packaged broker starts agents' M9R tools through the engine beside it, n
 
 test("the broker bridge does not replay tasks from before startup, including the old two-second grace and missing timestamps", async () => {
   const tasks: TestRoomTask[] = [
-    { id: "T-old-window", from: "claude", to: "opencode", goal: "stale task inside old grace window", origin: "agent_initiated", approval: "pending", createdAt: new Date(Date.now() - 1_500).toISOString() },
-    { id: "T-no-time", from: "claude", to: "opencode", goal: "legacy task with no timestamp", origin: "agent_initiated", approval: "pending" },
+    { id: "T-native", from: "codex", fromSession: "native-codex-thread", to: "opencode", goal: "native task must not enter the browser worker", origin: "agent_initiated", approval: "approved", createdAt: new Date().toISOString() },
+    { id: "T-native-pinned", from: "web-claude", to: "opencode", targetSession: "native-opencode-session", goal: "explicit native recipient", origin: "agent_initiated", approval: "approved", createdAt: new Date().toISOString() },
+    { id: "T-old-window", from: "claude", fromSession: "web-claude-test", to: "opencode", goal: "stale task inside old grace window", origin: "agent_initiated", approval: "pending", createdAt: new Date(Date.now() - 1_500).toISOString() },
+    { id: "T-no-time", from: "claude", fromSession: "web-claude-test", to: "opencode", goal: "legacy task with no timestamp", origin: "agent_initiated", approval: "pending" },
   ];
   const store = {
     issueIdentity: (handle: string, _p: string, sessionId: string) => ({ token: `tok-${handle}-${sessionId.slice(-4)}` }),
@@ -331,7 +407,7 @@ test("the broker bridge does not replay tasks from before startup, including the
     setAnswerPushed: () => undefined,
     markResultShown: () => undefined,
   };
-  const root = mkdtempSync(join(tmpdir(), "m9r-stale-bridge-"));
+  const root = makeFixture("m9r-stale-bridge-");
   const claude = fakeClaude();
   const sessions = createWebLiveSessions({
     agents: [{ handle: "claude", provider: "claude-code", folder: root }, { handle: "opencode", provider: "claude-code", folder: root }],
@@ -385,7 +461,7 @@ test("web agent prompt closes the loop on announced checks instead of leaving th
 });
 
 test("OpenCode replaces a provider process that died while idle and resumes the same session", async () => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-opencode-dead-"));
+  const root = makeFixture("m9r-opencode-dead-");
   const made: Array<{ resumeId?: string; dead: boolean; closed: boolean }> = [];
   const openCodeRuntime = ({ resumeId }: { resumeId?: string }) => {
     const record = { resumeId, dead: false, closed: false };
@@ -422,7 +498,7 @@ test("OpenCode replaces a provider process that died while idle and resumes the 
 });
 
 test("OpenCode resumes its durable provider session after the broker session manager restarts", async () => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-opencode-resume-"));
+  const root = makeFixture("m9r-opencode-resume-");
   const resumed: Array<string | undefined> = [];
   const openCodeRuntime = ({ resumeId }: { resumeId?: string }) => {
     resumed.push(resumeId);
@@ -460,7 +536,7 @@ test("OpenCode resumes its durable provider session after the broker session man
 });
 
 test("the live OpenCode harness reuses one ACP launch per active session and restores its saved provider session after restart", async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-opencode-live-acp-"));
+  const root = makeFixture("m9r-opencode-live-acp-");
   const providerSessionId = "ses_opencode_persistent_1";
   // Model OpenCode's persisted transcript separately from each simulated ACP process.
   const historyBySession = new Map<string, string[]>();
@@ -568,8 +644,8 @@ test("the live OpenCode harness reuses one ACP launch per active session and res
 });
 
 test("a persisted provider session is not resumed when the agent's project folder changes", async () => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-opencode-project-boundary-"));
-  const otherFolder = mkdtempSync(join(tmpdir(), "m9r-opencode-other-project-"));
+  const root = makeFixture("m9r-opencode-project-boundary-");
+  const otherFolder = makeFixture("m9r-opencode-other-project-");
   const resumed: Array<string | undefined> = [];
   const openCodeRuntime = ({ resumeId }: { resumeId?: string }) => {
     resumed.push(resumeId);
@@ -619,7 +695,7 @@ test("agents in the room message each other directly: the ask reaches the teamma
     setAnswerPushed: (id: string) => { const task = tasks.find((t) => t.id === id); if (task) task.answerPushedAt = "now"; },
     markResultShown: (ids: string[]) => { for (const id of ids) { const task = tasks.find((t) => t.id === id); if (task) task.resultShownAt = "now"; } },
   };
-  const root = mkdtempSync(join(tmpdir(), "m9r-bridge-"));
+  const root = makeFixture("m9r-bridge-");
   const claude = fakeClaude();
   const sessions = createWebLiveSessions({
     agents: [{ handle: "claude", provider: "claude-code", folder: root }, { handle: "opencode", provider: "claude-code", folder: root }],
@@ -627,7 +703,7 @@ test("agents in the room message each other directly: the ask reaches the teamma
     authorizeRoomMessage: allowRoomMessage,
   } as never);
   try {
-    tasks.push({ id: "T1", from: "claude", to: "opencode", goal: "Which plan has the API tier?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
+    tasks.push({ id: "T1", from: "claude", fromSession: "web-claude-test", to: "opencode", goal: "Which plan has the API tier?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     await new Promise((r) => setTimeout(r, 1000));
     assert.equal(claude.spawned.length, 1, "the teammate's session was started for the ask");
     assert.match(claude.spawned[0].written.join(""), /@claude messaged you \(T1\)/);
@@ -656,7 +732,7 @@ test("a stopped agent is still woken by a teammate's ask, not just by the owner"
     setAnswerPushed: () => undefined,
     markResultShown: () => undefined,
   };
-  const root = mkdtempSync(join(tmpdir(), "m9r-stopped-"));
+  const root = makeFixture("m9r-stopped-");
   const claude = fakeClaude();
   const sessions = createWebLiveSessions({
     agents: [{ handle: "claude", provider: "claude-code", folder: root }, { handle: "opencode", provider: "claude-code", folder: root }],
@@ -668,7 +744,7 @@ test("a stopped agent is still woken by a teammate's ask, not just by the owner"
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(sessions.stop("claude"), true);
     assert.equal(sessions.snapshot().find((s) => s.handle === "claude")?.status, "stopped");
-    tasks.push({ id: "T1", from: "opencode", to: "claude", goal: "What did you find?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
+    tasks.push({ id: "T1", from: "opencode", fromSession: "web-opencode-test", to: "claude", goal: "What did you find?", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     await new Promise((r) => setTimeout(r, 1000));
     assert.equal(claude.spawned.length, 2, "the stopped agent was started again by the teammate's ask");
     assert.match(claude.spawned[1].written.join(""), /@opencode messaged you \(T1\)/);
@@ -691,7 +767,7 @@ test("Stop All is not undone by an ask that was already queued: the bridge stays
     setAnswerPushed: () => undefined,
     markResultShown: () => undefined,
   };
-  const root = mkdtempSync(join(tmpdir(), "m9r-stopall-"));
+  const root = makeFixture("m9r-stopall-");
   const claude = fakeClaude();
   const sessions = createWebLiveSessions({
     agents: [{ handle: "claude", provider: "claude-code", folder: root }, { handle: "opencode", provider: "claude-code", folder: root }],
@@ -701,7 +777,7 @@ test("Stop All is not undone by an ask that was already queued: the bridge stays
   try {
     sessions.deliver("claude", "get started");
     await new Promise((r) => setTimeout(r, 50));
-    tasks.push({ id: "T1", from: "opencode", to: "claude", goal: "queued right before stop", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
+    tasks.push({ id: "T1", from: "opencode", fromSession: "web-opencode-test", to: "claude", goal: "queued right before stop", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 1800));
     assert.equal(claude.spawned.length, 1, "the halted room does not re-spawn the agent it just stopped");
@@ -727,7 +803,7 @@ test("snapshot() reports waitingOn for an idle agent with a real, still-open ask
     setAnswerPushed: () => undefined,
     markResultShown: () => undefined,
   };
-  const root = mkdtempSync(join(tmpdir(), "m9r-waitingon-"));
+  const root = makeFixture("m9r-waitingon-");
   const claude = fakeClaude();
   const sessions = createWebLiveSessions({
     agents: [{ handle: "claude", provider: "claude-code", folder: root }, { handle: "opencode", provider: "claude-code", folder: root }],
@@ -766,7 +842,7 @@ test("room asks stored under web-<handle> (what m9r_send really writes) reach th
     setAnswerPushed: (id: string) => { const task = tasks.find((t) => t.id === id); if (task) task.answerPushedAt = "now"; },
     markResultShown: (ids: string[]) => { for (const id of ids) { const task = tasks.find((t) => t.id === id); if (task) task.resultShownAt = "now"; } },
   };
-  const root = mkdtempSync(join(tmpdir(), "m9r-bridge-"));
+  const root = makeFixture("m9r-bridge-");
   const claude = fakeClaude();
   const sessions = createWebLiveSessions({
     agents: [{ handle: "claude", provider: "claude-code", folder: root }, { handle: "opencode", provider: "claude-code", folder: root }],
@@ -810,7 +886,7 @@ test("a queued room ask is not pushed after AWARE authorization is revoked", asy
     setAnswerPushed: () => undefined,
     markResultShown: () => undefined,
   };
-  const root = mkdtempSync(join(tmpdir(), "m9r-revoked-room-ask-"));
+  const root = makeFixture("m9r-revoked-room-ask-");
   const claude = fakeClaude();
   const sessions = createWebLiveSessions({
     agents: [{ handle: "claude", provider: "claude-code", folder: root }, { handle: "opencode", provider: "claude-code", folder: root }],

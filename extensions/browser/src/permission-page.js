@@ -53,8 +53,10 @@
   const paintQuiet = async () => {
     const stored = await chrome.storage.local.get("m9rQuietMode").catch(() => ({}));
     const on = stored.m9rQuietMode === true && await chrome.permissions.contains({ permissions: ["debugger"] }).catch(() => false);
-    quietToggle.textContent = on ? "Turn off quiet mode" : "Turn on quiet mode";
-    quietStatus.textContent = on ? "Quiet mode is on." : "Quiet mode is off. Agents use the standard click.";
+    quietToggle.textContent = on ? "Turn off independent browser input" : "Enable independent browser input";
+    quietStatus.textContent = on
+      ? "Independent browser input is on. Clicks do not move your physical mouse."
+      : "Independent browser input is off. Browser clicks are blocked; M9R will not use your physical mouse.";
     return on;
   };
   void paintQuiet();
@@ -67,7 +69,7 @@
       } else {
         const granted = await chrome.permissions.request({ permissions: ["debugger"] });
         await chrome.storage.local.set({ m9rQuietMode: granted === true });
-        if (!granted) quietStatus.textContent = "Chrome did not grant the permission, so quiet mode stays off.";
+        if (!granted) quietStatus.textContent = "Chrome did not grant the permission. Browser clicks stay blocked, and your physical mouse will not be used.";
       }
     } finally {
       quietToggle.disabled = false;

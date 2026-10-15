@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
 import { collectCodexResults, deliverToCodex, findRolloutFile, type DeliveryDeps } from "../src/lib/native/codex-delivery";
 import { renderInboxInjection, renderResultsInjection } from "../src/lib/native/inbox-core";
 import { handleHookEvent } from "../src/lib/native/hook-handler";
@@ -28,6 +28,41 @@ function seedCodex(store: ReturnType<typeof newStore>) {
 }
 const typed = (store: ReturnType<typeof newStore>, goal = "Review lease.ts", key = "k1") =>
   store.addTask({ from: "claude", to: "codex", goal, origin: "human_typed", idempotencyKey: key }).task;
+
+test("concurrent Codex dispatchers inject a task once", async () => {
+  const store = newStore();
+  seedCodex(store);
+  const task = typed(store);
+  let calls = 0;
+  const deps = fakeDeps({ runCodex: async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return { code: 0, stderr: "" };
+  } });
+  const results = await Promise.all([deliverToCodex(store, task.id, deps), deliverToCodex(store, task.id, deps)]);
+  assert.equal(calls, 1);
+  assert.deepEqual(results.map((result) => result.state).sort(), ["queued", "skipped"]);
+  assert.equal(store.getTask(task.id)?.delivery?.attempts, 1);
+});
+
+test("an ambiguous Codex dispatch failure is not injected again", async () => {
+  const store = newStore();
+  seedCodex(store);
+  const task = typed(store);
+  let calls = 0;
+  const deps = fakeDeps({ runCodex: async () => { calls += 1; throw new Error("response lost"); } });
+  assert.equal((await deliverToCodex(store, task.id, deps)).state, "failed");
+  assert.equal(store.getTask(task.id)?.delivery?.state, "uncertain");
+  assert.deepEqual(store.claimInboxTasks("codex", THREAD, [task.id]), [], "inbox fallback must not replay an ambiguous push");
+  assert.equal((await deliverToCodex(store, task.id, deps)).state, "skipped");
+  assert.equal(calls, 1);
+  const tail = [
+    { type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: queueMarker(task.id) }] } },
+    { type: "event_msg", payload: { type: "task_complete", last_agent_message: "Finished once" } },
+  ].map((item) => JSON.stringify(item)).join("\n");
+  assert.equal(collectCodexResults(store, { readRolloutTail: () => tail }), 1);
+  assert.equal(store.getTask(task.id)?.delivery?.state, "done", "observed rollout completion reconciles the lost response without replay");
+});
 
 test("only tasks a human typed or approved may be queued; everything else is never pushed", () => {
   assert.equal(canQueue({ origin: "human_typed", approval: "not_needed" }), true);
@@ -220,8 +255,11 @@ test("a prompt M9R pushed into Codex is not routed as a new mention (it names it
   assert.equal(dispatched.length, 0);
   assert.doesNotMatch(out?.hookSpecificOutput.additionalContext ?? "", /already sent your message/, "Codex is not told to skip the work");
   // A person's own prompt with a mention still routes, so the guard is only for M9R's own pushed prompts.
+  // @claude has no live session here, so the ack must say the task is held -- not pretend it was pushed.
   const own = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "@claude please look at this" }, { provider: "codex", store, pathExists: () => false, readIndex: () => null });
-  assert.match(own?.hookSpecificOutput.additionalContext ?? "", /already sent your message to @claude/);
+  assert.match(own?.hookSpecificOutput.additionalContext ?? "", /held your message to @claude/, "an unpushed mention must not promise immediate work");
+  assert.match(own?.hookSpecificOutput.additionalContext ?? "", /no active session/, "the sender learns why it is waiting");
+  assert.match(own?.hookSpecificOutput.additionalContext ?? "", /Do not do that work yourself/, "the held ack still stops the sender doing the work");
 });
 
 const A = "01a0bfd8-4e13-76d3-9077-fdef973a978c";
@@ -268,6 +306,40 @@ test("the sender's own folder aims the push, and --session pins it exactly", asy
   const pinned = store.addTask({ from: "claude", to: "codex", goal: "two", origin: "human_typed", idempotencyKey: "b", cwd: "C:/nowhere", targetSession: B.slice(0, 12) }).task;
   assert.deepEqual(await deliverToCodex(store, pinned.id, deps), { state: "queued", threadId: B });
   assert.deepEqual(deps.calls.map((c) => c[2]), [A, B]);
+});
+
+test("the M9R install directory is not treated as a Codex project folder", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: THREAD, cwd: "C:/runleak/runleak" });
+  const deps = fakeDeps();
+  const t = store.addTask({
+    from: "you",
+    to: "codex",
+    goal: "Show one labeled M9R ghost cursor",
+    origin: "human_typed",
+    idempotencyKey: "install-cwd",
+    cwd: join(store.root, "bin"),
+  }).task;
+
+  assert.deepEqual(await deliverToCodex(store, t.id, deps), { state: "queued", threadId: THREAD });
+  assert.equal(deps.calls.length, 1, "a task created from the runtime install folder still reaches the live project session");
+});
+
+test("Windows System32 is never treated as a Codex project folder", async () => {
+  const store = newStore();
+  store.registerEndpoint({ provider: "codex", sessionId: THREAD, cwd: "C:/runleak/runleak" });
+  assert.equal(isWindowsSystemCwd("C:\\WINDOWS\\System32"), true);
+  const deps = fakeDeps();
+  const task = store.addTask({
+    from: "you",
+    to: "codex",
+    goal: "Show one labeled M9R ghost cursor",
+    origin: "human_typed",
+    idempotencyKey: "system32-cwd",
+    cwd: "C:\\WINDOWS\\System32",
+  }).task;
+  assert.deepEqual(await deliverToCodex(store, task.id, deps), { state: "queued", threadId: THREAD });
+  assert.equal(deps.calls.length, 1);
 });
 
 test("`sessions` lists what was seen and how to aim a task", async () => {

@@ -12,7 +12,7 @@ import { createM9rMcpServer } from "@/lib/native/mcp-server";
 import { handleHookEvent } from "@/lib/native/hook-handler";
 import type { WebBrokerClient } from "@/lib/native/web-broker-client";
 
-type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ type: string; text: string }> }> }> };
+type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ type: string; text: string }> }>; inputSchema: unknown; description?: string }> };
 
 function setup(options: { allowRule?: boolean; web?: WebBrokerClient; roomStartedAt?: number; now?: () => Date } = {}) {
   const root = mkdtempSync(join(tmpdir(), "m9r-inbox-"));
@@ -22,12 +22,48 @@ function setup(options: { allowRule?: boolean; web?: WebBrokerClient; roomStarte
   const call = async (name: string, args: unknown) => (await (server as unknown as ToolServer)._registeredTools[name].handler(args)).content[0].text;
   return {
     store,
+    server,
     call,
     claude: store.issueIdentity("claude", "claude-code", "c1").token,
     codex: store.issueIdentity("codex", "codex", "x1").token,
     done: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+test("desktop stage MCP tools default to the current owner desktop", () => {
+  const t = setup();
+  try {
+    const tools = (t.server as unknown as ToolServer)._registeredTools;
+    for (const name of ["m9r_stage_prepare", "m9r_stage_action", "m9r_stage_app"]) {
+      const shape = (tools[name]?.inputSchema as { shape?: Record<string, { parse(value: unknown): unknown }> } | undefined)?.shape;
+      assert.equal(shape?.mode?.parse(undefined), "owner-preview", `${name} must not silently select a background desktop`);
+      assert.match(tools[name]?.description ?? "", /owner-preview/);
+    }
+  } finally { t.done(); }
+});
+
+test("desktop stage input derives a private one-shot receipt ID from the MCP request identity", async () => {
+  let receivedOperationId = "";
+  const web: WebBrokerClient = {
+    taskStageAction: async (_token, _taskId, _action, _mode, operationId) => {
+      receivedOperationId = operationId ?? "";
+      return { ok: true, result: { operationReceipt: { status: "applied" }, actionExecuted: true } };
+    },
+    run: async () => ({ ok: false, error: "unused" }),
+  };
+  const t = setup({ web });
+  try {
+    const handler = (t.server as unknown as ToolServer)._registeredTools["m9r_stage_action"]!.handler as (
+      args: unknown,
+      extra: { requestId: string | number },
+    ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    const result = await handler({ token: t.codex, taskId: "T1", action: { kind: "cursor", x: 2, y: 3 } }, { requestId: 17 });
+    assert.match(receivedOperationId, /^[a-f0-9]{64}$/);
+    assert.match(result.content[0]?.text ?? "", /"status":"applied"/);
+    await handler({ token: t.codex, taskId: "T1", operationId: "task1-click1", action: { kind: "cursor", x: 2, y: 3 } }, { requestId: 18 });
+    assert.equal(receivedOperationId, "task1-click1", "an explicit operation identity survives a new MCP request");
+  } finally { t.done(); }
+});
 
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });
@@ -95,13 +131,15 @@ test("an explicit inbox check shows a long message in full, while the automatic 
   t.done();
 });
 
-test("two sessions of the same agent each see a message once, and one session's check does not hide it from the other", async () => {
+test("one task is claimed by one provider session and another session cannot take or answer it", async () => {
   const t = setup();
   const second = t.store.issueIdentity("codex", "codex", "x2").token;
   await t.call("m9r_send", { token: t.claude, to: "codex", goal: "shared finding" });
   assert.match(await t.call("m9r_inbox", { token: t.codex }), /shared finding/);
-  assert.match(await t.call("m9r_inbox", { token: second }), /shared finding/);
   assert.equal(await t.call("m9r_inbox", { token: second }), "Inbox is empty.");
+  await assert.rejects(t.call("m9r_result", { token: second, taskId: "T1", summary: "wrong session" }), /belongs to another session/);
+  assert.match(await t.call("m9r_result", { token: t.codex, taskId: "T1", summary: "right session" }), /Recorded result/);
+  assert.equal(t.store.getTask("T1")?.resultSummary, "right session");
   t.done();
 });
 
@@ -129,7 +167,7 @@ test("a new browser room inbox ignores pre-start work but still shows tasks crea
 
 test("a bad token is refused", async () => {
   const t = setup();
-  await assert.rejects(t.call("m9r_inbox", { token: "nope", waitSeconds: 0 }), /invalid or has been revoked/);
+  await assert.rejects(t.call("m9r_inbox", { token: "nope", waitSeconds: 0 }), /token is malformed/);
   t.done();
 });
 

@@ -6,7 +6,7 @@ import { Ticker } from "./ticker";
 import { providerLogo } from "./provider";
 import { buildPrompt } from "./composer";
 import { State, type AgentTask, type LinkOffer } from "../core/state";
-import type { SessionRow } from "../core/transport";
+import type { DesktopStage, DesktopStageTransport, SessionRow } from "../core/transport";
 import type { SpeechEnv } from "../core/speech";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 
@@ -26,6 +26,7 @@ export interface ViewActions {
     list(handle: string): Promise<SessionRow[]>;
     link(offer: LinkOffer, toSession: string): Promise<void>;
   };
+  desktopStages?: DesktopStageTransport;
   toggleSound(): void;
   setAutoClose(seconds: number): void;
   blip(): void;
@@ -34,6 +35,10 @@ export interface ViewActions {
 export interface ViewHost {
   el: HTMLElement;
   sync(): void;
+  /** Called when the view becomes active; used for a lazy local-state refresh. */
+  activate?(): void;
+  /** Called when the view is hidden or replaced. */
+  deactivate?(): void;
   /** Called when the view becomes active, for views with a text field. */
   focus?(): void;
   /** Push-to-talk from the keyboard (the message view only). */
@@ -78,6 +83,10 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 export function buildHeader(actions: ViewActions): ViewHost {
   const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
   const tabChat = h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
+  const tabStage = actions.desktopStages
+    ? h("button", { class: "tab", title: "Desktop stage", onclick: () => go("stage") }, svg(ICONS.display, 14, { stroke: 1.7 }))
+    : null;
+  const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
 
@@ -89,8 +98,8 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat),
-    h("div", { class: "header-actions" }, gearBtn, soundBtn),
+    h("div", { class: "tabs" }, tabHome, tabChat, tabStage),
+    h("div", { class: "header-actions" }, brokerStatus, gearBtn, soundBtn),
   );
 
   return {
@@ -99,7 +108,13 @@ export function buildHeader(actions: ViewActions): ViewHost {
       const v = State.view;
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");
+      tabStage?.classList.toggle("on", v === "stage");
       gearBtn.classList.toggle("on", v === "settings");
+      const connection = State.brokerConnection;
+      brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";
+      brokerStatus.dataset.state = connection;
+      brokerStatus.title = connection === "disconnected" ? "The M9R browser broker is disconnected" : "Connecting to the M9R browser broker";
+      brokerStatus.style.display = connection === "connecting" || connection === "disconnected" ? "inline-flex" : "none";
       clear(soundBtn);
       soundBtn.append(svg(State.settings.soundEnabled ? ICONS.speakerOn : ICONS.speakerOff, 14));
     },
@@ -208,8 +223,9 @@ function buildEmpty(actions: ViewActions): ViewHost {
 function buildApproval(actions: ViewActions): ViewHost {
   const who = h("div");
   const code = h("div", { class: "code" });
+  const status = h("div", { class: "detail approval-status", role: "status", "aria-live": "polite" });
   const row = h("div", { class: "actions" });
-  const el = h("div", { class: "view" }, card("amber", stack(116, 16, who, code, row)));
+  const el = h("div", { class: "view" }, card("amber", stack(116, 16, who, code, status, row)));
   let built = false;
   return {
     el,
@@ -221,6 +237,14 @@ function buildApproval(actions: ViewActions): ViewHost {
       who.append(agentWho(agent ?? State.focusTask, `wants to: ${req?.title ?? "act"}${more}`));
       // The line being authorised: the action, path or address, not just the name of the tool asking.
       code.textContent = req?.detail || "…";
+      const decisionError = req && State.decisionError?.approvalId === req.id ? State.decisionError.message : null;
+      status.textContent = decisionError
+        ? `Decision not sent: ${decisionError}`
+        : req?.unconfirmed
+          ? "Approval status is unconfirmed. M9R will validate your choice before applying it."
+          : "";
+      status.dataset.state = decisionError ? "error" : req?.unconfirmed ? "unconfirmed" : "";
+      status.hidden = !decisionError && !req?.unconfirmed;
       // Built once: rebuilding buttons between a mouse-down and a mouse-up would swallow the click.
       if (built) return;
       built = true;
@@ -310,6 +334,262 @@ function buildSettings(actions: ViewActions): ViewHost {
   };
 }
 
+// ── Desktop stage ────────────────────────────────────────────────
+
+function buildDesktopStage(actions: ViewActions): ViewHost {
+  const desktopStages = actions.desktopStages;
+  const rows = h("div", { class: "stage-list" });
+  const status = h("div", { class: "stage-message", "aria-live": "polite" });
+  const detailTitle = h("div", { class: "stage-detail-title" });
+  const detailSession = h("div", { class: "stage-detail-session" });
+  const detailStatus = h("div", { class: "stage-detail-status" });
+  const activityLabel = h("div", { class: "stage-detail-label" });
+  const activity = h("div", { class: "stage-detail-task" });
+  const cursorNote = h("div", { class: "stage-detail-note", text: "Agent cursors are native Windows overlays. This view switches to a desktop; it does not stream video." });
+  const detailAction = h("div", { class: "stage-detail-action" });
+  const refresh = h("button", {
+    class: "stage-icon-button",
+    title: "Refresh agent desktops",
+    "aria-label": "Refresh agent desktops",
+    onclick: () => void refreshStages(),
+  }, "↻");
+  const listWrap = h("div", { class: "stage-list-wrap" },
+    h("div", { class: "stage-rail-heading" },
+      h("span", { text: "AGENT DESKTOPS" }),
+      h("div", { class: "stage-rail-tools" }, refresh),
+    ),
+    rows,
+  );
+  const detail = h("div", { class: "stage-workspace" },
+    h("div", { class: "stage-heading" }, svg(ICONS.display, 18), detailStatus),
+    detailTitle,
+    detailSession,
+    h("div", { class: "stage-detail-activity" }, activityLabel, activity),
+    cursorNote,
+    detailAction,
+    status,
+  );
+  const el = h("div", { class: "view stage-view" }, card(null, listWrap, detail));
+
+  let stages: DesktopStage[] = [];
+  let loaded = false;
+  let busy = false;
+  let message = "";
+  let selectedName: string | null = null;
+  let refreshTimer: number | null = null;
+
+  function agentTask(handle: string): AgentTask | undefined {
+    return State.tasks.find((task) => task.name.toLowerCase() === handle.toLowerCase());
+  }
+
+  function agentStateLabel(task: AgentTask | undefined): string {
+    if (!task) return "Not connected";
+    if (task.runState === "working") return "Working";
+    if (task.runState === "starting") return "Starting";
+    if (task.state === "approval") return "Waiting for approval";
+    if (task.runState === "failed") return "Error";
+    if (task.runState === "stopped") return "Stopped";
+    if (task.runState === "not_connected") return "Not connected";
+    if (task.runState === "seen") return "Seen recently · live status unavailable";
+    if (task.runState === "unknown") return "Live status unavailable";
+    if (task.runState === "idle") return "Idle";
+    return "Waiting";
+  }
+
+  function currentTaskText(task: AgentTask | undefined): string {
+    if (!task) return "No current task reported.";
+    if (task.runState === "working" || task.runState === "starting") return task.task ?? (task.runState === "working" ? "Working on a turn" : "Starting a turn");
+    if (task.state === "approval") return "Waiting for approval.";
+    if (task.runState === "failed") return "The agent reported an error.";
+    if (task.runState === "stopped") return "The agent is stopped.";
+    if (task.runState === "not_connected") return "No session for this agent has been seen on this computer.";
+    if (task.runState === "seen") return "Seen recently; M9R cannot confirm its current activity.";
+    if (task.runState === "unknown") return "M9R cannot confirm this agent's current activity.";
+    if (task.runState === "waiting") return "The agent is waiting.";
+    return "No current task reported.";
+  }
+
+  function stageLabel(stage: DesktopStage): string {
+    if (stage.status === "current") return "Your current desktop";
+    if (stage.status === "background") return "Windows desktop · background";
+    return "Unavailable";
+  }
+
+  function render() {
+    status.textContent = message;
+    status.hidden = !message;
+    refresh.disabled = busy || !desktopStages;
+    rows.replaceChildren();
+
+    if (!desktopStages) {
+      rows.append(h("div", { class: "stage-empty", text: "Agent desktops are available in the Windows desktop pill." }));
+      detailTitle.textContent = "Windows agent desktops";
+      detailSession.textContent = "";
+      detailStatus.textContent = "";
+      activityLabel.textContent = "";
+      activity.textContent = "This computer does not expose the local Stage controls.";
+      cursorNote.hidden = true;
+      detailAction.replaceChildren();
+      return;
+    }
+    if (!loaded) rows.append(h("div", { class: "stage-empty", text: "Loading agent desktops…" }));
+
+    const assigned = stages.filter((stage) => stage.agentAssignment);
+    const assignedHandles = new Set(assigned.map((stage) => stage.agentAssignment!.handle.toLowerCase()));
+    for (const stage of assigned) {
+      const assignment = stage.agentAssignment!;
+      const task = agentTask(assignment.handle);
+      const selected = stage.name === selectedName;
+      const row = h("div", { class: "stage-row" + (selected ? " selected" : "") });
+      const select = h("button", {
+        class: "stage-row-select",
+        "aria-pressed": String(selected),
+        "aria-label": "Show @" + assignment.handle + " desktop details",
+        onclick: () => { selectedName = stage.name; render(); },
+      },
+        dot(task?.color ?? "#9AA1AC", 8),
+        h("div", { class: "stage-row-main" },
+          h("div", { class: "stage-row-name", text: "@" + assignment.handle }),
+          h("div", { class: "stage-row-state", "data-state": stage.status, text: stageLabel(stage) }),
+          h("div", { class: "stage-row-task", text: task ? currentTaskText(task) : "No current task reported" }),
+        ),
+      );
+      const joinLabel = stage.status === "current" ? "Here" : stage.status === "unavailable" ? "Unavailable" : "Join";
+      const join = h("button", {
+        class: "stage-join",
+        disabled: busy || stage.status !== "background",
+        "aria-label": stage.status === "background" ? "Join @" + assignment.handle + " desktop" : joinLabel,
+        onclick: () => void runStageAction("join", stage.name),
+      }, joinLabel);
+      row.append(select, join);
+      rows.append(row);
+    }
+
+    const withoutDesktop = State.tasks.filter((task) => !assignedHandles.has(task.name.toLowerCase()));
+    if (withoutDesktop.length > 0) {
+      rows.append(h("div", { class: "stage-roster-subheading", text: "NO DESKTOP ASSIGNED" }));
+      for (const task of withoutDesktop) {
+        rows.append(h("div", { class: "stage-row stage-row-unassigned" },
+          dot(task.color, 8),
+          h("div", { class: "stage-row-main" },
+            h("div", { class: "stage-row-name", text: "@" + task.name }),
+            h("div", { class: "stage-row-state", text: agentStateLabel(task) }),
+            h("div", { class: "stage-row-task", text: currentTaskText(task) }),
+          ),
+        ));
+      }
+    }
+
+    if (loaded && assigned.length === 0) {
+      rows.prepend(h("div", { class: "stage-empty", text: "No agent desktop yet. Send an agent a task; its assigned desktop appears here." }));
+    }
+
+    const selected = assigned.find((stage) => stage.name === selectedName)
+      ?? assigned.find((stage) => stage.isCurrent)
+      ?? assigned[0];
+    selectedName = selected?.name ?? null;
+    detailAction.replaceChildren();
+    if (!selected) {
+      detailTitle.textContent = "Your agents’ desktops";
+      detailSession.textContent = "";
+      detailStatus.textContent = "";
+      activityLabel.textContent = "";
+      activity.textContent = loaded ? "When an agent starts a Stage task, its desktop and activity will appear here." : "Connecting to this computer’s Stage registry…";
+      cursorNote.hidden = true;
+      return;
+    }
+
+    const assignment = selected.agentAssignment!;
+    const task = agentTask(assignment.handle);
+    detailTitle.textContent = "@" + assignment.handle;
+    detailSession.textContent = "Session " + assignment.sessionTag;
+    detailStatus.textContent = stageLabel(selected);
+    detailStatus.dataset.state = selected.status;
+    activityLabel.textContent = task?.runState === "working" || task?.runState === "starting" ? "CURRENT TASK" : "CURRENT STATUS";
+    activity.textContent = currentTaskText(task);
+    cursorNote.hidden = !selected.hasAnchor;
+    if (selected.error) {
+      status.textContent = selected.error;
+      status.hidden = false;
+    }
+    if (selected.status === "background") {
+      detailAction.append(h("button", {
+        class: "btn primary stage-join-primary",
+        disabled: busy,
+        onclick: () => void runStageAction("join", selected.name),
+      }, "Join this desktop", svg(ICONS.display, 12)));
+    } else if (selected.status === "current" && selected.returnToDesktopId) {
+      detailAction.append(h("button", {
+        class: "btn secondary stage-join-primary",
+        disabled: busy,
+        onclick: () => void runStageAction("return", selected.name),
+      }, "Return to my desktop"));
+    }
+  }
+
+  async function refreshStages(silent = false) {
+    if (!desktopStages || busy) return;
+    busy = true;
+    if (!silent) message = "Refreshing agent desktops…";
+    render();
+    try {
+      stages = await desktopStages.list();
+      loaded = true;
+      if (!silent) message = "";
+      if (!selectedName || !stages.some((stage) => stage.name === selectedName)) {
+        selectedName = stages.find((stage) => stage.isCurrent && stage.agentAssignment)?.name
+          ?? stages.find((stage) => stage.agentAssignment)?.name
+          ?? null;
+      }
+    } catch (error) {
+      loaded = true;
+      message = "Could not read agent desktops: " + (error instanceof Error ? error.message : String(error));
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  async function runStageAction(action: "join" | "return", stageName: string) {
+    if (!desktopStages || busy) return;
+    busy = true;
+    message = action === "join" ? "Joining the agent’s Windows desktop…" : "Returning to your desktop…";
+    render();
+    try {
+      if (action === "join") await desktopStages.activate(stageName);
+      else await desktopStages.returnToOwner(stageName);
+      stages = await desktopStages.list();
+      loaded = true;
+      message = action === "join" ? "You joined the agent’s Windows desktop." : "Returned to your desktop.";
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  function startPolling() {
+    if (!desktopStages || refreshTimer !== null) return;
+    void refreshStages();
+    refreshTimer = window.setInterval(() => {
+      if (State.mode === "expanded" && State.view === "stage") void refreshStages(true);
+    }, 3_000);
+  }
+
+  function stopPolling() {
+    if (refreshTimer !== null) window.clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+
+  render();
+  return {
+    el,
+    activate: startPolling,
+    deactivate: stopPolling,
+    sync: render,
+  };
+}
 // ── Registry ─────────────────────────────────────────────────────
 
 export function buildViews(actions: ViewActions, onChatHeightChange: () => void): Map<IslandViewName, ViewHost> {
@@ -322,5 +602,6 @@ export function buildViews(actions: ViewActions, onChatHeightChange: () => void)
   map.set("note", buildNote());
   map.set("settings", buildSettings(actions));
   map.set("prompt", buildPrompt(actions, onChatHeightChange));
+  if (actions.desktopStages) map.set("stage", buildDesktopStage(actions));
   return map;
 }

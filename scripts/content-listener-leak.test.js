@@ -47,7 +47,7 @@ function harness(registration) {
   const overlayUpdates = [];
   let root = null;
   const mountedFrames = [];
-  let nativePointerResult = Promise.resolve(true);
+  let nativePointerCalls = 0;
   let overlaysDestroyed = 0;
   let overlaysSuspended = 0;
   let overlaysResumed = 0;
@@ -76,7 +76,7 @@ function harness(registration) {
           togglePill: () => {},
           showComposer: () => {},
           whenArrived: () => Promise.resolve(),
-          nativePointer: () => nativePointerResult,
+          nativePointer: () => { nativePointerCalls++; return Promise.resolve(true); },
           mountFrame: (...args) => mountedFrames.push(args),
           };
         },
@@ -111,7 +111,7 @@ function harness(registration) {
   context.chrome.runtime.onMessage.removeListener = runtimeBus.removeListener;
   return {
     context, windowBus, docBus, runtimeBus, overlayUpdates, getRoot: () => root, mountedFrames,
-    setNativePointerResult: (value) => { nativePointerResult = value; },
+    nativePointerCalls: () => nativePointerCalls,
     destroyed: () => overlaysDestroyed,
     suspended: () => overlaysSuspended,
     resumed: () => overlaysResumed,
@@ -148,19 +148,15 @@ test("pill registration exposes a transport failure without exposing exception t
   assert.equal(JSON.stringify(root.dataset).includes("private runtime detail"), false);
 });
 
-test("arrival acknowledgment waits for the visible native cursor render", async () => {
-  const { context, runtimeBus, setNativePointerResult } = harness();
+test("legacy native pointer messages cannot position the page cursor from physical pointer coordinates", () => {
+  const { context, runtimeBus, nativePointerCalls } = harness();
   inject(context);
-  let finishPaint;
-  setNativePointerResult(new Promise((resolve) => { finishPaint = resolve; }));
-  let response;
-  const returns = runtimeBus.dispatch({ type: "m9r-native-pointer", agent: "codex", x: 20, y: 40, active: true, phase: "arrived" }, (value) => { response = value; });
+  let responded = false;
+  const returns = runtimeBus.dispatch({ type: "m9r-native-pointer", agent: "codex", x: 20, y: 40, active: true, phase: "arrived" }, () => { responded = true; });
 
-  assert.deepEqual(returns, [true]);
-  assert.equal(response, undefined);
-  finishPaint(true);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(JSON.parse(JSON.stringify(response)), { painted: true });
+  assert.deepEqual(returns, [undefined]);
+  assert.equal(nativePointerCalls(), 0);
+  assert.equal(responded, false);
 });
 
 test("repeated injection removes prior listeners and leaves exactly one active generation", () => {

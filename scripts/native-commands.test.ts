@@ -161,6 +161,30 @@ test("uninstall with nothing installed says so and does nothing; --purge also re
   s.done();
 });
 
+test("pill sends from the install folder retain the owner's configured project", async () => {
+  const s = sandbox();
+  try {
+    mkdirSync(s.p.m9r, { recursive: true });
+    const project = join(s.home, "project");
+    s.io.cwd = join(s.p.m9r, "bin");
+    writeFileSync(join(s.p.m9r, "broker-autostart.json"), JSON.stringify({ projectRoot: project }));
+    await s.run("send", ["@opencode", "show your cursor"]);
+    assert.equal(createLocalStore(s.p.m9r).tasksFor("opencode")[0]?.cwd, project);
+  } finally { s.done(); }
+});
+
+test("pill sends launched from Windows System32 retain the owner's configured project", async () => {
+  const s = sandbox();
+  try {
+    mkdirSync(s.p.m9r, { recursive: true });
+    const project = join(s.home, "project");
+    s.io.cwd = "C:\\WINDOWS\\System32";
+    writeFileSync(join(s.p.m9r, "broker-autostart.json"), JSON.stringify({ projectRoot: project }));
+    await s.run("send", ["@opencode", "show your cursor"]);
+    assert.equal(createLocalStore(s.p.m9r).tasksFor("opencode")[0]?.cwd, project);
+  } finally { s.done(); }
+});
+
 test("send creates a task for the agent, once per key, and rejects an empty message", async () => {
   const s = sandbox();
   assert.equal(await s.run("send", ["@claude", "review", "lease.ts", "--from", "codex", "--key", "same"]), 0);
@@ -330,12 +354,40 @@ test("with the engine, setup copies it into M9R's folder and the hooks call it (
   s.done();
 });
 
+test("an engine update removes dead retired-image entries from the install ownership manifest", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  writeFileSync(engine, "stand-in engine v1", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+
+  const bin = join(s.p.m9r, "bin");
+  const missingRetired = join(bin, "m9r-engine.exe.m9r-retired-previous-missing");
+  const removableRetired = join(bin, "m9r-engine.exe.m9r-retired-previous-unlocked");
+  writeFileSync(removableRetired, "stale engine image", "utf8");
+  const before = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { runtimeFiles: string[] };
+  before.runtimeFiles.push(missingRetired, removableRetired);
+  writeFileSync(s.p.manifest, JSON.stringify(before, null, 2) + "\n", "utf8");
+  writeFileSync(engine, "stand-in engine v2", "utf8");
+
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const after = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { runtimeFiles: string[] };
+  assert.equal(readFileSync(join(bin, "m9r-engine.exe"), "utf8"), "stand-in engine v2");
+  assert.equal(existsSync(removableRetired), false, "the runtime update prunes an unlocked retired image");
+  assert.equal(after.runtimeFiles.includes(missingRetired), false, "missing retired images are removed from ownership metadata");
+  assert.equal(after.runtimeFiles.includes(removableRetired), false, "pruned retired images are removed from ownership metadata");
+  s.done();
+});
+
 test("with the engine and the native hook side by side, the settings point at the small hook, both are copied, and uninstall removes both", async () => {
   const s = sandbox();
   const engine = join(s.home, "m9r-engine.exe");
   const shim = join(s.home, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native");
   writeFileSync(engine, "stand-in engine", "utf8");
   writeFileSync(shim, "stand-in native hook", "utf8");
+  writeFileSync(join(s.home, "m9r-build-info.json"), "stand-in runtime manifest", "utf8");
   const nativeInputHost = join(s.home, "m9r-native-input-host.exe");
   if (process.platform === "win32") writeFileSync(nativeInputHost, "stand-in trusted input host", "utf8");
   const overlay = join(s.home, "m9r-overlay.exe");
@@ -345,6 +397,7 @@ test("with the engine and the native hook side by side, the settings point at th
   assert.equal(await s.run("setup", ["--yes"]), 0);
   const bin = join(s.p.m9r, "bin");
   assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native"), "utf8"), "stand-in native hook");
+  assert.equal(readFileSync(join(bin, "m9r-build-info.json"), "utf8"), "stand-in runtime manifest");
   if (process.platform === "win32") assert.equal(readFileSync(join(bin, "m9r-native-input-host.exe"), "utf8"), "stand-in trusted input host");
   if (process.platform === "win32") assert.equal(readFileSync(join(bin, "m9r-overlay.exe"), "utf8"), "stand-in pill overlay");
   assert.equal(readFileSync(join(bin, process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine"), "utf8"), "stand-in engine");
@@ -359,6 +412,7 @@ test("with the engine and the native hook side by side, the settings point at th
   }
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(existsSync(join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native")), false);
+  assert.equal(existsSync(join(bin, "m9r-build-info.json")), false);
   if (process.platform === "win32") assert.equal(existsSync(join(bin, "m9r-native-input-host.exe")), false);
   if (process.platform === "win32") assert.equal(existsSync(join(bin, "m9r-overlay.exe")), false);
   s.done();
@@ -381,11 +435,17 @@ test("with the engine, setup registers the M9R MCP server for Claude (and Codex,
   assert.deepEqual(claudeMcp.mcpServers.other, { command: "npx", args: ["-y", "other-server"] }, "an already-registered server is left alone");
   assert.match(claudeMcp.mcpServers.m9r.command, /m9r-engine(\.exe)?$/);
   assert.deepEqual(claudeMcp.mcpServers.m9r.args, ["mcp"]);
+  assert.equal(claudeMcp.mcpServers.m9r.env.M9R_HOME, s.p.m9r);
+  assert.equal(claudeMcp.mcpServers.m9r.env.M9R_WEB_BROKER_PORT, "47821");
 
   const codexConfig = readFileSync(s.p.codexConfig, "utf8");
   assert.match(codexConfig, /\[mcp_servers\.github\]/);
   assert.match(codexConfig, /\[mcp_servers\.m9r\]/);
   assert.match(codexConfig, /args = \["mcp"\]/);
+  assert.match(codexConfig, /\[mcp_servers\.m9r\.env\]/);
+  const tomlM9rHome = s.p.m9r.replace(/\\/g, "\\\\");
+  assert.ok(codexConfig.includes(`M9R_HOME = "${tomlM9rHome}"`));
+  assert.match(codexConfig, /M9R_WEB_BROKER_PORT = "47821"/);
 
   assert.equal(await s.run("setup", ["--yes"]), 0);
   assert.match(s.out.join("\n"), /Already set up/);
@@ -419,7 +479,6 @@ test("starting with Windows is optional: only with --autostart (or a yes to its 
   autostartCalls.length = 0; autostartOn = false;
   assert.equal(await s.run("setup", ["--yes"]), 0);
   assert.deepEqual(autostartCalls, [], "--yes alone never turns it on");
-  assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(await s.run("setup", ["--yes", "--autostart"]), 0);
   assert.equal(autostartCalls.length, 1);
   assert.match(autostartCalls[0], /^enable ".*m9r-engine\.exe" feed --watch --serve-hooks$/);
@@ -427,6 +486,35 @@ test("starting with Windows is optional: only with --autostart (or a yes to its 
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(autostartCalls.at(-1), "disable");
   s.done();
+});
+
+test("Windows setup installs the pill, broker, and Driver runtime together and starts the pill", async () => {
+  if (process.platform !== "win32") return;
+  const s = sandbox();
+  try {
+    for (const name of ["m9r-engine.exe", "m9r-hook.exe", "m9r-overlay.exe", "m9r-web-broker.exe"]) writeFileSync(join(s.home, name), name);
+    const driverDir = join(s.home, "cua-driver-runtime", "node_modules", "driver");
+    mkdirSync(driverDir, { recursive: true });
+    writeFileSync(join(driverDir, "driver.node"), "driver fixture");
+    delete s.io.env.M9R_HOOK_ENTRY;
+    s.io.env.M9R_ENGINE = join(s.home, "m9r-engine.exe");
+    s.io.env.M9R_NO_DAEMON = "1";
+    autostartCalls.length = 0;
+    assert.equal(await s.run("setup", ["--yes", "--autostart"]), 0);
+    assert.match(autostartCalls.at(-1)!, /m9r-overlay\.exe/);
+    assert.equal(readFileSync(join(s.p.m9r, "bin", "m9r-web-broker.exe"), "utf8"), "m9r-web-broker.exe");
+    assert.equal(readFileSync(join(s.p.m9r, "bin", "cua-driver-runtime", "node_modules", "driver", "driver.node"), "utf8"), "driver fixture");
+    const brokerPath = join(s.p.m9r, "bin", "m9r-web-broker.exe");
+    writeFileSync(join(s.p.m9r, "web-broker-install.json"), JSON.stringify({ version: 1, path: brokerPath, sha256: "f".repeat(64) }));
+    writeFileSync(join(s.home, "m9r-web-broker.exe"), "new broker from a later engine build", "utf8");
+    assert.equal(await s.run("setup", ["--yes"]), 0);
+    assert.equal(readFileSync(brokerPath, "utf8"), "m9r-web-broker.exe", "native setup leaves the installer-owned broker for its authenticated updater");
+    assert.match(s.out.at(-2) ?? s.out.join("\n"), /Already set up|M9R/);
+    assert.equal(await s.run("uninstall", ["--yes"]), 0);
+    assert.equal(existsSync(brokerPath), true, "engine uninstall leaves the separately managed broker for its owner manifest");
+    assert.equal(existsSync(join(s.p.m9r, "bin", "m9r-overlay.exe")), false);
+    assert.equal(existsSync(join(s.p.m9r, "bin", "cua-driver-runtime", "node_modules", "driver", "driver.node")), false);
+  } finally { s.done(); }
 });
 
 test("m9r note saves to the project room's shared memory where agents read it, and refuses empty or oversized notes", async () => {

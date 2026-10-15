@@ -27,6 +27,7 @@ export interface FeedAgent {
 export type NeedsYou =
   | { surface: "native"; kind: "approval"; taskId: string; from: string; to: string; goal: string; protected: boolean }
   | { surface: "native"; kind: "push_failed"; taskId: string; from: string; fromSession?: string; to: string; reason: string; fix: string; linkable: boolean }
+  | { surface: "native"; kind: "delivery_uncertain"; taskId: string; from: string; to: string; reason: string }
   | { surface: "native"; kind: "answer"; taskId: string; from: string; summary: string };
 
 export interface FeedPing { surface: "native"; id: number; kind: NeedsYou["kind"]; taskId: string; text: string }
@@ -38,8 +39,8 @@ export interface InProgress {
   from: string;
   to: string;
   goal: string;
-  /** `queued`: pushed into the agent's session, waiting for it to pick up; `waiting_prompt`: the agent sees it at its next prompt; `working`: the agent has it. */
-  state: "queued" | "waiting_prompt" | "working";
+  /** Delivery state only. Provider activity is reported separately and is never inferred from a delivery timestamp. */
+  state: "sending" | "queued" | "waiting_prompt";
   since: string;
 }
 
@@ -98,6 +99,7 @@ const ANSWER_WINDOW_MS = 6 * 3_600_000;
 /** Once the answer has reached the agent that asked, the pill only keeps it a little while. */
 const SHOWN_ANSWER_WINDOW_MS = 10 * 60_000;
 const FAILED_WINDOW_MS = 24 * 3_600_000;
+const DELIVERY_CONFIRMATION_WINDOW_MS = 60_000;
 const KNOWN_AGENTS = ["claude", "codex", "opencode"] as const;
 
 const safe = (text: string, max: number) => {
@@ -135,13 +137,13 @@ function agentFor(handle: string, input: FeedInput): FeedAgent {
     const open = probed.filter((s) => input.probes[s.sessionId].live === "live");
     if (open.length > 0) {
       const working = open.some((s) => input.probes[s.sessionId].turn === "working");
-      const known = open.every((s) => input.probes[s.sessionId].turn !== "unknown");
+      const idle = open.every((s) => input.probes[s.sessionId].turn === "idle");
       const doing = open.map((s) => input.probes[s.sessionId]).find((p) => p.turn === "working" && p.doing)?.doing ?? null;
       return {
         surface: "native", handle, sessions: rows, doing: doing ? safe(doing, 120) : null,
-        state: working ? "open_working" : "open_idle",
+        state: working ? "open_working" : idle ? "open_idle" : "unknown",
         since: open[0].lastSeenAt,
-        evidence: `${open.length} open session(s): its session file is held open${known ? `, ${working ? "a turn is in progress" : "no turn is running"}` : ""}.`,
+        evidence: `${open.length} open session(s): its session file is held open${working ? ", a turn is in progress" : idle ? ", no turn is running" : ", turn activity could not be confirmed"}.`,
       };
     }
     if (probed.every((s) => input.probes[s.sessionId].live === "free")) return { surface: "native", handle, state: "offline", sessions: rows, doing: null, evidence: "No session of this agent is open right now." };
@@ -167,9 +169,14 @@ function inProgressFrom(input: FeedInput): InProgress[] {
     if (t.dismissedAt || t.resultSummary || t.approval === "pending" || t.approval === "denied" || t.approval === "expired") continue;
     if (nowMs - Date.parse(t.createdAt) > PROGRESS_WINDOW_MS) continue;
     const goal = safe(t.goal, 120);
-    if (t.delivery?.state === "queued") out.push({ surface: "native", taskId: t.id, from: t.from, to: t.to, goal, state: "queued", since: t.delivery.queuedAt ?? t.createdAt });
-    else if (t.delivery?.state === "failed") continue; // shown as a failed push instead
-    else if (t.deliveredAt) out.push({ surface: "native", taskId: t.id, from: t.from, to: t.to, goal, state: "working", since: t.deliveredAt });
+    const claimAt = Date.parse(t.delivery?.claimedAt ?? "");
+    const claimIsStale = t.delivery?.state === "sending" && Number.isFinite(claimAt)
+      && nowMs - claimAt >= DELIVERY_CONFIRMATION_WINDOW_MS;
+    if (claimIsStale) continue;
+    if (t.delivery?.state === "sending") out.push({ surface: "native", taskId: t.id, from: t.from, to: t.to, goal, state: "sending", since: t.delivery.claimedAt ?? t.createdAt });
+    else if (t.delivery?.state === "queued") out.push({ surface: "native", taskId: t.id, from: t.from, to: t.to, goal, state: "queued", since: t.delivery.queuedAt ?? t.createdAt });
+    else if (t.delivery?.state === "failed" || t.delivery?.state === "uncertain" || t.delivery?.state === "done") continue;
+    else if (t.deliveredAt) out.push({ surface: "native", taskId: t.id, from: t.from, to: t.to, goal, state: "waiting_prompt", since: t.deliveredAt });
     else out.push({ surface: "native", taskId: t.id, from: t.from, to: t.to, goal, state: "waiting_prompt", since: t.createdAt });
   }
   return out.sort((a, b) => Number(b.taskId.slice(1)) - Number(a.taskId.slice(1))).slice(0, 4);
@@ -184,6 +191,12 @@ function needsYouFrom(input: FeedInput): NeedsYou[] {
     if (t.dismissedAt) continue;
     if (t.approval === "pending" && input.pendingIds.has(t.id)) {
       out.push({ surface: "native", kind: "approval", taskId: t.id, from: t.from, to: t.to, goal: safe(t.goal, GOAL_CHARS), protected: isProtectedAction(t.goal) });
+    } else if ((t.delivery?.state === "uncertain"
+      || (t.delivery?.state === "sending" && Number.isFinite(Date.parse(t.delivery.claimedAt ?? ""))
+        && nowMs - Date.parse(t.delivery.claimedAt!) >= DELIVERY_CONFIRMATION_WINDOW_MS))
+      && t.approval !== "denied" && t.approval !== "expired" && nowMs - Date.parse(t.createdAt) < FAILED_WINDOW_MS) {
+      out.push({ surface: "native", kind: "delivery_uncertain", taskId: t.id, from: t.from, to: t.to,
+        reason: safe(t.delivery.error ?? "The provider did not confirm receipt. M9R will not resend this task automatically.", REASON_CHARS) });
     } else if (t.delivery?.state === "failed" && t.approval !== "denied" && t.approval !== "expired" && nowMs - Date.parse(t.createdAt) < FAILED_WINDOW_MS && !t.deliveredAt) {
       const reason = t.delivery.error ?? "The push failed.";
       out.push({ surface: "native", kind: "push_failed", taskId: t.id, from: t.from, fromSession: t.fromSession, to: t.to, reason: safe(reason, REASON_CHARS), fix: /To aim it/.test(reason) ? "" : /sessions are open/.test(reason) ? "m9r-cli sessions, then m9r-cli send @codex --session <id> \"...\"" : "m9r-cli tasks", linkable: !!t.fromSession });
@@ -192,7 +205,7 @@ function needsYouFrom(input: FeedInput): NeedsYou[] {
     }
   }
   // Approvals first (they block work), then failures, then answers; newest first within each.
-  const rank = { approval: 0, push_failed: 1, answer: 2 } as const;
+  const rank = { approval: 0, delivery_uncertain: 1, push_failed: 2, answer: 3 } as const;
   return out.sort((a, b) => rank[a.kind] - rank[b.kind] || Number(b.taskId.slice(1)) - Number(a.taskId.slice(1)));
 }
 
@@ -212,7 +225,10 @@ export function buildFeed(input: FeedInput, previous: Feed | null): Feed {
   const pings: FeedPing[] = changed
     ? needsYou.filter((n) => !before.has(needsKey(n))).map((n) => ({
         surface: "native", id: seq, kind: n.kind, taskId: n.taskId,
-        text: n.kind === "approval" ? `@${n.from} asks @${n.to}: ${n.goal}` : n.kind === "push_failed" ? `${n.taskId} could not be pushed: ${n.reason}` : `@${n.from} answered ${n.taskId}`,
+        text: n.kind === "approval" ? `@${n.from} asks @${n.to}: ${n.goal}`
+          : n.kind === "push_failed" ? `${n.taskId} could not be pushed: ${n.reason}`
+            : n.kind === "delivery_uncertain" ? `${n.taskId} delivery to @${n.to} is unconfirmed: ${n.reason}`
+              : `@${n.from} answered ${n.taskId}`,
       }))
     : (previous?.pings ?? []);
   return { surface: "native", version: 1, seq, generatedAt: input.now.toISOString(), agents, needsYou, inProgress, recent, pings, reserved: { people: [], channels: [] } };

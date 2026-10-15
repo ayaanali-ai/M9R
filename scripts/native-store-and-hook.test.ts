@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { handleHookEvent } from "@/lib/native/hook-handler";
 import { normalizeHandle, renderInboxInjection } from "@/lib/native/inbox-core";
 import { CODEX_WEB_PREFACE, webAgentPrompt } from "@/lib/native/web-live-sessions";
 import { isBrokerAgentPrompt } from "@/lib/native/codex-delivery-core";
+import { applyAgentMcpStoreMutation } from "@/lib/native/web-broker-server";
 
 function tempStore(now?: () => Date) {
   const root = mkdtempSync(join(tmpdir(), "m9r-store-"));
@@ -48,13 +49,16 @@ test("inbox cursors are folder scoped when the same agent session id is observed
   done();
 });
 
-test("hook inbox delivery does not let a same-id session in another folder inherit the first folder's cursor", () => {
+test("an already claimed session does not receive the same task again through another cwd", () => {
   const { store, done } = tempStore();
-  store.addTask(task({ idempotencyKey: "folder-scope-hook" }));
+  const created = store.addTask(task({ idempotencyKey: "folder-scope-hook" }));
   const one = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "same", cwd: "C:\\Work\\One", prompt: "hello" }, ctx(store));
   const two = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "same", cwd: "C:\\Work\\Two", prompt: "hello" }, ctx(store));
   assert.match(ctxOf(one) ?? "", /look at the reconnect bug/);
-  assert.match(ctxOf(two) ?? "", /look at the reconnect bug/);
+  assert.equal(two, null, "the provider session id is the task owner even when its cursor is project-scoped");
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, "same");
+  assert.equal(store.cursorFor("claude", "same", "C:\\Work\\One"), 1);
+  assert.equal(store.cursorFor("claude", "same", "C:\\Work\\Two"), 1, "the second cursor advances past work already delivered to this session");
   done();
 });
 
@@ -96,16 +100,34 @@ test("state survives a new store instance on the same folder, cursors are per se
   done();
 });
 
-test("a task addressed to @claude shows in every open Claude session, not just whichever one prompts first", () => {
+test("an untargeted task is claimed by one Claude session and cannot be answered from a different session", () => {
   const { store, done } = tempStore();
-  store.addTask({ from: "codex", to: "claude", goal: "check the build", origin: "human_typed", idempotencyKey: "k1" });
-  // Session A prompts first and gets shown the task.
-  const a = renderInboxInjection(store.tasksFor("claude"), store.cursorFor("claude", "session-a"));
-  assert.match(a.text, /check the build/);
-  store.setCursor("claude", "session-a", a.newCursor);
-  // Session B, a second open Claude session in a different folder, prompts afterward -- it must still see it.
-  const b = renderInboxInjection(store.tasksFor("claude"), store.cursorFor("claude", "session-b"));
-  assert.match(b.text, /check the build/, "session B's own cursor was never advanced, so it must not have been starved by session A's");
+  const created = store.addTask({ from: "codex", to: "claude", goal: "check the build", origin: "human_typed", idempotencyKey: "k1" });
+  const a = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "session-a", cwd: "/repo", prompt: "hi" }, ctx(store));
+  assert.match(ctxOf(a) ?? "", /check the build/);
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, "session-a");
+  const b = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "session-b", cwd: "/repo", prompt: "hi" }, ctx(store));
+  assert.equal(b, null, "a different provider session must not receive work already claimed by session A");
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, "session-a");
+  done();
+});
+
+test("an explicit target session repairs a stale deliveredSession from an older build", () => {
+  const { root, store, done } = tempStore();
+  const target = store.issueIdentity("claude", "claude-code", "target-session");
+  const task = store.addTask({ from: "codex", to: "claude", goal: "continue the task", origin: "human_typed", targetSession: "target-session", idempotencyKey: "stale-target-delivery" });
+  const state = JSON.parse(readFileSync(join(root, "state.json"), "utf8")) as { tasks: Array<Record<string, unknown>> };
+  state.tasks[0].deliveredAt = new Date().toISOString();
+  state.tasks[0].deliveredSession = "old-session";
+  writeFileSync(join(root, "state.json"), JSON.stringify(state), "utf8");
+
+  assert.equal(store.tasksForSession("claude", "old-session").length, 0);
+  assert.equal(store.tasksForSession("claude", "target-session").length, 1);
+  const claimed = store.claimInboxTasks("claude", "target-session", [task.task.id], "/repo");
+  assert.equal(claimed.length, 1);
+  assert.equal(store.getTask(task.task.id)?.deliveredSession, "target-session");
+  const result = applyAgentMcpStoreMutation(store, { action: "result", token: target.token, taskId: task.task.id, summary: "done" });
+  assert.equal(result.status, 200);
   done();
 });
 
@@ -122,22 +144,42 @@ test("approvals and results are stored, results are capped and redacted", () => 
   done();
 });
 
-test("a corrupt state file is set aside and the store starts clean instead of breaking prompts", () => {
+test("a corrupt state file fails closed without losing identity or resetting task ids", () => {
   const { root, store, done } = tempStore();
   store.addTask(task());
   writeFileSync(join(root, "state.json"), "{ not json", "utf8");
-  assert.equal(store.tasksFor("claude").length, 0);
-  assert.equal(store.addTask(task()).task.id, "T1");
-  assert.equal(readdirSync(root).some((f) => f.startsWith("state.json.corrupt-")), true);
+  assert.throws(() => store.tasksFor("claude"), /M9R local state.*invalid/);
+  assert.throws(() => store.addTask(task()), /M9R local state.*invalid/);
+  assert.equal(readFileSync(join(root, "state.json"), "utf8"), "{ not json");
   done();
 });
 
-test("a stale lock left by a crashed process does not block the store", () => {
+test("a newer state version is preserved and cannot be overwritten by an older runtime", () => {
+  const { root, store, done } = tempStore();
+  const original = JSON.stringify({ version: 2, identities: [{ secret: "preserve" }] });
+  writeFileSync(join(root, "state.json"), original);
+  assert.throws(() => store.addTask(task()), /unsupported version/);
+  assert.equal(readFileSync(join(root, "state.json"), "utf8"), original);
+  done();
+});
+
+test("an aged lock is preserved instead of stealing ownership from another writer", () => {
   const { root, store, done } = tempStore();
   mkdirSync(join(root, "state.lock"));
+  writeFileSync(join(root, "state.lock", "owner-abc.json"), JSON.stringify({ pid: process.pid, nonce: "live-owner" }));
   const old = new Date(Date.now() - 60_000);
   utimesSync(join(root, "state.lock"), old, old);
-  assert.equal(store.addTask(task()).created, true);
+  assert.throws(() => store.addTask(task()), /lock was preserved/);
+  assert.equal(JSON.parse(readFileSync(join(root, "state.lock", "owner-abc.json"), "utf8")).nonce, "live-owner");
+  done();
+});
+
+test("a lock with a demonstrably dead owner recovers without resetting the state", () => {
+  const { root, store, done } = tempStore();
+  store.addTask(task());
+  mkdirSync(join(root, "state.lock"));
+  writeFileSync(join(root, "state.lock", "owner-abc.json"), JSON.stringify({ pid: 2147483647, nonce: "dead-owner" }));
+  assert.equal(store.addTask(task({ idempotencyKey: "after-crash" })).task.id, "T2");
   done();
 });
 
@@ -163,6 +205,129 @@ test("SessionStart registers the endpoint and prints a short card that lists rec
   done();
 });
 
+test("repeated SessionStart for the same session keeps its token valid, while explicit revocation allows a fresh token", () => {
+  const { store, done } = tempStore();
+  const start = () => handleHookEvent({ hook_event_name: "SessionStart", session_id: "resume-me", cwd: "/repo" }, ctx(store));
+  const extractToken = (out: unknown) => {
+    const match = /M9R session token[^:]*: ([A-Za-z0-9_-]{32})/.exec(ctxOf(out) ?? "");
+    assert.ok(match, "SessionStart must include the session identity token");
+    return match[1];
+  };
+
+  const firstToken = extractToken(start());
+  const resumedToken = extractToken(start());
+  assert.equal(resumedToken, firstToken, "resuming a provider session must not invalidate its earlier SessionStart card");
+  assert.notEqual(store.verifyIdentity(firstToken), null);
+
+  store.revokeIdentity("resume-me");
+  const afterRevoke = extractToken(start());
+  assert.notEqual(afterRevoke, firstToken, "a revoked identity must be replaced when the provider session reconnects");
+  assert.equal(store.verifyIdentity(firstToken), null);
+  assert.notEqual(store.verifyIdentity(afterRevoke), null);
+  done();
+});
+
+test("an already-open Codex session restores its missing identity on the next trusted prompt", () => {
+  const { store, done } = tempStore();
+  store.registerEndpoint({ provider: "codex", sessionId: "codex-open", cwd: "C:/repo" });
+  assert.equal(store.identityTokenFor("codex", "codex-open"), null);
+
+  const result = handleHookEvent({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "codex-open",
+    cwd: "C:/repo",
+    prompt: "continue",
+  }, ctx(store, "codex"));
+
+  assert.ok(store.identityTokenFor("codex", "codex-open"));
+  assert.match(ctxOf(result) ?? "", /M9R connected as @codex/);
+  assert.match(ctxOf(result) ?? "", /M9R session token/);
+  done();
+});
+
+test("OpenCode polling pushes only an approved, fresh task into its exact authenticated session and acknowledges once", () => {
+  const now = new Date("2026-10-07T12:00:00Z");
+  const { store, done } = tempStore(() => now);
+  store.registerEndpoint({ provider: "opencode", sessionId: "oc-1", cwd: "C:/repo" });
+  const identity = store.issueIdentity("opencode", "opencode", "oc-1");
+  const pinned = store.addTask({
+    from: "codex", to: "opencode", goal: "review the shared change", origin: "human_typed",
+    cwd: "C:/repo", targetSession: "oc-1", idempotencyKey: "opencode-live-prompt",
+  }).task;
+  const pending = store.addTask({
+    from: "claude", to: "opencode", goal: "publish the announcement", origin: "agent_initiated",
+    cwd: "C:/repo", targetSession: "oc-1", idempotencyKey: "opencode-live-approval",
+  }).task;
+  const context = { ...ctx(store, "opencode"), now: () => now };
+  const poll = (session = "oc-1") => handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: session, cwd: "C:/repo" }, context);
+
+  const offered = poll();
+  assert.equal(offered?.hookSpecificOutput.hookEventName, "OpenCodePoll");
+  const envelope = JSON.parse(ctxOf(offered)!) as { task_id: string; prompt: string };
+  assert.equal(envelope.task_id, pinned.id);
+  assert.equal(envelope.prompt.startsWith("[M9R T1]\n"), true);
+  assert.match(envelope.prompt, /review the shared change/);
+  assert.match(envelope.prompt, new RegExp(identity.token));
+  assert.equal(store.getTask(pinned.id)?.delivery?.state, "sending", "the durable claim prevents a second prompt while acceptance is unconfirmed");
+  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pinned.seq);
+  assert.equal(poll(), null, "an unacknowledged offer is still delivered at most once");
+  assert.equal(poll("different-session"), null, "a pinned task never leaks into another OpenCode session");
+
+  const ack = handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "oc-1", cwd: "C:/repo", task_id: pinned.id }, context);
+  assert.deepEqual(JSON.parse(ctxOf(ack)!), { accepted: true, task_id: pinned.id });
+  assert.equal(store.getTask(pinned.id)?.delivery?.state, "queued");
+  assert.equal(store.getTask(pinned.id)?.deliveredSession, "oc-1");
+  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pinned.seq);
+  assert.deepEqual(JSON.parse(ctxOf(handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "oc-1", cwd: "C:/repo", task_id: pinned.id }, context))!), { accepted: true, task_id: pinned.id }, "ack retry is idempotent");
+  assert.equal(poll(), null, "acknowledged work is not prompted a second time");
+
+  assert.equal(poll(), null, "agent work stays blocked while approval is pending");
+  store.setApproval(pending.id, "approved");
+  const approved = JSON.parse(ctxOf(poll())!) as { task_id: string; prompt: string };
+  assert.equal(approved.task_id, pending.id);
+  assert.match(approved.prompt, /publish the announcement/);
+
+  // The dedicated task pump owns the cursor once it claims a task; an unrelated provider prompt does not.
+  assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "oc-1", cwd: "C:/repo", prompt: "ordinary prompt" }, context), null);
+  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pending.seq);
+  done();
+});
+
+test("a stale authenticated OpenCode session cannot block the current session's unpinned task", () => {
+  let clock = new Date("2026-10-07T11:00:00Z");
+  const { store, done } = tempStore(() => clock);
+  store.registerEndpoint({ provider: "opencode", sessionId: "closed", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "closed");
+  clock = new Date("2026-10-07T12:00:00Z");
+  store.registerEndpoint({ provider: "opencode", sessionId: "current", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "current");
+  const task = store.addTask({ from: "you", to: "opencode", goal: "show the cursor", origin: "human_typed", cwd: "C:/repo", idempotencyKey: "stale-session" }).task;
+  const context = { ...ctx(store, "opencode"), now: () => clock };
+  const output = handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: "current", cwd: "C:/repo" }, context);
+  assert.equal(JSON.parse(ctxOf(output)!).task_id, task.id);
+  handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "current", cwd: "C:/repo", task_id: task.id }, context);
+  assert.equal(store.getTask(task.id)?.deliveredSession, "current");
+  done();
+});
+
+test("OpenCode live task acknowledgement refuses revoked identities, denied approvals, and another project", () => {
+  const now = new Date("2026-10-07T12:00:00Z");
+  const { store, done } = tempStore(() => now);
+  store.registerEndpoint({ provider: "opencode", sessionId: "oc-1", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "oc-1");
+  const taskRecord = store.addTask({
+    from: "codex", to: "opencode", goal: "inspect this project", origin: "human_typed",
+    cwd: "C:/other", targetSession: "oc-1", idempotencyKey: "wrong-project",
+  }).task;
+  const context = { ...ctx(store, "opencode"), now: () => now };
+  assert.equal(handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: "oc-1", cwd: "C:/repo" }, context), null);
+  assert.equal(handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "oc-1", cwd: "C:/repo", task_id: taskRecord.id }, context), null);
+  assert.equal(store.getTask(taskRecord.id)?.delivery, undefined);
+  store.revokeIdentity("oc-1");
+  assert.equal(handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: "oc-1", cwd: "C:/other" }, context), null);
+  done();
+});
+
 test("a typed mention creates a task for the target and tells the sender not to do the work", () => {
   const { store, done } = tempStore();
   store.registerEndpoint({ provider: "codex" });
@@ -172,8 +337,109 @@ test("a typed mention creates a task for the target and tells the sender not to 
   assert.equal(t[0].goal, "investigate the relay reconnect bug");
   assert.equal(t[0].from, "claude");
   assert.equal(t[0].origin, "human_typed");
-  assert.match(ctxOf(out)!, /sent your message to @codex as task T1/);
+  // No dispatch is wired in this ctx, so no push is attempted: the ack must say held, not sent.
+  assert.match(ctxOf(out)!, /held your message to @codex as task T1/);
   assert.match(ctxOf(out)!, /do not do that work yourself/i);
+  done();
+});
+
+test("a mention states the true delivery state: pushed, inbox pickup, or held", () => {
+  const { store, done } = tempStore();
+  const dispatched: string[] = [];
+  const wire = (provider: string) => ({ provider, store, pathExists: () => false, readIndex: () => null, dispatch: (id: string) => dispatched.push(id) });
+  // Pushed: @codex mentioned from claude, with a queue push attempted live.
+  const pushed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "@codex review the relay" }, wire("claude-code"));
+  assert.match(ctxOf(pushed)!, /already sent your message to @codex/);
+  assert.equal(dispatched.length, 1);
+  // Inbox pickup: a live claude session exists, but nothing pushes to it mid-turn.
+  // (Sent from codex so @claude is another agent, not a self-mention.)
+  store.registerEndpoint({ provider: "claude-code", sessionId: "cl-live", cwd: "/repo" });
+  store.issueIdentity("claude", "claude-code", "cl-live");
+  const pickup = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s9", cwd: "/repo", prompt: "@claude check the relay too" }, wire("codex"));
+  assert.match(ctxOf(pickup)!, /in their inbox as task T2/);
+  assert.match(ctxOf(pickup)!, /next prompt/);
+  assert.match(ctxOf(pickup)!, /Do not do that work yourself/);
+  // Held: no live opencode session anywhere.
+  const held = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s9", cwd: "/repo", prompt: "@opencode compare notes" }, wire("codex"));
+  assert.match(ctxOf(held)!, /held your message to @opencode/);
+  assert.match(ctxOf(held)!, /no active session/);
+  assert.match(ctxOf(held)!, /Do not do that work yourself/);
+  done();
+});
+
+test("the per-user M9R install folder is never persisted as a project scope", () => {
+  const { root, store, done } = tempStore();
+  store.registerEndpoint({ provider: "codex", sessionId: "codex-install", cwd: join(root, "bin") });
+  const direct = store.addTask({ from: "you", to: "codex", goal: "direct store task", origin: "human_typed", cwd: join(root, "bin"), idempotencyKey: "direct-install-cwd" });
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s-install", cwd: join(root, "bin"), prompt: "@codex use the approved stage" }, ctx(store));
+
+  const endpoint = store.listEndpoints().find((item) => item.handle === "claude");
+  assert.equal(endpoint?.cwd, undefined);
+  assert.equal(store.sessionsFor("codex")[0]?.cwd, undefined);
+  assert.equal(direct.task.cwd, undefined);
+  assert.equal(store.tasksFor("codex")[0]?.cwd, undefined);
+
+  handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s-project", cwd: "C:/RunLeak/runleak", prompt: "@codex use the project" }, ctx(store));
+  assert.equal(store.tasksFor("codex")[2]?.cwd, "C:/RunLeak/runleak");
+  done();
+});
+
+test("Windows System32 is never persisted as a provider project scope", () => {
+  const { store, done } = tempStore();
+  handleHookEvent({ hook_event_name: "SessionStart", session_id: "system-session", cwd: "C:\\WINDOWS\\System32" }, { ...ctx(store, "codex") });
+  assert.equal(store.sessionsFor("codex")[0]?.cwd, undefined);
+  const routed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "source", cwd: "C:\\WINDOWS\\System32", prompt: "@codex use the current project" }, { ...ctx(store, "opencode"), strictTargetIdentity: false });
+  assert.match(ctxOf(routed) ?? "", /task T1/);
+  assert.equal(store.tasksFor("codex")[0]?.cwd, undefined);
+  done();
+});
+
+test("cursor and session-link APIs also discard an M9R install cwd", () => {
+  const { root, store, done } = tempStore();
+  const installCwd = join(root, "bin");
+
+  store.setCursor("codex", "install-session", 7, installCwd);
+  assert.equal(store.cursorFor("codex", "install-session", installCwd), 7, "install-scoped callers use the unscoped session cursor");
+  assert.equal(store.cursorFor("codex", "install-session"), 7, "the install path cannot create a separate project cursor");
+
+  store.setLink(
+    { handle: "codex", sessionId: "install-session", cwd: installCwd },
+    { handle: "claude", sessionId: "partner-session", cwd: installCwd },
+    "picked",
+  );
+  const link = store.allLinks()[0];
+  assert.equal(link.a.cwd, undefined);
+  assert.equal(link.b.cwd, undefined);
+  assert.equal(store.linksFor("codex", "install-session", installCwd).length, 1);
+  assert.doesNotMatch(readFileSync(join(root, "state.json"), "utf8"), /\\bin[\\"]|\/bin[\"]/, "the install directory is not written into store state");
+  done();
+});
+
+test("legacy records with an M9R install cwd are repaired on the next store write", () => {
+  const { root, store, done } = tempStore();
+  const installCwd = join(root, "bin");
+  writeFileSync(join(root, "state.json"), JSON.stringify({
+    version: 1,
+    nextTaskNo: 4,
+    nextSeq: { codex: 3 },
+    tasks: [{ id: "T3", seq: 3, from: "you", to: "codex", goal: "old proof", origin: "human_typed", idempotencyKey: "old-proof", cwd: installCwd }],
+    cursors: {},
+    endpoints: { codex: { handle: "codex", provider: "codex", cwd: installCwd, lastSeenAt: new Date().toISOString() } },
+    events: [],
+    rules: [],
+    nextRuleNo: 1,
+    sessions: [{ handle: "codex", provider: "codex", sessionId: "old", cwd: installCwd, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString() }],
+    links: [{ id: "L1", a: { handle: "codex", sessionId: "old", cwd: installCwd }, b: { handle: "claude", sessionId: "partner", cwd: installCwd }, origin: "picked", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
+    nextLinkNo: 2,
+    identities: [],
+  }), "utf8");
+
+  assert.equal(store.getTask("T3")?.cwd, undefined);
+  assert.equal(store.listEndpoints()[0]?.cwd, undefined);
+  assert.equal(store.sessionsFor("codex")[0]?.cwd, undefined);
+  assert.equal(store.allLinks()[0]?.a.cwd, undefined);
+  store.dismiss([]); // force the repaired read-state to be persisted atomically
+  assert.doesNotMatch(readFileSync(join(root, "state.json"), "utf8"), /\\bin[\\"]|\/bin[\"]/);
   done();
 });
 
@@ -260,20 +526,39 @@ test("a plain prompt with nothing in the inbox prints nothing, which costs zero 
   done();
 });
 
-test("a pending inbox item is injected once per session at the next prompt, then never again in that same session -- but a different open session of the same agent still sees it", () => {
+test("an inbox item is injected once and remains bound to the session that received it", () => {
   const { store, done } = tempStore();
   store.addTask({ from: "codex", to: "claude", goal: "review lease.ts", origin: "human_typed", idempotencyKey: "a" });
   const first = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "hi" }, ctx(store));
   assert.match(ctxOf(first)!, /M9R inbox \(1 new\)/);
   assert.match(ctxOf(first)!, /T1 from @codex, typed by the user\] review lease\.ts/);
   assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "and again" }, ctx(store)), null);
-  // A second open Claude session must not be starved just because session s1 already saw it -- confirmed live
-  // 2026-09-22: with several Claude sessions open, whichever one prompted first silently ate the notification
-  // for every other one, and the person had to manually ask a different session to check its inbox.
   const otherSession = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s2", cwd: "/repo", prompt: "new window" }, ctx(store));
-  assert.match(ctxOf(otherSession)!, /T1 from @codex, typed by the user\] review lease\.ts/, "a different open session must still see a task it has not itself been shown yet");
-  // But s2 itself must not repeat it a second time either.
-  assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s2", cwd: "/repo", prompt: "and again" }, ctx(store)), null);
+  assert.equal(otherSession, null, "the same task must not be replayed into a second Claude session");
+  done();
+});
+
+test("a Claude tool-result notice does not consume a task before a real prompt can claim it", () => {
+  const { store, done } = tempStore();
+  const created = store.addTask({ from: "codex", to: "claude", goal: "continue the T37 diagnosis", origin: "human_typed", idempotencyKey: "t37-post-tool-notice" });
+  const first = store.issueIdentity("claude", "claude-code", "session-a");
+  const second = store.issueIdentity("claude", "claude-code", "session-b");
+
+  const notice = handleHookEvent({ hook_event_name: "PostToolUse", session_id: "session-a", cwd: "/repo" }, ctx(store));
+  assert.equal(notice, null, "a tool-result hook is not a reliable task-delivery channel");
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, undefined);
+  assert.equal(store.getTask(created.task.id)?.deliveredAt, undefined);
+  assert.equal(store.cursorFor("claude", "session-a", "/repo"), 0);
+
+  const delivered = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "session-b", cwd: "/repo", prompt: "check inbox" }, ctx(store));
+  assert.match(ctxOf(delivered) ?? "", /continue the T37 diagnosis/);
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, "session-b");
+
+  const result = (token: string) => applyAgentMcpStoreMutation(store, {
+    action: "result", token, taskId: created.task.id, summary: "diagnosis complete",
+  });
+  assert.equal(result(first.token).status, 403, "a different provider session cannot report the task result");
+  assert.equal(result(second.token).status, 200, "the session that received the task can report its result");
   done();
 });
 
@@ -317,6 +602,23 @@ test("hook failures are silent: a broken store or unknown event prints nothing a
   assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "@codex hi" }, ctx(broken)), null);
   assert.equal(handleHookEvent({ hook_event_name: "PostToolUse" }, ctx(store)), null);
   assert.equal(handleHookEvent({}, ctx(store)), null);
+  done();
+});
+
+test("stale OpenCode PostToolUse hook registrations cannot inject the same task on every tool call", () => {
+  const { store, done } = tempStore();
+  store.registerEndpoint({ provider: "opencode", sessionId: "oc-1", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "oc-1");
+  const { task: pending } = store.addTask({
+    from: "codex", to: "opencode", goal: "inspect this file", origin: "human_typed", cwd: "C:/repo", targetSession: "oc-1", idempotencyKey: "stale-opencode-posttooluse",
+  });
+  const context = { ...ctx(store, "opencode"), now: () => new Date("2026-10-07T12:00:00Z") };
+  const event = { hook_event_name: "PostToolUse", session_id: "oc-1", cwd: "C:/repo", tool_name: "read" };
+  assert.equal(handleHookEvent(event, context), null);
+  assert.equal(handleHookEvent(event, context), null);
+  assert.equal(store.getTask(pending.id)?.delivery, undefined);
+  assert.equal(store.getTask(pending.id)?.deliveredAt, undefined);
+  assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), 0);
   done();
 });
 

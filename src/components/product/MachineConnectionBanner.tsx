@@ -21,10 +21,10 @@ export default function MachineConnectionBanner({ hasLiveConnection, hasRegister
     return (
       <div className="machine-connection-banner" role="status" data-state="reconnecting">
         <div className="machine-connection-banner-text">
-          <strong>Registered agents are offline and reconnecting.</strong>
-          <span>Your agent registrations are still intact. M9R will keep them visible and resume when a runtime heartbeat returns. No new approval is required.</span>
+          <strong>Registered agents are offline.</strong>
+          <span>Your registrations are still intact. Check the local connection first. No new approval is required unless the check reports that the connection is missing.</span>
         </div>
-        <code className="machine-connection-banner-command">npx m9r-cli terminal runtime</code>
+        <code className="machine-connection-banner-command">npx m9r-cli doctor</code>
       </div>
     );
   }
@@ -32,7 +32,7 @@ export default function MachineConnectionBanner({ hasLiveConnection, hasRegister
     <div className="machine-connection-banner" role="status">
       <div className="machine-connection-banner-text">
         <strong>No agent runtime is currently reaching this workspace.</strong>
-        <span>This usually means the M9R CLI hasn&apos;t been connected on any machine yet, or it stopped running. Run this once in the repository you control:</span>
+        <span>This usually means the M9R CLI has not been connected on this machine yet. Run this once from any terminal:</span>
       </div>
       <code className="machine-connection-banner-command">npx m9r-cli connect</code>
     </div>

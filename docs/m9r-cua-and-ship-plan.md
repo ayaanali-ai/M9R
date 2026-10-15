@@ -2,7 +2,9 @@
 
 2026-10-03. Cua facts are from their public repo README, the Cua Spaces launch coverage and release notes. Tavus facts are from their public pages. "Verified" means I read it; "not verified" means I could not.
 
-Owner rules this plan follows: the moat is multiplayer (people and their agents, across providers, in rooms). Cursors, memory and features alone are copyable, so we keep shipping things others do not have. Nothing here is merged to `main` yet.
+> **Historical research snapshot, not the active task list.** Its competitive framing and Part 4 order are superseded. Use [M9R_CUA_WAVE_PLAN.md](M9R_CUA_WAVE_PLAN.md) for C1–C15 status/order and [M9R_COMPETITIVE_RESEARCH_2026-10-04.md](M9R_COMPETITIVE_RESEARCH_2026-10-04.md) for Track B.
+
+Owner rules this plan follows: the moat is multiplayer (people and their agents, across providers, in rooms). Cursors, memory and features alone are copyable, so we keep shipping things others do not have. At the time of this snapshot, the listed work had not been merged to `main`.
 
 ---
 

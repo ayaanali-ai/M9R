@@ -1,5 +1,6 @@
 -- Invite tokens confer membership; administrators alone may read them.
 drop policy if exists "members read their workspace invites" on public.workspace_invites;
+drop policy if exists "administrators read workspace invites" on public.workspace_invites;
 create policy "administrators read workspace invites" on public.workspace_invites for select to authenticated using (
  exists(select 1 from public.projects p where p.id = workspace_id and p.owner_id = auth.uid())
  or exists(select 1 from public.workspace_members m where m.workspace_id = workspace_invites.workspace_id and m.user_id = auth.uid() and m.role in ('owner','admin'))

@@ -9,7 +9,6 @@
     "scripting",
     "alarms",
     "storage",
-    "nativeMessaging",
     "search"
   ],
   "optional_permissions": [

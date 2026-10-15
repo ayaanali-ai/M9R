@@ -118,7 +118,9 @@ function m9rPageClickPlan(selector, expectOrigin, expectPathPrefix, requestedX, 
       if (target.disabled || (typeof target.matches === "function" && target.matches(":disabled"))) return { ok: false, error: "element is disabled" };
       const style = getComputedStyle(target);
       if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return { ok: false, error: "element is not visible" };
-      target.scrollIntoView({ block: "center", inline: "center" });
+      // Native input needs stable viewport coordinates while the OS pointer travels. An automatic
+      // scroll can inherit a page's smooth-scroll CSS and move the target after we capture its point.
+      target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
       const rect = target.getBoundingClientRect();
       if (!rect || rect.width <= 0 || rect.height <= 0) return { ok: false, error: "element has no visible area" };
       const fragments = typeof target.getClientRects === "function" ? Array.from(target.getClientRects()) : [];

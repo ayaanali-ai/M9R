@@ -41,6 +41,8 @@ test("API routes never return a raw error message unless it is on the reviewed l
     "api/agent/endpoints/resolve/route.ts",
     "api/dashboard/_shared.ts",
     "api/dashboard/runs/[id]/evidence-authorization/route.ts",
+    // This route returns typed AgentJoinError messages from shared-memory service; untyped failures use a fixed public message.
+    "api/rooms/[roomId]/memory/route.ts",
   ];
   const offenders: string[] = [];
   const walk = (dir: string) => {

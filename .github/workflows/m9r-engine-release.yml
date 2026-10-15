@@ -19,6 +19,10 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
+      - run: npm --prefix pill ci
+      - run: npm --prefix overlay ci
+      - run: npm --prefix overlay run typecheck
+      - run: npm --prefix overlay run build
       - run: npm run build:engine
       - run: node --test ./scripts/install-m9r.test.mjs
       - name: Package standalone installer assets

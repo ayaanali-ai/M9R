@@ -343,7 +343,7 @@ const NON_TERMINAL_RUN_STATUSES = ["started", "working", "blocked", "waiting_for
  * update -- updateAgentRunStatus's own time-budget check (checkRunDurationBudget)
  * only ever runs when the agent reports again, so a run that goes silent
  * mid-flight stays "working" forever with nothing to trigger the same check.
- * Invoked on a schedule (see vercel.json crons), never by a request an agent
+ * Invoked by the Cloudflare cron scheduler, never by a request an agent
  * or human can trigger. Reuses the exact same budget policy live updates use,
  * so a swept run is finalized identically to how one more heartbeat would
  * have finalized it -- no separate staleness heuristic.

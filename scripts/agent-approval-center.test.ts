@@ -282,17 +282,18 @@ test("Ready for Review opens inline in the shared side panel, defaults to five r
   // properly," and Files/Review are mutually exclusive in that one slot.
   assert.match(workspace, /function WorkspaceDrawer/);
   assert.match(workspace, /function ApprovalCenter/);
-  // Files and Activity tabs were removed outright (items #24/#25) -- the
-  // shared side-panel slot now covers Review/Whispers/Drafts/People/Live.
-  assert.match(workspace, /type SidePanelMode = "review" \| "whispers" \| "drafts" \| "people" \| "live" \| "handoffs" \| null/);
-  assert.match(workspace, /function toggleSidePanel\(mode: "review" \| "whispers" \| "drafts" \| "people" \| "live" \| "handoffs"\)/);
+  // The current shared side-panel modes are Review, Drafts, People, and
+  // Activity. Keep this source-level contract aligned with the rendered shell.
+  assert.match(workspace, /type SidePanelMode = "review" \| "drafts" \| "people" \| "activity" \| null/);
+  assert.match(workspace, /function toggleSidePanel\(mode: "review" \| "drafts" \| "people" \| "activity"\)/);
   assert.match(workspace, /sidePanelMode === "review"/);
   assert.match(workspace, /<span>Ready for Review<\/span>/);
   assert.match(workspace, /onOpenReview=\{\(\) => toggleSidePanel\("review"\)\}/);
   assert.match(workspace, /pendingReviewCount=\{approvalCenter\.counts\.total\}/);
   assert.match(workspace, /wf-review-panel-body/);
-  assert.match(conversationPanel, /m9r-channel-dock__item/); // the header toggle class after the channel dock redesign
-  assert.match(conversationPanel, /onOpenReview && \(/);
+  assert.match(conversationPanel, /aria-label="Ready for review"/);
+  assert.match(conversationPanel, /onClick=\{onOpenReview\}/);
+  assert.match(conversationPanel, /onOpenReview && <button/);
   assert.match(workspace, /overflow-y-auto/);
   assert.match(workspace, /Approval type filters/);
   assert.match(workspace, /Agent evidence/);

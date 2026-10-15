@@ -107,7 +107,9 @@ test("package.json has the publishable bin/metadata shape", () => {
   assert.equal(pkg.bin.oathlock, "dist/oathlock.js");
   assert.ok(pkg.license, "license placeholder required");
   assert.ok(pkg.repository, "repository required for publishing");
-  assert.deepEqual(pkg.files, ["dist/", "README.md"]);
+  // The shipped CLI includes required third-party attribution and license
+  // texts alongside the compiled product and README.
+  assert.deepEqual(pkg.files, ["dist/", "README.md", "THIRD_PARTY_NOTICES.md", "licenses/"]);
   assert.ok(pkg.dependencies?.["node-pty"], "packaged terminal bridge requires node-pty");
   assert.ok(pkg.dependencies?.ws, "packaged terminal bridge requires ws");
 });
@@ -135,10 +137,18 @@ test("built entry has the correct shebang and a relative core import", () => {
   assert.ok(existsSync(resolve(distDir, "oathlock-cli-core.js")));
   assert.equal(compatibilityEntry, entry, "legacy oathlock entry must remain the same compiled CLI");
   assert.ok(existsSync(resolve(distDir, "adapter-contract.js")));
+  assert.ok(existsSync(resolve(distDir, "broker-update-record.js")), "the CLI broker updater must ship its BOM-compatible ownership-record parser");
   assert.ok(existsSync(resolve(distDir, "agent-task-routing.js")));
   assert.ok(existsSync(resolve(distDir, "opencode-capture-backfill-core.js")));
   assert.ok(!readFileSync(resolve(distDir, "resident-provider-adapters.js"), "utf8").includes("@/lib/"));
   assert.ok(!readFileSync(resolve(distDir, "oathlock-resident-core.js"), "utf8").includes("@/lib/"));
+});
+
+test("packaged broker updater parses both legacy BOM and BOM-free ownership records", async () => {
+  const { parseBrokerUpdateRecord } = await import(pathToFileURL(resolve(distDir, "broker-update-record.js")).href);
+  const expected = { version: 1, path: "C:/Users/test/.m9r/bin/m9r-web-broker.exe" };
+  assert.deepEqual(parseBrokerUpdateRecord(Buffer.from(JSON.stringify(expected), "utf8"), "web broker install"), expected);
+  assert.deepEqual(parseBrokerUpdateRecord(Buffer.from(`\uFEFF${JSON.stringify(expected)}`, "utf8"), "web broker install"), expected);
 });
 
 test("built MCP package includes the web broker, turn scheduler, powers, and page-notes runtime dependencies", () => {
@@ -186,7 +196,12 @@ test("built standalone web setup includes its broker runtime resolver", () => {
 });
 
 test("managed extension refresh changes only owned extension files and preserves user files", () => {
-  const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-extension-refresh-"));
+  // Keep the simulated LOCALAPPDATA on the same writable volume as this
+  // checkout. Some Windows sandboxes redirect the system temp directory into
+  // an AppContainer that allows writes but denies atomic replacement renames.
+  const fixtureRoot = resolve(repoRoot, ".workcache", "cli-package-fixtures");
+  mkdirSync(fixtureRoot, { recursive: true });
+  const temporaryRoot = mkdtempSync(join(fixtureRoot, "m9r-extension-refresh-"));
   const home = join(temporaryRoot, "home");
   const localAppData = join(temporaryRoot, "local-app-data");
   const source = join(temporaryRoot, "source-extension");

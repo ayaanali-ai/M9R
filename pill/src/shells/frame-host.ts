@@ -51,8 +51,15 @@ export function createFrameHost(inner: PillTransport, win: Window = window): Fra
       try { hostPort?.close(); } catch { /* already closed */ }
       hostPort = event.ports[0];
       hostPort.onmessage = (m: MessageEvent) => {
-        const d = m.data as { m9r?: string; nonce?: string; kind?: string; active?: unknown } | null;
-        if (d && d.m9r === "host" && d.nonce === nonce && typeof d.kind === "string") for (const fn of commands) fn(d.kind, { active: d.active === true });
+        const d = m.data as { m9r?: string; nonce?: string; kind?: string; active?: unknown; probeId?: unknown } | null;
+        if (!d || d.m9r !== "host" || d.nonce !== nonce || typeof d.kind !== "string") return;
+        if (d.kind === "health-ping") {
+          if (typeof d.probeId === "string" && d.probeId.length <= 80) {
+            try { hostPort?.postMessage({ m9r: "frame", nonce, kind: "health-pong", probeId: d.probeId }); } catch { /* the host has already closed this channel */ }
+          }
+          return;
+        }
+        for (const fn of commands) fn(d.kind, { active: d.active === true });
       };
       hostPort.start?.();
       sendSize();

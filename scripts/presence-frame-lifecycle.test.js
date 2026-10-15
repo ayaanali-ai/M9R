@@ -214,7 +214,7 @@ test('an iframe navigation cannot send host messages to the new page origin and 
   overlay.destroy();
 });
 
-test('an authenticated extension frame keeps its port when its later load event fires', () => {
+test('an authenticated extension frame acknowledges the host liveness probe before a resume is trusted', () => {
   const handlers = new Map();
   const sent = [];
   class FakePort {
@@ -250,7 +250,12 @@ test('an authenticated extension frame keeps its port when its later load event 
         node.contentWindow = { postMessage(payload, _origin, ports) {
           if (payload.m9r === 'host-port' && Array.isArray(ports)) {
             node.framePort = ports[0];
-            node.framePort.onmessage = (event) => sent.push(event.data);
+            node.framePort.onmessage = (event) => {
+              sent.push(event.data);
+              if (event.data?.kind === 'health-ping') {
+                node.framePort.postMessage({ m9r: 'frame', nonce: 'fixture-nonce', kind: 'health-pong', probeId: event.data.probeId });
+              }
+            };
           }
         } };
         frame = node;
@@ -269,6 +274,7 @@ test('an authenticated extension frame keeps its port when its later load event 
   assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'ready');
   overlay.resume(); // Broker startup broadcasts owner-resume even to already-live tabs.
   assert.equal(authenticatedPort.closed, undefined, 'owner-resume preserves a healthy frame channel');
+  assert.ok(sent.some((payload) => payload.kind === 'health-ping'), 'resume must prove the port is still responsive');
   frame.fire('load'); // Chrome can deliver the load event after the extension handshake.
   handlers.get('resize')();
 
@@ -457,6 +463,90 @@ test('an unauthenticated first frame load is retried at the trusted extension UR
   assert.equal(new URL(frame.src).searchParams.get('n'), 'fixture-nonce');
   assert.equal(new URL(frame.src).searchParams.get('m9r_retry'), '1');
   assert.deepEqual(sent, [], 'no host data is delivered before an authenticated extension message');
+
+  for (let timeout = 0; timeout < 3; timeout++) {
+    const [timerId, nextRetry] = [...timers.entries()][0] || [];
+    assert.equal(typeof nextRetry, 'function', 'every failed frame load must get another bounded recovery check');
+    timers.delete(timerId);
+    nextRetry();
+  }
+  assert.equal(srcAssignments, 4, 'authentication retries stop after three trusted reloads');
+  assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'failed');
+  assert.equal(doc.documentElement.child.dataset.m9rComposerFailure, 'authentication-timeout');
+  assert.equal(timers.size, 0, 'a terminal frame failure must not leave a retry timer running');
+  overlay.destroy();
+});
+
+test('resume reloads a ready frame whose private port does not acknowledge liveness', () => {
+  const handlers = new Map();
+  const timers = new Map();
+  const sent = [];
+  let nextTimer = 0;
+  let srcAssignments = 0;
+  class FakePort {
+    postMessage(data) { if (this.closed) throw new Error('port is closed'); this.peer.onmessage?.({ data }); }
+    close() { this.closed = true; if (this.peer) this.peer.closed = true; }
+    start() {}
+  }
+  class FakeMessageChannel {
+    constructor() {
+      this.port1 = new FakePort();
+      this.port2 = new FakePort();
+      this.port1.peer = this.port2;
+      this.port2.peer = this.port1;
+    }
+  }
+  const extensionOrigin = 'chrome-extension://test-id';
+  let frame;
+  const win = {
+    innerWidth: 1000, innerHeight: 800,
+    addEventListener(type, fn) { handlers.set(type, fn); },
+    removeEventListener(type, fn) { if (handlers.get(type) === fn) handlers.delete(type); },
+    setInterval() { return 1; }, clearInterval() {},
+    setTimeout(fn) { const id = ++nextTimer; timers.set(id, fn); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    requestAnimationFrame() { return 1; }, cancelAnimationFrame() {},
+  };
+  const doc = {
+    defaultView: win,
+    documentElement: element('html'),
+    createElement(tag) {
+      const node = element(tag);
+      if (tag === 'iframe') {
+        node.contentDocument = null;
+        Object.defineProperty(node, 'src', { get() { return this._src; }, set(value) { this._src = value; srcAssignments++; } });
+        node.contentWindow = { postMessage(payload, _origin, ports) {
+          if (payload.m9r === 'host-port' && Array.isArray(ports)) {
+            node.framePort = ports[0];
+            node.framePort.onmessage = (event) => sent.push(event.data); // Deliberately no pong: simulate a dead document.
+          }
+        } };
+        frame = node;
+      }
+      return node;
+    },
+  };
+  win.MessageChannel = FakeMessageChannel;
+  win.chrome = { runtime: { getURL: (path) => `chrome-extension://test-id/${path}` } };
+  runInNewContext(source, { window: win, URL, Date, Map, Set, Math, performance, console });
+  const overlay = win.M9RPresence.createPresenceOverlay(doc, {});
+  overlay.mountFrame('composer', 'chrome-extension://test-id/composer.html?n=fixture-nonce', { w: 448, h: 72, bottom: 6 });
+  handlers.get('message')({ origin: extensionOrigin, source: frame.contentWindow, data: { m9r: 'frame', nonce: 'fixture-nonce', kind: 'ready' } });
+  const deadPort = frame.framePort;
+  assert.ok(deadPort);
+
+  overlay.resume();
+  assert.ok(sent.some((payload) => payload.kind === 'health-ping'), 'resume checks the supposedly ready frame');
+  assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'ready', 'the frame stays visible while its health probe is pending');
+  const [healthTimerId, onHealthTimeout] = [...timers.entries()].at(-1);
+  timers.delete(healthTimerId);
+  onHealthTimeout();
+
+  assert.equal(deadPort.closed, true, 'a non-responsive port is discarded');
+  assert.equal(doc.documentElement.child.dataset.m9rComposerFrame, 'retrying');
+  assert.equal(doc.documentElement.child.dataset.m9rComposerFailure, 'port-unresponsive', 'the liveness failure remains diagnosable during recovery');
+  assert.equal(srcAssignments, 2, 'the trusted frame URL is reloaded once after failed liveness');
+  assert.ok(timers.size > 0, 'authentication recovery is monitored until the replacement frame responds');
   overlay.destroy();
 });
 

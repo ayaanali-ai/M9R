@@ -7,7 +7,7 @@
  * back exactly. Local mode needs no account and no network.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +31,7 @@ import {
   type McpServerSpec,
 } from "./install-core";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
+import { hasPendingRuntimeTransaction, installRuntimeTransaction, recoverRuntimeTransactions } from "./runtime-install-transaction";
 import { createPageNotesStore } from "./page-notes-store";
 import { projectRoomId } from "./project-room";
 import { DEFAULT_CLOUD_URL, clearCloudConfig, cloudUrlProblem, loadCloudConfig, pullCloudNotes, pushCloudNote, saveCloudConfig } from "./cloud-memory";
@@ -38,7 +39,7 @@ import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type Delivery
 import { codexNoteInEffect, createCodexWatcher } from "./codex-watch";
 import { hookPipePath, requestShutdown, startHookServer } from "./hook-server";
 import { runHookRequest } from "./hook-run";
-import { canQueue } from "./codex-delivery-core";
+import { canQueue, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
@@ -53,7 +54,7 @@ export interface NativeIo {
   confirm?(question: string): Promise<boolean>;
   /** Codex delivery dependencies; tests inject fakes, production uses the real `codex queue`. */
   codexDeps?: DeliveryDeps;
-  /** Where the command was run; the default is the process's own folder. Used to pick between several open sessions. */
+  /** The caller's working folder, used to pick a session. M9R's own install directory is never a project folder. */
   cwd?: string;
   /** Start-with-Windows switch; tests inject a fake so nothing ever touches the real registry. */
   autostart?: Autostart;
@@ -83,7 +84,7 @@ export const registryAutostart: Autostart = {
 const autostartOf = (io: NativeIo): Autostart => io.autostart ?? registryAutostart;
 
 type Kind = "hooks-json" | "markdown-block" | "mcp-json" | "mcp-toml";
-interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEntry & { kind: Kind }>; /** Hook program files M9R copied into its own folder; removed on uninstall. */ runtimeFiles?: string[]; /** M9R starts when you sign in to Windows (removed on uninstall). */ autostart?: boolean }
+interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEntry & { kind: Kind }>; /** Bundled runtimes installed by M9R, including retired images retained by still-running agent sessions. */ runtimeFiles?: string[]; /** M9R starts when you sign in to Windows (removed on uninstall). */ autostart?: boolean }
 
 export function nativePaths(io: Pick<NativeIo, "env" | "homeDir">) {
   const m9r = defaultStoreRoot(io.homeDir, io.env);
@@ -139,14 +140,21 @@ function shimSource(env: Record<string, string | undefined>): string | null {
 
 /** Stops a running resident engine so its file can be replaced or removed; harmless when none is running. */
 async function stopResidentEngine(io: NativeIo): Promise<void> {
-  if (await requestShutdown(hookPipePath(nativePaths(io).m9r))) await new Promise((r) => setTimeout(r, 900));
+  const pipe = hookPipePath(nativePaths(io).m9r);
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await requestShutdown(pipe, 1000);
+    await new Promise((r) => setTimeout(r, 150));
+    // A live listener means shutdown has not completed (or the pill's supervisor restarted it).
+    if (!await requestShutdown(pipe, 250)) return;
+  }
+  throw new Error("The M9R resident engine did not stop. Close the M9R desktop pill before retrying setup.");
 }
 
 const sameFile = (a: string, b: string): boolean => {
   try { return statSync(a).size === statSync(b).size && createHash("sha256").update(readFileSync(a)).digest("hex") === createHash("sha256").update(readFileSync(b)).digest("hex"); } catch { return false; }
 };
 
-function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; targetDir: string; missingSource: string[]; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; overlay?: { from: string; to: string } } {
+function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; targetDir: string; missingSource: string[]; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> } {
   const targetDir = join(nativePaths(io).m9r, "bin");
   const engine = engineSource(io.env);
   if (engine && !io.env.M9R_HOOK_ENTRY?.trim()) {
@@ -157,16 +165,23 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
     const nativeInputHost = nativeInputSource && existsSync(nativeInputSource)
       ? { from: nativeInputSource, to: join(targetDir, "m9r-native-input-host.exe") }
       : undefined;
-    // The pill overlay ships beside the engine in every release package, same as the native-input host. Before this,
-    // nothing ever copied or refreshed it: a stale build could sit in .m9r\bin indefinitely across every reinstall.
-    const overlaySource = process.platform === "win32" ? join(dirname(engine), "m9r-overlay.exe") : "";
-    const overlay = overlaySource && existsSync(overlaySource)
-      ? { from: overlaySource, to: join(targetDir, "m9r-overlay.exe") }
-      : undefined;
-    return {
-      needed: !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)) || (!!nativeInputHost && !sameFile(nativeInputHost.from, nativeInputHost.to)) || (!!overlay && !sameFile(overlay.from, overlay.to)),
-      sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim, nativeInputHost, overlay,
+    const companions: Array<{ from: string; to: string }> = [];
+    const collect = (source: string, target: string) => {
+      const info = lstatSync(source);
+      if (info.isSymbolicLink()) throw new Error("The bundled runtime must not contain symbolic links.");
+      if (info.isDirectory()) for (const name of readdirSync(source)) collect(join(source, name), join(target, name));
+      else if (info.isFile()) companions.push({ from: source, to: target });
+      else throw new Error("The bundled runtime contains an unsupported file type.");
     };
+    for (const name of ["m9r-overlay.exe", "m9r-web-broker.exe", "cua-driver-runtime", "THIRD_PARTY_NOTICES.txt", "m9r-build-info.json"]) {
+      // The standalone installer owns the web broker's hash manifest and has
+      // an authenticated stop/replace/start lifecycle. A plain engine setup
+      // must not overwrite that image behind the installer's ownership record.
+      if (name === "m9r-web-broker.exe" && existsSync(join(nativePaths(io).m9r, "web-broker-install.json"))) continue;
+      const source = join(dirname(engine), name);
+      if (existsSync(source)) collect(source, join(targetDir, name));
+    }
+    return { needed: hasPendingRuntimeTransaction(targetDir) || !sameFile(engine, to) || (!!shim && !sameFile(shim.from, shim.to)) || (!!nativeInputHost && !sameFile(nativeInputHost.from, nativeInputHost.to)) || companions.some((file) => !sameFile(file.from, file.to)), sourceDir: dirname(engine), targetDir, missingSource: existsSync(engine) ? [] : [engine], engine: { from: engine, to }, shim, nativeInputHost, companions };
   }
   const sourceDir = hookSourceDir(io.env);
   if (io.env.M9R_HOOK_ENTRY?.trim()) return { needed: false, sourceDir, targetDir, missingSource: [] };
@@ -175,18 +190,68 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
   return { needed, sourceDir, targetDir, missingSource };
 }
 
-function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; overlay?: { from: string; to: string } }): string[] {
+function replaceRuntimeFile(from: string, to: string): string[] {
+  if (sameFile(from, to)) return [];
+  const staged = `${to}.m9r-new-${process.pid}-${randomUUID()}`;
+  try {
+    copyFileSync(from, staged);
+    try {
+      // Same-directory rename is atomic. On Windows this works even when an agent still has the old image mapped.
+      renameSync(staged, to);
+      return [];
+    } catch (replaceError) {
+      if (process.platform !== "win32" || !existsSync(to)) throw replaceError;
+      const retired = `${to}.m9r-retired-${Date.now()}-${randomUUID()}`;
+      renameSync(to, retired);
+      try {
+        renameSync(staged, to);
+      } catch (installError) {
+        try { renameSync(retired, to); } catch { /* keep the old image recoverable if rollback is also blocked */ }
+        throw installError;
+      }
+      // A running MCP server may still be mapped to the renamed image. Keep it tracked until a later setup/uninstall
+      // can remove it after the owner closes that agent session.
+      try {
+        rmSync(retired, { force: true });
+        return [];
+      } catch {
+        return [retired];
+      }
+    }
+  } finally {
+    rmSync(staged, { force: true });
+  }
+}
+
+function pruneRetiredRuntimeFile(target: string): void {
+  let names: string[];
+  try { names = readdirSync(dirname(target)); } catch { return; }
+  const prefix = `${basename(target)}.m9r-retired-`;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    try { rmSync(join(dirname(target), name), { force: true }); } catch { /* still mapped by an open agent process */ }
+  }
+}
+
+function isRetiredRuntimePath(path: string): boolean {
+  return /\.m9r-retired-[^\\/]+$/i.test(path);
+}
+
+function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> }): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
   if (plan.engine) {
-    const written = [plan.engine.to];
-    copyFileSync(plan.engine.from, plan.engine.to);
-    if (plan.shim) { copyFileSync(plan.shim.from, plan.shim.to); written.push(plan.shim.to); }
-    if (plan.nativeInputHost) { copyFileSync(plan.nativeInputHost.from, plan.nativeInputHost.to); written.push(plan.nativeInputHost.to); }
-    if (plan.overlay) { copyFileSync(plan.overlay.from, plan.overlay.to); written.push(plan.overlay.to); }
+    recoverRuntimeTransactions(plan.targetDir, replaceRuntimeFile);
+    const files = [plan.engine, ...(plan.shim ? [plan.shim] : []), ...(plan.nativeInputHost ? [plan.nativeInputHost] : []), ...(plan.companions ?? [])];
+    const written = installRuntimeTransaction(plan.targetDir, files, replaceRuntimeFile);
+    for (const file of files) pruneRetiredRuntimeFile(file.to);
     return written;
   }
   const written: string[] = [];
-  for (const f of HOOK_RUNTIME_FILES) { copyFileSync(join(plan.sourceDir, f), join(plan.targetDir, f)); written.push(join(plan.targetDir, f)); }
+  for (const f of HOOK_RUNTIME_FILES) {
+    const target = join(plan.targetDir, f);
+    pruneRetiredRuntimeFile(target);
+    written.push(...replaceRuntimeFile(join(plan.sourceDir, f), target), target);
+  }
   // The runtime files are ES modules; this keeps them working wherever the folder lives.
   const pkg = join(plan.targetDir, "package.json");
   writeFileSync(pkg, JSON.stringify({ type: "module", private: true }) + "\n", "utf8");
@@ -222,7 +287,16 @@ export const MCP_SERVER_NAME = "m9r";
  */
 function mcpServerSpec(io: NativeIo): McpServerSpec | null {
   const entry = activeHookEntry(io);
-  return /m9r-engine(\.exe)?$/i.test(entry) ? { command: slash(entry), args: ["mcp"] } : null;
+  if (!/m9r-engine(\.exe)?$/i.test(entry)) return null;
+  const m9r = nativePaths(io).m9r;
+  return {
+    command: slash(entry),
+    args: ["mcp"],
+    env: {
+      M9R_HOME: m9r,
+      M9R_WEB_BROKER_PORT: io.env.M9R_WEB_BROKER_PORT?.trim() || "47821",
+    },
+  };
 }
 
 interface PlannedFile { path: string; kind: Kind; before: string | null; after: string; changed: boolean; summary: string }
@@ -292,8 +366,12 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
     io.err("Nothing was changed.");
     return 1;
   }
-  if (todo.length === 0 && !runtime.needed) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
+  // A previously installed user can opt into startup without reinstalling hooks.
+  const startupRequested = flags.autostart === true && !!runtime.engine && !!runtime.shim
+    && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
+  if (todo.length === 0 && !runtime.needed && !startupRequested) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
   io.out("This will:");
+  if (startupRequested) io.out("  - start the M9R desktop pill when this Windows user signs in (uninstall removes this entry)");
   if (runtime.needed) io.out(`  - copy the small hook program to ${runtime.targetDir} (so the hooks keep working even if this CLI moves or is updated)`);
   if (runtime.engine && runtime.shim) io.out("  - start the M9R background engine, which answers your agents' hooks in milliseconds (uninstall stops it)");
   for (const f of todo) io.out(`  - ${f.summary}`);
@@ -310,7 +388,10 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   // The hook program goes first, so a hook can never point at a file that is not there yet.
   if (runtime.needed) {
     if (runtime.engine) await stopResidentEngine(io);
-    manifest.runtimeFiles = copyRuntime(runtime);
+    manifest.runtimeFiles = [...new Set([...(manifest.runtimeFiles ?? []), ...copyRuntime(runtime)])]
+      // Retired images that were unlocked get pruned during copyRuntime. Drop their now-dead ownership
+      // records; keep any image still on disk because a running provider MCP process may have it mapped.
+      .filter((file) => !isRetiredRuntimePath(file) || existsSync(file));
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   for (const f of todo) {
@@ -394,7 +475,14 @@ export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?:
   // Only what this install turned on: a scratch install's uninstall must never switch off the real one.
   if (manifest.autostart) autostartOf(io).disable();
   if ((manifest.runtimeFiles ?? []).length > 0) await stopResidentEngine(io);
-  for (const f of manifest.runtimeFiles ?? []) rmSync(f, { force: true });
+  // The standalone installer records the broker separately so it can preserve a broker that a user changed after
+  // installation. The engine copied that companion during setup, but must leave it for the installer-owned manifest
+  // to verify and remove; a direct engine-only install has no separate record and still removes it normally.
+  const managedWebBroker = existsSync(join(p.m9r, "web-broker-install.json"));
+  for (const f of manifest.runtimeFiles ?? []) {
+    if (managedWebBroker && basename(f).toLowerCase() === "m9r-web-broker.exe") continue;
+    rmSync(f, { force: true });
+  }
   try { rmdirSync(join(p.m9r, "bin")); } catch { /* not empty or already gone: leave it */ }
   rmSync(p.manifest, { force: true });
   if (flags.purge) rmSync(p.m9r, { recursive: true, force: true });
@@ -408,7 +496,29 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
   const store = createLocalStore(nativePaths(io).m9r);
   // Typed by a person only with a real terminal and no agent markers; an agent running this command is agent-initiated.
   const human = isHumanContext({ hasTerminal: !!io.confirm, env: io.env });
-  const { task, created } = store.addTask({ from: input.from ?? (human ? "you" : "agent"), to: handleForProvider(to), goal: input.text, origin: human ? "human_typed" : "agent_initiated", cwd: io.cwd ?? process.cwd(), ...(input.session ? { targetSession: input.session } : {}), idempotencyKey: input.key ?? randomUUID() });
+  const workingDirectory = io.env.M9R_PROJECT_ROOT?.trim() || io.cwd || process.cwd();
+  const storeRoot = normCwd(nativePaths(io).m9r);
+  const normalizedWorkingDirectory = normCwd(workingDirectory);
+  // M9R's installed executables live under ~/.m9r/bin. A sign-in shortcut can
+  // also inherit Windows\System32 when the shell did not provide a project.
+  // Neither location is a user's project and neither may pin delivery to a
+  // nonexistent Codex session.
+  let taskCwd = isWindowsSystemCwd(workingDirectory)
+    || normalizedWorkingDirectory === storeRoot || normalizedWorkingDirectory.startsWith(`${storeRoot}/`)
+    ? undefined
+    : workingDirectory;
+  if (!taskCwd) {
+    // A sign-in-launched pill inherits the install folder, not a project.
+    // Recover only the owner's saved broker project, never another agent's cwd.
+    try {
+      const configured = JSON.parse(readFileSync(join(nativePaths(io).m9r, "broker-autostart.json"), "utf8").replace(/^\uFEFF/, "")) as { projectRoot?: unknown };
+      if (typeof configured.projectRoot === "string" && configured.projectRoot.trim()
+        && normCwd(configured.projectRoot) !== storeRoot
+        && !normCwd(configured.projectRoot).startsWith(`${storeRoot}/`)
+        && !isWindowsSystemCwd(configured.projectRoot)) taskCwd = configured.projectRoot;
+    } catch { /* no owner-configured project: keep the existing unscoped route */ }
+  }
+  const { task, created } = store.addTask({ from: input.from ?? (human ? "you" : "agent"), to: handleForProvider(to), goal: input.text, origin: human ? "human_typed" : "agent_initiated", ...(taskCwd ? { cwd: taskCwd } : {}), ...(input.session ? { targetSession: input.session } : {}), idempotencyKey: input.key ?? randomUUID() });
   if (task.approval === "pending") {
     io.out(`Task ${task.id} to @${task.to} is waiting for the user's approval; nothing was delivered.`);
     io.out(`Tell the user to run: m9r-cli approve ${task.id}${isProtectedAction(task.goal) ? "  (it looks like a protected action, so a standing rule would not cover it)" : ""}`);
@@ -416,7 +526,7 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
   }
   if (task.to === "codex" && created && canQueue(task)) {
     const outcome = await deliverToCodex(store, task.id, io.codexDeps ?? realDeps(io.env));
-    if (outcome.state === "queued") { io.out(`Sent to @codex as task ${task.id} and pushed into its session; it runs there now. The answer reaches ${task.from === "you" ? "your" : `@${task.from}'s`} inbox.`); return 0; }
+    if (outcome.state === "queued") { io.out(`Sent to @codex as task ${task.id} and accepted by its session. That confirms delivery, not that work has started. The answer reaches ${task.from === "you" ? "your" : `@${task.from}'s`} inbox.`); return 0; }
     if (outcome.state === "failed") { io.out(`Sent to @codex as task ${task.id}, but it could not be pushed: ${outcome.reason}`); io.out("It will show at Codex's next prompt instead."); return 0; }
   }
   io.out(`${created ? "Sent" : "Already sent"} to @${task.to} as task ${task.id}. It appears at that agent's next prompt.`);
