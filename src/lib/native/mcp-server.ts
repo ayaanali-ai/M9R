@@ -25,9 +25,11 @@ import { createPageNotesStore, type PageNotesStore } from "./page-notes-store";
 import { isStageAppReference } from "./task-stage-apps";
 import type { NetworkCoreClient } from "./network-core-client";
 import { registerNetworkCoreTools } from "./network-core-mcp-tools";
+import type { ConnectionBinding } from "./mcp-connection-core";
 import { pushCloudNote } from "./cloud-memory";
 import { gitRead, readGovernedFile } from "../bridge/governed-agent-tools";
 import { prepareTaskStageNotice } from "./task-stage-notice";
+import { registerComputerUseTools } from "./computer-use-mcp";
 
 export interface McpServerDeps {
   store: LocalStore;
@@ -39,9 +41,27 @@ export interface McpServerDeps {
   roomStartedAt?: number;
   /** Clock for the inbox age limit; defaults to the real time (tests inject the store's fake clock). */
   now?: () => Date;
+  /** Monotonic clock for computer-use latency telemetry; injectable for deterministic tests. */
+  monotonicNow?: () => number;
+  /** Private provider-session binding resolved by the local hook/runtime. */
+  connectionBindingId?: string;
+  /** Provider parent process used to resolve a claim after hook/MCP startup races. */
+  connectionProcessId?: number;
+  connectionProvider?: string;
 }
 
-const TOKEN_FIELD = { token: z.string().min(1).describe("Your M9R session token, from the line the SessionStart card gave you (\"M9R session token: ...\"). Required on every call.") };
+// Always present, always optional, regardless of whether this process was configured for
+// connection-mode binding at startup. A tool's schema used to be frozen one way or the other
+// the instant the server was created (a required-string token field, or no token field at all,
+// baked in from the start), so a process that failed to pick up its connection-mode env at that
+// one moment --
+// a timing race, an env-inheritance quirk, anything -- was stuck permanently requiring a manual
+// token for its entire life, with no way to self-heal short of restarting the whole session.
+// requireIdentity() below now re-attempts connection-mode resolution on every single call
+// instead of caching a yes/no decision from process start, so a claim that becomes available a
+// moment later (the normal case: a hook fires just after the MCP connection opens) is picked up
+// on the very next tool call automatically.
+const OPTIONAL_TOKEN_FIELD = { token: z.string().min(1).optional().describe("Your M9R session token, if this connection was not already bound by its provider adapter. Most connections do not need this.") };
 const STAGE_APP_REF = z.string().min(1).max(1024).refine(isStageAppReference, "Use an installed app name, app id, or absolute .exe path.");
 const runtimeIdentityAtProcessStart = readRuntimeBuildIdentity();
 
@@ -55,8 +75,44 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const server = new McpServer({ name: "m9r-mcp", version: runtimeServerVersion() });
   const operationNamespace = randomUUID();
   const pageNotes = deps.pageNotes ?? createPageNotesStore(deps.store.root);
+  // Whether this process was ever told anything connection-mode-shaped at startup. This stays a
+  // static fact about how the process was launched (its env/deps genuinely never changes after
+  // that) -- what changed is that it no longer freezes the *schema* or skips a fresh resolution
+  // attempt on every call; see requireIdentity() below.
+  const connectionConfigured = Boolean(deps.connectionBindingId || deps.connectionProcessId || deps.connectionProvider);
+  const AUTH_FIELD = OPTIONAL_TOKEN_FIELD;
+  let connectionBindingId = deps.connectionBindingId;
 
-  function requireIdentity(token: string): VerifiedIdentity {
+  function resolveConnectionBinding(): ConnectionBinding | null {
+    if (connectionBindingId) {
+      return deps.store.verifyConnectionBinding(connectionBindingId)
+        ? { bindingId: connectionBindingId, claimId: "bound", handle: "", provider: "", sessionId: "", boundAt: "" }
+        : null;
+    }
+    if (deps.connectionProcessId === undefined && !deps.connectionProvider) return null;
+    const binding = deps.store.bindConnectionForProcess({ provider: deps.connectionProvider, processId: deps.connectionProcessId });
+    if (binding) connectionBindingId = binding.bindingId;
+    return binding;
+  }
+
+  function requireIdentity(token?: string): VerifiedIdentity {
+    // Always try connection-mode resolution fresh when this process has any connection-mode
+    // configuration at all, before ever falling back to a manual token -- a claim that did not
+    // exist yet on an earlier call (the hook had not fired) can exist now, and this picks it up
+    // without needing the process to restart. A manual token remains a true fallback for a
+    // process with no connection-mode configuration, or while a connection genuinely has none
+    // bound yet and the caller supplied one anyway (legacy/manual use).
+    if (connectionConfigured) {
+      const binding = resolveConnectionBinding();
+      const identity = binding ? deps.store.verifyConnectionBinding(binding.bindingId) : null;
+      if (identity) return identity;
+      if (typeof token !== "string") {
+        throw new Error("This M9R MCP connection has no provider-session binding yet. This usually resolves itself within a few seconds as the provider's own session-start hook issues one -- retry the call. Reconnect the provider adapter if it persists; no task credential needs to be typed in.");
+      }
+      // Fall through to legacy token verification below -- a caller that supplied a token
+      // explicitly is honored even on a connection-configured process.
+    }
+    if (typeof token !== "string") throw new Error("M9R session token is required for this legacy MCP connection.");
     // Tokens are 24 random bytes encoded as base64url. Detect copied or truncated
     // values before consulting the store so they are not misreported as revoked.
     if (!/^[A-Za-z0-9_-]{32}$/.test(token)) {
@@ -68,6 +124,50 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     }
     return identity;
   }
+
+  /**
+   * Resolve the private credential needed by legacy store/web adapters.
+   *
+   * Bound MCP transports intentionally do not receive a token in their tool
+   * arguments.  The lower-level adapters still use the existing token-shaped
+   * authorization API, so resolve the already-issued credential internally
+   * after the transport binding has authenticated the provider session.  The
+   * credential never crosses the MCP tool boundary and is never rendered in a
+   * task card.
+   */
+  function authenticate(token?: string): { identity: VerifiedIdentity; token: string } {
+    const identity = requireIdentity(token);
+    // A manually presented token is already the right credential -- requireIdentity just
+    // verified it against the store -- so use it directly rather than looking it up again.
+    // Only when no token was presented (the normal connection-mode case) does this need to ask
+    // the store for the credential bound to that identity.
+    const credential = token ?? deps.store.identityTokenFor(identity.handle, identity.sessionId);
+    if (typeof credential !== "string" || credential.length === 0) {
+      throw new Error("The authenticated provider session has no active internal M9R credential. Reconnect the provider adapter.");
+    }
+    return { identity, token: credential };
+  }
+
+  // The provider-neutral computer-use surface is registered on the same authenticated
+  // MCP server as the legacy tools. It owns observation/action routing; the existing
+  // web broker and owner-launched desktop stage remain its only dispatch backends.
+  registerComputerUseTools(server, {
+    store: deps.store,
+    web: deps.web,
+    requireIdentity,
+    identityToken: (identity, presented) => authenticate(presented as string | undefined).token,
+    resolveTaskId: (identity, taskId) => {
+      if (taskId) return taskId;
+      const pending = deps.store.tasksForSession(identity.handle, identity.sessionId)
+        .filter((task) => !task.resultSummary && task.deliveredSession === identity.sessionId)
+        .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+      if (pending.length !== 1) throw new Error("A computer-use taskId is required when this session has zero or multiple pending tasks.");
+      return pending[0].id;
+    },
+    now: deps.now,
+    monotonicNow: deps.monotonicNow,
+    authField: AUTH_FIELD,
+  });
 
   function workingDirectory(identity: VerifiedIdentity): string {
     const sessions = deps.store.sessionsFor(identity.handle).filter((session) =>
@@ -89,7 +189,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_git_read",
     {
       description: "Read repository status, recent commits, diff summary, or branch in your authenticated session's working directory.",
-      inputSchema: { ...TOKEN_FIELD, operation: z.enum(["status", "log", "diff_stat", "branch"]), limit: z.number().int().min(1).max(20).default(10) },
+      inputSchema: { ...AUTH_FIELD, operation: z.enum(["status", "log", "diff_stat", "branch"]), limit: z.number().int().min(1).max(20).default(10) },
     },
     async ({ token, operation, limit }) => {
       const identity = requireIdentity(token);
@@ -102,7 +202,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_read_file",
     {
       description: "Read a UTF-8 file inside your authenticated session's working directory, with a 10 MB file limit.",
-      inputSchema: { ...TOKEN_FIELD, path: z.string().min(1).max(1_000) },
+      inputSchema: { ...AUTH_FIELD, path: z.string().min(1).max(1_000) },
     },
     async ({ token, path }) => {
       const identity = requireIdentity(token);
@@ -115,7 +215,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_whoami",
     {
       description: "Confirm your own verified M9R identity (handle, provider, session) for this connection. Use this once if you're unsure whether M9R recognizes this session.",
-      inputSchema: { ...TOKEN_FIELD },
+      inputSchema: { ...AUTH_FIELD },
     },
     async ({ token }) => {
       const identity = requireIdentity(token);
@@ -125,32 +225,43 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
 
   server.registerTool("m9r_stage_app", {
     description: "Stage mode defaults to owner-preview: open a normal installed app on the current desktop or restore the existing personal browser without an extra browser window or separate profile. Use m9r_stage_action for explicitly requested icon clicks. Pass mode \"background\" only for an explicitly requested isolated desktop. In background mode, launch an installed app using the owner's active access policy or discard an app owned by this task; preserve the task result first.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), appId: STAGE_APP_REF.optional() },
-  }, async ({ token, taskId, operation, mode, appId }) => {
-    requireIdentity(token);
+    inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), appId: STAGE_APP_REF.optional(), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional() },
+  }, async ({ token, taskId, operation, mode, appId, operationId: requestedOperationId }, extra) => {
+    const { token: authToken } = authenticate(token);
     if ((operation === "launch") !== (appId !== undefined)) throw new Error("Launch requires an app ID; discard takes no app ID.");
-    const result = deps.web?.taskStageApp ? await deps.web.taskStageApp(token, taskId, appId, mode)
+    const operationId = operation === "launch"
+      ? (requestedOperationId ?? createHash("sha256").update(`${operationNamespace}\0stage-app\0${String(extra.requestId)}`).digest("hex"))
+      : undefined;
+    const result = deps.web?.taskStageApp ? await deps.web.taskStageApp(authToken, taskId, appId, mode, operationId)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
     return { content: [{ type: "text" as const, text: JSON.stringify(result) }], isError: !result.ok };
   });
 
   server.registerTool("m9r_stage_action", {
     description: "Capture, inspect, or control this task's desktop; mode defaults to owner-preview. After m9r_stage_app selects an app, omitted action.view uses that exact app window; otherwise it uses the owner's current desktop. Set action.view to app or desktop to explicitly choose screenshot coordinates. Use read_structure with view=app for one bounded accessibility-tree observation of the selected window; desktop-wide structure is refused and remains visual. Desktop icons, taskbar apps, Start, windows, and controls are supported. Pass background mode only for an explicitly requested isolated desktop. Supports capture, structure read, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Mutating inputs carry a durable one-shot receipt: if the receipt says already_applied, in_progress, or uncertain, do not repeat the action; capture and inspect first. Input remains bound to the exact window and does not activate the app as a fallback. If a target class rejects background input, the action reports the target and fails without sending text; add an accessibility value adapter or app-specific background route for that control. Capture before input, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Verify effects; a driver receipt alone is not proof of the application state.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional().describe("Stable ID for one intended input. Reuse this ID when reconciling a lost response; never generate a new ID to retry an uncertain action."), action: z.discriminatedUnion("kind", [
+    inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional().describe("Stable ID for one intended input. Reuse this ID when reconciling a lost response; never generate a new ID to retry an uncertain action."), action: z.discriminatedUnion("kind", [
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("capture") }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("read_structure") }).strict(),
-      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
-      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["double_click", "right_click"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383) }).strict(),
-      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("type"), text: z.string().min(1).max(500) }).strict(),
-      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("scroll"), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), direction: z.enum(["up", "down"]) }).strict(),
-      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("drag"), fromX: z.number().int().min(0).max(16383), fromY: z.number().int().min(0).max(16383), toX: z.number().int().min(0).max(16383), toY: z.number().int().min(0).max(16383) }).strict(),
-      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("press_key"), key: z.string().min(1).max(20).regex(/^(?:[a-z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Ctrl|Control|Alt|Shift|Meta|Win|Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Insert|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Up|Down|Left|Right|CapsLock|PrintScreen)$/i) }).strict(),
-      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("hotkey"), keys: z.array(z.string().min(1).max(20)).min(1).max(4) }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["double_click", "middle_click", "right_click"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("type"), text: z.string().min(1).max(500), mode: z.enum(["insert", "replace"]).optional(), x: z.number().int().min(0).max(16383).optional(), y: z.number().int().min(0).max(16383).optional(), expectedRole: z.string().max(160).optional(), expectedLabel: z.string().max(160).optional(), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("scroll"), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), direction: z.enum(["up", "down"]), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("scroll_delta"), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), deltaX: z.number().int().min(-16383).max(16383), deltaY: z.number().int().min(-16383).max(16383), unit: z.enum(["pixel", "line", "page"]), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("drag"), fromX: z.number().int().min(0).max(16383), fromY: z.number().int().min(0).max(16383), toX: z.number().int().min(0).max(16383), toY: z.number().int().min(0).max(16383), durationMs: z.number().int().min(1).max(10_000).optional(), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("press_key"), key: z.string().min(1).max(20).regex(/^(?:[a-z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Ctrl|Control|Alt|Shift|Meta|Win|Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Insert|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Up|Down|Left|Right|CapsLock|PrintScreen)$/i), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("hotkey"), keys: z.array(z.string().min(1).max(20)).min(1).max(4), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("click_element"), ref: z.string().min(1).max(512), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("replace_element"), ref: z.string().min(1).max(512), text: z.string().min(1).max(500) }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("window_frame"), x: z.number().int().min(-16383).max(16383), y: z.number().int().min(-16383).max(16383), width: z.number().int().min(1).max(16383), height: z.number().int().min(1).max(16383) }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("focus"), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("invoke_menu"), path: z.array(z.string().trim().min(1).max(160)).min(1).max(16) }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("clipboard_read"), includeText: z.boolean(), confirmSharedClipboard: z.boolean().optional() }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("clipboard_write"), text: z.string().min(1).max(500), confirmSharedClipboard: z.literal(true) }).strict(),
   ]) },
   }, async ({ token, taskId, mode, action, operationId: requestedOperationId }, extra) => {
-    requireIdentity(token);
+    const { token: authToken } = authenticate(token);
     const operationId = requestedOperationId ?? createHash("sha256").update(`${operationNamespace}\0${String(extra.requestId)}`).digest("hex");
-    const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(token, taskId, action, mode, operationId)
+    const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(authToken, taskId, action, mode, operationId)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
     const capture = (response.result as { capture?: { dataUrl?: string } } | undefined)?.capture;
     const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
@@ -162,11 +273,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
 
   server.registerTool("m9r_stage_prepare", {
     description: "Bind an approved unfinished task to the desktop the owner is currently viewing; mode defaults to owner-preview. Preparation never creates, switches, moves, or closes desktops or windows. Pass mode \"background\" only when the task explicitly requests an isolated Windows desktop. Use the same mode on each m9r_stage_action call; preparation itself does not prove an action succeeded.",
-    inputSchema: { ...TOKEN_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview") },
+    inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview") },
   }, async ({ token, taskId, mode }) => {
-    requireIdentity(token);
+    const { token: authToken } = authenticate(token);
     const result = deps.web?.prepareTaskStage
-      ? await deps.web.prepareTaskStage(token, taskId, mode)
+      ? await deps.web.prepareTaskStage(authToken, taskId, mode)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
     return { content: [{ type: "text" as const, text: JSON.stringify(result) }], isError: !result.ok };
   });
@@ -175,7 +286,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_agents",
     {
       description: "List other M9R agents active recently. Use this before m9r_send if you don't already know who's around.",
-      inputSchema: { ...TOKEN_FIELD, activeWindowMinutes: z.number().int().min(1).max(1440).default(10) },
+      inputSchema: { ...AUTH_FIELD, activeWindowMinutes: z.number().int().min(1).max(1440).default(10) },
     },
     async ({ token, activeWindowMinutes }) => {
       const identity = requireIdentity(token);
@@ -198,13 +309,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     {
       description: "Send a task to another M9R agent by handle. It goes into their inbox and arrives at their next prompt or turn -- this does not wait for a reply.",
       inputSchema: {
-        ...TOKEN_FIELD,
+        ...AUTH_FIELD,
         to: z.string().min(1).max(80).describe("The recipient's handle, without the @, e.g. \"codex\"."),
         goal: z.string().min(1).max(4_000).describe("What you want the recipient to do, written for them to act on directly."),
       },
     },
     async ({ token, to: rawTo, goal }) => {
-      const identity = requireIdentity(token);
+      const { identity, token: authToken } = authenticate(token);
       const to = rawTo.replace(/^@+/, "").trim().toLowerCase();
       if (inRoom(identity)) {
         const authorization = await deps.web?.authorizeRoomMessage?.(identity.handle, to);
@@ -214,7 +325,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       }
       let taskId: string;
       if (deps.web?.submitAgentTask) {
-        const result = await deps.web.submitAgentTask(token, to, goal);
+        const result = await deps.web.submitAgentTask(authToken, to, goal);
         if (!result.ok || !result.taskId) throw new Error(result.error ?? "The owner broker did not accept the M9R task.");
         taskId = result.taskId;
       } else {
@@ -270,12 +381,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       description:
         "Check your inbox for new messages from teammates. Each call shows only messages you have not seen yet, and marks them seen. If you are a web-room agent (working in the shared browser), a teammate's answer is pushed to you automatically as your next message -- end your turn after m9r_send instead of calling this to wait. waitSeconds (up to 30) is for a native/terminal session with no such push: it waits once instead of polling in a loop.",
       inputSchema: {
-        ...TOKEN_FIELD,
+        ...AUTH_FIELD,
         waitSeconds: z.number().int().min(0).max(30).default(0).describe("How long to wait for a new message before giving up. 0 checks once."),
       },
     },
     async ({ token, waitSeconds }) => {
-      const identity = requireIdentity(token);
+      const { identity, token: authToken } = authenticate(token);
       // A web-room agent has one durable room inbox even when its provider process/session is restarted; using a
       // cursor keyed by that session ID would replay its ENTIRE delivered history after recovery, including old
       // "stop all work" messages. The cursor belongs to the stable room handle, never to a process or provider session.
@@ -309,7 +420,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           if (!inRoom(identity)) {
             let claimedIds: string[];
             if (deps.web?.claimAgentInbox) {
-              const claimed = await deps.web.claimAgentInbox(token, injection.includedIds);
+              const claimed = await deps.web.claimAgentInbox(authToken, injection.includedIds);
               if (!claimed.ok) throw new Error(claimed.error ?? "The owner broker could not claim these inbox messages for this session.");
               claimedIds = claimed.taskIds ?? [];
             } else {
@@ -325,10 +436,10 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           }
           const included = authorizedTasks.filter((task) => delivered.includedIds.includes(task.id))
             .find((task) => ["approved", "not_needed"].includes(task.approval));
-          const stageNotice = included ? await prepareTaskStageNotice(deps.store.root, deps.web, token, identity.handle, included.id) : "";
+          const stageNotice = included ? await prepareTaskStageNotice(deps.store.root, deps.web, authToken, identity.handle, included.id) : "";
           if (inRoom(identity)) {
             if (deps.web?.advanceAgentInboxCursor) {
-              const saved = await deps.web.advanceAgentInboxCursor(token, delivered.newCursor);
+              const saved = await deps.web.advanceAgentInboxCursor(authToken, delivered.newCursor);
               if (!saved.ok) throw new Error(saved.error ?? "The owner broker could not record which M9R messages were shown.");
             } else {
               deps.store.setCursor(handle, cursorSession, delivered.newCursor);
@@ -347,21 +458,21 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     {
       description: "Report the result of a task you were sent, so it gets recorded and (if the sender is a live Codex session) pushed back to them.",
       inputSchema: {
-        ...TOKEN_FIELD,
+        ...AUTH_FIELD,
         taskId: z.string().min(1).max(80).describe("The task id you were given, e.g. \"T12\"."),
         summary: z.string().min(1).max(4_000).describe("What you actually did and found -- concrete, not a vague completion claim."),
       },
     },
     async ({ token, taskId, summary }) => {
-      const identity = requireIdentity(token);
+      const { identity, token: authToken } = authenticate(token);
       const existing = deps.store.getTask?.(taskId);
       if (!existing) throw new Error(`No task ${taskId} found.`);
       if (existing.to !== identity.handle && existing.to !== roomHandle(identity, identity.handle)) throw new Error(`Task ${taskId} was not sent to you (@${identity.handle}), refusing to report a result for it.`);
       if (deps.web?.recordAgentTaskResult) {
-        const recorded = await deps.web.recordAgentTaskResult(token, taskId, summary);
+        const recorded = await deps.web.recordAgentTaskResult(authToken, taskId, summary);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
       } else {
-        const recorded = deps.store.recordTaskResult(token, taskId, summary);
+        const recorded = deps.store.recordTaskResult(authToken, taskId, summary);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
       }
       return { content: [{ type: "text", text: `Recorded result for ${taskId}, visible to @${existing.from} next time they check their results.` }] };
@@ -373,7 +484,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     {
       description: "Append or manage durable shared project-room memory. Notes are authored under your verified M9R identity; page-derived text is labeled untrusted. For room-wide agent memory, use source=agent and omit sourceUrl. Page-derived notes require a valid HTTP(S) URL, which is stored without query strings or fragments. This tool never reads page fields or stores form values. Actions: append, list, clear, export. Clear appends a tombstone; it does not rewrite note history.",
       inputSchema: {
-        ...TOKEN_FIELD,
+        ...AUTH_FIELD,
         action: z.enum(["append", "list", "clear", "export"]),
         room: z.string().min(1).max(120).describe("Local project room name or ID that owns these notes."),
         text: z.string().max(2_000).optional().describe("Note text for append only. Never include passwords, tokens, one-time codes, or copied form values."),
@@ -414,11 +525,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   );
 
   if (deps.networkCore) {
-    registerNetworkCoreTools({ server, client: deps.networkCore, requireIdentity });
+    registerNetworkCoreTools({ server, client: deps.networkCore, requireIdentity, authField: AUTH_FIELD });
   }
 
-  async function runWeb(token: string, partial: Pick<WebRequest, "action"> & Partial<WebRequest>) {
-    const identity = requireIdentity(token);
+  async function runWeb(token: string | undefined, partial: Pick<WebRequest, "action"> & Partial<WebRequest>) {
+    const { identity } = authenticate(token);
     if (!deps.web) {
       return { content: [{ type: "text" as const, text: "Browser tools are not available in this M9R setup." }], isError: true };
     }
@@ -437,8 +548,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     return { content: [{ type: "text" as const, text }] };
   }
 
-  async function runWebBatch(token: string, input: Omit<WebBatchRequest, "agent" | "provider" | "sessionId">) {
-    const identity = requireIdentity(token);
+  async function runWebBatch(token: string | undefined, input: Omit<WebBatchRequest, "agent" | "provider" | "sessionId">) {
+    const { identity } = authenticate(token);
     if (!deps.web?.runBatch) return { content: [{ type: "text" as const, text: "Browser batch tools are not available in this M9R setup." }], isError: true };
     const result = await deps.web.runBatch({ ...input, agent: identity.handle, provider: identity.provider, sessionId: identity.sessionId });
     return { content: [{ type: "text" as const, text: JSON.stringify(result) }], ...(result.ok ? {} : { isError: true }) };
@@ -466,7 +577,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_web_open",
     {
       description: "Open a web page (http or https) in the shared M9R browser. Use this instead of your own browser when you are working with other agents, so they can see where you are and avoid colliding with you. Work on the page like a person: open the site's own page, then use its controls. To search, take a snapshot, click the search box, m9r_web_type the query and m9r_web_press Enter. URLs that carry a search query (?q=...) are refused. If the page you need is already open in a shared tab (yours or a teammate's), work on that tab instead of opening another; open a new tab only when you need a second page at the same time.",
-      inputSchema: { ...TOKEN_FIELD, ...TAB_FIELD, url: z.string().min(1).max(2_000), newTab: z.boolean().optional().describe("Always create a distinct named tab; normally M9R reuses a named tab and opens a new one automatically if another agent holds the current tab.") },
+      inputSchema: { ...AUTH_FIELD, ...TAB_FIELD, url: z.string().min(1).max(2_000), newTab: z.boolean().optional().describe("Always create a distinct named tab; normally M9R reuses a named tab and opens a new one automatically if another agent holds the current tab.") },
     },
     async ({ token, tab, url, newTab, shareWith }) => {
       const identity = requireIdentity(token);
@@ -479,7 +590,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_web_read",
     {
       description: "Read the visible text of the page, or of one element if you pass a CSS selector. Reading is always allowed, even on a tab another agent is using.",
-      inputSchema: { ...TOKEN_FIELD, ...TAB_FIELD, ...TARGET_FIELDS },
+      inputSchema: { ...AUTH_FIELD, ...TAB_FIELD, ...TARGET_FIELDS },
     },
     async ({ token, tab, selector, ref }) => runWeb(token, { action: "read", tab, selector: targetSelector(selector, ref) }),
   );
@@ -489,7 +600,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     {
       description: "Click the element matching a CSS selector. Refused if another agent is currently using this tab; the error says how long to wait.",
     inputSchema: {
-      ...TOKEN_FIELD,
+      ...AUTH_FIELD,
       ...TAB_FIELD,
       ...TARGET_FIELDS,
       targetLabel: z.string().max(200).optional().describe("Optional untrusted visible-control label hint. Risky clicks are held for owner review; this label is never treated as trusted page content."),
@@ -507,7 +618,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     {
       description: "Type text into the input matching a CSS selector or snapshot ref, one key at a time, so the owner and teammates watch it happen. Refused if another agent is currently using this tab. Use this (then m9r_web_press Enter) for searches and forms instead of opening a URL that already contains the answer.",
     inputSchema: {
-      ...TOKEN_FIELD,
+      ...AUTH_FIELD,
       ...TAB_FIELD,
       ...TARGET_FIELDS,
       formSelector: z.string().min(1).max(500).optional(),
@@ -522,7 +633,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     {
       description: "Run 1-24 ordered open/click/type/press/scroll steps in one broker call under one tab claim. Stops at the first failure and returns each changed page state plus the bounded changed part. The broker takes the post-action page state; do not call m9r_web_snapshot just to observe the result.",
       inputSchema: {
-        ...TOKEN_FIELD,
+        ...AUTH_FIELD,
         tab: z.string().min(1).max(40).optional(),
         shareWith: z.array(z.string().min(1).max(80)).max(16).optional(),
         includePageState: z.boolean().optional().default(true),
@@ -560,9 +671,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     description: string,
     inputSchema: Record<string, z.ZodType>,
     map: (input: Record<string, unknown>) => Partial<WebRequest> = () => ({}),
-  ) => server.registerTool(name, { description, inputSchema: { ...TOKEN_FIELD, ...POWER_TAB_FIELD, ...inputSchema } }, async (raw) => {
+  ) => server.registerTool(name, { description, inputSchema: { ...AUTH_FIELD, ...POWER_TAB_FIELD, ...inputSchema } }, async (raw) => {
     const input = raw as Record<string, unknown>;
-    return runWeb(String(input.token), { action, tab: typeof input.tab === "string" ? input.tab : undefined, ...map(input) });
+    return runWeb(typeof input.token === "string" ? input.token : undefined, { action, tab: typeof input.tab === "string" ? input.tab : undefined, ...map(input) });
   });
 
   powerTool("m9r_web_scroll", "scroll", "Scroll the page or the element identified by a fresh snapshot ref or CSS selector.", {
@@ -684,7 +795,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_web_follow_link",
     {
       description: "Snapshot first, then pass a link ref. Reads its href and opens it in a new named/grouped tab so another agent's shared page is never navigated away from.",
-      inputSchema: { ...TOKEN_FIELD, ...POWER_TAB_FIELD, ...TARGET_FIELDS },
+      inputSchema: { ...AUTH_FIELD, ...POWER_TAB_FIELD, ...TARGET_FIELDS },
     },
     async ({ token, tab, selector, ref }) => {
       const identity = requireIdentity(token);
