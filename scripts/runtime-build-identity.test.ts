@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createRuntimeBuildInfo, readRuntimeBuildIdentity } from "../src/lib/native/runtime-build-identity";
+import { createRuntimeBuildInfo, readRuntimeBuildId, readRuntimeBuildIdentity } from "../src/lib/native/runtime-build-identity";
 import { writeRuntimeBuildManifest } from "./engine-build-transaction.mjs";
 
 test("runtime identity verifies the running executable against the adjacent build manifest", () => {
@@ -46,11 +46,30 @@ test("runtime identity refuses tampered manifests and labels development process
     writeFileSync(executable, "engine");
     const digest = createHash("sha256").update("engine").digest("hex");
     const manifest = createRuntimeBuildInfo({ "m9r-engine.exe": digest });
-    writeFileSync(join(root, "m9r-build-info.json"), JSON.stringify({ ...manifest, buildId: "0".repeat(64) }));
+    writeFileSync(join(root, "m9r-build-info.json"), JSON.stringify({ ...manifest, buildId: "not-a-build-id" }));
     assert.equal(readRuntimeBuildIdentity(executable).status, "invalid_manifest");
     rmSync(join(root, "m9r-build-info.json"));
     assert.equal(readRuntimeBuildIdentity(join(root, "node.exe")).status, "unmanaged");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("runtime generation reads cheaply without hashing the executable", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-runtime-generation-"));
+  try {
+    const executable = join(root, "m9r-engine.exe");
+    writeFileSync(executable, "engine");
+    const digest = createHash("sha256").update("engine").digest("hex");
+    const manifest = createRuntimeBuildInfo({ "m9r-engine.exe": digest });
+    writeFileSync(join(root, "m9r-build-info.json"), JSON.stringify(manifest));
+    assert.equal(readRuntimeBuildId(executable), manifest.buildId);
+    writeFileSync(join(root, "m9r-build-info.json"), JSON.stringify({ ...manifest, buildId: "not-a-build-id" }));
+    assert.equal(readRuntimeBuildId(executable), null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the local oathlock command uses the current M9R CLI entrypoint", () => {
+  const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as { scripts?: { oathlock?: string } };
+  assert.match(packageJson.scripts?.oathlock ?? "", /scripts\/m9r-cli\.ts$/);
 });
 
 test("the engine packager manifest is accepted by the runtime identity verifier", () => {

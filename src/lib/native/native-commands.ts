@@ -44,6 +44,7 @@ import { isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
 import { USER_STEPS } from "./onboarding-steps";
+import { readRuntimeBuildId } from "./runtime-build-identity";
 
 export interface NativeIo {
   env: Record<string, string | undefined>;
@@ -56,6 +57,8 @@ export interface NativeIo {
   codexDeps?: DeliveryDeps;
   /** The caller's working folder, used to pick a session. M9R's own install directory is never a project folder. */
   cwd?: string;
+  /** Runtime image path; production defaults to the current executable, tests may use an isolated image. */
+  executablePath?: string;
   /** Start-with-Windows switch; tests inject a fake so nothing ever touches the real registry. */
   autostart?: Autostart;
 }
@@ -639,25 +642,58 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
     const controller = new AbortController();
     const release = has("--watch") ? acquireFeedLock(root) : () => {};
     if (!release) { io.out("The feed is already being written by another M9R process."); return 0; }
-    if (has("--watch")) { process.once("SIGINT", () => controller.abort()); process.once("SIGTERM", () => controller.abort()); io.out(`Writing ${feedPath(root)} (Ctrl+C to stop)`); }
-    // The Codex watcher forwards what a person types in Codex; Codex must be told to stand down or the work is done twice, so it only
-    // runs when the stand-down note is installed for Codex (or a test forces it on).
-    // Finding Codex sessions (so `@codex` has somewhere to go) always runs while watching. Forwarding what a person types in Codex only
-    // happens for sessions where Codex was told to stand down (its AGENTS.md carries the note), or when a test forces it on.
-    const routeMentions = io.env.M9R_CODEX_WATCH === "1" ? true : (cwd: string | undefined) => codexNoteInEffect(cwd, codexHome(io.env));
-    const watcher = has("--watch") && !io.env.M9R_NO_CODEX_WATCH ? createCodexWatcher(createLocalStore(root), { codexHome: codexHome(io.env), routeMentions, dispatch: (id) => spawnDeliveryRunner(activeHookEntry(io), id, io.env) }) : undefined;
-    const server = has("--watch") && has("--serve-hooks")
-      ? startHookServer({
-          path: hookPipePath(root),
-          handle: (req) => runHookRequest({ event: req.event ?? "", provider: req.provider ?? "claude-code", input: req.input ?? null, env: req.env }, activeHookEntry(io), { ...io.env }, true),
-          onShutdown: () => controller.abort(),
-        })
-      : undefined;
-    await runFeed({ root, watch: has("--watch"), codexWatcher: watcher, signal: controller.signal, onWrite: has("--watch") ? (f) => io.out(`feed #${f.seq}: ${f.needsYou.length} need you`) : undefined });
-    server?.close();
-    release();
-    if (!has("--watch")) io.out(`Wrote ${feedPath(root)}`);
-    return 0;
+    const watching = has("--watch");
+    let server: ReturnType<typeof startHookServer> | undefined;
+    let freshnessTimer: ReturnType<typeof setInterval> | undefined;
+    try {
+      if (watching) {
+        process.once("SIGINT", () => controller.abort());
+        process.once("SIGTERM", () => controller.abort());
+        io.out(`Writing ${feedPath(root)} (Ctrl+C to stop)`);
+
+        // A runtime update replaces the adjacent manifest atomically. A feed
+        // process that keeps its old executable mapped would otherwise keep
+        // serving stale hooks forever while the new files sit unused. Abort
+        // through runFeed's normal drain path when the generation changes;
+        // the overlay supervisor or the next hook then starts the current
+        // image. The marker read is cheap and does not re-hash the executable.
+        const buildIdAtStart = readRuntimeBuildId(io.executablePath ?? process.execPath);
+        if (buildIdAtStart) {
+          let reported = false;
+          freshnessTimer = setInterval(() => {
+            if (reported) return;
+            const currentBuildId = readRuntimeBuildId(io.executablePath ?? process.execPath);
+            if (currentBuildId === buildIdAtStart) return;
+            reported = true;
+            io.err("M9R runtime generation changed on disk; draining the feed before the current runtime takes over.");
+            controller.abort();
+          }, 2_000);
+          freshnessTimer.unref?.();
+        }
+      }
+      // The Codex watcher forwards what a person types in Codex; Codex must be told to stand down or the work is done twice, so it only
+      // runs when the stand-down note is installed for Codex (or a test forces it on).
+      // Finding Codex sessions (so `@codex` has somewhere to go) always runs while watching. Forwarding what a person types in Codex only
+      // happens for sessions where Codex was told to stand down (its AGENTS.md carries the note), or when a test forces it on.
+      const routeMentions = io.env.M9R_CODEX_WATCH === "1" ? true : (cwd: string | undefined) => codexNoteInEffect(cwd, codexHome(io.env));
+      const watcher = watching && !io.env.M9R_NO_CODEX_WATCH ? createCodexWatcher(createLocalStore(root), { codexHome: codexHome(io.env), routeMentions, dispatch: (id) => spawnDeliveryRunner(activeHookEntry(io), id, io.env) }) : undefined;
+      server = watching && has("--serve-hooks")
+        ? startHookServer({
+            path: hookPipePath(root),
+            handle: (req) => runHookRequest({ event: req.event ?? "", provider: req.provider ?? "claude-code", input: req.input ?? null, env: req.env }, activeHookEntry(io), { ...io.env }, true),
+            onShutdown: () => controller.abort(),
+          })
+        : undefined;
+      await runFeed({ root, watch: watching, codexWatcher: watcher, signal: controller.signal, onWrite: watching ? (f) => io.out(`feed #${f.seq}: ${f.needsYou.length} need you`) : undefined });
+      if (!watching) io.out(`Wrote ${feedPath(root)}`);
+      return 0;
+    } finally {
+      if (freshnessTimer) clearInterval(freshnessTimer);
+      server?.close();
+      // A runtime-generation change must never strand the single-writer lock,
+      // even if feed observation or hook-server startup throws.
+      release();
+    }
   }
   if (command === "dismiss") { const n = createLocalStore(root).dismiss(positionals.map((p) => p.toUpperCase())); io.out(n ? `Cleared ${n} from the overlay list.` : "Nothing to clear."); return 0; }
   if (command === "tasks") return runTasks(io, root);

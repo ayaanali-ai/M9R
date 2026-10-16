@@ -48,7 +48,7 @@
     "test:resident": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-alias.mjs --test ./scripts/resident-launch-contract.test.ts ./scripts/resident-routing.test.ts ./scripts/resident-service.test.ts ./scripts/resident-provider-adapters.test.ts ./scripts/resident-grant-queue.test.ts ./scripts/resident-daemon.test.ts ./scripts/resident-authorization.test.ts ./scripts/resident-resilience.test.ts",
     "test:hackathon": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test ./scripts/hackathon-submission.test.ts",
     "loadtest": "node ./scripts/reliability-load-test.mjs",
-    "oathlock": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-alias.mjs ./scripts/oathlock-cli.ts",
+    "oathlock": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-alias.mjs ./scripts/m9r-cli.ts",
     "diagnose:run": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-alias.mjs ./scripts/diagnose-run.ts",
     "reconcile:counts": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-alias.mjs ./scripts/reconcile-real-counts.ts",
     "export:proof": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-alias.mjs ./scripts/export-proof-snapshot.ts",

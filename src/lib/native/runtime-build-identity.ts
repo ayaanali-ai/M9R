@@ -49,6 +49,26 @@ export function createRuntimeBuildInfo(artifacts: Record<string, string>, builtA
   return { schemaVersion: 1, buildId: calculateRuntimeBuildId(normalized), builtAt, artifacts: normalized };
 }
 
+/**
+ * Read only the generation marker for a running runtime.
+ *
+ * Long-lived feed processes use this cheap check while they are alive. The
+ * full identity check hashes the executable and is intentionally reserved for
+ * startup/health verification; hashing a large SEA executable on every poll
+ * would turn stale-build protection into avoidable background I/O.
+ */
+export function readRuntimeBuildId(executablePath = process.execPath): string | null {
+  try {
+    const manifestPath = join(dirname(executablePath), RUNTIME_BUILD_INFO_FILE);
+    const parsed = JSON.parse(readFileSync(manifestPath, "utf8")) as { schemaVersion?: unknown; buildId?: unknown };
+    return parsed.schemaVersion === 1 && typeof parsed.buildId === "string" && /^[a-f0-9]{64}$/.test(parsed.buildId)
+      ? parsed.buildId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

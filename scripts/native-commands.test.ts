@@ -8,6 +8,7 @@ import { createLocalStore } from "@/lib/native/local-store";
 import { createPageNotesStore } from "@/lib/native/page-notes-store";
 import { projectRoomId } from "@/lib/native/project-room";
 import { ONBOARDING_STEPS, renderStepsMarkdown } from "@/lib/native/onboarding-steps";
+import { createRuntimeBuildInfo } from "@/lib/native/runtime-build-identity";
 
 const autostartCalls: string[] = [];
 let autostartOn = false;
@@ -504,6 +505,26 @@ test("Windows setup installs the pill, broker, and Driver runtime together and s
     assert.equal(existsSync(brokerPath), true, "engine uninstall leaves the separately managed broker for its owner manifest");
     assert.equal(existsSync(join(s.p.m9r, "bin", "m9r-overlay.exe")), false);
     assert.equal(existsSync(join(s.p.m9r, "bin", "cua-driver-runtime", "node_modules", "driver", "driver.node")), false);
+  } finally { s.done(); }
+});
+
+test("a watched feed drains on runtime generation change and releases its writer lock", async () => {
+  const s = sandbox();
+  try {
+    const executable = join(s.home, "m9r-engine.exe");
+    const manifest = join(s.home, "m9r-build-info.json");
+    writeFileSync(executable, "stand-in engine", "utf8");
+    const writeGeneration = (hash: string) => writeFileSync(manifest, JSON.stringify(createRuntimeBuildInfo({ "m9r-engine.exe": hash })));
+    writeGeneration("a".repeat(64));
+    s.io.executablePath = executable;
+    s.io.env.M9R_NO_CODEX_WATCH = "1";
+
+    const running = s.run("feed", ["--watch"]);
+    await new Promise((resolve) => setTimeout(resolve, 2_250));
+    writeGeneration("b".repeat(64));
+    assert.equal(await running, 0);
+    assert.match(s.err.join("\n"), /runtime generation changed on disk; draining the feed/i);
+    assert.equal(existsSync(join(s.p.m9r, "feed.lock")), false, "the stale watcher must not strand the single-writer lock");
   } finally { s.done(); }
 });
 

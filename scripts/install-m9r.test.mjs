@@ -49,6 +49,10 @@ function createPackage(directory) {
   }
   cpSync(join(engineDist, "m9r-overlay.exe"), join(stage, "m9r-overlay.exe"));
   cpSync(join(engineDist, "m9r-build-info.json"), join(stage, "m9r-build-info.json"));
+  // The engine's native setup resolves the Cua runtime beside the engine.
+  // Keep this fixture representative of the canonical release packager so a
+  // stale/minimal test ZIP cannot report a false installer regression.
+  cpSync(join(engineDist, "cua-driver-runtime"), join(stage, "cua-driver-runtime"), { recursive: true });
   cpSync(installer, join(stage, "install-m9r.ps1"));
   cpSync(resolve("scripts/install-m9r.cmd"), join(stage, "install-m9r.cmd"));
   writeFileSync(join(stage, "INSTALLATION.txt"), "M9R Windows standalone installer test package\n");
@@ -200,6 +204,7 @@ test("release ZIP contains the built standalone broker", { skip: skipNative }, (
   assert.match(listed.stdout, /^m9r-web-broker\.exe\s*$/m);
   assert.match(listed.stdout, /^m9r-overlay\.exe\s*$/m);
   assert.match(listed.stdout, /^m9r-build-info\.json\s*$/m);
+  assert.match(listed.stdout, /^cua-driver-runtime\/bin\/cua-cursor-theme\.exe\s*$/m);
 });
 
 test("standalone package consent, setup, integrity, and uninstall paths", { skip: skipNative }, async (t) => {

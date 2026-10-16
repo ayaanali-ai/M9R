@@ -288,7 +288,7 @@ function build() {
 
   // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "local-store", "runtime-install-transaction", "runtime-build-identity", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server"]) {
+  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "local-store", "runtime-install-transaction", "runtime-build-identity", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source)
       .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
@@ -645,11 +645,18 @@ function build() {
   // compares its own startup-captured value against on every poll cycle.
   writeFileSync(resolve(outDir, "build-info.json"), JSON.stringify({ builtAt: new Date().toISOString() }, null, 2) + "\n");
 
-  // Validate the generated native setup dependency graph before publishing.
-  // A missing generated module must fail this build, not the subsequent SEA
-  // packaging or a user's first setup command. No verification bundle ships.
-  buildSync({ entryPoints: [resolve(outDir, "native-commands.js")], bundle: true,
-    platform: "node", format: "esm", write: false, logLevel: "warning" });
+  // Validate every generated executable entrypoint before publishing. A
+  // missing generated module must fail this build, not the subsequent SEA
+  // packaging or a user's first provider/desktop command. No verification
+  // bundle ships; this is only a dependency-graph check.
+  for (const entry of ["m9r.js", "m9r-hook.js", "m9r-mcp.js", "dev-mcp-server.js", "native-commands.js"]) {
+    buildSync({ entryPoints: [resolve(outDir, entry)], bundle: true,
+      platform: "node", format: "esm", write: false, logLevel: "warning",
+      // The CLI has a fallback import for source checkouts; packaged builds
+      // ship m9r-web-broker.cjs beside the entry and the SEA build externalizes
+      // this same optional path.
+      external: entry === "m9r.js" ? ["./m9r-web-broker"] : [] });
+  }
   publishGeneratedDirectory(outDir, finalOutDir);
   console.log(`Built CLI -> ${finalOutDir}`);
 }
