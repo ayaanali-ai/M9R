@@ -898,6 +898,10 @@ function openCodeEntry(command: WebMcpCommand): Record<string, unknown> {
     type: "local",
     command: [command.command, ...command.args],
     environment: { M9R_HOME: command.m9rHome, M9R_WEB_BROKER_PORT: String(command.brokerPort ?? 47821) },
+    // OpenCode does not treat a configured MCP server as on by default; omitting this leaves
+    // the server registered but never actually started, so none of its tools ever appear --
+    // confirmed live (the real symptom this fixes, not a defensive guess).
+    enabled: true,
   };
 }
 
