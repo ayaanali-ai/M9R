@@ -32,6 +32,7 @@ async function main(): Promise<void> {
   const projectRoot = resolve(process.env.M9R_PROJECT_ROOT?.trim() || process.cwd());
   process.env.M9R_PROJECT_ROOT = projectRoot;
   const root = defaultStoreRoot(homedir(), process.env);
+  const colorStore = createLocalStore(root);
   const key = loadOrCreateBrokerKey(brokerKeyPath(root));
   const ownerId = process.env.M9R_OWNER_ID?.trim() || "local-machine";
   const authorityStore = createWebAuthorityStore(root);
@@ -42,6 +43,7 @@ async function main(): Promise<void> {
   const pageNotes = createPageNotesStore(root);
   // A note saved from the pill lands in the same project-room memory agents read at session start.
   const ui = createWebUiBridge({
+    colorFor: (handle) => colorStore.colorFor(handle),
     saveNote: (text) => {
       const result = pageNotes.append({ room: projectRoomId(projectRoot), agent: "you", text, source: "agent" });
       if (result.ok) void pushCloudNote(root, text); // best effort: also appears in the team's dashboard when this machine is connected

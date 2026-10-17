@@ -1,5 +1,8 @@
 /**
- * Stripe client + the real M9R prices (Relationship Memory and Team).
+ * Stripe client + the real M9R price. One product, one price per cohort --
+ * no seats, no tiers, no annual toggle. $17/month is locked for life for the
+ * first 500 subscribers; everyone after pays $27/month, also locked for that
+ * cohort. Both prices already exist as live Stripe objects.
  * ----------------------------------------------------------------------------
  * Price IDs are not secret (they're safe to ship to the client and appear in
  * the Stripe dashboard URL bar), so they're plain constants rather than env
@@ -10,44 +13,27 @@
 
 import Stripe from "stripe";
 
-export const STRIPE_PRICE_MONTHLY = "price_1UOspWRSegzd51KSidxXe3VZ"; // M9R Relationship Memory, $7/mo
-export const STRIPE_PRICE_ANNUAL = "price_1UOspXRSegzd51KSsSCyf4JO"; // M9R Relationship Memory, $70/yr
+export const STRIPE_PRICE_FOUNDING = "price_1URgeZRSegzd51KS4OxidJG7"; // M9R, $17/mo, locked for life, first 500
+export const STRIPE_PRICE_STANDARD = "price_1URgeeRSegzd51KS2NsoEZIf"; // M9R, $27/mo, locked for that cohort
 
-export const STRIPE_PRICE_TEAM_MONTHLY = "price_1UOsprRSegzd51KSCS63oCiu"; // M9R Team, $9/seat/mo, 7-day trial
-export const STRIPE_PRICE_TEAM_ANNUAL = "price_1UOspsRSegzd51KSlez8jG76"; // M9R Team, $90/seat/yr, 7-day trial
+export const FOUNDING_COHORT_SIZE = 500;
 
-export type BillingInterval = "monthly" | "annual";
-export type BillingProduct = "memory" | "team";
+export type BillingCohort = "founding" | "standard";
 
-const PRICE_IDS: Record<BillingProduct, Record<BillingInterval, string>> = {
-  memory: { monthly: STRIPE_PRICE_MONTHLY, annual: STRIPE_PRICE_ANNUAL },
-  team: { monthly: STRIPE_PRICE_TEAM_MONTHLY, annual: STRIPE_PRICE_TEAM_ANNUAL },
+const PRICE_IDS: Record<BillingCohort, string> = {
+  founding: STRIPE_PRICE_FOUNDING,
+  standard: STRIPE_PRICE_STANDARD,
 };
 
-/** Team's trial is also set on the Stripe price; checkout passes it explicitly
- *  so the trial holds even where Checkout ignores price-level trial days. */
-export const TEAM_TRIAL_DAYS = 7;
-
-export function priceIdFor(product: BillingProduct, interval: BillingInterval): string {
-  return PRICE_IDS[product][interval];
+export function priceIdFor(cohort: BillingCohort): string {
+  return PRICE_IDS[cohort];
 }
 
-/** Kept for existing callers: resolves the Relationship Memory price. */
-export function priceIdForInterval(interval: BillingInterval): string {
-  return priceIdFor("memory", interval);
-}
-
-export function planForPriceId(priceId: string): { product: BillingProduct; interval: BillingInterval } | null {
-  for (const product of Object.keys(PRICE_IDS) as BillingProduct[]) {
-    for (const interval of Object.keys(PRICE_IDS[product]) as BillingInterval[]) {
-      if (PRICE_IDS[product][interval] === priceId) return { product, interval };
-    }
+export function cohortForPriceId(priceId: string): BillingCohort | null {
+  for (const cohort of Object.keys(PRICE_IDS) as BillingCohort[]) {
+    if (PRICE_IDS[cohort] === priceId) return cohort;
   }
   return null;
-}
-
-export function intervalForPriceId(priceId: string): BillingInterval | null {
-  return planForPriceId(priceId)?.interval ?? null;
 }
 
 let cachedClient: Stripe | null = null;

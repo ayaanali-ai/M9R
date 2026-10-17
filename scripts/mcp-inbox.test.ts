@@ -98,6 +98,51 @@ test("each inbox check shows only messages not seen before, then reports empty",
   t.done();
 });
 
+test("m9r_pending_work still surfaces a task after the inbox has already delivered it and moved on", async () => {
+  // Confirmed live, 2026-10-17: an agent reported "inbox is empty" for a task that had, in fact,
+  // already been delivered and was still open -- the inbox's one-shot replay fence (correct,
+  // kept as-is) means a delivered task never reappears there, so an agent with no memory of
+  // having seen it (a fresh session, a reconnect) has no way to discover it is still owed a
+  // result. This proves the new lookup closes exactly that gap.
+  const t = setup();
+  try {
+    await t.call("m9r_send", { token: t.claude, to: "codex", goal: "open file explorer and type hello" });
+    const first = await t.call("m9r_inbox", { token: t.codex });
+    assert.match(first, /open file explorer/);
+    assert.equal(await t.call("m9r_inbox", { token: t.codex }), "Inbox is empty.", "the task was already delivered once");
+
+    const pending = await t.call("m9r_pending_work", { token: t.codex });
+    assert.match(pending, /open file explorer/, "pending work must still list a delivered-but-unresolved task");
+
+    const taskId = /^(T\d+):/m.exec(pending)?.[1];
+    assert.ok(taskId, "pending work must expose the real task id so m9r_result can close it");
+    await t.call("m9r_result", { token: t.codex, taskId, summary: "done" });
+    assert.equal(await t.call("m9r_pending_work", { token: t.codex }), "No open tasks owed a result right now.", "a reported result must no longer count as pending");
+  } finally { t.done(); }
+});
+
+test("colorFor allocates one durable color per handle, never a collision between concurrently active agents", () => {
+  // Findings I/AD: confirmed live that the pill's own hardcoded Codex color changed between two
+  // audits the same night, with nothing keeping any surface in sync with any other. This proves
+  // the actual fix: one persisted source of truth, stable across repeated calls, never a
+  // duplicate among handles that are all assigned at once.
+  const t = setup();
+  try {
+    const claude = t.store.colorFor("claude");
+    assert.equal(claude, "#D97757", "Claude keeps its real brand color as the preferred first pick");
+    assert.equal(t.store.colorFor("claude"), claude, "the same handle must always get the same answer");
+
+    const codex = t.store.colorFor("codex");
+    const opencode = t.store.colorFor("opencode");
+    assert.notEqual(codex, claude);
+    assert.notEqual(opencode, claude);
+    assert.notEqual(codex, opencode, "two concurrently active agents must never be assigned the same color");
+
+    // Case/prefix variance in how a handle is spelled must resolve to the same stored identity.
+    assert.equal(t.store.colorFor("Codex"), codex);
+  } finally { t.done(); }
+});
+
 test("waitSeconds returns as soon as a message arrives instead of running out the clock", async () => {
   const t = setup();
   const started = Date.now();

@@ -9,6 +9,14 @@ mod pointer_restore_regressions {
     use std::cell::Cell;
 
     #[test]
+    fn lifecycle_and_popup_ops_validate_identity_before_native_work() {
+        for op in ["windowStatus", "setWindowState", "listOwnedPopups"] {
+            let result = super::handle_desktop_stage_request(&serde_json::json!({"op":op,"pid":0,"windowId":"0","state":"maximized"}));
+            assert_eq!(result["ok"], false);
+        }
+    }
+
+    #[test]
     fn restores_pointer_after_success_and_failure() {
         for fail in [false, true] {
             let restored = Cell::new(None);

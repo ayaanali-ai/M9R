@@ -258,21 +258,29 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       z.object({ view: z.literal("app"), kind: z.literal("click_element"), ref: z.string().min(1).max(512), expectedRole: z.string().max(160).optional().describe("The element's role from the read_structure call this ref came from. Strongly recommended: lets the system confirm it is still the exact same control before clicking, since the underlying ref can become ambiguous if the page/window structure changed in between."), expectedLabel: z.string().max(160).optional().describe("The element's label from that same read_structure call, for the same confirmation."), confirmFocusForeground: z.boolean().optional() }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("replace_element"), ref: z.string().min(1).max(512), text: z.string().min(1).max(500), expectedRole: z.string().max(160).optional().describe("The element's role from the read_structure call this ref came from, for the same confirmation as click_element."), expectedLabel: z.string().max(160).optional() }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("window_frame"), x: z.number().int().min(-16383).max(16383), y: z.number().int().min(-16383).max(16383), width: z.number().int().min(1).max(16383), height: z.number().int().min(1).max(16383) }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("window_status") }).strict(),
+      z.object({ kind: z.literal("stop") }).strict(),
+      z.object({ kind: z.literal("window_state"), view: z.literal("app"), state: z.enum(["minimized", "maximized", "restored"]) }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("focus"), confirmFocusForeground: z.boolean().optional() }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("invoke_menu"), path: z.array(z.string().trim().min(1).max(160)).min(1).max(16) }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("clipboard_read"), includeText: z.boolean(), confirmSharedClipboard: z.boolean().optional() }).strict(),
-      z.object({ view: z.literal("app"), kind: z.literal("clipboard_write"), text: z.string().min(1).max(500), confirmSharedClipboard: z.literal(true) }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("clipboard_write"), text: z.string().min(1).max(500).optional(), imagePath: z.string().max(1024).optional(), filePath: z.string().max(1024).optional(), confirmSharedClipboard: z.literal(true) }).strict(),
   ]) },
   }, async ({ token, taskId, mode, action, operationId: requestedOperationId }, extra) => {
     const { token: authToken } = authenticate(token);
     const operationId = requestedOperationId ?? createHash("sha256").update(`${operationNamespace}\0${String(extra.requestId)}`).digest("hex");
     const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(authToken, taskId, action, mode, operationId)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
-    const capture = (response.result as { capture?: { dataUrl?: string } } | undefined)?.capture;
+    const result = response.result as { capture?: { dataUrl?: string; ownedPopups?: Array<{ dataUrl?: string }> };
+      fallbackCapture?: { dataUrl?: string; ownedPopups?: Array<{ dataUrl?: string }> } } | undefined;
+    const capture = result?.capture ?? result?.fallbackCapture;
     const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
-      { type: "text", text: JSON.stringify({ ...response, result: response.result ? { ...response.result as object, capture: capture ? { ...capture, dataUrl: undefined } : undefined } : undefined }) },
+      { type: "text", text: JSON.stringify(response, (key, value) => key === "dataUrl" ? undefined : value) },
     ];
     if (response.ok && capture?.dataUrl?.startsWith("data:image/png;base64,")) content.push({ type: "image", data: capture.dataUrl.slice("data:image/png;base64,".length), mimeType: "image/png" });
+    if (response.ok) for (const popup of capture?.ownedPopups ?? []) if (popup.dataUrl?.startsWith("data:image/png;base64,")) {
+      content.push({ type: "image", data: popup.dataUrl.slice("data:image/png;base64,".length), mimeType: "image/png" });
+    }
     return { content, isError: !response.ok };
   });
 
@@ -459,6 +467,25 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   );
 
   server.registerTool(
+    "m9r_pending_work",
+    {
+      description:
+        "List your own currently open tasks -- ones you still owe a result for -- regardless of whether they show up in your inbox. The inbox only shows messages you have not been shown yet; a task you were already sent (in this session, in an earlier session, or across a provider reconnect) never reappears there once delivered, even if it is still open and you have no memory of it. Call this whenever you're unsure whether you actually have open work, instead of treating an empty inbox as proof there is none.",
+      inputSchema: { ...AUTH_FIELD },
+    },
+    async ({ token }) => {
+      const { identity } = authenticate(token);
+      const handle = roomHandle(identity, identity.handle);
+      const pending = (inRoom(identity) ? deps.store.tasksFor(handle) : deps.store.pendingWorkFor(identity.handle, identity.sessionId))
+        .filter((task) => ["approved", "not_needed"].includes(task.approval) && !task.resultSummary)
+        .sort((a, b) => a.seq - b.seq);
+      if (pending.length === 0) return { content: [{ type: "text" as const, text: "No open tasks owed a result right now." }] };
+      const lines = pending.map((task) => `${task.id}: ${task.goal.slice(0, 200)}${task.goal.length > 200 ? "…" : ""}`);
+      return { content: [{ type: "text" as const, text: `Open tasks awaiting a result:\n${lines.join("\n")}` }] };
+    },
+  );
+
+  server.registerTool(
     "m9r_result",
     {
       description: "Report the result of a task you were sent, so it gets recorded and (if the sender is a live Codex session) pushed back to them.",
@@ -578,6 +605,15 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     ref: z.string().regex(/^e[a-f0-9]{24}_\d{1,3}$/).optional().describe("Snapshot-scoped element ref returned by the latest m9r_web_snapshot. Re-snapshot after navigation or page changes."),
   };
 
+  // Owner-directed, 2026-10-17: the browser extension is not the primary route and must never be
+  // offered as one -- an agent choosing it over the OS-level native route (m9r_stage_app +
+  // m9r_stage_action/m9r_computer_observe) was observed live, stalling a task that should have
+  // used the real OS cursor. These tools are no longer registered at all, so they cannot appear
+  // in any agent's tool list or be selected as a fallback. The extension/runWeb implementation
+  // is left in place (not deleted) in case the owner wants it back for its original narrow
+  // shared-tab, multi-agent-visibility purpose, but it is off by default and must stay off.
+  const WEB_EXTENSION_ROUTE_ENABLED = false;
+  if (WEB_EXTENSION_ROUTE_ENABLED) {
   server.registerTool(
     "m9r_web_open",
     {
@@ -819,6 +855,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       return runWeb(token, { action: "open", tab: newTab, url: url.href });
     },
   );
+  } // WEB_EXTENSION_ROUTE_ENABLED
 
   return server;
 }

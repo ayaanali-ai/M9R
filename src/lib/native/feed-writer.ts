@@ -127,7 +127,7 @@ export async function feedPass(root: string, deps: FeedDeps, probes: Record<stri
   store.sweepExpired(PENDING_TTL_MS);
   const snap = store.snapshot();
   const previous = readPrevious(path);
-  const feed = buildFeed({ now, endpoints: snap.endpoints, sessions: snap.sessions, tasks: snap.tasks, events: snap.events, probes, pendingIds: new Set(store.pendingApprovals().map((t) => t.id)) }, previous);
+  const feed = buildFeed({ now, endpoints: snap.endpoints, sessions: snap.sessions, tasks: snap.tasks, events: snap.events, probes, pendingIds: new Set(store.pendingApprovals().map((t) => t.id)), colorFor: (handle) => store.colorFor(handle) }, previous);
   if (previous && feedBody(previous) === feedBody(feed)) return null;
   mkdirSync(root, { recursive: true });
   writeAtomic(path, JSON.stringify(feed, null, 2) + "\n");

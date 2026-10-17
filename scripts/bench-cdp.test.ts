@@ -16,8 +16,13 @@ type ToolResult = { content: Array<{ type: string; text: string }>; isError?: bo
 type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<ToolResult> }> };
 
 const chrome = findChrome();
+// Owner-directed, 2026-10-17: the browser extension route (WEB_EXTENSION_ROUTE_ENABLED in
+// mcp-server.ts) is deliberately disabled -- an agent chose it over the OS-level native route and
+// stalled a real task. This test drives m9r_web_open/read/type/click, which are no longer
+// registered. Skipped, not deleted, pending the flag flipping back on.
+const skipReason = chrome ? "The browser extension route is deliberately disabled (mcp-server.ts WEB_EXTENSION_ROUTE_ENABLED); m9r_web_* tools are not registered." : "no Chrome or Edge installed";
 
-test("an agent tool call drives a real headless browser end to end: open, read, type, click, and the site scores the answer", { skip: chrome ? false : "no Chrome or Edge installed" }, async (t) => {
+test("an agent tool call drives a real headless browser end to end: open, read, type, click, and the site scores the answer", { skip: skipReason }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "m9r-bench-e2e-"));
   const modeFile = join(root, "mode");
   writeFileSync(modeFile, "hands-off\n", "utf8");

@@ -31,6 +31,12 @@ function fakeSessions(handles = ["claude", "codex"]) {
   return { port, delivered, status, stopped, waitingOn };
 }
 
+test("UI snapshots carry the host's allocated color, including unknown providers", () => {
+  const ui = createWebUiBridge({ colorFor: (handle) => handle === "custom" ? "#123ABC" : "#456DEF" });
+  ui.attachSessions(fakeSessions(["custom"]).port);
+  assert.equal(ui.snapshot().agents[0]?.color, "#123ABC");
+});
+
 function bridgeWith(handles?: string[]) {
   let clock = 1_000;
   let n = 0;

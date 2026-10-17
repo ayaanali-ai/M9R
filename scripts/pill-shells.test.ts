@@ -5,6 +5,12 @@ import { createExtensionTransport } from "../pill/src/shells/extension";
 import { createDesktopTransport } from "../pill/src/shells/desktop";
 import { createFrameHost } from "../pill/src/shells/frame-host";
 
+test("both pill shells preserve host-allocated identity colors", () => {
+  const color = "#123ABC";
+  assert.equal(fromFeed({ agents: [{ handle: "custom", color }] }).agents[0]?.color, color);
+  assert.equal(fromUiState({ agents: [{ id: "custom", color }] }).agents[0]?.color, color);
+});
+
 test("provider detection covers handles, provider ids and unknown agents", () => {
   assert.equal(providerOf("claude"), "claude");
   assert.equal(providerOf("claude-code"), "claude");

@@ -40,17 +40,16 @@ test("the built engine exe's `mcp` subcommand completes a real MCP handshake and
     const toolsResult = messages.find((m) => m.id === 2);
     assert.ok(toolsResult?.result?.tools, "no response to tools/list");
     const names = toolsResult.result!.tools!.map((t) => t.name);
-    // These specifically require deps.web to be wired (scripts/m9r-mcp.ts) -- if the engine's MCP entry ever loses its
-    // web broker client again, these tools are simply absent from the list, exactly reproducing the real failure.
-    for (const required of ["m9r_web_open", "m9r_web_click", "m9r_web_read", "m9r_send", "m9r_inbox", "m9r_git_read", "m9r_read_file"]) {
+    for (const required of ["m9r_send", "m9r_inbox", "m9r_git_read", "m9r_read_file"]) {
       assert.ok(names.includes(required), `${required} missing from the engine's real tool list: [${names.join(", ")}]`);
     }
-    const readTool = toolsResult.result!.tools!.find((tool) => tool.name === "m9r_web_read");
-    assert.equal(
-      readTool?.inputSchema?.properties?.ref?.pattern,
-      "^e[a-f0-9]{24}_\\d{1,3}$",
-      "the built engine must expose the current snapshot-scoped nonce-ref format",
-    );
+    // The browser-extension route was deliberately, permanently disabled (Finding C /
+    // WEB_EXTENSION_ROUTE_ENABLED = false in mcp-server.ts) after a live task failed when an
+    // agent chose the extension route over the OS-native one. These tools must never reappear
+    // in a real engine's tool list, not just be discouraged in a prompt.
+    for (const removed of ["m9r_web_open", "m9r_web_click", "m9r_web_read"]) {
+      assert.ok(!names.includes(removed), `${removed} must not be registered; the browser-extension route is permanently disabled`);
+    }
     for (const toolName of ["m9r_stage_prepare", "m9r_stage_app", "m9r_stage_action"]) {
       const stageTool: ToolInfo | undefined = toolsResult.result!.tools!.find((tool: ToolInfo) => tool.name === toolName);
       assert.ok(stageTool, `${toolName} missing from the built engine's real tool list`);

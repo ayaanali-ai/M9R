@@ -1,12 +1,28 @@
 import type { LocalStore } from "./local-store";
 import { canQueue } from "./codex-delivery-core";
+import { inboxMaxAgeMs } from "./inbox-core";
 
+/**
+ * A verbatim retry of a failed/abandoned task (the single most common retry pattern -- resend the
+ * exact same wording) used to be deferred indefinitely behind the original attempt: this had no
+ * staleness bound at all, so if the original attempt's delivery record was never finalized (it
+ * failed over to a different tool, the owner redirected it, the process died mid-turn -- anything
+ * that doesn't end in a clean resultSummary), the identical-text retry silently never got
+ * delivered, with nothing telling the owner or the agent why. Confirmed live: T248 ("open file
+ * explorer and type hello in the search bar") never finalized; the identical-text retry T249
+ * sat deferred for ~49s until an unrelated instruction happened to trigger a re-check. Bounding
+ * this the same way `injectTasks` already bounds inbox staleness means a stuck original attempt
+ * can delay a retry by at most this window, never indefinitely.
+ */
 export function sessionHasUnfinishedDelivery(store: LocalStore, handle: string, sessionId: string, exceptTaskId: string): boolean {
   const goal = store.getTask(exceptTaskId)?.goal;
+  const maxAge = inboxMaxAgeMs();
+  const now = Date.now();
   return store.tasksFor(handle).some(task => task.id !== exceptTaskId && !task.resultSummary
     && task.goal === goal
     && (task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId) === sessionId
-    && ["sending", "queued", "uncertain"].includes(task.delivery?.state ?? ""));
+    && ["sending", "queued", "uncertain"].includes(task.delivery?.state ?? "")
+    && now - Date.parse(task.createdAt) <= maxAge);
 }
 
 /** Adapters own transport; the pump owns bounded scheduling, never computer-use behavior. */

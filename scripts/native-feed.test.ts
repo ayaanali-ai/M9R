@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,19 @@ import { createLocalStore } from "../src/lib/native/local-store";
 import type { Task } from "../src/lib/native/inbox-core";
 
 const NOW = new Date("2026-09-20T12:00:00Z");
+
+test("reading an allocated color neither rewrites state nor reallocates on another store instance", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-color-read-"));
+  try {
+    const store = createLocalStore(root);
+    const color = store.colorFor("custom-provider");
+    const path = join(root, "state.json");
+    utimesSync(path, 1, 1);
+    const before = statSync(path).mtimeMs;
+    assert.equal(createLocalStore(root).colorFor("@CUSTOM-PROVIDER"), color);
+    assert.equal(statSync(path).mtimeMs, before, "rendering an existing identity is read-only");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 const S1 = "01a0c010-9e03-7152-a1d2-039c92c32e05";
 const S2 = "01a0c011-1111-7152-a1d2-039c92c32e06";
 
@@ -131,6 +144,7 @@ test("web activity is persisted as a web surface and never mixed into the native
   assert.equal(native.surface, "native");
   assert.equal("web" in native, false);
   assert.ok(native.agents.every((item) => item.surface === "native"));
+  assert.ok(native.agents.every((item) => item.color === store.colorFor(item.handle)), "the feed carries the durable allocator's colors");
   assert.ok(native.needsYou.every((item) => item.surface === "native"));
   assert.ok(native.pings.every((item) => item.surface === "native"));
   assert.ok(native.recent.every((item) => item.surface === "native"));

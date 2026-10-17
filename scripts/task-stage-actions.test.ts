@@ -111,3 +111,14 @@ test("window placement accepts signed screen origins without allowing negative c
     { kind: "window_frame", view: "app", x: -1200, y: -80, width: 800, height: 600 });
   assert.throws(() => parseTaskStageAction({ kind: "click", x: -1, y: 0 }), /coordinates/);
 });
+
+test("window states and clipboard payloads preserve explicit intent and refuse ambiguous inputs", () => {
+  for (const state of ["minimized", "maximized", "restored"]) assert.equal(parseTaskStageAction({ kind: "window_state", view: "app", state }).kind, "window_state");
+  assert.throws(() => parseTaskStageAction({ kind: "window_state", view: "desktop", state: "minimized" }));
+  for (const field of ["imagePath", "filePath"]) {
+    assert.equal(parseTaskStageAction({ kind: "clipboard_write", view: "app", [field]: "C:\\Temp\\safe.png", confirmSharedClipboard: true }).kind, "clipboard_write");
+    assert.throws(() => parseTaskStageAction({ kind: "clipboard_write", view: "app", [field]: "\\\\remote\\share\\file", confirmSharedClipboard: true }));
+  }
+  assert.throws(() => parseTaskStageAction({ kind: "clipboard_write", view: "app", text: "one", imagePath: "C:\\two.png", confirmSharedClipboard: true }));
+  assert.throws(() => parseTaskStageAction({ kind: "clipboard_write", view: "app", imagePath: "C:\\two.png", confirmSharedClipboard: false }));
+});

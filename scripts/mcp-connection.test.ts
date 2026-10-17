@@ -131,7 +131,9 @@ test("a bound MCP connection answers without a tool-call credential, even though
     assert.ok(binding);
     const server = createM9rMcpServer({ store, connectionBindingId: binding!.bindingId });
     const tools = (server as unknown as { _registeredTools: Record<string, { inputSchema: { shape?: Record<string, { optional?: unknown }> }; handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
-    for (const toolName of ["m9r_whoami", "m9r_stage_app", "m9r_stage_action", "m9r_computer_observe", "m9r_computer_action", "m9r_web_open"]) {
+    // m9r_web_open deliberately excluded: the browser extension route is disabled
+    // (mcp-server.ts WEB_EXTENSION_ROUTE_ENABLED), so it is not registered at all.
+    for (const toolName of ["m9r_whoami", "m9r_stage_app", "m9r_stage_action", "m9r_computer_observe", "m9r_computer_action"]) {
       // The field itself is always present now (one uniform schema for every connection, see
       // mcp-server.ts's OPTIONAL_TOKEN_FIELD) -- what must hold is that it is never required.
       const tokenSchema = tools[toolName]?.inputSchema.shape?.token;

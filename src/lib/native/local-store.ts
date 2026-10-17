@@ -14,6 +14,20 @@ import { canQueue } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, newConnectionId, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
 
+/**
+ * Findings I/AD: this is the one place a cursor/pill color is chosen for an agent handle.
+ * Claude's real brand color is the preferred first pick for "claude" specifically; Codex's and
+ * OpenCode's current brand colors (near-white, near-black) are deliberately NOT reused here --
+ * too little contrast against an arbitrary desktop background to work as a filled cursor shape --
+ * they get the next free palette color instead, same as any other handle.
+ */
+const CURSOR_BRAND_COLORS: Readonly<Record<string, string>> = {
+  claude: "#D97757",
+};
+const CURSOR_COLOR_PALETTE: readonly string[] = [
+  "#D97757", "#7AA2F7", "#34D399", "#F59E0B", "#EC4899", "#38BDF8", "#A78BFA", "#FB7185",
+];
+
 export interface EndpointRecord {
   handle: string;
   provider: string;
@@ -129,6 +143,14 @@ interface StoreState {
   connectionClaims: ConnectionClaim[];
   /** Durable MCP bindings; a worker restart may reuse one while the provider identity is active. */
   connectionBindings: ConnectionBinding[];
+  /**
+   * Findings I/AD: one durable color per agent handle, allocated once and shared by every
+   * surface that shows that agent's identity (the pill, the native cursor overlay once it
+   * supports per-agent theming). Replaces ad hoc hardcoded color maps that drifted independently
+   * of each other (confirmed live: the pill's own Codex color was found changed between two
+   * audits in the same night, with nothing keeping it in sync with anything else).
+   */
+  cursorColors: Record<string, string>;
 }
 
 export interface SessionLink {
@@ -140,7 +162,7 @@ export interface SessionLink {
   updatedAt: string;
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], connectionClaims: [], connectionBindings: [] });
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], connectionClaims: [], connectionBindings: [], cursorColors: {} });
 
 const stageOperationKey = (input: StageOperationInput): string => createHash("sha256")
   .update(JSON.stringify([normalizeHandle(input.handle), input.sessionId, input.taskId, input.operationId]))
@@ -642,10 +664,17 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (!identity || !task || task.resultSummary || !canQueue(task) || normalizeHandle(task.to) !== normalizeHandle(identity.handle)) return false;
         const owner = task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId;
         if (owner && owner !== identity.sessionId) return false;
+        // Same staleness bound as sessionHasUnfinishedDelivery (task-delivery-pump.ts), and for the
+        // identical reason: a verbatim retry (the common case -- resend the exact same wording
+        // after a failure) must not stay blocked forever behind an original attempt whose delivery
+        // record never got finalized. Confirmed live in production state (T248/T249, 2026-10-17).
+        const maxAge = inboxMaxAgeMs();
+        const occupiedAt = now().getTime();
         const occupied = s.tasks.some((other) => other.id !== id && normalizeHandle(other.to) === normalizeHandle(identity.handle)
           && !other.resultSummary && other.goal === task.goal
           && (other.targetSession ?? other.deliveredSession ?? other.delivery?.threadId) === identity.sessionId
-          && ["sending", "queued", "uncertain"].includes(other.delivery?.state ?? ""));
+          && ["sending", "queued", "uncertain"].includes(other.delivery?.state ?? "")
+          && occupiedAt - Date.parse(other.createdAt) <= maxAge);
         if (occupied) return false;
         task.deliveredSession = identity.sessionId;
         if (task.delivery) task.delivery.threadId = identity.sessionId;
@@ -929,6 +958,53 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     tasksForSession(handle: string, sessionId: string): Task[] {
       const normalizedHandle = normalizeHandle(handle);
       return readState().tasks.filter((task) => normalizeHandle(task.to) === normalizedHandle && (!(task.targetSession ?? task.deliveredSession) || (task.targetSession ?? task.deliveredSession) === sessionId));
+    },
+
+    /**
+     * What this session's actual open work is -- distinct from the inbox, which deliberately
+     * hides anything already pushed as a prompt (a real, one-shot replay fence, kept as-is).
+     * That fence means a task that was genuinely delivered earlier (a live push, a prior inbox
+     * read, a reconnect) never shows up in the inbox again, even though it is still open and the
+     * agent may have no memory of it (a fresh session, a restarted provider process). Confirmed
+     * live, 2026-10-17: an agent reported "inbox is empty" for a task that had, in fact, already
+     * been delivered and was still awaiting a result -- the inbox was telling the truth about
+     * unread messages and nothing about pending work, and nothing distinguished the two for the
+     * agent. This is the generic "what do I actually still owe a result for" lookup Codex's
+     * audit asked for, independent of the inbox's replay semantics.
+     */
+    /**
+     * One durable color per agent handle (Findings I/AD): allocated once, on first request, from
+     * a fixed accessible palette; never reassigned afterward, so every surface that calls this
+     * for the same handle always gets the same answer. Claude and Codex get their real/chosen
+     * brand colors first if those are still free; every other handle (and an overflow past the
+     * two brand colors) gets the next unused color in the shared palette, so concurrently active
+     * agents are never assigned the same color as each other.
+     */
+    colorFor(handle: string): string {
+      const normalized = normalizeHandle(handle);
+      // Rendering an existing assignment must not acquire a write lock or rewrite state.
+      const assigned = readState().cursorColors[normalized];
+      if (assigned) return assigned;
+      return update((s) => {
+        const existing = s.cursorColors[normalized];
+        if (existing) return existing;
+        const used = new Set(Object.values(s.cursorColors));
+        const brand = CURSOR_BRAND_COLORS[normalized];
+        const chosen = brand && !used.has(brand) ? brand : CURSOR_COLOR_PALETTE.find((color) => !used.has(color)) ?? CURSOR_COLOR_PALETTE[used.size % CURSOR_COLOR_PALETTE.length]!;
+        s.cursorColors[normalized] = chosen;
+        return chosen;
+      });
+    },
+
+    pendingWorkFor(handle: string, sessionId: string): Task[] {
+      const normalizedHandle = normalizeHandle(handle);
+      const maxAge = inboxMaxAgeMs();
+      const cutoff = now().getTime() - maxAge;
+      return readState().tasks.filter((task) => normalizeHandle(task.to) === normalizedHandle
+        && (!(task.targetSession ?? task.deliveredSession) || (task.targetSession ?? task.deliveredSession) === sessionId)
+        && !task.resultSummary
+        && task.approval !== "denied" && task.approval !== "expired"
+        && Date.parse(task.createdAt) >= cutoff);
     },
 
     /**

@@ -4,6 +4,9 @@ import { classifyWebActionRisk } from "./risk-core";
 type TaskStageActionBody =
   | { kind: "capture" }
   | { kind: "read_structure"; view: "app" }
+  | { kind: "window_status"; view: "app" }
+  | { kind: "stop" }
+  | { kind: "window_state"; view: "app"; state: "minimized" | "maximized" | "restored" }
   | { kind: "click" | "cursor"; x: number; y: number; confirmFocusForeground?: boolean }
   | { kind: "double_click" | "middle_click" | "right_click"; x: number; y: number; confirmFocusForeground?: boolean }
   | { kind: "type"; text: string; mode?: "insert" | "replace"; x?: number; y?: number; expectedRole?: string; expectedLabel?: string; confirmFocusForeground?: boolean }
@@ -18,7 +21,7 @@ type TaskStageActionBody =
   | { kind: "focus"; confirmFocusForeground?: boolean }
   | { kind: "invoke_menu"; path: string[] }
   | { kind: "clipboard_read"; includeText: boolean; confirmSharedClipboard?: boolean }
-  | { kind: "clipboard_write"; text: string; confirmSharedClipboard: true };
+  | { kind: "clipboard_write"; text?: string; imagePath?: string; filePath?: string; confirmSharedClipboard: true };
 export type TaskStageAction = TaskStageActionBody & { view?: "desktop" | "app" };
 
 const KEY_NAMES = new Set([
@@ -37,27 +40,29 @@ function validKey(value: unknown): value is string {
 export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid stage action.");
   const action = value as Record<string, unknown>;
-  const fields: Record<string, string[]> = { capture: [], read_structure: [], click: ["x", "y"], double_click: ["x", "y"], middle_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
+  const fields: Record<string, string[]> = { capture: [], stop: [], read_structure: [], window_status: [], click: ["x", "y"], double_click: ["x", "y"], middle_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
     type: ["text", "mode", "x", "y", "expectedRole", "expectedLabel"], scroll: ["x", "y", "direction"], drag: ["fromX", "fromY", "toX", "toY", "durationMs"], press_key: ["key"], hotkey: ["keys"],
     click_element: ["ref", "expectedRole", "expectedLabel"], replace_element: ["ref", "text", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
-    window_frame: ["x", "y", "width", "height"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "confirmSharedClipboard"] };
+    window_frame: ["x", "y", "width", "height"], window_state: ["state"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "imagePath", "filePath", "confirmSharedClipboard"] };
   if (typeof action.kind !== "string" || !Object.hasOwn(fields, action.kind)) throw new Error("Unsupported stage action.");
   const allowedFields = fields[action.kind]!;
   const requiredFields = action.kind === "type" ? ["text"] : action.kind === "read_structure" ? ["view"]
     : action.kind === "scroll_delta" ? ["x", "y", "deltaX", "deltaY", "unit"] : action.kind === "window_frame" ? allowedFields
-      : action.kind === "clipboard_read" ? ["includeText"] : action.kind === "click_element" ? ["ref"]
+      : action.kind === "clipboard_read" ? ["includeText"] : action.kind === "clipboard_write" ? ["confirmSharedClipboard"] : action.kind === "click_element" ? ["ref"]
         : action.kind === "replace_element" ? ["ref", "text"] : allowedFields;
   const commonOptionalFields = ["view", "confirmFocusForeground"];
   if (Object.keys(action).some((key) => key !== "kind" && !commonOptionalFields.includes(key) && !allowedFields.includes(key))
     || requiredFields.some((key) => !Object.hasOwn(action, key))) throw new Error("Invalid stage action fields.");
   if (action.view !== undefined && action.view !== "desktop" && action.view !== "app") throw new Error("Invalid stage action view.");
   if (action.kind === "read_structure" && action.view !== "app") throw new Error("Structure observation requires the exact app view.");
-  if (["click_element", "replace_element", "window_frame", "focus", "invoke_menu", "clipboard_read", "clipboard_write"].includes(action.kind)
+  if (action.kind === "window_state" && (action.view !== "app" || !["minimized", "maximized", "restored"].includes(String(action.state)))) throw new Error("Invalid exact-app window state.");
+  if (["click_element", "replace_element", "window_frame", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write"].includes(action.kind)
     && action.view !== "app") throw new Error("This semantic stage action requires the exact app view.");
   if (action.kind === "click_element" || action.kind === "replace_element") {
     if (typeof action.ref !== "string" || !/^[A-Za-z0-9._:-]{1,512}$/.test(action.ref)) throw new Error("Invalid accessibility element reference.");
   }
   for (const key of ["x", "y", "fromX", "fromY", "toX", "toY"]) {
+    if (action.kind === "window_frame" && (key === "x" || key === "y")) continue;
     if (key in action && (!Number.isSafeInteger(action[key]) || (action[key] as number) < 0 || (action[key] as number) > 16383)) {
       throw new Error("Invalid stage action coordinates.");
     }
@@ -82,7 +87,12 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     && (typeof action.durationMs !== "number" || !Number.isSafeInteger(action.durationMs) || action.durationMs < 1 || action.durationMs > 10_000)) {
     throw new Error("Invalid drag duration.");
   }
-  if ((action.kind === "replace_element" || action.kind === "clipboard_write") && (typeof action.text !== "string" || !action.text.length || action.text.length > 500)) throw new Error("Invalid stage input text.");
+  if ((action.kind === "replace_element" || (action.kind === "clipboard_write" && action.text !== undefined)) && (typeof action.text !== "string" || !action.text.length || action.text.length > 500)) throw new Error("Invalid stage input text.");
+  if (action.kind === "clipboard_write") {
+    if (["text", "imagePath", "filePath"].filter((key) => action[key] !== undefined).length !== 1) throw new Error("Clipboard write requires exactly one payload.");
+    for (const key of ["imagePath", "filePath"]) if (action[key] !== undefined
+      && (typeof action[key] !== "string" || !/^[a-z]:[\\/]/i.test(action[key] as string) || /[\u0000-\u001f]/.test(action[key] as string) || (action[key] as string).length > 1024)) throw new Error("Clipboard paths must be bounded absolute local paths.");
+  }
   if (action.kind === "invoke_menu" && (!Array.isArray(action.path) || action.path.length < 1 || action.path.length > 16 || !action.path.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 160))) throw new Error("Invalid menu path.");
   if (action.kind === "clipboard_read" && typeof action.includeText !== "boolean") throw new Error("Invalid clipboard read flag.");
   if (action.kind === "clipboard_read" && action.includeText && action.confirmSharedClipboard !== true) throw new Error("Reading clipboard text requires explicit shared-clipboard confirmation.");
@@ -97,9 +107,9 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
 }
 
 export async function runTaskStageAction(driver: ReturnType<typeof createCuaStageDriver>, name: string, action: TaskStageAction,
-  identity: CuaAgentCursorIdentity, mode: "background" | "owner-preview" = "owner-preview") {
+  identity: CuaAgentCursorIdentity, mode: "background" | "owner-preview" = "owner-preview", signal?: AbortSignal) {
   const stageOptions = <T extends Record<string, unknown>>(options: T): T | undefined => {
-    const normalized = { ...options } as Record<string, unknown>;
+    const normalized = { ...options, ...(signal ? { signal } : {}) } as Record<string, unknown>;
     for (const key of Object.keys(normalized)) if (normalized[key] === undefined) delete normalized[key];
     return Object.keys(normalized).length ? normalized as T : undefined;
   };
@@ -117,6 +127,9 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "read_structure":
       if (!desktopWide) return driver.readStructure(name, identity);
       throw new Error("Structure-first observation requires one exact app window; desktop-wide observation remains visual.");
+    case "window_status": throw new Error("Window status is handled by the stage service before recovery.");
+    case "stop": throw new Error("Stop is handled outside the stage action queue.");
+    case "window_state": return driver.windowState(name, action.state);
     case "cursor": return cursor(action.x, action.y);
     case "click": return click(action.x, action.y, { confirmFocusForeground: action.confirmFocusForeground });
     case "double_click": return click(action.x, action.y, { count: 2, confirmFocusForeground: action.confirmFocusForeground });
@@ -146,7 +159,7 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "focus": return driver.focusWindow(name, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground }));
     case "invoke_menu": return driver.invokeMenu(name, action.path, identity);
     case "clipboard_read": return driver.clipboardRead(name, action.includeText, identity);
-    case "clipboard_write": return driver.clipboardWrite(name, action.text, identity);
+    case "clipboard_write": return driver.clipboardWrite(name, action.text ?? "", identity, action.imagePath || action.filePath ? { imagePath: action.imagePath, filePath: action.filePath } : undefined);
   }
 }
 

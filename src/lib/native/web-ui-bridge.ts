@@ -159,7 +159,7 @@ export type WebActivity =
 // ---------------------------------------------------------------------------------------------------------------
 
 export type UiAgentState = "idle" | "starting" | "working" | "waiting" | "blocked" | "stopped" | "failed";
-export interface UiAgent { id: string; provider: string; folder: string; state: UiAgentState; doing: string }
+export interface UiAgent { id: string; provider: string; folder: string; state: UiAgentState; doing: string; color?: string }
 export type UiThreadKind = "say" | "do" | "block" | "approval" | "system";
 export interface UiThreadEntry { id: string; at: string; kind: UiThreadKind; agent: string; provider: string; to?: string; text: string; phase?: "start" | "done"; ok?: boolean }
 export interface UiApproval { id: string; agent: string; provider: string; text: string }
@@ -342,7 +342,7 @@ const TOOL_WORDS: Record<string, string> = {
   m9r_result: "Reporting back",
 };
 
-export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void; saveNote?: (text: string) => { ok: boolean; error?: string } } = {}) {
+export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void; colorFor?: (handle: string) => string; saveNote?: (text: string) => { ok: boolean; error?: string } } = {}) {
   const now = options.now ?? Date.now;
   const debounceMs = options.debounceMs ?? 100;
   const newId = options.newId ?? (() => randomUUID());
@@ -420,7 +420,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       else if (s.waitingOn) { state = "waiting"; what = `Waiting for @${s.waitingOn}`; }
       else if (blocked.has(s.handle) && (s.status === "working" || s.status === "idle")) { state = "blocked"; what = doing.get(s.handle) ?? "Blocked by another agent"; }
       else if (s.status === "working" && doing.get(s.handle)) what = doing.get(s.handle)!;
-      return { id: s.handle, provider: s.provider, folder: s.folder, state, doing: redact(what) };
+      return { id: s.handle, provider: s.provider, folder: s.folder, state, doing: redact(what), ...(options.colorFor ? { color: options.colorFor(s.handle) } : {}) };
     });
     const approvals: UiApproval[] = pending.map((p) => {
       const known = approvalText.get(p.id);

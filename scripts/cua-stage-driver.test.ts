@@ -52,6 +52,30 @@ test("app captures expose bounded accessibility targets in screenshot coordinate
   assert.deepEqual((await driver.capture("stage")).controls, [{ label: "Search field", role: "Edit", rect: { x: 10, y: 10, width: 100, height: 20 } }]);
 }));
 
+test("a capture whose window has more than 200 accessible targets reports controlsTruncated, never a silent cut", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true,
+    screenshotWidth: 200, screenshotHeight: 100, windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }],
+    elements: Array.from({ length: 201 }, (_, i) => ({ label: `item ${i}`, role: "text", enabled: true, frame: { x: 120, y: 70, w: 1, h: 1 } })) };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ state, calls: [] }) as never });
+  const capture = await driver.capture("stage");
+  assert.equal(capture.controls?.length, 200, "the cap itself is unchanged");
+  assert.equal(capture.controlsTruncated, true, "a 201st element must set the truncation flag, not vanish silently");
+}));
+
+test("a capture whose window has exactly 200 accessible targets reports no truncation", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true,
+    screenshotWidth: 200, screenshotHeight: 100, windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }],
+    elements: Array.from({ length: 200 }, (_, i) => ({ label: `item ${i}`, role: "text", enabled: true, frame: { x: 120, y: 70, w: 1, h: 1 } })) };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ state, calls: [] }) as never });
+  const capture = await driver.capture("stage");
+  assert.equal(capture.controls?.length, 200);
+  assert.equal(capture.controlsTruncated, undefined, "hitting the cap exactly, with nothing left over, is not truncation");
+}));
+
 test("accessibility failure retains the same exact-window screenshot route", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
@@ -167,6 +191,72 @@ test("coordinate click background insertion also preserves existing value", asyn
   assert.equal((call?.value as { args: { value: string } }).args.value, "beforeafter");
 }));
 
+test("a failed post-close screenshot is replaced by an exact closed-window postcondition, not a replay", async () => withRoot(async (root) => {
+  const windowId = "12345";
+  await registerStage(root, windowId);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const base = makeSdk({ calls, state: { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }] } });
+  const native = stageDependencies(root);
+  const driver = createCuaStageDriver({ stage: { ...native, invokeNative: async (request) => request.op === "windowStatus"
+    ? { ok: true, windowState: "closed" } : native.invokeNative!(request) },
+    loadSdk: async () => {
+      const create = base.CuaDriver.create;
+      return { ...base, CuaDriver: { ...base.CuaDriver, create: () => {
+        const d = create(); const getState = d.getWindowState;
+        d.getWindowState = async (request: unknown) => {
+          if (calls.some((c) => c.method === "callTool" && (c.value as { name: string }).name === "hotkey")) throw new Error("window closed");
+          return getState(request);
+        };
+        return d;
+      } } } as never;
+    } });
+  const proof = await driver.hotkey("stage", ["Alt", "F4"]);
+  assert.ok("postcondition" in proof);
+  assert.equal(proof.outcome.status, "confirmed");
+  assert.equal(calls.filter((c) => c.method === "callTool" && (c.value as { name: string }).name === "hotkey").length, 1);
+}));
+
+for (const kind of ["type_text", "drag"]) test(`AbortSignal reaches in-flight native ${kind} dispatch`, async () => withRoot(async (root) => {
+  await registerStage(root);
+  const controller = new AbortController();
+  let started!: () => void;
+  const dispatched = new Promise<void>((resolve) => { started = resolve; });
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls,
+    callToolHook: async (name, _args, signal) => {
+      assert.equal(name, kind);
+      assert.equal(signal, controller.signal);
+      started();
+      return new Promise<never>((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }));
+    } }) as never });
+  const action = kind === "drag" ? driver.drag("stage", 10, 10, 30, 30, undefined, { signal: controller.signal })
+    : driver.typeText("stage", "long text", undefined, { signal: controller.signal });
+  const rejected = assert.rejects(action, /explicit stop/);
+  await dispatched;
+  controller.abort(new Error("explicit stop"));
+  await rejected;
+}));
+
+test("app capture includes independently owned popup surfaces without changing app coordinates", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const native = stageDependencies(root);
+  const driver = createCuaStageDriver({ stage: { ...native, invokeNative: async (request) => request.op === "listOwnedPopups"
+    ? { ok: true, windows: [{ pid: 4321, windowId: "55", title: "Menu", width: 120, height: 80 }] } : native.invokeNative!(request) },
+    loadSdk: async () => makeSdk({ calls, stateForRequest: (request) => ({ pid: 4321, windowId: (request as { windowId: bigint }).windowId,
+      screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+      windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }] }) }) as never });
+  const capture = await driver.capture("stage");
+  assert.equal(capture.popupCaptureStatus, "complete");
+  assert.equal(capture.ownedPopups?.length, 1);
+  assert.equal(capture.ownedPopups?.[0]?.coordinateSpace, "popup-local");
+  assert.ok(capture.ownedPopups?.[0]?.dataUrl.startsWith("data:image/png;base64,"));
+  const structure = await driver.readStructure("stage");
+  assert.equal(structure.status, "partial");
+  assert.equal(structure.fallbackCapture?.ownedPopups?.length, 1);
+}));
+
 test("semantic app actions use fresh structure and the shared driver primitives", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
@@ -185,6 +275,7 @@ test("semantic app actions use fresh structure and the shared driver primitives"
   await driver.invokeMenu("stage", ["Edit", "Select All"], identity);
   const clipboard = await driver.clipboardRead("stage", true, identity);
   await driver.clipboardWrite("stage", "replacement", identity);
+  await driver.clipboardWrite("stage", "", identity, { imagePath: "C:\\Temp\\sample.png" });
 
   const click = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click")?.value as { args: Record<string, unknown> };
   assert.equal(click.args.delivery_mode, "foreground");
@@ -197,6 +288,7 @@ test("semantic app actions use fresh structure and the shared driver primitives"
   assert.equal(calls.some((call) => call.method === "invokeMenu"), true);
   assert.equal(calls.some((call) => call.method === "clipboardRead"), true);
   assert.equal(calls.some((call) => call.method === "clipboardWrite"), true);
+  assert.ok(calls.some((call) => call.method === "clipboardWrite" && (call.value as { imagePath?: string }).imagePath === "C:\\Temp\\sample.png"));
   assert.deepEqual(clipboard.clipboard, { text: "fixture clipboard" });
 }));
 
@@ -426,6 +518,7 @@ async function registerOwnerPreview(root: string, identity = { handle: "codex", 
 }
 
 function makeSdk(options: {
+  stateForRequest?: (request: unknown) => Record<string, unknown>;
   state?: Record<string, unknown>;
   cursorState?: { enabled: boolean; position: { x: number; y: number } };
   actionResult?: Record<string, unknown>;
@@ -441,6 +534,7 @@ function makeSdk(options: {
   typeTextError?: Error;
   callToolResult?: Record<string, unknown>;
   callToolResultByName?: Record<string, Record<string, unknown>>;
+  callToolHook?: (name: string, args: string, signal?: AbortSignal) => Promise<never>;
   calls: Array<{ method: string; value?: unknown }>;
 }) {
   const actionResult = options.actionResult ?? { effect: 0, route: 1, summary: "action confirmed" };
@@ -451,6 +545,7 @@ function makeSdk(options: {
     async setAgentCursorMotion(input: unknown) { options.calls.push({ method: "setAgentCursorMotion", value: input }); return { isError: false }; },
     async getWindowState(input: unknown) {
       options.calls.push({ method: "getWindowState", value: input });
+      if (options.stateForRequest) return options.stateForRequest(input);
       if (options.accessibilityError && (input as { includeAccessibilityTree?: boolean }).includeAccessibilityTree) throw options.accessibilityError;
       if (options.windowStateError) throw options.windowStateError;
       return options.state ?? {
@@ -490,8 +585,9 @@ function makeSdk(options: {
     },
     async setAgentCursorEnabled(input: unknown) { options.calls.push({ method: "setAgentCursorEnabled", value: input }); return { isError: false }; },
     async moveCursor(input: unknown) { options.calls.push({ method: "moveCursor", value: input }); return { isError: false }; },
-    async callTool(name: string, argumentsJson: string) {
+    async callTool(name: string, argumentsJson: string, asyncOptions?: { signal: AbortSignal }) {
       options.calls.push({ method: "callTool", value: { name, args: JSON.parse(argumentsJson) } });
+      if (options.callToolHook) return options.callToolHook(name, argumentsJson, asyncOptions?.signal);
       return options.callToolResultByName?.[name] ?? options.callToolResult ?? toolResult;
     },
     async getAgentCursorState() {
@@ -1311,6 +1407,37 @@ test("explicit foreground delivery reaches every shared Cua input primitive that
   }
   const foregroundActivations = calls.filter((call) => call.method === "callTool" && (call.value as { name?: string }).name === "bring_to_front");
   assert.equal(foregroundActivations.length, 5, "each foreground input primitive activates its exact target before dispatch");
+}));
+
+test("foreground delivery captures and restores the owner's real pointer position", async () => withRoot(async (root) => {
+  // Owner-cursor-isolation fix: the owner's pointer must end up exactly where it was before the
+  // agent's real SendInput ran, regardless of where the action itself moved it.
+  await registerStage(root);
+  const positions = [{ x: 500, y: 400 }, { x: 500, y: 400 }]; // unchanged between the two reads: no owner activity
+  let restoreCall: { x: number; y: number } | undefined;
+  const ownerPointer = {
+    get: async () => positions.shift() ?? { x: 500, y: 400 },
+    restore: async (x: number, y: number) => { restoreCall = { x, y }; },
+  };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls: [] }) as never, ownerPointer });
+  await driver.typeText("stage", "sample", undefined, { confirmFocusForeground: true });
+  assert.deepEqual(restoreCall, { x: 500, y: 400 }, "the owner's pointer must be restored to its exact pre-action position");
+}));
+
+test("foreground delivery waits once for a natural gap when the owner is actively moving the real pointer, instead of grabbing control", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const positions = [{ x: 500, y: 400 }, { x: 540, y: 420 }]; // moved well past the noise threshold between reads: real owner activity
+  let getCalls = 0;
+  const ownerPointer = {
+    get: async () => { getCalls += 1; return positions.shift() ?? { x: 540, y: 420 }; },
+    restore: async () => {},
+  };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls: [] }) as never, ownerPointer });
+  const started = Date.now();
+  await driver.typeText("stage", "sample", undefined, { confirmFocusForeground: true });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 300, `expected the extra wait for detected owner activity (~300ms total), took ${elapsed}ms`);
+  assert.equal(getCalls, 2, "activity is detected from exactly two reads, not a retry loop");
 }));
 
 test("scroll and drag use window-local screenshot coordinates and validate bounds before dispatch", async () => withRoot(async (root) => {

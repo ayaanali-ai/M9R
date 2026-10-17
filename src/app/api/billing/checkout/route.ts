@@ -1,15 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { supabase } from "@/lib/supabase";
-import { requireStripe, priceIdFor, TEAM_TRIAL_DAYS, type BillingInterval, type BillingProduct } from "@/lib/stripe";
+import { requireStripe, priceIdFor } from "@/lib/stripe";
+import { currentCheckoutCohort } from "@/lib/billing-cohort";
 import { BILLING_ENABLED } from "@/lib/billing-config";
 import { resolveBaseUrl } from "../../agent/_shared";
 
 /**
- * POST /api/billing/checkout — start a Stripe Checkout session for M9R
- * Relationship Memory (default) or Team (`product: "team"`). Cookie-authenticated. Reuses an existing Stripe customer if this user
- * already has one on file (from a prior subscription attempt) instead of
- * creating a duplicate customer per checkout.
+ * POST /api/billing/checkout — start a Stripe Checkout session for M9R.
+ * One flat price per computer, no seats, no tiers. Which of the two live
+ * prices a brand-new subscription gets is decided here, server-side, from a
+ * live count at the moment of checkout -- never from anything the client
+ * sends. Cookie-authenticated. Reuses an existing Stripe customer if this
+ * user already has one on file (from a prior subscription attempt) instead
+ * of creating a duplicate customer per checkout.
  */
 export async function POST(req: NextRequest) {
   const db = await createClient();
@@ -20,11 +24,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Billing is temporarily paused while Stripe is being repaired." }, { status: 503 });
   }
 
-  const body = await req.json().catch(() => ({})) as { interval?: unknown; product?: unknown };
-  const interval: BillingInterval = body.interval === "annual" ? "annual" : "monthly";
-  const product: BillingProduct = body.product === "team" ? "team" : "memory";
-  const priceId = priceIdFor(product, interval);
-  const isTeam = product === "team";
+  const cohort = await currentCheckoutCohort();
+  const priceId = priceIdFor(cohort);
 
   try {
     const stripe = requireStripe();
@@ -43,17 +44,11 @@ export async function POST(req: NextRequest) {
 
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
-      // Team is billed per seat; the buyer sets the seat count on Stripe's page.
-      line_items: [isTeam
-        ? { price: priceId, quantity: 1, adjustable_quantity: { enabled: true, minimum: 1, maximum: 99 } }
-        : { price: priceId, quantity: 1 }],
+      line_items: [{ price: priceId, quantity: 1 }],
       customer: existingCustomerId ?? undefined,
       customer_email: existingCustomerId ? undefined : user.email,
       client_reference_id: user.id,
-      subscription_data: {
-        metadata: { user_id: user.id, product },
-        ...(isTeam ? { trial_period_days: TEAM_TRIAL_DAYS } : {}),
-      },
+      subscription_data: { metadata: { user_id: user.id, cohort } },
       success_url: `${baseUrl}/dashboard/settings?upgraded=1`,
       cancel_url: `${baseUrl}/dashboard/settings`,
       allow_promotion_codes: true,

@@ -10,6 +10,7 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { VerifiedIdentity } from "./identity-core";
@@ -104,6 +105,7 @@ function reply(res: ServerResponse, status: number, body: unknown): void {
 }
 
 function stageFailure(error: unknown, fallback: string): Record<string, unknown> {
+  if (error instanceof DesktopInputNotDispatchedError) return { ok: false, code: "desktop-input-not-dispatched", dispatchState: "not-dispatched", error: error.message };
   if (typeof error === "object" && error !== null && "inner" in error) {
     const inner = (error as { inner?: unknown }).inner;
     if (typeof inner === "object" && inner !== null) {
@@ -586,7 +588,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       if (path.endsWith("/prepare")) return { status: 200, body: { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, mode) } };
       if (value.operationId !== undefined && (typeof value.operationId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.operationId))) throw new Error("Invalid stage request.");
       const kind = value.action && typeof value.action === "object" && !Array.isArray(value.action) ? (value.action as { kind?: unknown }).kind : undefined;
-      const requiresReceipt = path.endsWith("/launch") || (path.endsWith("/action") && kind !== "capture");
+      const requiresReceipt = path.endsWith("/launch") || (path.endsWith("/action") && !["capture", "read_structure", "window_status", "stop"].includes(String(kind)));
       if (requiresReceipt && typeof value.operationId !== "string") return { status: 409, body: { ok: false,
         error: "This M9R MCP runtime does not send desktop-operation receipts. Update the M9R engine before sending desktop input; no action was dispatched." } };
       if (path.endsWith("/launch")) {

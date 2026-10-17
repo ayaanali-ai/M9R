@@ -55,6 +55,9 @@ interface NativeStageResponse {
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
   control?: NativePointControl;
   windows?: { pid: number; windowId: string; title: string; width: number; height: number }[];
+  position?: { x: number; y: number };
+  windowState?: "closed" | "moved" | "minimized" | "occluded" | "hidden" | "visible";
+  state?: "minimized" | "maximized" | "restored";
 }
 
 export interface NativePointControl {
@@ -216,10 +219,15 @@ export function formatWindowsStageRoomKeys(machineId: string, stage: Pick<Window
 // and restarted many times across one session), not one still working.
 const STALE_LOCK_MS = 30_000;
 
-function acquireRegistryLock(root: string): () => void {
+export function acquireRegistryLock(root: string): () => void {
   mkdirSync(root, { recursive: true });
   const target = registryPath(root);
   const lock = `${target}.lock`;
+  const token = randomUUID();
+  const ownerPath = join(lock, "owner.json");
+  const readOwner = (): { pid?: number; token?: string } => {
+    try { return JSON.parse(readFileSync(ownerPath, "utf8")); } catch { return {}; }
+  };
   try {
     mkdirSync(lock);
   } catch (error) {
@@ -233,6 +241,13 @@ function acquireRegistryLock(root: string): () => void {
     let ageMs: number;
     try { ageMs = Date.now() - statSync(lock).mtimeMs; } catch { ageMs = Infinity; }
     if (ageMs < STALE_LOCK_MS) throw new Error("Another Windows stage registry update is already running; retry after it finishes.");
+    const owner = readOwner();
+    if (Number.isSafeInteger(owner.pid) && owner.pid! > 0) {
+      try { process.kill(owner.pid!, 0); throw new Error("Another Windows stage registry update is already running; its owner is alive."); }
+      catch (failure) {
+        if ((failure as NodeJS.ErrnoException).code !== "ESRCH") throw failure;
+      }
+    }
     try { rmSync(lock, { recursive: true, force: true }); } catch { /* another process may have just cleared it too; proceed to retry regardless */ }
     try {
       mkdirSync(lock);
@@ -241,7 +256,11 @@ function acquireRegistryLock(root: string): () => void {
       throw retryError;
     }
   }
-  return () => rmSync(lock, { recursive: true, force: true });
+  try { writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token }), { flag: "wx", mode: 0o600 }); }
+  catch (error) { rmSync(lock, { recursive: true, force: true }); throw error; }
+  return () => {
+    if (readOwner().token === token) rmSync(lock, { recursive: true, force: true });
+  };
 }
 
 function writeRegistryWhileLocked(root: string, registry: StageRegistry): void {
@@ -341,6 +360,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     try {
       const registry = readRegistry(root);
       const existing = registry.stages.find((stage) => stage.name === name);
+      const claimed = registry.stages.find((stage) => stage.name !== name
+        && stage.anchor?.pid === info.pid && stage.anchor.windowId === info.windowId);
+      if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
       if (existing && existing.desktopId !== info.desktopId) {
         throw new Error(`Stage “${name}” already names a different desktop. Forget it first, then register the new desktop.`);
       }
@@ -381,7 +403,15 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       if (registry.stages.some((stage) => stage.name === name)) throw new Error(`A local stage named “${name}” already exists.`);
       if (registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
 
+      // Prepare durable recovery evidence before crossing the native side-effect
+      // boundary. A failed registry replacement must not erase the created ID.
+      const recoveryRoot = join(root, "desktop-creation-recovery");
+      mkdirSync(recoveryRoot, { recursive: true });
+      const recoveryFile = join(recoveryRoot, `${randomUUID()}.json`);
+      writeFileSync(recoveryFile, JSON.stringify({ name, state: "creation-requested", requestedAt: now().toISOString() }), { flag: "wx", mode: 0o600 });
       const result = await invokeNative({ op: "createDesktop" });
+      writeFileSync(recoveryFile, JSON.stringify({ name, state: result.ok ? "created-unregistered" : "failed", desktop: result.desktop,
+        error: result.error, recordedAt: now().toISOString() }), { mode: 0o600 });
       if (!result.ok) throw new Error(result.error ?? "Windows could not create a virtual desktop.");
       const desktop = normalizeDesktopInfo(result.desktop);
       if (desktop.isCurrent) throw new Error("Windows created the desktop but activated it unexpectedly; M9R did not register the stage.");
@@ -400,8 +430,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       try {
         writeRegistryWhileLocked(root, { version: STAGE_REGISTRY_VERSION, stages: [...registry.stages, record] });
       } catch (error) {
-        throw new Error(`Windows created desktop ${desktop.desktopId}, but M9R could not save its local stage mapping. The desktop was left intact. ${error instanceof Error ? error.message : ""}`.trim());
+        throw new Error(`Windows created desktop ${desktop.desktopId}, but M9R could not save its local stage mapping. The desktop was left intact; recovery evidence: ${recoveryFile}. ${error instanceof Error ? error.message : ""}`.trim());
       }
+      try { unlinkSync(recoveryFile); } catch { /* a retained journal is reconcilable against the saved registry; do not misreport a mapped desktop as failed */ }
       return record;
     } finally {
       release();
@@ -542,6 +573,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
+    assertWindowUnclaimed(name, Number(pidInput), windowIdInput);
     const stage = readRegistry(root).stages.find((item) => item.name === name);
     if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
     const current = await inspectWindow(pidInput, windowIdInput);
@@ -662,6 +694,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   }
 
   async function presentOwnerWindow(name: string, pid: number, windowId: string) {
+    assertWindowUnclaimed(name, pid, windowId);
     const inspected = await inspectStage(name);
     if (!inspected.desktop.isCurrent) throw new Error("The owner's desktop changed before application presentation.");
     const result = await invokeNative({ op: "presentOwnerWindow", pid, windowId, desktopId: inspected.stage.desktopId });
@@ -670,6 +703,39 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       throw new Error(result.error ?? "The requested application window was not presented on the owner's desktop.");
     }
     return result.window;
+  }
+
+  function assertWindowUnclaimed(name: string, pid: number, windowId: string) {
+    const claimed = readRegistry(root).stages.find((stage) => stage.name !== name
+      && stage.anchor?.pid === pid && stage.anchor.windowId === windowId);
+    if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
+  }
+
+  async function windowStatus(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "windowStatus", pid, windowId });
+    if (!result.ok || !["closed", "moved", "minimized", "occluded", "hidden", "visible"].includes(result.windowState ?? "")) {
+      throw new Error(result.error ?? "Window lifecycle state could not be verified.");
+    }
+    return result.windowState!;
+  }
+
+  async function ownedPopups(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "listOwnedPopups", pid, windowId });
+    if (!result.ok || !Array.isArray(result.windows) || result.windows.length > 8) throw new Error(result.error ?? "Owned popup enumeration failed.");
+    if (result.windows.some((w) => w.pid !== pid || !WINDOW_ID_RE.test(w.windowId))) throw new Error("Invalid owned popup identity.");
+    return result.windows;
+  }
+
+  async function setWindowState(name: string, state: "minimized" | "maximized" | "restored") {
+    const inspected = await inspectStage(name);
+    if (!inspected.anchor) throw new Error("No exact selected window.");
+    const result = await invokeNative({ op: "setWindowState", ...inspected.anchor, state });
+    if (!result.ok || result.state !== state) throw new Error(result.error ?? "Window state was not verified.");
+    return state;
   }
 
   async function showOwnedWindow(name: string) {
@@ -693,6 +759,27 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return { stage: inspected.stage, window };
   }
 
+  /**
+   * The owner's real, physical pointer position -- distinct from any agent's synthetic cursor
+   * overlay. Added for the owner-cursor-isolation fix: any action that must fall back to real
+   * SendInput captures this immediately before acting and restores it with
+   * `restoreOwnerCursorPosition` immediately after, so the owner's pointer is never left wherever
+   * the agent's action happened to leave it.
+   */
+  async function getOwnerCursorPosition(): Promise<{ x: number; y: number }> {
+    const result = await invokeNative({ op: "getCursorPosition" });
+    if (!result.ok || !result.position || !Number.isFinite(result.position.x) || !Number.isFinite(result.position.y)) {
+      throw new Error(result.error ?? "Could not read the owner's real pointer position.");
+    }
+    return result.position;
+  }
+
+  async function restoreOwnerCursorPosition(x: number, y: number): Promise<void> {
+    if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y)) throw new Error("Invalid owner pointer restore coordinates.");
+    const result = await invokeNative({ op: "restoreCursorPosition", x, y });
+    if (!result.ok) throw new Error(result.error ?? "Could not restore the owner's real pointer position.");
+  }
+
   function clearOwnedAnchor(nameInput: string, pid: number, windowId: string) {
     assertWindows(); assertOwner();
     const name = normalizedName(nameInput), release = acquireRegistryLock(root);
@@ -704,7 +791,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor };
+  return { inspectWindow, windowAtPoint, pointControl, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, setWindowState, ownedPopups };
 }
 
 function parsePid(value: string): number {

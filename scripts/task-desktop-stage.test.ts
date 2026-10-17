@@ -11,6 +11,7 @@ import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageW
 import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT } from "../src/lib/native/windows-installed-apps";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
+import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
 
 function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
   resolveWindowExecutable?: (executable: string) => Promise<string | undefined>) {
@@ -208,6 +209,45 @@ test("a stage operation id makes a replay return its durable receipt without mov
     assert.equal(first.operationReceipt?.status, "applied");
     assert.equal(replay.operationReceipt?.status, "already_applied");
     assert.equal(replay.actionExecuted, false);
+  } finally { f.cleanup(); }
+});
+
+test("a typed pre-dispatch refusal releases its claim instead of turning it uncertain", async () => {
+  const f = fixture(true);
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    const refusal = new DesktopInputNotDispatchedError("No text was sent.");
+    f.driver.typeTextDesktop = async () => { throw refusal; };
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "type", text: "safe" }, "owner-preview", "refused-op"), (error) => error === refusal);
+    f.driver.typeTextDesktop = async () => ({ capture: { dataUrl: "", width: 1, height: 1, capturedAt: new Date().toISOString() }, outcome: { status: "confirmed" } });
+    const result = await f.service.act(f.identity.token, f.task.id, { kind: "type", text: "safe" }, "owner-preview", "refused-op") as { operationReceipt: { status: string } };
+    assert.equal(result.operationReceipt.status, "applied");
+  } finally { f.cleanup(); }
+});
+
+test("explicit stop bypasses the occupied stage queue and aborts its in-flight text call", async () => {
+  const f = fixture(true);
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    let started!: () => void;
+    const dispatched = new Promise<void>((resolve) => { started = resolve; });
+    let activeSignal: AbortSignal | undefined;
+    f.driver.typeTextDesktop = async (_name, _text, _identity, options) => {
+      assert.ok(options?.signal);
+      activeSignal = options.signal;
+      started();
+      return new Promise<never>((_resolve, reject) => options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true }));
+    };
+    const pending = assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "type", text: "long" }, "owner-preview"), /stop requested/);
+    await dispatched;
+    const other = f.store.addTask({ from: "you", to: "codex", goal: "Other task", origin: "human_typed", idempotencyKey: "other-stop", targetSession: "session-one" }).task;
+    const otherStop = await f.service.act(f.identity.token, other.id, { kind: "stop" }, "owner-preview");
+    assert.equal((otherStop as { stopped: boolean }).stopped, false);
+    assert.equal(activeSignal?.aborted, false, "stopping another task must not abort this task's input");
+    const result = await f.service.act(f.identity.token, f.task.id, { kind: "stop" }, "owner-preview");
+    assert.equal((result as { stopped: boolean }).stopped, true);
+    await pending;
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "type", text: "queued" }, "owner-preview"), /explicitly stopped/);
   } finally { f.cleanup(); }
 });
 
@@ -610,6 +650,56 @@ test("act() recovery relaunches only when the window is genuinely gone, not on o
       /anchor moved to another desktop/,
     );
     assert.equal(f.creations(), creationsBefore, "a non-'gone' inspection failure must not trigger a relaunch");
+  } finally { f.cleanup(); }
+});
+
+test("a relaunch recovery honestly reports the lost window state instead of pretending nothing happened", async () => {
+  const f = fixture(true, (root, appId) => {
+    assert.equal(appId, "chrome");
+    return { executable: join(root, "chrome.exe"), args: [] };
+  });
+  try {
+    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Personal Chrome", width: 1280, height: 720 }];
+    await f.service.launch(f.identity.token, f.task.id, "chrome");
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+
+    // A read_structure result carries the real window title (CuaStageStructure.windowTitle);
+    // it is stashed opportunistically -- no dedicated fetch, just a field already present
+    // in a result the caller already got.
+    f.driver.readStructure = async () => ({ status: "complete" as const, capturedAt: new Date(0).toISOString(),
+      windowTitle: "report.docx - Google Chrome", elements: [] });
+    const beforeClose = await f.service.act(f.identity.token, f.task.id, { kind: "read_structure", view: "app" }, "owner-preview");
+    assert.equal((beforeClose as Record<string, unknown>).recoveryNotice, undefined, "a normal read has no recovery notice");
+
+    let failOnce = true;
+    f.setInspectOverride(() => {
+      if (failOnce) { failOnce = false; return { ok: false, error: "window closed" }; }
+      return { ok: true, window: { pid: 123, windowId: "456", desktopId: "33333333-3333-4333-8333-333333333333", onCurrentDesktop: true } };
+    });
+    const recovered = await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview") as Record<string, unknown>;
+    assert.match(String(recovered.recoveryNotice), /relaunched/);
+    assert.match(String(recovered.recoveryNotice), /report\.docx - Google Chrome/,
+      "the notice must name the actual lost state, not a generic message, when a title was known");
+  } finally { f.cleanup(); }
+});
+
+test("a relaunch recovery with no previously observed title still reports the loss honestly, just without specifics", async () => {
+  const f = fixture(true, (root, appId) => {
+    assert.equal(appId, "chrome");
+    return { executable: join(root, "chrome.exe"), args: [] };
+  });
+  try {
+    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Personal Chrome", width: 1280, height: 720 }];
+    await f.service.launch(f.identity.token, f.task.id, "chrome");
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+
+    let failOnce = true;
+    f.setInspectOverride(() => {
+      if (failOnce) { failOnce = false; return { ok: false, error: "window closed" }; }
+      return { ok: true, window: { pid: 123, windowId: "456", desktopId: "33333333-3333-4333-8333-333333333333", onCurrentDesktop: true } };
+    });
+    const recovered = await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview") as Record<string, unknown>;
+    assert.match(String(recovered.recoveryNotice), /was not restored/);
   } finally { f.cleanup(); }
 });
 

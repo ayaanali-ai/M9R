@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { renameStateFile } from "./atomic-file";
@@ -189,6 +190,8 @@ export function createTaskDesktopStageService(input: {
   const stageDeps = { nativeHostPath: existsSync(bundledHost) ? bundledHost : undefined, ...input.stage, root, terminal: true };
   const manager = createWindowsDesktopStageManager(stageDeps);
   const driver = input.driver ?? createCuaStageDriver({ stage: stageDeps });
+  const activeInputs = new Map<string, { controller: AbortController; taskId: string }>();
+  const stoppedTaskInputs = new Set<string>();
   const readPolicy = input.readPolicy ?? (() => readTaskStagePolicy(root));
   // Serialize preparations so duplicate deliveries cannot create duplicate desktops --
   // but ONE queue per stage name, not one for the whole broker. A single shared queue
@@ -216,6 +219,9 @@ export function createTaskDesktopStageService(input: {
     process?: ChildProcess;
     ownsProcess: boolean;
     windowId: string;
+    /** Best-effort, in-memory only: the most recent window title this stage observed, for an honest
+     * recovery notice after a relaunch. Never persisted and never used to re-dispatch anything automatically. */
+    lastKnownWindowTitle?: string;
   };
   const ownedApps = new Map<string, OwnedStageApp>();
   const activeAgentCursors = new Map<string, CuaAgentCursorIdentity>();
@@ -325,9 +331,22 @@ export function createTaskDesktopStageService(input: {
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
     const { name: queueName } = authorize(token, taskId, mode);
+    if (action.kind === "stop") {
+      stoppedTaskInputs.add(`${queueName}\0${taskId}`);
+      const active = activeInputs.get(queueName);
+      if (active?.taskId === taskId) active.controller.abort(new Error("Explicit desktop stop requested."));
+      return { stopped: active?.taskId === taskId, cancellationRequested: true };
+    }
+    let recoveryNotice: string | undefined;
     const run = async () => {
       const { name, identity } = authorize(token, taskId, mode);
+      if (stoppedTaskInputs.has(`${name}\0${taskId}`)) throw new DesktopInputNotDispatchedError("This task was explicitly stopped; no input was sent.");
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
+      if (action.kind === "window_status") {
+        const selected = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
+        if (!selected) throw new Error("This session has no selected application window.");
+        return { windowState: await manager.windowStatus(selected.pid, selected.windowId) };
+      }
       let inspected: Awaited<ReturnType<typeof manager.inspectStage>>;
       try {
         inspected = await manager.inspectStage(name);
@@ -362,6 +381,13 @@ export function createTaskDesktopStageService(input: {
           await launch(token, taskId, ownedBeforeFailure.appId, mode, undefined, { skipQueue: true });
           process.stderr.write(`[stage-recovery] ${taskId}: relaunch completed after ${Date.now() - recoveryStartedAt}ms, re-inspecting\n`);
           inspected = await manager.inspectStage(name);
+          // Lightweight, no added latency: this reuses the title already known from the
+          // owned app record (stashed opportunistically below, never a dedicated fetch) to
+          // tell the agent honestly that on-screen state was lost, instead of pretending the
+          // relaunched window continues where the old one left off.
+          recoveryNotice = ownedBeforeFailure.lastKnownWindowTitle
+            ? `The application window was closed and relaunched; it previously had "${ownedBeforeFailure.lastKnownWindowTitle}" open, which this relaunch did not restore. Re-open or re-navigate to that state if the task still needs it.`
+            : "The application window was closed and relaunched; its on-screen state (open file, search, scroll position) was not restored.";
         } else {
           throw error;
         }
@@ -375,7 +401,7 @@ export function createTaskDesktopStageService(input: {
       // fresh taskId per request even mid-task, so gating on an exact match here
       // breaks the normal, continuous case (launch under one task, act under the
       // next) that this is meant to support.
-      const effectiveAction: typeof action = action.kind === "read_structure"
+      const effectiveAction: typeof action = action.kind === "read_structure" || action.view === "app"
         ? action
         : { ...action, view: action.view ?? (selected ? "app" : "desktop") };
       if (mode === "owner-preview" && effectiveAction.view === "desktop" && inspected.anchor) {
@@ -417,15 +443,42 @@ export function createTaskDesktopStageService(input: {
           nextStep: "Capture the stage and inspect the current state before issuing a new action." };
       }
       let result: unknown;
+      const controller = new AbortController();
+      activeInputs.set(name, { controller, taskId });
+      const cancellationPoll = setInterval(() => {
+        try {
+          authorize(token, taskId, mode);
+          if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) controller.abort(new Error("Desktop control revoked."));
+        } catch (error) { controller.abort(error); }
+      }, 50);
+      cancellationPoll.unref();
       try {
-        result = await runTaskStageAction(driver, name, effectiveAction, identity, mode);
+        result = await runTaskStageAction(driver, name, effectiveAction, identity, mode, controller.signal);
+        // Opportunistic, free: a read_structure result already carries the window title
+        // in memory (CuaStageStructure.windowTitle); stash it in case a future action in
+        // this same stage needs to relaunch and give an honest recovery notice. No
+        // dedicated fetch, no added latency.
+        const resultRecord = result && typeof result === "object" ? result as Record<string, unknown> : undefined;
+        const observedTitle = resultRecord?.windowTitle
+          ?? (resultRecord?.capture && typeof resultRecord.capture === "object" ? (resultRecord.capture as Record<string, unknown>).windowTitle : undefined);
+        if (typeof observedTitle === "string" && observedTitle.length > 0) {
+          const current = ownedApps.get(name);
+          if (current) ownedApps.set(name, { ...current, lastKnownWindowTitle: observedTitle });
+        }
       } catch (error) {
+        if (error instanceof DesktopInputNotDispatchedError) {
+          if (receiptInput) input.store.releaseStageOperation(receiptInput);
+          throw error;
+        }
         if (receiptInput) {
           try { input.store.settleStageOperation({ ...receiptInput, state: "uncertain" }); } catch { /* the durable running claim still blocks a replay */ }
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`The desktop input outcome is uncertain; the operation will not be replayed automatically. Capture the stage before issuing a new action. ${detail}`, { cause: error });
         }
         throw error;
+      } finally {
+        clearInterval(cancellationPoll);
+        if (activeInputs.get(name)?.controller === controller) activeInputs.delete(name);
       }
       if (!receiptInput) return result;
       try {
@@ -440,7 +493,9 @@ export function createTaskDesktopStageService(input: {
           nextStep: "The input was sent; capture and inspect before issuing another action." };
       }
     };
-    return enqueueStage(queueName, run);
+    const outcome = await enqueueStage(queueName, run);
+    if (!recoveryNotice) return outcome;
+    return { ...(outcome && typeof outcome === "object" ? outcome : { result: outcome }), recoveryNotice };
   }
 
   /**
@@ -809,6 +864,7 @@ export function createTaskDesktopStageService(input: {
 
   async function close() {
     clearInterval(cursorReaper);
+    for (const active of activeInputs.values()) active.controller.abort(new Error("Stage service closing."));
     await Promise.all([...stageQueues.values(), reaperPending]);
     activeAgentCursors.clear();
     await driver.shutdown();

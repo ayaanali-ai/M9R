@@ -14,6 +14,7 @@ export type AgentState = "open_working" | "open_idle" | "offline" | "unknown" | 
 export type FeedSurface = "native" | "web";
 
 export interface FeedAgent {
+  color?: string;
   surface: "native";
   handle: string;
   state: AgentState;
@@ -70,6 +71,7 @@ export interface SessionProbe {
 }
 
 export interface FeedInput {
+  colorFor?: (handle: string) => string;
   now: Date;
   endpoints: readonly EndpointRecord[];
   sessions: readonly SessionRecord[];
@@ -212,7 +214,7 @@ function needsYouFrom(input: FeedInput): NeedsYou[] {
 /** Builds the feed. `previous` (the last feed written) supplies `seq` and decides which items are new pings. */
 export function buildFeed(input: FeedInput, previous: Feed | null): Feed {
   const handles = [...new Set<string>([...KNOWN_AGENTS, ...input.endpoints.map((e) => e.handle), ...input.sessions.map((s) => s.handle)])];
-  const agents = handles.map((h) => ({ ...agentFor(h, input), surface: "native" as const }));
+  const agents = handles.map((h) => ({ ...agentFor(h, input), surface: "native" as const, ...(input.colorFor ? { color: input.colorFor(h) } : {}) }));
   const needsYou = needsYouFrom(input);
   const inProgress = inProgressFrom(input);
   const recent = input.events.slice(-RECENT_ITEMS).reverse().map((e) => ({ surface: "native" as const, at: e.at, taskId: e.taskId, text: safe(e.text, 140) }));

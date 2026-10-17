@@ -154,8 +154,14 @@ function dataUrlImage(value: unknown): ImageBlock | undefined {
 }
 
 function toolResponse(value: unknown, image?: ImageBlock, isError = false) {
-  const content: Array<TextBlock | ImageBlock> = [{ type: "text", text: JSON.stringify(value) }];
+  const content: Array<TextBlock | ImageBlock> = [{ type: "text", text: JSON.stringify(value, (key, item) => key === "dataUrl" ? undefined : item) }];
   if (image) content.push(image);
+  const observation = recordOf(recordOf(value)?.observation);
+  const popups = recordOf(observation?.capture)?.ownedPopups;
+  if (Array.isArray(popups)) for (const popup of popups.slice(0, 8)) {
+    const image = dataUrlImage(recordOf(popup)?.dataUrl);
+    if (image) content.push(image);
+  }
   return { content, ...(isError ? { isError: true } : {}) };
 }
 
@@ -317,6 +323,8 @@ function publicStageCapture(capture: Record<string, unknown>) {
     height: capture.height,
     capturedAt: capture.capturedAt,
     ...(typeof capture.accessibilityStatus === "string" ? { accessibilityStatus: capture.accessibilityStatus } : {}),
+    ...(Array.isArray(capture.ownedPopups) ? { ownedPopups: capture.ownedPopups } : {}),
+    ...(capture.popupCaptureStatus ? { popupCaptureStatus: capture.popupCaptureStatus } : {}),
   };
 }
 
@@ -473,7 +481,9 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     const observedAt = capturedAt ? Date.parse(capturedAt) : Number.NaN;
     if (!Number.isSafeInteger(observedAt) || observedAt < 0) throw new Error("The desktop broker returned an invalid capture timestamp.");
     const controls: DesktopControl[] = [];
-    const rawElements = Array.isArray(structure?.elements) ? structure.elements.slice(0, 200).map(recordOf).filter((value): value is Record<string, unknown> => Boolean(value)) : [];
+    const allElements = Array.isArray(structure?.elements) ? structure.elements : [];
+    if (allElements.length > 200 && structureStatus === "complete") structureStatus = "partial";
+    const rawElements = allElements.slice(0, 200).map(recordOf).filter((value): value is Record<string, unknown> => Boolean(value));
     const stageRefMap = new Map<string, string>();
     for (const element of rawElements) {
       if (typeof element.ref === "string" && STAGE_REF.test(element.ref) && !stageRefMap.has(element.ref)) {
@@ -501,6 +511,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       });
     }
     const structuredControls = [...controls];
+    if (visibleCapture?.controlsTruncated === true && structureStatus === "complete") structureStatus = "partial";
     if (visibleCapture && Array.isArray(visibleCapture.controls)) {
       const controlByStageRef = new Map(controls.filter((control) => control.stageRef).map((control) => [control.stageRef!, control]));
       for (const raw of visibleCapture.controls.slice(0, 200)) {
@@ -1186,6 +1197,27 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     }
     record.pinnedRouteId = selection.routeId;
 
+    // Finding AE: the 30s observation-age check above only catches staleness by elapsed
+    // time, not by what actually happened to the window since it was observed. One bounded
+    // lifecycle probe (not a capture, not a retry loop) catches the window having been
+    // closed, moved, or minimized in the meantime, so a coordinate from a now-meaningless
+    // screenshot is never dispatched blind. It does not catch same-window content changes
+    // (e.g. in-place navigation) -- that still requires a fresh observation, same as today.
+    // A probe failure must not block a dispatch that might otherwise succeed.
+    if (record.context.kind === "desktop" && record.context.view === "app" && action.kind !== "observe" && deps.web?.taskStageAction) {
+      try {
+        const status = await deps.web!.taskStageAction!(
+          authToken, record.context.kind === "desktop" ? record.context.taskId : "", { kind: "window_status", view: "app" },
+          record.context.kind === "desktop" ? record.context.mode : undefined);
+        const windowState = status && typeof status === "object" && status.ok
+          ? (status.result as Record<string, unknown> | undefined)?.windowState : undefined;
+        if (typeof windowState === "string" && windowState !== "visible") {
+          return refreshStaleTarget(action, identity, record, authToken, timing,
+            `The target window is no longer visible (${windowState}); observe it again before acting.`);
+        }
+      } catch { /* the freshness probe is a bonus safety net, not a new point of failure */ }
+    }
+
     let browserRequest: WebRequest | undefined;
     if (record.context.kind === "browser" && action.kind !== "observe") {
       if (!deps.web) return refusal(action, action.targetId, "browser-route-unavailable", "The M9R browser broker is unavailable.");
@@ -1246,6 +1278,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       const capture = stageCapture(response);
       const resultObject = recordOf(response.result);
       const outcome = recordOf(resultObject?.outcome);
+      const nativePostcondition = recordOf(resultObject?.postcondition);
+      const targetClosed = response.ok && nativePostcondition?.kind === "window-closed" && nativePostcondition.verified === true
+        && typeof nativePostcondition.observedAt === "string" && Number.isFinite(Date.parse(nativePostcondition.observedAt))
+        && typeof nativePostcondition.evidenceRef === "string";
       // Foreground delivery is itself sufficient proof of focus (real OS
       // SendInput to the actual foreground window), independent of whether
       // the driver can also confirm a separate visual effect -- see the
@@ -1287,13 +1323,14 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         : undefined;
       const effectStatus: ComputerUseResult["effectStatus"] = dispatchStatus === "not-dispatched"
         ? "not-checked"
-        : postconditionStatus ?? (dispatchStatus === "dispatched" && updated ? "observed" : "unknown");
+        : targetClosed && !action.postcondition ? "verified"
+          : postconditionStatus ?? (dispatchStatus === "dispatched" && updated ? "observed" : "unknown");
       const resultError = !response.ok
         ? { code: response.code ?? "desktop-action-failed", message: (response.error ?? "The desktop broker refused the action.").slice(0, 2_000),
             retry: response.dispatchState === "not-dispatched" ? "never" as const : "same-operation-id" as const }
         : dispatchStatus === "unknown"
           ? { code: "dispatch-outcome-unknown", message: "The desktop broker did not return a conclusive dispatch receipt. Reconcile with the same operation ID before doing anything else.", retry: "same-operation-id" as const }
-          : dispatchStatus === "dispatched" && !updated
+          : dispatchStatus === "dispatched" && !updated && !targetClosed
             ? { code: "post-action-observation-failed", message: "Input was dispatched, but no fresh desktop observation is available. Reconcile with the same operation ID before another input.", retry: "same-operation-id" as const }
             : action.postcondition && effectStatus !== "verified"
               ? { code: effectStatus === "mismatch" ? "postcondition-mismatch" : "postcondition-unverified",
@@ -1307,16 +1344,18 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         effectStatus,
         ...(operationReceipt && operationReceipt.state !== "claimed" && operationReceipt.state !== "conflict"
           ? { operationReceipt: { status: operationReceipt.state, ...(operationReceipt.updatedAt ? { updatedAt: operationReceipt.updatedAt } : {}) } } : {}),
-        ...(updated ? { observation: { revision: updated.record.target.revision, observedAt: updated.record.target.observedAt, evidenceRef: updated.record.target.revision } } : {}),
+        ...(updated ? { observation: { revision: updated.record.target.revision, observedAt: updated.record.target.observedAt, evidenceRef: updated.record.target.revision } }
+          : targetClosed ? { observation: { revision: nativePostcondition!.evidenceRef as string, observedAt: Date.parse(nativePostcondition!.observedAt as string), evidenceRef: nativePostcondition!.evidenceRef as string } } : {}),
         ...(resultError ? { error: resultError } : {}),
       });
       const image = updated?.image ?? dataUrlImage(capture?.dataUrl);
-      const nextStep = response.nextStep ?? (dispatchStatus === "unknown"
+      if (targetClosed) removeTarget(record.target.targetId);
+      const nextStep = response.nextStep ?? (targetClosed ? "The exact window is verified closed; observe a new target before further input." : dispatchStatus === "unknown"
         ? "Reconcile with the same operation ID; do not send a second input."
         : dispatchStatus === "dispatched" && !action.postcondition
           ? updated ? "Inspect the fresh desktop observation before reporting task success; the effect is observed, not verified." : "Reconcile with the same operation ID to obtain a fresh observation."
           : action.postcondition && effectStatus !== "verified" ? "Refresh and inspect the target; do not report success until the postcondition is verified." : undefined);
-      return toolResponse({ result, ...(operationReceipt ? { operationReceipt: { status: operationReceipt.state, ...(operationReceipt.updatedAt ? { updatedAt: operationReceipt.updatedAt } : {}) } } : {}),
+      return toolResponse({ result, ...(nativePostcondition ? { nativePostcondition } : {}), ...(operationReceipt ? { operationReceipt: { status: operationReceipt.state, ...(operationReceipt.updatedAt ? { updatedAt: operationReceipt.updatedAt } : {}) } } : {}),
         ...(action.kind === "focus" || ("confirmFocusForeground" in action && action.confirmFocusForeground) ? { sharedInput: {
           foregroundMayChange: true,
           physicalPointerMayMove: action.kind === "click" || action.kind === "scroll" || action.kind === "drag",

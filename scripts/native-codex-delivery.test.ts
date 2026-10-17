@@ -49,6 +49,27 @@ test("a busy target defers the next plain task and the shared pump resumes it wi
   assert.equal(store.getTask(second.id)?.deliveredSession, THREAD);
 });
 
+test("a verbatim retry is not deferred forever behind a stale, never-finalized original attempt", async () => {
+  // Confirmed live in production state (T248/T249, 2026-10-17): the owner resent a failed task
+  // with the exact same wording; the retry was silently deferred with no bound at all, because
+  // the original attempt's delivery record was never finalized (it failed over elsewhere and the
+  // owner redirected it, so it never got a resultSummary). sessionHasUnfinishedDelivery now bounds
+  // how long an unfinished original attempt can block an identical-text retry.
+  let clock = Date.now() - 31 * 60_000; // older than the default 30-minute inbox staleness window
+  const dir = mkdtempSync(join(tmpdir(), "m9r-n2-stale-"));
+  const store = createLocalStore(dir, { now: () => new Date(clock) });
+  seedCodex(store);
+  store.issueIdentity("codex", "codex", THREAD);
+  const first = typed(store, "open file explorer and type hello in the search bar", "first-attempt");
+  clock = Date.now(); // the retry itself is sent now, in real time
+  const second = typed(store, "open file explorer and type hello in the search bar", "second-attempt");
+  const deps = fakeDeps({ requireTargetIdentity: true });
+  assert.equal((await deliverToCodex(store, first.id, deps)).state, "queued");
+  // The first attempt never resolves (no setResult, no setDelivery to a terminal state) -- exactly
+  // what happens when a task fails over to a different tool or the owner redirects it by hand.
+  assert.equal((await deliverToCodex(store, second.id, deps)).state, "queued", "a retry must not be deferred behind an original attempt old enough to be stale");
+});
+
 test("concurrent Codex dispatchers inject a task once", async () => {
   const store = newStore();
   seedCodex(store);

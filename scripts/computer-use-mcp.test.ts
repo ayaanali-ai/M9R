@@ -163,6 +163,7 @@ test("app-window observations are structure-first and semantic clicks stay on th
     taskStageAction: async (_token, _taskId, action, _mode, operationId) => {
       stageActions.push({ action, operationId });
       const kind = (action as { kind?: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
       if (kind === "read_structure") return { ok: true, result: structure };
       if (kind === "click_element") return { ok: true, result: {
         capture: { dataUrl: "data:image/png;base64,", width: 640, height: 480, capturedAt: new Date().toISOString(),
@@ -201,8 +202,37 @@ test("app-window observations are structure-first and semantic clicks stay on th
   } }));
   assert.equal(clicked.result.dispatchStatus, "dispatched");
   assert.equal(clicked.result.effectStatus, "verified");
-  assert.deepEqual(stageActions.map(({ action }) => (action as { kind: string }).kind), ["read_structure", "click_element"]);
-  assert.equal(stageActions[1]?.operationId, "semantic-site-link");
+  assert.deepEqual(stageActions.map(({ action }) => (action as { kind: string }).kind), ["read_structure", "window_status", "click_element"]);
+  assert.equal(stageActions[2]?.operationId, "semantic-site-link");
+});
+
+test("an observation that silently drops elements past 200 is reported partial, never complete", async (t) => {
+  const structure = {
+    status: "complete",
+    capturedAt: new Date().toISOString(),
+    appName: "chrome.exe",
+    windowTitle: "Huge Tree",
+    elements: Array.from({ length: 250 }, (_, i) => ({ ref: `item-${i}`, role: "text", label: `item ${i}`, depth: 0, enabled: true, actions: [] })),
+  };
+  const web: WebBrokerClient = {
+    run: async () => ({ ok: false, error: "the extension browser route must not receive this app-window test" }),
+    prepareTaskStage: async () => ({ ok: true, result: { prepared: true } }),
+    taskStageAction: async (_token, _taskId, action) => {
+      const kind = (action as { kind?: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
+      if (kind === "read_structure") return { ok: true, result: structure };
+      return { ok: false, error: `unexpected stage action ${String(kind)}`, dispatchState: "not-dispatched" };
+    },
+  };
+  const h = createHarness(web);
+  t.after(async () => { await h.server.close(); });
+
+  const observed = body(await h.call("m9r_computer_observe", {
+    token: TOKEN_A, target: "app-window", taskId: "T903", mode: "owner-preview",
+  }));
+  assert.equal(observed.observation.structure.elements.length, 200, "the wrapper's own cap still applies");
+  assert.equal(observed.observation.structure.status, "partial",
+    "a driver status of complete must be downgraded once this wrapper's own 200-element cap drops elements, so callers never trust an undercounted tree as complete");
 });
 
 test("explicit app-window focus stays on the OS route for configured and arbitrary provider identities", async (t) => {
@@ -215,6 +245,7 @@ test("explicit app-window focus stays on the OS route for configured and arbitra
     taskStageAction: async (token, _taskId, action, _mode, operationId) => {
       stageActions.push({ token, action });
       const kind = (action as { kind: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
       if (kind === "read_structure") return { ok: true, result: structure };
       if (kind === "focus") return { ok: true, result: {
         capture: { dataUrl: "data:image/png;base64,", width: 640, height: 480, capturedAt: new Date().toISOString(),
@@ -241,7 +272,7 @@ test("explicit app-window focus stays on the OS route for configured and arbitra
   }
 
   assert.deepEqual(stageActions.map(({ action }) => (action as { kind: string }).kind), [
-    "read_structure", "focus", "read_structure", "focus", "read_structure", "focus",
+    "read_structure", "window_status", "focus", "read_structure", "window_status", "focus", "read_structure", "window_status", "focus",
   ]);
   assert.deepEqual(stageActions.filter(({ action }) => (action as { kind: string }).kind === "focus")
     .map(({ action }) => action), [
@@ -259,6 +290,7 @@ test("app-window screenshot is returned only as the same-call fallback for an in
     prepareTaskStage: async () => ({ ok: true, result: { prepared: true } }),
     taskStageAction: async (_token, _taskId, action) => {
       const kind = (action as { kind: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
       calls.push(kind);
       if (kind !== "read_structure") return { ok: false, error: `unexpected ${kind}`, dispatchState: "not-dispatched" };
       return { ok: true, result: {
@@ -289,6 +321,7 @@ test("explicit visual observation requests one exact app-window screenshot", asy
     prepareTaskStage: async () => ({ ok: true, result: { prepared: true } }),
     taskStageAction: async (_token, _taskId, action) => {
       const kind = (action as { kind: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
       calls.push(kind);
       if (kind === "capture") return { ok: true, result: { capture: {
         dataUrl: "data:image/png;base64,c2NyZWVuc2hvdA==", width: 640, height: 480,
@@ -319,6 +352,7 @@ for (const semanticAction of ["expand", "toggle", "select"]) test(`native ${sema
     prepareTaskStage: async () => ({ ok: true }),
     taskStageAction: async (_token, _taskId, action) => {
       const kind = (action as { kind: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
       calls.push(kind);
       if (kind === "read_structure") return { ok: true, result: structure };
       return { ok: true, result: { actionExecuted: true, outcome: { status: "confirmed" }, operationReceipt: { status: "applied" } } };
@@ -337,6 +371,29 @@ for (const semanticAction of ["expand", "toggle", "select"]) test(`native ${sema
   assert.ok(calls.includes("click_element"));
 });
 
+test("a native verified close is not downgraded by the absence of a post-close screenshot", async (t) => {
+  const web: WebBrokerClient = {
+    prepareTaskStage: async () => ({ ok: true }),
+    run: async () => ({ ok: false, error: "wrong route" }),
+    taskStageAction: async (_token, _taskId, action) => {
+      if ((action as { kind: string }).kind === "capture") return { ok: true, result: { capture: {
+        dataUrl: "data:image/png;base64,eA==", width: 200, height: 100, capturedAt: new Date().toISOString(), controls: [],
+      } } };
+      return { ok: true, result: { actionExecuted: true, operationReceipt: { status: "applied" }, outcome: { status: "confirmed" },
+        postcondition: { kind: "window-closed", verified: true, observedAt: new Date().toISOString(), evidenceRef: "native-window-closed-proof" } } };
+    },
+  };
+  const h = createHarness(web); t.after(async () => { await h.server.close(); });
+  const observed = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "app-window", taskId: "T12", representation: "visual" }));
+  const reply = await h.call("m9r_computer_action", { token: TOKEN_A, action: {
+    operationId: "native-close-proof", targetId: observed.target.targetId, targetRevision: observed.target.revision,
+    kind: "key", key: "F4", modifiers: ["Alt"], confirmFocusForeground: true,
+  } });
+  assert.equal(reply.isError, undefined);
+  assert.equal(body(reply).result.effectStatus, "verified");
+  assert.equal(body(reply).nativePostcondition.kind, "window-closed");
+});
+
 test("desktop field replacement dispatches by fresh UIA element ref, not a derived point", async (t) => {
   const stageActions: Array<{ kind: string; operationId?: string }> = [];
   const structure = { status: "complete", capturedAt: new Date().toISOString(), appName: "notepad.exe", windowTitle: "Untitled",
@@ -347,6 +404,7 @@ test("desktop field replacement dispatches by fresh UIA element ref, not a deriv
     prepareTaskStage: async () => ({ ok: true, result: { prepared: true } }),
     taskStageAction: async (_token, _taskId, action, _mode, operationId) => {
       const kind = (action as { kind: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
       stageActions.push({ kind, operationId });
       if (kind === "read_structure") return { ok: true, result: structure };
       if (kind === "replace_element") return { ok: true, result: {
@@ -1112,6 +1170,7 @@ test("exact app-window observations stay isolated across tasks and reject refs f
     prepareTaskStage: async () => ({ ok: true }),
     taskStageAction: async (_token, taskId, action) => {
       const kind = (action as { kind?: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
       stageActions.push({ taskId, action });
       if (kind === "capture") return { ok: true, result: { capture: captureFor(taskId) } };
       return { ok: true, result: { capture: captureFor(taskId), actionExecuted: true,
@@ -1312,8 +1371,54 @@ test("generic computer-use receipts survive MCP server recreation and block a se
   }
 });
 
+test("a window closed, moved, or minimized since it was observed refuses dispatch instead of acting on a stale point (Finding AE)", async (t) => {
+  const stageActions: string[] = [];
+  let windowState: "visible" | "closed" | "minimized" = "visible";
+  const web: WebBrokerClient = {
+    prepareTaskStage: async () => ({ ok: true }),
+    taskStageAction: async (_token, _taskId, action) => {
+      const kind = (action as { kind?: string }).kind;
+      stageActions.push(String(kind));
+      if (kind === "window_status") return { ok: true, result: { windowState } };
+      return { ok: true, result: { capture: { dataUrl: "data:image/png;base64,eA==", width: 200, height: 100,
+        capturedAt: new Date().toISOString(), controls: [] },
+        ...(kind === "capture" ? {} : { actionExecuted: true, outcome: { status: "confirmed" }, operationReceipt: { status: "applied" } }) } };
+    },
+    run: async () => ({ ok: false, error: "unused browser route" }),
+  };
+  const h = createHarness(web);
+  t.after(async () => { await h.server.close(); });
+  const observed = body(await h.call("m9r_computer_observe", {
+    token: TOKEN_A, target: "app-window", taskId: "T904", mode: "owner-preview", representation: "visual",
+  }));
+
+  windowState = "closed";
+  const refused = await h.call("m9r_computer_action", { token: TOKEN_A, action: {
+    operationId: "stale-point-click", targetId: observed.target.targetId, targetRevision: observed.target.revision,
+    kind: "click", locator: { kind: "point", x: 45, y: 55, coordinateSpace: "target-local" },
+  } });
+  assert.equal(refused.isError, true, "a window reported closed by the freshness probe must refuse, not dispatch blind");
+  assert.notEqual(body(refused).result.error.message.toLowerCase().includes("closed"), false);
+  assert.equal(stageActions.includes("click"), false, "the stale click itself must never reach the native stage broker");
+
+  windowState = "visible";
+  const observedAgain = body(await h.call("m9r_computer_observe", {
+    token: TOKEN_A, target: "app-window", taskId: "T904", mode: "owner-preview", representation: "visual",
+  }));
+  const succeeded = await h.call("m9r_computer_action", { token: TOKEN_A, action: {
+    operationId: "fresh-point-click", targetId: observedAgain.target.targetId, targetRevision: observedAgain.target.revision,
+    kind: "click", locator: { kind: "point", x: 45, y: 55, coordinateSpace: "target-local" },
+  } });
+  assert.equal(succeeded.isError, undefined, "a window the probe reports visible must dispatch normally, with no added friction");
+  assert.equal(stageActions.includes("click"), true);
+});
+
 test("generic desktop actions use the prepared exact stage target and refuse unsupported capabilities before dispatch", async (t) => {
   const stageActions: Array<{ taskId: string; action: unknown; mode?: string; operationId?: string }> = [];
+  // The Finding AE freshness probe (window_status) now runs before every dispatched action; it is
+  // bookkeeping, not one of the logical actions this test is asserting about, so it is filtered out
+  // here rather than renumbering every index below.
+  const dispatched = () => stageActions.filter((entry) => (entry.action as { kind?: string }).kind !== "window_status");
   let prepares = 0;
   let captureSequence = 0;
   const capture = () => ({
@@ -1328,6 +1433,7 @@ test("generic desktop actions use the prepared exact stage target and refuse uns
     taskStageAction: async (_token, taskId, action, mode, operationId) => {
       const input = action as { kind?: string };
       stageActions.push({ taskId, action, mode, operationId });
+      if (input.kind === "window_status") return { ok: true, result: { windowState: "visible" } };
       if (input.kind === "capture") return { ok: true, result: { capture: capture() } };
       return {
         ok: true,
@@ -1364,7 +1470,7 @@ test("generic desktop actions use the prepared exact stage target and refuse uns
   assert.equal(prematureInsert.isError, true);
   assert.equal(body(prematureInsert).result.error.code, "unsupported-target-action");
   assert.match(body(prematureInsert).result.error.message, /confirmed input selection/);
-  assert.equal(stageActions.length, 1, "unselected typing is rejected before a stage operation receipt or input dispatch");
+  assert.equal(dispatched().length, 1, "unselected typing is rejected before a stage operation receipt or input dispatch");
   const control = initial.observation.controls[0];
   const actionReply = await h.call("m9r_computer_action", {
     token: TOKEN_A,
@@ -1384,8 +1490,8 @@ test("generic desktop actions use the prepared exact stage target and refuse uns
   assert.equal(acted.result.operationReceipt.status, "applied");
   assert.ok(acted.target.capabilities.includes("input.text.insert"), "a confirmed click unlocks caret insertion on the exact window");
   assert.notEqual(acted.target.revision, initial.target.revision);
-  assert.equal(stageActions.length, 2, "the action's own fresh capture is reused rather than recaptured");
-  assert.deepEqual(stageActions[1], {
+  assert.equal(dispatched().length, 2, "the action's own fresh capture is reused rather than recaptured");
+  assert.deepEqual(dispatched()[1], {
     taskId: "T12",
     action: { kind: "click", x: 20, y: 25, view: "app" },
     mode: "owner-preview",
@@ -1405,7 +1511,7 @@ test("generic desktop actions use the prepared exact stage target and refuse uns
   });
   assert.equal(insertReply.isError, undefined);
   const inserted = body(insertReply);
-  assert.deepEqual(stageActions[2], {
+  assert.deepEqual(dispatched()[2], {
     taskId: "T12",
     action: { kind: "type", mode: "insert", text: "append at the confirmed caret", view: "app" },
     mode: "owner-preview",
@@ -1428,7 +1534,7 @@ test("generic desktop actions use the prepared exact stage target and refuse uns
   assert.equal(replaceReply.isError, undefined);
   const replaced = body(replaceReply);
   assert.equal(replaced.result.dispatchStatus, "dispatched");
-  assert.deepEqual(stageActions[3], {
+  assert.deepEqual(dispatched()[3], {
     taskId: "T12",
     action: { kind: "type", mode: "replace", x: 20, y: 25, expectedRole: "Edit", expectedLabel: "Search", text: "new field value", view: "app" },
     mode: "owner-preview",
@@ -1449,7 +1555,7 @@ test("generic desktop actions use the prepared exact stage target and refuse uns
     },
   });
   assert.equal(scrollReply.isError, undefined);
-  assert.deepEqual(stageActions[4], {
+  assert.deepEqual(dispatched()[4], {
     taskId: "T12",
     action: { kind: "scroll_delta", x: 40, y: 60, deltaX: 0, deltaY: 1, unit: "page", view: "app" },
     mode: "owner-preview",
@@ -1470,7 +1576,7 @@ test("generic desktop actions use the prepared exact stage target and refuse uns
   });
   assert.equal(doubled.isError, undefined);
   assert.equal(body(doubled).result.dispatchStatus, "dispatched");
-  assert.deepEqual(stageActions[5], {
+  assert.deepEqual(dispatched()[5], {
     taskId: "T12",
     action: { kind: "double_click", x: 20, y: 25, view: "app" },
     mode: "owner-preview",
@@ -1488,7 +1594,7 @@ test("generic desktop actions use the prepared exact stage target and refuse uns
   assert.equal(middleClick.isError, true);
   assert.equal(body(middleClick).result.error.code, "unsupported-target-capability");
   assert.match(body(middleClick).result.error.message, /input\.click\.middle/);
-  assert.equal(stageActions.length, 6, "unsupported middle clicks never reach the native stage broker");
+  assert.equal(dispatched().length, 6, "unsupported middle clicks never reach the native stage broker");
 
   const replay = await h.call("m9r_computer_action", { token: TOKEN_A, action: {
     operationId: "desktop-click-1", targetId: initial.target.targetId, targetRevision: initial.target.revision,
@@ -1498,9 +1604,9 @@ test("generic desktop actions use the prepared exact stage target and refuse uns
   assert.equal(replay.isError, undefined);
   assert.equal(body(replay).result.effectStatus, "verified");
   assert.equal(body(replay).result.operationReceipt.status, "applied");
-  assert.equal(stageActions.length, 7, "same-ID desktop recovery performs only a fresh capture, not the click again");
-  assert.equal(stageActions.filter((entry) => (entry.action as { kind?: string }).kind === "click").length, 1);
-  assert.equal(stageActions.filter((entry) => (entry.action as { kind?: string }).kind === "double_click").length, 1);
+  assert.equal(dispatched().length, 7, "same-ID desktop recovery performs only a fresh capture, not the click again");
+  assert.equal(dispatched().filter((entry) => (entry.action as { kind?: string }).kind === "click").length, 1);
+  assert.equal(dispatched().filter((entry) => (entry.action as { kind?: string }).kind === "double_click").length, 1);
 });
 
 test("foreground confirmation is forwarded end-to-end for every shared app-window input family", async (t) => {
@@ -1518,6 +1624,7 @@ test("foreground confirmation is forwarded end-to-end for every shared app-windo
     taskStageAction: async (_token, taskId, action, mode, operationId) => {
       stageActions.push({ taskId, action, mode, operationId });
       const kind = (action as { kind?: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
       return { ok: true, result: {
         capture: capture(),
         ...(kind === "capture" ? {} : {
@@ -1576,7 +1683,7 @@ test("foreground confirmation is forwarded end-to-end for every shared app-windo
     current = body(reply);
   }
 
-  const dispatched = stageActions.slice(1);
+  const dispatched = stageActions.slice(1).filter((entry) => (entry.action as { kind?: string }).kind !== "window_status");
   assert.deepEqual(dispatched.map(({ action }) => (action as { kind: string }).kind), [
     "click", "type", "press_key", "hotkey", "scroll_delta", "drag", "right_click", "double_click",
   ]);
@@ -1634,7 +1741,7 @@ test("an ambiguous exact-window action is durably reconciled without a second de
   assert.equal(body(recovered).result.operationReceipt.status, "uncertain");
   assert.equal(body(recovered).result.effectStatus, "unknown");
   assert.equal(clickDispatches, 1, "same-ID reconciliation observes the exact window but never retries the click");
-  assert.deepEqual(stageActions.map(({ action: value }) => (value as { kind?: string }).kind),
+  assert.deepEqual(stageActions.map(({ action: value }) => (value as { kind?: string }).kind).filter((kind) => kind !== "window_status"),
     ["capture", "click", "capture", "capture"]);
 });
 
@@ -1669,12 +1776,13 @@ test("system actions use the same exact-window route for both provider identitie
       current = body(reply);
     }
   }
-  assert.deepEqual(inputs.filter(({ action }) => action.kind !== "capture").map(({ action }) => action.kind),
+  assert.deepEqual(inputs.filter(({ action }) => action.kind !== "capture" && action.kind !== "window_status").map(({ action }) => action.kind),
     ["window_frame", "invoke_menu", "clipboard_read", "clipboard_write", "window_frame", "invoke_menu", "clipboard_read", "clipboard_write"]);
 });
 
 test("exact app-window capabilities expose supported right and double clicks without claiming middle click", async (t) => {
   const stageActions: Array<{ action: unknown; operationId?: string }> = [];
+  const dispatched = () => stageActions.filter((entry) => (entry.action as { kind?: string }).kind !== "window_status");
   const capture = () => ({
     dataUrl: "data:image/png;base64,eA==",
     width: 200,
@@ -1718,7 +1826,7 @@ test("exact app-window capabilities expose supported right and double clicks wit
     locator: { kind: "element", ref: control.ref, snapshotId: initial.target.revision },
   } }));
   assert.equal(right.result.dispatchStatus, "dispatched");
-  assert.deepEqual(stageActions[1], {
+  assert.deepEqual(dispatched()[1], {
     operationId: "desktop-right-click",
     action: { kind: "right_click", x: 25, y: 25, view: "app" },
   });
@@ -1732,7 +1840,7 @@ test("exact app-window capabilities expose supported right and double clicks wit
     locator: { kind: "point", x: 40, y: 50, coordinateSpace: "target-local" },
   } }));
   assert.equal(doubled.result.dispatchStatus, "dispatched");
-  assert.deepEqual(stageActions[2], {
+  assert.deepEqual(dispatched()[2], {
     operationId: "desktop-double-click",
     action: { kind: "double_click", x: 40, y: 50, view: "app" },
   });
@@ -1747,7 +1855,7 @@ test("exact app-window capabilities expose supported right and double clicks wit
   } });
   assert.equal(middle.isError, true);
   assert.equal(body(middle).result.error.code, "unsupported-target-capability");
-  assert.equal(stageActions.length, 3, "unsupported middle clicks never reach the native stage broker");
+  assert.equal(dispatched().length, 3, "unsupported middle clicks never reach the native stage broker");
 
   const desktop = body(await h.call("m9r_computer_observe", {
     token: TOKEN_A, target: "desktop", taskId: "T903", mode: "owner-preview",

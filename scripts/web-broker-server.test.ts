@@ -20,6 +20,13 @@ import { webExtensionAllowlist, WEB_EXTENSION_ID } from "@/lib/native/web-setup-
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<ToolResult> }> };
 
+// Owner-directed, 2026-10-17: the browser extension route (WEB_EXTENSION_ROUTE_ENABLED in
+// mcp-server.ts) is deliberately disabled -- an agent chose it over the OS-level native route and
+// stalled a real task. These tests exercise extension-specific plumbing (tab claims, stop-all,
+// Done-notice/overlay confirmation, the extension socket handshake) that is now unreachable from
+// the MCP surface. Skipped, not deleted, so they're ready the moment that flag flips back on.
+const WEB_EXTENSION_SKIP = "The browser extension route is deliberately disabled (mcp-server.ts WEB_EXTENSION_ROUTE_ENABLED); this plumbing is unreachable from the MCP surface.";
+
 test("agent message receipts distinguish full goals and results respect the receiving session", () => {
   const root = mkdtempSync(join(process.cwd(), ".workcache", "m9r-message-scope-"));
   const store = createLocalStore(root);
@@ -224,6 +231,19 @@ test("owner broker atomically claims a native inbox task for one session", async
     assert.equal(right.ok, true);
     assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, "diagnosis complete");
   } finally { await ctx.done(); }
+});
+
+test("native pre-dispatch refusals survive the broker transport as not-dispatched", async () => {
+  const { DesktopInputNotDispatchedError } = await import("../src/lib/native/desktop-input-errors");
+  const key = randomBytes(32).toString("hex");
+  const broker = await startWebBroker({ key, port: 0, taskStages: { prepare: async () => ({}), act: async () => { throw new DesktopInputNotDispatchedError("No input was sent."); } } });
+  try {
+    const response = await fetch(`http://127.0.0.1:${broker.port}/web/stage/action`, { method: "POST", headers: { "content-type": "application/json", "x-m9r-key": key },
+      body: JSON.stringify({ token: "session-token", taskId: "T1", operationId: "refused-op", action: { kind: "type", text: "hello" } }) });
+    const body = await response.json();
+    assert.equal(body.dispatchState, "not-dispatched");
+    assert.equal(body.code, "desktop-input-not-dispatched");
+  } finally { await broker.close(); }
 });
 
 test("task stage preparation requires the broker key and refuses browser origins and extra control fields", async () => {
@@ -489,7 +509,7 @@ const until = async (check: () => boolean) => {
   assert.ok(check(), "condition was not met in time");
 };
 
-test("the local /cmd path auto-admits a first-contact local agent instead of blocking it forever", async () => {
+test("the local /cmd path auto-admits a first-contact local agent instead of blocking it forever", { skip: WEB_EXTENSION_SKIP }, async () => {
   // LOCAL_AWARE_ROOM_ID is the single-machine ledger: only the owner's own configured agents
   // (claude/codex/opencode, all started by this same broker) ever reach this endpoint -- real
   // cross-machine guests go through the separate Supabase /api/rooms join/admit flow, which
@@ -522,7 +542,7 @@ test("the local /cmd path auto-admits a first-contact local agent instead of blo
 // web-broker-server.ts's /cmd handler. The five tests that lived here asserted the removed
 // behavior directly and were deleted rather than left red.
 
-test("an MCP tool call travels through the broker to the extension and back", async () => {
+test("an MCP tool call travels through the broker to the extension and back", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true });
   const issued = await t.issueIdentity("claude", "claude-code", "s1");
   const { ws, received } = await t.connectExtension();
@@ -542,7 +562,7 @@ test("an MCP tool call travels through the broker to the extension and back", as
   await t.done();
 });
 
-test("owner web feed is authenticated and m9r_send publishes only a bounded sender-session notice", async () => {
+test("owner web feed is authenticated and m9r_send publishes only a bounded sender-session notice", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true });
   try {
     const identity = await t.issueIdentity("claude", "claude-code", "web-feed-session");
@@ -603,7 +623,7 @@ test("room m9r_send works for local agents with no admission step, and the autho
   }
 });
 
-test("a native agent's Stop hook (markDone) notices every tab it is tracked on as finished", async () => {
+test("a native agent's Stop hook (markDone) notices every tab it is tracked on as finished", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true });
   try {
     const sessionId = "native-session-1";
@@ -630,7 +650,7 @@ test("a native agent's Stop hook (markDone) notices every tab it is tracked on a
   }
 });
 
-test("Done notices are scoped to the exact provider session, not every session with the same agent name", async () => {
+test("Done notices are scoped to the exact provider session, not every session with the same agent name", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true });
   try {
     const firstSessionId = "native-session-one";
@@ -665,7 +685,7 @@ test("Done notices are scoped to the exact provider session, not every session w
   }
 });
 
-test("Done is not reported successful when the extension never confirms that the overlay rendered it", async () => {
+test("Done is not reported successful when the extension never confirms that the overlay rendered it", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true });
   try {
     const sessionId = "no-render-ack-session";
@@ -685,7 +705,7 @@ test("Done is not reported successful when the extension never confirms that the
   }
 });
 
-test("the real native Stop-hook request waits until the browser receives its Done notice", async () => {
+test("the real native Stop-hook request waits until the browser receives its Done notice", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true });
   try {
     const identity = await t.issueIdentity("codex", "codex", "native-stop-session");
@@ -716,7 +736,7 @@ test("the real native Stop-hook request waits until the browser receives its Don
   }
 });
 
-test("authorized extension stop-all blocks subsequent agent actions and appears in the local feed", async () => {
+test("authorized extension stop-all blocks subsequent agent actions and appears in the local feed", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true });
   try {
     const identity = await t.issueIdentity("claude", "claude-code", "stop-session");
@@ -734,7 +754,7 @@ test("authorized extension stop-all blocks subsequent agent actions and appears 
   }
 });
 
-test("through the whole stack, a second agent waits for the current tab writer", async () => {
+test("through the whole stack, a second agent waits for the current tab writer", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true });
   const claude = await t.issueIdentity("claude", "claude-code", "s1");
   const codex = await t.issueIdentity("codex", "codex", "s2");
@@ -755,7 +775,7 @@ test("through the whole stack, a second agent waits for the current tab writer",
   await t.done();
 });
 
-test("the MCP surface permits concurrent field claims and queues a duplicate field", async () => {
+test("the MCP surface permits concurrent field claims and queues a duplicate field", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true });
   const claude = await t.issueIdentity("claude", "claude-code", "field-1");
   const codex = await t.issueIdentity("codex", "codex", "field-2");
@@ -781,7 +801,7 @@ test("the MCP surface permits concurrent field claims and queues a duplicate fie
   await t.done();
 });
 
-test("risky actions wait for authenticated owner approval and audit requested/approved", async () => {
+test("risky actions wait for authenticated owner approval and audit requested/approved", { skip: WEB_EXTENSION_SKIP }, async () => {
   const authority = createWebAuthority({ ownerId: "alice" });
   const t = await setup({ allowAnyExtension: true, authority, requestTimeoutMs: 5_000 });
   try {
@@ -819,7 +839,7 @@ test("risky actions wait for authenticated owner approval and audit requested/ap
   }
 });
 
-test("risky action denial and timeout are terminal and produce audit entries without dispatch", async () => {
+test("risky action denial and timeout are terminal and produce audit entries without dispatch", { skip: WEB_EXTENSION_SKIP }, async () => {
   const authority = createWebAuthority({ ownerId: "alice" });
   // Keep enough time for the owner-side HTTP poll under parallel test load;
   // the old 100ms deadline could expire before the denial endpoint was hit.
@@ -864,7 +884,7 @@ test("risky action denial and timeout are terminal and produce audit entries wit
   }
 });
 
-test("with no extension connected the tool reports it instead of hanging", async () => {
+test("with no extension connected the tool reports it instead of hanging", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup();
   const issued = await t.issueIdentity("claude", "claude-code", "s1");
   const result = await t.call("m9r_web_read", { token: issued.token });
@@ -960,7 +980,7 @@ test("a failed shutdown drain leaves health available for an authenticated retry
   }
 });
 
-test("a command waits for the extension ready handshake before dispatching", async () => {
+test("a command waits for the extension ready handshake before dispatching", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true, extensionConnectTimeoutMs: 500 });
   try {
     const issued = await t.issueIdentity("claude", "claude-code", "startup");
@@ -977,7 +997,7 @@ test("a command waits for the extension ready handshake before dispatching", asy
   }
 });
 
-test("a bad token is refused before anything reaches the broker", async () => {
+test("a bad token is refused before anything reaches the broker", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup();
   await assert.rejects(t.call("m9r_web_read", { token: "not-a-token" }), /token is malformed/);
   await t.done();
@@ -1005,7 +1025,7 @@ test("only a browser extension origin may open the extension socket, and an allo
   await strict.done();
 });
 
-test("a new extension connection replaces the old one, and commands go to the new one", async () => {
+test("a new extension connection replaces the old one, and commands go to the new one", { skip: WEB_EXTENSION_SKIP }, async () => {
   const t = await setup({ allowAnyExtension: true });
     const issued = await t.issueIdentity("claude", "claude-code", "s1");
   const first = await t.connectExtension();

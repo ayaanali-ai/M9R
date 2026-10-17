@@ -81,3 +81,10 @@ test("mention detection finds the @handle being typed at the caret and nothing i
   assert.equal(mentionAt("hello", 5), null);
   assert.equal(mentionAt("@claude hi", 10), null, "a finished mention followed by text is not being typed");
 });
+
+test("pill uses the durable host color rather than a provider constant", () => {
+  State.apply({ agents: [{ handle: "color-test", provider: "codex", state: "idle", activity: [], color: "#123ABC" }], approvals: [], thread: [] });
+  assert.equal(State.tasks.find((agent) => agent.name === "color-test")?.color, "#123ABC");
+  State.apply({ agents: [{ handle: "color-test", provider: "codex", state: "idle", activity: [], color: "red;position:fixed" }], approvals: [], thread: [] });
+  assert.equal(State.tasks[0]?.color, "#7AA2F7", "invalid wire colors cannot enter inline styles");
+});
