@@ -106,3 +106,8 @@ test("explicit app view targets the selected window while remaining in owner-pre
   assert.deepEqual(calls, ["app capture", "app click", "app type"]);
   assert.throws(() => parseTaskStageAction({ kind: "capture", view: "other-user-window" }), /Invalid stage action view/);
 });
+test("window placement accepts signed screen origins without allowing negative click coordinates", () => {
+  assert.deepEqual(parseTaskStageAction({ kind: "window_frame", view: "app", x: -1200, y: -80, width: 800, height: 600 }),
+    { kind: "window_frame", view: "app", x: -1200, y: -80, width: 800, height: 600 });
+  assert.throws(() => parseTaskStageAction({ kind: "click", x: -1, y: 0 }), /coordinates/);
+});

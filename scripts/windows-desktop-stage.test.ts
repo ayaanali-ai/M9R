@@ -8,6 +8,16 @@ const stageDesktop = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
 const createdDesktop = "4fc4701b-6c3e-46d1-bba1-e99d993a28a2";
 const ownerDesktop = "c0999999-87d4-4f8b-9fd1-48bc9d8c14ae";
 
+test("an exact HWND cannot be claimed by two stages", async () => withRoot(async (root) => {
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => ({
+    ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: stageDesktop, onCurrentDesktop: true },
+  }) });
+  await manager.register("first", "123", "456");
+  await assert.rejects(manager.register("second", "123", "456"), /already claimed/i);
+  assert.equal(manager.list().length, 1);
+  await manager.register("first", "123", "456");
+}));
+
 test("shell point inspection and invocation preserve exact control identity without global input", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const control = { label: "Start", pid: 123, windowPid: 123, windowId: "456", rect: { x: 0, y: 0, width: 50, height: 50 }, invoked: false };
