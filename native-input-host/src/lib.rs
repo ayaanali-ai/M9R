@@ -3,6 +3,33 @@ use std::io::{self, Read, Write};
 
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
+#[cfg(test)]
+mod pointer_restore_regressions {
+    use super::virtual_desktop::with_owner_pointer_restored;
+    use std::cell::Cell;
+
+    #[test]
+    fn restores_pointer_after_success_and_failure() {
+        for fail in [false, true] {
+            let restored = Cell::new(None);
+            let result = with_owner_pointer_restored(|| Ok((15, -20)), |x, y| { restored.set(Some((x, y))); Ok(()) },
+                || if fail { Err("dispatch failed") } else { Ok(()) });
+            assert_eq!(restored.get(), Some((15, -20)));
+            assert_eq!(result.is_err(), fail);
+        }
+    }
+
+    #[test]
+    fn active_owner_use_prevents_input() {
+        let reads = Cell::new(0);
+        let dispatched = Cell::new(false);
+        let result = with_owner_pointer_restored(|| { reads.set(reads.get() + 1); Ok((reads.get(), 0)) },
+            |_, _| panic!("owner motion must not be overwritten"), || { dispatched.set(true); Ok(()) });
+        assert!(result.is_err());
+        assert!(!dispatched.get());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClickRequest {
     pub request_id: String,
