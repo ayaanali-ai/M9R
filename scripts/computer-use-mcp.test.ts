@@ -309,6 +309,34 @@ test("explicit visual observation requests one exact app-window screenshot", asy
   assert.equal(observed.observation.capture.accessibilityStatus, "complete");
 });
 
+for (const semanticAction of ["expand", "toggle", "select"]) test(`native ${semanticAction} controls advertise and dispatch semantic clicks`, async (t) => {
+  const calls: string[] = [];
+  const structure = { status: "complete", capturedAt: new Date().toISOString(), elements: [
+    { ref: "snapshot:action", role: "TreeItem", label: "Safe control", enabled: true, actions: [semanticAction] },
+  ] };
+  const web: WebBrokerClient = {
+    run: async () => ({ ok: false, error: "wrong route" }),
+    prepareTaskStage: async () => ({ ok: true }),
+    taskStageAction: async (_token, _taskId, action) => {
+      const kind = (action as { kind: string }).kind;
+      calls.push(kind);
+      if (kind === "read_structure") return { ok: true, result: structure };
+      return { ok: true, result: { actionExecuted: true, outcome: { status: "confirmed" }, operationReceipt: { status: "applied" } } };
+    },
+  };
+  const h = createHarness(web);
+  t.after(async () => { await h.server.close(); });
+  const observed = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "app-window", taskId: "T906", representation: "structured" }));
+  assert.ok(observed.target.capabilities.includes("input.click.element"));
+  const element = observed.observation.structure.elements[0];
+  const reply = body(await h.call("m9r_computer_action", { token: TOKEN_A, action: {
+    operationId: `semantic-${semanticAction}`, targetId: observed.target.targetId, targetRevision: observed.target.revision,
+    kind: "click", locator: { kind: "element", ref: element.ref, snapshotId: observed.target.revision },
+  } }));
+  assert.equal(reply.result.dispatchStatus, "dispatched");
+  assert.ok(calls.includes("click_element"));
+});
+
 test("desktop field replacement dispatches by fresh UIA element ref, not a derived point", async (t) => {
   const stageActions: Array<{ kind: string; operationId?: string }> = [];
   const structure = { status: "complete", capturedAt: new Date().toISOString(), appName: "notepad.exe", windowTitle: "Untitled",
