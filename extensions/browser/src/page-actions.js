@@ -163,8 +163,25 @@ function m9rPageClickPlan(selector, expectOrigin, expectPathPrefix, requestedX, 
   }
 }
 
-function m9rPageClick(selector, expectOrigin, expectPathPrefix, live) {
+function m9rPageClick(selector, expectOrigin, expectPathPrefix, live, retrying) {
   try {
+    // A newly navigated document can be visible before its controls are attached. Keep
+    // the live route bounded and retry the selector in-page instead of making the agent
+    // spend another turn re-observing a target that was never actually stale.
+    if (live && !retrying && typeof selector === "string" && !selector.startsWith("@m9r-ref:")) {
+      return (async () => {
+        const retryDelays = [40, 80, 160, 320];
+        for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+          try {
+            if (document.querySelector(selector)) return m9rPageClick(selector, expectOrigin, expectPathPrefix, true, true);
+          } catch {
+            return { ok: false, error: "invalid click selector" };
+          }
+          if (attempt < retryDelays.length) await new Promise((resolve) => setTimeout(resolve, retryDelays[attempt]));
+        }
+        return { ok: false, error: "no element matches " + selector };
+      })();
+    }
     let el;
     if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
       const match = /^@m9r-ref:(e[a-f0-9]{24}_\d{1,3})$/.exec(selector);
@@ -283,8 +300,24 @@ function m9rPageClick(selector, expectOrigin, expectPathPrefix, live) {
 
 // With `live`, the text goes in one character at a time (so the owner sees it being typed) and a promise is returned;
 // the typing is capped at about two seconds, after which the rest of the value is set at once.
-function m9rPageType(selector, text, expectOrigin, expectPathPrefix, live) {
+function m9rPageType(selector, text, expectOrigin, expectPathPrefix, live, retrying) {
   try {
+    // Match click's bounded live-target readiness behavior. Snapshot refs remain
+    // strict: a detached ref is stale and must be re-observed, never guessed.
+    if (live && !retrying && typeof selector === "string" && !selector.startsWith("@m9r-ref:")) {
+      return (async () => {
+        const retryDelays = [40, 80, 160, 320];
+        for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+          try {
+            if (document.querySelector(selector)) return m9rPageType(selector, text, expectOrigin, expectPathPrefix, true, true);
+          } catch {
+            return { ok: false, error: "invalid text selector" };
+          }
+          if (attempt < retryDelays.length) await new Promise((resolve) => setTimeout(resolve, retryDelays[attempt]));
+        }
+        return { ok: false, error: "no element matches " + selector };
+      })();
+    }
     let el;
     if (typeof selector === "string" && selector.startsWith("@m9r-ref:")) {
       const match = /^@m9r-ref:(e[a-f0-9]{24}_\d{1,3})$/.exec(selector);

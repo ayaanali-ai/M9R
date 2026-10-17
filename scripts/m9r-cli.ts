@@ -60,7 +60,7 @@ import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
 import { createInterface } from "node:readline/promises";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { isAgentContext, isHumanContext } from "@/lib/native/approval-core";
-import { DEFAULT_BROKER_PORT, brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
+import { DEFAULT_BROKER_PORT, brokerKeyPath } from "@/lib/native/web-broker-paths";
 import { standaloneWebBrokerRuntime } from "@/lib/native/web-broker-runtime";
 import { runWebAuthorityCli } from "@/lib/native/web-authority-cli";
 import { apiKeyLaunchBlock, buildVendorLaunchPlan, type M9rLaunchProfile, type M9rLaunchVendor } from "@/lib/native/vendor-launch-core";
@@ -444,8 +444,14 @@ async function runResidentCli(argv: string[]): Promise<number> {
   let profile: ResidentProfile = checked.profile;
   const controller = new AbortController();
   const stop = () => controller.abort();
+  const drainMessage = (message: unknown) => {
+    if (message && typeof message === "object" && (message as { type?: unknown }).type === "m9r:drain") {
+      controller.abort();
+    }
+  };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  process.on("message", drainMessage);
   process.stdout.write(`Resident ${profile.instanceKey} ready for ${profile.provider} (${profile.executionMode}).\n`);
   await checkBuildFreshness(`resident run --profile ${profileName ?? selectedName}`, { exitOnStale: true });
   try {
@@ -464,6 +470,8 @@ async function runResidentCli(argv: string[]): Promise<number> {
   } finally {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
+    process.removeListener("message", drainMessage);
+    if (typeof process.disconnect === "function" && process.connected) process.disconnect();
   }
 }
 
@@ -743,7 +751,10 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
     launch(profile, onExit) {
       const child = spawn(process.execPath, [process.argv[1], "resident", "run", "--config", configFile, "--profile", profile], {
         cwd: process.cwd(),
-        stdio: "ignore",
+        // Private IPC is the graceful drain path. A resident can finish its
+        // current bounded provider unit before the parent uses termination,
+        // instead of relying on a Windows tree kill that may interrupt work.
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
         windowsHide: true,
       });
       let reported = false;
@@ -754,7 +765,52 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
       };
       child.once("error", () => report(1));
       child.once("exit", report);
-      return { kill: () => { if (!child.killed) child.kill(); } };
+      return {
+        kill: () => { if (!child.killed) child.kill(); },
+        shutdown: () => new Promise<void>((resolveShutdown, rejectShutdown) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            resolveShutdown();
+            return;
+          }
+          let settled = false;
+          let killTimer: NodeJS.Timeout | undefined;
+          const finish = (error?: unknown) => {
+            if (settled) return;
+            settled = true;
+            child.off("exit", onExit);
+            clearTimeout(graceTimer);
+            if (killTimer) clearTimeout(killTimer);
+            if (error) rejectShutdown(error);
+            else resolveShutdown();
+          };
+          const onExit = () => finish();
+          const graceTimer = setTimeout(() => {
+            if (child.exitCode !== null || child.signalCode !== null) {
+              finish();
+              return;
+            }
+            try {
+              if (!child.killed) child.kill();
+            } catch (error) {
+              finish(error);
+              return;
+            }
+            killTimer = setTimeout(() => finish(new Error(`resident ${profile} did not exit after graceful drain`)), 2_000);
+          }, 5_000);
+          child.once("exit", onExit);
+          if (typeof child.send !== "function" || !child.connected) {
+            try { if (!child.killed) child.kill(); } catch (error) { finish(error); }
+            return;
+          }
+          try {
+            child.send({ type: "m9r:drain" }, (error) => {
+              if (error) finish(error);
+            });
+          } catch (error) {
+            finish(error);
+          }
+        }),
+      };
     },
     schedule(callback, delayMs) {
       const timer = setTimeout(callback, delayMs);
@@ -770,7 +826,13 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
       if (state === "failed") process.stderr.write(`[resident-supervisor] profile "${profile}" has FAILED and will not auto-restart -- it exhausted its restart budget. Restart the terminal runtime once the underlying issue is fixed.\n`);
     },
   });
-  const stop = () => supervisor.stop();
+  let stopPromise: Promise<void> | null = null;
+  const stop = () => {
+    stopPromise ??= supervisor.stopGracefully().catch((error) => {
+      process.stderr.write(`[resident-supervisor] graceful drain failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    });
+    return stopPromise;
+  };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   supervisor.start();
@@ -1843,7 +1905,7 @@ async function startManagedBrokerAfterUpdate(target: NonNullable<Awaited<ReturnT
     const liveImage = await readManagedBrokerProcessState(target.brokerPath);
     if (liveImage.processes.length) throw new Error("A broker process is still present but could not be authenticated; refusing to replace its running task.");
   }
-  let currentTask = await inspectLocalBrokerTask(WEB_TASK_NAME);
+  const currentTask = await inspectLocalBrokerTask(WEB_TASK_NAME);
   if (!currentTask || !localBrokerTaskDefinitionOwned(currentTask, target.taskDefinitionHash, target.taskActionHash)) {
     throw new Error("The M9R broker task changed before restart; it was not started.");
   }
@@ -2743,7 +2805,7 @@ async function runWebUninstall(args: string[]): Promise<number> {
     }
     let currentRegistration: string | null;
     try { currentRegistration = await readNativeInputRegistration(registration.key); }
-    catch (error) {
+    catch {
       nativeManifestUnreferenced = false;
       process.stdout.write(`  [KEEP] Could not safely inspect ${registration.browser}'s native-input registration; preserved its manifest.\n`);
       continue;

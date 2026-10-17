@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { createCuaStageDriver as createCuaStageDriverCore, topmostWindowAtScreenPoint, type CuaStageDriverDependencies } from "../src/lib/native/cua-stage-driver";
@@ -70,22 +70,221 @@ test("stage key parsing accepts the case-insensitive names advertised by MCP", (
   assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["ctrl", "l"] }), { kind: "hotkey", keys: ["Ctrl", "l"] });
 });
 
-test("background text refusal is reported without activating the window or retrying through global input", async () => withRoot(async (root) => {
+test("type with mode:\"replace\" actually replaces the field's value instead of silently appending text wherever focus is", async () => withRoot(async (root) => {
+  // Before this fix, replace mode discarded the targeted field entirely and
+  // fell through to the generic append path (type_text) -- the agent was
+  // promised an exact-field replacement and got an append somewhere else,
+  // with no error to reveal the mismatch.
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const state = {
+    pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }],
+    elements: [{ elementToken: "uia:field", enabled: true, role: "Edit", label: "Search", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } }],
+  };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
+  const identity = { handle: "codex", sessionId: "replace-mode-session" };
+  await driver.typeText("stage", "new value", identity, { mode: "replace", x: 30, y: 15 });
+  const setValue = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "set_value")?.value as { args: Record<string, unknown> };
+  assert.ok(setValue, "replace mode calls set_value directly on the exact field, not type_text");
+  assert.equal(setValue.args.value, "new value");
+  assert.equal(setValue.args.element_token, "uia:field");
+  assert.equal(calls.some((call) => call.method === "callTool" && (call.value as { name?: string }).name === "type_text"), false,
+    "replace mode never falls through to the generic append path");
+}));
+
+test("type with mode:\"replace\" refuses when the field at the point does not match the role/label the caller observed", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const state = {
+    pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }],
+    elements: [{ elementToken: "uia:field", enabled: true, role: "Edit", label: "Something else now", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } }],
+  };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
+  const identity = { handle: "codex", sessionId: "replace-mode-mismatch-session" };
+  await assert.rejects(
+    driver.typeText("stage", "new value", identity, { mode: "replace", x: 30, y: 15, expectedRole: "Edit", expectedLabel: "Search" }),
+    /could not be confirmed as the same one/,
+  );
+  assert.equal(calls.some((call) => call.method === "callTool"), false, "no text is sent when the field cannot be confirmed");
+}));
+
+test("semantic app actions use fresh structure and the shared driver primitives", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const state = {
+    pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }],
+    elements: [{ elementToken: "uia:field", enabled: true, role: "Edit", label: "Search", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } }],
+  };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
+  const identity = { handle: "codex", sessionId: "semantic-session" };
+
+  await driver.clickElement("stage", "uia:field", identity, { confirmFocusForeground: true });
+  await driver.replaceElement("stage", "uia:field", "replacement", identity);
+  await driver.windowFrame("stage", 10, 20, 800, 600, identity);
+  await driver.focusWindow("stage", identity, { confirmFocusForeground: true });
+  await driver.invokeMenu("stage", ["Edit", "Select All"], identity);
+  const clipboard = await driver.clipboardRead("stage", true, identity);
+  await driver.clipboardWrite("stage", "replacement", identity);
+
+  const click = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click")?.value as { args: Record<string, unknown> };
+  assert.equal(click.args.delivery_mode, "foreground");
+  const foregroundCalls = calls
+    .filter((call) => call.method === "callTool")
+    .map((call) => (call.value as { name?: string }).name);
+  assert.ok(foregroundCalls.indexOf("bring_to_front") >= 0, "foreground input explicitly activates its exact target window");
+  assert.ok(foregroundCalls.indexOf("bring_to_front") < foregroundCalls.indexOf("click"), "focus is established before foreground click delivery");
+  assert.equal(calls.some((call) => call.method === "setWindowFrame"), true);
+  assert.equal(calls.some((call) => call.method === "invokeMenu"), true);
+  assert.equal(calls.some((call) => call.method === "clipboardRead"), true);
+  assert.equal(calls.some((call) => call.method === "clipboardWrite"), true);
+  assert.deepEqual(clipboard.clipboard, { text: "fixture clipboard" });
+}));
+
+test("click_element resolves a ref whose token prefix changed between the read and the click, by its stable suffix", async () => withRoot(async (root) => {
+  // Empirically confirmed live: the same, completely unchanged control got a
+  // different full elementToken on two back-to-back read_structure calls (the
+  // part before the last ":" changes on every independent getWindowState call;
+  // the part after it, the element's stable tree position, did not). An exact
+  // string match therefore fails for the overwhelming majority of real
+  // click_element calls even though the target control plainly still exists --
+  // this was the actual cause behind every "stale or disabled" click failure.
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  let walk = 0;
+  const driver = createCuaStageDriverCore({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls, windows: [] }) as never,
+    connectRuntime: async (sdk) => {
+      const inner = sdk.CuaDriver.create(undefined);
+      return {
+        driver: {
+          ...inner,
+          async getWindowState(input: Parameters<typeof inner.getWindowState>[0]) {
+            walk += 1;
+            return {
+              pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+              windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }],
+              elements: [{ elementToken: `s${String(walk).padStart(8, "0")}:8`, elementIndex: BigInt(8), depth: 0, enabled: true, role: "Button", label: "Line up", actions: ["click"], frame: { x: 120, y: 70, w: 20, h: 20 } }],
+            };
+          },
+        } as never,
+        processId: 1,
+        close: async () => {},
+      };
+    },
+  });
+  const identity = { handle: "codex", sessionId: "token-drift-session" };
+  const firstReadRef = (await driver.readStructure("stage", identity)).elements[0]!.ref;
+  await driver.clickElement("stage", firstReadRef, identity);
+  const click = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click");
+  assert.ok(click, "the click still executes against the correct control despite its token prefix having changed since the read");
+}));
+
+test("click_element refuses to click a different control that now occupies the same tree position, when expectedRole/expectedLabel are given", async () => withRoot(async (root) => {
+  // The suffix match only proves the control is at the same TREE POSITION as
+  // before, not that it is the SAME control -- if the tree genuinely changed
+  // (a dialog opened, a row was removed) between the read and the click, a
+  // different control can now sit at that exact position. Silently clicking
+  // it would be worse than the old "stale" error it replaced. When the caller
+  // supplies the role/label it actually saw, a position match that doesn't
+  // also match those must be refused, not acted on.
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriverCore({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls, windows: [] }) as never,
+    connectRuntime: async (sdk) => {
+      const inner = sdk.CuaDriver.create(undefined);
+      let walk = 0;
+      return {
+        driver: {
+          ...inner,
+          async getWindowState(input: Parameters<typeof inner.getWindowState>[0]) {
+            walk += 1;
+            // Walk 1 (the read): "Line up" is at tree position 8.
+            // Walk 2 (the click): a DIFFERENT control, "Delete", now occupies position 8.
+            const element = walk === 1
+              ? { elementToken: "s00000001:8", elementIndex: BigInt(8), depth: 0, enabled: true, role: "Button", label: "Line up", actions: ["click"], frame: { x: 120, y: 70, w: 20, h: 20 } }
+              : { elementToken: "s00000002:8", elementIndex: BigInt(8), depth: 0, enabled: true, role: "Button", label: "Delete", actions: ["click"], frame: { x: 120, y: 70, w: 20, h: 20 } };
+            return {
+              pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+              windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }],
+              elements: [element],
+            };
+          },
+        } as never,
+        processId: 1,
+        close: async () => {},
+      };
+    },
+  });
+  const identity = { handle: "codex", sessionId: "wrong-element-session" };
+  const read = await driver.readStructure("stage", identity);
+  const seen = read.elements[0]!;
+  assert.equal(seen.label, "Line up");
+  await assert.rejects(
+    driver.clickElement("stage", seen.ref, identity, { expectedRole: seen.role, expectedLabel: seen.label }),
+    /could not be confirmed as the same control/,
+  );
+  assert.equal(calls.some((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click"), false,
+    "no click is ever sent to the wrong control");
+}));
+
+test("click_element accepts a real driver-reported action string beyond click/invoke/press", async () => withRoot(async (root) => {
+  // Confirmed live against the real Windows driver (WinForms + UI Automation): a
+  // collapsed menu item/tree node/combo box commonly reports only "expand", never
+  // "invoke"/"click"/"press" -- the original click/invoke/press-only regex would
+  // have wrongly refused this real, legitimate click target.
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriverCore({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls, windows: [] }) as never,
+    connectRuntime: async (sdk) => {
+      const inner = sdk.CuaDriver.create(undefined);
+      return {
+        driver: {
+          ...inner,
+          async getWindowState() {
+            return {
+              pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+              windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }],
+              elements: [{ elementToken: "s00000001:8", elementIndex: BigInt(8), depth: 0, enabled: true, role: "MenuItem", label: "System", actions: ["expand"], frame: { x: 120, y: 70, w: 20, h: 20 } }],
+            };
+          },
+        } as never,
+        processId: 1,
+        close: async () => {},
+      };
+    },
+  });
+  const identity = { handle: "codex", sessionId: "expand-only-session" };
+  const ref = (await driver.readStructure("stage", identity)).elements[0]!.ref;
+  await driver.clickElement("stage", ref, identity);
+  const click = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click");
+  assert.ok(click, "an expand-only element is a real, legitimate click target and must not be refused");
+}));
+
+test("background text refusal is retried only through the driver's explicit foreground route", async () => withRoot(async (root) => {
   await registerStage(root, "4567");
   const identity = { handle: "codex", sessionId: "terminal-session" };
   const calls: Array<{ method: string; value?: unknown }> = [];
-  const driverError = new Error("Background delivery is not available for target window class 'CASCADIA_HOSTING_WINDOW_CLASS' on this event kind (text_input).");
+  const refusal = { text: "Background delivery is not available for target window class 'CASCADIA_HOSTING_WINDOW_CLASS' on this event kind (text_input). No text was sent.", images: [], isError: true, errorCode: "background_unavailable", degraded: false, rawJson: "" };
   const state = { pid: 4321, windowId: BigInt(4567), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
     windowBounds: { x: 100, y: 50, width: 400, height: 200 },
     images: [{ mimeType: "image/png", dataBase64: imageData }] };
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state,
-    typeTextError: driverError,
+    callToolResultByName: { type_text: refusal },
   }) as never });
 
   await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity),
-    /Background delivery is not available.*No text was sent.*will not activate the window as a fallback/i);
+    /Background delivery is not available.*No text was sent/i);
   assert.throws(() => parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "foreground" }), /Invalid stage action fields/);
-  assert.equal(calls.some((item) => item.method === "callTool"), false, "background refusal never retries with global foreground input");
+  assert.equal(calls.filter((item) => item.method === "callTool" && (item.value as { name?: string }).name === "type_text").length, 2,
+    "only the driver's explicit foreground retry follows a structured background refusal");
 }));
 
 test("owner-preview clears its remembered app target after background text is refused", async () => withRoot(async (root) => {
@@ -94,9 +293,9 @@ test("owner-preview clears its remembered app target after background text is re
   const calls: Array<{ method: string; value?: unknown }> = [];
   const windows = [{ pid: 4321, windowId: BigInt(windowId), appName: "notepad.exe", title: "Untitled - Notepad",
     bounds: { x: 0, y: 0, width: 1920, height: 1080 }, isOnScreen: true, zIndex: BigInt(1) }];
-  const backgroundError = new Error("Background delivery is not available for target window class 'CASCADIA_HOSTING_WINDOW_CLASS' on this event kind (text_input).");
+  const refusal = { text: "Background delivery is not available for target window class 'CASCADIA_HOSTING_WINDOW_CLASS' on this event kind (text_input). No text was sent.", images: [], isError: true, errorCode: "background_unavailable", degraded: false, rawJson: "" };
   const driver = createCuaStageDriver({ stage: stageDependencies(root),
-    loadSdk: async () => makeSdk({ calls, windows, typeTextError: backgroundError,
+    loadSdk: async () => makeSdk({ calls, windows, callToolResultByName: { type_text: refusal },
       state: { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
         windowBounds: { x: 0, y: 0, width: 1920, height: 1080 }, images: [{ mimeType: "image/png", dataBase64: imageData }] },
     }) as never,
@@ -105,9 +304,9 @@ test("owner-preview clears its remembered app target after background text is re
 
   await driver.captureDesktop("preview", identity);
   await driver.clickDesktop("preview", 0, 0, identity);
-  await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No text was sent.*will not activate the window as a fallback/);
+  await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No text was sent/);
   await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No agent input window is selected yet/);
-  assert.equal(calls.some((call) => call.method === "callTool"), false, "no foreground or generic-input retry is attempted");
+  assert.equal(calls.filter((call) => call.method === "callTool" && (call.value as { name?: string }).name === "type_text").length, 2);
 }));
 
 function withRoot(run: (root: string) => Promise<void>): Promise<void> {
@@ -184,11 +383,13 @@ function makeSdk(options: {
   accessibilityError?: Error;
   typeTextError?: Error;
   callToolResult?: Record<string, unknown>;
+  callToolResultByName?: Record<string, Record<string, unknown>>;
   calls: Array<{ method: string; value?: unknown }>;
 }) {
   const actionResult = options.actionResult ?? { effect: 0, route: 1, summary: "action confirmed" };
   const toolResult = options.toolResult ?? { text: "", images: [], isError: false, degraded: false, rawJson: "", action: actionResult };
   const driver = {
+    async metadata() { options.calls.push({ method: "metadata" }); return { driverVersion: "0.34.0", embedded: false }; },
     async startSession(input: unknown) { options.calls.push({ method: "startSession", value: input }); },
     async setAgentCursorMotion(input: unknown) { options.calls.push({ method: "setAgentCursorMotion", value: input }); return { isError: false }; },
     async getWindowState(input: unknown) {
@@ -234,7 +435,7 @@ function makeSdk(options: {
     async moveCursor(input: unknown) { options.calls.push({ method: "moveCursor", value: input }); return { isError: false }; },
     async callTool(name: string, argumentsJson: string) {
       options.calls.push({ method: "callTool", value: { name, args: JSON.parse(argumentsJson) } });
-      return options.callToolResult ?? { isError: false };
+      return options.callToolResultByName?.[name] ?? options.callToolResult ?? toolResult;
     },
     async getAgentCursorState() {
       options.calls.push({ method: "getAgentCursorState" });
@@ -243,14 +444,12 @@ function makeSdk(options: {
         x?: number; y?: number; target?: { input?: { pid?: number; windowId?: bigint } };
       } | undefined;
       const windowTarget = lastMove?.target?.input;
-      const state = options.state ?? { screenshotWidth: 200, screenshotHeight: 100,
-        windowBounds: { x: 100, y: 50, width: 400, height: 200 } };
-      const bounds = state.windowBounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
-      const screenshotWidth = Number(state.screenshotWidth ?? 200);
-      const screenshotHeight = Number(state.screenshotHeight ?? 100);
-      const position = windowTarget?.pid && bounds
-        ? { x: (bounds.x ?? 0) + (lastMove?.x ?? 0) * (bounds.width ?? screenshotWidth) / screenshotWidth,
-          y: (bounds.y ?? 0) + (lastMove?.y ?? 0) * (bounds.height ?? screenshotHeight) / screenshotHeight }
+      const position = windowTarget?.pid
+        // The typed Cua window target reports its agent cursor in the
+        // window-local screenshot coordinate space. Desktop/shell calls use
+        // desktop coordinates; keep the fixture aligned with the native
+        // contract so scaled captures exercise the real verification path.
+        ? { x: lastMove?.x ?? 42, y: lastMove?.y ?? 24 }
         : { x: lastMove?.x ?? 42, y: lastMove?.y ?? 24 };
       return { isError: false, structuredJson: JSON.stringify(options.cursorState ?? { enabled: true, position }) };
     },
@@ -265,6 +464,13 @@ function makeSdk(options: {
     async typeText(input: unknown) { options.calls.push({ method: "typeText", value: input }); if (options.typeTextError) throw options.typeTextError; return toolResult; },
     async scroll(input: unknown) { options.calls.push({ method: "scroll", value: input }); return toolResult; },
     async drag(input: unknown) { options.calls.push({ method: "drag", value: input }); return toolResult; },
+    async setWindowFrame(input: unknown) { options.calls.push({ method: "setWindowFrame", value: input }); return toolResult; },
+    async invokeMenu(input: unknown) { options.calls.push({ method: "invokeMenu", value: input }); return toolResult; },
+    async clipboardRead(input: unknown) {
+      options.calls.push({ method: "clipboardRead", value: input });
+      return { ...toolResult, structuredJson: JSON.stringify({ text: "fixture clipboard" }) };
+    },
+    async clipboardWrite(input: unknown) { options.calls.push({ method: "clipboardWrite", value: input }); return toolResult; },
     async endSession(input: unknown) { options.calls.push({ method: "endSession", value: input }); },
     async shutdown() { options.calls.push({ method: "shutdown" }); },
   };
@@ -406,10 +612,14 @@ test("uses one bounded exact-window screenshot fallback when accessibility is un
   assert.equal(structure.elements.length, 0);
   assert.equal(structure.fallbackCapture?.dataUrl, `data:image/png;base64,${imageData}`);
   const requests = calls.filter((call) => call.method === "getWindowState").map((call) => call.value as Record<string, unknown>);
-  assert.equal(requests.length, 2);
-  assert.equal(requests[0]!.includeAccessibilityTree, true);
-  assert.equal(requests[1]!.includeAccessibilityTree, false);
-  assert.equal(requests[0]!.windowId, requests[1]!.windowId);
+  // A freshly-opened window's accessibility surface can take a moment to become queryable; this
+  // is retried a bounded number of times before falling back to a plain screenshot, so a
+  // persistent failure produces the retry attempts (tree requested) plus the one final fallback
+  // request (tree not requested) -- never an unbounded loop.
+  assert.equal(requests.length, 4);
+  assert.ok(requests.slice(0, 3).every((request) => request.includeAccessibilityTree === true));
+  assert.equal(requests[3]!.includeAccessibilityTree, false);
+  assert.ok(requests.every((request) => request.windowId === requests[0]!.windowId));
 }));
 
 test("moves and verifies Cua's ghost cursor through the typed exact-window API", async () => withRoot(async (root) => {
@@ -459,25 +669,25 @@ test("owner preview captures the whole current desktop and binds visible cursor 
   assert.equal(desktopCapture.maxImageDimension, 1024);
   assert.equal(calls.some((call) => call.method === "desktopTarget"), false, "the agent cursor never uses the desktop target that warps the real pointer");
   assert.ok(calls.some((call) => call.method === "windowTarget"), "desktop input resolves to one exact HWND");
-  const clickInput = calls.find((call) => call.method === "click")?.value as Record<string, unknown>;
-  assert.equal(clickInput.deliveryMode, 0, "owner-preview routes clicks to the exact window in the background");
+  const clickCall = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click")?.value as { args: Record<string, unknown> };
+  const clickInput = clickCall.args;
+  assert.equal(clickInput.delivery_mode, "background", "owner-preview asks the driver for background delivery first");
   const cursorMove = calls.find((call) => call.method === "moveCursor")?.value as {
     x: number; y: number; target: { input?: { pid?: number; windowId?: bigint } }; session: string;
   };
   assert.deepEqual({ x: cursorMove.x, y: cursorMove.y }, { x: 100, y: 50 }, "screen point maps into the exact window screenshot coordinates");
   assert.deepEqual(cursorMove.target.input, { pid: 4321, windowId: BigInt(windowId) });
   assert.equal(typeof cursorMove.session, "string");
-  const windowTarget = clickInput.target as { input?: { pid?: number; windowId?: bigint } };
-  assert.deepEqual(windowTarget.input, { pid: 4321, windowId: BigInt(windowId) });
-  assert.equal(calls.some((call) => call.method === "callTool"), false, "cursor movement never uses an untyped protocol scope");
-  const clickPosition = clickInput.position as { inner?: { x?: number; y?: number } };
-  assert.deepEqual(clickPosition.inner, { x: 100, y: 50 }, "captured desktop pixels map into exact-window screenshot pixels");
+  assert.deepEqual({ pid: clickInput.pid, window_id: clickInput.window_id }, { pid: 4321, window_id: Number(windowId) });
+  assert.deepEqual({ x: clickInput.x, y: clickInput.y }, { x: 100, y: 50 }, "captured desktop pixels map into exact-window screenshot pixels");
   assert.equal(clickInput.count, 2);
+  assert.equal(calls.some((call) => call.method === "callTool" && (call.value as { name?: string }).name === "move_cursor"), false,
+    "cursor movement never uses the desktop-scoped physical pointer");
   assert.equal(calls.some((call) => call.method === "getWindowState"), true, "background input is bound to a verified window snapshot");
-  const typed = calls.find((call) => call.method === "typeText")?.value as { target?: { input?: unknown } };
-  const hotkey = calls.find((call) => call.method === "hotkey")?.value as { target?: { input?: unknown } };
-  assert.deepEqual(typed.target?.input, { pid: 4321, windowId: BigInt(windowId) });
-  assert.deepEqual(hotkey.target?.input, { pid: 4321, windowId: BigInt(windowId) });
+  const typed = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "type_text")?.value as { args: Record<string, unknown> };
+  const hotkey = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "hotkey")?.value as { args: Record<string, unknown> };
+  assert.deepEqual({ pid: typed.args.pid, window_id: typed.args.window_id }, { pid: 4321, window_id: Number(windowId) });
+  assert.deepEqual({ pid: hotkey.args.pid, window_id: hotkey.args.window_id }, { pid: 4321, window_id: Number(windowId) });
   assert.equal(calls.some((call) => call.method === "capturedPosition"), false, "owner-preview never falls back to foreground desktop click input");
   await driver.shutdown();
 }));
@@ -648,7 +858,7 @@ test("owner-preview does not retain a keyboard target after an unconfirmed backg
   await driver.shutdown();
 }));
 
-test("owner-preview types to a reinspected accessibility field without relying on click focus", async () => withRoot(async (root) => {
+test("owner-preview does not retain a keyboard target after an unconfirmed accessibility click", async () => withRoot(async (root) => {
   await registerOwnerPreview(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const field = { elementToken: "snapshot:field", label: "Text editor", role: "Document", enabled: true,
@@ -664,16 +874,61 @@ test("owner-preview types to a reinspected accessibility field without relying o
   const identity = { handle: "codex", sessionId: "desktop-session" };
   await driver.captureDesktop("preview", identity);
   assert.equal((await driver.clickDesktop("preview", 0, 0, identity)).outcome.status, "suspected-noop");
-  await driver.typeTextDesktop("preview", "hello", identity);
-  const sent = calls.find((call) => call.method === "callTool" && (call.value as { name: string }).name === "set_value")?.value as { args: Record<string, unknown> };
-  assert.equal(sent.args.element_token, "snapshot:field");
-  assert.equal(sent.args.value, "hello");
-  assert.equal(sent.args.pid, 4321);
+  await assert.rejects(() => driver.typeTextDesktop("preview", "hello", identity), /No agent input window is selected yet/);
   assert.equal(calls.some((call) => call.method === "typeText"), false);
-  field.label = "Different editor";
-  await assert.rejects(driver.typeTextDesktop("preview", "must not write", identity), /text field changed/);
-  assert.equal(calls.filter((call) => call.method === "callTool" && (call.value as { name: string }).name === "set_value").length, 1);
+  assert.equal(calls.filter((call) => call.method === "callTool" && (call.value as { name: string }).name === "set_value").length, 0);
   await driver.shutdown();
+}));
+
+test("registered clicks request the full accessibility walk before choosing a deep target", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls,
+    state: {
+      pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+      windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+      elements: [{ elementToken: "snapshot:deep-button", depth: 24, role: "Button", label: "Deep button", enabled: true,
+        frame: { x: 150, y: 75, w: 100, h: 50 }, actions: ["click"] }],
+      images: [{ mimeType: "image/png", dataBase64: imageData }],
+    },
+  }) as never });
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await driver.click("stage", 50, 25, identity);
+  const deepWalk = calls.map((call) => call.value as Record<string, unknown> | undefined)
+    .find((value) => value?.includeScreenshot === true && value?.includeAccessibilityTree === true && value?.maxDepth === 24);
+  assert.equal(deepWalk?.maxElements, 512);
+  const click = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click");
+  assert.equal((click?.value as { args?: { element_token?: string } } | undefined)?.args?.element_token, "snapshot:deep-button");
+}));
+
+test("a later Cua click clears the native child-control selection and malformed state falls back safely", async () => withRoot(async (root) => {
+  const base = stageDependencies(root);
+  const nativeInputCalls: string[] = [];
+  const stage = { ...base, invokeNative: async (request: Record<string, unknown>) => {
+    if (request.op === "input") {
+      nativeInputCalls.push(String(request.kind));
+      return { ok: true, input: { childWindowId: "child-1" } };
+    }
+    return base.invokeNative!(request);
+  } };
+  const manager = createWindowsDesktopStageManager(stage);
+  await manager.register("stage", "4321", windowId);
+  const roomDesktopId = manager.list()[0]!.roomDesktopId;
+  writeFileSync(join(root, `stage-input-${roomDesktopId}.json`), "{not-json", "utf8");
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage, loadSdk: async () => makeSdk({ calls }) as never });
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+
+  await driver.typeText("stage", "safe", identity);
+  assert.deepEqual(nativeInputCalls, [], "corrupt native selection state must not be sent to the native child-control path");
+  assert.equal(calls.some((call) => call.method === "callTool" && (call.value as { name?: string }).name === "type_text"), true);
+
+  await driver.click("stage", 10, 10, identity);
+  assert.deepEqual(nativeInputCalls, ["click"]);
+  await driver.click("stage", 10, 10, identity, { confirmFocusForeground: true });
+  await driver.typeText("stage", "after-cua-click", identity);
+  assert.deepEqual(nativeInputCalls, ["click"], "a later Cua click must not reuse the earlier native child-control selection");
+  assert.equal(existsSync(join(root, `stage-input-${roomDesktopId}.json`)), false);
 }));
 
 test("owner-preview scroll and drag use the exact window under the cursor", async () => withRoot(async (root) => {
@@ -692,9 +947,9 @@ test("owner-preview scroll and drag use the exact window under the cursor", asyn
   await driver.dragDesktop("preview", 0, 0, 0, 0, identity);
 
   for (const method of ["scroll", "drag"]) {
-    const action = calls.find((call) => call.method === method)?.value as { target?: { input?: unknown }; deliveryMode?: number };
-    assert.deepEqual(action.target?.input, { pid: 4321, windowId: BigInt(windowId) });
-    assert.equal(action.deliveryMode, undefined, `${method} does not use a foreground delivery mode`);
+    const action = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === method)?.value as { args: Record<string, unknown> };
+    assert.deepEqual({ pid: action.args.pid, window_id: action.args.window_id }, { pid: 4321, window_id: Number(windowId) });
+    assert.equal(action.args.delivery_mode, "background", `${method} asks the driver for background delivery first`);
   }
   assert.equal(calls.some((call) => call.method === "capturedPosition"), false);
   await driver.shutdown();
@@ -844,17 +1099,63 @@ test("lists only eligible visible app windows and keeps the result local and bou
   assert.equal(calls.filter((call) => call.method === "shutdown").length, 1);
 }));
 
-test("targets click at exact window-local coordinates with background-only delivery", async () => withRoot(async (root) => {
+test("read_structure recovers from a cached connection that died after a successful connect, without retrying twice on every call", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  let instancesCreated = 0;
+  let connectionIsDead = false;
+  const driver = createCuaStageDriverCore({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls }) as never,
+    connectRuntime: async (sdk) => {
+      instancesCreated += 1;
+      const isFirstInstance = instancesCreated === 1;
+      const inner = sdk.CuaDriver.create(undefined);
+      return {
+        driver: {
+          ...inner,
+          async getWindowState(input: Parameters<typeof inner.getWindowState>[0]) {
+            if (isFirstInstance && connectionIsDead) throw new Error("write EPIPE: the connection is gone");
+            return inner.getWindowState(input);
+          },
+        } as never,
+        processId: instancesCreated,
+        close: async () => { calls.push({ method: "shutdown" }); },
+      };
+    },
+  });
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await driver.readStructure("stage", identity);
+  assert.equal(instancesCreated, 1, "the first call connects once and caches the runtime");
+  await driver.readStructure("stage", identity);
+  assert.equal(instancesCreated, 1, "a healthy cached runtime is reused, not reconnected on every call");
+  // The host process crashes, or the pipe drops, sometime after the connection
+  // was already established and cached -- this is the actual bug: without
+  // detecting it, every call for the rest of this broker's life would keep
+  // reusing the now-dead connection and failing, for any app, with no way to
+  // recover short of restarting the whole broker. read_structure never mutates
+  // anything, so it is safe to retry once against a fresh connection rather than
+  // probing liveness on every single access (which was tried and measured to
+  // slow down launch()'s tight window-discovery polling loop enough to blow
+  // through its 70s client timeout -- reacting to a real failure is both safer
+  // and faster than checking for one that usually has not happened).
+  connectionIsDead = true;
+  const recovered = await driver.readStructure("stage", identity);
+  assert.equal(instancesCreated, 2, "a dead cached runtime is detected on real failure and replaced with a fresh one");
+  assert.notEqual(recovered.status, "unavailable", "the retried call succeeds on the freshly reconnected runtime instead of failing outright");
+}));
+
+test("targets click at exact window-local coordinates with driver delivery fallback", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never });
   const proof = await driver.click("stage", 42, 24);
   assert.equal(proof.outcome.status, "confirmed");
   assert.equal(proof.capture.width, 200);
-  const click = calls.find((call) => call.method === "click")?.value as { target: { input: unknown }; position: { inner: unknown }; deliveryMode: number; session: string };
-  assert.deepEqual(click.target.input, { pid: 4321, windowId: BigInt(windowId) });
-  assert.deepEqual(click.position.inner, { x: 42, y: 24 });
-  assert.equal(click.deliveryMode, 0);
+  const click = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click")?.value as { args: Record<string, unknown> };
+  assert.deepEqual({ pid: click.args.pid, window_id: click.args.window_id }, { pid: 4321, window_id: Number(windowId) });
+  assert.deepEqual({ x: click.args.x, y: click.args.y }, { x: 42, y: 24 });
+  assert.equal(click.args.delivery_mode, "background");
   assert.equal(calls.filter((call) => call.method === "getWindowState").length, 3, "the input uses a fresh accessibility hit-test and is followed by a fresh window snapshot");
 }));
 
@@ -870,9 +1171,25 @@ test("click resolves the smallest enabled control in the exact-window snapshot",
     ] };
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
   await driver.click("stage", 42, 24);
-  const click = calls.find((call) => call.method === "click")?.value as { position: { inner: unknown }; deliveryMode: number };
-  assert.deepEqual(click.position.inner, { elementToken: "button" });
-  assert.equal(click.deliveryMode, 0);
+  const click = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click")?.value as { args: Record<string, unknown> };
+  assert.deepEqual(click.args.element_token, "button");
+  assert.equal(click.args.delivery_mode, "background");
+}));
+
+test("middle_click in app view is actually sent as a middle click, not silently downgraded to left", async () => withRoot(async (root) => {
+  // Before this fix, the app-view click mapped any button other than "right"
+  // to "left" -- middle_click was sent to the driver as an ordinary left
+  // click with no error, even though the desktop-wide click already handled
+  // "middle" correctly right next to it.
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true,
+    screenshotWidth: 200, screenshotHeight: 100, windowBounds: { x: 0, y: 0, width: 200, height: 100 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }], elements: [] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
+  await driver.click("stage", 42, 24, undefined, { button: "middle" });
+  const click = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click")?.value as { args: Record<string, unknown> };
+  assert.equal(click.args.button, "middle");
 }));
 
 test("native child input retains exact anchor and screenshot geometry without foreground delivery", async () => withRoot(async (root) => {
@@ -905,13 +1222,38 @@ test("types bounded text to the exact focused window without echoing it in the r
   const secretLikeText = "local-only fixture text";
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never });
   const proof = await driver.typeText("stage", secretLikeText);
-  const request = calls.find((call) => call.method === "typeText")?.value as { text: string; target: { input: unknown } };
-  assert.equal(request.text, secretLikeText);
-  assert.deepEqual(request.target.input, { pid: 4321, windowId: BigInt(windowId) });
+  const request = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "type_text")?.value as { args: Record<string, unknown> };
+  assert.equal(request.args.text, secretLikeText);
+  assert.equal(request.args.delay_ms, 30, "legacy driver typing uses the shared human-paced default");
+  assert.deepEqual({ pid: request.args.pid, window_id: request.args.window_id }, { pid: 4321, window_id: Number(windowId) });
   assert.equal(proof.outcome.status, "confirmed");
   assert.doesNotMatch(JSON.stringify(proof), /local-only fixture text/);
+  await driver.typeText("stage", "foreground", undefined, { confirmFocusForeground: true, delayMs: 45 });
+  const foreground = calls.filter((call) => call.method === "callTool" && (call.value as { name?: string }).name === "type_text").at(-1)?.value as { args: Record<string, unknown> };
+  assert.equal(foreground.args.delivery_mode, "foreground");
+  assert.equal(foreground.args.delay_ms, 45);
   await assert.rejects(() => driver.typeText("stage", ""), /1–500 characters/);
   await assert.rejects(() => driver.typeText("stage", "x".repeat(501)), /1–500 characters/);
+  await assert.rejects(() => driver.typeText("stage", "hello", undefined, { delayMs: 201 }), /Text delay must be a whole number/);
+}));
+
+test("explicit foreground delivery reaches every shared Cua input primitive that exposes it", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never });
+
+  await driver.typeText("stage", "foreground text", undefined, { confirmFocusForeground: true });
+  await driver.pressKey("stage", "Enter", undefined, { confirmFocusForeground: true });
+  await driver.hotkey("stage", ["Ctrl", "A"], undefined, { confirmFocusForeground: true });
+  await driver.scroll("stage", 42, 24, "down", undefined, { confirmFocusForeground: true });
+  await driver.drag("stage", 10, 20, 100, 80, undefined, { confirmFocusForeground: true });
+
+  for (const name of ["type_text", "press_key", "hotkey", "scroll", "drag"]) {
+    const action = calls.filter((call) => call.method === "callTool" && (call.value as { name?: string }).name === name).at(-1)?.value as { args: Record<string, unknown> } | undefined;
+    assert.equal(action?.args.delivery_mode, "foreground", `${name} must use the driver's foreground delivery field when explicitly requested`);
+  }
+  const foregroundActivations = calls.filter((call) => call.method === "callTool" && (call.value as { name?: string }).name === "bring_to_front");
+  assert.equal(foregroundActivations.length, 5, "each foreground input primitive activates its exact target before dispatch");
 }));
 
 test("scroll and drag use window-local screenshot coordinates and validate bounds before dispatch", async () => withRoot(async (root) => {
@@ -919,25 +1261,34 @@ test("scroll and drag use window-local screenshot coordinates and validate bound
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never });
   await driver.scroll("stage", 42, 24, "down");
-  const scroll = calls.find((call) => call.method === "scroll")?.value as { x: number; y: number; direction: number; by: number; amount: bigint; target: { input: unknown } };
-  assert.deepEqual({ x: scroll.x, y: scroll.y, direction: scroll.direction, by: scroll.by, amount: scroll.amount }, { x: 42, y: 24, direction: 1, by: 0, amount: BigInt(3) });
-  assert.deepEqual(scroll.target.input, { pid: 4321, windowId: BigInt(windowId) });
+  const scroll = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "scroll")?.value as { args: Record<string, unknown> };
+  assert.deepEqual({ x: scroll.args.x, y: scroll.args.y, direction: scroll.args.direction, by: scroll.args.by, amount: scroll.args.amount }, { x: 42, y: 24, direction: "down", by: "line", amount: 3 });
+  assert.deepEqual({ pid: scroll.args.pid, window_id: scroll.args.window_id }, { pid: 4321, window_id: Number(windowId) });
   await driver.drag("stage", 10, 20, 100, 80);
-  const drag = calls.find((call) => call.method === "drag")?.value as { fromX: number; fromY: number; toX: number; toY: number; durationMs: bigint; steps: bigint; target: { input: unknown } };
-  assert.deepEqual({ fromX: drag.fromX, fromY: drag.fromY, toX: drag.toX, toY: drag.toY, durationMs: drag.durationMs, steps: drag.steps }, { fromX: 10, fromY: 20, toX: 100, toY: 80, durationMs: BigInt(500), steps: BigInt(10) });
-  assert.deepEqual(drag.target.input, { pid: 4321, windowId: BigInt(windowId) });
-  const callsBeforeInvalid = calls.filter((call) => call.method === "drag").length;
+  const drag = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "drag")?.value as { args: Record<string, unknown> };
+  assert.deepEqual({ from_x: drag.args.from_x, from_y: drag.args.from_y, to_x: drag.args.to_x, to_y: drag.args.to_y, duration_ms: drag.args.duration_ms, steps: drag.args.steps }, { from_x: 10, from_y: 20, to_x: 100, to_y: 80, duration_ms: 500, steps: 10 });
+  assert.deepEqual({ pid: drag.args.pid, window_id: drag.args.window_id }, { pid: 4321, window_id: Number(windowId) });
+  const callsBeforeInvalid = calls.filter((call) => call.method === "callTool" && (call.value as { name?: string }).name === "drag").length;
   await assert.rejects(() => driver.drag("stage", 10, 20, 200, 80), /Both drag points must fall inside/);
-  assert.equal(calls.filter((call) => call.method === "drag").length, callsBeforeInvalid);
+  assert.equal(calls.filter((call) => call.method === "callTool" && (call.value as { name?: string }).name === "drag").length, callsBeforeInvalid);
 }));
 
-test("surfaces a Cua Driver background refusal instead of retrying with foreground input", async () => withRoot(async (root) => {
+test("surfaces a persistent Cua Driver refusal after the bounded foreground retry", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const refusal = { text: "background input is unavailable", images: [], isError: true, errorCode: "background_unavailable", degraded: false, rawJson: "" };
-  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, toolResult: refusal }) as never });
-  await assert.rejects(() => driver.typeText("stage", "sample"), /background input is unavailable/);
-  assert.equal(calls.some((call) => call.method === "click"), false);
+  const foregroundReady = { text: "", images: [], isError: false, degraded: false, rawJson: "", action: { effect: 0, summary: "window foreground" } };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls,
+    callToolResultByName: { bring_to_front: foregroundReady, type_text: refusal },
+  }) as never });
+  const identity = { handle: "codex", sessionId: "cursor-cleanup-session" };
+  await assert.rejects(() => driver.typeText("stage", "sample", identity), /background input is unavailable/);
+  assert.equal(calls.filter((call) => call.method === "callTool" && (call.value as { name?: string }).name === "type_text").length, 2);
+  const cursorStateCalls = calls.filter((call) => call.method === "setAgentCursorEnabled");
+  const lastCursorState = cursorStateCalls.at(-1)?.value as { session?: string; enabled?: boolean };
+  assert.equal(lastCursorState.enabled, false, "a failed action leaves the agent cursor in a deliberate hidden state");
+  assert.match(lastCursorState.session ?? "", /^@codex-/);
+  await driver.shutdown();
   assert.ok(calls.some((call) => call.method === "shutdown"));
 }));
 

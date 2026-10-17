@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { renameStateFile } from "../src/lib/native/atomic-file";
 import { createLocalStore } from "../src/lib/native/local-store";
-import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
+import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode, TASK_STAGE_POLICY_FILE } from "../src/lib/native/task-desktop-stage";
 import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
 import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageWindowMatchesApp, type StageAppLaunchSpec } from "../src/lib/native/task-stage-apps";
 import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT } from "../src/lib/native/windows-installed-apps";
@@ -20,6 +20,9 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   let creations = 0;
   const desktopActions: Array<{ kind: string; x?: number; y?: number }> = [];
   const currentDesktopId = "33333333-3333-4333-8333-333333333333";
+  // Lets a test swap in a different "inspect" native response after setup,
+  // without touching every other test's default always-fresh behavior.
+  let inspectOverride: (() => { ok: false; error: string } | { ok: true; window: { pid: number; windowId: string; desktopId: string; onCurrentDesktop: boolean } }) | undefined;
   const previewCapture = { dataUrl: "data:image/png;base64,eA==", width: 1280, height: 720, capturedAt: new Date(0).toISOString() };
   const driver = {
     capture: async () => previewCapture,
@@ -39,11 +42,13 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
       }
       if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: String(request.desktopId) === currentDesktopId } };
       if (request.op === "presentOwnerWindow") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } };
-      if (request.op === "inspect") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } };
+      if (request.op === "inspect") return inspectOverride?.() ?? { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } };
       throw new Error("Unexpected native operation; preparation must not move or activate windows.");
     },
   } });
-  return { root, store, identity, task, service, driver, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, store, identity, task, service, driver, creations: () => creations, desktopActions,
+    setInspectOverride: (fn: typeof inspectOverride) => { inspectOverride = fn; },
+    cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("state file replacement retries transient Windows sharing errors, but surfaces persistent failures", () => {
@@ -232,11 +237,94 @@ test("an owner desktop app request reuses personal Chrome without creating anoth
     await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "desktop" }, "owner-preview");
     assert.equal(f.desktopActions.length, 1);
     await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview");
+    // A real agent session naturally issues a fresh taskId for a follow-up request even
+    // when continuing the exact same piece of work. The stage (one per identity/session,
+    // see authorize()) already has a selected app; a new task in the *same* session
+    // continues using it rather than being rejected for not being the exact task that
+    // originally selected it.
     const next = f.store.addTask({ from: "you", to: "codex", goal: "Next app task", origin: "human_typed", targetSession: "session-one", idempotencyKey: "next-app" }).task;
-    assert.equal((await f.service.prepare(f.identity.token, next.id, "owner-preview")).hasAnchor, false);
-    await assert.rejects(f.service.act(f.identity.token, next.id, { kind: "capture", view: "app" }, "owner-preview"), /selected app/);
+    assert.equal((await f.service.prepare(f.identity.token, next.id, "owner-preview")).hasAnchor, true, "a new task in the same session continues using the already-selected app");
+    await f.service.act(f.identity.token, next.id, { kind: "capture", view: "app" }, "owner-preview");
+    // The reuse check previously only ran for background-mode launches --
+    // owner-preview launch() skipped it entirely, so a follow-up launch of the
+    // same app under a new taskId (the normal case for a continuing session)
+    // always opened a second window instead of reusing the one already open.
+    const relaunched = await f.service.launch(f.identity.token, next.id, "chrome");
+    assert.equal(relaunched.running, true, "launch() of the same already-running app under a new taskId reuses it instead of opening a duplicate");
     assert.equal(f.creations(), 0, "launch without an explicit background mode must not create a desktop or process");
   } finally { f.cleanup(); }
+});
+
+test("a stage launch operation id prevents a lost response from launching or adopting twice", async () => {
+  const f = fixture(true, (root, appId) => {
+    assert.equal(appId, "chrome");
+    return { executable: join(root, "chrome.exe"), args: [] };
+  });
+  try {
+    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Personal Chrome", width: 1280, height: 720 }];
+    const first = await f.service.launch(f.identity.token, f.task.id, "chrome", "owner-preview", "mcp-test:launch-1");
+    const replay = await f.service.launch(f.identity.token, f.task.id, "chrome", "owner-preview", "mcp-test:launch-1");
+    assert.equal(first.reused, true);
+    assert.equal(first.operationReceipt?.status, "applied");
+    assert.equal(replay.operationReceipt?.status, "already_applied");
+    assert.equal(replay.actionExecuted, false);
+    assert.equal(f.creations(), 0);
+  } finally { f.cleanup(); }
+});
+
+test("background launch adopts a delegated window after its launcher exits and a fresh service recovers it", async () => {
+  const root = mkdtempSync(join(process.cwd(), ".m9r-stage-handoff-"));
+  const store = createLocalStore(root);
+  const identity = store.issueIdentity("codex", "codex", "session-handoff");
+  const { task } = store.addTask({ from: "you", to: "codex", goal: "Launch a hand-off app", origin: "human_typed", idempotencyKey: "handoff-launch", targetSession: "session-handoff" });
+  const stageDesktop = "11111111-1111-4111-8111-111111111111";
+  const ownerDesktop = "22222222-2222-4222-8222-222222222222";
+  let visibleCalls = 0;
+  const delegatedWindow = { pid: 9876, windowId: "8765", appName: "node.exe", title: "Delegated app", width: 900, height: 700 };
+  const previewCapture = { dataUrl: "data:image/png;base64,eA==", width: 900, height: 700, capturedAt: new Date(0).toISOString() };
+  const fakeDriver = {
+    listVisibleWindows: async () => {
+      visibleCalls += 1;
+      if (visibleCalls === 1) return [];
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return [delegatedWindow];
+    },
+    capture: async () => previewCapture,
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const stage = {
+    platform: "win32" as const, env: {},
+    invokeNative: async (request: Record<string, unknown>) => {
+      if (request.op === "createDesktop") return { ok: true as const, desktop: { desktopId: stageDesktop, isCurrent: false, returnDesktopId: ownerDesktop } };
+      if (request.op === "inspectDesktop") return { ok: true as const, desktop: { desktopId: String(request.desktopId), isCurrent: false } };
+      if (request.op === "listOwnedWindows") return { ok: true as const, windows: [] };
+      if (request.op === "showAndMoveOwnedWindow" || request.op === "showOwnedWindow") {
+        return { ok: true as const, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: stageDesktop, onCurrentDesktop: false } };
+      }
+      if (request.op === "inspect") {
+        return { ok: true as const, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: stageDesktop, onCurrentDesktop: false } };
+      }
+      throw new Error(`Unexpected native operation in hand-off fixture: ${String(request.op)}`);
+    },
+  };
+  const createService = () => createTaskDesktopStageService({
+    store,
+    driver: fakeDriver,
+    stage,
+    readPolicy: () => ({ handles: ["codex"], controlHandles: ["codex"] }),
+    resolveStageAppForTest: () => ({ executable: process.execPath, args: ["-e", ""] }),
+  });
+  try {
+    const first = createService();
+    await first.prepare(identity.token, task.id, "background");
+    const launched = await first.launch(identity.token, task.id, "handoff-app", "background");
+    assert.equal(launched.running, true, "a delegated window is sufficient ownership proof after the launcher exits");
+    assert.equal(launched.appId, "handoff-app");
+
+    const reloaded = createService();
+    await reloaded.prepare(identity.token, task.id, "background");
+    const recovered = await reloaded.act(identity.token, task.id, { kind: "capture", view: "app" }, "background");
+    assert.deepEqual((recovered as { capture?: unknown }).capture, previewCapture, "a fresh broker must recover the selected window from the durable registry anchor");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("invalid stage modes fail closed instead of becoming background mode", async () => {
@@ -306,6 +394,30 @@ test("pending and finished tasks cannot provision stages", async () => {
     f.store.setResult(f.task.id, "Done");
     await assert.rejects(f.service.prepare(f.identity.token, f.task.id), /approved, unfinished/);
     assert.equal(f.creations(), 0);
+  } finally { f.cleanup(); }
+});
+
+test("a stale permission lock from a killed process self-heals; a genuinely fresh one still blocks", async () => {
+  // Before this fix, a lock directory with no PID, no age limit, and no
+  // staleness check meant a process killed while holding it (a forced
+  // broker restart, in particular -- this happened many times in one real
+  // session) permanently broke every future permission change until a human
+  // deleted the lock directory by hand, with only a raw EEXIST to show for it.
+  const f = fixture();
+  try {
+    const lock = join(f.root, `${TASK_STAGE_POLICY_FILE}.lock`);
+    mkdirSync(lock);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    // A 60-second-old lock is self-healed: the permission change still succeeds.
+    setTaskStagePermission(f.root, "codex", true, { terminal: true, env: {} });
+    assert.deepEqual(readTaskStagePolicy(f.root), { handles: ["codex"] });
+
+    mkdirSync(lock);
+    // A genuinely fresh lock (just created, well under the staleness window)
+    // still correctly blocks -- this is not a blanket bypass of the lock.
+    assert.throws(() => setTaskStagePermission(f.root, "codex", false, { terminal: true, env: {} }), /already running/);
+    rmSync(lock, { recursive: true, force: true });
   } finally { f.cleanup(); }
 });
 
@@ -427,6 +539,103 @@ test("revoking control while the owner decides stops the click even after approv
     await assert.rejects(pending, /revoked/);
     assert.equal(f.clicks.length, 0, "a revoked agent must not click even with an approval in flight");
   } finally { f.cleanup(); }
+});
+
+test("act() recovery relaunches only when the window is genuinely gone, not on other inspection failures", async () => {
+  const f = fixture(true, (root, appId) => {
+    assert.equal(appId, "chrome");
+    return { executable: join(root, "chrome.exe"), args: [] };
+  });
+  try {
+    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Personal Chrome", width: 1280, height: 720 }];
+    await f.service.launch(f.identity.token, f.task.id, "chrome");
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+
+    // A genuinely closed/gone window ("anchor is unavailable") must still trigger
+    // the existing one-shot relaunch-and-retry recovery.
+    let failOnce = true;
+    f.setInspectOverride(() => {
+      if (failOnce) { failOnce = false; return { ok: false, error: "window closed" }; }
+      return { ok: true, window: { pid: 123, windowId: "456", desktopId: "33333333-3333-4333-8333-333333333333", onCurrentDesktop: true } };
+    });
+    const recovered = await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview");
+    assert.ok(recovered, "a genuinely closed window must still recover via the existing relaunch path");
+
+    // An anchor that simply resolved to a different desktop ("anchor moved to
+    // another desktop") is NOT a closed window -- relaunching here would leave a
+    // needless second instance running alongside a window that is still alive.
+    f.setInspectOverride(() => ({ ok: true, window: { pid: 123, windowId: "456", desktopId: "99999999-9999-4999-8999-999999999999", onCurrentDesktop: false } }));
+    const creationsBefore = f.creations();
+    await assert.rejects(
+      f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview"),
+      /anchor moved to another desktop/,
+    );
+    assert.equal(f.creations(), creationsBefore, "a non-'gone' inspection failure must not trigger a relaunch");
+  } finally { f.cleanup(); }
+});
+
+test("one agent session's long owner-approval wait does not block a different session's action", async () => {
+  // Two different sessions under the same handle get two different stage names
+  // (name = hash(handle, sessionId)); before the per-stage queue fix, both shared
+  // one broker-wide queue, so session B's benign click would have waited behind
+  // session A's up-to-55s money-gate approval hold.
+  const root = mkdtempSync(join(tmpdir(), "m9r-stage-concurrency-"));
+  const store = createLocalStore(root);
+  const identityA = store.issueIdentity("codex", "codex", "session-a");
+  const identityB = store.issueIdentity("codex", "codex", "session-b");
+  const { task: taskA } = store.addTask({ from: "you", to: "codex", goal: "Use a stage", origin: "human_typed", idempotencyKey: "concurrency-a", targetSession: "session-a" });
+  const { task: taskB } = store.addTask({ from: "you", to: "codex", goal: "Use a stage", origin: "human_typed", idempotencyKey: "concurrency-b", targetSession: "session-b" });
+  const clicks: Array<{ x: number; y: number }> = [];
+  const release: { current: (() => void) | null } = { current: null };
+  const seen: StageApprovalRequest[] = [];
+  const fakeDriver = {
+    // An undescribed target fails closed and also holds for approval (by design --
+    // see "an undescribed click target holds for the owner instead of guessing"),
+    // so session B's target must be explicitly described as benign, not merely omitted.
+    describeTarget: async (_name: string, x: number) => (x === 1 ? { label: "Pay now" } : { label: "Next" }),
+    click: async (_name: string, x: number, y: number) => {
+      clicks.push({ x, y });
+      return { capture: { dataUrl: "data:image/png;base64,x", width: 8, height: 8, capturedAt: new Date(0).toISOString() }, outcome: { status: "confirmed" as const } };
+    },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  let desktopCounter = 0;
+  const service = createTaskDesktopStageService({
+    store,
+    readPolicy: () => ({ handles: ["codex"], controlHandles: ["codex"] }),
+    stage: {
+      platform: "win32", env: {}, invokeNative: async (request) => {
+        if (request.op === "createDesktop") {
+          desktopCounter += 1;
+          return { ok: true, desktop: { desktopId: `1111111${desktopCounter}-1111-4111-8111-111111111111`, isCurrent: false, returnDesktopId: "22222222-2222-4222-8222-222222222222" } };
+        }
+        if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: false } };
+        throw new Error(`Unexpected native operation in concurrency fixture: ${request.op}`);
+      },
+    },
+    driver: fakeDriver,
+    approvals: () => ({
+      requestApproval: async (request: StageApprovalRequest) => {
+        seen.push(request);
+        await new Promise<void>((resolve) => { release.current = resolve; });
+        return true;
+      },
+    }),
+  });
+  try {
+    await service.prepare(identityA.token, taskA.id, "background");
+    await service.prepare(identityB.token, taskB.id, "background");
+    const held = service.act(identityA.token, taskA.id, { kind: "click", x: 1, y: 1 }, "background");
+    for (let i = 0; i < 200 && seen.length === 0; i += 1) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(seen.length, 1, "session A's money click must be waiting on the owner");
+    // Session B's benign click must complete without waiting on session A's hold.
+    const started = Date.now();
+    await service.act(identityB.token, taskB.id, { kind: "click", x: 2, y: 2 }, "background");
+    assert.ok(Date.now() - started < 2_000, "session B's action must not queue behind session A's pending approval");
+    assert.deepEqual(clicks, [{ x: 2, y: 2 }]);
+    release.current?.();
+    await held;
+    assert.deepEqual(clicks, [{ x: 2, y: 2 }, { x: 1, y: 1 }]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("enabled agents use any installed app; legacy access modes do not restore per-app gates", async () => {

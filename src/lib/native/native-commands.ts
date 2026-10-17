@@ -44,7 +44,7 @@ import { isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
 import { USER_STEPS } from "./onboarding-steps";
-import { readRuntimeBuildId } from "./runtime-build-identity";
+import { readRuntimeBuildId, readRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
 
 export interface NativeIo {
   env: Record<string, string | undefined>;
@@ -87,7 +87,28 @@ export const registryAutostart: Autostart = {
 const autostartOf = (io: NativeIo): Autostart => io.autostart ?? registryAutostart;
 
 type Kind = "hooks-json" | "markdown-block" | "mcp-json" | "mcp-toml";
-interface Manifest { version: 1; installedAt: string; entries: Array<ManifestEntry & { kind: Kind }>; /** Bundled runtimes installed by M9R, including retired images retained by still-running agent sessions. */ runtimeFiles?: string[]; /** M9R starts when you sign in to Windows (removed on uninstall). */ autostart?: boolean }
+interface ActiveRuntimeManifest {
+  schemaVersion: 1;
+  buildId: string;
+  sourceCommit: string;
+  sourceDirty: boolean;
+  installedRoot: string;
+  stateRoot: string;
+  installedAt: string;
+  /** Present only when setup was invoked with a known project root. */
+  sourceRoot?: string;
+}
+interface Manifest {
+  version: 1;
+  installedAt: string;
+  entries: Array<ManifestEntry & { kind: Kind }>;
+  /** Bundled runtimes installed by M9R, including retired images retained by still-running agent sessions. */
+  runtimeFiles?: string[];
+  /** M9R starts when you sign in to Windows (removed on uninstall). */
+  autostart?: boolean;
+  /** Source-owned identity of the runtime image currently installed in the stable bin folder. */
+  activeRuntime?: ActiveRuntimeManifest;
+}
 
 export function nativePaths(io: Pick<NativeIo, "env" | "homeDir">) {
   const m9r = defaultStoreRoot(io.homeDir, io.env);
@@ -106,7 +127,7 @@ export function hookEntryPath(env: Record<string, string | undefined>): string {
  * The hook must not run from where the CLI happens to live: `npx` runs it from a cache that is later cleared, which
  * would silently kill the hooks. Setup copies this small runtime into M9R's own folder and points the hooks there.
  */
-export const HOOK_RUNTIME_FILES = ["m9r-hook.js", "local-store.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js", "web-broker-client.js", "web-broker-paths.js", "identity-core.js", "hook-server.js"] as const;
+export const HOOK_RUNTIME_FILES = ["m9r-hook.js", "local-store.js", "mcp-connection-core.js", "hook-handler.js", "hook-run.js", "inbox-core.js", "mention-core.js", "memory-hint-core.js", "codex-delivery-core.js", "codex-delivery.js", "codex-liveness.js", "approval-core.js", "risk-core.js", "web-broker-client.js", "web-broker-paths.js", "identity-core.js", "hook-server.js"] as const;
 
 function hookSourceDir(env: Record<string, string | undefined>): string {
   return env.M9R_HOOK_SOURCE?.trim() || dirname(hookEntryPath(env));
@@ -288,7 +309,7 @@ export const MCP_SERVER_NAME = "m9r";
  * plain .js files, not @modelcontextprotocol/sdk/zod) -- a real gap, not silently pretended away. `plan()` below only
  * adds these entries when `activeHookEntry` resolves to the engine binary.
  */
-function mcpServerSpec(io: NativeIo): McpServerSpec | null {
+function mcpServerSpec(io: NativeIo, provider: string): McpServerSpec | null {
   const entry = activeHookEntry(io);
   if (!/m9r-engine(\.exe)?$/i.test(entry)) return null;
   const m9r = nativePaths(io).m9r;
@@ -298,6 +319,7 @@ function mcpServerSpec(io: NativeIo): McpServerSpec | null {
     env: {
       M9R_HOME: m9r,
       M9R_WEB_BROKER_PORT: io.env.M9R_WEB_BROKER_PORT?.trim() || "47821",
+      M9R_PROVIDER: provider,
     },
   };
 }
@@ -319,10 +341,10 @@ function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = tru
       { path: p.claudeMd, kind: "markdown-block", before: mdBefore, after: md.content, changed: md.changed, summary: `${mdBefore == null ? "create" : "add a short block to"} ${p.claudeMd}` },
     );
   }
-  const mcpSpec = includeMcp ? mcpServerSpec(io) : null;
-  if (mcpSpec && wantsClaude) {
+  const claudeMcpSpec = includeMcp ? mcpServerSpec(io, "claude-code") : null;
+  if (claudeMcpSpec && wantsClaude) {
     const claudeMcpBefore = readText(p.claudeMcp);
-    const claudeMcp = mergeMcpServerJson(claudeMcpBefore, MCP_SERVER_NAME, mcpSpec, p.claudeMcp);
+    const claudeMcp = mergeMcpServerJson(claudeMcpBefore, MCP_SERVER_NAME, claudeMcpSpec, p.claudeMcp);
     files.push({ path: p.claudeMcp, kind: "mcp-json", before: claudeMcpBefore, after: claudeMcp.content, changed: claudeMcp.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.claudeMcp}` });
   }
   if (wantsCodex) {
@@ -334,9 +356,10 @@ function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = tru
       { path: p.codexHooks, kind: "hooks-json", before: hooksBefore, after: codexHooks.content, changed: codexHooks.changed, summary: `add 2 hooks (session start, prompt submit) to ${p.codexHooks} (Codex; you trust them once with /hooks)` },
       { path: p.codexAgents, kind: "markdown-block", before: agentsBefore, after: agents.content, changed: agents.changed, summary: `${agentsBefore == null ? "create" : "add a short block to"} ${p.codexAgents} (it tells Codex to leave @mentions of other agents to M9R, so nothing is done twice)` },
     );
-    if (mcpSpec && includeMcp) {
+    const codexMcpSpec = includeMcp ? mcpServerSpec(io, "codex") : null;
+    if (codexMcpSpec) {
       const codexConfigBefore = readText(p.codexConfig);
-      const codexConfig = mergeMcpServerToml(codexConfigBefore, MCP_SERVER_NAME, mcpSpec);
+      const codexConfig = mergeMcpServerToml(codexConfigBefore, MCP_SERVER_NAME, codexMcpSpec);
       files.push({ path: p.codexConfig, kind: "mcp-toml", before: codexConfigBefore, after: codexConfig.content, changed: codexConfig.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.codexConfig}` });
     }
   }
@@ -345,6 +368,35 @@ function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = tru
 
 function readManifest(path: string): Manifest | null {
   try { return JSON.parse(readFileSync(path, "utf8")) as Manifest; } catch { return null; }
+}
+
+function activeRuntimeFromIdentity(io: NativeIo, runtimeRoot: string, identity: RuntimeBuildIdentity): ActiveRuntimeManifest | null {
+  if (identity.status !== "verified" || !identity.buildId || !identity.sourceCommit || identity.sourceDirty === undefined) return null;
+  const sourceRoot = io.env.M9R_PROJECT_ROOT?.trim();
+  return {
+    schemaVersion: 1,
+    buildId: identity.buildId,
+    sourceCommit: identity.sourceCommit,
+    sourceDirty: identity.sourceDirty,
+    installedRoot: runtimeRoot,
+    stateRoot: nativePaths(io).m9r,
+    installedAt: new Date().toISOString(),
+    ...(sourceRoot ? { sourceRoot } : {}),
+  };
+}
+
+function sameActiveRuntime(left: ActiveRuntimeManifest | undefined, right: ActiveRuntimeManifest | null): boolean {
+  if (!left || !right) return false;
+  return left.schemaVersion === right.schemaVersion
+    && left.buildId === right.buildId
+    && left.sourceCommit === right.sourceCommit
+    && left.sourceDirty === right.sourceDirty
+    && left.installedRoot === right.installedRoot
+    && left.stateRoot === right.stateRoot;
+}
+
+function installedEnginePath(io: NativeIo, runtime: ReturnType<typeof runtimePlan>): string {
+  return runtime.engine?.to ?? join(runtime.targetDir, process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
 }
 
 async function ask(io: NativeIo, yes: boolean, question: string): Promise<boolean> {
@@ -362,6 +414,19 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   const p = nativePaths(io);
   const todo = files.filter((f) => f.changed);
   const runtime = runtimePlan(io);
+  const manifestBefore = readManifest(p.manifest);
+  const installedEngine = installedEnginePath(io, runtime);
+  const installedIdentity = existsSync(installedEngine) ? readRuntimeBuildIdentity(installedEngine) : null;
+  const activeRuntime = installedIdentity ? activeRuntimeFromIdentity(io, runtime.targetDir, installedIdentity) : null;
+  // A legacy hook-only install has no build manifest and remains supported. Once
+  // an install claims an active runtime, however, an unreadable or mismatched
+  // image must not be treated as converged or silently overwritten by setup.
+  if (manifestBefore?.activeRuntime && existsSync(installedEngine) && !activeRuntime && !runtime.needed) {
+    io.err(`The installed M9R runtime identity could not be verified (${installedIdentity?.reason ?? "unknown"}); refusing to claim setup is current.`);
+    io.err("Repair the runtime from a verified package before retrying setup.");
+    return 1;
+  }
+  const identityNeedsReconcile = !!activeRuntime && !sameActiveRuntime(manifestBefore?.activeRuntime, activeRuntime);
 
   io.out("M9R setup (local mode: no account, no network)");
   if (runtime.missingSource.length > 0) {
@@ -372,11 +437,12 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   // A previously installed user can opt into startup without reinstalling hooks.
   const startupRequested = flags.autostart === true && !!runtime.engine && !!runtime.shim
     && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
-  if (todo.length === 0 && !runtime.needed && !startupRequested) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
+  if (todo.length === 0 && !runtime.needed && !startupRequested && !identityNeedsReconcile) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
   io.out("This will:");
   if (startupRequested) io.out("  - start the M9R desktop pill when this Windows user signs in (uninstall removes this entry)");
   if (runtime.needed) io.out(`  - copy the small hook program to ${runtime.targetDir} (so the hooks keep working even if this CLI moves or is updated)`);
   if (runtime.engine && runtime.shim) io.out("  - start the M9R background engine, which answers your agents' hooks in milliseconds (uninstall stops it)");
+  if (identityNeedsReconcile) io.out(`  - reconcile the verified installed runtime identity in ${p.manifest}`);
   for (const f of todo) io.out(`  - ${f.summary}`);
   if (todo.some((f) => f.before != null)) io.out(`  - back up each existing file to ${p.backups} first`);
   io.out("Undo anytime with: m9r-cli uninstall");
@@ -387,7 +453,7 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   const wantAutostart = canAutostart && (flags.autostart === true || (flags.autostart === undefined && !flags.yes && !!io.confirm && (await io.confirm("Also start M9R when you sign in to Windows, so it is ready before your first prompt? (Uninstall turns this off.)"))));
 
   mkdirSync(p.backups, { recursive: true });
-  const manifest: Manifest = readManifest(p.manifest) ?? { version: 1, installedAt: new Date().toISOString(), entries: [] };
+  const manifest: Manifest = manifestBefore ?? { version: 1, installedAt: new Date().toISOString(), entries: [] };
   // The hook program goes first, so a hook can never point at a file that is not there yet.
   if (runtime.needed) {
     if (runtime.engine) await stopResidentEngine(io);
@@ -421,9 +487,23 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
     manifest.autostart = autostartOf(io).enable(command);
     io.out(manifest.autostart ? "M9R will start when you sign in to Windows." : "Could not turn on starting with Windows; M9R still starts itself when an agent first needs it.");
   }
+  const verifiedInstalledIdentity = existsSync(installedEngine) ? readRuntimeBuildIdentity(installedEngine) : null;
+  const verifiedActiveRuntime = verifiedInstalledIdentity ? activeRuntimeFromIdentity(io, runtime.targetDir, verifiedInstalledIdentity) : null;
+  if (verifiedActiveRuntime) {
+    // Write the record only after the image and companion transaction has
+    // completed. The manifest therefore cannot point at a build that was only
+    // staged or was replaced by a partial copy.
+    manifest.activeRuntime = verifiedActiveRuntime;
+  } else if (manifest.activeRuntime && (runtime.needed || identityNeedsReconcile)) {
+    io.err(`The installed runtime could not be verified after setup (${verifiedInstalledIdentity?.reason ?? "missing build manifest"}); no active-runtime claim was written.`);
+    return 1;
+  }
   writeFileSync(p.manifest, JSON.stringify(manifest, null, 2) + "\n", "utf8");
   createLocalStore(p.m9r); // make sure the local store folder exists
-  if (runtime.engine && runtime.shim && !io.env.M9R_NO_DAEMON) warmUpAndStart(io, runtime.shim.to, runtime.engine.to);
+  // Identity-only reconciliation must not spawn a second resident engine. A
+  // runtime replacement or a real setup change may start the managed daemon;
+  // otherwise the existing owner stays in place.
+  if (runtime.engine && runtime.shim && !io.env.M9R_NO_DAEMON && (runtime.needed || startupRequested || todo.length > 0)) warmUpAndStart(io, runtime.shim.to, runtime.engine.to);
   io.out("Done.");
   printOpenSteps(io);
   return 0;
@@ -680,7 +760,7 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
       server = watching && has("--serve-hooks")
         ? startHookServer({
             path: hookPipePath(root),
-            handle: (req) => runHookRequest({ event: req.event ?? "", provider: req.provider ?? "claude-code", input: req.input ?? null, env: req.env }, activeHookEntry(io), { ...io.env }, true),
+            handle: (req) => runHookRequest({ event: req.event ?? "", provider: req.provider ?? "claude-code", input: req.input ?? null, providerProcessId: req.providerProcessId, env: req.env }, activeHookEntry(io), { ...io.env }, true),
             onShutdown: () => controller.abort(),
           })
         : undefined;

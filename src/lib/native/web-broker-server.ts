@@ -8,17 +8,17 @@
  *   listed extension id or an explicit development-only opt-in when no ids are configured. One extension at a time:
  *   an authorized new connection replaces the old one.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { VerifiedIdentity } from "./identity-core";
 import type { LocalStore } from "./local-store";
-import { readRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
+import { readManagedWebBrokerIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
 import { dirname } from "node:path";
 import { platform } from "node:os";
 import { WebSocket, WebSocketServer } from "ws";
-import type { BrowserTransport } from "./agent-chrome";
+import { findChrome, type BrowserTransport } from "./agent-chrome";
 import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
 import { createWebBroker, ROOM_MODES, type RoomMode, type StageApprovalRequest, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
@@ -33,7 +33,7 @@ const LOCAL_AWARE_ROOM_ID = "room-local";
 
 // Capture at process start. Re-reading process.execPath on each health request
 // could hash a replacement file after an update while the old image is still mapped.
-const runtimeIdentityAtProcessStart = readRuntimeBuildIdentity();
+const runtimeIdentityAtProcessStart = readManagedWebBrokerIdentity();
 
 /**
  * Windows ignores the 0o600 file mode entirely, so without this any process running as the same OS user -- including a
@@ -153,7 +153,7 @@ function readBody(req: IncomingMessage): Promise<string | null> {
 export interface WebBrokerServerOptions {
   /** Owner-hosted, task-authorized desktop preparation; absent means desktop access is unavailable. */
   taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>;
-    launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview"): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown> };
+    launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
   agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">;
   /** Dedicated browser transport. Extension connections are disabled on this broker. */
@@ -345,9 +345,54 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     for (const settle of [...readyWaiters]) settle(ready);
   }
 
+  // No open-tab/site-specific knowledge here -- this only notices "nothing is answering as
+  // the browser extension yet" and starts the one browser that extension lives in, the same
+  // way a person would double-click its icon. One attempt per cooldown window regardless of
+  // how many requests pile up waiting on it, so a burst of calls never opens several windows.
+  //
+  // Launching chrome.exe with no arguments while Chrome is ALREADY running does not open a
+  // fresh, quiet window -- a running Chrome forwards that launch to its existing instance,
+  // which (depending on the owner's own "on startup" setting) can restore their entire last
+  // session, including whatever stale/broken tabs were sitting open. That would repeat on
+  // every single call that finds the extension not ready, hijacking the owner's browser over
+  // and over with no way for them to get ahead of it. Launching is only ever safe, and only
+  // ever useful, when Chrome has no running process at all -- if it is already running and the
+  // extension still is not connecting, another launch cannot fix that (the extension itself is
+  // the problem, not whether the browser is open), so skip it rather than risk harm for nothing.
+  let lastBrowserLaunchAttemptAt = 0;
+  const browserLaunchCooldownMs = 10_000;
+  function chromeAlreadyRunning(): boolean {
+    try {
+      if (process.platform === "win32") {
+        const out = execFileSync("tasklist", ["/FI", "IMAGENAME eq chrome.exe", "/NH"], { encoding: "utf8", timeout: 2000 });
+        return /chrome\.exe/i.test(out);
+      }
+      const out = execFileSync("pgrep", ["-f", "[Gg]oogle Chrome"], { encoding: "utf8", timeout: 2000 });
+      return out.trim().length > 0;
+    } catch {
+      // If the running-process check itself cannot be trusted, assume Chrome is already
+      // running rather than risk a session-restore hijack on a false "not running" read.
+      return true;
+    }
+  }
+  function ensureBrowserLaunchedForExtension(): void {
+    const now = Date.now();
+    if (now - lastBrowserLaunchAttemptAt < browserLaunchCooldownMs) return;
+    lastBrowserLaunchAttemptAt = now;
+    if (chromeAlreadyRunning()) return;
+    try {
+      const child = spawn(findChrome(), [], { detached: true, stdio: "ignore" });
+      child.unref();
+    } catch {
+      // No installed Chrome found, or the spawn itself failed -- the normal
+      // "extension did not become ready" timeout below still reports it.
+    }
+  }
+
   function waitForExtensionReady(timeoutMs: number): Promise<boolean> {
     if (options.browserTransport) return Promise.resolve(options.browserTransport.ready());
     if (extension && extension === readyExtension && extension.readyState === WebSocket.OPEN) return Promise.resolve(true);
+    ensureBrowserLaunchedForExtension();
     return new Promise((resolve) => {
       const settle = (ready: boolean) => {
         clearTimeout(timer);
@@ -529,7 +574,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     try {
       if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
       const value = body as Record<string, unknown>;
-      const extraFields = path.endsWith("/launch") ? ["appId"] : path.endsWith("/action") ? ["action", "operationId"] : [];
+      const extraFields = path.endsWith("/launch") ? ["appId", "operationId"] : path.endsWith("/action") ? ["action", "operationId"] : [];
       const fields = ["token", "taskId", "mode", ...extraFields];
       if (!agentStagePaths.has(path) || Object.keys(value).some((key) => !fields.includes(key))
         || typeof value.token !== "string" || value.token.length > 128
@@ -539,19 +584,20 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       const unavailable = () => ({ status: 503, body: { ok: false, error: "Task stage operations are unavailable on this broker." } });
       if (!options.taskStages) return unavailable();
       if (path.endsWith("/prepare")) return { status: 200, body: { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, mode) } };
+      if (value.operationId !== undefined && (typeof value.operationId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.operationId))) throw new Error("Invalid stage request.");
+      const kind = value.action && typeof value.action === "object" && !Array.isArray(value.action) ? (value.action as { kind?: unknown }).kind : undefined;
+      const requiresReceipt = path.endsWith("/launch") || (path.endsWith("/action") && kind !== "capture");
+      if (requiresReceipt && typeof value.operationId !== "string") return { status: 409, body: { ok: false,
+        error: "This M9R MCP runtime does not send desktop-operation receipts. Update the M9R engine before sending desktop input; no action was dispatched." } };
       if (path.endsWith("/launch")) {
         if (!isStageAppReference(value.appId)) throw new Error("Invalid stage request.");
         if (!options.taskStages.launch) return unavailable();
-        return { status: 200, body: { ok: true, result: await options.taskStages.launch(value.token, value.taskId, value.appId, mode) } };
+        return { status: 200, body: { ok: true, result: await options.taskStages.launch(value.token, value.taskId, value.appId, mode, value.operationId as string | undefined) } };
       }
       if (path.endsWith("/close")) {
         if (!options.taskStages.closeApp) return unavailable();
         return { status: 200, body: { ok: true, result: await options.taskStages.closeApp(value.token, value.taskId, mode) } };
       }
-      if (value.operationId !== undefined && (typeof value.operationId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.operationId))) throw new Error("Invalid stage request.");
-      const kind = value.action && typeof value.action === "object" && !Array.isArray(value.action) ? (value.action as { kind?: unknown }).kind : undefined;
-      if (kind !== "capture" && typeof value.operationId !== "string") return { status: 409, body: { ok: false,
-        error: "This M9R MCP runtime does not send desktop-operation receipts. Update the M9R engine before sending desktop input; no action was dispatched." } };
       if (!options.taskStages.act) return unavailable();
       return { status: 200, body: { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, mode, value.operationId as string | undefined) } };
     } catch (error) {

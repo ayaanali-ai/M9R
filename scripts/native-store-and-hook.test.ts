@@ -265,9 +265,9 @@ test("OpenCode polling pushes only an approved, fresh task into its exact authen
   assert.equal(offered?.hookSpecificOutput.hookEventName, "OpenCodePoll");
   const envelope = JSON.parse(ctxOf(offered)!) as { task_id: string; prompt: string };
   assert.equal(envelope.task_id, pinned.id);
-  assert.equal(envelope.prompt.startsWith("[M9R T1]\n"), true);
-  assert.match(envelope.prompt, /review the shared change/);
-  assert.match(envelope.prompt, new RegExp(identity.token));
+  assert.equal(envelope.prompt, pinned.goal, "OpenCode receives only the owner's task text");
+  assert.doesNotMatch(envelope.prompt, new RegExp(pinned.id), "task correlation stays in the envelope");
+  assert.doesNotMatch(envelope.prompt, new RegExp(identity.token), "the session credential stays in trusted adapter context");
   assert.equal(store.getTask(pinned.id)?.delivery?.state, "sending", "the durable claim prevents a second prompt while acceptance is unconfirmed");
   assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pinned.seq);
   assert.equal(poll(), null, "an unacknowledged offer is still delivered at most once");

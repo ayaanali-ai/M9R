@@ -20,6 +20,8 @@ export interface HookRequest {
   input: HookInput | null;
   /** Original stdin wire payload; populated only by the standalone m9r-hook entrypoint. */
   rawPayload?: string;
+  /** The native shim's verified parent provider PID, carried across the resident-engine pipe. */
+  providerProcessId?: number;
   /** Only the few settings the hook reads (M9R_HOME, CODEX_HOME, PATH...); the caller's own environment, not the server's. */
   env?: Record<string, string | undefined>;
 }
@@ -130,6 +132,16 @@ export async function runHookRequest(req: HookRequest, runnerEntry: string, base
   const result = handleHookEvent(input, {
     provider: req.provider,
     store,
+    // Hooks are short-lived children of the provider host. Bind the private
+    // claim to that stable parent rather than to this transient hook process.
+    providerProcessId: Number.isSafeInteger(req.providerProcessId) && (req.providerProcessId ?? 0) > 0
+      ? req.providerProcessId
+      : Number.isSafeInteger(Number(env.M9R_PROVIDER_PROCESS_ID)) && Number(env.M9R_PROVIDER_PROCESS_ID) > 0
+        ? Number(env.M9R_PROVIDER_PROCESS_ID)
+        // A standalone Node hook is itself the provider's child, so its
+        // parent is meaningful. The resident engine is not: its parent owns
+        // the daemon, not the provider session, and must never be guessed.
+        : !inProcess && Number.isSafeInteger(process.ppid) && process.ppid > 0 ? process.ppid : undefined,
     rawPayload: req.rawPayload,
     strictTargetIdentity: true,
     sessionMetadataVerified: sessionMetadata.verified,

@@ -161,7 +161,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const pending = deps.store.tasksForSession(identity.handle, identity.sessionId)
         .filter((task) => !task.resultSummary && task.deliveredSession === identity.sessionId)
         .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
-      if (pending.length !== 1) throw new Error("A computer-use taskId is required when this session has zero or multiple pending tasks.");
+      if (pending.length !== 1) {
+        const detail = pending.length === 0
+          ? "none are currently pending"
+          : `candidates: ${pending.map((task) => task.id).join(", ")}`;
+        throw new Error(`A computer-use taskId is required when this session has zero or multiple pending tasks (${detail}). Pass the exact taskId you were given.`);
+      }
       return pending[0].id;
     },
     now: deps.now,
@@ -250,8 +255,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("drag"), fromX: z.number().int().min(0).max(16383), fromY: z.number().int().min(0).max(16383), toX: z.number().int().min(0).max(16383), toY: z.number().int().min(0).max(16383), durationMs: z.number().int().min(1).max(10_000).optional(), confirmFocusForeground: z.boolean().optional() }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("press_key"), key: z.string().min(1).max(20).regex(/^(?:[a-z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Ctrl|Control|Alt|Shift|Meta|Win|Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Insert|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Up|Down|Left|Right|CapsLock|PrintScreen)$/i), confirmFocusForeground: z.boolean().optional() }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("hotkey"), keys: z.array(z.string().min(1).max(20)).min(1).max(4), confirmFocusForeground: z.boolean().optional() }).strict(),
-      z.object({ view: z.literal("app"), kind: z.literal("click_element"), ref: z.string().min(1).max(512), confirmFocusForeground: z.boolean().optional() }).strict(),
-      z.object({ view: z.literal("app"), kind: z.literal("replace_element"), ref: z.string().min(1).max(512), text: z.string().min(1).max(500) }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("click_element"), ref: z.string().min(1).max(512), expectedRole: z.string().max(160).optional().describe("The element's role from the read_structure call this ref came from. Strongly recommended: lets the system confirm it is still the exact same control before clicking, since the underlying ref can become ambiguous if the page/window structure changed in between."), expectedLabel: z.string().max(160).optional().describe("The element's label from that same read_structure call, for the same confirmation."), confirmFocusForeground: z.boolean().optional() }).strict(),
+      z.object({ view: z.literal("app"), kind: z.literal("replace_element"), ref: z.string().min(1).max(512), text: z.string().min(1).max(500), expectedRole: z.string().max(160).optional().describe("The element's role from the read_structure call this ref came from, for the same confirmation as click_element."), expectedLabel: z.string().max(160).optional() }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("window_frame"), x: z.number().int().min(-16383).max(16383), y: z.number().int().min(-16383).max(16383), width: z.number().int().min(1).max(16383), height: z.number().int().min(1).max(16383) }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("focus"), confirmFocusForeground: z.boolean().optional() }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("invoke_menu"), path: z.array(z.string().trim().min(1).max(160)).min(1).max(16) }).strict(),
@@ -460,7 +465,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       inputSchema: {
         ...AUTH_FIELD,
         taskId: z.string().min(1).max(80).describe("The task id you were given, e.g. \"T12\"."),
-        summary: z.string().min(1).max(4_000).describe("What you actually did and found -- concrete, not a vague completion claim."),
+        summary: z.string().min(1).max(20_000).describe("What you actually did and found -- concrete, not a vague completion claim. Real structured evidence (an observation payload, a diff, a long error) is fine; prefer a focused excerpt over the entire raw object when it is this large."),
       },
     },
     async ({ token, taskId, summary }) => {
@@ -560,7 +565,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       .string()
       .max(40)
       .optional()
-      .describe("Browser tab name. Defaults to your own handle. On a shared tab, reads never claim; typing claims one field, while opening or a submit-like click claims the tab."),
+      .describe("Browser tab name. Omit this to let the server resolve it for you -- it uses whichever tab you most recently opened or are already on, or the one shared tab if nobody else is using it. Never guess a name (for example, your own handle): it is auto-generated and will not match. On a shared tab, reads never claim; typing claims one field, while opening or a submit-like click claims the tab."),
     shareWith: z.array(z.string().min(1).max(80)).max(16).optional().describe("Optional M9R agent handles allowed to act under the claim you create."),
   };
   const targetSelector = (selector: unknown, ref: unknown): string | undefined => {
@@ -576,7 +581,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_web_open",
     {
-      description: "Open a web page (http or https) in the shared M9R browser. Use this instead of your own browser when you are working with other agents, so they can see where you are and avoid colliding with you. Work on the page like a person: open the site's own page, then use its controls. To search, take a snapshot, click the search box, m9r_web_type the query and m9r_web_press Enter. URLs that carry a search query (?q=...) are refused. If the page you need is already open in a shared tab (yours or a teammate's), work on that tab instead of opening another; open a new tab only when you need a second page at the same time.",
+      description: "Requires the M9R browser extension to be installed; this is NOT the primary or preferred way to work in a browser and will fail outright if the extension is not present. The standard, OS-level route is m9r_stage_app (launch appId chrome.exe) followed by m9r_stage_action / m9r_computer_observe on that window -- the same generic native route used for every other app, with a real OS cursor. Prefer that route; only use this tool for the specific shared-tab, multi-agent-visibility use case it exists for. Open a web page (http or https) in the shared M9R browser. Use this instead of your own browser when you are working with other agents, so they can see where you are and avoid colliding with you. Work on the page like a person: open the site's own page, then use its controls. To search, take a snapshot, click the search box, m9r_web_type the query and m9r_web_press Enter. URLs that carry a search query (?q=...) are refused. If the page you need is already open in a shared tab (yours or a teammate's), work on that tab instead of opening another; open a new tab only when you need a second page at the same time.",
       inputSchema: { ...AUTH_FIELD, ...TAB_FIELD, url: z.string().min(1).max(2_000), newTab: z.boolean().optional().describe("Always create a distinct named tab; normally M9R reuses a named tab and opens a new one automatically if another agent holds the current tab.") },
     },
     async ({ token, tab, url, newTab, shareWith }) => {

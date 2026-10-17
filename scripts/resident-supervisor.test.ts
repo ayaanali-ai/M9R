@@ -66,6 +66,32 @@ test("supervisor shutdown kills residents once and suppresses restart", () => {
   assert.deepEqual(supervisor.snapshot(), [{ profile: "claude", state: "stopped", restarts: 0 }]);
 });
 
+test("graceful shutdown drains every resident and never schedules a replacement", async () => {
+  const log: string[] = [];
+  const exits: Array<(code: number | null) => void> = [];
+  const supervisor = createResidentSupervisor({
+    profiles: ["claude", "codex"],
+    launch(profile, onExit) {
+      exits.push(onExit);
+      return {
+        kill() { log.push(`kill:${profile}`); onExit(0); },
+        async shutdown() { log.push(`shutdown:${profile}`); onExit(0); },
+      };
+    },
+    schedule() { return { cancel() { log.push("cancel"); } }; },
+  });
+
+  supervisor.start();
+  await Promise.all([supervisor.stopGracefully(), supervisor.stopGracefully()]);
+  assert.deepEqual(log, ["shutdown:claude", "shutdown:codex"]);
+  assert.deepEqual(supervisor.snapshot(), [
+    { profile: "claude", state: "stopped", restarts: 0 },
+    { profile: "codex", state: "stopped", restarts: 0 },
+  ]);
+  exits.forEach((exit) => exit(1));
+  assert.deepEqual(log, ["shutdown:claude", "shutdown:codex"]);
+});
+
 test("supervisor launches a provider added after the runtime started and removes it cleanly", () => {
   const log: string[] = [];
   const supervisor = createResidentSupervisor({

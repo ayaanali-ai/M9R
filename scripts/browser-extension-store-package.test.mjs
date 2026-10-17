@@ -44,6 +44,7 @@ test("store package is reproducible and includes the production manifest, runtim
     assert.equal(names.some((name) => name.includes("newtab")), false, "the package ships no New Tab page");
     assert.ok(names.includes("assets/m9r-mark.jpg"));
     assert.ok(names.includes("src/background.js"));
+    assert.ok(names.includes("src/retired-pages.js"), "the package must include the retired-page repair used by refreshed installations");
     for (const provider of ["claude", "codex", "opencode"]) assert.ok(names.includes(`assets/providers/${provider}.svg`));
     for (const size of [16, 32, 48, 128]) assert.ok(names.includes(`icons/icon-${size}.png`));
     assert.equal(names.some((name) => name.startsWith("test-page/")), false);

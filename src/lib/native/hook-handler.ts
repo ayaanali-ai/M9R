@@ -15,6 +15,7 @@ import { buildQueueMessage, canQueue, isM9rPushedPrompt, isWindowsSystemCwd, nor
 import { findEndpointMentions } from "./mention-core";
 import { findMemoryHints, renderMemoryHint } from "./memory-hint-core";
 import { handleForProvider, type LocalStore } from "./local-store";
+import { deliveredTaskContext } from "./task-execution-context";
 
 export interface HookInput {
   hook_event_name?: string;
@@ -31,6 +32,10 @@ export interface HookInput {
 export interface HookContext {
   provider: string;
   store: LocalStore;
+  /** Parent provider process that owns this hook/MCP session. Kept local; never rendered to the agent. */
+  providerProcessId?: number;
+  /** True only when the provider supplied a trusted session identifier for this hook invocation. */
+  sessionMetadataVerified?: boolean;
   /** Where shared memory lives, shown in the session card. */
   memoryDir?: string;
   pathExists?: (absolutePath: string) => boolean;
@@ -184,7 +189,12 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const identityToken = input.session_id
         ? ctx.store.identityTokenFor(self, input.session_id) ?? ctx.store.issueIdentity(self, ctx.provider, input.session_id).token
         : undefined;
-      return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir, identityToken }));
+      if (input.session_id && ctx.providerProcessId !== undefined) {
+        ctx.store.issueConnectionClaim({ handle: self, provider: ctx.provider, sessionId: input.session_id, cwd: projectCwd, ownerProcessId: ctx.providerProcessId });
+      }
+      // Managed MCP connections bind privately through the provider parent PID. The old
+      // token card remains only for legacy/unmanaged adapters during migration.
+      return out(event, renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir, identityToken: ctx.providerProcessId === undefined ? identityToken : undefined }));
     }
 
     // The OpenCode plugin polls independently of user prompts, then inserts an approved task as a real prompt into
@@ -299,12 +309,34 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const knownSession = input.session_id
         ? ctx.store.sessionsFor(self, projectCwd).some((session) => session.sessionId === input.session_id)
         : false;
-      if (self === "codex" && input.session_id && knownSession && !ctx.store.identityTokenFor(self, input.session_id)) {
+      if (input.session_id && ctx.providerProcessId !== undefined) {
+        const identity = ctx.store.identityTokenFor(self, input.session_id)
+          ? undefined
+          : ctx.store.issueIdentity(self, ctx.provider, input.session_id);
+        ctx.store.issueConnectionClaim({ handle: self, provider: ctx.provider, sessionId: input.session_id, cwd: projectCwd, ownerProcessId: ctx.providerProcessId });
+        if (identity && self === "codex" && knownSession) parts.push(renderSessionCard({ handle: self, others: [], pendingCount: 0, awaitingApproval: 0 }));
+      } else if (self === "codex" && input.session_id && knownSession && !ctx.store.identityTokenFor(self, input.session_id)) {
         const identity = ctx.store.issueIdentity(self, ctx.provider, input.session_id);
         parts.push(renderSessionCard({ handle: self, others: [], pendingCount: 0, awaitingApproval: 0, identityToken: identity.token }));
       }
 
       parts.push(...routeTypedMentions(input, ctx).acks);
+
+      // Reattach only the matching internal task context to a trusted
+      // provider prompt. The queued task body itself remains plain user text.
+      const deliveredContext = deliveredTaskContext(ctx.store, {
+        handle: self,
+        provider: ctx.provider,
+        sessionId: input.session_id,
+        taskId: input.task_id,
+        prompt,
+      });
+      if (deliveredContext) {
+        parts.push(deliveredContext);
+        // A provider-pushed task is its own turn. Do not mix older inbox work,
+        // result summaries, or a second task into the same execution context.
+        return out(event, parts.join("\n"));
+      }
 
       // A prompt M9R pushed in is a task by itself: nothing else (older inbox items, results) is mixed into it, or the agent
       // may answer the wrong one. Those items wait for the user's next real prompt.

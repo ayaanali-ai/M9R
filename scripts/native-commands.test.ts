@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -352,6 +353,38 @@ test("with the engine, setup copies it into M9R's folder and the hooks call it (
   assert.match(s.out.join("\n"), /Already set up/);
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(existsSync(installed), false);
+  s.done();
+});
+
+test("setup records verified runtime provenance and repairs stale active-runtime metadata without restarting the daemon", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  const engineBytes = Buffer.from("verified stand-in engine", "utf8");
+  writeFileSync(engine, engineBytes);
+  const engineHash = createHash("sha256").update(engineBytes).digest("hex");
+  writeFileSync(join(s.home, "m9r-build-info.json"), JSON.stringify(createRuntimeBuildInfo(
+    { "m9r-engine.exe": engineHash },
+    "2026-10-16T00:00:00.000Z",
+    { sourceCommit: "source-commit-1", sourceDirty: false },
+  )));
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const first = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { activeRuntime?: { buildId: string; sourceCommit: string; sourceDirty: boolean; installedRoot: string; stateRoot: string } };
+  assert.equal(first.activeRuntime?.sourceCommit, "source-commit-1");
+  assert.equal(first.activeRuntime?.sourceDirty, false);
+  assert.equal(first.activeRuntime?.installedRoot, join(s.p.m9r, "bin"));
+  assert.equal(first.activeRuntime?.stateRoot, s.p.m9r);
+
+  first.activeRuntime!.sourceCommit = "stale-commit";
+  writeFileSync(s.p.manifest, JSON.stringify(first, null, 2) + "\n", "utf8");
+  s.out.length = 0;
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const repaired = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { activeRuntime?: { sourceCommit: string } };
+  assert.equal(repaired.activeRuntime?.sourceCommit, "source-commit-1");
+  assert.match(s.out.join("\n"), /reconcile the verified installed runtime identity/i);
   s.done();
 });
 

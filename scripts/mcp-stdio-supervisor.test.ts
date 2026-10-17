@@ -80,6 +80,17 @@ test("a healthy worker adopts an updated trusted runtime revision without closin
   } finally { await h.runtime.stop(); }
 });
 
+test("queues the first provider messages until the private worker handshake completes", async () => {
+  const h = harness(() => spawn(process.execPath, ["-e", fixture], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true }), 3);
+  try {
+    h.send({ id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "pipelined-provider", version: "1" } } });
+    h.send({ method: "notifications/initialized" });
+    h.send({ id: 2, method: "tools/list" });
+    assert.equal((await h.response(1)).result.serverInfo.name, "m9r-fixture");
+    assert.equal((await h.response(2)).result.client.name, "pipelined-provider");
+  } finally { await h.runtime.stop(); }
+});
+
 test("an update waits for an in-flight tool response before retiring the private worker", async () => {
   let revision = "first";
   let starts = 0;

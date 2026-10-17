@@ -12,6 +12,13 @@ import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { publishRuntimeBuild, verifyRuntimeBuildManifest, writeRuntimeBuildManifest } from "./engine-build-transaction.mjs";
 
+// Git for Windows ships its own GNU tar earlier on PATH than the real Windows System32 bsdtar.
+// GNU tar misparses a bare "C:\..." path as a remote "host:path" spec and cannot read .zip
+// archives at all -- it fails with "Cannot connect to C: resolve failed", which looks like a
+// network error but is purely a PATH-order collision between two different tar binaries. Calling
+// the real one by its full path sidesteps that collision entirely, regardless of PATH order.
+const systemTarExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const engineDir = join(root, "engine");
 const output = join(engineDir, "dist");
@@ -45,6 +52,24 @@ function buildSeaExecutable(main, executable, label) {
   copyFileSync(process.execPath, executable);
   result = spawnSync(process.execPath, [postjectCli, executable, "NODE_SEA_BLOB", blob, "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2", ...(process.platform === "darwin" ? ["--macho-segment-name", "NODE_SEA"] : [])], { stdio: "inherit" });
   if (result.error || result.status !== 0) throw new Error(`Could not inject the ${label} SEA blob.`, { cause: result.error });
+}
+
+function sourceProvenance() {
+  const commit = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
+  if (commit.error || commit.status !== 0) throw new Error("Cannot determine the source commit; refusing to build an unidentified runtime.", { cause: commit.error });
+  const sourceCommit = String(commit.stdout).trim();
+  if (!/^[a-f0-9]{40}$/i.test(sourceCommit)) throw new Error("Git returned an invalid source commit; refusing to build an unidentified runtime.");
+  // Normal untracked reporting is sufficient for a dirty/clean bit and avoids
+  // expanding every file inside large untracked artifact directories. The
+  // previous `--untracked-files=all` form could overflow spawnSync's buffer and
+  // make an otherwise identifiable build fail closed as "unknown".
+  const status = spawnSync("git", ["status", "--porcelain=v1", "--untracked-files=normal"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 256 * 1024,
+  });
+  if (status.error || status.status !== 0) throw new Error("Cannot determine source cleanliness; refusing to build an unidentified runtime.", { cause: status.error });
+  return { sourceCommit, sourceDirty: String(status.stdout).trim().length > 0 };
 }
 
 // The dispatcher: SEA argv is [exe, exe, ...args]; shift so both programs see the argv they were written for.
@@ -141,7 +166,7 @@ if (process.platform === "win32") {
     throw new Error(`Cua Driver ${cuaDriverVersion} Windows archive checksum mismatch: ${archiveHash}. Refusing to package an unverified daemon.`);
   }
   const expectedEntries = ["cua-driver.exe", "cua-cursor-theme.exe", "cua-driver-uia.exe", "cua_driver_sdk.dll", "cua_driver_node_runtime.node", "cua_driver_abi.h"];
-  const archiveEntries = spawnSync("tar.exe", ["-tf", archivePath], { encoding: "utf8", windowsHide: true });
+  const archiveEntries = spawnSync(systemTarExe, ["-tf", archivePath], { encoding: "utf8", windowsHide: true });
   if (archiveEntries.status !== 0) throw new Error(`Could not list the verified Cua Driver archive: ${archiveEntries.stderr || archiveEntries.stdout}`);
   const entries = archiveEntries.stdout.trim().split(/\r?\n/).filter(Boolean).sort();
   if (JSON.stringify(entries) !== JSON.stringify([...expectedEntries].sort())) {
@@ -150,7 +175,7 @@ if (process.platform === "win32") {
   const extractedRoot = join(work, `cua-driver-${cuaDriverVersion}-windows`);
   rmSync(extractedRoot, { recursive: true, force: true });
   mkdirSync(extractedRoot, { recursive: true });
-  const extraction = spawnSync("tar.exe", ["-xf", archivePath, "-C", extractedRoot], { stdio: "inherit", windowsHide: true });
+  const extraction = spawnSync(systemTarExe, ["-xf", archivePath, "-C", extractedRoot], { stdio: "inherit", windowsHide: true });
   if (extraction.status !== 0) throw new Error(`Could not extract verified Cua Driver ${cuaDriverVersion} Windows files.`);
   const binaryRoot = join(cuaRuntimeRoot, "bin");
   mkdirSync(binaryRoot, { recursive: true });
@@ -169,13 +194,15 @@ if (process.platform === "win32") {
 
 const managedRuntimePaths = [exeName, brokerExeName, shimName,
   ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "cua-driver-runtime", "m9r-overlay.exe"] : [])];
-writeRuntimeBuildManifest(out);
+const provenance = sourceProvenance();
+writeRuntimeBuildManifest(out, undefined, provenance);
 const stagedIdentity = verifyRuntimeBuildManifest(out, { exact: true });
 const publishedIdentity = publishRuntimeBuild(out, output, managedRuntimePaths);
 if (publishedIdentity.buildId !== stagedIdentity.buildId) throw new Error("Published runtime identity differs from its staged artifact hashes.");
 console.log(`Built ${join(output, exeName)} (${Math.round(readFileSync(join(output, exeName)).length / 1e6)} MB)`);
 console.log(`Built ${join(output, brokerExeName)} (${Math.round(readFileSync(join(output, brokerExeName)).length / 1e6)} MB)`);
 console.log(`Runtime build identity ${publishedIdentity.buildId} verified across ${Object.keys(publishedIdentity.artifacts).length} files.`);
+console.log(`Runtime source ${provenance.sourceCommit} (${provenance.sourceDirty ? "dirty" : "clean"}).`);
 if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")} from the current desktop build.`);
 } finally {
   rmSync(buildRoot, { recursive: true, force: true });

@@ -7,11 +7,63 @@ use std::{
     env,
     fs::{self, OpenOptions},
     io::{Read, Write},
+    mem::size_of,
     path::PathBuf,
     process::{exit, Command, Stdio},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+#[repr(C)]
+struct ProcessEntry32W {
+    dw_size: u32,
+    cnt_usage: u32,
+    th32_process_id: u32,
+    th32_default_heap_id: usize,
+    th32_module_id: u32,
+    cnt_threads: u32,
+    th32_parent_process_id: u32,
+    pc_pri_class_base: i32,
+    dw_flags: u32,
+    sz_exe_file: [u16; 260],
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> isize;
+    fn Process32FirstW(snapshot: isize, entry: *mut ProcessEntry32W) -> i32;
+    fn Process32NextW(snapshot: isize, entry: *mut ProcessEntry32W) -> i32;
+    fn CloseHandle(handle: isize) -> i32;
+    fn GetCurrentProcessId() -> u32;
+}
+
+#[cfg(windows)]
+fn provider_process_id() -> Option<u32> {
+    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const INVALID_HANDLE_VALUE: isize = -1;
+    let current = unsafe { GetCurrentProcessId() };
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE { return None; }
+    let mut entry: ProcessEntry32W = unsafe { std::mem::zeroed() };
+    entry.dw_size = size_of::<ProcessEntry32W>() as u32;
+    let mut found = None;
+    if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
+        loop {
+            if entry.th32_process_id == current {
+                found = (entry.th32_parent_process_id > 0).then_some(entry.th32_parent_process_id);
+                break;
+            }
+            if unsafe { Process32NextW(snapshot, &mut entry) } == 0 { break; }
+        }
+    }
+    unsafe { CloseHandle(snapshot); }
+    found
+}
+
+#[cfg(not(windows))]
+fn provider_process_id() -> Option<u32> { None }
 
 const GIVE_UP: Duration = Duration::from_millis(3500);
 const RESTART_GUARD_SECS: u64 = 25;
@@ -164,10 +216,11 @@ fn main() {
         }
     }
     let request = format!(
-        "{{\"event\":{},\"provider\":{},\"input\":{},\"env\":{{{}}}}}\n",
+        "{{\"event\":{},\"provider\":{},\"input\":{},\"providerProcessId\":{},\"env\":{{{}}}}}\n",
         json_str(&event),
         json_str(&provider),
         input,
+        provider_process_id().map(|pid| pid.to_string()).unwrap_or_else(|| "null".into()),
         env_part.join(",")
     );
 

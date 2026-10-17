@@ -5,6 +5,7 @@
  * changed, so the overlay never sees a half file and is not woken for nothing.
  */
 import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync, rmSync, rmdirSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -183,7 +184,37 @@ export const feedPath = (root: string) => join(root, FEED_FILE);
 export const feedExists = (root: string) => existsSync(feedPath(root));
 
 const lockPath = (root: string) => join(root, "feed.lock");
-const pidAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code !== "ESRCH"; } };
+const pidAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (process.platform !== "win32" || (code !== "EPERM" && code !== "EACCES")) return code !== "ESRCH";
+
+    // On Windows, process.kill(pid, 0) can return EPERM for a PID that has
+    // already exited (or belongs to a protected process). Use the OS process
+    // list to distinguish that from a live holder before refusing recovery.
+    // If the probe itself fails, fail closed: an unreadable process list is
+    // not permission to steal another watcher’s lock.
+    try {
+      const output = execFileSync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$p = Get-Process -Id $env:M9R_PROBE_PID -ErrorAction SilentlyContinue; if ($p) { $p.Id }; exit 0",
+      ], {
+        encoding: "utf8",
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+        env: { ...process.env, M9R_PROBE_PID: String(pid) },
+      });
+      return output.trim() === String(pid);
+    } catch {
+      return true;
+    }
+  }
+};
 
 /** Only one watcher may write the feed (the overlay starts one, and a person may too). Returns a release function, or null when another one is running. */
 export function acquireFeedLock(root: string, pid = process.pid): (() => void) | null {

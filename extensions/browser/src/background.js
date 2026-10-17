@@ -1,4 +1,4 @@
-importScripts("page-actions.js", "powers.js", "permission-logic.js", "pill-bridge.js", "quiet-input.js");
+importScripts("page-actions.js", "powers.js", "permission-logic.js", "pill-bridge.js", "quiet-input.js", "retired-pages.js");
 
 const BROKER_URL = "ws://127.0.0.1:47821/ext";
 const BROKER_AUTH_TIMEOUT_MS = 5000;
@@ -16,6 +16,30 @@ const permissionQueue = [];
 const promptingGrants = new Set();
 const quietInput = M9RQuietInput.create(chrome);
 void quietInput.adoptAndRelease();
+
+// Older development builds briefly exposed a new-tab page.  A tab opened by
+// that build survives extension refreshes and otherwise leaves the owner's
+// personal browser on a broken chrome-extension://.../newtab.html page.  The
+// current manifest never overrides New Tab; repair only that exact retired
+// page, and never touch an ordinary site or another extension's page.
+function repairRetiredPages() {
+  return M9RRetiredPages.repair(chrome).catch(() => 0);
+}
+
+void repairRetiredPages();
+if (chrome.runtime.onStartup) chrome.runtime.onStartup.addListener(() => { void repairRetiredPages(); });
+if (chrome.runtime.onInstalled) chrome.runtime.onInstalled.addListener(() => { void repairRetiredPages(); });
+if (chrome.tabs?.onCreated) chrome.tabs.onCreated.addListener((tab) => {
+  if (M9RRetiredPages.isRetiredUrl(tab?.url, chrome.runtime.id) && Number.isSafeInteger(tab.id)) {
+    void chrome.tabs.update(tab.id, { url: "chrome://newtab/" }).catch(() => {});
+  }
+});
+if (chrome.tabs?.onUpdated) chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  const url = changeInfo?.url ?? tab?.url;
+  if (M9RRetiredPages.isRetiredUrl(url, chrome.runtime.id)) {
+    void chrome.tabs.update(tabId, { url: "chrome://newtab/" }).catch(() => {});
+  }
+});
 
 // Browser clicks must never move the owner's physical mouse. They use the
 // extension's explicitly enabled Chrome debugger route or fail closed.
@@ -357,7 +381,10 @@ function ensurePresenceOverlay(tabId) {
   });
 }
 
-if (chrome.runtime.onInstalled) chrome.runtime.onInstalled.addListener(() => { injectedTabs.clear(); });
+if (chrome.runtime.onInstalled) chrome.runtime.onInstalled.addListener(() => {
+  injectedTabs.clear();
+  void repairRetiredPages();
+});
 
 function reply(id, result, origin, url) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;

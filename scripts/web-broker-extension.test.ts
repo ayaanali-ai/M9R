@@ -155,6 +155,7 @@ function createHarness(settings: { completeOnCreate?: boolean; quietModeEnabled?
     const context = {
       chrome,
       WebSocket: FakeWebSocket,
+      M9RRetiredPages: { isRetiredUrl: () => false, repair: async () => 0 },
       importScripts() {},
       setTimeout: workerSetTimeout,
       clearTimeout: workerClearTimeout,

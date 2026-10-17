@@ -190,6 +190,20 @@ test("re-registering a known desktop refreshes its anchor without changing its i
   assert.notEqual(refreshed.roomWindowId, original.roomWindowId, "a different native window gets a fresh coordination identity");
 }));
 
+test("persists the selected app reference so a fresh manager can recover it", async () => withRoot(async (root) => {
+  const deps = {
+    platform: "win32" as const, root, terminal: true, env: {},
+    invokeNative: async (request: Record<string, unknown>) => ({ ok: true as const, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } }),
+  };
+  const manager = createWindowsDesktopStageManager(deps);
+  const registered = await manager.register("stage", "4321", anchor.windowId, "notepad");
+  assert.equal(registered.appId, "notepad");
+  const reloaded = createWindowsDesktopStageManager(deps);
+  assert.equal(reloaded.list()[0]?.appId, "notepad");
+  const rebound = await reloaded.register("stage", "4321", anchor.windowId);
+  assert.equal(rebound.appId, "notepad", "re-registering without an app id must preserve durable recovery metadata");
+}));
+
 test("room lease keys are stable and opaque and migrate existing v2 records once", async () => withRoot(async (root) => {
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {},

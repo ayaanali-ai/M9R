@@ -51,9 +51,9 @@ test("task stage app/action routes require loopback key, reject origins and extr
   } });
   try {
     for (const [path, body] of [["action", { token: "session-token", taskId: "T1", action: { kind: "capture" } }],
-      ["launch", { token: "session-token", taskId: "T1", appId: "fixture" }],
-      ["launch", { token: "session-token", taskId: "T1", appId: "MSI Center" }],
-      ["launch", { token: "session-token", taskId: "T1", appId: "C:\\Windows\\System32\\cmd.exe" }],
+      ["launch", { token: "session-token", taskId: "T1", appId: "fixture", operationId: "launch-fixture" }],
+      ["launch", { token: "session-token", taskId: "T1", appId: "MSI Center", operationId: "launch-msi" }],
+      ["launch", { token: "session-token", taskId: "T1", appId: "C:\\Windows\\System32\\cmd.exe", operationId: "launch-cmd" }],
       ["close", { token: "session-token", taskId: "T1" }]] as const) {
       const request = (headers: Record<string, string>, payload: unknown = body) => fetch(`http://127.0.0.1:${broker.port}/web/stage/${path}`, {
         method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(payload),
@@ -63,6 +63,12 @@ test("task stage app/action routes require loopback key, reject origins and extr
       assert.equal((await request({ "x-m9r-key": key }, { ...body, executable: "unapproved.exe" })).status, 403);
       assert.equal((await request({ "x-m9r-key": key })).status, 200);
     }
+    const missingLaunchReceipt = await fetch(`http://127.0.0.1:${broker.port}/web/stage/launch`, {
+      method: "POST", headers: { "content-type": "application/json", "x-m9r-key": key },
+      body: JSON.stringify({ token: "session-token", taskId: "T1", appId: "fixture" }),
+    });
+    assert.equal(missingLaunchReceipt.status, 409);
+    assert.match((await missingLaunchReceipt.json() as { error: string }).error, /desktop-operation receipts/);
     assert.equal(calls, 5);
   } finally { await broker.close(); }
 });

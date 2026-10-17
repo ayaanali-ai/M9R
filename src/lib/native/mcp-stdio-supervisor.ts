@@ -47,6 +47,11 @@ export function runMcpStdioSupervisor(options: McpSupervisorOptions) {
   let cancelHandshake: (() => void) | undefined;
   let serverRequestSequence = 0;
   let inputBuffer = "";
+  // Providers are allowed to pipeline notifications and the first request
+  // after initialize. Hold those messages until the private worker has
+  // completed its own handshake instead of treating startup latency as a
+  // runtime failure.
+  const preReadyMessages: Message[] = [];
   let loadedRevision: string | undefined;
   let refreshing = false;
   let finishClosed!: () => void;
@@ -165,6 +170,8 @@ export function runMcpStdioSupervisor(options: McpSupervisorOptions) {
             const result = { ...message.result, capabilities: { ...message.result.capabilities } };
             if (result.capabilities.tools) result.capabilities.tools = { ...result.capabilities.tools, listChanged: true };
             send({ jsonrpc: "2.0", id: initialization!.id, result });
+            const queued = preReadyMessages.splice(0);
+            for (const queuedMessage of queued) receive(queuedMessage);
           } else {
             if (initialized) write(worker, { jsonrpc: "2.0", method: "notifications/initialized" });
             if (initialized && message.result.capabilities?.tools) send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
@@ -229,7 +236,11 @@ export function runMcpStdioSupervisor(options: McpSupervisorOptions) {
       return;
     }
     if (!initialization || !initializationAnswered) {
-      if (message.id !== undefined) failure(message.id, false);
+      if (message.id !== undefined || message.method === "notifications/initialized") {
+        if (preReadyMessages.length >= 128) {
+          if (message.id !== undefined) failure(message.id, false);
+        } else preReadyMessages.push(message);
+      }
       return;
     }
     if (message.method === "notifications/initialized") { initialized = true; if (child) write(child, message); return; }

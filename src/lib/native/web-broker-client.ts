@@ -7,14 +7,26 @@ import type { TaskStageMode } from "./task-desktop-stage";
 
 const MAX_STAGE_REQUEST_TIMEOUT_MS = 70_000;
 
+/** Common response envelope for stage operations and the provider-neutral computer-use adapter. */
+export interface StageClientResult {
+  ok: boolean;
+  result?: unknown;
+  data?: unknown;
+  error?: string;
+  code?: string;
+  dispatchState?: "not-dispatched" | "dispatched" | "unknown" | string;
+  nextStep?: string;
+  recovery?: unknown;
+}
+
 export interface WebBrokerClient {
   /** Durable task/inbox mutations performed by the owner broker under its own M9R-home ACL. */
   submitAgentTask?(token: string, to: string, goal: string): Promise<{ ok: boolean; taskId?: string; created?: boolean; error?: string }>;
   claimAgentInbox?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; taskIds?: string[]; error?: string }>;
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
   recordAgentTaskResult?(token: string, taskId: string, summary: string): Promise<{ ok: boolean; error?: string }>;
-  taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode): Promise<{ ok: boolean; result?: unknown; error?: string }>;
-  taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string): Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
+  taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
   prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
   run(request: WebRequest): Promise<WebResponse>;
   runBatch?(request: WebBatchRequest): Promise<WebBatchResponse>;
@@ -148,10 +160,11 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
     async recordAgentTaskResult(token, taskId, summary) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary } });
     },
-    async taskStageApp(token, taskId, appId, mode = "owner-preview") {
+    async taskStageApp(token, taskId, appId, mode = "owner-preview", operationId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,
         url: `${baseUrl}/web/stage/${appId === undefined ? "close" : "launch"}`,
-        body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }) }, timeoutMs: 70_000 });
+        body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }), ...(operationId ? { operationId } : {}) },
+        timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
     async taskStageAction(token, taskId, action, mode = "owner-preview", operationId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/action`,

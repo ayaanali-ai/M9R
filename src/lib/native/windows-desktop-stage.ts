@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { renameStateFile } from "./atomic-file";
@@ -18,6 +18,8 @@ const MACHINE_ID_FILE = "windows-stage-machine-id";
 
 export interface WindowsStageRecord {
   name: string;
+  /** Stable logical app reference used to recover the selected window after a broker restart. */
+  appId?: string;
   desktopId: string;
   /** Random local coordination identity; the Windows desktop GUID never leaves this machine. */
   roomDesktopId: string;
@@ -93,6 +95,11 @@ function isNonzeroDesktopId(value: unknown): value is string {
   return typeof value === "string" && DESKTOP_ID_RE.test(value) && !EMPTY_DESKTOP_ID_RE.test(value);
 }
 
+function isPersistedAppId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 1024
+    && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
 function parseRegistry(raw: string): StageRegistry {
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { throw new Error("The local Windows stage registry is corrupt; it was left unchanged."); }
@@ -110,6 +117,7 @@ function parseRegistry(raw: string): StageRegistry {
     const name = normalizedName(typeof record.name === "string" ? record.name : "");
     if (names.has(name)) throw new Error("The local Windows stage registry contains duplicate names; it was left unchanged.");
     names.add(name);
+    if (record.appId !== undefined && (!isPersistedAppId(record.appId))) throw new Error("The local Windows stage registry contains an invalid app reference; it was left unchanged.");
     if (typeof record.desktopId !== "string" || !DESKTOP_ID_RE.test(record.desktopId)) throw new Error("The local Windows stage registry contains an invalid desktop id; it was left unchanged.");
     const returnToDesktopId = record.returnToDesktopId ?? null;
     if (returnToDesktopId !== null && (typeof returnToDesktopId !== "string" || !DESKTOP_ID_RE.test(returnToDesktopId))) {
@@ -145,6 +153,7 @@ function parseRegistry(raw: string): StageRegistry {
     }
     return {
       name,
+      ...(record.appId !== undefined ? { appId: record.appId } : {}),
       desktopId: record.desktopId.toLowerCase(),
       roomDesktopId: roomDesktopId.toLowerCase(),
       returnToDesktopId: returnToDesktopId?.toLowerCase() ?? null,
@@ -200,6 +209,13 @@ export function formatWindowsStageRoomKeys(machineId: string, stage: Pick<Window
   };
 }
 
+// No legitimate registry update holds this lock for anywhere close to this
+// long -- it exists only to make the handful of synchronous filesystem calls
+// in writeRegistryWhileLocked atomic as a group. A lock older than this was
+// left behind by a process that no longer exists (the broker has been killed
+// and restarted many times across one session), not one still working.
+const STALE_LOCK_MS = 30_000;
+
 function acquireRegistryLock(root: string): () => void {
   mkdirSync(root, { recursive: true });
   const target = registryPath(root);
@@ -207,8 +223,23 @@ function acquireRegistryLock(root: string): () => void {
   try {
     mkdirSync(lock);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Another Windows stage registry update is already running; retry after it finishes.");
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // A lock with no PID, no age limit, and no staleness check meant that any
+    // process killed or crashed while holding it (a forced restart, in
+    // particular) permanently broke every future registry operation until
+    // someone deleted the lock directory by hand. Self-heal instead: a lock
+    // old enough to be certain nothing legitimate still holds it is removed
+    // and re-acquired, exactly once, before giving up for real.
+    let ageMs: number;
+    try { ageMs = Date.now() - statSync(lock).mtimeMs; } catch { ageMs = Infinity; }
+    if (ageMs < STALE_LOCK_MS) throw new Error("Another Windows stage registry update is already running; retry after it finishes.");
+    try { rmSync(lock, { recursive: true, force: true }); } catch { /* another process may have just cleared it too; proceed to retry regardless */ }
+    try {
+      mkdirSync(lock);
+    } catch (retryError) {
+      if ((retryError as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Another Windows stage registry update is already running; retry after it finishes.");
+      throw retryError;
+    }
   }
   return () => rmSync(lock, { recursive: true, force: true });
 }
@@ -300,10 +331,11 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return control;
   }
 
-  async function register(nameInput: string, pidInput: string, windowIdInput: string): Promise<WindowsStageRecord> {
+  async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string): Promise<WindowsStageRecord> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
+    if (appId !== undefined && !isPersistedAppId(appId)) throw new Error("The Windows stage app reference is invalid.");
     const info = await inspectWindow(pidInput, windowIdInput);
     const release = acquireRegistryLock(root);
     try {
@@ -312,8 +344,10 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       if (existing && existing.desktopId !== info.desktopId) {
         throw new Error(`Stage “${name}” already names a different desktop. Forget it first, then register the new desktop.`);
       }
+      const savedAppId = appId ?? existing?.appId;
       const record: WindowsStageRecord = {
         name,
+        ...(savedAppId !== undefined ? { appId: savedAppId } : {}),
         desktopId: info.desktopId,
         roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
         returnToDesktopId: existing?.returnToDesktopId ?? null,
@@ -504,7 +538,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return { fromDesktopId: current.desktopId, window: moved, stage };
   }
 
-  async function attachWindow(nameInput: string, pidInput: string, windowIdInput: string): Promise<{ stage: WindowsStageRecord; window: NativeWindowStageInfo }> {
+  async function attachWindow(nameInput: string, pidInput: string, windowIdInput: string, appId?: string): Promise<{ stage: WindowsStageRecord; window: NativeWindowStageInfo }> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
@@ -512,7 +546,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
     const current = await inspectWindow(pidInput, windowIdInput);
     if (current.desktopId !== stage.desktopId) await moveWindow(name, pidInput, windowIdInput);
-    const registered = await register(name, pidInput, windowIdInput);
+    const registered = await register(name, pidInput, windowIdInput, appId);
     const inspected = await inspectStage(name);
     if (!inspected.anchor || inspected.anchor.pid !== registered.anchor?.pid || inspected.anchor.windowId !== registered.anchor?.windowId) {
       throw new Error(`Windows did not confirm that the selected app window is attached to stage “${name}”.`);
@@ -665,7 +699,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     try {
       const registry = readRegistry(root), stage = registry.stages.find((item) => item.name === name);
       if (!stage || stage.anchor?.pid !== pid || stage.anchor.windowId !== windowId) throw new Error("The task app is no longer this stage's registered window.");
-      stage.anchor = null; stage.roomWindowId = null;
+      stage.anchor = null; stage.roomWindowId = null; delete stage.appId;
       writeRegistryWhileLocked(root, registry);
     } finally { release(); }
   }

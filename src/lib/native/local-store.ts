@@ -12,6 +12,7 @@ import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
 import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
 import { canQueue } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
+import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, newConnectionId, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
 
 export interface EndpointRecord {
   handle: string;
@@ -42,6 +43,8 @@ export interface EventRecord {
 const MAX_EVENTS = 500;
 /** Keep receipts for recent stage actions so an MCP retry cannot repeat an OS input. */
 const MAX_STAGE_OPERATION_RECEIPTS = 10_000;
+/** Keep generic computer-use receipts across broker/client restarts; fail closed rather than evicting replay protection. */
+const MAX_COMPUTER_OPERATION_RECEIPTS = 10_000;
 /** Hard ceiling for the complete local snapshot, including extensible cursor and rule maps. */
 export const MAX_LOCAL_STATE_BYTES = 16 * 1024 * 1024;
 /** Keep each rewritten local state file within a predictable task count when user work can be retired safely. */
@@ -76,6 +79,21 @@ export interface StageOperationInput {
 
 export type StageOperationClaim = { state: "claimed" | "in_progress" | "applied" | "uncertain" | "conflict"; updatedAt?: string };
 
+/** Provider-neutral idempotency identity for an action dispatched through any computer-use backend. */
+export interface ComputerOperationInput {
+  handle: string;
+  sessionId: string;
+  targetId: string;
+  operationId: string;
+  fingerprint: string;
+}
+
+interface ComputerOperationRecord extends ComputerOperationInput {
+  key: string;
+  state: "running" | "applied" | "uncertain";
+  updatedAt: string;
+}
+
 interface StageOperationRecord {
   key: string;
   handle: string;
@@ -105,6 +123,12 @@ interface StoreState {
   identities: IdentityToken[];
   /** Durable one-shot receipts for mutating desktop-stage operations. */
   stageOperations: StageOperationRecord[];
+  /** Durable one-shot receipts for provider-neutral computer-use operations. */
+  computerOperations: ComputerOperationRecord[];
+  /** Private provider-to-MCP claims; never rendered in provider prompts or tool arguments. */
+  connectionClaims: ConnectionClaim[];
+  /** Durable MCP bindings; a worker restart may reuse one while the provider identity is active. */
+  connectionBindings: ConnectionBinding[];
 }
 
 export interface SessionLink {
@@ -116,10 +140,14 @@ export interface SessionLink {
   updatedAt: string;
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [] });
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], connectionClaims: [], connectionBindings: [] });
 
 const stageOperationKey = (input: StageOperationInput): string => createHash("sha256")
   .update(JSON.stringify([normalizeHandle(input.handle), input.sessionId, input.taskId, input.operationId]))
+  .digest("hex");
+
+const computerOperationKey = (input: ComputerOperationInput): string => createHash("sha256")
+  .update(JSON.stringify([normalizeHandle(input.handle), input.sessionId, input.targetId, input.operationId]))
   .digest("hex");
 
 const normalizeSessionFolder = (cwd?: string): string => {
@@ -160,6 +188,8 @@ const normalizeStoredScopes = (storeRoot: string, state: StoreState): StoreState
   state.endpoints = Object.fromEntries(Object.entries(state.endpoints).map(([key, value]) => [key, dropInstallCwd(storeRoot, value)]));
   state.sessions = state.sessions.map((session) => dropInstallCwd(storeRoot, session));
   state.tasks = state.tasks.map((task) => dropInstallCwd(storeRoot, task));
+  state.connectionClaims = state.connectionClaims.map((claim) => dropInstallCwd(storeRoot, claim));
+  state.connectionBindings = state.connectionBindings.map((binding) => dropInstallCwd(storeRoot, binding));
   state.links = state.links.map((link) => ({
     ...link,
     a: dropInstallCwd(storeRoot, link.a),
@@ -387,6 +417,83 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return [...new Set([...seen, ...Object.values(KNOWN_PROVIDER_HANDLES)])];
     },
 
+    /** Read a provider-neutral receipt without claiming or repeating the remote/desktop action. */
+    inspectComputerOperation(input: ComputerOperationInput): StageOperationClaim | undefined {
+      const record = readState().computerOperations.find((candidate) => candidate.key === computerOperationKey(input));
+      if (!record) return undefined;
+      if (record.fingerprint !== input.fingerprint) return { state: "conflict" };
+      return { state: record.state === "running" ? "in_progress" : record.state, updatedAt: record.updatedAt };
+    },
+
+    /** Atomically claims one generic computer-use mutation before it reaches a non-stage backend. */
+    claimComputerOperation(input: ComputerOperationInput): StageOperationClaim {
+      const handle = normalizeHandle(input.handle);
+      if (!handle || !input.sessionId || input.sessionId.length > 512
+        || !input.targetId || input.targetId.length > 512
+        || !/^[a-zA-Z0-9._:-]{1,128}$/.test(input.operationId) || !/^[a-f0-9]{64}$/.test(input.fingerprint)) {
+        throw new Error("Invalid generic computer-use operation receipt identity.");
+      }
+      const key = computerOperationKey({ ...input, handle });
+      return update((s) => {
+        const existing = s.computerOperations.find((record) => record.key === key);
+        if (existing) {
+          if (existing.fingerprint !== input.fingerprint) return { state: "conflict" };
+          return { state: existing.state === "running" ? "in_progress" : existing.state, updatedAt: existing.updatedAt };
+        }
+        if (s.computerOperations.length >= MAX_COMPUTER_OPERATION_RECEIPTS) {
+          throw new Error(`The generic computer-use receipt store is at capacity (${MAX_COMPUTER_OPERATION_RECEIPTS}); no input was sent.`);
+        }
+        const updatedAt = now().toISOString();
+        s.computerOperations.push({ key, handle, sessionId: input.sessionId, targetId: input.targetId,
+          operationId: input.operationId, fingerprint: input.fingerprint, state: "running", updatedAt });
+        return { state: "claimed", updatedAt };
+      });
+    },
+
+    /** Only a response explicitly proving no dispatch may release a generic receipt claim. */
+    releaseComputerOperation(input: ComputerOperationInput): boolean {
+      const key = computerOperationKey(input);
+      return update((s) => {
+        const record = s.computerOperations.find((candidate) => candidate.key === key);
+        if (!record || record.fingerprint !== input.fingerprint || record.state !== "running") return false;
+        s.computerOperations = s.computerOperations.filter((candidate) => candidate !== record);
+        return true;
+      });
+    },
+
+    /** A completed or ambiguous operation is terminal for replay purposes; recovery must observe, not redispatch. */
+    settleComputerOperation(input: ComputerOperationInput & { state: "applied" | "uncertain" }): boolean {
+      const key = computerOperationKey(input);
+      return update((s) => {
+        const record = s.computerOperations.find((candidate) => candidate.key === key);
+        if (!record || record.fingerprint !== input.fingerprint) return false;
+        if (record.state === input.state) return true;
+        if (record.state !== "running") return false;
+        record.state = input.state;
+        record.updatedAt = now().toISOString();
+        return true;
+      });
+    },
+
+    /** Read a stage receipt without touching desktop state or claiming another operation. */
+    inspectStageOperation(input: StageOperationInput): StageOperationClaim | undefined {
+      const record = readState().stageOperations.find((candidate) => candidate.key === stageOperationKey(input));
+      if (!record) return undefined;
+      if (record.fingerprint !== input.fingerprint) return { state: "conflict" };
+      return { state: record.state === "running" ? "in_progress" : record.state, updatedAt: record.updatedAt };
+    },
+
+    /** A typed pre-dispatch refusal may release its claim; ambiguous input never does. */
+    releaseStageOperation(input: StageOperationInput): boolean {
+      const key = stageOperationKey(input);
+      return update((s) => {
+        const record = s.stageOperations.find((candidate) => candidate.key === key);
+        if (!record || record.fingerprint !== input.fingerprint || record.state !== "running") return false;
+        s.stageOperations = s.stageOperations.filter((candidate) => candidate !== record);
+        return true;
+      });
+    },
+
     /** Atomically claims an operation before OS input is sent; the same request cannot be replayed. */
     claimStageOperation(input: StageOperationInput): StageOperationClaim {
       const handle = normalizeHandle(input.handle);
@@ -521,9 +628,171 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return identity?.token ?? null;
     },
 
+    /** Distinguishes a session that never had an identity from one whose identity was explicitly revoked. */
+    identityWasRevoked(handle: string, sessionId: string): boolean {
+      const records = readState().identities.filter((item) => item.sessionId === sessionId && normalizeHandle(item.handle) === normalizeHandle(handle));
+      return records.length > 0 && records.every((item) => !!item.revokedAt);
+    },
+
+    /** Bind direct delivery to one verified provider session before the provider receives its plain task. */
+    bindTaskToSession(id: string, token: string): boolean {
+      return update((s) => {
+        const identity = s.identities.find((item) => item.token === token && !item.revokedAt);
+        const task = s.tasks.find((item) => item.id === id);
+        if (!identity || !task || task.resultSummary || !canQueue(task) || normalizeHandle(task.to) !== normalizeHandle(identity.handle)) return false;
+        const owner = task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId;
+        if (owner && owner !== identity.sessionId) return false;
+        const occupied = s.tasks.some((other) => other.id !== id && normalizeHandle(other.to) === normalizeHandle(identity.handle)
+          && !other.resultSummary && other.goal === task.goal
+          && (other.targetSession ?? other.deliveredSession ?? other.delivery?.threadId) === identity.sessionId
+          && ["sending", "queued", "uncertain"].includes(other.delivery?.state ?? ""));
+        if (occupied) return false;
+        task.deliveredSession = identity.sessionId;
+        if (task.delivery) task.delivery.threadId = identity.sessionId;
+        return true;
+      });
+    },
+
     /** Ends a session's token early (the person revoked it from the pill, or the session closed). */
     revokeIdentity(sessionId: string): void {
-      update((s) => { const at = now().toISOString(); for (const t of s.identities) if (t.sessionId === sessionId && !t.revokedAt) t.revokedAt = at; });
+      update((s) => {
+        const at = now().toISOString();
+        for (const t of s.identities) if (t.sessionId === sessionId && !t.revokedAt) t.revokedAt = at;
+        // A revoked provider session can never authenticate an MCP transport again. Remove its
+        // private connection records so a later provider process cannot inherit stale ownership.
+        s.connectionClaims = s.connectionClaims.filter((claim) => claim.sessionId !== sessionId);
+        s.connectionBindings = s.connectionBindings.filter((binding) => binding.sessionId !== sessionId);
+      });
+    },
+
+    /**
+     * Issues one private provider-session claim. Repeated SessionStart events for the same
+     * session are idempotent and refresh the provider parent PID, so an MCP worker can be
+     * replaced without rotating a user-facing credential or selecting a different session.
+     */
+    issueConnectionClaim(input: ConnectionClaimInput): ConnectionClaim {
+      const handle = normalizeHandle(input.handle);
+      const provider = input.provider.trim();
+      if (!handle || !provider || !input.sessionId) throw new Error("A connection claim needs a provider, handle, and session.");
+      if (input.ownerProcessId !== undefined && !validConnectionProcessId(input.ownerProcessId)) throw new Error("A connection claim process id must be a positive integer.");
+      return update((s) => {
+        const at = now();
+        const activeIdentity = s.identities.find((identity) => !identity.revokedAt
+          && identity.sessionId === input.sessionId
+          && normalizeHandle(identity.handle) === handle
+          && sameConnectionProvider(identity.provider, provider));
+        if (!activeIdentity) throw new Error("Cannot issue a connection claim without an active provider identity.");
+
+        const existing = s.connectionClaims.find((claim) => claim.sessionId === input.sessionId
+          && normalizeHandle(claim.handle) === handle
+          && sameConnectionProvider(claim.provider, provider));
+        if (existing) {
+          existing.cwd = projectCwd(root, input.cwd);
+          existing.ownerProcessId = input.ownerProcessId;
+          existing.expiresAt = new Date(at.getTime() + CONNECTION_CLAIM_TTL_MS).toISOString();
+          const bound = existing.bindingId ? s.connectionBindings.find((candidate) => candidate.bindingId === existing.bindingId) : undefined;
+          if (bound) {
+            bound.cwd = existing.cwd;
+            bound.ownerProcessId = existing.ownerProcessId;
+          }
+          return existing;
+        }
+
+        const claim: ConnectionClaim = {
+          claimId: newConnectionId(),
+          handle,
+          provider,
+          sessionId: input.sessionId,
+          ...(projectCwd(root, input.cwd) ? { cwd: projectCwd(root, input.cwd) } : {}),
+          ...(input.ownerProcessId !== undefined ? { ownerProcessId: input.ownerProcessId } : {}),
+          issuedAt: at.toISOString(),
+          expiresAt: new Date(at.getTime() + CONNECTION_CLAIM_TTL_MS).toISOString(),
+        };
+        s.connectionClaims = [...s.connectionClaims.filter((candidate) => candidate.expiresAt > at.toISOString() || candidate.bindingId), claim].slice(-MAX_CONNECTION_RECORDS);
+        return claim;
+      });
+    },
+
+    /** Binds an explicit private claim. Once bound, worker restarts reuse the same binding idempotently. */
+    bindConnectionClaim(claimId: string, expected: BindConnectionInput = {}): ConnectionBinding | null {
+      return update((s) => {
+        const claim = s.connectionClaims.find((candidate) => candidate.claimId === claimId);
+        if (!claim) return null;
+        const existing = claim.bindingId ? s.connectionBindings.find((candidate) => candidate.bindingId === claim.bindingId) : undefined;
+        if (existing) {
+          const identity = s.identities.find((candidate) => !candidate.revokedAt && candidate.sessionId === existing.sessionId
+            && normalizeHandle(candidate.handle) === normalizeHandle(existing.handle)
+            && sameConnectionProvider(candidate.provider, existing.provider));
+          return identity ? existing : null;
+        }
+        if (!usableConnectionClaim(claim, now().getTime(), expected)) return null;
+        const binding: ConnectionBinding = {
+          bindingId: newConnectionId(),
+          claimId: claim.claimId,
+          handle: claim.handle,
+          provider: claim.provider,
+          sessionId: claim.sessionId,
+          ...(claim.cwd ? { cwd: claim.cwd } : {}),
+          ...(claim.ownerProcessId !== undefined ? { ownerProcessId: claim.ownerProcessId } : {}),
+          boundAt: now().toISOString(),
+        };
+        claim.bindingId = binding.bindingId;
+        claim.boundAt = binding.boundAt;
+        s.connectionBindings = [...s.connectionBindings.filter((candidate) => candidate.bindingId !== binding.bindingId), binding].slice(-MAX_CONNECTION_RECORDS);
+        return binding;
+      });
+    },
+
+    /**
+     * Resolves the one claim owned by a provider parent process. Multiple matching sessions
+     * fail closed; M9R must never guess after a stale or duplicated runtime is present.
+     */
+    bindConnectionForProcess(expected: BindConnectionInput): ConnectionBinding | null {
+      return update((s) => {
+        const provider = expected.provider?.trim();
+        const processId = expected.processId;
+        const active = (sessionId: string, handle: string, claimProvider: string) => s.identities.some((identity) => !identity.revokedAt
+          && identity.sessionId === sessionId
+          && normalizeHandle(identity.handle) === normalizeHandle(handle)
+          && sameConnectionProvider(identity.provider, claimProvider));
+        const matchingBindings = s.connectionBindings.filter((binding) => (!provider || sameConnectionProvider(binding.provider, provider))
+          && (processId === undefined || binding.ownerProcessId === processId)
+          && active(binding.sessionId, binding.handle, binding.provider));
+        if (matchingBindings.length === 1) return matchingBindings[0];
+        if (matchingBindings.length > 1) return null;
+
+        const candidates = s.connectionClaims.filter((claim) => usableConnectionClaim(claim, now().getTime(), expected)
+          && active(claim.sessionId, claim.handle, claim.provider));
+        if (candidates.length !== 1) return null;
+        const claim = candidates[0];
+        const binding: ConnectionBinding = {
+          bindingId: newConnectionId(),
+          claimId: claim.claimId,
+          handle: claim.handle,
+          provider: claim.provider,
+          sessionId: claim.sessionId,
+          ...(claim.cwd ? { cwd: claim.cwd } : {}),
+          ...(claim.ownerProcessId !== undefined ? { ownerProcessId: claim.ownerProcessId } : {}),
+          boundAt: now().toISOString(),
+        };
+        claim.bindingId = binding.bindingId;
+        claim.boundAt = binding.boundAt;
+        s.connectionBindings = [...s.connectionBindings, binding].slice(-MAX_CONNECTION_RECORDS);
+        return binding;
+      });
+    },
+
+    /** Returns the verified provider identity behind a private binding, or null if it was revoked. */
+    verifyConnectionBinding(bindingId: string): VerifiedIdentity | null {
+      const state = readState();
+      const binding = state.connectionBindings.find((candidate) => candidate.bindingId === bindingId);
+      if (!binding) return null;
+      const claim = state.connectionClaims.find((candidate) => candidate.claimId === binding.claimId);
+      if (!claim || claim.bindingId !== binding.bindingId) return null;
+      const identity = state.identities.find((candidate) => !candidate.revokedAt && candidate.sessionId === binding.sessionId
+        && normalizeHandle(candidate.handle) === normalizeHandle(binding.handle)
+        && sameConnectionProvider(candidate.provider, binding.provider));
+      return identity ? { handle: identity.handle, provider: identity.provider, sessionId: identity.sessionId } : null;
     },
 
     /** Every link this session takes part in, either side. */
@@ -736,7 +1005,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const task = s.tasks.find((item) => item.id === id);
         if (!task || task.to !== "codex" || task.resultSummary || task.deliveredAt || !canQueue(task)) return undefined;
-        if (task.delivery && task.delivery.state !== "failed") return undefined;
+        if (task.delivery && task.delivery.state !== "failed" && task.delivery.state !== "deferred") return undefined;
         task.delivery = { state: "sending", attempts: (task.delivery?.attempts ?? 0) + 1, claimedAt: now().toISOString() };
         return task;
       });

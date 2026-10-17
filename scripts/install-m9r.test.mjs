@@ -154,7 +154,7 @@ test("standalone release packages runtime companions from the canonical engine d
   assert.ok(overlayPreflightIndex >= 0 && stagingIndex > overlayPreflightIndex, "missing pill input must fail before a new build staging directory is created");
   assert.match(builderSource, /m9r-web-broker\.cjs[\s\S]*m9r-web-broker\.exe/, "the build must turn the bundled broker into its own executable");
   assert.match(builderSource, /copyFileSync\(overlayExe, join\(out, "m9r-overlay\.exe"\)\)/, "the engine distribution must capture the just-built desktop pill");
-  assert.match(builderSource, /writeRuntimeBuildManifest\(out\)[\s\S]*verifyRuntimeBuildManifest\(out, \{ exact: true \}\)[\s\S]*publishRuntimeBuild\(out, output, managedRuntimePaths\)/,
+  assert.match(builderSource, /writeRuntimeBuildManifest\(out(?:, [^\n]*)?\)[\s\S]*verifyRuntimeBuildManifest\(out, \{ exact: true \}\)[\s\S]*publishRuntimeBuild\(out, output, managedRuntimePaths\)/,
     "the complete artifact set must be hashed and verified before it is published");
   assert.match(builderSource, /rmSync\(buildRoot, \{ recursive: true, force: true \}\)/, "only the unique build staging directory may be removed after publication");
   assert.doesNotMatch(builderSource, /rmSync\(out,\s*\{\s*recursive:\s*true/, "the build must preserve other files already in engine/dist");

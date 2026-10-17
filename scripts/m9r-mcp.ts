@@ -19,6 +19,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 async function main(): Promise<void> {
+  const configuredProcessId = Number(process.env.M9R_CONNECTION_PROCESS_ID);
+  // Never infer ownership from the MCP process's ambient parent. A standalone
+  // launch, test runner, shell, or supervisor can all have a parent PID that
+  // is unrelated to the provider session. Provider adapters either pass the
+  // exact host PID explicitly or bind by their explicit provider identity;
+  // otherwise this remains the legacy token-authenticated transport.
+  const connectionProcessId = Number.isSafeInteger(configuredProcessId) && configuredProcessId > 0
+    ? configuredProcessId
+    : undefined;
+  const connectionProvider = process.env.M9R_PROVIDER?.trim() || undefined;
   if (process.env.M9R_MCP_WORKER !== "1") {
     const packaged = /m9r-engine(?:\.exe)?$/i.test(process.execPath);
     const executableDirectory = dirname(process.execPath);
@@ -34,7 +44,7 @@ async function main(): Promise<void> {
     const runtime = runMcpStdioSupervisor({ input: process.stdin, output: process.stdout, workerRevision,
       spawnWorker: () => spawn(process.execPath, args, {
         stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
-        env: { ...process.env, M9R_MCP_WORKER: "1" },
+        env: { ...process.env, M9R_MCP_WORKER: "1", ...(connectionProcessId ? { M9R_CONNECTION_PROCESS_ID: String(connectionProcessId) } : {}) },
       }),
       onEvent: event => process.stderr.write(`M9R MCP lifecycle ${JSON.stringify(event)}\n`),
     });
@@ -49,7 +59,14 @@ async function main(): Promise<void> {
     credentials: parseNetworkCredentials(process.env.M9R_NETWORK_CREDENTIALS_JSON),
   });
   const roomStartedAt = Number(process.env.M9R_ROOM_STARTED_AT);
-  const server: McpServer = createM9rMcpServer({ store, web, networkCore, ...(Number.isSafeInteger(roomStartedAt) && roomStartedAt > 0 ? { roomStartedAt } : {}) });
+  const server: McpServer = createM9rMcpServer({
+    store,
+    web,
+    networkCore,
+    ...(Number.isSafeInteger(roomStartedAt) && roomStartedAt > 0 ? { roomStartedAt } : {}),
+    ...(connectionProcessId ? { connectionProcessId } : {}),
+    ...(connectionProvider ? { connectionProvider } : {}),
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

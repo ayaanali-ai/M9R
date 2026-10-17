@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,4 +34,17 @@ test("a hook call through the shared runner registers the session and prints the
   const home = mkdtempSync(join(tmpdir(), "m9r-hr-"));
   const text = await runHookRequest({ event: "SessionStart", provider: "claude-code", input: { hook_event_name: "SessionStart", session_id: "abc", cwd: home }, env: { M9R_HOME: home } }, "unused");
   assert.match(text, /M9R connected as @claude/);
+});
+
+test("a resident-engine hook request carries the verified provider parent instead of the daemon parent", async () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-hr-binding-"));
+  await runHookRequest({
+    event: "SessionStart",
+    provider: "codex",
+    providerProcessId: 4545,
+    input: { hook_event_name: "SessionStart", session_id: "codex-session", cwd: home },
+    env: { M9R_HOME: home },
+  }, "unused", {}, true);
+  const state = JSON.parse(readFileSync(join(home, "state.json"), "utf8")) as { connectionClaims: Array<{ ownerProcessId?: number }> };
+  assert.equal(state.connectionClaims[0]?.ownerProcessId, 4545);
 });

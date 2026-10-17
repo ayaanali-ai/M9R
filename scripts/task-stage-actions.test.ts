@@ -18,6 +18,20 @@ test("desktop action parser accepts common pointer and keyboard actions but reje
   assert.throws(() => parseTaskStageAction({ kind: "click", x: 1, y: 2, hwnd: "123" }), /Invalid stage action fields/);
 });
 
+test("stage parser accepts the provider-neutral semantic action contract", () => {
+  const actions = [
+    { kind: "click_element", view: "app", ref: "uia:button", confirmFocusForeground: true },
+    { kind: "replace_element", view: "app", ref: "uia:field", text: "hello" },
+    { kind: "scroll_delta", view: "app", x: 20, y: 30, deltaX: 0, deltaY: 2, unit: "page", confirmFocusForeground: true },
+    { kind: "window_frame", view: "app", x: 10, y: 20, width: 800, height: 600 },
+    { kind: "focus", view: "app", confirmFocusForeground: true },
+    { kind: "invoke_menu", view: "app", path: ["Edit", "Select All"] },
+    { kind: "clipboard_read", view: "app", includeText: false },
+    { kind: "clipboard_write", view: "app", text: "hello", confirmSharedClipboard: true },
+  ];
+  for (const action of actions) assert.deepEqual(parseTaskStageAction(action), action);
+});
+
 test("structure observation is app-window-only and does not use desktop coordinates", async () => {
   const calls: string[] = [];
   const driver = {

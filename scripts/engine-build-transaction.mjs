@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
 export const RUNTIME_BUILD_INFO_FILE = "m9r-build-info.json";
 
@@ -52,9 +52,17 @@ function buildIdFor(artifacts) {
   return createHash("sha256").update(JSON.stringify(Object.entries(artifacts))).digest("hex");
 }
 
-export function writeRuntimeBuildManifest(root, builtAt = new Date().toISOString()) {
+export function writeRuntimeBuildManifest(
+  root,
+  builtAt = new Date().toISOString(),
+  source = { sourceCommit: "unknown", sourceDirty: true },
+) {
+  if (!source || typeof source.sourceCommit !== "string" || !source.sourceCommit
+    || typeof source.sourceDirty !== "boolean") {
+    throw new Error("Runtime build source provenance is required.");
+  }
   const artifacts = normalizeArtifacts(listFiles(resolve(root)));
-  const manifest = { schemaVersion: 1, buildId: buildIdFor(artifacts), builtAt, artifacts };
+  const manifest = { schemaVersion: 1, buildId: buildIdFor(artifacts), builtAt, artifacts, source };
   writeFileSync(join(root, RUNTIME_BUILD_INFO_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }
@@ -67,7 +75,10 @@ export function verifyRuntimeBuildManifest(root, { exact = false } = {}) {
 
   if (!manifest || manifest.schemaVersion !== 1 || typeof manifest.buildId !== "string"
     || !/^[a-f0-9]{64}$/.test(manifest.buildId) || typeof manifest.builtAt !== "string"
-    || !manifest.artifacts || typeof manifest.artifacts !== "object" || Array.isArray(manifest.artifacts)) {
+    || !manifest.artifacts || typeof manifest.artifacts !== "object" || Array.isArray(manifest.artifacts)
+    || !manifest.source || typeof manifest.source !== "object" || Array.isArray(manifest.source)
+    || typeof manifest.source.sourceCommit !== "string" || !manifest.source.sourceCommit
+    || typeof manifest.source.sourceDirty !== "boolean") {
     throw new Error("Runtime build manifest has an invalid schema.");
   }
   const artifacts = normalizeArtifacts(Object.entries(manifest.artifacts));
