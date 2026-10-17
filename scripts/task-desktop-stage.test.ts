@@ -541,6 +541,21 @@ test("revoking control while the owner decides stops the click even after approv
   } finally { f.cleanup(); }
 });
 
+test("prepare preserves the recovery anchor across repeated missing-window observations and broker recreation", async () => {
+  const f = fixture(true, (root) => ({ executable: join(root, "chrome.exe"), args: [] }));
+  try {
+    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Chrome" }];
+    await f.service.launch(f.identity.token, f.task.id, "chrome");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let absent = true;
+      f.setInspectOverride(() => absent ? { ok: false, error: "window closed" } : { ok: true, window: { pid: 123, windowId: "456", desktopId: "33333333-3333-4333-8333-333333333333", onCurrentDesktop: true } });
+      await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+      absent = false;
+      await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview");
+    }
+  } finally { f.cleanup(); }
+});
+
 test("act() recovery relaunches only when the window is genuinely gone, not on other inspection failures", async () => {
   const f = fixture(true, (root, appId) => {
     assert.equal(appId, "chrome");
