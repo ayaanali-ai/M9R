@@ -204,12 +204,26 @@ interface DesktopInputTarget {
 type CuaWindowInfo = Awaited<ReturnType<CuaDriverLike["listWindows"]>>["windows"][number];
 type CuaWindowElement = NonNullable<Awaited<ReturnType<CuaDriverLike["getWindowState"]>>["elements"]>[number];
 
-function elementAtScreenPoint(elements: readonly CuaWindowElement[], x: number, y: number) {
-  return elements.filter((element) => {
+function elementAtScreenPoint(elements: readonly CuaWindowElement[], x: number, y: number,
+  supports?: (element: CuaWindowElement) => boolean) {
+  const hit = elements.filter((element) => {
     const frame = element.frame;
     return element.enabled !== false && element.elementToken && frame && frame.w > 0 && frame.h > 0
       && x >= frame.x && y >= frame.y && x < frame.x + frame.w && y < frame.y + frame.h;
   }).sort((a, b) => a.frame!.w * a.frame!.h - b.frame!.w * b.frame!.h)[0];
+  if (!supports) return hit;
+  // Follow real UIA ancestry, never a merely overlapping sibling. Bound cycles
+  // and refuse disabled ancestors instead of turning hit testing into guessing.
+  const parents = new Map(elements.map((element) => [element.elementIndex, element]));
+  const visited = new Set<CuaWindowElement>();
+  let current: CuaWindowElement | undefined = hit;
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    if (current.enabled === false) return undefined;
+    if (current.elementToken && supports(current)) return current;
+    current = current.parentIndex === undefined ? undefined : parents.get(current.parentIndex);
+  }
+  return undefined;
 }
 
 async function typeIntoExactField(driver: CuaDriverLike, selected: DesktopInputTarget, session: string, text: string) {
@@ -217,12 +231,17 @@ async function typeIntoExactField(driver: CuaDriverLike, selected: DesktopInputT
   const state = await driver.getWindowState({ pid: selected.pid, windowId: selected.windowId, session,
     includeAccessibilityTree: true, includeScreenshot: false, maxElements: 512, maxDepth: 24, timeoutMs: 1_500 });
   if (state.pid !== selected.pid || state.windowId !== selected.windowId) throw new Error("The selected text field returned a different application window.");
-  const element = elementAtScreenPoint(state.elements ?? [], selected.field.x, selected.field.y);
+  const element = elementAtScreenPoint(state.elements ?? [], selected.field.x, selected.field.y,
+    (candidate) => candidate.actions?.includes("set_value") === true);
   if (!element?.elementToken || element.label !== selected.field.label || element.role !== selected.field.role
     || !element.actions?.includes("set_value")) throw new Error("The selected text field changed; no text was sent.");
+  // UIA ValuePattern has no caret/selection range in this driver contract.
+  // Background insertion therefore appends to the freshly read value; never
+  // replace existing content or invent an empty value when it is unavailable.
+  if (typeof element.value !== "string") throw new Error("The selected field's current value is unavailable; no insertion was sent.");
   return actionOutcome(await driver.callTool("set_value", JSON.stringify({
     pid: selected.pid, window_id: Number(selected.windowId), element_token: element.elementToken,
-    value: text, session,
+    value: element.value + text, session,
   })), "Cua Driver could not type into the exact accessibility field.");
 }
 
@@ -1026,7 +1045,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     capture: () => Promise<CuaStageWindowFrame>;
     readStructure: () => Promise<CuaStageStructure>;
     elementAt: (x: number, y: number) => Promise<string | undefined>;
-    elementAtPoint: (x: number, y: number) => Promise<CuaWindowElement | undefined>;
+    elementAtPoint: (x: number, y: number, action?: "click" | "set_value") => Promise<CuaWindowElement | undefined>;
     elementByToken: (token: string, expected?: { role?: string; label?: string }) => Promise<{ element: CuaWindowElement; frame: CuaStageWindowFrame } | undefined>;
     captureTarget: (x: number, y: number) => Promise<CuaStageTargetDescription | undefined>;
   }) => Promise<T>, cursorIdentity?: CuaAgentCursorIdentity): Promise<T> {
@@ -1165,7 +1184,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           ...(status !== "complete" ? { fallbackCapture: stageCapture({ ...fallback, capturedAt: now().toISOString() }, now) } : {}),
         };
       };
-      const hitTarget = async (x: number, y: number) => {
+      const hitTarget = async (x: number, y: number, action?: "click" | "set_value") => {
         const state = await driver.getWindowState({ pid, windowId, session, includeAccessibilityTree: true,
           includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, maxElements: 512, maxDepth: 24, timeoutMs: 1500 });
         imageFromWindowState(state, pid, windowId);
@@ -1175,12 +1194,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         // passes scaled screenshot pixels. Convert before hit-testing.
         const screenX = bounds.x + x * bounds.width / state.screenshotWidth!;
         const screenY = bounds.y + y * bounds.height / state.screenshotHeight!;
-        const hits = (state.elements ?? []).filter((element) => {
-          const frame = element.frame;
-          return element.enabled !== false && element.elementToken && frame && frame.w > 0 && frame.h > 0
-            && screenX >= frame.x && screenY >= frame.y && screenX < frame.x + frame.w && screenY < frame.y + frame.h;
-        }).sort((a, b) => a.frame!.w * a.frame!.h - b.frame!.w * b.frame!.h);
-        return hits[0];
+        return elementAtScreenPoint(state.elements ?? [], screenX, screenY, action === undefined ? undefined
+          : (element) => action === "set_value" ? element.actions?.includes("set_value") === true
+            : (element.actions === undefined && !/^(?:Text|StaticText|Label)$/i.test(element.role ?? ""))
+              || element.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name)) === true);
       };
       const elementByToken = async (token: string, expected?: { role?: string; label?: string }) => {
         const state = await driver.getWindowState({ pid, windowId, session, includeAccessibilityTree: true,
@@ -1648,7 +1665,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         && await nativeControl(name, "click", { x, y, imageWidth: before.width, imageHeight: before.height })) return { capture: stageCapture(await captureWindow(), now),
         outcome: { status: "unverifiable", summary: "Routed the click to the exact native child control; application effect requires verification." } };
       await clearNativeInputSelection(name);
-      const element = sdk.ClickPosition.Element ? await elementAtPoint(x, y) : undefined;
+      const element = sdk.ClickPosition.Element ? await elementAtPoint(x, y, "click") : undefined;
       const token = element?.elementToken;
       const outcome = await driverInputAction(driver, "click", {
         pid,
@@ -1726,7 +1743,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       // wherever focus happens to be.
       if (options.mode === "replace") {
         if (options.x === undefined || options.y === undefined) throw new Error("Replace mode requires an exact field point; no text was sent.");
-        const element = await elementAtPoint(options.x, options.y);
+        const element = await elementAtPoint(options.x, options.y, "set_value");
         if (!element?.elementToken || element.enabled === false || !element.actions?.includes("set_value")) {
           throw new Error("No replaceable text field was found at the given point; no text was sent.");
         }
@@ -1812,9 +1829,16 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       if (selected.element.actions && !selected.element.actions.some((action) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(action))) throw new Error("The accessibility element does not advertise a click action; no click was sent.");
       const point = elementCursorPoint(selected.element, selected.frame);
       if (cursorIdentity && point) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
+      if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
+      await clearNativeInputSelection(name);
       const outcome = await driverInputAction(driver, "click", {
         pid, window_id: Number(windowId), element_token: selected.element.elementToken, button: "left", count: 1, session,
       }, "Cua Driver could not click the selected accessibility element.", { preferForeground: options.confirmFocusForeground });
+      if (cursorIdentity && point && outcome.status === "confirmed" && selected.element.actions?.includes("set_value")
+        && /^(?:Document|Edit|TextField|TextArea)$/i.test(selected.element.role ?? "")) {
+        rememberDesktopInputTarget(name, cursorIdentity, { pid, windowId,
+          field: { ...cursorScreenPoint(point.x, point.y, selected.frame), label: selected.element.label, role: selected.element.role } });
+      }
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }

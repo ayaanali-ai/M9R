@@ -116,20 +116,29 @@ test("point replacement climbs the actual parent chain rather than selecting a T
   const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
     windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }],
     elements: [
-      { elementIndex: 1n, elementToken: "uia:parent", role: "Edit", label: "Search", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } },
-      { elementIndex: 2n, parentIndex: 1n, elementToken: "uia:child", role: "Text", frame: { x: 140, y: 72, w: 30, h: 15 } },
-      { elementIndex: 3n, elementToken: "uia:sibling", role: "Edit", actions: ["set_value"], frame: { x: 130, y: 70, w: 60, h: 20 } },
+      { elementIndex: BigInt(1), elementToken: "uia:parent", role: "Edit", label: "Search", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } },
+      { elementIndex: BigInt(2), parentIndex: BigInt(1), elementToken: "uia:child", role: "Text", frame: { x: 140, y: 72, w: 30, h: 15 } },
+      { elementIndex: BigInt(3), elementToken: "uia:sibling", role: "Edit", actions: ["set_value"], frame: { x: 130, y: 70, w: 60, h: 20 } },
     ] };
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
   await driver.typeText("stage", "new", { handle: "codex", sessionId: "ancestor" }, { mode: "replace", x: 25, y: 15, expectedRole: "Edit", expectedLabel: "Search" });
   const call = calls.find((c) => c.method === "callTool" && (c.value as { name?: string }).name === "set_value");
   assert.equal((call?.value as { args: { element_token: string } }).args.element_token, "uia:parent");
+  await driver.click("stage", 25, 15, { handle: "codex", sessionId: "ancestor" });
+  const click = calls.find((c) => c.method === "callTool" && (c.value as { name?: string }).name === "click");
+  assert.equal((click?.value as { args: { element_token: string } }).args.element_token, "uia:parent");
+  state.elements[0]!.parentIndex = BigInt(2);
+  state.elements[0]!.actions = [];
+  const before = calls.filter((c) => c.method === "callTool" && (c.value as { name?: string }).name === "set_value").length;
+  await assert.rejects(driver.typeText("stage", "unsafe", undefined, { mode: "replace", x: 25, y: 15 }), /No replaceable/);
+  assert.equal(calls.filter((c) => c.method === "callTool" && (c.value as { name?: string }).name === "set_value").length, before);
 }));
 
 test("semantic click remembers the exact field and background insert preserves its existing Unicode value", async () => withRoot(async (root) => {
-  await registerStage(root);
+  const windowId = "12345";
+  await registerStage(root, windowId);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  const field = { elementIndex: 1n, elementToken: "uia:field", role: "Edit", label: "Search", value: "existing 🌍", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } };
+  const field = { elementIndex: BigInt(1), elementToken: "uia:field", role: "Edit", label: "Search", value: "existing 🌍", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } };
   const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
     windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }], elements: [field] };
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
@@ -144,11 +153,12 @@ test("semantic click remembers the exact field and background insert preserves i
 }));
 
 test("coordinate click background insertion also preserves existing value", async () => withRoot(async (root) => {
-  await registerStage(root);
+  const windowId = "12345";
+  await registerStage(root, windowId);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
     windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }],
-    elements: [{ elementIndex: 1n, elementToken: "uia:field", role: "Edit", label: "Search", value: "before", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } }] };
+    elements: [{ elementIndex: BigInt(1), elementToken: "uia:field", role: "Edit", label: "Search", value: "before", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } }] };
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
   const identity = { handle: "codex", sessionId: "point-insert" };
   await driver.click("stage", 30, 15, identity, { confirmFocusForeground: false });

@@ -21,6 +21,53 @@ const APP_ALIASES: Record<string, readonly string[]> = {
 const WINDOWS_TERMINAL_NAMES = new Set(["terminal", "windowsterminal", "wt"]);
 const WINDOWS_TERMINAL_REGISTERED_NAME = "Terminal";
 
+/** Resolve compatibility launchers through Windows' installed app metadata.
+ * No per-app renderer aliases, title substring guesses, or unrelated fresh HWNDs.
+ * Data crosses the PowerShell boundary only through an environment variable.
+ */
+export const WINDOWS_RENDERER_DISCOVERY_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$launcher = Get-Item -LiteralPath $env:M9R_APP_LAUNCHER
+function Key([string] $value) { ($value.ToLowerInvariant() -replace '\.exe$', '' -replace '[^\p{L}\p{N}]', '') }
+$description = [string] $launcher.VersionInfo.FileDescription
+$names = @($launcher.BaseName, $description)
+# Windows compatibility stubs commonly retain the OS brand in FileDescription
+# while StartApps exposes the same registered product without that brand.
+if ($description -match '^Windows\s+(.+)$') { $names += $Matches[1] }
+$keys = @($names | Where-Object { $_ } | ForEach-Object { Key $_ })
+$shell = New-Object -ComObject Shell.Application
+$item = $shell.Namespace($launcher.DirectoryName).ParseName($launcher.Name)
+$aumid = [string] $item.ExtendedProperty('System.AppUserModel.ID')
+$found = @()
+foreach ($app in @(Get-StartApps | Where-Object { ($keys -contains (Key $_.Name)) -or ($aumid -and $_.AppID -eq $aumid) })) {
+  if ($app.AppID -notmatch '^([^!]+)!([^!]+)$') { continue }
+  $family = $Matches[1]; $id = $Matches[2]
+  $packageName = $family.Substring(0, $family.LastIndexOf('_'))
+  foreach ($package in @(Get-AppxPackage -Name $packageName | Where-Object PackageFamilyName -eq $family)) {
+    $manifest = $package | Get-AppxPackageManifest
+    foreach ($entry in @($manifest.Package.Applications.Application | Where-Object Id -eq $id)) {
+      if ($entry.Executable) { $found += [IO.Path]::GetFileName([string] $entry.Executable) }
+    }
+  }
+}
+ConvertTo-Json -InputObject @($found | Sort-Object -Unique) -Compress
+`;
+
+export async function discoverInstalledWindowExecutable(executable: string,
+  query?: (script: string, env: Record<string, string>) => Promise<string>): Promise<string | undefined> {
+  if (!query && process.platform !== "win32") return undefined;
+  const run = query ?? ((script: string, env: Record<string, string>) => new Promise<string>((resolve, reject) => {
+    execFile(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      { windowsHide: true, timeout: 15_000, maxBuffer: 64 * 1024, env: { ...process.env, ...env } },
+      (error, stdout) => error ? reject(new Error("Windows renderer identity lookup failed; no mismatched window was adopted.")) : resolve(stdout));
+  }));
+  const parsed: unknown = JSON.parse((await run(WINDOWS_RENDERER_DISCOVERY_SCRIPT, { M9R_APP_LAUNCHER: executable })).replace(/^\uFEFF/, ""));
+  if (!Array.isArray(parsed) || parsed.some((name) => typeof name !== "string" || !/^[^\\/\u0000-\u001f]+\.exe$/i.test(name))) return undefined;
+  const names = [...new Map((parsed as string[]).map((name) => [name.toLowerCase(), name])).values()];
+  return names.length === 1 ? names[0] : undefined;
+}
+
 function appNameKey(value: string): string {
   return value.toLowerCase().replace(/\.exe$/, "").replace(/[^\p{L}\p{N}]/gu, "");
 }

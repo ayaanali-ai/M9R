@@ -224,7 +224,7 @@ function withComputerUseTelemetry<Args>(
 function capabilitiesForDesktop(controls: readonly DesktopControl[], view: "desktop" | "app", inputSelectionConfirmed: boolean,
   representation: "structured" | "visual", structureStatus?: string): ComputerUseCapability[] {
   const semanticControls = controls.filter((control) => control.enabled !== false && control.stageRef
-    && control.actions?.some((action) => /^(?:click|invoke|press)$/i.test(action)));
+    && control.actions?.some((action) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(action)));
   const visualControls = controls.filter((control) => control.enabled !== false && control.rect);
   const visualAvailable = representation === "visual" || structureStatus === "partial" || structureStatus === "unknown"
     || structureStatus === "unavailable" || structureStatus === "not-requested";
@@ -695,7 +695,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (record.context.kind === "desktop" && action.locator.kind === "element") {
         const control = record.context.controls.get(action.locator.ref);
         const semanticClick = action.button === "left" && action.count === 1 && control?.stageRef
-          && control.enabled !== false && control.actions?.some((name) => /^(?:click|invoke|press)$/i.test(name));
+          && control.enabled !== false && control.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name));
         if (!semanticClick && !control?.rect) {
           return "This structured element has no safe semantic click action and no visual fallback bounds. Request a fresh visual app-window observation; no input was sent.";
         }
@@ -888,7 +888,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     if (action.kind === "click") {
       const control = action.locator.kind === "element" ? record.context.controls.get(action.locator.ref) : undefined;
       const semanticClick = action.locator.kind === "element" && action.button === "left" && action.count === 1
-        && control?.stageRef && control.enabled !== false && control.actions?.some((name) => /^(?:click|invoke|press)$/i.test(name));
+        && control?.stageRef && control.enabled !== false && control.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name));
       const confirmFocusForeground = action.confirmFocusForeground === true;
       if (semanticClick) {
         stageAction = { kind: "click_element", ref: control.stageRef, view: "app", ...(confirmFocusForeground ? { confirmFocusForeground } : {}) };

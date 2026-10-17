@@ -12,7 +12,8 @@ import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT } from "../src/lib/
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
 
-function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec) {
+function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
+  resolveWindowExecutable?: (executable: string) => Promise<string | undefined>) {
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "session-one");
@@ -32,7 +33,8 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
       return { capture: previewCapture, outcome: { status: "confirmed" as const } };
     },
   } as unknown as ReturnType<typeof createCuaStageDriver>;
-  const service = createTaskDesktopStageService({ store, readPolicy: () => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) }), driver,
+  const recreateService = () => createTaskDesktopStageService({ store, readPolicy: () => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) }), driver,
+    ...(resolveWindowExecutable ? { resolveWindowExecutable } : {}),
     ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage: {
     platform: "win32", env: {}, invokeNative: async (request) => {
       if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentDesktopId, isCurrent: true } };
@@ -46,7 +48,8 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
       throw new Error("Unexpected native operation; preparation must not move or activate windows.");
     },
   } });
-  return { root, store, identity, task, service, driver, creations: () => creations, desktopActions,
+  const service = recreateService();
+  return { root, store, identity, task, service, recreateService, driver, creations: () => creations, desktopActions,
     setInspectOverride: (fn: typeof inspectOverride) => { inspectOverride = fn; },
     cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -541,17 +544,38 @@ test("revoking control while the owner decides stops the click even after approv
   } finally { f.cleanup(); }
 });
 
-test("prepare preserves the recovery anchor across repeated missing-window observations and broker recreation", async () => {
+test("owner-preview adopts only the fresh renderer identified by Windows after a differently named launcher", async () => {
+  let lookups = 0;
+  const f = fixture(true, () => ({ executable: process.execPath, args: ["-e", "process.exit(0)"] }), async () => { lookups++; return "Renderer.exe"; });
+  try {
+    let reads = 0;
+    f.driver.listVisibleWindows = async () => ++reads === 1 ? [] : [
+      { pid: 321, windowId: "654", appName: "Renderer.exe", title: "Target", width: 1280, height: 720 },
+      { pid: 999, windowId: "999", appName: "Unrelated.exe", title: "Renderer.exe", width: 1280, height: 720 },
+    ];
+    const launched = await f.service.launch(f.identity.token, f.task.id, "generic-launcher", "owner-preview");
+    assert.equal(launched.running, true);
+    assert.equal(lookups, 1);
+    const stage = createWindowsDesktopStageManager({ root: f.root, platform: "win32", terminal: true, env: {} }).list()[0];
+    assert.deepEqual(stage?.anchor, { pid: 321, windowId: "654" });
+  } finally { f.cleanup(); }
+});
+
+test("prepare preserves the durable recovery anchor across repeated missing-window observations", async () => {
   const f = fixture(true, (root) => ({ executable: join(root, "chrome.exe"), args: [] }));
   try {
-    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Chrome" }];
+    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Chrome", width: 1280, height: 720 }];
     await f.service.launch(f.identity.token, f.task.id, "chrome");
+    let service = f.service;
     for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt === 1) service = f.recreateService();
       let absent = true;
+      f.driver.listVisibleWindows = async () => { absent = false; return [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Chrome", width: 1280, height: 720 }]; };
       f.setInspectOverride(() => absent ? { ok: false, error: "window closed" } : { ok: true, window: { pid: 123, windowId: "456", desktopId: "33333333-3333-4333-8333-333333333333", onCurrentDesktop: true } });
-      await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
-      absent = false;
-      await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview");
+      await service.prepare(f.identity.token, f.task.id, "owner-preview");
+      const persisted = createWindowsDesktopStageManager({ root: f.root, platform: "win32", terminal: true, env: {} }).list();
+      assert.ok(persisted.some((stage) => stage.appId === "chrome" && stage.anchor?.windowId === "456"), "prepare must not erase on-disk recovery evidence");
+      await service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview");
     }
   } finally { f.cleanup(); }
 });

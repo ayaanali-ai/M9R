@@ -23,7 +23,7 @@ import {
 } from "./task-stage-apps";
 import type { ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { discoverInstalledWindowsApp } from "./windows-installed-apps";
+import { discoverInstalledWindowsApp, discoverInstalledWindowExecutable } from "./windows-installed-apps";
 
 export const TASK_STAGE_POLICY_FILE = "task-stage-policy.json";
 export type TaskStageMode = "background" | "owner-preview";
@@ -174,6 +174,8 @@ export function createTaskDesktopStageService(input: {
   driver?: ReturnType<typeof createCuaStageDriver>;
   /** Test seam for harmless local fixtures with fixed launch arguments. */
   resolveStageAppForTest?: (appId: string) => StageAppLaunchSpec;
+  /** Read-only OS identity evidence for launcher/renderer delegation. */
+  resolveWindowExecutable?: (executable: string) => Promise<string | undefined>;
   /** Owner-selected browser policy. Personal profile is the safe product default. */
   browserLaunchMode?: BrowserLaunchMode;
   /**
@@ -299,10 +301,13 @@ export function createTaskDesktopStageService(input: {
             // A closed or moved window must be rebound to the owner's desktop.
           }
         }
-        if (!retainSelection) {
+        if (!retainSelection && !existing?.anchor) {
           await manager.adoptCurrentDesktop(name);
-          ownedApps.delete(name);
         }
+        // Keep the durable exact-window anchor when inspection fails. act()
+        // distinguishes gone windows (recover once) from moved/unknown windows
+        // (refuse without spawning). Clearing it here destroys that evidence,
+        // including for a fresh broker that must recover from disk.
         assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
       }
       // Return opaque coordination IDs only, never desktop GUIDs or owner-window identifiers.
@@ -518,7 +523,23 @@ export function createTaskDesktopStageService(input: {
           target = { app: installed };
         }
       }
-      const approved = target.app;
+      let approved = target.app;
+      let rendererLookupAttempted = Boolean(approved.windowExecutable);
+      const matchesLaunchedWindows = async (windows: Parameters<typeof stageWindowMatchesApp>[0][]) => {
+        let matches = windows.filter((window) => stageWindowMatchesApp(window, approved));
+        if (!matches.length && windows.length && !rendererLookupAttempted) {
+          rendererLookupAttempted = true;
+          // Test launchers never consult the host's installed app inventory.
+          const resolveRenderer = input.resolveWindowExecutable
+            ?? (input.resolveStageAppForTest ? undefined : discoverInstalledWindowExecutable);
+          const windowExecutable = await resolveRenderer?.(approved.executable);
+          if (windowExecutable) {
+            approved = { ...approved, windowExecutable };
+            matches = windows.filter((window) => stageWindowMatchesApp(window, approved));
+          }
+        }
+        return matches;
+      };
       // The "same app already running" reuse check previously only ran for the
       // background-mode branch below -- owner-preview launches skipped it
       // entirely, so a follow-up launch of the same app under a new taskId
@@ -578,8 +599,7 @@ export function createTaskDesktopStageService(input: {
             }
             // Windows packaged apps may delegate to another PID. Select the new
             // exact window of the resolved executable, never the launcher stub.
-            const matches = windows.filter((window) => !beforeKeys.has(`${window.pid}:${window.windowId}`)
-              && stageWindowMatchesApp(window, approved));
+            const matches = await matchesLaunchedWindows(windows.filter((window) => !beforeKeys.has(`${window.pid}:${window.windowId}`)));
             if (matches.length > 1) throw new Error("The requested application opened multiple windows; select the intended window before continuing.");
             if (matches.length === 1) {
               await manager.presentOwnerWindow(name, matches[0]!.pid, matches[0]!.windowId);
@@ -677,8 +697,7 @@ export function createTaskDesktopStageService(input: {
               // the safe hand-off path.
             }
             const visibleWindows = await driver.listVisibleWindows({ onScreenOnly: false });
-            const delegatedWindows = visibleWindows.filter((window) => !beforeLaunchWindowKeys.has(`${window.pid}:${window.windowId}`)
-              && stageWindowMatchesApp(window, approved));
+            const delegatedWindows = await matchesLaunchedWindows(visibleWindows.filter((window) => !beforeLaunchWindowKeys.has(`${window.pid}:${window.windowId}`)));
             const candidates = [...exactProcessWindows, ...delegatedWindows.filter((window) =>
               !exactProcessWindows.some((exact) => exact.pid === window.pid && exact.windowId === window.windowId))];
             candidateWindows = candidates;
