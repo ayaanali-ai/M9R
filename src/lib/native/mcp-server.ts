@@ -164,7 +164,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     if (pending.length === 0) {
       throw new Error("A taskId is required: this session has no currently pending task. Pass the exact taskId you were given.");
     }
-    return pending[0].id;
+    // Prefer whichever pending task this session most recently dispatched a real stage
+    // operation against, if any -- that is the turn actually in progress. A newer task that
+    // arrived mid-turn but has had no action taken against it yet must not silently steal an
+    // in-progress multi-call operation away from the task it started on; only once nothing has
+    // been acted on yet does "newest created" decide.
+    const active = deps.store.mostRecentlyActiveTaskId(identity.handle, identity.sessionId, pending.map((task) => task.id));
+    return active ?? pending[0].id;
   }
 
   // The provider-neutral computer-use surface is registered on the same authenticated

@@ -102,6 +102,37 @@ test("an ambiguous pending-task backlog resolves to the newest one instead of re
   } finally { t.done(); }
 });
 
+test("a task already in progress keeps being resolved to, even once a newer task is pending (Codex's turn-pinning catch, 2026-10-17)", async () => {
+  // Codex's review of the newest-pending-task fix above: within one multi-call turn (observe,
+  // then several actions, each free to omit taskId), a newer task arriving mid-turn must not
+  // silently steal the turn away from the task actually being acted on.
+  const web: WebBrokerClient = {
+    taskStageAction: async (_token, taskId) => ({ ok: true, result: { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date().toISOString() }, taskIdEchoed: taskId } }),
+    run: async () => ({ ok: false, error: "unused" }),
+  };
+  const t = setup({ web });
+  try {
+    const inProgress = t.store.addTask({ from: "you", to: "codex", goal: "open the calculator and do 2+2", origin: "human_typed", idempotencyKey: "in-progress" }).task;
+    assert.ok(t.store.bindTaskToSession(inProgress.id, t.codex));
+    const identity = t.store.verifyIdentity(t.codex)!;
+    // Simulate a real stage action already dispatched against the in-progress task this turn.
+    t.store.claimStageOperation({ handle: identity.handle, sessionId: identity.sessionId, taskId: inProgress.id, operationId: "op-1", fingerprint: "a".repeat(64) });
+
+    // A different task arrives mid-turn -- a real, separate thing the person asked for, but not
+    // what this turn's in-flight action is about.
+    const midTurnArrival = t.store.addTask({ from: "you", to: "codex", goal: "also check my email", origin: "human_typed", idempotencyKey: "mid-turn" }).task;
+    assert.ok(t.store.bindTaskToSession(midTurnArrival.id, t.codex));
+
+    const actionHandler = (t.server as unknown as ToolServer)._registeredTools["m9r_stage_action"]!.handler as (
+      args: unknown, extra: { requestId: string | number },
+    ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    const result = await actionHandler({ token: t.codex, action: { kind: "capture" } }, { requestId: 1 });
+    const reply = JSON.parse(result.content[0]!.text);
+    assert.equal(reply.result.taskIdEchoed, inProgress.id,
+      "an omitted taskId mid-turn must keep resolving to the task actually being acted on, not silently retarget onto a newer, untouched task");
+  } finally { t.done(); }
+});
+
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

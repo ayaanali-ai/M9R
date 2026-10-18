@@ -961,6 +961,26 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /**
+     * The taskId a stage-tool call should default to when it omits one, among a set of
+     * candidate pending taskIds -- whichever one this session most recently dispatched a real
+     * stage operation against, if any. Exists so an in-progress multi-call turn (observe, then
+     * several actions, each free to omit taskId) keeps landing on the exact task it started
+     * acting on, even if a newer task arrives mid-turn; falling back to "newest created" alone
+     * would silently retarget an ongoing operation onto an unrelated queued request.
+     */
+    mostRecentlyActiveTaskId(handle: string, sessionId: string, candidateIds: readonly string[]): string | undefined {
+      const normalizedHandle = normalizeHandle(handle);
+      const candidates = new Set(candidateIds);
+      let best: { taskId: string; updatedAt: number } | undefined;
+      for (const record of readState().stageOperations) {
+        if (normalizeHandle(record.handle) !== normalizedHandle || record.sessionId !== sessionId || !candidates.has(record.taskId)) continue;
+        const updatedAt = Date.parse(record.updatedAt);
+        if (!best || updatedAt > best.updatedAt) best = { taskId: record.taskId, updatedAt };
+      }
+      return best?.taskId;
+    },
+
+    /**
      * What this session's actual open work is -- distinct from the inbox, which deliberately
      * hides anything already pushed as a prompt (a real, one-shot replay fence, kept as-is).
      * That fence means a task that was genuinely delivered earlier (a live push, a prior inbox
