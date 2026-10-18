@@ -65,6 +65,43 @@ test("desktop stage input derives a private one-shot receipt ID from the MCP req
   } finally { t.done(); }
 });
 
+test("an ambiguous pending-task backlog resolves to the newest one instead of refusing every later prompt (live bug, 2026-10-17)", async () => {
+  // Reproduces exactly what the owner hit live: a session accumulates abandoned "pending" tasks
+  // (origin human_typed, never finalized by m9r_result after a failure) and a brand-new typed
+  // prompt with no explicit taskId used to get refused outright once two or more existed.
+  const web: WebBrokerClient = {
+    prepareTaskStage: async () => ({ ok: true }),
+    taskStageApp: async (_token, taskId) => ({ ok: true, result: { name: `stage-${taskId}`, taskId, running: true } }),
+    taskStageAction: async (_token, taskId) => ({ ok: true, result: { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date().toISOString() }, taskIdEchoed: taskId } }),
+    run: async () => ({ ok: false, error: "unused" }),
+  };
+  const t = setup({ web });
+  try {
+    const older = t.store.addTask({ from: "you", to: "codex", goal: "open chrome go on x", origin: "human_typed", idempotencyKey: "older" }).task;
+    assert.ok(t.store.bindTaskToSession(older.id, t.codex));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const newer = t.store.addTask({ from: "you", to: "codex", goal: "go on youtube now and find me a video on ferraris", origin: "human_typed", idempotencyKey: "newer" }).task;
+    assert.ok(t.store.bindTaskToSession(newer.id, t.codex));
+
+    const prepareReply = await t.call("m9r_stage_prepare", { token: t.codex, mode: "owner-preview" });
+    assert.match(prepareReply, /"ok":true/, "two pending tasks must no longer refuse a taskId-less call");
+
+    const appHandler = (t.server as unknown as ToolServer)._registeredTools["m9r_stage_app"]!.handler as (
+      args: unknown, extra: { requestId: string | number },
+    ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    const appResult = await appHandler({ token: t.codex, operation: "launch", appId: "chrome" }, { requestId: 1 });
+    const appReply = JSON.parse(appResult.content[0]!.text);
+    assert.equal(appReply.result.taskId, newer.id, "the omitted taskId must resolve to the newest pending task, not refuse or pick an abandoned one");
+
+    const actionHandler = (t.server as unknown as ToolServer)._registeredTools["m9r_stage_action"]!.handler as (
+      args: unknown, extra: { requestId: string | number },
+    ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    const actionResult = await actionHandler({ token: t.codex, action: { kind: "capture" } }, { requestId: 2 });
+    const actionReply = JSON.parse(actionResult.content[0]!.text);
+    assert.equal(actionReply.result.taskIdEchoed, newer.id);
+  } finally { t.done(); }
+});
+
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

@@ -148,6 +148,25 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     return { identity, token: credential };
   }
 
+  // Shared by every tool surface that takes an optional taskId (the provider-neutral
+  // computer-use tools below, and the legacy m9r_stage_app/m9r_stage_action tools further
+  // down): a session is one agent working on one thing at a time, so when a caller omits
+  // taskId, the newest pending task is almost always the one it means. Older "pending" entries
+  // are virtually always abandoned turns that errored out before ever calling m9r_result, not
+  // real concurrent work this call could be confused about -- refusing outright whenever more
+  // than one candidate existed used to block every ordinary follow-up prompt behind the first
+  // task in a session that ever failed to self-close, which is the common case, not an edge one.
+  function resolveTaskId(identity: VerifiedIdentity, taskId?: string): string {
+    if (taskId) return taskId;
+    const pending = deps.store.tasksForSession(identity.handle, identity.sessionId)
+      .filter((task) => !task.resultSummary && task.deliveredSession === identity.sessionId)
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+    if (pending.length === 0) {
+      throw new Error("A taskId is required: this session has no currently pending task. Pass the exact taskId you were given.");
+    }
+    return pending[0].id;
+  }
+
   // The provider-neutral computer-use surface is registered on the same authenticated
   // MCP server as the legacy tools. It owns observation/action routing; the existing
   // web broker and owner-launched desktop stage remain its only dispatch backends.
@@ -156,19 +175,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     web: deps.web,
     requireIdentity,
     identityToken: (identity, presented) => authenticate(presented as string | undefined).token,
-    resolveTaskId: (identity, taskId) => {
-      if (taskId) return taskId;
-      const pending = deps.store.tasksForSession(identity.handle, identity.sessionId)
-        .filter((task) => !task.resultSummary && task.deliveredSession === identity.sessionId)
-        .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
-      if (pending.length !== 1) {
-        const detail = pending.length === 0
-          ? "none are currently pending"
-          : `candidates: ${pending.map((task) => task.id).join(", ")}`;
-        throw new Error(`A computer-use taskId is required when this session has zero or multiple pending tasks (${detail}). Pass the exact taskId you were given.`);
-      }
-      return pending[0].id;
-    },
+    resolveTaskId,
     now: deps.now,
     monotonicNow: deps.monotonicNow,
     authField: AUTH_FIELD,
@@ -230,9 +237,10 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
 
   server.registerTool("m9r_stage_app", {
     description: "Stage mode defaults to owner-preview: open a normal installed app on the current desktop or restore the existing personal browser without an extra browser window or separate profile. Use m9r_stage_action for explicitly requested icon clicks. Pass mode \"background\" only for an explicitly requested isolated desktop. In background mode, launch an installed app using the owner's active access policy or discard an app owned by this task; preserve the task result first.",
-    inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), appId: STAGE_APP_REF.optional(), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional() },
-  }, async ({ token, taskId, operation, mode, appId, operationId: requestedOperationId }, extra) => {
-    const { token: authToken } = authenticate(token);
+    inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Omit to use this session's current pending task."), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), appId: STAGE_APP_REF.optional(), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional() },
+  }, async ({ token, taskId: requestedTaskId, operation, mode, appId, operationId: requestedOperationId }, extra) => {
+    const { identity, token: authToken } = authenticate(token);
+    const taskId = resolveTaskId(identity, requestedTaskId);
     if ((operation === "launch") !== (appId !== undefined)) throw new Error("Launch requires an app ID; discard takes no app ID.");
     const operationId = operation === "launch"
       ? (requestedOperationId ?? createHash("sha256").update(`${operationNamespace}\0stage-app\0${String(extra.requestId)}`).digest("hex"))
@@ -244,7 +252,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
 
   server.registerTool("m9r_stage_action", {
     description: "Capture, inspect, or control this task's desktop; mode defaults to owner-preview. After m9r_stage_app selects an app, omitted action.view uses that exact app window; otherwise it uses the owner's current desktop. Set action.view to app or desktop to explicitly choose screenshot coordinates. Use read_structure with view=app for one bounded accessibility-tree observation of the selected window; desktop-wide structure is refused and remains visual. Desktop icons, taskbar apps, Start, windows, and controls are supported. Pass background mode only for an explicitly requested isolated desktop. Supports capture, structure read, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Mutating inputs carry a durable one-shot receipt: if the receipt says already_applied, in_progress, or uncertain, do not repeat the action; capture and inspect first. Input remains bound to the exact window and does not activate the app as a fallback. If a target class rejects background input, the action reports the target and fails without sending text; add an accessibility value adapter or app-specific background route for that control. Capture before input, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Verify effects; a driver receipt alone is not proof of the application state.",
-    inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional().describe("Stable ID for one intended input. Reuse this ID when reconciling a lost response; never generate a new ID to retry an uncertain action."), action: z.discriminatedUnion("kind", [
+    inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Omit to use this session's current pending task."), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional().describe("Stable ID for one intended input. Reuse this ID when reconciling a lost response; never generate a new ID to retry an uncertain action."), action: z.discriminatedUnion("kind", [
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("capture") }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("read_structure") }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), confirmFocusForeground: z.boolean().optional() }).strict(),
@@ -266,8 +274,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       z.object({ view: z.literal("app"), kind: z.literal("clipboard_read"), includeText: z.boolean(), confirmSharedClipboard: z.boolean().optional() }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("clipboard_write"), text: z.string().min(1).max(500).optional(), imagePath: z.string().max(1024).optional(), filePath: z.string().max(1024).optional(), confirmSharedClipboard: z.literal(true) }).strict(),
   ]) },
-  }, async ({ token, taskId, mode, action, operationId: requestedOperationId }, extra) => {
-    const { token: authToken } = authenticate(token);
+  }, async ({ token, taskId: requestedTaskId, mode, action, operationId: requestedOperationId }, extra) => {
+    const { identity, token: authToken } = authenticate(token);
+    const taskId = resolveTaskId(identity, requestedTaskId);
     const operationId = requestedOperationId ?? createHash("sha256").update(`${operationNamespace}\0${String(extra.requestId)}`).digest("hex");
     const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(authToken, taskId, action, mode, operationId)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
@@ -286,9 +295,10 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
 
   server.registerTool("m9r_stage_prepare", {
     description: "Bind an approved unfinished task to the desktop the owner is currently viewing; mode defaults to owner-preview. Preparation never creates, switches, moves, or closes desktops or windows. Pass mode \"background\" only when the task explicitly requests an isolated Windows desktop. Use the same mode on each m9r_stage_action call; preparation itself does not prove an action succeeded.",
-    inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/), mode: z.enum(["background", "owner-preview"]).default("owner-preview") },
-  }, async ({ token, taskId, mode }) => {
-    const { token: authToken } = authenticate(token);
+    inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Omit to use this session's current pending task."), mode: z.enum(["background", "owner-preview"]).default("owner-preview") },
+  }, async ({ token, taskId: requestedTaskId, mode }) => {
+    const { identity, token: authToken } = authenticate(token);
+    const taskId = resolveTaskId(identity, requestedTaskId);
     const result = deps.web?.prepareTaskStage
       ? await deps.web.prepareTaskStage(authToken, taskId, mode)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
