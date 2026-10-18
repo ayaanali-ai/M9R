@@ -25,6 +25,20 @@ test("the injected stage notice explicitly forbids falling back to the agent's o
   assert.match(notice, /do not switch to a different automation system/i);
 }));
 
+test("the stage notice authorizes ordinary actions despite unrelated content, and scopes approval to purchases only (owner direction, 2026-10-18)", () => withPolicyRoot("codex", async (root) => {
+  // Live example that prompted this: a Notepad task was refused because the window "contains
+  // many unsaved documents," even though the task named an exact target. The owner's explicit
+  // direction: an explicit task authorizes ordinary actions on the target it names regardless of
+  // unrelated content elsewhere; only purchases/money-moving actions need approval; deletions get
+  // a little extra care, not a blanket hold.
+  const web = { prepareTaskStage: async () => {} } as unknown as WebBrokerClient;
+  const notice = await prepareTaskStageNotice(root, web, "tok", "codex", "T1");
+  assert.match(notice, /do not refuse or hold for approval just because the selected app or page also has unrelated unsaved/i);
+  assert.match(notice, /the owner naming a target is itself the authorization/i);
+  assert.match(notice, /purchases and other money-moving actions remain the one mandatory approval boundary/i);
+  assert.match(notice, /be a bit more careful specifically with delete actions/i);
+}));
+
 test("the stage notice is empty for a handle without task-stage access", () => withPolicyRoot("codex", async (root) => {
   const web = { prepareTaskStage: async () => {} } as unknown as WebBrokerClient;
   const notice = await prepareTaskStageNotice(root, web, "tok", "claude", "T1");

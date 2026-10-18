@@ -75,6 +75,16 @@ test("tasks get sequential ids and per-inbox sequence numbers, and the same key 
   done();
 });
 
+test("a resolved idempotency match does not swallow a deliberate resend of identical pill text", () => {
+  const { store, done } = tempStore();
+  const first = store.addTask(task({ idempotencyKey: "paste-repeat" }));
+  store.setResult(first.task.id, "the first identical message was already handled");
+  const resent = store.addTask(task({ idempotencyKey: "paste-repeat" }));
+  assert.equal(resent.created, true, "a pasted resend must create a fresh task after the old one resolved");
+  assert.notEqual(resent.task.id, first.task.id);
+  done();
+});
+
 test("recipient handles are normalized before task storage, inbox lookup and idempotency checks", () => {
   const { store, done } = tempStore();
   const created = store.addTask(task({ to: "@CLAUDE" }));

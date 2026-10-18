@@ -573,7 +573,18 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       };
       return update((s) => {
         const existing = findByIdempotencyKey(s.tasks, normalizedInput.to, normalizedInput.idempotencyKey);
-        if (existing) return { task: existing, created: false };
+        // Idempotency dedup exists to collapse an accidental double-submit (a retried network
+        // call sending the identical request twice within moments), not to permanently block a
+        // deliberate resend of the same wording later -- live bug, 2026-10-18: pasting text
+        // identical to an earlier task (the idempotency key hashes session+target+exact text,
+        // with no bound) silently reused the old, already-resolved task forever instead of
+        // creating a fresh one, so the paste appeared to do nothing live. An existing match only
+        // suppresses creation while it is still within the same staleness bound used for
+        // in-flight delivery elsewhere (inboxMaxAgeMs) and not yet resolved; past that, or once
+        // resolved, a repeated send is a new request and gets a new task.
+        if (existing && !existing.resultSummary && now().getTime() - Date.parse(existing.createdAt) <= inboxMaxAgeMs()) {
+          return { task: existing, created: false };
+        }
         // Retire aged or over-budget resolved work before admitting a task. Anything still in flight, awaiting
         // approval, undelivered, or unread is retained, so a full backlog becomes an explicit send failure.
         const retainedTasks = pruneTasks(s.tasks, {
