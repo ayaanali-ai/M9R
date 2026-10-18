@@ -64,6 +64,9 @@ export const MAX_LOCAL_STATE_BYTES = 16 * 1024 * 1024;
 /** Keep each rewritten local state file within a predictable task count when user work can be retired safely. */
 export const MAX_STORED_TASKS = 2_000;
 const RESOLVED_TASK_RETENTION_MS = 7 * 24 * 60 * 60_000;
+/** How long a task's last recorded stage activity still counts as "the current turn" for
+ *  mostRecentlyActiveTaskId -- a real turn's calls happen seconds to low minutes apart. */
+const ACTIVE_TURN_WINDOW_MS = 5 * 60_000;
 
 export class LocalStateCapacityError extends Error {
   readonly code = "M9R_LOCAL_STATE_CAPACITY";
@@ -963,18 +966,28 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     /**
      * The taskId a stage-tool call should default to when it omits one, among a set of
      * candidate pending taskIds -- whichever one this session most recently dispatched a real
-     * stage operation against, if any. Exists so an in-progress multi-call turn (observe, then
-     * several actions, each free to omit taskId) keeps landing on the exact task it started
-     * acting on, even if a newer task arrives mid-turn; falling back to "newest created" alone
-     * would silently retarget an ongoing operation onto an unrelated queued request.
+     * stage operation against, if any, AND only if that activity happened within the active-turn
+     * window. Exists so an in-progress multi-call turn (observe, then several actions, each free
+     * to omit taskId) keeps landing on the exact task it started acting on, even if a newer task
+     * arrives mid-turn; falling back to "newest created" alone would silently retarget an ongoing
+     * operation onto an unrelated queued request.
+     *
+     * The staleness bound is the fix for a real bug this exact mechanism caused, live, 2026-10-17:
+     * with no bound, a brand-new task's very first call (zero operations yet) always lost to ANY
+     * older pending task that had ever had one operation recorded against it, however long ago --
+     * a two-day-old orphaned "launch File Explorer" task (T236) hijacked a fresh "open Chrome"
+     * task's app launch this way. A real turn's calls happen seconds to low minutes apart, never
+     * days; activity older than that is itself an abandoned turn, not the current one.
      */
     mostRecentlyActiveTaskId(handle: string, sessionId: string, candidateIds: readonly string[]): string | undefined {
       const normalizedHandle = normalizeHandle(handle);
       const candidates = new Set(candidateIds);
+      const cutoff = now().getTime() - ACTIVE_TURN_WINDOW_MS;
       let best: { taskId: string; updatedAt: number } | undefined;
       for (const record of readState().stageOperations) {
         if (normalizeHandle(record.handle) !== normalizedHandle || record.sessionId !== sessionId || !candidates.has(record.taskId)) continue;
         const updatedAt = Date.parse(record.updatedAt);
+        if (updatedAt < cutoff) continue;
         if (!best || updatedAt > best.updatedAt) best = { taskId: record.taskId, updatedAt };
       }
       return best?.taskId;

@@ -1476,7 +1476,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       // Only a driver-confirmed click can establish where later keyboard input
       // should go. Returning an unverified click is truthful; remembering its
       // HWND would let a follow-up type/hotkey act on an unconfirmed focus.
-      if (outcome.status === "confirmed" && point.element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea)$/i.test(point.element.role ?? "")) {
+      if (outcome.status === "confirmed" && point.element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(point.element.role ?? "")) {
         // The click remains unverified. Subsequent typing addresses this exact
         // field explicitly, so it never depends on an unconfirmed focus change.
         rememberDesktopInputTarget(name, identity, { ...point.target, field: {
@@ -1744,7 +1744,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         session,
       }, "Cua Driver could not click the registered stage window.", { preferForeground: options.confirmFocusForeground });
       if (cursorIdentity) {
-        if (outcome.status === "confirmed" && element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea)$/i.test(element.role ?? "")) {
+        if (outcome.status === "confirmed" && element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(element.role ?? "")) {
           const point = cursorScreenPoint(x, y, before);
           rememberDesktopInputTarget(name, cursorIdentity, { pid, windowId, field: { ...point, label: element.label, role: element.role } });
         }
@@ -1913,7 +1913,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         pid, window_id: Number(windowId), element_token: selected.element.elementToken, button: "left", count: 1, session,
       }, "Cua Driver could not click the selected accessibility element.", { preferForeground: options.confirmFocusForeground });
       if (cursorIdentity && point && outcome.status === "confirmed" && selected.element.actions?.includes("set_value")
-        && /^(?:Document|Edit|TextField|TextArea)$/i.test(selected.element.role ?? "")) {
+        && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(selected.element.role ?? "")) {
         rememberDesktopInputTarget(name, cursorIdentity, { pid, windowId,
           field: { ...cursorScreenPoint(point.x, point.y, selected.frame), label: selected.element.label, role: selected.element.role } });
       }

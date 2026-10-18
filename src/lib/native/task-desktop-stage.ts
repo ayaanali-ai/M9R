@@ -628,14 +628,16 @@ export function createTaskDesktopStageService(input: {
           return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", capture: await driver.capture(name, identity) });
         }
         // Normal profile, normal executable, fixed owner-resolved arguments.
-        // If no existing personal browser window was discoverable, open a
-        // deterministic same-profile blank window. This prevents Chrome from
-        // restoring a retired extension page (or another stale tab) as the
-        // first owner-preview target. Existing personal windows are adopted
-        // above and are never replaced by this fallback.
+        // If no existing personal browser window was discoverable, open a fresh same-profile
+        // window with no forced start URL, so it looks like Chrome actually opening -- its own
+        // real new-tab page, the way a human opening Chrome sees it. An earlier version forced
+        // about:blank here to avoid the browser-extension route restoring a retired extension
+        // page; that route is now permanently disabled (Finding C, WEB_EXTENSION_ROUTE_ENABLED
+        // in mcp-server.ts), so the thing this was protecting against no longer exists. Existing
+        // personal windows are adopted above and are never replaced by this fallback.
         const beforeKeys = new Set(before.map((window) => `${window.pid}:${window.windowId}`));
         const launchSpec = kind
-          ? ownedBrowserLaunch(root, name, approved, { mode: "personal", startUrl: "about:blank" })
+          ? ownedBrowserLaunch(root, name, approved, { mode: "personal" })
           : approved;
         const child = launchStageApp(launchSpec, { windowsHide: false, cwd: stageAppLaunchCwd(task.cwd) });
         let launchError: Error | undefined;

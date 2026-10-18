@@ -133,6 +133,39 @@ test("a task already in progress keeps being resolved to, even once a newer task
   } finally { t.done(); }
 });
 
+test("stage activity older than the active-turn window must not hijack a brand-new task's first call (live bug, T236 vs T257, 2026-10-17)", async () => {
+  // Reproduces the exact live failure: "go on chrome and search X for the new Tesla" (T257)
+  // opened File Explorer instead, because a two-day-old orphaned "launch File Explorer" task
+  // (T236) still had a stage operation on record and, with no staleness bound, unconditionally
+  // outranked T257's brand-new, zero-history first call.
+  let clock = Date.parse("2026-10-16T23:21:11.034Z");
+  const now = () => new Date(clock);
+  const web: WebBrokerClient = {
+    taskStageApp: async (_token, taskId) => ({ ok: true, result: { taskId, running: true } }),
+    run: async () => ({ ok: false, error: "unused" }),
+  };
+  const t = setup({ web, now });
+  try {
+    const stale = t.store.addTask({ from: "you", to: "codex", goal: "Call m9r_stage_app with taskId T236, operation launch, appId explorer.exe.", origin: "human_typed", idempotencyKey: "stale-explorer" }).task;
+    assert.ok(t.store.bindTaskToSession(stale.id, t.codex));
+    const identity = t.store.verifyIdentity(t.codex)!;
+    t.store.claimStageOperation({ handle: identity.handle, sessionId: identity.sessionId, taskId: stale.id, operationId: "op-explorer", fingerprint: "b".repeat(64) });
+
+    // Two days pass with no further activity on that task -- it was abandoned, not continued.
+    clock += 2 * 24 * 60 * 60_000;
+    const freshChromeTask = t.store.addTask({ from: "you", to: "codex", goal: "go on chrome and search X for the new Tesla", origin: "human_typed", idempotencyKey: "fresh-chrome" }).task;
+    assert.ok(t.store.bindTaskToSession(freshChromeTask.id, t.codex));
+
+    const appHandler = (t.server as unknown as ToolServer)._registeredTools["m9r_stage_app"]!.handler as (
+      args: unknown, extra: { requestId: string | number },
+    ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    const result = await appHandler({ token: t.codex, operation: "launch", appId: "chrome" }, { requestId: 1 });
+    const reply = JSON.parse(result.content[0]!.text);
+    assert.equal(reply.result.taskId, freshChromeTask.id,
+      "a brand-new task's first call must resolve to itself, not to a days-old orphan with stale activity");
+  } finally { t.done(); }
+});
+
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

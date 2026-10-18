@@ -176,6 +176,25 @@ test("semantic click remembers the exact field and background insert preserves i
   await assert.rejects(driver.typeText("stage", "unsafe", identity, { mode: "insert" }), /current value.*unavailable/i);
 }));
 
+test("semantic click on a ComboBox search field is remembered too, not just Edit/TextField/TextArea/Document (live bug, 2026-10-17)", async () => withRoot(async (root) => {
+  // X/Twitter's own search box exposes UIA role "ComboBox", not "Edit" -- the field-memory
+  // allowlist used to miss it entirely even though the driver confirmed it supports set_value,
+  // so a confirmed semantic click there never got remembered as the active typing target.
+  const windowId = "12345";
+  await registerStage(root, windowId);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const field = { elementIndex: BigInt(1), elementToken: "uia:search", role: "ComboBox", label: "Search query", value: "", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } };
+  const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }], elements: [field] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
+  const identity = { handle: "codex", sessionId: "combobox-memory" };
+  await driver.clickElement("stage", "uia:search", identity);
+  await driver.typeText("stage", "new Tesla", identity, { mode: "insert" });
+  const call = calls.find((c) => c.method === "callTool" && (c.value as { name?: string }).name === "set_value");
+  assert.ok(call, "a confirmed click on a ComboBox-role field must be remembered, the same as Edit/TextField/TextArea/Document");
+  assert.equal((call.value as { args: { value: string } }).args.value, "new Tesla");
+}));
+
 test("coordinate click background insertion also preserves existing value", async () => withRoot(async (root) => {
   const windowId = "12345";
   await registerStage(root, windowId);
