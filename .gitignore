@@ -146,3 +146,4 @@ skills-lock.json
 # local tool scratch caches, never committed
 .workcache/
 .worktrees/
+.n3-proof/

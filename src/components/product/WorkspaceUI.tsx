@@ -2,6 +2,7 @@
 
 import Activity from "reicon-react/icons/Activity";
 import { User as UserIcon } from "lucide-react";
+import { AGENT_BRAND_COLOR } from "@/lib/agent-brand-color";
 
 /**
  * M9R WorkspaceUI primitives
@@ -161,21 +162,10 @@ export const AGENT_GLYPH: Record<string, string> = {
   opencode: "◈",
 };
 
-/**
- * Anthropic's terracotta is Claude Code's real, current brand color. Neither
- * OpenAI nor x.ai publishes a signature color for Codex/Grok, so those two
- * used to render neutral gray rather than a stale or guessed hex -- but
- * product chose a deliberate identity color for Codex anyway (soft violet)
- * since distinguishing agents at a glance outweighs the no-official-color
- * caution here. OpenCode stays neutral by choice, not by omission.
- */
-export const AGENT_BRAND_COLOR: Partial<Record<string, string>> = {
-  "claude-code": "#D97757",
-  // OpenAI's real Codex/ChatGPT mark color is white/near-black (theme-dependent),
-  // not a tinted hue -- matching their actual brand rather than the placeholder
-  // violet used before.
-  codex: "#F2EFE9",
-};
+// Moved to agent-brand-color.ts (a plain .ts module, not .tsx) so non-React code -- like the
+// server-side cursor-color resolution in agent-color.ts -- can import it without pulling in a
+// React component file. Re-exported here so every existing `from WorkspaceUI` import keeps working.
+export { AGENT_BRAND_COLOR };
 
 /**
  * Status ring colors -- the same three-value semantic system used everywhere
