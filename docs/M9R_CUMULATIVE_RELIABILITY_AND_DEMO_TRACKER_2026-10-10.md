@@ -2853,3 +2853,18 @@ The staged set contains only the MCP SDK security-floor update, lockfiles, root 
 The reviewed nine-file source/release slice was committed as **`0395d0d8`** (`Harden dependency and lint release boundaries`). The commit contains only the dependency security floor and lockfiles, lint-scope boundary, regression tests, test manifest, and tracker evidence. Post-commit status confirms the generated icon files, manifest/marketing asset group, runtime output, activation evidence, recovery quarantine, cutover material, scratchpad, user document, and other held paths remain outside the commit. No live runtime, provider process, pill, desktop state, database, or task was changed.
 
 The next gate is a clean packaged-runtime review from this committed source, followed by an explicit install/activation decision. Live provider acceptance remains closed until the installed runtime fingerprint, provider reconnect, and owner-visible sessions are all verified.
+
+### 2026-10-20 (Codex) — clean packaged-runtime gate: source green, publish blocked
+
+A disposable managed worktree was created from committed `HEAD` `872ca60d` at `C:\Users\kaina\.codex\worktrees\clean-runtime-gate-20261020\runleak`; the active checkout and installed runtime were not used for this build. Locked root, overlay, and pill dependencies were installed in the disposable candidate.
+
+Evidence:
+
+- overlay web and pill desktop builds passed;
+- native Tauri overlay build passed and produced `m9r-overlay.exe` plus the NSIS bundle;
+- standalone engine compilation passed for the SEA engine, web broker, hook, and native-input host;
+- pinned Cua Driver `0.34.0` archive download/extraction and SHA-256 verification passed;
+- the transactional CLI publish initially hit Windows `EPERM` once and passed on one controlled retry;
+- the runtime publish then failed twice at the same operation: renaming the generated `cua-driver-runtime` directory into `engine/dist/cua-driver-runtime`. Both attempts rolled back cleanly; post-rollback checks found no staged runtime, backup directory, destination runtime directory, or related process lock. No force delete, copy-over, bypass, installation, activation, provider reconnect, or live task was performed.
+
+Conclusion: the source and native compilation portions are green, but the clean packaged-runtime gate is **blocked by a reproducible Windows filesystem publish failure at the Cua runtime directory rename**. This is not evidence that the runtime is safe to install. The candidate must be retried from a normal clean filesystem boundary or the transaction/host-lock cause must be diagnosed and fixed before activation. The active checkout’s held artifacts remain untouched.
