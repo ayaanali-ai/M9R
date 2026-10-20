@@ -80,8 +80,11 @@ check does not close a live, installed, provider, or production gate by itself.
    documentation that are actually verified. Exclude generated runtime output,
    secrets, user documents, historical quarantine, and unverified design/icon
    files. **In progress.**
-4. Stage and review logical commits separately. Do not commit the mixed dirty
-   worktree as one blob. **Not started.**
+4. Stage and review logical commits separately. The documentation boundary is
+   committed as `7f806b79` plus tracker correction `f600bd92`, and the verified
+   foreground/package reliability group is committed as `5f447ba7`. The
+   remaining mixed source and product edits are not staged or committed.
+   **In progress.**
 5. Rebuild from the resulting clean commit, run the release manifest/checks,
    and compare the complete artifact set. **Open.**
 6. Only after that, activate/reconnect as an explicitly authorized live change,
