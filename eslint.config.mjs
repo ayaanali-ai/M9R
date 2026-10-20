@@ -41,6 +41,10 @@ const eslintConfig = defineConfig([
     "oathlock-deck/**",
     // Generated CLI distributable (compiled from src by scripts/build-cli.mjs).
     "cli/dist/**",
+    // Local M9R runtime state, browser profiles, screenshots, and recovery
+    // artifacts are generated data, not application source. Traversing them
+    // makes root lint unbounded and can parse bundled third-party extensions.
+    ".m9r/**",
     // Claude worktrees are separate generated checkouts, not this repository's
     // source tree. Linting them duplicates failures and makes the root result
     // depend on another agent's temporary workspace.
