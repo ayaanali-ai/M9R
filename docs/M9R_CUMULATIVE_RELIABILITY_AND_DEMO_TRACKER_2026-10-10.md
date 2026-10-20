@@ -2467,3 +2467,17 @@ Verification evidence:
 No live runtime activation, provider reconnect, desktop action, artifact drain, held-asset staging, or user-file mutation occurred. Live Codex/Claude/OpenCode acceptance remains a separate gate; these source/package checks prove the provider-neutral runtime path, not universal live-provider success.
 
 **Status:** source quality, dependency audit, tests, typecheck, web build, pill/native build, and package-level runtime checks are green or explicitly bounded as above. The final clean provenance rebuild and commit boundary are the remaining release steps in this pass.
+
+### 2026-10-20 (Codex) — final clean provenance rebuild
+
+The verified release-gate commit is `a0906210` (`chore: harden clean runtime release gate`). The post-commit standalone rebuild completed with:
+
+- build ID `ad110138f2311e80a2ced38168096ba877308c98754b991e8501dbc9c1f775a2`;
+- source commit `a090621073833def91e900dd850bbbf197f090bb`;
+- `sourceDirty: false`;
+- 185 manifest-hashed artifacts;
+- engine 94,971,392 bytes, web broker 93,048,320 bytes, overlay 3,355,648 bytes;
+- Cua Driver 0.34.0 SHA-256 verification passed;
+- transaction regression **3/3**, packaged MCP smoke **2/2**, and runtime lifecycle **4/4**.
+
+This is a clean, reproducible candidate from committed source. It has not been copied into the active runtime, installed, restarted, or live-provider accepted. The existing unsigned SEA injection warning remains a release-signing concern; injection itself completed and the packaged smoke tests passed. Live Codex/Claude/OpenCode acceptance and any activation/restart remain separate owner-authorized gates.
