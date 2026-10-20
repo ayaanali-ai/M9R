@@ -47,6 +47,7 @@ test("release-boundary scanners tolerate a large Git inventory and held director
     write(root, "OPEN_CORE_LAUNCH_PLAN.md", "production-ready terminal is explicitly labeled experimental\nTerminal demo — deferred\n");
     write(root, "README.md", "Implemented in the current code path. Provider-attributed live completion is a separate release gate. Provider availability and quotas can prevent a turn.\n");
     write(root, "packages/runtime-core/package.json", JSON.stringify({ private: false, license: "Apache-2.0" }));
+    write(root, "scripts/cross-agent-capture-core.test.ts", 'const reviewedFixture = "sk-' + "A".repeat(20) + '";\n');
 
     // This inventory is intentionally larger than Node's historical 1 MiB
     // execFileSync default. It reproduces the old ENOBUFS failure.
@@ -58,10 +59,12 @@ test("release-boundary scanners tolerate a large Git inventory and held director
 
     // The release candidate must not try to read a held directory as a file.
     // Its contents are deliberately left untracked, like retained local evidence.
-    write(root, "held-evidence/notes.txt", "retained locally");
-
     runGit(root, ["init", "--quiet"]);
+    runGit(root, ["config", "user.email", "m9r-release-test@example.invalid"]);
+    runGit(root, ["config", "user.name", "M9R release test"]);
     runGit(root, ["add", "."]);
+    runGit(root, ["commit", "--quiet", "-m", "fixture"]);
+    write(root, "held-evidence/notes.txt", "retained locally");
 
     const run = (script, args = []) => execFileSync(process.execPath, [script, ...args], {
       cwd: root,
@@ -71,6 +74,7 @@ test("release-boundary scanners tolerate a large Git inventory and held director
 
     assert.match(run(publicSurfaceScript), /Public-surface gate: PASS/);
     assert.match(run(releaseManifestScript, ["--check"]), /Release manifest check: PASS/);
+    assert.match(run(join(repoRoot, "scripts", "open-core-history-audit.mjs")), /History audit: PASS/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
