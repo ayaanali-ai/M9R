@@ -63,17 +63,24 @@ function sourceProvenance() {
   if (commit.error || commit.status !== 0) throw new Error("Cannot determine the source commit; refusing to build an unidentified runtime.", { cause: commit.error });
   const sourceCommit = String(commit.stdout).trim();
   if (!/^[a-f0-9]{40}$/i.test(sourceCommit)) throw new Error("Git returned an invalid source commit; refusing to build an unidentified runtime.");
-  // Normal untracked reporting is sufficient for a dirty/clean bit and avoids
-  // expanding every file inside large untracked artifact directories. The
-  // previous `--untracked-files=all` form could overflow spawnSync's buffer and
-  // make an otherwise identifiable build fail closed as "unknown".
-  const status = spawnSync("git", ["status", "--porcelain=v1", "--untracked-files=normal"], {
-    cwd: root,
-    encoding: "utf8",
-    maxBuffer: 256 * 1024,
-  });
-  if (status.error || status.status !== 0) throw new Error("Cannot determine source cleanliness; refusing to build an unidentified runtime.", { cause: status.error });
-  return { sourceCommit, sourceDirty: String(status.stdout).trim().length > 0 };
+  // Compare content, not the status command's cached file metadata. Native
+  // packaging tools can touch a tracked file's mtime without changing bytes;
+  // `git status --porcelain` can then report a false dirty build even though
+  // the committed source is unchanged. Keep untracked source/artifact paths in
+  // the decision, but collapse ignored directories so large runtime evidence
+  // trees cannot overflow spawnSync's buffer.
+  const runGitCleanCheck = (args) => {
+    const result = spawnSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 256 * 1024 });
+    if (result.error || (result.status !== 0 && result.status !== 1)) {
+      throw new Error("Cannot determine source cleanliness; refusing to build an unidentified runtime.", { cause: result.error });
+    }
+    return result;
+  };
+  const worktreeDiff = runGitCleanCheck(["diff", "--quiet", "--no-ext-diff", "--ignore-submodules"]);
+  const indexDiff = runGitCleanCheck(["diff", "--cached", "--quiet", "--no-ext-diff", "--ignore-submodules"]);
+  const untracked = runGitCleanCheck(["ls-files", "--others", "--exclude-standard", "--directory"]);
+  const sourceDirty = worktreeDiff.status === 1 || indexDiff.status === 1 || String(untracked.stdout).trim().length > 0;
+  return { sourceCommit, sourceDirty };
 }
 
 // The dispatcher: SEA argv is [exe, exe, ...args]; shift so both programs see the argv they were written for.
