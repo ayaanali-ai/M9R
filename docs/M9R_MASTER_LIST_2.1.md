@@ -84,7 +84,8 @@ check does not close a live, installed, provider, or production gate by itself.
    committed as `7f806b79` plus tracker correction `f600bd92`, and the verified
    foreground/package reliability group is committed as `5f447ba7`, and the
    provider-neutral delivery/runtime group is committed as `61469d95`. The
-   remaining mixed source and product edits are not staged or committed.
+   durable per-connection color/dashboard group is committed as `be19dc38`.
+   The remaining mixed source and product edits are not staged or committed.
    **In progress.**
 5. Rebuild from the resulting clean commit, run the release manifest/checks,
    and compare the complete artifact set. **Open.**
