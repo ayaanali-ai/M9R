@@ -2,7 +2,12 @@ import type { ChildProcess } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 
-type Message = { jsonrpc?: string; id?: string | number; method?: string; params?: any; result?: any; error?: any };
+type RpcId = string | number;
+type RpcParams = Record<string, unknown> & { requestId?: RpcId };
+type RpcCapabilities = Record<string, unknown> & { tools?: Record<string, unknown> & { listChanged?: boolean } };
+type RpcResult = Record<string, unknown> & { protocolVersion?: string; capabilities?: RpcCapabilities };
+type RpcError = Record<string, unknown> & { data?: Record<string, unknown> };
+type Message = { jsonrpc?: string; id?: RpcId; method?: string; params?: RpcParams; result?: RpcResult; error?: RpcError };
 type Pending = { message: Message; generation?: number };
 
 export interface McpSupervisorOptions {
@@ -156,25 +161,27 @@ export function runMcpStdioSupervisor(options: McpSupervisorOptions) {
         let message: Message;
         try { message = parseMessage(line); } catch { lost(); return; }
         if (message.id === handshakeId && !message.method) {
-          if (!message.result?.protocolVersion || message.error || (initialProtocol && initialProtocol !== message.result.protocolVersion)) {
+          const result = message.result;
+          if (!result?.protocolVersion || message.error || (initialProtocol && initialProtocol !== result.protocolVersion)) {
             reject(new Error("Worker protocol negotiation failed"));
             continue;
           }
           if (settled) continue;
           settled = true; clearTimeout(timer);
           cancelHandshake = undefined;
-          initialProtocol = message.result.protocolVersion;
+          initialProtocol = result.protocolVersion;
           loadedRevision = startingRevision;
           if (!initializationAnswered) {
             initializationAnswered = true;
-            const result = { ...message.result, capabilities: { ...message.result.capabilities } };
-            if (result.capabilities.tools) result.capabilities.tools = { ...result.capabilities.tools, listChanged: true };
-            send({ jsonrpc: "2.0", id: initialization!.id, result });
+            const capabilities = result.capabilities ?? {};
+            const forwardedResult = { ...result, capabilities: { ...capabilities } };
+            if (forwardedResult.capabilities.tools) forwardedResult.capabilities.tools = { ...forwardedResult.capabilities.tools, listChanged: true };
+            send({ jsonrpc: "2.0", id: initialization!.id, result: forwardedResult });
             const queued = preReadyMessages.splice(0);
             for (const queuedMessage of queued) receive(queuedMessage);
           } else {
             if (initialized) write(worker, { jsonrpc: "2.0", method: "notifications/initialized" });
-            if (initialized && message.result.capabilities?.tools) send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+            if (initialized && result.capabilities?.tools) send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
           }
           event("ready", undefined, worker.pid);
           finish();
@@ -252,6 +259,7 @@ export function runMcpStdioSupervisor(options: McpSupervisorOptions) {
     }
     if (message.method === "notifications/cancelled") {
       const id = message.params?.requestId;
+      if (id === undefined) { if (child) write(child, message); return; }
       const entry = pending.get(id);
       if (entry && entry.generation === undefined) pending.delete(id);
       else if (child) write(child, message);

@@ -2445,3 +2445,25 @@ The verified two-file boundary from this review is committed as `9b6e01c9` (`cho
 The first full runtime build from committed HEAD completed its packaging steps and verified **185** artifacts, but its own manifest reported `sourceDirty: true`. This was traced to the builder itself: `scripts/build-engine.mjs` created `engine/.m9r-engine-build-<pid>-<uuid>/` before calling `sourceProvenance()`, and that temporary path was not ignored. The result was a false dirty stamp even in an otherwise clean detached worktree.
 
 The fix moves provenance capture before any temporary build staging is created. A regression assertion was added to `scripts/install-m9r.test.mjs` requiring the provenance call to precede the staging directory creation; the old ordering fails this assertion. `node --check scripts/build-engine.mjs` passed, and the focused release-packaging regression passed **1/1**. The previously generated dirty candidate was not copied into the active runtime and will not be treated as releasable.
+
+### 2026-10-20 (Codex) — clean runtime candidate, lint/type hardening, and dependency security gate
+
+The clean detached worktree was revalidated from the committed source boundary. Three classes of source-quality findings were fixed at their boundaries rather than suppressed: the MCP supervisor and its regression harness now use explicit JSON-RPC types instead of `any`, cancellation notifications without a request id are forwarded safely, `RoomLiveView` initializes its unavailable-Supabase state without a synchronous effect update, and the remaining immutable binding/empty-interface lint findings were corrected. These edits are provider-neutral and do not change the desktop action contract.
+
+Dependency audit remediation was applied without `--force`: the lockfile now resolves `proxy-addr` **2.0.8**, `source-map-js` **1.2.2**, `sharp` **0.35.5**, and `@modelcontextprotocol/sdk` **1.31.0**; compatible ACP and Google GenAI refreshes landed at **0.64.2** and **2.30.0**. `npm audit --omit=dev --audit-level=high` reports **0 vulnerabilities** against the refreshed lockfile. A full `npm ci` in the disposable worktree did not finish its final npm phase and was stopped; the fixed package entries were present and lockfile audit verification completed. No active workspace install was changed.
+
+Verification evidence:
+
+- `npm run typecheck`: **passed**.
+- Full source lint immediately after the source fixes: **0 errors, 0 warnings**; the later full rerun became non-terminating after the disposable install attempt and was stopped rather than counted as a new pass. Final lint of all changed source/test files: **passed**.
+- Full repository regression: **206 files, 2,586 tests passed, 0 failed**.
+- MCP supervisor regression: **10/10 passed** outside the sandbox; the one sandbox run was excluded because Windows denied the isolated lock-file rename.
+- Production Webpack build: **passed** outside the sandbox; compilation, TypeScript, 138 static pages, route data, and optimization completed. Turbopack was not counted because its disposable dependency junction is intentionally outside the worktree root; the first Webpack attempt was likewise excluded for sandbox `EPERM`/DNS boundaries.
+- Pill desktop build: **passed**.
+- Native overlay release build: **passed** (`cargo build --release`).
+- Standalone engine build: completed CLI, SEA engine/broker injection, native hook/input-host builds, Cua Driver 0.34.0 SHA verification, and 185-file identity verification. The first candidate was correctly marked dirty because the source/lock edits were not yet committed; it was not released. A final post-commit rebuild is required for the releasable `sourceDirty:false` manifest.
+- Installer regression: remains **inconclusive** because its earlier clean-worktree run hung without output; no installer/restart was attempted as a substitute.
+
+No live runtime activation, provider reconnect, desktop action, artifact drain, held-asset staging, or user-file mutation occurred. Live Codex/Claude/OpenCode acceptance remains a separate gate; these source/package checks prove the provider-neutral runtime path, not universal live-provider success.
+
+**Status:** source quality, dependency audit, tests, typecheck, web build, pill/native build, and package-level runtime checks are green or explicitly bounded as above. The final clean provenance rebuild and commit boundary are the remaining release steps in this pass.

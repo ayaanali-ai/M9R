@@ -9,6 +9,20 @@ import { runMcpStdioSupervisor } from "../src/lib/native/mcp-stdio-supervisor.ts
 import { createLocalStore } from "../src/lib/native/local-store.ts";
 import { stopChildProcess } from "./runtime-child-shutdown.mjs";
 
+type RpcId = string | number;
+type TestParams = Record<string, unknown> & { requestId?: RpcId };
+type TestResult = Record<string, unknown> & {
+  client: { name: string; version?: string };
+  serverInfo: { name: string; version?: string };
+  content: Array<{ text: string }>;
+  data: { dispatchStatus?: string; replayAllowed?: boolean };
+  lastRoots?: unknown;
+};
+type TestError = Record<string, unknown> & { data: { dispatchStatus?: string; replayAllowed?: boolean } };
+type TestMessage = { jsonrpc?: string; id?: RpcId; method?: string; params?: TestParams; result: TestResult; error: TestError };
+type TestInput = { id?: RpcId; method?: string; params?: TestParams; result?: Record<string, unknown>; error?: Record<string, unknown> };
+type SupervisorEvent = { kind?: string; generation?: number; workerPid?: number };
+
 const fixture = String.raw`
 const readline = require('node:readline');
 const fs = require('node:fs');
@@ -36,20 +50,20 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 function harness(spawnWorker: () => ReturnType<typeof spawn>, attempts = 3, workerRevision?: () => string) {
   const input = new PassThrough();
   const output = new PassThrough();
-  const messages: any[] = [];
+  const messages: TestMessage[] = [];
   let buffer = "";
   output.on("data", chunk => {
     buffer += chunk.toString();
     for (;;) {
       const end = buffer.indexOf("\n");
       if (end < 0) break;
-      messages.push(JSON.parse(buffer.slice(0, end)));
+      messages.push(JSON.parse(buffer.slice(0, end)) as TestMessage);
       buffer = buffer.slice(end + 1);
     }
   });
   const runtime = runMcpStdioSupervisor({ input, output, spawnWorker, maxAttempts: attempts,
     retryDelayMs: 5, handshakeTimeoutMs: 500, shutdownTimeoutMs: 500, workerRevision, refreshEveryMs: 10 });
-  const send = (message: any) => input.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+  const send = (message: TestInput) => input.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
   const response = async (id: number, timeoutMs = 3000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -212,8 +226,8 @@ test("the real M9R entry recovers an isolated local provider without rotating it
   const parent = spawn(process.execPath, ["--experimental-transform-types", "--import", "./scripts/register-alias.mjs", "scripts/m9r-mcp.ts"], {
     stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: { ...process.env, M9R_HOME: root, M9R_MCP_WORKER: "" },
   });
-  const messages: any[] = [];
-  const events: any[] = [];
+  const messages: TestMessage[] = [];
+  const events: SupervisorEvent[] = [];
   let output = "";
   let diagnostics = "";
   const startupErrors: string[] = [];
@@ -221,7 +235,7 @@ test("the real M9R entry recovers an isolated local provider without rotating it
     output += chunk.toString();
     while (output.includes("\n")) {
       const end = output.indexOf("\n");
-      messages.push(JSON.parse(output.slice(0, end))); output = output.slice(end + 1);
+      messages.push(JSON.parse(output.slice(0, end)) as TestMessage); output = output.slice(end + 1);
     }
   });
   parent.stderr.on("data", chunk => {
@@ -229,7 +243,7 @@ test("the real M9R entry recovers an isolated local provider without rotating it
     while (diagnostics.includes("\n")) {
       const end = diagnostics.indexOf("\n");
       const line = diagnostics.slice(0, end); diagnostics = diagnostics.slice(end + 1);
-      if (line.startsWith("M9R MCP lifecycle ")) events.push(JSON.parse(line.slice("M9R MCP lifecycle ".length)));
+      if (line.startsWith("M9R MCP lifecycle ")) events.push(JSON.parse(line.slice("M9R MCP lifecycle ".length)) as SupervisorEvent);
       else startupErrors.push(line.replaceAll(identity.token, "[redacted-test-credential]"));
     }
   });
@@ -250,7 +264,7 @@ test("the real M9R entry recovers an isolated local provider without rotating it
     const args = { name: "m9r_whoami", arguments: { token: identity.token } };
     assert.match((await request(2, "tools/call", args)).result.content[0].text, /@local-model \(custom-open-weight-provider\)/);
     const workerPid = events.find(x => x.kind === "ready")?.workerPid;
-    assert.ok(Number.isSafeInteger(workerPid));
+    if (typeof workerPid !== "number" || !Number.isSafeInteger(workerPid)) throw new Error("The isolated supervisor did not report a worker PID.");
     // This PID is the private worker spawned by our isolated test parent. No
     // installed provider/runtime process participates in this fault injection.
     process.kill(workerPid, "SIGTERM");
