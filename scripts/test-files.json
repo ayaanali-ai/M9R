@@ -204,6 +204,7 @@
   "relay-lease.test.ts",
   "mission-relay-deployment.test.ts",
   "test-suite-runner-core.test.mjs",
+  "open-core-release-boundary.test.mjs",
   "public-error.test.ts",
   "web-live-sessions.test.ts"
 ]

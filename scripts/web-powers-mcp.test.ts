@@ -155,14 +155,22 @@ test("a web-room agent's inbox cursor survives a fresh respawn (a new session ID
   t.after(async () => { await client.close(); await server.close(); });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-  // First worker (session A) already saw both messages, including the ancient one, and its cursor advanced.
+  // Recovery is deliberately one message per call. The room cursor, however, is
+  // shared across provider respawns, so the next call in the same room receives
+  // the next message rather than replaying the first one.
   const first = await client.callTool({ name: "m9r_inbox", arguments: { token: WEB_SESSION_A_TOKEN } });
   const firstText = (first.content as Array<{ text?: string }>)[0]?.text ?? "";
   assert.match(firstText, /old stop-all relic/);
-  assert.match(firstText, /real, current question/);
+  assert.doesNotMatch(firstText, /real, current question/);
 
-  // A brand-new process for the same agent (session B) must NOT see that ancient relic resurface.
-  const second = await client.callTool({ name: "m9r_inbox", arguments: { token: WEB_SESSION_B_TOKEN } });
+  const second = await client.callTool({ name: "m9r_inbox", arguments: { token: WEB_SESSION_A_TOKEN } });
   const secondText = (second.content as Array<{ text?: string }>)[0]?.text ?? "";
-  assert.equal(secondText, "Inbox is empty.", "a fresh respawn's cursor must not reset to zero and re-show old delivered tasks");
+  assert.match(secondText, /real, current question/);
+  assert.doesNotMatch(secondText, /old stop-all relic/);
+
+  // A brand-new process for the same agent (session B) must NOT see either
+  // already-delivered message resurface.
+  const fresh = await client.callTool({ name: "m9r_inbox", arguments: { token: WEB_SESSION_B_TOKEN } });
+  const freshText = (fresh.content as Array<{ text?: string }>)[0]?.text ?? "";
+  assert.equal(freshText, "Inbox is empty.", "a fresh respawn's room cursor must not reset to zero and re-show delivered tasks");
 });

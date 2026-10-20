@@ -2709,3 +2709,65 @@ This proves the release candidate is internally coherent and that the packaged w
 The cursor redesign is now separated correctly from Harbor/pill design. The installed Cua Driver exposes one local theme, `cua.default`; its theme helper supports `validate`, `build`, `inspect`, `preview`, `install`, `list`, and `uninstall` for custom `.cua-theme` packages built from dotLottie sources. M9R currently selects the default theme and does not yet install custom assets.
 
 A preview-only board was generated for three Cua cursor directions: **Halo** (provider-color halo), **Ghost** (translucent cursor with restrained motion echo), and **Prism** (faceted provider-color edge). Each direction shows idle, moving, acting, and attention states with visible provider names and no task IDs, session IDs, or tokens. This is design evidence only; no Cua theme was built, installed, or wired into the runtime. Harbor remains a separate M9R identity/agent surface that can later be placed in the pill or another owner-visible rail.
+
+### 2026-10-20 (Codex) — theme catalog search and pre-live source gate recheck
+
+The official Cua documentation was rechecked before any theme work. Cua currently documents **one built-in theme**, `cua.default`, and six built-in motion styles: `signature_arc`, `spring_settle`, `magnetic`, `comet_swoop`, `adaptive`, and `classic`. It documents a local authoring/install format for custom dotLottie themes, but no official theme marketplace or additional official theme catalog was found.
+
+One compatible community candidate was found in the MIT-licensed `988hj7tczd-oss/dsh-computer-use` repository: `com.dsh.computeruse.rainbow`. Its repository includes `theme.lottie` and `tools/make_theme.py`, and its verification notes claim a 128x128, 30fps, twelve-action theme that was compiled and demo-tested by that project. This is **third-party evidence only**; it has not been downloaded, validated, built, installed, or selected for M9R. No current pill/runtime/theme state was changed. The candidate remains pending owner visual/license review.
+
+The provider-independent source gate was advanced without live desktop or provider mutation. Current checkout results:
+
+- desktop/Cua/room/pill stage suite: **117/117**;
+- provider presence/heartbeat suite: **26/26**;
+- routing suite: **8/8**;
+- resident/provider continuity suite: **89/89**;
+- stage-1 delivery/restart/recovery suite: **53/53**;
+- conversation/idempotency/history suite: **34/34**;
+- Codex app-server adapter suite: **16/16**;
+- host-boundary local terminal bridge integration: **18/18**;
+- installer source/release subchecks: **4/4**;
+- `git diff --check`: not rerun in this slice; prior release-boundary result remains recorded above.
+
+The coordination suite printed ten passing assertions but did not terminate cleanly after its result stream; it is therefore **not counted as a completed gate** and remains a harness follow-up. Live acceptance is also still open: the current M9R agent roster reported no other active agents during this check, so no provider task was dispatched and no live result was claimed. The next live gate remains owner-visible Codex/Claude/OpenCode acceptance followed by the open-world matrix; this source pass does not close it.
+
+### 2026-10-20 (Codex) — completed web/coordination source gate
+
+The prior web-broker failure was reproduced and traced to a stale test expectation, not to a runtime replay defect. Commit `61469d95` intentionally changed provider inbox recovery from up to ten messages per call to one message per call, so recovery remains bounded and does not flood a provider turn. `scripts/web-powers-mcp.test.ts` still expected both fixture messages in the first call. The test now verifies the intended contract: the first call returns the first message, the next call in the same room returns the next message, and a replacement provider session sees `Inbox is empty.` rather than replaying either message. The targeted regression passed, then the full host-boundary web-broker suite passed **233/233 executed tests, 20 intentional skips, 0 failures**.
+
+The coordination suite was rerun with host access because the restricted sandbox could not rename temporary M9R state locks (`EPERM`); under the host boundary `npm run test:coordination` passed **36/36** and terminated normally. This closes the previously inconclusive coordination harness/source gate. No runtime binary, installed engine, provider session, live task, pill surface, or cursor theme was changed.
+
+### 2026-10-20 (Codex) — current-head release gate continuation
+
+The stale Codex app-server token in `scripts/open-core-release-check.mjs` was removed from the retired-path denylist after tracing it to the intentionally supported optional `M9R_CODEX_APP_SERVER=1` adapter. The active adapter was not changed. The old release-check failure reproduced before this edit; afterward `npm run open-core:check` passed all deterministic checks, including licenses, release documents, retired dashboard/thread-host absence, and tracked-secret checks. Targeted ESLint for the changed release-check and web regression files passed with no output/errors.
+
+Current-head verification also passed: repository typecheck; production `npm run build` (Turbopack compiled, TypeScript completed, all 138 routes generated); production dependency audit (`npm audit --omit=dev --audit-level=high`, **0 vulnerabilities**); full host-boundary web-broker (**233/233 executed, 20 intentional skips**); and coordination (**36/36**). The unrestricted root lint scan was stopped after remaining silent while traversing the preserved dirty artifact/quarantine tree; it is **inconclusive**, not green. The dev-only audit reports **11 vulnerabilities** in transitive tooling (`brace-expansion`, `braces`, `postcss-selector-parser`); `npm audit fix --force` proposes a breaking `shadcn` major upgrade, so no dependency rewrite was applied. `open-core:public-surface` and `open-core:manifest` also remain blocked in this dirty checkout by `git` `ENOBUFS` while enumerating the preserved quarantine/activation material. Those artifacts were not deleted, hidden, or modified; a clean allowlisted release candidate is still required for that gate.
+
+The provider-continuity source/package gate then passed **37/37** (`mcp-connection`, env, runtime-path, and stdio-supervisor suites) plus **6/6** packaged-engine binding/reconnect tests. Evidence covers exact-PID binding, continuation claim reuse, dead-claim reconciliation, ambiguity fail-closed behavior, worker respawn and runtime revision handoff, late hook readiness, and arbitrary-provider identity preservation. No live engine, provider session, or installed runtime was restarted; live Claude/Codex/OpenCode acceptance remains a separate gate.
+
+The provider-neutral desktop/action gate passed **163/163** across the generic computer-use contract/MCP/router, Windows desktop stage, task-stage actions, renderer resolution, operation receipts, and cursor-race suites. Evidence includes launcher/renderer alias resolution from Windows registration evidence, exact-window focus and ownership, stale observation refusal, semantic/point/clipboard/keyboard/window-state actions, cancellation, recovery, shared-window coordination, no per-app allowlist, and background-stage safety. This is source/fixture evidence only; arbitrary live apps, multi-provider focus contention, and open-world owner acceptance remain open.
+
+The pill/presence/cursor/provider-facing contract gate passed **98/98** across presence lifecycle, cursor target highlighting/slot allocation, bridge mention routing, session redaction, and installation/standing-instruction behavior. It confirms stable provider-neutral labels/routing, no credential leakage in redaction, cursor labels at shared targets, and automatic authorized delivery language without routine inbox polling. This does not select or build a cursor theme, and it does not close live visual acceptance.
+
+### 2026-10-20 (Codex) — live-acceptance readiness check
+
+The source/package gate is complete for this pass, and `git diff --check` is green. Before dispatching any live acceptance task, the current M9R roster was checked read-only with a 15-minute activity window. The broker reported **no other agents active recently**, so there was no safe owner-visible Codex/Claude/OpenCode target for a live matrix task. No synthetic task was dispatched and no live acceptance result was claimed.
+
+The live gate therefore remains **blocked on provider availability/owner-visible sessions**, not on a newly observed source failure. Once the provider sessions are visibly active, run separate real owner-approved acceptance tasks first, then the open-world multi-provider matrix. The current pill, installed runtime, provider processes, desktop state, and held artifacts were not changed by this check.
+
+### 2026-10-20 (Codex) — release-checker robustness correction
+
+The release-boundary scripts had two independent dirty-checkout robustness defects. Their Git inventory calls used Node's default 1 MiB `execFileSync` buffer, which failed with `ENOBUFS` against the retained recovery/activation evidence, and the manifest attempted to hash directory entries as files, which failed with `EISDIR` after the buffer issue was removed. Both scripts now use a bounded 16 MiB inventory buffer and filter candidate paths to regular files before reading or hashing them. The active release policy was not weakened: the public-surface check now reaches and correctly reports the real blocker—retained `.key` files inside `.m9r-recovery-quarantine-20261014`—instead of crashing. Those files remain held and were not deleted, hidden, or committed.
+
+Regression evidence after the correction:
+
+- `npm run open-core:check`: **passed**;
+- changed release-check scripts: **ESLint passed with zero warnings/errors**;
+- `npm run test:web-broker`: **233/233 executed tests passed, 20 intentional skips**;
+- `git diff --check`: **passed**.
+
+The new regression `scripts/open-core-release-boundary.test.mjs` builds a temporary Git candidate with an inventory larger than the old 1 MiB buffer and retained held-directory material. It passes **1/1** after the correction; before the correction the same fixture failed during Git inventory enumeration. The test is included in `scripts/test-files.json` so the full manifest cannot omit it.
+
+The public-surface/manifest release boundary remains blocked until a clean, explicitly allowlisted candidate is assembled and reviewed. This is a release hygiene boundary, not a live-engine or provider failure.
+
+The verified source-check slice was committed as **`c84aa7e4`** (`Harden release boundary checks and web cursor regression`). Only the seven files named by that commit were staged; generated icon changes, the app manifest, marketing fixture, runtime output, activation evidence, recovery quarantine, scratchpad, user-owned DOCX, and separate cutover material remain outside the commit boundary.

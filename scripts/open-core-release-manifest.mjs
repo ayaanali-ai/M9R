@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const root = process.cwd();
@@ -95,7 +95,14 @@ function normalize(path) {
 }
 
 function gitFiles(args) {
-  return execFileSync("git", args, { cwd: root, encoding: "utf8" })
+  // Release validation must classify retained recovery evidence rather than
+  // aborting on Node's 1 MiB default exec buffer. Keep this bounded while
+  // allowing the current local checkout's Git path inventory to be read.
+  return execFileSync("git", args, {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  })
     .split(/\r?\n/)
     .map((value) => normalize(value.trim()))
     .filter(Boolean);
@@ -112,11 +119,19 @@ function sha256(path) {
   return createHash("sha256").update(readFileSync(join(root, path))).digest("hex");
 }
 
+function isRegularFile(path) {
+  try {
+    return statSync(join(root, path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 const allCandidates = [...new Set([
   ...gitFiles(["ls-files"]),
   ...gitFiles(["ls-files", "--others", "--exclude-standard"]),
 ])]
-  .filter((path) => existsSync(join(root, path)) && !path.startsWith(".git/"));
+  .filter((path) => isRegularFile(path) && !path.startsWith(".git/"));
 
 const intentionallyExcluded = allCandidates.filter((path) => isExcluded(path));
 const prohibited = allCandidates.filter((path) =>

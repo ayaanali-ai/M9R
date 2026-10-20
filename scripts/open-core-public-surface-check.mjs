@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const root = process.cwd();
@@ -18,8 +18,24 @@ function fail(label, detail) {
   console.log(`FAIL  ${label} — ${detail}`);
 }
 
+function isRegularFile(path) {
+  try {
+    return statSync(join(root, path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function gitFiles(args) {
-  return execFileSync("git", args, { cwd: root, encoding: "utf8" })
+  // A dirty developer checkout can contain retained recovery evidence and
+  // nested fixture paths. The default 1 MiB exec buffer makes the release
+  // check fail with ENOBUFS before it can classify those paths. Keep the
+  // enumeration bounded but large enough for a realistic local checkout.
+  return execFileSync("git", args, {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  })
     .split(/\r?\n/)
     .map((value) => value.trim())
     .filter(Boolean);
@@ -55,7 +71,7 @@ const tracked = gitFiles(["ls-files"]);
 const untracked = gitFiles(["ls-files", "--others", "--exclude-standard"]);
 const candidateFiles = [...new Set([...tracked, ...untracked])]
   .map((path) => path.replaceAll("\\", "/"))
-  .filter((path) => existsSync(join(root, path)) && !path.startsWith(".git/"));
+  .filter((path) => isRegularFile(path) && !path.startsWith(".git/"));
 const initialSnapshotExcluded = new Set([
   "M9R_MASTER_BUILD_PLAN.md",
   "OathLock_Realtime_Multi_Agent_Execution_Plan_v1_0.md",
