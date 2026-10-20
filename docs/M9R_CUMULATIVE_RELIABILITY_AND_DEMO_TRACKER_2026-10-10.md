@@ -2703,3 +2703,9 @@ Packaged-runtime verification then passed:
 - packaged provider-binding mode across worker reconnect, native-shim provider/PID propagation, safe unbound behavior without typed tokens, and refreshed-worker recovery: **4/4**.
 
 This proves the release candidate is internally coherent and that the packaged worker/env propagation paths are covered. It does **not** activate or install the candidate, restart the live engine, reconnect providers, or claim live provider acceptance. The active pill/runtime remains untouched. The release boundary is therefore **verified for source/package/transactional correctness; live install/activation and Codex/Claude/OpenCode acceptance remain separate owner-approved gates**.
+
+### 2026-10-20 (Codex) — Cua cursor-theme design exploration, build deferred
+
+The cursor redesign is now separated correctly from Harbor/pill design. The installed Cua Driver exposes one local theme, `cua.default`; its theme helper supports `validate`, `build`, `inspect`, `preview`, `install`, `list`, and `uninstall` for custom `.cua-theme` packages built from dotLottie sources. M9R currently selects the default theme and does not yet install custom assets.
+
+A preview-only board was generated for three Cua cursor directions: **Halo** (provider-color halo), **Ghost** (translucent cursor with restrained motion echo), and **Prism** (faceted provider-color edge). Each direction shows idle, moving, acting, and attention states with visible provider names and no task IDs, session IDs, or tokens. This is design evidence only; no Cua theme was built, installed, or wired into the runtime. Harbor remains a separate M9R identity/agent surface that can later be placed in the pill or another owner-visible rail.
