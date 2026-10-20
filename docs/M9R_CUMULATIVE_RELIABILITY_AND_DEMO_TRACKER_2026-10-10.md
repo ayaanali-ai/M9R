@@ -2691,3 +2691,15 @@ Additional current-head verification:
 The allowlisted release boundary is the verified provider/action source and tests, the Supabase explicit-grant migrations and regression test, the package/test-manifest changes, the parent typecheck boundary, and this evidence entry. The manifest/logo/icon group, asset-dependent marketing test, runtime output, activation evidence, recovery quarantine, scratchpad (including its unread local secret), separate cutover worktree, and user-owned DOCX remain held and unstaged. No runtime activation, install, restart, provider reconnect, artifact drain, broad cleanup, or deletion occurred. A clean post-commit runtime rebuild and installed/live acceptance remain separate gates.
 
 The first disposable post-commit runtime build reached packaging but stamped `sourceDirty: true` even though the clean worktree had no content diff or non-ignored untracked files. The only `git status` entry was `overlay/src-tauri/Cargo.toml`; its HEAD, index, and worktree hashes were identical, confirming a file-metadata false positive after native packaging touched its timestamp. `scripts/build-engine.mjs` now determines cleanliness from tracked-content diffs plus explicit non-ignored paths, and `scripts/install-m9r.test.mjs` asserts that contract. The targeted release regression passes **1/1**; a new clean runtime build is required to prove the corrected manifest before this boundary is called release-ready.
+
+### 2026-10-20 (Codex) — clean packaged runtime and release-boundary smoke proof
+
+The corrected provenance check was rerun from a **fresh detached worktree** at commit `ffc8bbf4aaa08abfb1c1a2cc79e195f571984b5b`, so the prior build output could not contaminate the cleanliness result. `npm run build:engine` completed and published build ID `381ec554b922aefb673c3f19e306aa15ad86cc897a7eaf7bb1b7a88a80e09190` with `sourceDirty: false`. The manifest verified **185 packaged artifact identities**, the pinned Cua Driver `0.34.0` package and SHA, the engine/web-broker/native-input-host/hook outputs, and the packaged overlay.
+
+Packaged-runtime verification then passed:
+
+- real packaged MCP handshake and web-tool exposure: **2/2**;
+- transactional runtime publish, rollback, and generated-CLI staging: **3/3** (the first restricted-sandbox run hit Windows temp-directory `EPERM`; the normal Windows rerun passed);
+- packaged provider-binding mode across worker reconnect, native-shim provider/PID propagation, safe unbound behavior without typed tokens, and refreshed-worker recovery: **4/4**.
+
+This proves the release candidate is internally coherent and that the packaged worker/env propagation paths are covered. It does **not** activate or install the candidate, restart the live engine, reconnect providers, or claim live provider acceptance. The active pill/runtime remains untouched. The release boundary is therefore **verified for source/package/transactional correctness; live install/activation and Codex/Claude/OpenCode acceptance remain separate owner-approved gates**.
