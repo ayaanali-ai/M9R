@@ -39,6 +39,10 @@ if (process.platform === "win32" && !existsSync(overlayExe)) {
 }
 const postjectCli = join(root, "node_modules", "postject", "dist", "cli.js");
 if (!existsSync(postjectCli)) throw new Error("postject is missing; install the locked development dependencies before building the engine.");
+// Capture source provenance before creating the builder's own temporary staging
+// directory. Otherwise the build would report every otherwise-clean checkout as
+// dirty because `engine/.m9r-engine-build-*/` exists during this check.
+const provenance = sourceProvenance();
 mkdirSync(out, { recursive: true });
 mkdirSync(work, { recursive: true });
 
@@ -194,7 +198,6 @@ if (process.platform === "win32") {
 
 const managedRuntimePaths = [exeName, brokerExeName, shimName,
   ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "cua-driver-runtime", "m9r-overlay.exe"] : [])];
-const provenance = sourceProvenance();
 writeRuntimeBuildManifest(out, undefined, provenance);
 const stagedIdentity = verifyRuntimeBuildManifest(out, { exact: true });
 const publishedIdentity = publishRuntimeBuild(out, output, managedRuntimePaths);

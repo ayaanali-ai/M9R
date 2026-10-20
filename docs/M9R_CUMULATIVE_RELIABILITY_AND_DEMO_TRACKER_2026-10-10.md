@@ -2439,3 +2439,9 @@ Allowlist decision:
 No runtime activation, restart, provider reconnect, automatic artifact drain, broad worktree prune, or deletion was performed. The exact disposable worktree and its admin record were removed; unrelated worktrees, evidence, and held items remain. Full scoped lint and `npm audit --audit-level=high` remain open as previously recorded, and live provider/matrix acceptance remains open.
 
 The verified two-file boundary from this review is committed as `9b6e01c9` (`chore: bound lint to source and record held review`).
+
+### 2026-10-20 (Codex) — clean runtime build provenance correction
+
+The first full runtime build from committed HEAD completed its packaging steps and verified **185** artifacts, but its own manifest reported `sourceDirty: true`. This was traced to the builder itself: `scripts/build-engine.mjs` created `engine/.m9r-engine-build-<pid>-<uuid>/` before calling `sourceProvenance()`, and that temporary path was not ignored. The result was a false dirty stamp even in an otherwise clean detached worktree.
+
+The fix moves provenance capture before any temporary build staging is created. A regression assertion was added to `scripts/install-m9r.test.mjs` requiring the provenance call to precede the staging directory creation; the old ordering fails this assertion. `node --check scripts/build-engine.mjs` passed, and the focused release-packaging regression passed **1/1**. The previously generated dirty candidate was not copied into the active runtime and will not be treated as releasable.

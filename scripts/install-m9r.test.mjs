@@ -151,7 +151,9 @@ test("standalone release packages runtime companions from the canonical engine d
   const cliSource = readFileSync(resolve("scripts/m9r-cli.ts"), "utf8");
   const overlayPreflightIndex = builderSource.indexOf('if (process.platform === "win32" && !existsSync(overlayExe))');
   const stagingIndex = builderSource.indexOf("mkdirSync(out, { recursive: true });");
+  const provenanceIndex = builderSource.indexOf("const provenance = sourceProvenance();");
   assert.ok(overlayPreflightIndex >= 0 && stagingIndex > overlayPreflightIndex, "missing pill input must fail before a new build staging directory is created");
+  assert.ok(provenanceIndex >= 0 && provenanceIndex < stagingIndex, "source provenance must be captured before build staging can make a clean checkout look dirty");
   assert.match(builderSource, /m9r-web-broker\.cjs[\s\S]*m9r-web-broker\.exe/, "the build must turn the bundled broker into its own executable");
   assert.match(builderSource, /copyFileSync\(overlayExe, join\(out, "m9r-overlay\.exe"\)\)/, "the engine distribution must capture the just-built desktop pill");
   assert.match(builderSource, /writeRuntimeBuildManifest\(out(?:, [^\n]*)?\)[\s\S]*verifyRuntimeBuildManifest\(out, \{ exact: true \}\)[\s\S]*publishRuntimeBuild\(out, output, managedRuntimePaths\)/,
