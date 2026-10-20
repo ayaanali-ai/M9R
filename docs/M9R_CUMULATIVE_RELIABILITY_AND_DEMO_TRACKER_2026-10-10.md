@@ -2887,3 +2887,23 @@ Evidence:
 The earlier `EPERM` was not reproduced in the normal clean clone; it was a restricted/managed filesystem-boundary failure during the prior disposable worktree test, not a failure of the current publish transaction on the host filesystem. The verifier itself also had a stale expectation for retired `m9r_web_*` extension tools; that expectation was corrected and committed as **`6006ffc1`** (`Align runtime MCP verifier with native desktop route`). No retry loop, forced copy-over, installation, activation, provider reconnect, or cleanup of held artifacts was performed.
 
 The clean **engine runtime package** is verified. The optional Windows installer bundle remains unverified solely because its external NSIS download was unavailable; live provider acceptance and runtime activation remain separate gates.
+
+### 2026-10-20 (Codex) — installer network completion and explicit runtime activation
+
+The previously unavailable NSIS dependency became reachable. The Tauri Windows installer completed and produced `M9R Overlay_0.1.0_x64-setup.exe`. The full standalone package was also assembled and independently verified: ZIP SHA-256 `d1a582f7e8e573dcb21e8bf3912b12ba0ccba3dcd775e00fa2c67ff301035750`, **217** entries, and all required engine, broker, hook, native-input, overlay, Cua runtime, extension, and reversible-installer files present.
+
+The exact ZIP was activated through `scripts/install-m9r.ps1 -PackagePath ...` after the installer displayed its setup plan and the owner-approved consent was supplied. The installer reported:
+
+- managed broker stop receipt: `ok=true`, `phase=stop`;
+- setup completed from the verified package;
+- managed broker start receipt: `ok=true`, `phase=start`, `result=running-current-build`;
+- desktop pill started and sign-in autostart enabled.
+
+Installed postcondition:
+
+- installed build ID: `de64fbf5940541bad49a731b7f0d869c411ed143dbe1e1f42188b701a7b62733`;
+- installed source commit: `6006ffc1a0d399db8fbb85e4aab1cbc1124921f6`;
+- installed `sourceDirty=false`;
+- installed MCP handshake/version/tool verification passed, including native stage/computer tools and absence of retired browser-extension tools.
+
+No provider task or live acceptance task was dispatched during activation. A read-only post-install process audit found the current feed/broker/pill running from the installed path, but also found pre-existing provider-owned `m9r-engine.exe mcp`/hook workers attached to Codex and OpenCode parents from earlier session times, plus newly spawned child workers. No process was killed blindly. Provider continuity/live acceptance therefore remains open until those workers are reconciled against the current runtime and live sessions are verified.
