@@ -66,9 +66,28 @@ test("owner-preview actions route through desktop-wide driver methods", async ()
   await runTaskStageAction(driver, "preview", { kind: "hotkey", keys: ["Control", "L"] }, identity, "owner-preview");
   await runTaskStageAction(driver, "preview", { kind: "cursor", x: 30, y: 45 }, identity);
   assert.deepEqual(calls.map((call) => call.method), ["clickDesktop", "typeTextDesktop", "hotkeyDesktop", "moveDesktopCursor"]);
-  assert.deepEqual(calls[0]?.args, ["preview", 12, 18, identity, { count: 2 }]);
-  assert.deepEqual(calls[1]?.args, ["preview", "echo M9R_TERM_OK", identity]);
+  assert.deepEqual(calls[0]?.args, ["preview", 12, 18, identity, { count: 2, deliveryMode: "owner-preview" }]);
+  assert.deepEqual(calls[1]?.args, ["preview", "echo M9R_TERM_OK", identity, { deliveryMode: "owner-preview" }]);
   assert.deepEqual(calls[3]?.args, ["preview", 30, 45, identity]);
+});
+
+test("stage policy reaches every input method and never lets a background action request foreground", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() }, outcome: { status: "confirmed" as const } };
+  const driver = {
+    click: async (...args: unknown[]) => { calls.push({ method: "click", args }); return proof; },
+    typeText: async (...args: unknown[]) => { calls.push({ method: "typeText", args }); return proof; },
+    focusWindow: async (...args: unknown[]) => { calls.push({ method: "focusWindow", args }); return proof; },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "session" };
+
+  await runTaskStageAction(driver, "preview", { kind: "click", view: "app", x: 12, y: 18 }, identity, "background");
+  await runTaskStageAction(driver, "preview", { kind: "type", view: "app", text: "hello" }, identity, "background");
+  assert.deepEqual(calls.map((call) => call.args.at(-1)), [
+    { deliveryMode: "background" },
+    { deliveryMode: "background" },
+  ]);
+  assert.equal(calls.some((call) => call.method === "focusWindow"), false);
 });
 
 test("broker client sends owner-preview when stage mode is omitted", async () => {

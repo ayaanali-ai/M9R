@@ -179,6 +179,40 @@ test("approved task preparation is idempotent and does not expose desktop GUIDs"
   } finally { f.cleanup(); }
 });
 
+test("each staged request durably records its queue and execution timing on the task", async () => {
+  const f = fixture(true);
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "desktop" }, "owner-preview", "timing-capture-1");
+
+    const persisted = f.store.getTask(f.task.id);
+    assert.ok(persisted?.stageTiming, "stage timing must be stored on the task record");
+    assert.ok(persisted.stageTiming.some((event) => event.phase === "prepare" && event.status === "ok"));
+    assert.ok(persisted.stageTiming.some((event) => event.phase === "action" && event.operationId === "timing-capture-1" && event.status === "ok"));
+    for (const event of persisted.stageTiming) {
+      assert.ok(Date.parse(event.startedAt) <= Date.parse(event.endedAt));
+      assert.ok(Number.isFinite(event.durationMs) && event.durationMs >= 0);
+    }
+  } finally { f.cleanup(); }
+});
+
+test("durable task timing accepts the inner Cua phases used for latency reconciliation", async () => {
+  const f = fixture(true);
+  try {
+    const startedAt = new Date().toISOString();
+    const endedAt = new Date(Date.now() + 3).toISOString();
+    for (const phase of ["sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion"] as const) {
+      assert.equal(f.store.recordStageTiming(f.task.id, {
+        phase, startedAt, endedAt, durationMs: 3, status: "ok",
+      }), true);
+    }
+    const persisted = f.store.getTask(f.task.id);
+    assert.deepEqual(persisted?.stageTiming?.map((event) => event.phase), [
+      "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion",
+    ]);
+  } finally { f.cleanup(); }
+});
+
 test("omitted mode stays on the owner's current desktop for preparation and cursor actions", async () => {
   const f = fixture(true);
   try {
@@ -295,6 +329,47 @@ test("an owner desktop app request reuses personal Chrome without creating anoth
     const relaunched = await f.service.launch(f.identity.token, next.id, "chrome");
     assert.equal(relaunched.running, true, "launch() of the same already-running app under a new taskId reuses it instead of opening a duplicate");
     assert.equal(f.creations(), 0, "launch without an explicit background mode must not create a desktop or process");
+  } finally { f.cleanup(); }
+});
+
+test("owner-preview launch presents an existing app without stealing the owner's foreground", async () => {
+  const f = fixture(true, (root, appId) => {
+    assert.equal(appId, "paint");
+    return { executable: join(root, "mspaint.exe"), args: [] };
+  });
+  let focusCalls = 0;
+  try {
+    f.driver.listVisibleWindows = async () => [{ pid: 321, windowId: "654", appName: "mspaint.exe", title: "Paint", width: 1000, height: 700 }];
+    f.driver.focusWindow = async () => {
+      focusCalls += 1;
+      return { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() }, outcome: { status: "confirmed" as const } };
+    };
+    const launched = await f.service.launch(f.identity.token, f.task.id, "paint", "owner-preview");
+    assert.equal(launched.reused, true);
+    assert.equal(focusCalls, 0, "launch must not activate a window; focus is an explicit leased action");
+  } finally { f.cleanup(); }
+});
+
+test("same-intent owner-preview stages join one native app window instead of launching duplicates", async () => {
+  const f = fixture(true, (root, appId) => {
+    assert.equal(appId, "calculator");
+    return { executable: join(root, "calculator.exe"), args: [] };
+  }, async () => "CalculatorApp.exe");
+  try {
+    const visible = [{ pid: 123, windowId: "456", appName: "CalculatorApp.exe", title: "Calculator", width: 500, height: 700 }];
+    f.driver.listVisibleWindows = async () => visible;
+    const first = await f.service.launch(f.identity.token, f.task.id, "calculator", "owner-preview");
+    assert.equal(first.reused, true, "the first owner-preview stage adopts the already-open Calculator");
+
+    const secondIdentity = f.store.issueIdentity("codex", "codex", "session-two");
+    const secondTask = f.store.addTask({ from: "you", to: "codex", goal: f.task.goal, origin: "human_typed",
+      idempotencyKey: "same-calculator-intent-second", targetSession: "session-two" }).task;
+    const second = await f.service.launch(secondIdentity.token, secondTask.id, "calculator", "owner-preview");
+    assert.equal(second.reused, true, "a second provider stage with the same owner intent joins the existing window");
+    const stages = createWindowsDesktopStageManager({ root: f.root, platform: "win32", terminal: true, env: {} }).list();
+    assert.equal(stages.length, 2, "the providers retain separate stage identities");
+    assert.equal(stages[0]?.coordinationKey, stages[1]?.coordinationKey, "the shared coordination key is durable");
+    assert.deepEqual(stages.map((stage) => stage.anchor), [{ pid: 123, windowId: "456" }, { pid: 123, windowId: "456" }]);
   } finally { f.cleanup(); }
 });
 
@@ -559,13 +634,17 @@ test("a benign stage click never bothers the owner", async () => {
   } finally { f.cleanup(); }
 });
 
-test("an undescribed click target holds for the owner instead of guessing", async () => {
+test("an undescribed click target refuses before dispatch instead of becoming an approval wait", async () => {
   const f = moneyFixture(undefined, false);
   try {
     await f.service.prepare(f.identity.token, f.task.id, "background");
-    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background"), /did not approve/);
-    assert.equal(f.seen.length, 1);
-    assert.equal(f.seen[0].targetLabel, undefined);
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background"), (error) => {
+      assert.ok(error instanceof DesktopInputNotDispatchedError);
+      assert.match(error.message, /could not be resolved/);
+      assert.match(error.message, /No input was sent/);
+      return true;
+    });
+    assert.equal(f.seen.length, 0, "an unresolved target must not create a misleading owner-approval request");
     assert.equal(f.clicks.length, 0);
   } finally { f.cleanup(); }
 });
@@ -718,9 +797,9 @@ test("one agent session's long owner-approval wait does not block a different se
   const release: { current: (() => void) | null } = { current: null };
   const seen: StageApprovalRequest[] = [];
   const fakeDriver = {
-    // An undescribed target fails closed and also holds for approval (by design --
-    // see "an undescribed click target holds for the owner instead of guessing"),
-    // so session B's target must be explicitly described as benign, not merely omitted.
+    // Session B's target is explicitly described as benign. The shared stage layer
+    // still fails closed for an unresolved target, but does not turn that lookup
+    // failure into a misleading owner-approval wait.
     describeTarget: async (_name: string, x: number) => (x === 1 ? { label: "Pay now" } : { label: "Next" }),
     click: async (_name: string, x: number, y: number) => {
       clicks.push({ x, y });

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { createCuaStageDriver as createCuaStageDriverCore, topmostWindowAtScreenPoint, type CuaStageDriverDependencies } from "../src/lib/native/cua-stage-driver";
+import { createCuaStageDriver as createCuaStageDriverCore, topmostWindowAtScreenPoint, type CuaStageDriverDependencies, type CuaStageTimingEvent } from "../src/lib/native/cua-stage-driver";
 import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
 import { parseTaskStageAction } from "../src/lib/native/task-stage-actions";
 
@@ -176,6 +176,23 @@ test("semantic click remembers the exact field and background insert preserves i
   await assert.rejects(driver.typeText("stage", "unsafe", identity, { mode: "insert" }), /current value.*unavailable/i);
 }));
 
+test("background insertion tolerates a dynamic field label after a confirmed semantic click", async () => withRoot(async (root) => {
+  const windowId = "12345";
+  await registerStage(root, windowId);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const field = { elementIndex: BigInt(1), elementToken: "uia:dynamic-field", role: "Edit", label: "Search", value: "before", actions: ["click", "set_value"], frame: { x: 120, y: 70, w: 100, h: 20 } };
+  const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }], elements: [field] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state }) as never });
+  const identity = { handle: "codex", sessionId: "dynamic-label-session" };
+  await driver.clickElement("stage", "uia:dynamic-field", identity);
+  field.label = "Search (before)";
+  await driver.typeText("stage", " +after", identity, { mode: "insert" });
+  const call = calls.find((c) => c.method === "callTool" && (c.value as { name?: string }).name === "set_value");
+  assert.equal((call?.value as { args: { value: string } }).args.value, "before +after",
+    "insert mode must keep using the confirmed role/point even when the field display label changes with its value");
+}));
+
 test("semantic click on a ComboBox search field is remembered too, not just Edit/TextField/TextArea/Document (live bug, 2026-10-17)", async () => withRoot(async (root) => {
   // X/Twitter's own search box exposes UIA role "ComboBox", not "Edit" -- the field-memory
   // allowlist used to miss it entirely even though the driver confirmed it supports set_value,
@@ -311,14 +328,15 @@ test("semantic app actions use fresh structure and the shared driver primitives"
   assert.deepEqual(clipboard.clipboard, { text: "fixture clipboard" });
 }));
 
-test("click_element resolves a ref whose token prefix changed between the read and the click, by its stable suffix", async () => withRoot(async (root) => {
+test("click_element refuses token-prefix drift when no semantic identity hints were supplied", async () => withRoot(async (root) => {
   // Empirically confirmed live: the same, completely unchanged control got a
   // different full elementToken on two back-to-back read_structure calls (the
   // part before the last ":" changes on every independent getWindowState call;
   // the part after it, the element's stable tree position, did not). An exact
   // string match therefore fails for the overwhelming majority of real
   // click_element calls even though the target control plainly still exists --
-  // this was the actual cause behind every "stale or disabled" click failure.
+  // A suffix is only a tree position, not a real identity. Acting on it without
+  // the role/label from the original observation can click a different control.
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   let walk = 0;
@@ -346,9 +364,9 @@ test("click_element resolves a ref whose token prefix changed between the read a
   });
   const identity = { handle: "codex", sessionId: "token-drift-session" };
   const firstReadRef = (await driver.readStructure("stage", identity)).elements[0]!.ref;
-  await driver.clickElement("stage", firstReadRef, identity);
-  const click = calls.find((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click");
-  assert.ok(click, "the click still executes against the correct control despite its token prefix having changed since the read");
+  await assert.rejects(driver.clickElement("stage", firstReadRef, identity), /stale or disabled/i);
+  assert.equal(calls.some((call) => call.method === "callTool" && (call.value as { name?: string }).name === "click"), false,
+    "a position-only suffix must never dispatch a click without semantic identity hints");
 }));
 
 test("click_element refuses to click a different control that now occupies the same tree position, when expectedRole/expectedLabel are given", async () => withRoot(async (root) => {
@@ -1179,6 +1197,28 @@ test("shows a distinct agent label on each native cursor and configures adaptive
   for (const identity of identities) await driver.closeAgentCursor(identity);
 }));
 
+test("cursor acquisition exposes privacy-safe phase timings without leaking session identity", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const events: CuaStageTimingEvent[] = [];
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    onTiming: (event) => events.push(event),
+    loadSdk: async () => makeSdk({ calls: [] }) as never,
+  });
+  await driver.moveCursor("stage", 42, 24, { handle: "codex", sessionId: "latency-secret-session" });
+  assert.ok(events.some((event) => event.phase === "sdk-load"));
+  assert.ok(events.some((event) => event.phase === "host-connect"));
+  assert.ok(events.some((event) => event.phase === "runtime-acquire"));
+  assert.ok(events.some((event) => event.phase === "session-start" && event.stageName === "stage"));
+  assert.ok(events.some((event) => event.phase === "cursor-motion" && event.stageName === "stage"));
+  assert.ok(events.every((event) => Number.isFinite(event.durationMs as number)));
+  assert.ok(events.every((event) => !Number.isNaN(Date.parse(event.startedAt)) && !Number.isNaN(Date.parse(event.endedAt))));
+  assert.ok(events.every((event) => event.status === "ok"));
+  assert.ok(events.filter((event) => event.phase === "session-start" || event.phase === "cursor-motion").every((event) => event.stageName === "stage"));
+  assert.equal(events.some((event) => JSON.stringify(event).includes("latency-secret-session")), false);
+  await driver.shutdown();
+}));
+
 test("owner desktop capture does not use legacy capture-scope session escalation", async () => withRoot(async (root) => {
   const identity = { handle: "codex", sessionId: "desktop-session" };
   await registerOwnerPreview(root, identity);
@@ -1493,6 +1533,24 @@ test("surfaces a persistent Cua Driver refusal after the bounded foreground retr
   assert.match(lastCursorState.session ?? "", /^@codex-/);
   await driver.shutdown();
   assert.ok(calls.some((call) => call.method === "shutdown"));
+}));
+
+test("an explicitly background stage refuses foreground escalation after a Cua refusal", async () => withRoot(async (root) => {
+  await registerStage(root, "4568");
+  const identity = { handle: "codex", sessionId: "strict-background-session" };
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const refusal = { text: "Background delivery is not available for target window class 'CASCADIA_HOSTING_WINDOW_CLASS' on this event kind (text_input). No text was sent.", images: [], isError: true, errorCode: "background_unavailable", degraded: false, rawJson: "" };
+  const state = { pid: 4321, windowId: BigInt(4568), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 }, images: [{ mimeType: "image/png", dataBase64: imageData }] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, state,
+    callToolResultByName: { type_text: refusal },
+  }) as never });
+
+  await assert.rejects(driver.typeText("stage", "hello", identity, { deliveryMode: "background" }), /no foreground fallback.*no input was sent/i);
+  assert.equal(calls.filter((call) => call.method === "callTool" && (call.value as { name?: string }).name === "type_text").length, 1,
+    "strict background mode makes one background attempt and never retries it as foreground input");
+  assert.equal(calls.some((call) => call.method === "callTool" && (call.value as { name?: string }).name === "bring_to_front"), false,
+    "strict background mode never steals the owner's foreground window");
 }));
 
 test("describeTarget reports the smallest enabled control label for the money gate", async () => withRoot(async (root) => {
