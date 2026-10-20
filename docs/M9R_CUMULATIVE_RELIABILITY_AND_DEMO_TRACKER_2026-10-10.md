@@ -2787,3 +2787,63 @@ An isolated detached candidate was created from the verified head, checked witho
 - whitespace/diff check: **pass**.
 
 The historical gate's prior false blocker was traced to three synthetic fixture paths missing from its reviewed allowlist while the public-surface gate already recognized them. The paths were added with a regression fixture and committed in **`99653cd8`** (`Align historical secret fixture allowlist`). The temporary candidate worktree was then removed; no pre-existing worktree, held artifact, icon, manifest, runtime output, pill state, or provider process was touched.
+
+### 2026-10-20 (Codex) — MCP SDK security floor raised; dev-toolchain findings classified
+
+The next release-gate step traced the current dependency audit instead of applying `npm audit fix --force`. The root manifest overrode `@modelcontextprotocol/sdk` to **1.31.0**, while the separate `cli/` package directly pinned **1.30.0**. The current npm audit identifies both as affected by the MCP task-session isolation advisory (`GHSA-22jm-h49p-29qw`, patched in 1.32.0) and the cross-origin redirect/header replay advisory (`GHSA-6prh-2h8m-c8cw`, patched in 1.32.0). The SDK is used in the runtime MCP servers, CLI, provider adapters, and packaged engine paths, so this was a real production dependency floor rather than a test-only finding.
+
+The root override and CLI dependency are now pinned to **1.32.1**, and both lockfiles resolve 1.32.1. The installed root and CLI dependency trees were refreshed and both now report 1.32.1. Regression proof is explicit: the new `scripts/mcp-sdk-security-floor.test.mjs` failed on the old manifests/lockfiles (**2/2 red**, root 1.31.0 and CLI 1.30.0) and passes after the change (**2/2 green**); it is included in `scripts/test-files.json`.
+
+Current verification:
+
+- `npm audit --omit=dev --audit-level=high`: **0 vulnerabilities** after the SDK update;
+- MCP/provider/desktop compatibility run: **159/194 passed, 35 failed**, with the failures concentrated in the restricted Windows sandbox (`EPERM` on temporary state-lock renames and junction creation), missing network access to `models.dev`, and Git fixture permissions; the SDK-floor, MCP handshake, packaged engine, and provider-continuity assertions themselves passed. This run is not counted as a green full gate and needs a normal host-boundary rerun;
+- `git diff --check`: passed.
+
+The remaining whole-tree audit is not being papered over: `postcss-selector-parser <7.1.6` is a separate moderate dev-toolchain advisory with a published patch, while `braces <=3.0.3` currently has no upstream patched release and npm's suggested force path would downgrade/replace the supported Next/shadcn toolchain. No force upgrade, downgrade, broad override, runtime restart, provider reconnect, or live task was performed. The postcss patch and a safe brace-expansion resolution are the next dependency sub-checks before the root lint/build gate; the unpatched `braces` finding will remain explicitly documented unless upstream publishes a compatible fix or a reviewed local mitigation is justified.
+
+The published dev-toolchain remediation was then applied without `--force`: `shadcn` advanced within its existing `^4.21.1` range to **4.22.1**, `postcss-selector-parser` resolved to **7.1.7**, and all locked `brace-expansion` copies moved to patched ranges (`1.1.21` or `5.0.12` where applicable). The extended security-floor regression is now **3/3 green**; the old lock failed the new parser-floor assertion (**RED** at 7.1.4), while the updated lock passes. The whole-tree audit now reports only the single upstream-unpatched `braces@3.0.3` advisory through `micromatch`/`fast-glob`; npm's only proposed remediation is the breaking `shadcn@1.0.0` path, which was rejected. This remains a documented dev-only exception, not a suppressed audit.
+
+Post-remediation compatibility evidence on the normal Windows host boundary:
+
+- focused MCP/provider/desktop regression: **195/195 passed**;
+- full repository regression before the lint-scope correction: **2,598/2,598 passed across 209 files, 0 failed batches**;
+- root `npm run typecheck`: **passed**;
+- production `npm run build`: **passed**, including TypeScript and all **138** generated routes;
+- changed dependency-floor test: ESLint passed;
+- `git diff --check`: passed;
+- root `npm run lint`: the old scope stalled for **90 seconds with no output** while traversing retained evidence/quarantine material; after the explicit boundary correction it completes with **0 errors** and **246 pre-existing warnings**.
+
+The dependency/security gate is therefore complete for the published fixes. The only remaining audit finding is the upstream-unpatched dev-only `braces@3.0.3` advisory; forcing `shadcn@1.0.0` or downgrading the supported Next toolchain is not an acceptable fix. No provider session, installed engine, live runtime, pill, desktop state, or user artifact was restarted, activated, deleted, or cleaned during this gate.
+
+The lint-scope investigation then found a separate configuration boundary defect. The root config ignored `.m9r/**` and `.claude/**` but not the retained `.m9r-*`/`.codex-*` data, Git worktrees, packaged runtime/cutover trees, scratchpads, project agent skills, or nested `services/**/.wrangler` bundles. `git ls-files` confirmed these paths contain no tracked application source. The config now excludes those generated/separate roots, and `scripts/lint-scope.test.mjs` guards the boundary. The old scope produced **89 errors** from those external/generated paths; after the correction `npm run lint` completes with **0 errors** and **246 pre-existing warnings**. No warning was silently converted to an ignore for tracked application source.
+
+Final post-boundary verification reran the full suite with the new lint regression included: **2,599/2,599 passed across 210 files, 0 failed batches**. The dependency-floor and lint-scope regressions pass **4/4**, and `git diff --check` remains green. The source slice is ready for a deliberate commit review; it is still unstaged/uncommitted, and no live runtime/provider action has been taken.
+
+The deterministic open-core release-policy check was rerun after the lockfile changes and passed. The dependency/security slice is ready for a deliberate commit review, but it has not been staged or committed in this step. The pre-existing held icon/manifest/marketing group, runtime output, activation evidence, recovery quarantine, separate cutover worktree, scratchpad, and user-owned DOCX remain outside this boundary.
+
+### 2026-10-20 (Codex) — execution kickoff and preserved release boundary
+
+Work resumed from the existing recoverable checkpoint before any implementation or live action. The current checkout is branch `codex/m9r-21-item-audit-close-20261017` at `4209175142f2e269eae8d107ba683e2a36a79d5f`; the preserved checkpoint ref `refs/m9r/checkpoints/pre-master-2.1-20261019` points to `b6134fae25379551c564d2000009e3c24dac4946`. The worktree remains intentionally dirty.
+
+The current boundary is split as follows:
+
+- **Candidate source/release slice for deliberate review:** the MCP SDK floor and lockfiles, lint-scope boundary, test-manifest additions, release-boundary regression coverage, and the associated tracker evidence. These changes must be reverified against the current checkout before staging or committing.
+- **Held and not to be guessed at:** generated Tauri icons, the current manifest/logo/marketing asset group, `engine/` runtime output, `.m9r-live-activation-20261018/`, `.m9r-recovery-quarantine-20261014/`, `m9r-clean-cutover-20261020/`, `scratchpad/`, the user-owned DOCX, and other untracked evidence/assets. No deletion, cleanup, activation, or commit of these paths is implied.
+
+No runtime binary, installed engine, provider process, pill surface, desktop state, session, database, or live task was changed by this kickoff. The next execution step is a fresh verification of the candidate source slice and its release-boundary classification; only after that review will a commit boundary be proposed. Live provider acceptance remains separate and will not be claimed from source/package evidence.
+
+### 2026-10-20 (Codex) — candidate source gate reverified before commit
+
+The safe source/release slice was reverified from the current checkout before any commit:
+
+- focused dependency-floor and lint-boundary regressions: **4/4 passed**;
+- full repository regression: **2,599/2,599 tests passed across 210 files, 0 failed batches**;
+- `npm run typecheck`: **passed**;
+- `npm run lint`: **0 errors**, 246 existing warnings;
+- `npm run open-core:check`: **passed**;
+- `npm audit --omit=dev --audit-level=high`: **0 vulnerabilities**;
+- `npm run build`: **passed**, including TypeScript and **138** generated routes;
+- `git diff --check` and staged-diff whitespace check: **passed**.
+
+The staged set contains only the MCP SDK security-floor update, lockfiles, root lint boundary, its two regression tests, the test manifest, and this tracker. The manifest/logo/marketing group, generated icons, runtime output, activation evidence, recovery quarantine, cutover material, scratchpad, user document, and other held paths remain outside the staged boundary. No runtime, provider, pill, desktop, database, or live-task state was changed. The source slice is ready for a deliberate commit; live installation and provider acceptance remain open gates.
