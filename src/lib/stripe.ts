@@ -17,6 +17,8 @@ export const STRIPE_PRICE_FOUNDING = "price_1URgeZRSegzd51KS4OxidJG7"; // M9R, $
 export const STRIPE_PRICE_STANDARD = "price_1URgeeRSegzd51KS2NsoEZIf"; // M9R, $27/mo, locked for that cohort
 
 export const FOUNDING_COHORT_SIZE = 500;
+export const FOUNDING_MONTHLY_PRICE_USD = 17;
+export const STANDARD_MONTHLY_PRICE_USD = 27;
 
 export type BillingCohort = "founding" | "standard";
 

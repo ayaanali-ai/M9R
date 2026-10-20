@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { CONTACT_MAILTO } from "@/lib/contact";
-import { FOUNDING_COHORT_SIZE } from "@/lib/stripe";
+import { FOUNDING_COHORT_SIZE, FOUNDING_MONTHLY_PRICE_USD, STANDARD_MONTHLY_PRICE_USD } from "@/lib/stripe";
 import s from "./ReferenceHome.module.css";
 import p from "./ReferencePricing.module.css";
 
@@ -38,7 +38,7 @@ export default function ReferencePricing() {
   }, []);
 
   const founding = remaining === null || remaining > 0;
-  const price = founding ? "$17" : "$27";
+  const price = founding ? FOUNDING_MONTHLY_PRICE_USD : STANDARD_MONTHLY_PRICE_USD;
 
   async function startCheckout() {
     setBusy(true);
@@ -79,7 +79,7 @@ export default function ReferencePricing() {
           <div className={`${s.productBody} ${p.planBody}`}>
             <p className={s.productKicker}>Per computer. Not per seat.</p>
             <h2 className={p.planName}>M9R</h2>
-            <p className={p.price}><span className={p.amount}>{price}</span><span className={p.unit}>per month, per computer</span></p>
+            <p className={p.price}><span className={p.amount}>${price}</span><span className={p.unit}>per month, per computer</span></p>
             <p className={p.aside}>
               {founding
                 ? `Locked for life, as one of the first ${FOUNDING_COHORT_SIZE}. The price doesn't go up on you later.`
@@ -87,7 +87,7 @@ export default function ReferencePricing() {
             </p>
             <p>Every agent you already pay for — Claude, Codex, whatever you run — gets to actually use the computer in front of you. No per-agent fee on top. No tier to upgrade into.</p>
             <div className={s.productActions}>
-              <button type="button" className={s.productButton} disabled={busy} onClick={startCheckout}>{busy ? "Opening Stripe…" : `Get M9R — ${price}/month`}</button>
+              <button type="button" className={s.productButton} disabled={busy} onClick={startCheckout}>{busy ? "Opening Stripe…" : `Get M9R — $${price}/month`}</button>
             </div>
             {error && <p className={p.error} role="alert">{error}</p>}
             {remaining !== null && founding && (
