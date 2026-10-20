@@ -2847,3 +2847,9 @@ The safe source/release slice was reverified from the current checkout before an
 - `git diff --check` and staged-diff whitespace check: **passed**.
 
 The staged set contains only the MCP SDK security-floor update, lockfiles, root lint boundary, its two regression tests, the test manifest, and this tracker. The manifest/logo/marketing group, generated icons, runtime output, activation evidence, recovery quarantine, cutover material, scratchpad, user document, and other held paths remain outside the staged boundary. No runtime, provider, pill, desktop, database, or live-task state was changed. The source slice is ready for a deliberate commit; live installation and provider acceptance remain open gates.
+
+### 2026-10-20 (Codex) — verified source slice committed
+
+The reviewed nine-file source/release slice was committed as **`0395d0d8`** (`Harden dependency and lint release boundaries`). The commit contains only the dependency security floor and lockfiles, lint-scope boundary, regression tests, test manifest, and tracker evidence. Post-commit status confirms the generated icon files, manifest/marketing asset group, runtime output, activation evidence, recovery quarantine, cutover material, scratchpad, user document, and other held paths remain outside the commit. No live runtime, provider process, pill, desktop state, database, or task was changed.
+
+The next gate is a clean packaged-runtime review from this committed source, followed by an explicit install/activation decision. Live provider acceptance remains closed until the installed runtime fingerprint, provider reconnect, and owner-visible sessions are all verified.
