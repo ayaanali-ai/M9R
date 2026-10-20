@@ -7,7 +7,7 @@ import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isTh
 import { collectCodexResults, deliverToCodex, findRolloutFile, type DeliveryDeps } from "../src/lib/native/codex-delivery";
 import { renderInboxInjection, renderResultsInjection } from "../src/lib/native/inbox-core";
 import { handleHookEvent } from "../src/lib/native/hook-handler";
-import { createLocalStore } from "../src/lib/native/local-store";
+import { createLocalStore, RESULT_RECONCILIATION_MAX_AGE_MS } from "../src/lib/native/local-store";
 import { createTaskDeliveryPump } from "../src/lib/native/task-delivery-pump";
 
 const THREAD = "01a0bf78-e44a-7801-8e67-681a53f0ab68";
@@ -68,6 +68,35 @@ test("a verbatim retry is not deferred forever behind a stale, never-finalized o
   // The first attempt never resolves (no setResult, no setDelivery to a terminal state) -- exactly
   // what happens when a task fails over to a different tool or the owner redirects it by hand.
   assert.equal((await deliverToCodex(store, second.id, deps)).state, "queued", "a retry must not be deferred behind an original attempt old enough to be stale");
+});
+
+test("Codex result collection ignores stale and non-Codex queued deliveries", async () => {
+  // Delivery selection uses the real wall clock because it represents the
+  // liveness of an actual Codex session. Keep the fixture's initial session
+  // fresh regardless of when the suite runs; the test advances this clock
+  // explicitly below to exercise reconciliation aging.
+  let clock = new Date();
+  const store = createLocalStore(mkdtempSync(join(tmpdir(), "m9r-n2-result-age-")), { now: () => new Date(clock) });
+  seedCodex(store);
+
+  const stale = typed(store, "stale Codex delivery", "stale-codex");
+  assert.equal((await deliverToCodex(store, stale.id, fakeDeps())).state, "queued");
+  store.setDelivery(stale.id, { state: "queued", threadId: "stale-codex-session" });
+
+  const otherProvider = store.addTask({ from: "claude", to: "opencode", goal: "queued for another provider", origin: "human_typed", idempotencyKey: "other-provider" }).task;
+  store.setDelivery(otherProvider.id, { state: "queued", threadId: "opencode-session" });
+
+  clock = new Date(clock.getTime() + RESULT_RECONCILIATION_MAX_AGE_MS + 1);
+  const current = typed(store, "current Codex delivery", "current-codex");
+  assert.equal((await deliverToCodex(store, current.id, fakeDeps())).state, "queued");
+
+  const readThreads: string[] = [];
+  assert.equal(collectCodexResults(store, {
+    readRolloutTail: (threadId) => { readThreads.push(threadId); return null; },
+  }), 0);
+  assert.deepEqual(readThreads, [THREAD], "only the fresh Codex delivery may be polled for a result");
+  assert.equal(store.getTask(stale.id)?.resultSummary, undefined, "stale history remains recorded but is not re-polled");
+  assert.equal(store.getTask(otherProvider.id)?.resultSummary, undefined, "another provider's delivery is not handed to the Codex collector");
 });
 
 test("concurrent Codex dispatchers inject a task once", async () => {
@@ -177,7 +206,7 @@ test("a typed task is pushed once with the real thread id, and marked delivered"
   assert.equal(deps.calls.length, 1, "a duplicate dispatch never queues a second prompt");
 });
 
-test("strict production delivery refuses missing identity and supplies credentials through internal context", async () => {
+test("strict production delivery refuses missing identity and keeps credentials out of provider context", async () => {
   const store = newStore();
   seedCodex(store);
   const task = typed(store, "Review only the changed files", "strict-identity");
@@ -195,7 +224,9 @@ test("strict production delivery refuses missing identity and supplies credentia
   assert.ok(!message.includes(token), "the visible task must not expose credentials");
   const hidden = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: message },
     { provider: "codex", store, strictTargetIdentity: true, readIndex: () => null });
-  assert.ok(hidden?.hookSpecificOutput.additionalContext.includes(token), "the receiving session gets its credential through internal context");
+  const context = hidden?.hookSpecificOutput.additionalContext ?? "";
+  assert.match(context, /approved work item/i, "the receiving session gets the internal execution guidance");
+  assert.doesNotMatch(context, /T\d+|codex|session-one|session-token|token/i, "provider-visible context must not expose routing metadata or credentials");
   assert.equal(store.verifyIdentity(token)?.sessionId, THREAD, "delivery does not revoke the existing token");
   assert.doesNotMatch(message, /Task from @claude|surrounding chat/i);
 });
@@ -476,8 +507,10 @@ test("an older inbox item is not mixed into a prompt M9R pushed; it waits for th
   const ctx = { provider: "codex", store, pathExists: () => false, readIndex: () => null };
   handleHookEvent({ hook_event_name: "SessionStart", session_id: THREAD, cwd: "C:/p" }, ctx);
   const pushed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: buildQueueMessage(pushedTask) }, ctx);
-  assert.ok(pushed?.hookSpecificOutput.additionalContext.includes(queueMarker(pushedTask.id)), "the task receives only its internal binding");
-  assert.ok(!pushed?.hookSpecificOutput.additionalContext.includes(waiting.goal), "older inbox work is not mixed into the pushed task");
+  const pushedContext = pushed?.hookSpecificOutput.additionalContext ?? "";
+  assert.match(pushedContext, /approved work item/i, "the pushed task receives internal execution guidance");
+  assert.doesNotMatch(pushedContext, new RegExp(queueMarker(pushedTask.id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the provider-visible context does not expose the task id");
+  assert.ok(!pushedContext.includes(waiting.goal), "older inbox work is not mixed into the pushed task");
   const real = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "what next?" }, ctx);
   assert.match(real?.hookSpecificOutput.additionalContext ?? "", /Older item that fell back to the inbox/, "it arrives at the user's own next prompt");
 });

@@ -68,6 +68,19 @@ test("an exact HWND cannot be claimed by two stages", async () => withRoot(async
   await manager.register("first", "123", "456");
 }));
 
+test("an exact HWND can be shared only by stages in the same durable coordination group", async () => withRoot(async (root) => {
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => ({
+    ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: stageDesktop, onCurrentDesktop: true },
+  }) });
+  const jointKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  await manager.register("provider-a", "123", "456", "calculator", jointKey);
+  const joined = await manager.register("provider-b", "123", "456", "calculator", jointKey);
+  assert.equal(joined.coordinationKey, jointKey);
+  await assert.rejects(manager.register("unrelated", "123", "456", "calculator",
+    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"), /already claimed/i);
+  assert.equal(manager.list().filter((stage) => stage.anchor?.windowId === "456").length, 2);
+}));
+
 test("shell point inspection and invocation preserve exact control identity without global input", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const control = { label: "Start", pid: 123, windowPid: 123, windowId: "456", rect: { x: 0, y: 0, width: 50, height: 50 }, invoked: false };
@@ -350,7 +363,7 @@ test("requires an interactive owner terminal and rejects agent initiated stage c
 
 test("refuses stale anchors, desktop id drift, and failed post-move verification", async () => withRoot(async (root) => {
   let anchorDesktop = stageDesktop;
-  let targetDesktop = ownerDesktop;
+  const targetDesktop = ownerDesktop;
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {},
     invokeNative: async (request) => {

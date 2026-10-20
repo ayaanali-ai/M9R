@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { dirname, join } from "node:path";
 import { renameStateFile } from "./atomic-file";
 import { isAgentContext } from "./approval-core";
-import { normalizeHandle } from "./inbox-core";
+import { normalizeHandle, type StageTimingPhase } from "./inbox-core";
 import type { LocalStore } from "./local-store";
 import { createWindowsDesktopStageManager, type WindowsStageDependencies } from "./windows-desktop-stage";
 import { createCuaStageDriver, type CuaAgentCursorIdentity } from "./cua-stage-driver";
@@ -37,6 +37,17 @@ function stageMode(value: unknown): TaskStageMode {
   if (value === undefined || value === "owner-preview") return "owner-preview";
   if (value === "background") return "background";
   throw new Error("Invalid task stage mode.");
+}
+
+/**
+ * Same-intent owner-preview work belongs to one logical window group even when
+ * different provider sessions receive the request.  Keep the raw goal out of
+ * the registry and derive a stable local key instead.  Background stages are
+ * deliberately excluded: they are isolated by design.
+ */
+function stageCoordinationKey(goal: string): string {
+  const normalized = goal.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase().slice(0, 2_000);
+  return createHash("sha256").update(`owner-preview\0${normalized}`).digest("hex");
 }
 
 /**
@@ -189,7 +200,25 @@ export function createTaskDesktopStageService(input: {
   const bundledHost = join(dirname(process.execPath), "m9r-native-input-host.exe");
   const stageDeps = { nativeHostPath: existsSync(bundledHost) ? bundledHost : undefined, ...input.stage, root, terminal: true };
   const manager = createWindowsDesktopStageManager(stageDeps);
-  const driver = input.driver ?? createCuaStageDriver({ stage: stageDeps });
+  const activeTimingTasks = new Map<string, string>();
+  const driver = input.driver ?? createCuaStageDriver({
+    stage: stageDeps,
+    // Keep the next live latency trace phase-correlated without logging
+    // provider tokens, task text, or session identifiers. This is diagnostic
+    // only; it must never affect stage control or recovery.
+    onTiming: (event) => {
+      process.stderr.write(`[stage-timing] ${JSON.stringify(event)}\n`);
+      const taskId = event.stageName ? activeTimingTasks.get(event.stageName) : undefined;
+      if (!taskId) return;
+      recordStageTiming(taskId, {
+        phase: event.phase,
+        startedAt: event.startedAt,
+        endedAt: event.endedAt,
+        durationMs: event.durationMs,
+        status: event.status,
+      });
+    },
+  });
   const activeInputs = new Map<string, { controller: AbortController; taskId: string }>();
   const stoppedTaskInputs = new Set<string>();
   const readPolicy = input.readPolicy ?? (() => readTaskStagePolicy(root));
@@ -206,6 +235,62 @@ export function createTaskDesktopStageService(input: {
     const result = previous.then(run, run);
     stageQueues.set(name, result.catch(() => undefined));
     return result;
+  }
+
+  /**
+   * Durable timing is intentionally orthogonal to the driver timing logger. The latter is useful
+   * for a live diagnostic, while these events let a later result reconcile queue and execution
+   * phases from the task record after the broker has gone away. A timing write is never allowed to
+   * change the action's outcome.
+   */
+  function recordStageTiming(taskId: string, event: {
+    phase: StageTimingPhase;
+    startedAt: string;
+    endedAt: string;
+    durationMs: number;
+    status: "ok" | "error";
+    operationId?: string;
+    detail?: string;
+  }): void {
+    try { input.store.recordStageTiming(taskId, event); } catch { /* telemetry must not alter control flow */ }
+  }
+
+  async function withActiveTimingTask<T>(stageName: string, taskId: string, run: () => Promise<T>): Promise<T> {
+    const prior = activeTimingTasks.get(stageName);
+    activeTimingTasks.set(stageName, taskId);
+    try { return await run(); }
+    finally {
+      if (prior === undefined) activeTimingTasks.delete(stageName);
+      else activeTimingTasks.set(stageName, prior);
+    }
+  }
+
+  async function timedStagePhase<T>(taskId: string, phase: Exclude<StageTimingPhase, "queue_wait">,
+    operationId: string | undefined, run: () => Promise<T>): Promise<T> {
+    const startedMs = Date.now();
+    const startedAt = new Date(startedMs).toISOString();
+    try {
+      const result = await run();
+      const endedMs = Date.now();
+      recordStageTiming(taskId, { phase, operationId, startedAt, endedAt: new Date(endedMs).toISOString(), durationMs: endedMs - startedMs, status: "ok" });
+      return result;
+    } catch (error) {
+      const endedMs = Date.now();
+      recordStageTiming(taskId, { phase, operationId, startedAt, endedAt: new Date(endedMs).toISOString(), durationMs: endedMs - startedMs,
+        status: "error", detail: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+  }
+
+  function enqueueTimedStage<T>(name: string, taskId: string, phase: Exclude<StageTimingPhase, "queue_wait" | "stop">,
+    operationId: string | undefined, run: () => Promise<T>, timingStageName = name): Promise<T> {
+    const requestedMs = Date.now();
+    return enqueueStage(name, async () => {
+      const dequeuedMs = Date.now();
+      recordStageTiming(taskId, { phase: "queue_wait", startedAt: new Date(requestedMs).toISOString(), endedAt: new Date(dequeuedMs).toISOString(),
+        durationMs: dequeuedMs - requestedMs, status: "ok" });
+      return withActiveTimingTask(timingStageName, taskId, () => timedStagePhase(taskId, phase, operationId, run));
+    });
   }
   // The cursor reaper is broker-wide housekeeping unrelated to any one stage's actions;
   // it must never queue behind (or make another agent's action queue behind) a stage
@@ -321,7 +406,7 @@ export function createTaskDesktopStageService(input: {
         ...(mode === "background" && assignedStage ? { roomDesktopId: assignedStage.roomDesktopId } : {}),
         controlEnabled: readPolicy().controlHandles?.includes(normalizeHandle(identity.handle)) === true };
     };
-    return enqueueStage(queueName, run);
+    return enqueueTimedStage(queueName, taskId, "prepare", undefined, run, queueName);
   }
 
   async function act(token: string, taskId: string, value: unknown, requestedMode?: TaskStageMode, operationId?: string) {
@@ -330,11 +415,17 @@ export function createTaskDesktopStageService(input: {
     if (operationId !== undefined && !/^[a-zA-Z0-9._:-]{1,128}$/.test(operationId)) throw new Error("Invalid desktop-stage operation ID.");
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
-    const { name: queueName } = authorize(token, taskId, mode);
+    const { name: stageName } = authorize(token, taskId, mode);
+    const registeredStage = manager.list().find((stage) => stage.name === stageName);
+    const queueName = registeredStage?.coordinationKey ?? stageName;
     if (action.kind === "stop") {
-      stoppedTaskInputs.add(`${queueName}\0${taskId}`);
-      const active = activeInputs.get(queueName);
+      const startedMs = Date.now();
+      stoppedTaskInputs.add(`${stageName}\0${taskId}`);
+      const active = activeInputs.get(stageName);
       if (active?.taskId === taskId) active.controller.abort(new Error("Explicit desktop stop requested."));
+      const endedMs = Date.now();
+      recordStageTiming(taskId, { phase: "stop", startedAt: new Date(startedMs).toISOString(), endedAt: new Date(endedMs).toISOString(),
+        durationMs: endedMs - startedMs, status: "ok" });
       return { stopped: active?.taskId === taskId, cancellationRequested: true };
     }
     let recoveryNotice: string | undefined;
@@ -493,7 +584,7 @@ export function createTaskDesktopStageService(input: {
           nextStep: "The input was sent; capture and inspect before issuing another action." };
       }
     };
-    const outcome = await enqueueStage(queueName, run);
+    const outcome = await enqueueTimedStage(queueName, taskId, "action", operationId, run, stageName);
     if (!recoveryNotice) return outcome;
     return { ...(outcome && typeof outcome === "object" ? outcome : { result: outcome }), recoveryNotice };
   }
@@ -515,10 +606,16 @@ export function createTaskDesktopStageService(input: {
     // A failed driver inspection is not an unknown but successfully inspected
     // control. Preserve the failure immediately rather than hiding it behind a
     // 55-second approval wait that the owner cannot use to repair the driver.
+    if (!described) throw new DesktopInputNotDispatchedError(
+      "The stage click target could not be resolved from the current observation; refresh the exact app structure or capture and try again. No input was sent.",
+    );
     const gate = stageClickNeedsApproval(described);
     if (!gate.hold) return;
+    if (!gate.label) throw new DesktopInputNotDispatchedError(
+      "The stage click target has no readable label, so it cannot be classified safely; no input was sent.",
+    );
     const approvals = input.approvals?.();
-    const target = gate.label ? `“${gate.label}”` : "an unidentified control";
+    const target = `“${gate.label}”`;
     if (!approvals) throw new Error(`This click targets ${target}, which looks like it moves or commits money, and this broker has no owner approval route attached; the action was refused.`);
     const approved = await approvals.requestApproval({
       agent: normalizeHandle(identity.handle),
@@ -538,9 +635,11 @@ export function createTaskDesktopStageService(input: {
     if (operationId !== undefined && !/^[a-zA-Z0-9._:-]{1,128}$/.test(operationId)) throw new Error("Invalid desktop-stage operation ID.");
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
-    const { name: queueName } = authorize(token, taskId, mode);
+    const initial = authorize(token, taskId, mode);
+    const queueName = mode === "owner-preview" ? stageCoordinationKey(initial.task.goal) : initial.name;
     const run = async () => {
       const { name, identity, task } = authorize(token, taskId, mode);
+      const coordinationKey = mode === "owner-preview" ? stageCoordinationKey(task.goal) : undefined;
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
       const receiptInput = operationId ? {
         handle: identity.handle,
@@ -617,14 +716,40 @@ export function createTaskDesktopStageService(input: {
         const before = await driver.listVisibleWindows({ onScreenOnly: false });
         process.stderr.write(`[stage-launch-pre] ${taskId}: listVisibleWindows done after ${Date.now() - preLoopStartedAt}ms total, found ${before.length} windows\n`);
         const kind = stageBrowserKind(approved.executable);
-        const existing = kind ? selectExistingPersonalBrowserWindow(kind, before) : undefined;
+        // A same-intent task from another provider may already have selected
+        // this exact window. Join that durable coordination group instead of
+        // launching a second Calculator/Notepad/Explorer window. The registry
+        // lease is shared only for the same hashed intent; unrelated stages
+        // remain isolated and cannot silently adopt one another's HWND.
+        if (coordinationKey) {
+          const coordinated = [] as Array<{ pid: number; windowId: string }>;
+          for (const candidate of manager.list().filter((stage) => stage.name !== name
+            && stage.appId === appId && stage.coordinationKey === coordinationKey && stage.anchor)) {
+            try {
+              const inspected = await manager.inspectStage(candidate.name);
+              if (inspected.desktop.isCurrent && inspected.anchor) coordinated.push(inspected.anchor);
+            } catch { /* stale groups are retained as recovery evidence, not adopted */ }
+          }
+          if (coordinated.length > 1) throw new Error("Multiple live windows are already assigned to this joint task; owner selection is required.");
+          if (coordinated.length === 1) {
+            const selected = coordinated[0]!;
+            authorize(token, taskId, mode);
+            if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
+            await manager.presentOwnerWindow(name, selected.pid, selected.windowId, coordinationKey);
+            await manager.attachWindow(name, String(selected.pid), selected.windowId, appId, coordinationKey);
+            ownedApps.set(name, { taskId, appId, pid: selected.pid, windowId: selected.windowId, ownsProcess: false });
+            return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", capture: await driver.capture(name, identity) });
+          }
+        }
+        const existingMatches = kind ? undefined : await matchesLaunchedWindows(before);
+        if (existingMatches && existingMatches.length > 1) throw new Error("The requested application has multiple visible windows; owner selection is required before joining one.");
+        const existing = kind ? selectExistingPersonalBrowserWindow(kind, before) : existingMatches?.[0];
         if (existing) {
           authorize(token, taskId, mode);
           if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
-          await manager.presentOwnerWindow(name, existing.pid, existing.windowId);
-          await manager.attachWindow(name, String(existing.pid), existing.windowId, appId);
+          await manager.presentOwnerWindow(name, existing.pid, existing.windowId, coordinationKey);
+          await manager.attachWindow(name, String(existing.pid), existing.windowId, appId, coordinationKey);
           ownedApps.set(name, { taskId, appId, pid: existing.pid, windowId: existing.windowId, ownsProcess: false });
-          try { await driver.focusWindow?.(name, identity); } catch { /* best-effort visibility only */ }
           return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", capture: await driver.capture(name, identity) });
         }
         // Normal profile, normal executable, fixed owner-resolved arguments.
@@ -659,14 +784,12 @@ export function createTaskDesktopStageService(input: {
             const matches = await matchesLaunchedWindows(windows.filter((window) => !beforeKeys.has(`${window.pid}:${window.windowId}`)));
             if (matches.length > 1) throw new Error("The requested application opened multiple windows; select the intended window before continuing.");
             if (matches.length === 1) {
-              await manager.presentOwnerWindow(name, matches[0]!.pid, matches[0]!.windowId);
-              await manager.attachWindow(name, String(matches[0]!.pid), matches[0]!.windowId, appId);
+              await manager.presentOwnerWindow(name, matches[0]!.pid, matches[0]!.windowId, coordinationKey);
+              await manager.attachWindow(name, String(matches[0]!.pid), matches[0]!.windowId, appId, coordinationKey);
               ownedApps.set(name, { taskId, appId, pid: matches[0]!.pid, windowId: matches[0]!.windowId, ownsProcess: false });
-              // "Present" places the window on the owner's current desktop; it does not
-              // guarantee the window is the active/foreground one. Owner-preview exists
-              // specifically so the owner can see what is happening -- a launch they cannot
-              // actually see is not previewed. Never fatal over a visibility nicety.
-              try { await driver.focusWindow?.(name, identity); } catch { /* best-effort visibility only */ }
+              // "Present" places the window on the owner's current desktop without
+              // activating it. Launch is deliberately non-stealing; an explicit focus
+              // action or unavoidable foreground input acquires the broker-wide lease.
               return finishLaunch({ name, taskId, appId, running: true, reused: false, view: "app", capture: await driver.capture(name, identity) });
             }
             await delay(100);
@@ -811,8 +934,8 @@ export function createTaskDesktopStageService(input: {
     // because that turn is itself awaiting this call. A real, silent deadlock, not
     // slowness: this is what the ~70s timeouts actually were. skipQueue lets an
     // already-queued caller run this launch immediately instead of behind itself.
-    if (options?.skipQueue) return run() as Promise<StageLaunchResult>;
-    return enqueueStage(queueName, run) as Promise<StageLaunchResult>;
+    if (options?.skipQueue) return withActiveTimingTask(initial.name, taskId, () => timedStagePhase(taskId, "launch", operationId, run)) as Promise<StageLaunchResult>;
+    return enqueueTimedStage(queueName, taskId, "launch", operationId, run, initial.name) as Promise<StageLaunchResult>;
   }
 
   async function closeApp(token: string, taskId: string, requestedMode?: TaskStageMode) {
@@ -833,7 +956,7 @@ export function createTaskDesktopStageService(input: {
       ownedApps.delete(name);
       return { name, taskId, closed: true };
     };
-    return enqueueStage(queueName, run);
+    return enqueueTimedStage(queueName, taskId, "close", undefined, run, queueName);
   }
 
   const cursorReaper = setInterval(() => {

@@ -288,15 +288,18 @@ function build() {
 
   // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "desktop-input-errors", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "mcp-connection-core", "local-store", "runtime-install-transaction", "runtime-build-identity", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server"]) {
+  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "foreground-input-lease", "desktop-input-errors", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "mcp-connection-core", "mcp-connection-env", "mcp-runtime-path", "local-store", "runtime-install-transaction", "runtime-build-identity", "engine-update-core", "update-lifecycle-core", "update-lifecycle", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "opencode-model-core", "opencode-plugin-refresh", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server", "m9r-prompt-markers"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source)
       .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
+      .replace(/["']\.\/m9r-prompt-markers["']/g, '"./m9r-prompt-markers.js"')
       .replace(/["']\.\.\/bridge\/governed-agent-tools["']/g, '"./governed-agent-tools.js"')
       .replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"')
       .replace(/["']\.\.\/agent-detection-core["']/g, '"./agent-detection-core.js"');
     writeFileSync(resolve(outDir, `${name}.js`), js);
   }
+  const localPresenceHeartbeatTs = readFileSync(resolve(repoRoot, "src/lib/native/local-presence-heartbeat.ts"), "utf8");
+  writeFileSync(resolve(outDir, "local-presence-heartbeat.js"), transpile(localPresenceHeartbeatTs));
   const hookEntryTs = readFileSync(resolve(repoRoot, "scripts/m9r-hook.ts"), "utf8");
   writeFileSync(resolve(outDir, "m9r-hook.js"), transpile(hookEntryTs).replace(/["']@\/lib\/native\/([a-z-]+)["']/g, '"./$1.js"'));
 
@@ -334,7 +337,10 @@ function build() {
   // the server-side router. Ship its protocol constants with the CLI rather
   // than leaving the generated Bridge import pointed at the monorepo source.
   const agentHeartbeatTs = readFileSync(resolve(repoRoot, "src/lib/agent-heartbeat.ts"), "utf8");
-  writeFileSync(resolve(outDir, "agent-heartbeat.js"), transpile(agentHeartbeatTs));
+  writeFileSync(
+    resolve(outDir, "agent-heartbeat.js"),
+    transpile(agentHeartbeatTs).replace(/['"]@\/lib\/provider-adapter-config['"]/g, '"./provider-adapter-config.js"'),
+  );
   // bridge-runtime imports conversation-routing (and, through it, agent-presence).
   // Ship both flattened next to it; without them every provider bridge crashes on
   // ERR_MODULE_NOT_FOUND the moment the packaged CLI starts it.
@@ -371,6 +377,7 @@ function build() {
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/workspace-prompt-queue['"]/g, '"./workspace-prompt-queue.js"')
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/bridge\/workspace-result-idempotency['"]/g, '"./workspace-result-idempotency.js"')
     .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/native\/provider-cooldown-core['"]/g, '"./provider-cooldown-core.js"')
+    .replace(/['"]\.\.\/\.\.\/\.\.\/src\/lib\/native\/m9r-prompt-markers['"]/g, '"./m9r-prompt-markers.js"')
     // Dynamic import (inside ensureTerminalPane), not a static one -- this
     // one was missing from the rewrite list entirely. Confirmed live: the
     // packaged CLI crashed every provider the moment M9R_TERMINAL_PANES

@@ -234,6 +234,22 @@ test("status flags provider sessions that cannot receive targeted delivery witho
   s.done();
 });
 
+test("status does not count expired or already-pushed history as waiting inbox work", () => {
+  const s = sandbox();
+  const store = createLocalStore(s.p.m9r);
+  store.registerEndpoint({ provider: "codex", sessionId: "codex-status", cwd: s.home });
+  const stale = store.addTask({ from: "you", to: "codex", goal: "old work", origin: "human_typed", idempotencyKey: "old-status" }).task;
+  store.setDelivery(stale.id, { state: "queued", threadId: "codex-status" });
+  const statePath = join(s.p.m9r, "state.json");
+  const state = JSON.parse(readFileSync(statePath, "utf8")) as { tasks: Array<{ id: string; createdAt: string }> };
+  state.tasks.find((task) => task.id === stale.id)!.createdAt = new Date(Date.now() - 31 * 60_000).toISOString();
+  writeFileSync(statePath, JSON.stringify(state), "utf8");
+
+  const pending = nativeStatus(s.io).find((row) => row.id === "pending");
+  assert.equal(pending, undefined, "historical pushed work must not be shown as an inbox item");
+  s.done();
+});
+
 test("the step list is the single source: every user-only step has a fix and the markdown lists them all", () => {
   for (const step of ONBOARDING_STEPS.filter((x) => x.who === "you" && x.id !== "logins")) assert.ok(step.fix, `${step.id} needs a fix line`);
   const md = renderStepsMarkdown();
@@ -442,25 +458,37 @@ test("with the engine and the native hook side by side, the settings point at th
   s.done();
 });
 
-test("with the engine, setup registers the M9R MCP server for Claude (and Codex, when installed), keeps every other registered server, and uninstall removes only ours", async () => {
+test("with the engine, setup registers the M9R MCP server for Claude at both effective scopes, keeps every other server, and uninstall removes only ours", async () => {
   const s = sandbox();
   const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, "m9r-hook.exe");
   writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in stable launcher", "utf8");
   delete s.io.env.M9R_HOOK_ENTRY;
   s.io.env.M9R_ENGINE = engine;
   mkdirSync(s.p.codex, { recursive: true });
   mkdirSync(s.p.claude, { recursive: true });
   writeFileSync(s.p.codexConfig, "[mcp_servers.github]\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-github\"]\n", "utf8");
   writeFileSync(s.p.claudeMcp, JSON.stringify({ mcpServers: { other: { command: "npx", args: ["-y", "other-server"] } } }), "utf8");
+  writeFileSync(s.p.claudeGlobalMcp, JSON.stringify({ mcpServers: {
+    otherGlobal: { command: "npx", args: ["-y", "other-global-server"] },
+    m9r: { command: engine, args: ["mcp"], env: { M9R_HOME: s.p.m9r }, },
+  } }), "utf8");
 
   assert.equal(await s.run("setup", ["--yes"]), 0);
 
   const claudeMcp = JSON.parse(readFileSync(s.p.claudeMcp, "utf8"));
   assert.deepEqual(claudeMcp.mcpServers.other, { command: "npx", args: ["-y", "other-server"] }, "an already-registered server is left alone");
-  assert.match(claudeMcp.mcpServers.m9r.command, /m9r-engine(\.exe)?$/);
+  assert.match(claudeMcp.mcpServers.m9r.command, /m9r-hook\.exe$/);
   assert.deepEqual(claudeMcp.mcpServers.m9r.args, ["mcp"]);
   assert.equal(claudeMcp.mcpServers.m9r.env.M9R_HOME, s.p.m9r);
   assert.equal(claudeMcp.mcpServers.m9r.env.M9R_WEB_BROKER_PORT, "47821");
+
+  const claudeGlobalMcp = JSON.parse(readFileSync(s.p.claudeGlobalMcp, "utf8"));
+  assert.deepEqual(claudeGlobalMcp.mcpServers.otherGlobal, { command: "npx", args: ["-y", "other-global-server"] }, "the user-level config preserves other servers");
+  assert.match(claudeGlobalMcp.mcpServers.m9r.command, /m9r-hook\.exe$/);
+  assert.deepEqual(claudeGlobalMcp.mcpServers.m9r.args, ["mcp"]);
+  assert.equal(claudeGlobalMcp.mcpServers.m9r.env.M9R_PROVIDER, "claude-code");
 
   const codexConfig = readFileSync(s.p.codexConfig, "utf8");
   assert.match(codexConfig, /\[mcp_servers\.github\]/);
@@ -478,9 +506,138 @@ test("with the engine, setup registers the M9R MCP server for Claude (and Codex,
   const claudeMcpAfter = JSON.parse(readFileSync(s.p.claudeMcp, "utf8"));
   assert.ok(!("m9r" in claudeMcpAfter.mcpServers), "our entry is gone");
   assert.deepEqual(claudeMcpAfter.mcpServers.other, { command: "npx", args: ["-y", "other-server"] }, "the other server survives uninstall");
+  const claudeGlobalAfter = JSON.parse(readFileSync(s.p.claudeGlobalMcp, "utf8"));
+  assert.deepEqual(claudeGlobalAfter.mcpServers.m9r, { command: engine, args: ["mcp"], env: { M9R_HOME: s.p.m9r } }, "the pre-existing user-level M9R entry is restored exactly");
+  assert.deepEqual(claudeGlobalAfter.mcpServers.otherGlobal, { command: "npx", args: ["-y", "other-global-server"] }, "the user-level other server survives uninstall");
   const codexConfigAfter = readFileSync(s.p.codexConfig, "utf8");
   assert.doesNotMatch(codexConfigAfter, /\[mcp_servers\.m9r\]/);
   assert.match(codexConfigAfter, /\[mcp_servers\.github\]/);
+  s.done();
+});
+
+test("with the engine, native setup maintains OpenCode's MCP entry and identity plugin without touching other config", async () => {
+  const s = sandbox();
+  const p = s.p as typeof s.p & { opencodeConfig: string; opencodePlugin: string };
+  const opencodeDirectory = join(s.home, ".config", "opencode");
+  mkdirSync(opencodeDirectory, { recursive: true });
+  writeFileSync(p.opencodeConfig, JSON.stringify({ mcp: { github: { type: "local", command: ["gh-mcp"] } }, theme: "dark" }, null, 2) + "\n", "utf8");
+
+  const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, "m9r-hook.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in stable launcher", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  s.io.env.M9R_OPENCODE_VERSION = "1.19.0";
+
+  assert.equal(await s.run("setup", ["--agents", "opencode", "--yes"]), 0);
+  const config = JSON.parse(readFileSync(p.opencodeConfig, "utf8")) as {
+    mcp: Record<string, { enabled?: boolean; command?: string[]; environment?: Record<string, string> }>;
+    theme: string;
+  };
+  assert.equal(config.theme, "dark");
+  assert.deepEqual(config.mcp.github, { type: "local", command: ["gh-mcp"] });
+  assert.equal(config.mcp.m9r.enabled, true);
+  assert.deepEqual(config.mcp.m9r.command, [join(s.p.m9r, "bin", "m9r-hook.exe").replaceAll("\\", "/"), "mcp"]);
+  assert.equal(config.mcp.m9r.environment?.M9R_PROVIDER, "opencode");
+  assert.equal(existsSync(p.opencodePlugin), true);
+  assert.match(readFileSync(p.opencodePlugin, "utf8"), /OpenCodePoll/);
+
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  const after = JSON.parse(readFileSync(p.opencodeConfig, "utf8")) as {
+    mcp: Record<string, { enabled?: boolean; command?: string[]; environment?: Record<string, string> }>;
+    theme: string;
+  };
+  assert.equal(after.theme, "dark");
+  assert.deepEqual(after.mcp.github, { type: "local", command: ["gh-mcp"] });
+  assert.equal("m9r" in after.mcp, false);
+  assert.equal(existsSync(p.opencodePlugin), false);
+  s.done();
+});
+
+test("native setup refreshes a stale OpenCode plugin that is owned by web setup", async () => {
+  const s = sandbox();
+  const p = s.p as typeof s.p & { opencodeConfig: string; opencodePlugin: string; webSetupManifest: string };
+  const opencodeDirectory = join(s.home, ".config", "opencode");
+  mkdirSync(join(opencodeDirectory, "plugins"), { recursive: true });
+  mkdirSync(s.p.m9r, { recursive: true });
+  writeFileSync(p.opencodeConfig, JSON.stringify({ mcp: {} }, null, 2) + "\n", "utf8");
+
+  const oldPlugin = "old web-setup plugin";
+  writeFileSync(p.opencodePlugin, oldPlugin, "utf8");
+  writeFileSync(p.webSetupManifest, JSON.stringify({
+    version: 1,
+    openCodeIdentityPluginPath: p.opencodePlugin,
+    openCodeIdentityPluginHash: createHash("sha256").update(oldPlugin).digest("hex"),
+    extensionPath: join(s.home, "extension"),
+    brokerConfigHash: "preserve-me",
+  }, null, 2) + "\n", "utf8");
+
+  const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, "m9r-hook.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in stable launcher", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  s.io.env.M9R_OPENCODE_VERSION = "1.19.0";
+
+  assert.equal(await s.run("setup", ["--agents", "opencode", "--yes"]), 0);
+  const refreshed = readFileSync(p.opencodePlugin, "utf8");
+  assert.notEqual(refreshed, oldPlugin);
+  assert.match(refreshed, /OpenCodeExecutionFailed/);
+  const webManifest = JSON.parse(readFileSync(p.webSetupManifest, "utf8")) as { openCodeIdentityPluginHash: string; brokerConfigHash: string };
+  assert.equal(webManifest.openCodeIdentityPluginHash, createHash("sha256").update(refreshed).digest("hex"));
+  assert.equal(webManifest.brokerConfigHash, "preserve-me");
+  s.done();
+});
+
+test("native OpenCode setup repairs a stale persisted model from the cached catalog and keeps a rollback", async () => {
+  const s = sandbox();
+  const p = s.p as typeof s.p & { opencodeConfig: string; opencodePlugin: string };
+  const opencodeDirectory = join(s.home, ".config", "opencode");
+  mkdirSync(opencodeDirectory, { recursive: true });
+  writeFileSync(p.opencodeConfig, JSON.stringify({ mcp: {} }, null, 2) + "\n", "utf8");
+
+  const modelStatePath = join(s.home, ".local", "state", "opencode", "model.json");
+  const modelCatalogPath = join(s.home, ".cache", "opencode", "models.json");
+  mkdirSync(join(s.home, ".local", "state", "opencode"), { recursive: true });
+  mkdirSync(join(s.home, ".cache", "opencode"), { recursive: true });
+  const originalState = JSON.stringify({
+    recent: [
+      { providerID: "opencode", modelID: "muse-spark-1.3-contributor-free" },
+      { providerID: "openai", modelID: "gpt-5.3-codex" },
+    ],
+    favorite: [],
+    variant: {
+      "opencode/muse-spark-1.3-contributor-free": "default",
+      "openai/gpt-5.3-codex": "default",
+    },
+    untouched: "keep-me",
+  }, null, 2) + "\n";
+  writeFileSync(modelStatePath, originalState, "utf8");
+  writeFileSync(modelCatalogPath, JSON.stringify({ providers: [{ id: "opencode", models: [{ id: "beam-free" }, { id: "muse-spark-1.3-contributor-free", status: "deprecated" }] }] }), "utf8");
+
+  const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, "m9r-hook.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in stable launcher", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  s.io.env.M9R_OPENCODE_VERSION = "1.19.0";
+
+  assert.equal(await s.run("setup", ["--agents", "opencode", "--yes"]), 0);
+  const repaired = JSON.parse(readFileSync(modelStatePath, "utf8")) as { recent: Array<{ providerID: string; modelID: string }>; variant: Record<string, string>; untouched: string };
+  assert.equal(repaired.recent[0]?.modelID, "beam-free");
+  assert.equal(repaired.recent.some((entry) => entry.modelID === "muse-spark-1.3-contributor-free"), false);
+  assert.equal(repaired.variant["opencode/muse-spark-1.3-contributor-free"], undefined);
+  assert.equal(repaired.variant["openai/gpt-5.3-codex"], "default");
+  assert.equal(repaired.untouched, "keep-me");
+  const backups = readdirSync(join(s.home, ".local", "state", "opencode")).filter((name) => name.startsWith("model.json.m9r-backup-"));
+  assert.equal(backups.length, 1);
+  assert.equal(readFileSync(join(s.home, ".local", "state", "opencode", backups[0]!), "utf8"), originalState);
   s.done();
 });
 

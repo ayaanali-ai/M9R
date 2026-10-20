@@ -15,11 +15,14 @@ const DESKTOP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const EMPTY_DESKTOP_ID_RE = /^00000000-0000-0000-0000-000000000000$/i;
 const WINDOW_ID_RE = /^(?:0[xX][0-9a-f]+|[0-9]+)$/;
 const MACHINE_ID_FILE = "windows-stage-machine-id";
+const COORDINATION_KEY_RE = /^[a-f0-9]{64}$/;
 
 export interface WindowsStageRecord {
   name: string;
   /** Stable logical app reference used to recover the selected window after a broker restart. */
   appId?: string;
+  /** Stable, local-only intent group. Stages in one group may share a window. */
+  coordinationKey?: string;
   desktopId: string;
   /** Random local coordination identity; the Windows desktop GUID never leaves this machine. */
   roomDesktopId: string;
@@ -103,6 +106,10 @@ function isPersistedAppId(value: unknown): value is string {
     && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
+function isCoordinationKey(value: unknown): value is string {
+  return typeof value === "string" && COORDINATION_KEY_RE.test(value);
+}
+
 function parseRegistry(raw: string): StageRegistry {
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { throw new Error("The local Windows stage registry is corrupt; it was left unchanged."); }
@@ -121,6 +128,7 @@ function parseRegistry(raw: string): StageRegistry {
     if (names.has(name)) throw new Error("The local Windows stage registry contains duplicate names; it was left unchanged.");
     names.add(name);
     if (record.appId !== undefined && (!isPersistedAppId(record.appId))) throw new Error("The local Windows stage registry contains an invalid app reference; it was left unchanged.");
+    if (record.coordinationKey !== undefined && !isCoordinationKey(record.coordinationKey)) throw new Error("The local Windows stage registry contains an invalid coordination key; it was left unchanged.");
     if (typeof record.desktopId !== "string" || !DESKTOP_ID_RE.test(record.desktopId)) throw new Error("The local Windows stage registry contains an invalid desktop id; it was left unchanged.");
     const returnToDesktopId = record.returnToDesktopId ?? null;
     if (returnToDesktopId !== null && (typeof returnToDesktopId !== "string" || !DESKTOP_ID_RE.test(returnToDesktopId))) {
@@ -157,6 +165,7 @@ function parseRegistry(raw: string): StageRegistry {
     return {
       name,
       ...(record.appId !== undefined ? { appId: record.appId } : {}),
+      ...(record.coordinationKey !== undefined ? { coordinationKey: record.coordinationKey } : {}),
       desktopId: record.desktopId.toLowerCase(),
       roomDesktopId: roomDesktopId.toLowerCase(),
       returnToDesktopId: returnToDesktopId?.toLowerCase() ?? null,
@@ -350,18 +359,21 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return control;
   }
 
-  async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string): Promise<WindowsStageRecord> {
+  async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<WindowsStageRecord> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
     if (appId !== undefined && !isPersistedAppId(appId)) throw new Error("The Windows stage app reference is invalid.");
+    if (coordinationKey !== undefined && !isCoordinationKey(coordinationKey)) throw new Error("The Windows stage coordination key is invalid.");
     const info = await inspectWindow(pidInput, windowIdInput);
     const release = acquireRegistryLock(root);
     try {
       const registry = readRegistry(root);
       const existing = registry.stages.find((stage) => stage.name === name);
+      const savedCoordinationKey = coordinationKey ?? existing?.coordinationKey;
       const claimed = registry.stages.find((stage) => stage.name !== name
-        && stage.anchor?.pid === info.pid && stage.anchor.windowId === info.windowId);
+        && stage.anchor?.pid === info.pid && stage.anchor.windowId === info.windowId
+        && !(savedCoordinationKey && stage.coordinationKey === savedCoordinationKey));
       if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
       if (existing && existing.desktopId !== info.desktopId) {
         throw new Error(`Stage “${name}” already names a different desktop. Forget it first, then register the new desktop.`);
@@ -370,6 +382,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       const record: WindowsStageRecord = {
         name,
         ...(savedAppId !== undefined ? { appId: savedAppId } : {}),
+        ...(savedCoordinationKey !== undefined ? { coordinationKey: savedCoordinationKey } : {}),
         desktopId: info.desktopId,
         roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
         returnToDesktopId: existing?.returnToDesktopId ?? null,
@@ -569,16 +582,17 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return { fromDesktopId: current.desktopId, window: moved, stage };
   }
 
-  async function attachWindow(nameInput: string, pidInput: string, windowIdInput: string, appId?: string): Promise<{ stage: WindowsStageRecord; window: NativeWindowStageInfo }> {
+  async function attachWindow(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<{ stage: WindowsStageRecord; window: NativeWindowStageInfo }> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
-    assertWindowUnclaimed(name, Number(pidInput), windowIdInput);
     const stage = readRegistry(root).stages.find((item) => item.name === name);
     if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
+    const sharedKey = coordinationKey ?? stage.coordinationKey;
+    assertWindowUnclaimed(name, Number(pidInput), windowIdInput, sharedKey);
     const current = await inspectWindow(pidInput, windowIdInput);
     if (current.desktopId !== stage.desktopId) await moveWindow(name, pidInput, windowIdInput);
-    const registered = await register(name, pidInput, windowIdInput, appId);
+    const registered = await register(name, pidInput, windowIdInput, appId, sharedKey);
     const inspected = await inspectStage(name);
     if (!inspected.anchor || inspected.anchor.pid !== registered.anchor?.pid || inspected.anchor.windowId !== registered.anchor?.windowId) {
       throw new Error(`Windows did not confirm that the selected app window is attached to stage “${name}”.`);
@@ -693,8 +707,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return result.windows;
   }
 
-  async function presentOwnerWindow(name: string, pid: number, windowId: string) {
-    assertWindowUnclaimed(name, pid, windowId);
+  async function presentOwnerWindow(name: string, pid: number, windowId: string, coordinationKey?: string) {
+    const existing = readRegistry(root).stages.find((stage) => stage.name === normalizedName(name));
+    assertWindowUnclaimed(name, pid, windowId, coordinationKey ?? existing?.coordinationKey);
     const inspected = await inspectStage(name);
     if (!inspected.desktop.isCurrent) throw new Error("The owner's desktop changed before application presentation.");
     const result = await invokeNative({ op: "presentOwnerWindow", pid, windowId, desktopId: inspected.stage.desktopId });
@@ -705,9 +720,10 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return result.window;
   }
 
-  function assertWindowUnclaimed(name: string, pid: number, windowId: string) {
+  function assertWindowUnclaimed(name: string, pid: number, windowId: string, coordinationKey?: string) {
     const claimed = readRegistry(root).stages.find((stage) => stage.name !== name
-      && stage.anchor?.pid === pid && stage.anchor.windowId === windowId);
+      && stage.anchor?.pid === pid && stage.anchor.windowId === windowId
+      && !(coordinationKey && stage.coordinationKey === coordinationKey));
     if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
   }
 

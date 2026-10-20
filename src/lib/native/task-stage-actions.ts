@@ -109,7 +109,7 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
 export async function runTaskStageAction(driver: ReturnType<typeof createCuaStageDriver>, name: string, action: TaskStageAction,
   identity: CuaAgentCursorIdentity, mode: "background" | "owner-preview" = "owner-preview", signal?: AbortSignal) {
   const stageOptions = <T extends Record<string, unknown>>(options: T): T | undefined => {
-    const normalized = { ...options, ...(signal ? { signal } : {}) } as Record<string, unknown>;
+    const normalized = { ...options, deliveryMode: mode, ...(signal ? { signal } : {}) } as Record<string, unknown>;
     for (const key of Object.keys(normalized)) if (normalized[key] === undefined) delete normalized[key];
     return Object.keys(normalized).length ? normalized as T : undefined;
   };
@@ -117,7 +117,7 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
   const capture = () => desktopWide ? driver.captureDesktop(name, identity) : driver.capture(name, identity);
   const cursor = (x: number, y: number) => desktopWide ? driver.moveDesktopCursor(name, x, y, identity) : driver.moveCursor(name, x, y, identity);
   const click = (x: number, y: number, options: { button?: "left" | "middle" | "right"; count?: 1 | 2; confirmFocusForeground?: boolean } = {}) => {
-    const normalized = { ...options };
+    const normalized = { ...options, deliveryMode: mode, ...(signal ? { signal } : {}) };
     if (normalized.confirmFocusForeground === undefined) delete normalized.confirmFocusForeground;
     return desktopWide
       ? driver.clickDesktop(name, x, y, identity, normalized) : driver.click(name, x, y, identity, normalized);

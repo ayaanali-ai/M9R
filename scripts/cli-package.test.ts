@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:net";
 import { dirname, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -32,6 +33,22 @@ const pkg = JSON.parse(readFileSync(resolve(repoRoot, "cli", "package.json"), "u
 const core = await import(pathToFileURL(resolve(distDir, "oathlock-cli-core.js")).href);
 
 const EXTERNAL_CWD = "/external/workspace";
+
+async function freeLoopbackPort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolvePort, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => resolvePort());
+  });
+  const address = probe.address();
+  if (!address || typeof address === "string") {
+    probe.close();
+    throw new Error("the test could not reserve a loopback port");
+  }
+  const port = address.port;
+  await new Promise<void>((resolveClose, rejectClose) => probe.close((error) => error ? rejectClose(error) : resolveClose()));
+  return port;
+}
 
 async function removeTempWorkspace(workspace: string): Promise<void> {
   // The runtime deliberately detaches its watchdog so it can survive a
@@ -285,10 +302,10 @@ test("built mission bridge runtime has no unresolved monorepo source imports", (
 });
 
 test("packed CLI entry boots the terminal runtime without printing a pairing secret", { timeout: 20_000 }, async () => {
-  const port = 43_120;
+  const port = await freeLoopbackPort();
   const child = spawn(process.execPath, [resolve(distDir, "m9r.js"), "terminal", "bridge"], {
     cwd: repoRoot,
-    env: { ...process.env, OATHLOCK_BRIDGE_PORT: String(port) },
+    env: { ...process.env, M9R_BRIDGE_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -319,7 +336,7 @@ test("packed CLI entry boots the terminal runtime without printing a pairing sec
 });
 
 test("packed CLI runtime uses the compiled mission runner for connected providers", { timeout: 20_000 }, async () => {
-  const port = 43_121;
+  const port = await freeLoopbackPort();
   const workspace = mkdtempSync(resolve(tmpdir(), "oathlock-cli-runtime-"));
   const localTokenPath = resolve(workspace, ".m9r", "agents", "codex", "local.json");
   mkdirSync(dirname(localTokenPath), { recursive: true });
@@ -334,7 +351,7 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
     // metadata sync from the OS home directory, independently of cwd.
     // Do not let startup recovery discover or launch the developer's globally
     // installed provider CLIs while this packaging test is running.
-    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, PATH: workspace, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", OATHLOCK_BRIDGE_PORT: String(port) },
+    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, PATH: workspace, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", M9R_BRIDGE_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -383,11 +400,11 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
 });
 
 test("packed CLI local-only runtime starts without a hosted token or mission bridge", { timeout: 20_000 }, async () => {
-  const port = 43_122;
+  const port = await freeLoopbackPort();
   const workspace = mkdtempSync(resolve(tmpdir(), "m9r-cli-local-only-"));
   const child = spawn(process.execPath, [resolve(distDir, "m9r.js"), "terminal", "runtime", "--local-only"], {
     cwd: workspace,
-    env: { ...process.env, OATHLOCK_BRIDGE_PORT: String(port), M9R_TEST_DISABLE_WATCHDOG: "1" },
+    env: { ...process.env, M9R_BRIDGE_PORT: String(port), M9R_TEST_DISABLE_WATCHDOG: "1" },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
