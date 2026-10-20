@@ -33,12 +33,15 @@ production gate by itself.
   quarantine history, `engine/` runtime outputs and backups, `scratchpad/`
   including its local secret, the user document, and unverified icon/reference
   assets.
-- Recorded verification: 2,586/2,586 repository tests, packaged CLI 19/19,
-  Codex delivery 39/39, typecheck, production build with 138 pages, focused
-  lint, native command plus Windows stage regressions 61/61, focused dashboard
-  regression 137/137, and focused marketing regression 8/8. Full scoped lint
-  remains not clean (15 errors and 704 warnings), and the high-severity audit
-  remains open (21 vulnerabilities: 1 critical, 19 high, 1 moderate).
+- Recorded verification at the current release boundary: 2,594/2,594
+  repository tests, focused provider/action regression 205/205, Codex
+  delivery 39/39, typecheck, production build with 138 pages, targeted lint,
+  native/stage, dashboard, and marketing regressions, and `git diff --check`.
+  Production dependencies report 0 vulnerabilities after the Hono patch-level
+  override. The full-tree audit still has dev-toolchain findings whose force
+  path proposes a breaking shadcn update; no breaking upgrade was applied.
+  The full unscoped lint command did not complete, so targeted lint—not a
+  fabricated full-lint pass—is the recorded result.
 
 ## Condensed execution lanes
 
@@ -214,7 +217,9 @@ Still required:
 - The current manifest/logo pair, icon binaries, asset-dependent marketing
   test, ESLint config cleanup, runtime outputs, quarantine, scratchpad, and
   user document remain held until individually reviewed. No automatic artifact
-  draining is part of this pass.
+  draining is part of this pass. The clean packaged runtime boundary is now
+  verified separately; activation/install and live-provider acceptance remain
+  open.
 
 ### Lane 7 — Live acceptance and multiplayer demo gates
 
@@ -278,19 +283,27 @@ foundational follow-up and is not falsely marked complete by the demo.
 
 1. Preserve the checkpoint and Master List 2.0 history. **Done.**
 2. Reconcile the tracker, source diffs, tests, installed evidence, and retained
-   artifacts into this condensed 2.1 plan. **In progress.**
+   artifacts into this condensed 2.1 plan. **Done for the current boundary.**
 3. Finish the reviewed allowlist of source, regression tests, migrations, and
    documentation. Exclude generated runtime output, secrets, user documents,
-   historical quarantine, and unverified design/icon files. **In progress.**
-4. Review and commit only verified logical groups. Existing verified groups are
-   committed as `5f447ba7`, `61469d95`, `be19dc38`, and `29e0f445`;
-   tracker records are committed separately. Held asset/config/runtime
-   categories are not staged or committed. **In progress.**
+   historical quarantine, and unverified design/icon files. **Done for the
+   reviewed source boundary.**
+4. Review and commit only verified logical groups. The current boundary is
+   recorded by allowlist commit `cc1f5b28`, provenance fix `ffc8bbf4`, and
+   tracker evidence commit `580a3705`; held asset/config/runtime categories
+   remain unstaged and uncommitted. **Done for this boundary.**
 5. Rebuild from the resulting clean commit, run release manifest/checks, and
-   compare the complete artifact set. **Open.**
+   compare the complete artifact set. **Verified for the packaged candidate:**
+   fresh build ID `381ec554b922aefb673c3f19e306aa15ad86cc897a7eaf7bb1b7a88a80e09190`,
+   `sourceDirty: false`, 185 artifact identities, packaged MCP 2/2,
+   transaction tests 3/3, and packaged binding/reconnect tests 4/4. Live
+   install/activation is intentionally separate.
 6. Only after that, activate/reconnect as an explicitly authorized live change,
    run the two difficult dry runs, rehearse the multiplayer demo, and record
    the final demo. **Open.**
 
-The next safe action is therefore the held-item review and allowlist work—not
-automatic deletion, blanket committing, runtime activation, or live acceptance.
+The next safe action is therefore held-item review and live-acceptance
+planning—not automatic deletion, blanket committing, runtime activation, or
+provider acceptance. The release-boundary source/package work is complete for
+this checkpoint; the remaining gates are explicitly live, visual, provider,
+or held-product work.
