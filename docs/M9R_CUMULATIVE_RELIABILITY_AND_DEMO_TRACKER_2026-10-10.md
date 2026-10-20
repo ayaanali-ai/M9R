@@ -2868,3 +2868,22 @@ Evidence:
 - the runtime publish then failed twice at the same operation: renaming the generated `cua-driver-runtime` directory into `engine/dist/cua-driver-runtime`. Both attempts rolled back cleanly; post-rollback checks found no staged runtime, backup directory, destination runtime directory, or related process lock. No force delete, copy-over, bypass, installation, activation, provider reconnect, or live task was performed.
 
 Conclusion: the source and native compilation portions are green, but the clean packaged-runtime gate is **blocked by a reproducible Windows filesystem publish failure at the Cua runtime directory rename**. This is not evidence that the runtime is safe to install. The candidate must be retried from a normal clean filesystem boundary or the transaction/host-lock cause must be diagnosed and fixed before activation. The active checkout’s held artifacts remain untouched.
+
+### 2026-10-20 (Codex) — clean current-HEAD runtime package verified
+
+The prior publish blocker was rechecked from a fresh, ordinary filesystem clone at corrected `HEAD` `6006ffc1` (`C:\RunLeak\runleak\.m9r-runtime-package-20261020-v2`). The active checkout, installed runtime, pill, provider processes, and desktop state were not used or changed.
+
+Evidence:
+
+- overlay frontend, pill desktop TypeScript/build, and native Tauri release executable build passed; the optional NSIS installer bundle could not download `nsis-3.11` because the host had no DNS/network access, so no installer artifact is claimed;
+- `npm run build:cli` passed;
+- standalone engine, web broker, hook, native-input host, pinned Cua Driver `0.34.0`, and overlay packaging passed;
+- runtime manifest verification passed with `exact: true`: **185/185 artifacts**, build ID `de64fbf5940541bad49a731b7f0d869c411ed143dbe1e1f42188b701a7b62733`, source commit `6006ffc1a0d399db8fbb85e4aab1cbc1124921f6`, `sourceDirty=false`;
+- the candidate MCP verifier passed: exact build/version match, stage and computer-use tools present, retired browser-extension tools absent;
+- packaged-engine smoke tests passed **2/2** (`mcp` handshake/tool contract and packaged `dev-mcp-server`);
+- transactional publish tests passed **3/3** on the normal host boundary;
+- candidate `npm run typecheck` passed.
+
+The earlier `EPERM` was not reproduced in the normal clean clone; it was a restricted/managed filesystem-boundary failure during the prior disposable worktree test, not a failure of the current publish transaction on the host filesystem. The verifier itself also had a stale expectation for retired `m9r_web_*` extension tools; that expectation was corrected and committed as **`6006ffc1`** (`Align runtime MCP verifier with native desktop route`). No retry loop, forced copy-over, installation, activation, provider reconnect, or cleanup of held artifacts was performed.
+
+The clean **engine runtime package** is verified. The optional Windows installer bundle remains unverified solely because its external NSIS download was unavailable; live provider acceptance and runtime activation remain separate gates.
