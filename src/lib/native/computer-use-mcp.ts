@@ -25,6 +25,17 @@ import type { WebRequest, WebResponse } from "./web-broker-core";
 const MAX_OBSERVATION_AGE_MS = 30_000;
 const MAX_TARGETS = 256;
 const TARGET_TTL_MS = MAX_OBSERVATION_AGE_MS * 4;
+const MAX_CHANGE_BASELINES = 256;
+const CHANGE_BASELINE_TTL_MS = TARGET_TTL_MS;
+/**
+ * A structured observation should stay cheap even when the native driver returns a
+ * noisy partial tree or several owned popups. Images are still available when they
+ * fit this bounded budget; an oversized visual is reported as omitted instead of
+ * silently turning one observation into an enormous provider turn.
+ */
+const MAX_RESPONSE_IMAGE_BYTES = 512 * 1024;
+const MAX_RESPONSE_IMAGES = 4;
+const FINGERPRINT_SCHEMA_VERSION = 1;
 const BROWSER_REF = /^e[a-f0-9]{24}_\d{1,3}$/;
 // Cua element tokens are opaque driver values and are not guaranteed to be
 // UUIDs. They stay private inside the desktop record; providers receive the
@@ -94,6 +105,37 @@ interface TargetRecord {
   route: ComputerUseRouteDescriptor;
   context: TargetContext;
   pinnedRouteId?: string;
+  change: ObservationChange;
+}
+
+type FingerprintCompleteness = "complete" | "partial" | "unavailable";
+type ChangeStatus = "initial" | "unchanged" | "changed" | "unknown";
+
+interface NormalizedFingerprintEntry {
+  base: string;
+  state: string;
+  geometry: string;
+}
+
+interface ObservationFingerprint {
+  completeness: FingerprintCompleteness;
+  entries: NormalizedFingerprintEntry[];
+  geometry: string[];
+  hash: string;
+}
+
+interface StoredObservationFingerprint extends ObservationFingerprint {
+  revision: string;
+  observedAt: number;
+}
+
+interface ObservationChange {
+  status: ChangeStatus;
+  fingerprintSchemaVersion: number;
+  comparisonScope: "full-target" | "observed-subtree" | "none";
+  counts: { added: number; removed: number; updated: number };
+  geometry: { status: "initial" | "unchanged" | "changed" | "unknown" };
+  comparedToRevision?: string;
 }
 
 interface ComputerUseMcpDeps {
@@ -148,20 +190,145 @@ function validRect(value: unknown): value is { x: number; y: number; width: numb
     && (rect.width as number) > 0 && (rect.height as number) > 0;
 }
 
+function structureCompleteness(value: unknown): FingerprintCompleteness {
+  return value === "complete" || value === "partial" || value === "unavailable" ? value : "unavailable";
+}
+
+function normalizedString(value: unknown, max = 256): string {
+  return typeof value === "string" ? value.replace(/[\r\n\t]+/g, " ").trim().slice(0, max) : "";
+}
+
+/**
+ * Build a privacy-safe semantic fingerprint from the observation already in
+ * hand. Transient refs/tokens, timestamps, screenshots, and control values are
+ * deliberately excluded. Parent relationships use the parent's semantic
+ * description rather than its per-walk opaque ref.
+ */
+function normalizeObservationFingerprint(
+  rawElements: readonly Record<string, unknown>[],
+  completeness: FingerprintCompleteness,
+): ObservationFingerprint {
+  const byRef = new Map<string, Record<string, unknown>>();
+  for (const element of rawElements) {
+    if (typeof element.ref === "string") byRef.set(element.ref, element);
+  }
+  const entries: NormalizedFingerprintEntry[] = [];
+  const geometry: string[] = [];
+  for (const element of rawElements.slice(0, 512)) {
+    const role = normalizedString(element.role, 80).toLowerCase();
+    const label = normalizedString(element.label ?? element.name, 160).toLowerCase();
+    const depth = Number.isSafeInteger(element.depth) ? String(element.depth) : "";
+    const parent = typeof element.parentRef === "string" ? byRef.get(element.parentRef) : undefined;
+    const parentRole = normalizedString(parent?.role, 80).toLowerCase();
+    const parentLabel = normalizedString(parent?.label ?? parent?.name, 160).toLowerCase();
+    const base = JSON.stringify({ role, label, depth, parentRole, parentLabel });
+    const actions = Array.isArray(element.actions)
+      ? element.actions.filter((item): item is string => typeof item === "string").map((item) => item.toLowerCase()).sort()
+      : [];
+    const state = JSON.stringify({
+      actions,
+      enabled: typeof element.enabled === "boolean" ? element.enabled : undefined,
+      disabled: typeof element.disabled === "boolean" ? element.disabled : undefined,
+      selected: typeof element.selected === "boolean" ? element.selected : undefined,
+      expanded: typeof element.expanded === "boolean" ? element.expanded : undefined,
+    });
+    const rect = validRect(element.rect)
+      ? JSON.stringify([element.rect.x, element.rect.y, element.rect.width, element.rect.height])
+      : "";
+    entries.push({ base, state, geometry: rect });
+    if (rect) geometry.push(`${base}\0${rect}`);
+  }
+  entries.sort((a, b) => `${a.base}\0${a.state}`.localeCompare(`${b.base}\0${b.state}`));
+  geometry.sort();
+  const hashInput = JSON.stringify({ completeness, entries: entries.map(({ base, state }) => [base, state]) });
+  const hash = createHash("sha256").update(hashInput).digest("hex");
+  return { completeness, entries, geometry, hash };
+}
+
+function multisetCounts(values: readonly string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return counts;
+}
+
+function compareFingerprintEntries(previous: readonly NormalizedFingerprintEntry[], current: readonly NormalizedFingerprintEntry[]) {
+  const previousByBase = new Map<string, string[]>();
+  const currentByBase = new Map<string, string[]>();
+  for (const entry of previous) previousByBase.set(entry.base, [...(previousByBase.get(entry.base) ?? []), entry.state]);
+  for (const entry of current) currentByBase.set(entry.base, [...(currentByBase.get(entry.base) ?? []), entry.state]);
+  let added = 0;
+  let removed = 0;
+  let updated = 0;
+  const bases = new Set([...previousByBase.keys(), ...currentByBase.keys()]);
+  for (const base of bases) {
+    const oldStates = previousByBase.get(base) ?? [];
+    const newStates = currentByBase.get(base) ?? [];
+    const oldCounts = multisetCounts(oldStates);
+    const newCounts = multisetCounts(newStates);
+    let unchanged = 0;
+    for (const [state, count] of oldCounts) unchanged += Math.min(count, newCounts.get(state) ?? 0);
+    const oldUnmatched = oldStates.length - unchanged;
+    const newUnmatched = newStates.length - unchanged;
+    const changedPairs = Math.min(oldUnmatched, newUnmatched);
+    updated += changedPairs;
+    removed += oldUnmatched - changedPairs;
+    added += newUnmatched - changedPairs;
+  }
+  return {
+    added: Math.min(added, 512),
+    removed: Math.min(removed, 512),
+    updated: Math.min(Math.max(0, updated), 512),
+  };
+}
+
+function compareObservationFingerprint(previous: StoredObservationFingerprint | undefined, current: ObservationFingerprint, revision: string): ObservationChange {
+  if (!previous) {
+    return { status: current.completeness === "complete" ? "initial" : "unknown", fingerprintSchemaVersion: FINGERPRINT_SCHEMA_VERSION,
+      comparisonScope: current.completeness === "complete" ? "full-target" : "observed-subtree", counts: { added: 0, removed: 0, updated: 0 },
+      geometry: { status: "initial" } };
+  }
+  const comparedToRevision = previous.revision;
+  const geometryStatus = !previous.geometry.length || !current.geometry.length
+    ? "unknown"
+    : JSON.stringify(previous.geometry) === JSON.stringify(current.geometry) ? "unchanged" : "changed";
+  if (previous.completeness !== "complete" || current.completeness !== "complete") {
+    return { status: "unknown", fingerprintSchemaVersion: FINGERPRINT_SCHEMA_VERSION, comparisonScope: "observed-subtree",
+      counts: { added: 0, removed: 0, updated: 0 }, geometry: { status: geometryStatus }, comparedToRevision };
+  }
+  const counts = compareFingerprintEntries(previous.entries, current.entries);
+  const changed = counts.added > 0 || counts.removed > 0 || counts.updated > 0;
+  return { status: changed ? "changed" : "unchanged", fingerprintSchemaVersion: FINGERPRINT_SCHEMA_VERSION,
+    comparisonScope: "full-target", counts, geometry: { status: geometryStatus }, comparedToRevision };
+}
+
 function dataUrlImage(value: unknown): ImageBlock | undefined {
   if (typeof value !== "string" || !value.startsWith("data:image/png;base64,")) return undefined;
   return { type: "image", data: value.slice("data:image/png;base64,".length), mimeType: "image/png" };
 }
 
 function toolResponse(value: unknown, image?: ImageBlock, isError = false) {
-  const content: Array<TextBlock | ImageBlock> = [{ type: "text", text: JSON.stringify(value, (key, item) => key === "dataUrl" ? undefined : item) }];
-  if (image) content.push(image);
+  const images: ImageBlock[] = [];
+  let omittedImages = 0;
+  const appendImage = (candidate: ImageBlock | undefined) => {
+    if (!candidate) return;
+    const estimatedBytes = Math.ceil(candidate.data.length * 3 / 4);
+    if (images.length >= MAX_RESPONSE_IMAGES || estimatedBytes > MAX_RESPONSE_IMAGE_BYTES
+      || images.reduce((sum, item) => sum + Math.ceil(item.data.length * 3 / 4), 0) + estimatedBytes > MAX_RESPONSE_IMAGE_BYTES) {
+      omittedImages += 1;
+      return;
+    }
+    images.push(candidate);
+  };
+  appendImage(image);
   const observation = recordOf(recordOf(value)?.observation);
   const popups = recordOf(observation?.capture)?.ownedPopups;
   if (Array.isArray(popups)) for (const popup of popups.slice(0, 8)) {
-    const image = dataUrlImage(recordOf(popup)?.dataUrl);
-    if (image) content.push(image);
+    appendImage(dataUrlImage(recordOf(popup)?.dataUrl));
   }
+  const body = omittedImages > 0 && recordOf(value)
+    ? { ...recordOf(value), imageDelivery: { status: "bounded", delivered: images.length, omitted: omittedImages, maxBytes: MAX_RESPONSE_IMAGE_BYTES } }
+    : value;
+  const content: Array<TextBlock | ImageBlock> = [{ type: "text", text: JSON.stringify(body, (key, item) => key === "dataUrl" ? undefined : item) }, ...images];
   return { content, ...(isError ? { isError: true } : {}) };
 }
 
@@ -336,6 +503,7 @@ function publicStageCapture(capture: Record<string, unknown>) {
 export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcpDeps): void {
   const records = new Map<string, TargetRecord>();
   const logicalTargets = new Map<string, string>();
+  const changeBaselines = new Map<string, StoredObservationFingerprint>();
   const monotonicNow = deps.monotonicNow ?? (() => performance.now());
   const now = deps.now ?? (() => new Date());
   const inputSchemas = buildInputSchemas(deps.authField);
@@ -353,6 +521,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (nowMs - record.target.observedAt > TARGET_TTL_MS) removeTarget(targetId);
     }
     while (records.size > MAX_TARGETS) removeTarget(records.keys().next().value as string);
+    for (const [key, baseline] of changeBaselines) {
+      if (nowMs - baseline.observedAt > CHANGE_BASELINE_TTL_MS) changeBaselines.delete(key);
+    }
+    while (changeBaselines.size > MAX_CHANGE_BASELINES) changeBaselines.delete(changeBaselines.keys().next().value as string);
   }
 
   function saveObservation(input: {
@@ -363,9 +535,11 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     capabilities: ComputerUseCapability[];
     context: TargetContext;
     extra?: Record<string, unknown>;
+    fingerprint: ObservationFingerprint;
   }): TargetRecord {
     const idKey = identityKey(input.identity);
     const logicalKey = `${idKey}\0${input.logicalKey}`;
+    const baselineKey = `${logicalKey}\0${input.kind}`;
     let targetId = logicalTargets.get(logicalKey);
     if (!targetId || !records.has(targetId)) {
       targetId = randomUUID();
@@ -373,6 +547,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     }
     const previous = records.get(targetId);
     const revision = randomUUID();
+    const change = compareObservationFingerprint(changeBaselines.get(baselineKey), input.fingerprint, revision);
     const targetInput = {
       kind: input.kind,
       targetId,
@@ -398,8 +573,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       scopeKey: input.logicalKey,
       route,
       context: input.context,
+      change,
       ...(previous?.pinnedRouteId ? { pinnedRouteId: previous.pinnedRouteId } : {}),
     };
+    changeBaselines.set(baselineKey, { ...input.fingerprint, revision, observedAt: input.observedAt });
     records.delete(targetId);
     records.set(targetId, record);
     pruneTargets(now().getTime());
@@ -545,6 +722,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     const inputSelectionConfirmed = input.inputSelectionConfirmed === true;
     const kind = input.view === "app" ? "desktop-window" : "desktop";
     const contextRepresentation = input.view === "desktop" ? "visual" : input.representation;
+    const rectByStageRef = new Map(controls.filter((control) => control.stageRef && control.rect).map((control) => [control.stageRef!, control.rect!]));
+    const fingerprintElements = structuredControls.map((element) => ({
+      ...element,
+      ...(rectByStageRef.get(element.stageRef ?? element.ref) ? { rect: rectByStageRef.get(element.stageRef ?? element.ref) } : {}),
+    })) as unknown as Record<string, unknown>[];
+    const fingerprint = normalizeObservationFingerprint(fingerprintElements, structureCompleteness(structureStatus));
     const record = saveObservation({
       identity: input.identity,
       logicalKey,
@@ -553,6 +736,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       capabilities: capabilitiesForDesktop(controls, input.view, inputSelectionConfirmed, contextRepresentation, structureStatus),
       context: { kind: "desktop", taskId: input.taskId, mode: input.mode, view: input.view, representation: contextRepresentation,
         ...(structureStatus ? { structureStatus } : {}), width: width ?? 0, height: height ?? 0, controls: map, inputSelectionConfirmed },
+      fingerprint,
     });
     const publicElements = structuredControls.map(({ ref, parentRef, depth, role, label, enabled, selected, actions, canReplaceValue }) => ({
       ref, ...(parentRef ? { parentRef } : {}), ...(depth !== undefined ? { depth } : {}), ...(role ? { role } : {}), ...(label ? { label } : {}),
@@ -565,6 +749,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       ...(typeof structure.appName === "string" ? { appName: structure.appName.slice(0, 120) } : {}),
       ...(typeof structure.windowTitle === "string" ? { windowTitle: structure.windowTitle.slice(0, 240) } : {}),
       elements: publicElements,
+      change: record.change,
     } : undefined;
     const publicControls = controls.filter((control) => control.stageRef || control.rect || control.canReplaceValue).map((control) => ({
       ref: control.ref,
@@ -581,8 +766,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     const image = visibleCapture ? dataUrlImage(visibleCapture.dataUrl) : undefined;
     const observation = input.representation === "structured" && input.view === "app"
       ? { representation: "structured", ...(structuredObservation ? { structure: structuredObservation } : {}), controls: publicControls,
+          change: record.change,
           ...(visibleCapture ? { capture: publicStageCapture(visibleCapture) } : {}) }
       : { representation: "visual", ...(structuredObservation ? { structure: structuredObservation } : {}),
+          change: record.change,
           ...(visibleCapture ? { capture: publicStageCapture(visibleCapture) } : {}), controls: publicControls };
     return {
       record,
@@ -613,7 +800,9 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     if (!response.ok) throw new Error(response.error ?? "The M9R browser snapshot failed.");
     const snapshot = browserSnapshotData(response);
     if (!snapshot || !Array.isArray(snapshot.elements)) throw new Error("The browser broker returned no structured page snapshot.");
-    const rawElements = snapshot.elements.slice(0, 150).map(recordOf).filter((value): value is Record<string, unknown> => Boolean(value));
+    const rawElementRecords = snapshot.elements.map(recordOf).filter((value): value is Record<string, unknown> => Boolean(value));
+    const browserCompleteness: FingerprintCompleteness = rawElementRecords.length > 150 ? "partial" : "complete";
+    const rawElements = rawElementRecords.slice(0, 150);
     const observedRefs = new Set(rawElements.flatMap((element) => typeof element.ref === "string" && BROWSER_REF.test(element.ref)
       && element.sensitive !== true ? [element.ref] : []));
     const elements: BrowserElement[] = [];
@@ -642,6 +831,11 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     const elementMap = new Map(elements.map((element) => [element.ref, element]));
     const url = typeof snapshot.url === "string" ? snapshot.url.slice(0, 4096) : undefined;
     const title = typeof snapshot.title === "string" ? snapshot.title.slice(0, 256) : undefined;
+    const fingerprint = normalizeObservationFingerprint(elements.map((element) => ({
+      ...element,
+      label: element.name,
+      ...(element.disabled !== undefined ? { enabled: !element.disabled } : {}),
+    })) as unknown as Record<string, unknown>[], browserCompleteness);
     const record = saveObservation({
       identity: input.identity,
       logicalKey: input.logicalKey ?? `browser:${input.tab ?? "default"}`,
@@ -651,6 +845,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       context: { kind: "browser", ...(input.tab ? { tab: input.tab } : {}), ...(url ? { url } : {}), ...(title ? { title } : {}),
         ...(typeof snapshot.text === "string" ? { text: snapshot.text.slice(0, 4_000) } : {}), elements: elementMap },
       extra: { ...(url ? { url } : {}) },
+      fingerprint,
     });
     return {
       record,
@@ -659,6 +854,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         title,
         text: typeof snapshot.text === "string" ? snapshot.text.slice(0, 4_000) : "",
         elements,
+        change: record.change,
       },
     };
   }
@@ -902,7 +1098,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         && control?.stageRef && control.enabled !== false && control.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name));
       const confirmFocusForeground = action.confirmFocusForeground === true;
       if (semanticClick) {
-        stageAction = { kind: "click_element", ref: control.stageRef, view: "app", ...(confirmFocusForeground ? { confirmFocusForeground } : {}) };
+        stageAction = { kind: "click_element", ref: control.stageRef, view: "app",
+          ...(control.role !== undefined ? { expectedRole: control.role } : {}),
+          ...(control.label !== undefined ? { expectedLabel: control.label } : {}),
+          ...(confirmFocusForeground ? { confirmFocusForeground } : {}) };
       } else {
         const point = desktopPoint(record, action.locator);
       stageAction = { kind: action.count === 2 ? "double_click" : action.button === "right" ? "right_click" : action.button === "middle" ? "middle_click" : "click", ...point, view: record.context.view,

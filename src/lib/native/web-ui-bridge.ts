@@ -310,7 +310,7 @@ export interface SessionsPort {
    * not "genuinely finished". Computed fresh on every snapshot from live task state, not baked in at exit time, so it
    * clears itself the moment the answer actually lands. */
   snapshot(): Array<{ handle: string; provider: string; folder: string; status: SessionStatus; doing: string; waitingOn?: string }>;
-  deliver(handle: string, text: string): { ok: true; mode: "sent" | "interrupted" | "started" | "restarted-worker" } | { ok: false; error: string };
+  deliver(handle: string, text: string, taskId?: string): { ok: true; mode: "sent" | "interrupted" | "started" | "restarted-worker" } | { ok: false; error: string };
   stop(handle: string): boolean;
   stopAll(): void;
   /** Strings that must never reach the pill (session tokens, interrupt markers). */

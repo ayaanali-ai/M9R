@@ -609,7 +609,9 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   };
   const ownerServer = options.ownerPipePath ? await startOwnerPipe({
     path: options.ownerPipePath,
-    requestTimeoutMs: (request) => request.method === "POST" && agentStagePaths.has(request.path) ? 70_000 : 2_000,
+    requestTimeoutMs: (request) => request.method === "POST" && agentStagePaths.has(request.path) ? 70_000
+      : request.method === "POST" && request.path === "/web/mcp/store" ? 15_000
+      : 2_000,
     handle: (request) => {
       if (request.method === "GET") return handleOwnerRequest(request);
       if (request.method === "POST" && request.path === "/web/mcp/store") {

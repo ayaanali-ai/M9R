@@ -66,7 +66,11 @@ test("the dashboard reads available_models from agent_connections and passes it 
   assert.match(dataSource, /availableModels: conn\?\.available_models \?\? null,/);
 });
 
-test("the model-override control prefers the real discovered list over the hardcoded catalog", () => {
+test("the model-override control never invents a model list when the provider has not reported one", () => {
   const source = readFileSync("src/components/product/agent-workspace/strip-board.tsx", "utf8");
-  assert.match(source, /agent\.availableModels && agent\.availableModels\.length > 0/);
+  assert.match(source, /const knownModels = agent\.availableModels \?\? \[\];/);
+  assert.doesNotMatch(source, /MODEL_CATALOG|claude-opus-5|claude-sonnet-5|gpt-5\.5/,
+    "a provider-reported-only picker must not expose guessed fallback IDs");
+  assert.match(source, /Provider model list unavailable; start a session to discover it\./);
+  assert.match(source, /knownModels\.length === 0/);
 });

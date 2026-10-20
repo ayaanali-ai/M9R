@@ -206,6 +206,117 @@ test("app-window observations are structure-first and semantic clicks stay on th
   assert.equal(stageActions[2]?.operationId, "semantic-site-link");
 });
 
+test("same-target observations report semantic change status without treating fresh revisions as UI changes", async (t) => {
+  let structure: Record<string, unknown> = {
+    status: "complete",
+    capturedAt: new Date().toISOString(),
+    appName: "notepad.exe",
+    windowTitle: "Untitled",
+    elements: [{ ref: "driver-root", role: "window", label: "Untitled", depth: 0, enabled: true, actions: [] }],
+  };
+  const web: WebBrokerClient = {
+    run: async () => ({ ok: false, error: "unused browser route" }),
+    prepareTaskStage: async () => ({ ok: true, result: { prepared: true } }),
+    taskStageAction: async (_token, _taskId, action) => {
+      const kind = (action as { kind?: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
+      if (kind === "read_structure") return { ok: true, result: structure };
+      return { ok: false, error: `unexpected stage action ${String(kind)}`, dispatchState: "not-dispatched" };
+    },
+  };
+  const h = createHarness(web);
+  t.after(async () => { await h.server.close(); });
+
+  const first = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "app-window", taskId: "T904", mode: "owner-preview" }));
+  const second = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "app-window", taskId: "T904", mode: "owner-preview" }));
+  assert.equal(first.observation.structure.change.status, "initial");
+  assert.notEqual(first.target.revision, second.target.revision, "freshness revisions remain unique per observation");
+  assert.equal(second.observation.structure.change.status, "unchanged");
+  assert.equal(second.observation.structure.change.comparedToRevision, first.target.revision);
+  assert.deepEqual(second.observation.structure.change.counts, { added: 0, removed: 0, updated: 0 });
+
+  structure = {
+    ...structure,
+    elements: [{ ref: "another-driver-root", role: "window", label: "Untitled", depth: 0, enabled: true, actions: [] }],
+  };
+  const refOnly = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "app-window", taskId: "T904", mode: "owner-preview" }));
+  assert.equal(refOnly.observation.structure.change.status, "unchanged", "opaque driver refs are not semantic changes");
+  assert.deepEqual(refOnly.observation.structure.change.counts, { added: 0, removed: 0, updated: 0 });
+
+  structure = {
+    ...structure,
+    elements: [{ ref: "new-driver-root", role: "window", label: "Renamed", depth: 0, enabled: true, actions: ["click"] }],
+  };
+  const third = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "app-window", taskId: "T904", mode: "owner-preview" }));
+  assert.equal(third.observation.structure.change.status, "changed");
+  assert.deepEqual(third.observation.structure.change.counts, { added: 1, removed: 1, updated: 0 });
+});
+
+test("incomplete structure observations never claim semantic equality", async (t) => {
+  const structure = {
+    status: "partial",
+    capturedAt: new Date().toISOString(),
+    appName: "notepad.exe",
+    windowTitle: "Untitled",
+    elements: [{ ref: "partial-root", role: "window", label: "Untitled", depth: 0, enabled: true, actions: [] }],
+  };
+  const web: WebBrokerClient = {
+    run: async () => ({ ok: false, error: "unused browser route" }),
+    prepareTaskStage: async () => ({ ok: true, result: { prepared: true } }),
+    taskStageAction: async (_token, _taskId, action) => {
+      const kind = (action as { kind?: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
+      if (kind === "read_structure") return { ok: true, result: structure };
+      if (kind === "capture") return { ok: true, result: {
+        dataUrl: "data:image/png;base64,", width: 640, height: 480, capturedAt: structure.capturedAt, structure,
+      } };
+      return { ok: false, error: `unexpected stage action ${String(kind)}`, dispatchState: "not-dispatched" };
+    },
+  };
+  const h = createHarness(web);
+  t.after(async () => { await h.server.close(); });
+
+  const first = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "app-window", taskId: "T905", mode: "owner-preview" }));
+  const second = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "app-window", taskId: "T905", mode: "owner-preview" }));
+  assert.equal(first.observation.structure.change.status, "unknown");
+  assert.equal(second.observation.structure.change.status, "unknown");
+  assert.equal(second.observation.structure.change.geometry.status, "unknown");
+});
+
+test("visual fallback geometry is tracked separately from semantic structure", async (t) => {
+  let x = 10;
+  const structure = () => ({
+    status: "partial",
+    capturedAt: new Date().toISOString(),
+    appName: "notepad.exe",
+    windowTitle: "Untitled",
+    elements: [{ ref: "driver-root", role: "window", label: "Untitled", depth: 0, enabled: true, actions: [] }],
+    fallbackCapture: {
+      dataUrl: "data:image/png;base64,", width: 640, height: 480, capturedAt: new Date().toISOString(),
+      controls: [{ elementRef: "driver-root", role: "window", label: "Untitled", rect: { x, y: 10, width: 200, height: 100 } }],
+    },
+  });
+  const web: WebBrokerClient = {
+    run: async () => ({ ok: false, error: "unused browser route" }),
+    prepareTaskStage: async () => ({ ok: true, result: { prepared: true } }),
+    taskStageAction: async (_token, _taskId, action) => {
+      const kind = (action as { kind?: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
+      if (kind === "read_structure") return { ok: true, result: structure() };
+      return { ok: false, error: `unexpected stage action ${String(kind)}`, dispatchState: "not-dispatched" };
+    },
+  };
+  const h = createHarness(web);
+  t.after(async () => { await h.server.close(); });
+
+  const first = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "app-window", taskId: "T906", mode: "owner-preview" }));
+  x = 40;
+  const second = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "app-window", taskId: "T906", mode: "owner-preview" }));
+  assert.equal(second.observation.structure.change.status, "unknown", "partial structure does not become semantically trusted because geometry changed");
+  assert.equal(first.observation.structure.change.geometry.status, "initial");
+  assert.equal(second.observation.structure.change.geometry.status, "changed");
+});
+
 test("an observation that silently drops elements past 200 is reported partial, never complete", async (t) => {
   const structure = {
     status: "complete",
@@ -340,6 +451,35 @@ test("explicit visual observation requests one exact app-window screenshot", asy
   assert.deepEqual(calls, ["capture"]);
   assert.ok(reply.content.some((part) => part.type === "image"));
   assert.equal(observed.observation.capture.accessibilityStatus, "complete");
+});
+
+test("oversized visual fallbacks are bounded instead of flooding the provider turn", async (t) => {
+  const calls: string[] = [];
+  const oversized = `data:image/png;base64,${"a".repeat(700_000)}`;
+  const web: WebBrokerClient = {
+    run: async () => ({ ok: false, error: "browser route must not receive app-window fallback" }),
+    prepareTaskStage: async () => ({ ok: true, result: { prepared: true } }),
+    taskStageAction: async (_token, _taskId, action) => {
+      const kind = (action as { kind: string }).kind;
+      if (kind === "window_status") return { ok: true, result: { windowState: "visible" } };
+      calls.push(kind);
+      if (kind !== "read_structure") return { ok: false, error: `unexpected ${kind}`, dispatchState: "not-dispatched" };
+      return { ok: true, result: {
+        status: "partial", capturedAt: new Date().toISOString(), elements: [],
+        fallbackCapture: { dataUrl: oversized, width: 1024, height: 768, capturedAt: new Date().toISOString(), accessibilityStatus: "partial", controls: [] },
+      } };
+    },
+  };
+  const h = createHarness(web);
+  t.after(async () => { await h.server.close(); });
+
+  const reply = await h.call("m9r_computer_observe", {
+    token: TOKEN_A, target: "app-window", taskId: "T906", mode: "owner-preview",
+  });
+  const observed = body(reply) as { imageDelivery?: { status: string; omitted: number; delivered: number } };
+  assert.deepEqual(calls, ["read_structure"]);
+  assert.equal(reply.content.some((part) => part.type === "image"), false);
+  assert.deepEqual(observed.imageDelivery, { status: "bounded", delivered: 0, omitted: 1, maxBytes: 512 * 1024 });
 });
 
 for (const semanticAction of ["expand", "toggle", "select"]) test(`native ${semanticAction} controls advertise and dispatch semantic clicks`, async (t) => {

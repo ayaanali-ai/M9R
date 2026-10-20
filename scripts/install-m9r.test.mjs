@@ -187,6 +187,14 @@ test("runtime updates replace a Windows-locked engine image without stopping act
   assert.match(nativeSource, /filter\(\(file\) => !isRetiredRuntimePath\(file\) \|\| existsSync\(file\)\)/);
 });
 
+test("the standalone broker updater resolves its script-relative default outside parameter binding", () => {
+  const updaterSource = readFileSync(resolve("scripts/update-web-broker.ps1"), "utf8");
+  assert.match(updaterSource, /\[string\]\$SourcePath\s*=\s*''/i);
+  assert.match(updaterSource, /\$scriptRoot\s*=\s*if\s*\(/i);
+  assert.match(updaterSource, /Split-Path\s+-Parent\s+\$MyInvocation\.MyCommand\.Path/i);
+  assert.match(updaterSource, /Join-Path\s+\$scriptRoot\s+'\.\.\\engine\\dist\\m9r-web-broker\.exe'/i);
+});
+
 test("release ZIP contains the built standalone broker", { skip: skipNative }, (t) => {
   const temp = mkdtempSync(join(tmpdir(), "m9r-release-package-test-"));
   t.after(() => rmSync(temp, { recursive: true, force: true }));
@@ -242,7 +250,7 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
     ]);
     for (const [path, contents] of originalFiles) writeFileSync(path, contents);
     const installed = runPowerShell(installer, ["-PackagePath", zipPath, "-NoAutostart", "-NoLaunch"], { input: "y\n", env: profile.env });
-    assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+    assert.equal(installed.status, 0, `${installed.stderr ?? ""}\n${installed.stdout ?? ""}`);
     assert.match(installed.stdout, /M9R FIRST-RUN CONSENT/);
     assert.match(installed.stdout, /Exact setup plan from the engine/);
     assert.match(installed.stdout, /m9r-engine uninstall/);
@@ -283,7 +291,7 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
   await t.test("a broker replaced by engine setup can be refreshed from a verified package", () => {
     const profile = makeProfile(join(temp, "stale-broker-record-case"));
     const firstInstall = runPowerShell(installer, ["-PackagePath", zipPath, "-NoAutostart", "-NoLaunch"], { input: "y\n", env: profile.env });
-    assert.equal(firstInstall.status, 0, firstInstall.stderr || firstInstall.stdout);
+    assert.equal(firstInstall.status, 0, `${firstInstall.stderr ?? ""}\n${firstInstall.stdout ?? ""}`);
     const installedBroker = join(profile.m9rHome, "bin", "m9r-web-broker.exe");
     const runtimeManifest = JSON.parse(readFileSync(join(profile.m9rHome, "install-manifest.json"), "utf8"));
     assert.ok(runtimeManifest.runtimeFiles.some((path) => canonicalPath(path) === canonicalPath(installedBroker)));
@@ -300,7 +308,7 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
   await t.test("uninstall preserves a web broker changed after installation", () => {
     const profile = makeProfile(join(temp, "modified-broker-case"));
     const installed = runPowerShell(installer, ["-PackagePath", zipPath, "-NoAutostart", "-NoLaunch"], { input: "y\n", env: profile.env });
-    assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+    assert.equal(installed.status, 0, `${installed.stderr ?? ""}\n${installed.stdout ?? ""}`);
     const brokerPath = join(profile.m9rHome, "bin", "m9r-web-broker.exe");
     const ownershipPath = join(profile.m9rHome, "web-broker-install.json");
     writeFileSync(brokerPath, Buffer.concat([readFileSync(brokerPath), Buffer.from("user change")]));

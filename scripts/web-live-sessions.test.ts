@@ -377,6 +377,10 @@ test("web MCP config carries the broker-room start time used to suppress stale i
     const { configPath } = writeWebMcpConfig(root, { repoRoot: root, storeRoot: root, brokerPort: 47821, roomStartedAt });
     const config = JSON.parse(readFileSync(configPath, "utf8")) as { mcpServers: { m9r: { env: Record<string, string> } } };
     assert.equal(config.mcpServers.m9r.env.M9R_ROOM_STARTED_AT, String(roomStartedAt));
+    assert.equal(config.mcpServers.m9r.env.M9R_PROVIDER, undefined);
+    const providerConfigPath = writeWebMcpConfig(root, { repoRoot: root, storeRoot: root, brokerPort: 47821, roomStartedAt, provider: "claude-code" }).configPath;
+    const providerConfig = JSON.parse(readFileSync(providerConfigPath, "utf8")) as { mcpServers: { m9r: { env: Record<string, string> } } };
+    assert.equal(providerConfig.mcpServers.m9r.env.M9R_PROVIDER, "claude-code");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -430,6 +434,7 @@ test("helpers: codex JSONL parsing, resume args, and the agent prompt", () => {
   const fresh = codexWorkerArgs({ prompt: "p", folder: "C:/f", launcher: "L", storeRoot: "R", brokerPort: 1, roomStartedAt: 1 });
   assert.deepEqual(fresh.slice(0, 4), ["exec", "p", "--cd", "C:/f"]);
   assert.match(fresh.join(" "), /M9R_ROOM_STARTED_AT="1"/);
+  assert.match(fresh.join(" "), /M9R_PROVIDER="codex"/);
   assert.ok(fresh.includes('sandbox_mode="read-only"'));
   assert.match(webAgentPrompt("claude", "T", ["codex"]), /@codex/);
   const prompt = webAgentPrompt("claude", "T", ["codex"], "project-test");
@@ -714,6 +719,40 @@ test("agents in the room message each other directly: the ask reaches the teamma
     assert.equal(claude.spawned.length, 2, "the answer started the asker's session");
     assert.match(claude.spawned[1].written.join(""), /@opencode answered T1: Pro and Team\./);
     assert.ok(tasks[0].answerPushedAt);
+  } finally {
+    sessions.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a provider failure auto-finalizes the room task that was handed to it", async () => {
+  const tasks: TestRoomTask[] = [];
+  const failures: string[] = [];
+  const store = {
+    issueIdentity: (handle: string, _p: string, sessionId: string) => ({ token: `tok-${handle}-${sessionId.slice(-4)}` }),
+    revokeIdentity: () => undefined,
+    tasksFor: (handle: string) => tasks.filter((t) => t.to === handle),
+    tasksFrom: (handle: string) => tasks.filter((t) => t.from === handle),
+    setApproval: (id: string, approval: string) => { const t = tasks.find((x) => x.id === id); if (t) t.approval = approval; },
+    markDelivered: (ids: string[]) => { for (const id of ids) { const t = tasks.find((x) => x.id === id); if (t) t.deliveredAt = "now"; } },
+    setAnswerPushed: () => undefined,
+    markResultShown: () => undefined,
+    setResult: (id: string, summary: string) => { const t = tasks.find((x) => x.id === id); if (t) t.resultSummary = summary; else failures.push(`unknown task ${id}`); },
+  };
+  const root = makeFixture("m9r-failed-room-task-");
+  const claude = fakeClaude();
+  const sessions = createWebLiveSessions({
+    agents: [{ handle: "claude", provider: "claude-code", folder: root }, { handle: "opencode", provider: "claude-code", folder: root }],
+    storeRoot: root, repoRoot: process.cwd(), brokerPort: 47999, store, env: {}, spawnClaude: claude.spawn,
+    authorizeRoomMessage: allowRoomMessage,
+  } as never);
+  try {
+    tasks.push({ id: "T-provider-failed", from: "claude", fromSession: "web-claude-test", to: "opencode", goal: "check the page", origin: "agent_initiated", approval: "pending", createdAt: new Date().toISOString() });
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.equal(claude.spawned.length, 1, "the provider received the room task before it failed");
+    claude.spawned[0].exit(1);
+    assert.match(tasks[0].resultSummary ?? "", /provider session failed|ended unexpectedly|exit 1/i);
+    assert.deepEqual(failures, []);
   } finally {
     sessions.close();
     rmSync(root, { recursive: true, force: true });

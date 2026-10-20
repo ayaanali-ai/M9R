@@ -27,6 +27,10 @@ export interface HookInput {
   task_id?: string;
   /** Fixed, non-sensitive delivery diagnostic; raw SDK errors and request bodies never cross this boundary. */
   delivery_error?: "session_rejected" | "unknown";
+  /** Provider execution failed after OpenCode accepted the M9R prompt. */
+  execution_error?: "provider_execution_failed" | "idle_without_response";
+  /** Bounded local diagnostic; never trust or render it as provider instructions. */
+  execution_detail?: string;
 }
 
 export interface HookContext {
@@ -109,6 +113,16 @@ function readMemoryIndex(cwd: string): string | null {
 export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "provider" | "store" | "pathExists" | "dispatch" | "strictTargetIdentity" | "captureMentionInput" | "rawPayload">): { acks: string[]; tasks: Array<{ id: string; to: string }> } {
   const self = handleForProvider(ctx.provider);
   const prompt = input.prompt ?? "";
+  // Keep this helper safe when an adapter calls it directly (the hook path
+  // also checks this before invoking it). A delivered task's body may contain
+  // ordinary @mentions and must not become a second outbound task.
+  if (deliveredTaskContext(ctx.store, {
+    handle: self,
+    provider: ctx.provider,
+    sessionId: input.session_id,
+    taskId: input.task_id,
+    prompt,
+  })) return { acks: [], tasks: [] };
   const cwd = input.cwd ?? process.cwd();
   const exists = ctx.pathExists ?? existsSync;
   const acks: string[] = [];
@@ -118,7 +132,8 @@ export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "pro
   // Handles inside pasted text (old test chatter, logs) were never addressed to anyone, so only what the person typed routes.
   // Text another agent sent into this session (a subagent report, a notification) is not the person typing, so it never routes.
   // A prompt M9R pushed in ("[M9R T3] Task from @claude ...") names its sender; routing that would bounce it back.
-  const targets = isM9rPushedPrompt(prompt) || /<(?:agent-message|task-notification|cross-session-message)/.test(prompt) ? [] : findEndpointMentions(prompt.replace(/<pasted_content[^>]*>[\s\S]*?<\/pasted_content[^>]*>/gi, " "), {
+  const providerGeneratedPrompt = isM9rPushedPrompt(prompt);
+  const targets = providerGeneratedPrompt || /<(?:agent-message|task-notification|cross-session-message)/.test(prompt) ? [] : findEndpointMentions(prompt.replace(/<pasted_content[^>]*>[\s\S]*?<\/pasted_content[^>]*>/gi, " "), {
     aliases: ctx.store.knownAliases().filter((a) => a !== self),
     pathExists: (token) => exists(resolve(join(cwd, token))),
   });
@@ -154,10 +169,10 @@ export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "pro
     if (!pushed && created) {
       const live = ctx.store.sessionsWithIdentity(to, projectCwd);
       acks.push(live.length > 0
-        ? to === "opencode" ? renderOpenCodePendingAck(task.id) : renderInboxAck(task.id, to)
-        : renderHeldAck(task.id, to));
+        ? to === "opencode" ? renderOpenCodePendingAck(task.id, false) : renderInboxAck(task.id, to, false)
+        : renderHeldAck(task.id, to, false));
     } else {
-      acks.push(renderSentAck(task.id, to));
+      acks.push(renderSentAck(task.id, to, false));
     }
     tasks.push({ id: task.id, to });
     if (pushed) ctx.dispatch?.(task.id);
@@ -190,7 +205,14 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
         ? ctx.store.identityTokenFor(self, input.session_id) ?? ctx.store.issueIdentity(self, ctx.provider, input.session_id).token
         : undefined;
       if (input.session_id && ctx.providerProcessId !== undefined) {
-        ctx.store.issueConnectionClaim({ handle: self, provider: ctx.provider, sessionId: input.session_id, cwd: projectCwd, ownerProcessId: ctx.providerProcessId });
+        ctx.store.issueConnectionClaim({
+          handle: self,
+          provider: ctx.provider,
+          sessionId: input.session_id,
+          cwd: projectCwd,
+          ownerProcessId: ctx.providerProcessId,
+          continuation: true,
+        });
       }
       // Managed MCP connections bind privately through the provider parent PID. The old
       // token card remains only for legacy/unmanaged adapters during migration.
@@ -247,7 +269,12 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
         .filter((session) => now.getTime() - Date.parse(session.lastSeenAt) < activeWindow);
       if (!sessions.some((session) => session.sessionId === sessionId)) return null;
       const task = ctx.store.getTask(input.task_id!);
-      if (!task || task.to !== self) return null;
+      // An acknowledgement is still part of the initial delivery window. An
+      // old task may remain in state for history, but a delayed/legacy plugin
+      // must never turn that historical row into new queued work.
+      const createdAt = task ? Date.parse(task.createdAt) : Number.NaN;
+      const ageMs = now.getTime() - createdAt;
+      if (!task || task.to !== self || !Number.isFinite(createdAt) || ageMs < 0 || ageMs > inboxMaxAgeMs()) return null;
       if (task.delivery?.threadId !== sessionId
         || !(task.targetSession === sessionId || (!task.targetSession && sessions.length === 1))
         || (task.cwd && (!projectCwd || normCwd(task.cwd) !== normCwd(projectCwd)))) return null;
@@ -276,16 +303,47 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       return settled ? out(event, JSON.stringify({ accepted: true, task_id: task.id })) : null;
     }
 
+    // OpenCode accepts promptAsync before its provider/model loop resolves. A
+    // later provider failure is terminal for the claimed task, but it is not a
+    // transport uncertainty and must never be replayed.
+    if (event === "OpenCodeExecutionFailed") {
+      if (self !== "opencode" || !input.session_id || !/^T\d{1,12}$/.test(input.task_id ?? "")) return null;
+      const sessionId = input.session_id;
+      const identityToken = ctx.store.identityTokenFor(self, sessionId);
+      if (!identityToken) return null;
+      ctx.store.registerEndpoint({ provider: ctx.provider, sessionId, cwd: projectCwd });
+      const sessions = ctx.store.sessionsWithIdentity(self, projectCwd)
+        .filter((session) => now.getTime() - Date.parse(session.lastSeenAt) < activeWindow);
+      if (!sessions.some((session) => session.sessionId === sessionId)) return null;
+      const task = ctx.store.getTask(input.task_id!);
+      if (!task || task.to !== self || task.delivery?.threadId !== sessionId) return null;
+      const detail = typeof input.execution_detail === "string" && input.execution_detail.trim().length > 0
+        ? input.execution_detail.trim().slice(0, 200)
+        : "OpenCode reported a provider execution failure.";
+      const settled = ctx.store.settleOpenCodeTask(task.id, sessionId, identityToken, {
+        state: "failed",
+        error: `OpenCode provider execution failed: ${detail}`,
+      });
+      return settled ? out(event, JSON.stringify({ accepted: true, task_id: task.id })) : null;
+    }
+
     // A turn finished. If this session was shown tasks other agents sent, its final message is the answer: record it and send it back.
     if (event === "Stop") {
+      // A Stop hook is a provider-turn boundary, not task evidence. Older code
+      // attached the same final answer to every recently delivered task when
+      // the adapter omitted a task reference. That polluted the ledger and
+      // made an unrelated user turn look like successful work. Close without a
+      // visible task id only when this session has exactly one waiting task;
+      // multiple waiting tasks remain open rather than being guessed.
       const waiting = ctx.store.awaitingAnswerFrom(self, input.session_id);
-      if (waiting.length === 0 || !ctx.lastAnswer) return null;
+      const task = input.task_id
+        ? waiting.find((candidate) => candidate.id === input.task_id)
+        : waiting.length === 1 ? waiting[0] : undefined;
+      if (!task || !ctx.lastAnswer) return null;
       const text = ctx.lastAnswer(input);
       if (!text) return null;
-      for (const t of waiting) {
-        ctx.store.setResult(t.id, text);
-        ctx.answerBack?.(t.id);
-      }
+      ctx.store.setResult(task.id, text);
+      ctx.answerBack?.(task.id);
       return null;
     }
 
@@ -309,18 +367,50 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const knownSession = input.session_id
         ? ctx.store.sessionsFor(self, projectCwd).some((session) => session.sessionId === input.session_id)
         : false;
-      if (input.session_id && ctx.providerProcessId !== undefined) {
+      const trustedSessionMetadata = ctx.sessionMetadataVerified === true || ctx.providerProcessId !== undefined;
+      const sessionWasRevoked = input.session_id ? ctx.store.identityWasRevoked(self, input.session_id) : false;
+      const hasPendingWorkForSession = input.session_id
+        ? ctx.store.pendingWorkFor(self, input.session_id).length > 0
+        : false;
+      // Codex's prompt hook can expose an incidental app/process id before its
+      // SessionStart record exists. A real provider PID is an equally strong
+      // proof for recovery; otherwise require the known Codex session boundary.
+      // If there is no delegated work waiting, a verified prompt may establish
+      // the identity; when work is waiting, require the known session boundary
+      // so an incidental app id cannot claim someone else's inbox.
+      const canHealIdentity = trustedSessionMetadata
+        && (self !== "codex" || knownSession || ctx.providerProcessId !== undefined || !hasPendingWorkForSession);
+      if (input.session_id && canHealIdentity && !sessionWasRevoked) {
+        // A verified adapter session is enough to restore its durable identity
+        // after a runtime/state split. A provider PID is additionally required
+        // before creating the private connection claim, because an unowned
+        // claim would make provider-only binding ambiguous. Normal installed
+        // shims supply the PID; this branch keeps the identity repair
+        // provider-neutral for adapters that can prove a canonical session but
+        // do not expose a process identity.
         const identity = ctx.store.identityTokenFor(self, input.session_id)
           ? undefined
           : ctx.store.issueIdentity(self, ctx.provider, input.session_id);
-        ctx.store.issueConnectionClaim({ handle: self, provider: ctx.provider, sessionId: input.session_id, cwd: projectCwd, ownerProcessId: ctx.providerProcessId });
-        if (identity && self === "codex" && knownSession) parts.push(renderSessionCard({ handle: self, others: [], pendingCount: 0, awaitingApproval: 0 }));
-      } else if (self === "codex" && input.session_id && knownSession && !ctx.store.identityTokenFor(self, input.session_id)) {
-        const identity = ctx.store.issueIdentity(self, ctx.provider, input.session_id);
-        parts.push(renderSessionCard({ handle: self, others: [], pendingCount: 0, awaitingApproval: 0, identityToken: identity.token }));
+        if (ctx.providerProcessId !== undefined) {
+          ctx.store.issueConnectionClaim({
+            handle: self,
+            provider: ctx.provider,
+            sessionId: input.session_id,
+            cwd: projectCwd,
+            ownerProcessId: ctx.providerProcessId,
+            continuation: true,
+          });
+        }
+        if (identity && self === "codex" && knownSession) {
+          parts.push(renderSessionCard({
+            handle: self,
+            others: [],
+            pendingCount: 0,
+            awaitingApproval: 0,
+            identityToken: ctx.providerProcessId === undefined ? identity.token : undefined,
+          }));
+        }
       }
-
-      parts.push(...routeTypedMentions(input, ctx).acks);
 
       // Reattach only the matching internal task context to a trusted
       // provider prompt. The queued task body itself remains plain user text.
@@ -330,6 +420,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
         sessionId: input.session_id,
         taskId: input.task_id,
         prompt,
+        now: now.getTime(),
       });
       if (deliveredContext) {
         parts.push(deliveredContext);
@@ -338,28 +429,33 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
         return out(event, parts.join("\n"));
       }
 
+      // Only an ordinary provider/user prompt can create new @mention tasks.
+      // A delivered task is checked above so an @mention inside its goal is
+      // never reinterpreted as a second outbound instruction.
+      parts.push(...routeTypedMentions(input, ctx).acks);
+
       // A prompt M9R pushed in is a task by itself: nothing else (older inbox items, results) is mixed into it, or the agent
       // may answer the wrong one. Those items wait for the user's next real prompt.
       if (isM9rPushedPrompt(prompt)) return out(event, parts.join("\n"));
 
       // 2a. Answers to tasks we sent, once.
       try { ctx.collect?.(); } catch { /* a collect failure must never touch the prompt */ }
-      const results = renderResultsInjection(ctx.store.tasksFrom(self), self);
+      const results = renderResultsInjection(ctx.store.tasksFrom(self), self, { includeTaskIds: false });
       if (results.text) { parts.push(results.text); ctx.store.markResultShown(results.ids); }
 
       // 2b. Anything new in our own inbox, delta-only.
       const cursor = ctx.store.cursorFor(self, input.session_id, cwd);
       const candidates = self === "opencode"
         ? { text: "", includedIds: [] as string[], newCursor: cursor, omitted: 0 }
-        : renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { now: now.getTime() });
+        : renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { includePending: false, includeTaskIds: false, items: 1, now: now.getTime() });
       if (candidates.text) {
-        const codexHasIdentity = self !== "codex" || Boolean(input.session_id && ctx.store.identityTokenFor(self, input.session_id));
-        if (!codexHasIdentity) {
-          parts.push("M9R is holding incoming work until this Codex session reconnects and receives an active M9R identity. No task details were included.");
+        const sessionHasIdentity = Boolean(input.session_id && ctx.store.identityTokenFor(self, input.session_id));
+        if (!sessionHasIdentity) {
+          parts.push("M9R is holding incoming work until this provider session reconnects and receives an active M9R identity. No task details were included.");
         } else {
           if (input.session_id) {
             const claimed = ctx.store.claimInboxTasks(self, input.session_id, candidates.includedIds, cwd);
-            const injection = renderInboxInjection(claimed, -1, { now: now.getTime() });
+            const injection = renderInboxInjection(claimed, -1, { includePending: false, includeTaskIds: false, items: 1, now: now.getTime() });
             if (injection.text) parts.push(injection.text);
           } else {
             parts.push("M9R is holding incoming work because this provider did not include a session id. Reconnect the agent so M9R can deliver the task to the session that will report its result.");

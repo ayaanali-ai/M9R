@@ -7,6 +7,7 @@
  */
 import { posix, win32 } from "node:path";
 import type { Task } from "./inbox-core";
+import { isM9rWorkspaceEnvelope } from "./m9r-prompt-markers";
 import { taskCorrelationMarker, visibleTaskText } from "./task-execution-context";
 
 /** A task may be pushed only when a human typed it or approved it. Everything else stays in the inbox. */
@@ -28,7 +29,9 @@ export const isBrokerAgentPrompt = (prompt: string) => /You are @[a-z0-9-]+, an 
   || prompt.includes("M9R tools may only be reachable as deferred tools through your exec/code gateway");
 
 /** True for a prompt M9R itself pushed into a session. Its @mentions are the sender's name, not a new request to route. */
-export const isM9rPushedPrompt = (prompt: string) => /^\s*\[M9R T\d+\]/.test(prompt) || isBrokerAgentPrompt(prompt);
+export const isM9rPushedPrompt = (prompt: string) => /^\s*\[M9R T\d+\]/.test(prompt)
+  || isBrokerAgentPrompt(prompt)
+  || isM9rWorkspaceEnvelope(prompt);
 
 export function buildQueueMessage(task: Pick<Task, "id" | "from" | "goal">, sessionToken?: string): string {
   // Correlation belongs in the trusted adapter context. The body is only the task text; never forward the

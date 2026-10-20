@@ -1,11 +1,29 @@
 [CmdletBinding()]
 param(
-    [string]$SourcePath = (Join-Path $PSScriptRoot '..\engine\dist\m9r-web-broker.exe'),
-    [string]$M9rHome = $(if ($env:M9R_HOME) { $env:M9R_HOME } else { Join-Path $env:USERPROFILE '.m9r' })
+    # Do not evaluate script-relative defaults in the param block. PowerShell can
+    # bind that block before $PSScriptRoot is populated (notably when invoked by
+    # the packaged updater), which previously produced an empty source path.
+    [string]$SourcePath = '',
+    [string]$M9rHome = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$scriptRoot = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $PSScriptRoot
+} else {
+    Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($SourcePath)) {
+    $SourcePath = Join-Path $scriptRoot '..\engine\dist\m9r-web-broker.exe'
+}
+if ([string]::IsNullOrWhiteSpace($M9rHome)) {
+    $M9rHome = if (-not [string]::IsNullOrWhiteSpace($env:M9R_HOME)) {
+        $env:M9R_HOME
+    } else {
+        Join-Path ([Environment]::GetFolderPath('UserProfile')) '.m9r'
+    }
+}
 
 function Get-Sha256([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()

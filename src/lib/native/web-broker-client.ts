@@ -6,6 +6,8 @@ import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import type { TaskStageMode } from "./task-desktop-stage";
 
 const MAX_STAGE_REQUEST_TIMEOUT_MS = 70_000;
+/** State writes use the same owner pipe but may serialize a large, locked local snapshot. */
+const AGENT_STORE_REQUEST_TIMEOUT_MS = 15_000;
 
 /** Common response envelope for stage operations and the provider-neutral computer-use adapter. */
 export interface StageClientResult {
@@ -77,9 +79,9 @@ async function agentStoreRequest<T extends { ok: boolean; error?: string }>(inpu
       method: "POST",
       path: "/web/mcp/store",
       body: input.body,
-    }, 3_000);
+    }, AGENT_STORE_REQUEST_TIMEOUT_MS);
     if (!result || typeof result !== "object" || typeof (result as { ok?: unknown }).ok !== "boolean") {
-      return { ok: false, error: "The owner broker did not return a valid M9R state response; no task was accepted." } as T;
+      return { ok: false, error: "The owner broker did not confirm this M9R state write before the timeout; it may already have been applied. Retry the same idempotent operation once rather than assuming it was lost." } as T;
     }
     return result as T;
   } catch {

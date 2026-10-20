@@ -811,7 +811,16 @@ export function bearerFrom(header: string | null): string | null {
  * connection is active and the token is not revoked/expired, bumps last_used_at,
  * and returns the bound workspace + scopes. Returns null when unauthenticated.
  */
-export async function authenticateAgent(rawToken: string | null): Promise<AuthedAgent | null> {
+export interface AuthenticateAgentOptions {
+  /**
+   * Heartbeat callers validate and persist liveness separately. Keeping this
+   * opt-out explicit prevents an invalid or replayed heartbeat from refreshing
+   * the connection's last_seen_at during authentication.
+   */
+  touchLastSeen?: boolean;
+}
+
+export async function authenticateAgent(rawToken: string | null, options: AuthenticateAgentOptions = {}): Promise<AuthedAgent | null> {
   if (!rawToken) return null;
   const db = requireService();
   const { data, error } = await db
@@ -838,7 +847,9 @@ export async function authenticateAgent(rawToken: string | null): Promise<Authed
 
   const now = new Date().toISOString();
   await db.from("agent_tokens").update({ last_used_at: now }).eq("id", data.id);
-  await db.from("agent_connections").update({ last_seen_at: now }).eq("id", data.connection_id);
+  if (options.touchLastSeen !== false) {
+    await db.from("agent_connections").update({ last_seen_at: now }).eq("id", data.connection_id);
+  }
 
   return {
     connectionId: data.connection_id as string,
@@ -1106,6 +1117,41 @@ export interface RecordSessionMeta {
   submissionDigest?: string | null;
 }
 
+type SessionIdempotencyLookup =
+  | { state: "found"; id: string }
+  | { state: "absent" }
+  | { state: "unavailable"; reason: "missing-column" | "error" };
+
+function isMissingSubmissionDigestColumn(error: { code?: string | null; message?: string | null } | null | undefined): boolean {
+  return Boolean(error && (error.code === "42703" || /column .*submission_digest.*does not exist/i.test(error.message ?? "")));
+}
+
+async function findExistingAgentSession(
+  db: ReturnType<typeof requireService>,
+  agent: AuthedAgent,
+  digest: string,
+): Promise<SessionIdempotencyLookup> {
+  const { data, error } = await db
+    .from("agent_sessions")
+    .select("id")
+    .eq("workspace_id", agent.workspaceId)
+    .eq("connection_id", agent.connectionId)
+    .eq("submission_digest", digest)
+    .maybeSingle();
+
+  // Older installations can be missing the additive attestation column. Keep
+  // the existing snapshot fallback in that case, but never turn an unrelated
+  // database/read failure into another insert (which would recreate the
+  // duplicate-history bug during a transient outage).
+  if (isMissingSubmissionDigestColumn(error)) return { state: "unavailable", reason: "missing-column" };
+  if (error) {
+    console.error("recordAgentSession idempotency lookup failed:", error.message, error.code);
+    return { state: "unavailable", reason: "error" };
+  }
+  if (!data?.id) return { state: "absent" };
+  return { state: "found", id: data.id as string };
+}
+
 /**
  * Persist honest, non-sensitive session metadata. Best-effort; never throws.
  * Returns the new session row id (or null on failure) so callers can link the
@@ -1114,7 +1160,13 @@ export interface RecordSessionMeta {
 export async function recordAgentSession(agent: AuthedAgent, meta: RecordSessionMeta): Promise<string | null> {
   try {
     const db = requireService();
-    const coreInsert = {
+    const submissionDigest = meta.submissionDigest?.trim() || null;
+    if (submissionDigest) {
+      const existing = await findExistingAgentSession(db, agent, submissionDigest);
+      if (existing.state === "found") return existing.id;
+      if (existing.state === "unavailable" && existing.reason === "error") return null;
+    }
+    const legacyInsert = {
       connection_id: agent.connectionId,
       workspace_id: agent.workspaceId,
       agent_kind: meta.agentKind ?? null,
@@ -1124,10 +1176,13 @@ export async function recordAgentSession(agent: AuthedAgent, meta: RecordSession
       findings_count: meta.findingsCount,
       rules_generated: meta.rulesGenerated,
       summary: meta.summary.slice(0, 500),
+    };
+    const coreInsert = {
+      ...legacyInsert,
       submission_origin: meta.submissionOrigin ?? null,
       attachment_status: meta.attachmentStatus ?? null,
       human_attestation: meta.humanAttestation ?? null,
-      submission_digest: meta.submissionDigest ?? null,
+      submission_digest: submissionDigest,
     };
     const snapshotInsert = {
       ...coreInsert,
@@ -1137,8 +1192,16 @@ export async function recordAgentSession(agent: AuthedAgent, meta: RecordSession
 
     let insertResult = await db.from("agent_sessions").insert(snapshotInsert).select("id").single();
     if (insertResult.error && (insertResult.error.code === "42703" || /column .* does not exist/i.test(insertResult.error.message ?? ""))) {
-      console.warn("agent_sessions snapshot columns missing; retrying session insert without compare snapshots.");
-      insertResult = await db.from("agent_sessions").insert(coreInsert).select("id").single();
+      console.warn("agent_sessions optional columns missing; retrying session insert with the legacy column set.");
+      insertResult = await db.from("agent_sessions").insert(legacyInsert).select("id").single();
+    }
+    // The unique partial index in the attestation migration is the race-safe
+    // boundary. A concurrent retry can still report 23505 after both callers
+    // missed the initial lookup; resolve that conflict to the first row rather
+    // than surfacing a second history entry or inventing a new one.
+    if (insertResult.error?.code === "23505" && submissionDigest) {
+      const existing = await findExistingAgentSession(db, agent, submissionDigest);
+      if (existing.state === "found") return existing.id;
     }
     if (insertResult.error) {
       console.error("recordAgentSession insert failed:", insertResult.error.message, insertResult.error.code);

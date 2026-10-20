@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { hasPendingRuntimeTransaction, installRuntimeTransaction, recoverRuntimeTransactions } from "@/lib/native/runtime-install-transaction";
+import { hasPendingRuntimeTransaction, installRuntimeTransaction, pruneCommittedRuntimeBackups, recoverRuntimeTransactions } from "@/lib/native/runtime-install-transaction";
 import { createHash, randomUUID } from "node:crypto";
 
 test("interrupted updates restore verified backups and reject tampering before replacement", () => {
@@ -55,5 +55,42 @@ test("invalid or missing sources cannot partially update a runtime", () => {
     assert.throws(() => installRuntimeTransaction(bin, [{ from, to }, { from: join(home, "missing"), to: join(bin, "broker") }], () => { throw new Error("must not replace"); }));
     assert.equal(readFileSync(to, "utf8"), "old");
     assert.throws(() => installRuntimeTransaction(bin, [{ from, to: join(home, "outside") }], () => []), /outside/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("retention prunes only old committed snapshots and preserves recovery evidence", () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-runtime-retention-"));
+  const bin = join(home, "bin");
+  const backupRoot = join(home, "runtime-backups");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(backupRoot, { recursive: true });
+  const makeJournal = (status: string, targetDir = bin, ageMinutes = 0) => {
+    const transaction = join(backupRoot, randomUUID());
+    mkdirSync(transaction, { recursive: true });
+    writeFileSync(join(transaction, "transaction.json"), JSON.stringify({ status, targetDir, files: [] }));
+    const time = new Date(Date.now() - ageMinutes * 60_000);
+    utimesSync(transaction, time, time);
+    utimesSync(join(transaction, "transaction.json"), time, time);
+    return transaction;
+  };
+  try {
+    const old1 = makeJournal("committed", bin, 500);
+    const old2 = makeJournal("committed", bin, 400);
+    const keep1 = makeJournal("committed", bin, 300);
+    const keep2 = makeJournal("committed", bin, 200);
+    const keep3 = makeJournal("committed", bin, 100);
+    const applying = makeJournal("applying", bin, 600);
+    const failed = makeJournal("rollback_failed", bin, 700);
+    const foreign = makeJournal("committed", join(home, "other-bin"), 800);
+    const malformed = join(backupRoot, randomUUID());
+    mkdirSync(malformed, { recursive: true });
+    writeFileSync(join(malformed, "transaction.json"), "not json");
+
+    const pruned = pruneCommittedRuntimeBackups(bin, 3);
+
+    assert.deepEqual(pruned.sort(), [old1, old2].sort());
+    assert.equal(existsSync(old1), false);
+    assert.equal(existsSync(old2), false);
+    for (const retained of [keep1, keep2, keep3, applying, failed, foreign, malformed]) assert.equal(existsSync(retained), true, retained);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });

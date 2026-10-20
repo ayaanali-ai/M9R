@@ -43,6 +43,15 @@ test("rejects unknown protocol versions and execution origins", () => {
   assert.equal(acceptHeartbeat(heartbeat({ executionOrigin: "magic" }), { receivedAt: RECEIVED_AT, previousSequence: null }).ok, false);
 });
 
+test("rejects a heartbeat whose provider identity does not match the authenticated connection", () => {
+  const result = acceptHeartbeat(heartbeat({ provider: "claude-code" }), {
+    receivedAt: RECEIVED_AT,
+    previousSequence: null,
+    expectedProvider: "codex",
+  });
+  assert.deepEqual(result, { ok: false, reason: "provider_mismatch" });
+});
+
 test("rejects malformed identity and idempotency fields", () => {
   assert.equal(acceptHeartbeat(heartbeat({ adapterInstanceId: "x" }), { receivedAt: RECEIVED_AT, previousSequence: null }).ok, false);
   assert.equal(acceptHeartbeat(heartbeat({ idempotencyKey: "short" }), { receivedAt: RECEIVED_AT, previousSequence: null }).ok, false);
@@ -57,9 +66,15 @@ test("rejects invalid server receipt timestamps instead of issuing a lease", () 
 
 test("heartbeat API authenticates the connection and never accepts workspace identity from the body", async () => {
   const route = await readFile(new URL("../src/app/api/agent/presence/heartbeat/route.ts", import.meta.url), "utf8");
-  assert.match(route, /authenticateAgent\(bearerFrom/);
+  assert.match(route, /authenticateAgent\(bearerFrom[\s\S]+touchLastSeen: false/);
   assert.match(route, /recordAgentHeartbeat\(agent, body/);
   assert.doesNotMatch(route, /body\.workspace/);
+});
+
+test("heartbeat authentication supports a validation-first path without touching connection liveness", async () => {
+  const service = await readFile(new URL("../src/lib/agent-join-service.ts", import.meta.url), "utf8");
+  assert.match(service, /export async function authenticateAgent\(rawToken: string \| null, options/);
+  assert.match(service, /options\.touchLastSeen !== false/);
 });
 
 test("heartbeat persistence scopes every lookup and write to token-bound connection and workspace", async () => {
@@ -67,5 +82,6 @@ test("heartbeat persistence scopes every lookup and write to token-bound connect
   assert.match(service, /\.rpc\("record_agent_heartbeat_atomic"/);
   assert.match(service, /p_workspace_id: agent\.workspaceId/);
   assert.match(service, /p_connection_id: agent\.connectionId/);
+  assert.match(service, /expectedProvider: agent\.agentKind/);
   assert.doesNotMatch(service, /service_role|SUPABASE_SERVICE_ROLE/);
 });

@@ -111,10 +111,11 @@ test("m9r_send creates a real inbox task the recipient can see, m9r_result recor
   const { store, done } = tempStore();
   const codex = store.issueIdentity("codex", "codex", "s-codex");
   const claude = store.issueIdentity("claude", "claude-code", "s-claude");
+  store.addRule({ from: "codex", to: "claude", ttlMs: 3_600_000 });
   const server = createM9rMcpServer({ store });
 
   const sent = await callTool(server, "m9r_send", { token: codex.token, to: "claude", goal: "check the build" });
-  assert.match(sent.content[0].text, /Sent to @claude as task T1/);
+  assert.match(sent.content[0].text, /Message sent to @claude/);
   assert.equal(store.getTask("T1")?.from, "codex");
 
   await assert.rejects(() => callTool(server, "m9r_result", { token: codex.token, taskId: "T1", summary: "done" }), /not sent to you/);
@@ -123,7 +124,7 @@ test("m9r_send creates a real inbox task the recipient can see, m9r_result recor
   assert.match(inbox.content[0].text, /check the build/);
 
   const result = await callTool(server, "m9r_result", { token: claude.token, taskId: "T1", summary: "build is green" });
-  assert.match(result.content[0].text, /Recorded result for T1/);
+  assert.match(result.content[0].text, /Result recorded/);
   assert.equal(store.getTask("T1")?.resultSummary, "build is green");
   done();
 });

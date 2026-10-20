@@ -30,8 +30,10 @@ for (const provider of ["local-open-weight-model", "arbitrary-provider", "claude
       const output = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: session,
         cwd: "C:/project", prompt: task.goal }, { provider, store, strictTargetIdentity: true, readIndex: () => null });
       const context = output?.hookSpecificOutput.additionalContext ?? "";
-      assert.ok(context.includes(`[M9R ${task.id}]`), "task correlation belongs in hidden hook context");
-      assert.ok(context.includes(identity.token), "context must supply the exact authenticated session credential");
+      assert.match(context, /M9R assigned one approved work item/i);
+      assert.match(context, /m9r_result/);
+      assert.doesNotMatch(context, new RegExp(task.id));
+      assert.doesNotMatch(context, new RegExp(identity.token));
       assert.deepEqual(routeTypedMentions({ session_id: session, cwd: "C:/project", prompt: task.goal },
         { provider, store, pathExists: () => false }), { acks: [], tasks: [] },
         "a hook-free adapter must not reinterpret a delivered task's mentions as fresh owner instructions");

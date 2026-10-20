@@ -25,6 +25,25 @@ export const TRUNCATION_MARKER = " [truncated: full text via get_task]";
 export type Approval = "not_needed" | "pending" | "approved" | "denied" | "expired";
 export type Origin = "human_typed" | "agent_initiated";
 
+/** A durable phase boundary for one request handled by the native desktop stage. */
+export type StageTimingPhase = "queue_wait" | "prepare" | "launch" | "action" | "close" | "stop"
+  | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion";
+
+/**
+ * Timing is deliberately kept on the task record so a later result or audit can reconcile
+ * the complete turn without depending on process stderr or a live broker. It contains no
+ * task text, credentials, window identifiers, or desktop pixels.
+ */
+export interface StageTimingEvent {
+  phase: StageTimingPhase;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  status: "ok" | "error";
+  operationId?: string;
+  detail?: string;
+}
+
 /** Canonical inbox key: tolerate a single mention marker and provider-handle casing. */
 export function normalizeHandle(handle: string): string {
   return (handle.startsWith("@") ? handle.slice(1) : handle).toLowerCase();
@@ -55,6 +74,8 @@ export interface Task {
   dismissedAt?: string;
   /** Native push (N2): how far pushing this task into the target session got. Absent for plain inbox tasks. */
   delivery?: TaskDelivery;
+  /** Durable target-session receipt; unlike a cursor this records what was actually presented. */
+  lifecycle?: TaskLifecycle;
   /** Working directory of the sender; used to pick the target's session when several are open. */
   cwd?: string;
   /** Session id (or unique prefix) the sender pinned, so a push never has to guess. */
@@ -65,6 +86,8 @@ export interface Task {
   deliveredSession?: string;
   /** Set when the answer was pushed back into the sender's session. */
   answerPushedAt?: string;
+  /** Durable, bounded phase timings for native desktop-stage requests. */
+  stageTiming?: StageTimingEvent[];
 }
 
 export interface TaskDelivery {
@@ -79,6 +102,24 @@ export interface TaskDelivery {
   error?: string;
   /** New adapters report an exact task outcome; marker inference is legacy-only. */
   correlation?: "internal-context";
+}
+
+/**
+ * Human-readable lifecycle evidence for a task. Delivery state answers
+ * "did the transport accept it?"; lifecycle answers "what did the target
+ * session actually receive/finish?" Keeping both prevents an inbox cursor
+ * from being mistaken for a completed provider turn.
+ */
+export type TaskLifecycleState = "queued" | "presented" | "acknowledged" | "completed" | "failed";
+export interface TaskLifecycle {
+  state: TaskLifecycleState;
+  sessionId?: string;
+  source?: "prompt" | "push" | "poll";
+  queuedAt?: string;
+  presentedAt?: string;
+  acknowledgedAt?: string;
+  completedAt?: string;
+  error?: string;
 }
 
 export interface NewTaskInput {
@@ -156,11 +197,14 @@ const RESULT_ITEMS = 3;
 const RESULT_CHARS = 400;
 
 /** Answers to tasks this agent sent, shown once at its next prompt. Empty when there are none (zero tokens). */
-export function renderResultsInjection(tasks: readonly Task[], handle: string): { text: string; ids: string[] } {
+export function renderResultsInjection(tasks: readonly Task[], handle: string, options: { includeTaskIds?: boolean } = {}): { text: string; ids: string[] } {
   const normalizedHandle = normalizeHandle(handle);
   const ready = tasks.filter((t) => normalizeHandle(t.from) === normalizedHandle && t.resultSummary && !t.resultShownAt).slice(0, RESULT_ITEMS);
   if (ready.length === 0) return { text: "", ids: [] };
-  const lines = ready.map((t) => `[${t.id} finished by @${t.to}] ${clip(t.resultSummary ?? "", RESULT_CHARS).text}`);
+  const includeTaskIds = options.includeTaskIds !== false;
+  const lines = ready.map((t) => includeTaskIds
+    ? `[${t.id} finished by @${t.to}] ${clip(t.resultSummary ?? "", RESULT_CHARS).text}`
+    : `Work finished by @${t.to}: ${clip(t.resultSummary ?? "", RESULT_CHARS).text}`);
   return { text: `M9R results (${ready.length})\n${lines.join("\n")}`, ids: ready.map((t) => t.id) };
 }
 
@@ -208,6 +252,10 @@ export interface InjectionOptions {
   items?: number;
   /** Longest goal shown per item; defaults to ENVELOPE_GOAL_CHARS. */
   itemChars?: number;
+  /** Provider delivery only: pending work is held until approval instead of being presented or cursor-advanced. */
+  includePending?: boolean;
+  /** Provider delivery only: keep durable task ids in the store, not in ordinary provider prompt text. */
+  includeTaskIds?: boolean;
 }
 
 export function renderInboxInjection(tasks: readonly Task[], cursor: number, options: InjectionOptions = {}): InjectionResult {
@@ -215,18 +263,28 @@ export function renderInboxInjection(tasks: readonly Task[], cursor: number, opt
   const goalChars = options.itemChars ?? ENVELOPE_GOAL_CHARS;
   const now = options.now ?? Date.now();
   const maxAge = options.maxAgeMs ?? inboxMaxAgeMs();
-  const visible = tasks
+  const includeTaskIds = options.includeTaskIds !== false;
+  const eligible = tasks
     // A task already pushed into the session as a real prompt must not be injected a second time from the inbox.
     // A task that already has a result is finished, and one older than the age limit is history, not work to hand a new session.
     .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired" && t.delivery?.state !== "queued" && t.delivery?.state !== "done"
       && !t.resultSummary && !(now - Date.parse(t.createdAt) > maxAge))
     .sort((a, b) => a.seq - b.seq);
+  // Provider delivery must preserve inbox order. If an unapproved task is at
+  // the frontier, do not skip over it and advance the cursor past it: approval
+  // later must still make that exact task deliverable. The owner-facing
+  // renderer keeps its historical default (includePending=true) so the
+  // approval card remains visible.
+  const firstPending = options.includePending === false
+    ? eligible.find((task) => task.approval === "pending")
+    : undefined;
+  const visible = firstPending ? eligible.filter((task) => task.seq < firstPending.seq) : eligible;
   const shown = visible.slice(0, maxItems);
   if (shown.length === 0) return { text: "", includedIds: [], newCursor: cursor, omitted: 0 };
   const perItemChars = options.itemChars ? options.itemChars + 200 : CAPS.inboxItemTokens * 4;
   const lines = shown.map((t) => {
-    const head = `[${t.id} from @${t.from}, ${approvalLabel(t)}] `;
-    const tail = ` Details: get_task ${t.id}.`;
+    const head = includeTaskIds ? `[${t.id} from @${t.from}, ${approvalLabel(t)}] ` : `M9R work from @${t.from}: `;
+    const tail = includeTaskIds ? ` Details: get_task ${t.id}.` : " More detail is available through the connected M9R context.";
     const room = Math.max(40, Math.min(goalChars, perItemChars - head.length - tail.length));
     // The pointer is only useful (and only safe to mention) when the text shown is not the whole goal.
     const shown = clip(t.goal, room);
@@ -235,7 +293,7 @@ export function renderInboxInjection(tasks: readonly Task[], cursor: number, opt
   const omitted = visible.length - shown.length;
   const more = omitted > 0 ? ` (${omitted} more waiting: call inbox.)` : "";
   return {
-    text: `M9R inbox (${shown.length} new)${more}\n${lines.join("\n")}`,
+    text: `${includeTaskIds ? "M9R inbox" : "M9R work"} (${shown.length} new)${more}\n${lines.join("\n")}${includeTaskIds ? "" : "\nWhen finished or blocked, call m9r_result with the concrete outcome."}`,
     includedIds: shown.map((t) => t.id),
     newCursor: shown[shown.length - 1].seq,
     omitted,
@@ -270,8 +328,9 @@ export function renderSessionCard(input: CardInput): string {
 }
 
 /** The one line injected after a human-typed mention so the sending agent does not do the work itself. */
-export function renderSentAck(taskId: string, to: string): string {
-  return `M9R already sent your message to @${to} as task ${taskId}, so @${to} will do it. Do not do that work yourself: tell the user it was sent to @${to}, and continue with anything else. The result will arrive in your inbox.`;
+export function renderSentAck(taskId: string, to: string, includeTaskId = true): string {
+  const reference = includeTaskId ? ` as task ${taskId}` : "";
+  return `M9R already sent your message to @${to}${reference}, so @${to} will do it. Do not do that work yourself: tell the user it was sent to @${to}, and continue with anything else. The result will arrive in your inbox.`;
 }
 
 /**
@@ -280,17 +339,20 @@ export function renderSentAck(taskId: string, to: string): string {
  * until it connects. Both keep the do-not-do-it-yourself directive: the failure mode being fixed is the
  * sender believing "sent" means "being worked on right now".
  */
-export function renderInboxAck(taskId: string, to: string): string {
-  return `M9R put your message to @${to} in their inbox as task ${taskId}; they pick it up at their next prompt, so it is not being worked on this instant. Do not do that work yourself: tell the user it was handed to @${to}, and continue with anything else. The result will arrive in your inbox.`;
+export function renderInboxAck(taskId: string, to: string, includeTaskId = true): string {
+  const reference = includeTaskId ? ` as task ${taskId}` : "";
+  return `M9R put your message to @${to} in their inbox${reference}; they pick it up at their next prompt, so it is not being worked on this instant. Do not do that work yourself: tell the user it was handed to @${to}, and continue with anything else. The result will arrive in your inbox.`;
 }
 
 /** OpenCode's resident plugin pushes approved work into the exact live session without waiting for another user prompt. */
-export function renderOpenCodePendingAck(taskId: string): string {
-  return `M9R queued task ${taskId} for @opencode's active session. Its M9R plugin will deliver the task directly without a manual inbox check; delivery is not confirmed until that session acknowledges it. Do not do that work yourself: tell the user it is queued for @opencode, and continue with anything else. The result will arrive in your inbox.`;
+export function renderOpenCodePendingAck(taskId: string, includeTaskId = true): string {
+  const reference = includeTaskId ? ` task ${taskId}` : " work";
+  return `M9R queued${reference} for @opencode's active session. Its M9R plugin will deliver the task directly without a manual inbox check; delivery is not confirmed until that session acknowledges it. Do not do that work yourself: tell the user it is queued for @opencode, and continue with anything else. The result will arrive in your inbox.`;
 }
 
-export function renderHeldAck(taskId: string, to: string): string {
-  return `M9R held your message to @${to} as task ${taskId} because @${to} has no active session right now; it reaches them when they connect. Do not do that work yourself: tell the user it is waiting for @${to}, and continue with anything else. The result will arrive in your inbox.`;
+export function renderHeldAck(taskId: string, to: string, includeTaskId = true): string {
+  const reference = includeTaskId ? ` as task ${taskId}` : "";
+  return `M9R held your message to @${to}${reference} because @${to} has no active session right now; it reaches them when they connect. Do not do that work yourself: tell the user it is waiting for @${to}, and continue with anything else. The result will arrive in your inbox.`;
 }
 
 /**

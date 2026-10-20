@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 type RuntimeFile = { from: string; to: string };
 const digest = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+const DEFAULT_COMMITTED_BACKUP_RETENTION = 3;
 
 function rejectRedirectedAncestors(path: string): void {
   for (let ancestor = resolve(path); ; ancestor = dirname(ancestor)) {
@@ -27,6 +28,56 @@ export function hasPendingRuntimeTransaction(targetDir: string): boolean {
       return record.status === "applying" || record.status === "rollback_failed";
     } catch { throw new Error("Runtime recovery journal is unreadable; preserved for inspection."); }
   });
+}
+
+/**
+ * Bound successful runtime snapshots without touching evidence needed to recover
+ * an interrupted or failed update.  A setup can run many times in one day, and
+ * each successful transaction contains a full copy of the runtime.  Keeping
+ * every committed snapshot makes the local installation grow without bound;
+ * keeping the newest small rollback window preserves recovery while draining
+ * redundant history.
+ *
+ * Unknown, malformed, foreign-target, applying, and rollback_failed journals
+ * are deliberately retained.  They may be needed for recovery or inspection,
+ * and an updater must never turn uncertainty into deletion.
+ */
+export function pruneCommittedRuntimeBackups(targetDir: string, keepCount = DEFAULT_COMMITTED_BACKUP_RETENTION): string[] {
+  if (!Number.isInteger(keepCount) || keepCount < 1 || keepCount > 32) throw new Error("Runtime backup retention count is invalid.");
+  const root = resolve(targetDir);
+  const backupRoot = join(dirname(root), "runtime-backups");
+  if (!existsSync(backupRoot)) return [];
+  rejectRedirectedAncestors(backupRoot);
+  const backupRootInfo = lstatSync(backupRoot);
+  if (backupRootInfo.isSymbolicLink() || !backupRootInfo.isDirectory()) throw new Error("Runtime backup directory is unsafe; preserved for inspection.");
+
+  const normalizedRoot = process.platform === "win32" ? root.toLowerCase() : root;
+  const committed: Array<{ path: string; mtimeMs: number }> = [];
+  for (const name of readdirSync(backupRoot)) {
+    if (!/^[a-f0-9-]{36}$/.test(name)) continue;
+    const transaction = join(backupRoot, name);
+    const transactionInfo = lstatSync(transaction);
+    if (transactionInfo.isSymbolicLink() || !transactionInfo.isDirectory()) continue;
+    const journal = join(transaction, "transaction.json");
+    if (!existsSync(journal)) continue;
+    const journalInfo = lstatSync(journal);
+    if (journalInfo.isSymbolicLink() || !journalInfo.isFile() || journalInfo.size > 2 * 1024 * 1024) continue;
+    let record: { status?: unknown; targetDir?: unknown; files?: unknown };
+    try { record = JSON.parse(readFileSync(journal, "utf8")) as typeof record; } catch { continue; }
+    const recordedTarget = typeof record.targetDir === "string" ? resolve(record.targetDir) : "";
+    if (record.status !== "committed" || (process.platform === "win32" ? recordedTarget.toLowerCase() : recordedTarget) !== normalizedRoot || !Array.isArray(record.files)) continue;
+    committed.push({ path: transaction, mtimeMs: Math.max(transactionInfo.mtimeMs, journalInfo.mtimeMs) });
+  }
+
+  committed.sort((a, b) => b.mtimeMs - a.mtimeMs || b.path.localeCompare(a.path));
+  const pruned: string[] = [];
+  for (const entry of committed.slice(keepCount)) {
+    try {
+      rmSync(entry.path, { recursive: true, force: true });
+      if (!existsSync(entry.path)) pruned.push(entry.path);
+    } catch { /* A locked snapshot remains recoverable and is retried on a later update. */ }
+  }
+  return pruned;
 }
 
 /** Stage and verify every file before replacing any; restore the entire prior set on failure.

@@ -171,6 +171,45 @@ fn start_engine() {
     let _ = cmd.spawn();
 }
 
+/// Provider MCP configurations use this stable native shim instead of the
+/// replaceable engine executable. It preserves the provider's stdio session
+/// while launching the current engine from the same installed directory, and
+/// makes the real provider parent PID explicit so binding never has to infer
+/// identity from an intermediate M9R process.
+fn run_mcp() -> i32 {
+    let dir = match env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        Some(d) => d,
+        None => {
+            eprintln!("M9R MCP launcher could not resolve its installed directory.");
+            return 1;
+        }
+    };
+    let engine = dir.join(if cfg!(windows) { "m9r-engine.exe" } else { "m9r-engine" });
+    if !engine.is_file() {
+        eprintln!("M9R MCP launcher could not find the active engine at {}.", engine.display());
+        return 1;
+    }
+    let mut command = Command::new(engine);
+    command.arg("mcp").stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    if env::var_os("M9R_CONNECTION_PROCESS_ID").is_none() {
+        if let Some(pid) = provider_process_id() {
+            command.env("M9R_CONNECTION_PROCESS_ID", pid.to_string());
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    }
+    match command.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            eprintln!("M9R MCP launcher could not start the active engine: {error}");
+            1
+        }
+    }
+}
+
 #[cfg(windows)]
 fn ask(request: &str) -> Option<Vec<u8>> {
     let mut pipe = OpenOptions::new().read(true).write(true).open(pipe_path()).ok()?;
@@ -190,6 +229,11 @@ fn ask(request: &str) -> Option<Vec<u8>> {
 }
 
 fn main() {
+    // This branch must run before the hook timeout thread: MCP is a long-lived
+    // stdio protocol, unlike per-event hooks.
+    if env::args().nth(1).as_deref() == Some("mcp") {
+        exit(run_mcp());
+    }
     // `m9r-hook --warm`: setup runs this once so the first real call is not the first time the program is ever started.
     if env::args().nth(1).as_deref() == Some("--warm") {
         exit(0);

@@ -206,6 +206,30 @@ test("restricted agent MCP writes go through the owner broker and are identity-s
   } finally { await ctx.done(); }
 });
 
+test("a slow owner state write stays acknowledged instead of looking like a lost m9r_result", async () => {
+  const ctx = await setup();
+  try {
+    await ctx.issueIdentity("sender", "codex", "slow-result-sender");
+    const recipient = await ctx.issueIdentity("recipient", "claude-code", "slow-result-recipient");
+    const sent = ctx.store.addTask({ from: "sender", to: "recipient", goal: "Return the slow-write proof.", origin: "human_typed",
+      idempotencyKey: "slow-result-proof", targetSession: "slow-result-recipient" });
+    const taskId = sent.task.id;
+    ctx.store.markDelivered([taskId], "slow-result-recipient");
+
+    const original = ctx.store.recordTaskResult.bind(ctx.store);
+    ctx.store.recordTaskResult = ((token: string, id: string, summary: string) => {
+      // This exceeds the old 3-second client budget and models a large locked state.json write.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3_500);
+      return original(token, id, summary);
+    }) as typeof ctx.store.recordTaskResult;
+
+    const web = createWebBrokerClient({ keyPath: brokerKeyPath(ctx.root), ownerPipePath: ownerPipePath(ctx.root), port: ctx.broker.port });
+    const result = await web.recordAgentTaskResult!(recipient.token, taskId, "Slow state write completed.");
+    assert.equal(result.ok, true);
+    assert.equal(ctx.store.getTask(taskId)?.resultSummary, "Slow state write completed.");
+  } finally { await ctx.done(); }
+});
+
 test("owner broker atomically claims a native inbox task for one session", async () => {
   const ctx = await setup();
   try {

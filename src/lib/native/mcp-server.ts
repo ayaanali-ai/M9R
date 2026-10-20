@@ -17,7 +17,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readRuntimeBuildIdentity } from "./runtime-build-identity";
 import type { LocalStore } from "./local-store";
-import { normalizeHandle, renderInboxInjection, type Task } from "./inbox-core";
+import { inboxMaxAgeMs, normalizeHandle, renderInboxInjection, type Task } from "./inbox-core";
 import type { VerifiedIdentity } from "./identity-core";
 import type { WebBatchRequest, WebRequest } from "./web-broker-core";
 import type { WebBrokerClient } from "./web-broker-client";
@@ -48,6 +48,18 @@ export interface McpServerDeps {
   /** Provider parent process used to resolve a claim after hook/MCP startup races. */
   connectionProcessId?: number;
   connectionProvider?: string;
+  /**
+   * A private worker refreshed underneath an already-running provider-owned
+   * supervisor may no longer have the launch environment that identified the
+   * provider. It may recover only a single active claim from the local store;
+   * multiple claims remain fail-closed. This is never enabled for a public or
+   * manually launched legacy MCP process.
+   */
+  connectionWorkerFallback?: boolean;
+  /** Bounded wait for the provider's SessionStart claim to arrive after MCP startup. */
+  connectionWaitMs?: number;
+  /** Poll interval used during the bounded provider-binding wait. */
+  connectionPollMs?: number;
 }
 
 // Always present, always optional, regardless of whether this process was configured for
@@ -79,9 +91,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   // static fact about how the process was launched (its env/deps genuinely never changes after
   // that) -- what changed is that it no longer freezes the *schema* or skips a fresh resolution
   // attempt on every call; see requireIdentity() below.
-  const connectionConfigured = Boolean(deps.connectionBindingId || deps.connectionProcessId || deps.connectionProvider);
+  const connectionConfigured = Boolean(deps.connectionBindingId || deps.connectionProcessId || deps.connectionProvider || deps.connectionWorkerFallback);
   const AUTH_FIELD = OPTIONAL_TOKEN_FIELD;
   let connectionBindingId = deps.connectionBindingId;
+  const connectionWaitMs = Math.max(0, Math.min(10_000, Math.floor(deps.connectionWaitMs ?? 3_000)));
+  const connectionPollMs = Math.max(10, Math.min(250, Math.floor(deps.connectionPollMs ?? 50)));
+  const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
   function resolveConnectionBinding(): ConnectionBinding | null {
     if (connectionBindingId) {
@@ -89,10 +104,23 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         ? { bindingId: connectionBindingId, claimId: "bound", handle: "", provider: "", sessionId: "", boundAt: "" }
         : null;
     }
-    if (deps.connectionProcessId === undefined && !deps.connectionProvider) return null;
+    if (deps.connectionProcessId === undefined && !deps.connectionProvider && !deps.connectionWorkerFallback) return null;
     const binding = deps.store.bindConnectionForProcess({ provider: deps.connectionProvider, processId: deps.connectionProcessId });
     if (binding) connectionBindingId = binding.bindingId;
     return binding;
+  }
+
+  function waitForConnectionBinding(): ConnectionBinding | null {
+    const immediate = resolveConnectionBinding();
+    if (immediate || connectionWaitMs === 0) return immediate;
+
+    const deadline = Date.now() + connectionWaitMs;
+    while (Date.now() < deadline) {
+      sleepSync(Math.min(connectionPollMs, Math.max(1, deadline - Date.now())));
+      const binding = resolveConnectionBinding();
+      if (binding) return binding;
+    }
+    return resolveConnectionBinding();
   }
 
   function requireIdentity(token?: string): VerifiedIdentity {
@@ -103,11 +131,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     // process with no connection-mode configuration, or while a connection genuinely has none
     // bound yet and the caller supplied one anyway (legacy/manual use).
     if (connectionConfigured) {
-      const binding = resolveConnectionBinding();
+      const binding = waitForConnectionBinding();
       const identity = binding ? deps.store.verifyConnectionBinding(binding.bindingId) : null;
       if (identity) return identity;
       if (typeof token !== "string") {
-        throw new Error("This M9R MCP connection has no provider-session binding yet. This usually resolves itself within a few seconds as the provider's own session-start hook issues one -- retry the call. Reconnect the provider adapter if it persists; no task credential needs to be typed in.");
+        throw new Error(`Automatic M9R provider binding did not become ready within ${connectionWaitMs}ms; the provider's SessionStart hook has not published a usable claim yet. No manual token or new session is required; retry after the provider connection settles.`);
       }
       // Fall through to legacy token verification below -- a caller that supplied a token
       // explicitly is honored even on a connection-configured process.
@@ -159,7 +187,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   function resolveTaskId(identity: VerifiedIdentity, taskId?: string): string {
     if (taskId) return taskId;
     const pending = deps.store.tasksForSession(identity.handle, identity.sessionId)
-      .filter((task) => !task.resultSummary && task.deliveredSession === identity.sessionId)
+      .filter((task) => taskIsFreshForIdentity(identity, task)
+        && !task.resultSummary
+        && task.approval !== "denied"
+        && task.approval !== "expired"
+        && task.delivery?.state !== "failed"
+        && task.delivery?.state !== "uncertain"
+        && task.deliveredSession === identity.sessionId)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
     if (pending.length === 0) {
       throw new Error("A taskId is required: this session has no currently pending task. Pass the exact taskId you were given.");
@@ -171,6 +205,21 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     // been acted on yet does "newest created" decide.
     const active = deps.store.mostRecentlyActiveTaskId(identity.handle, identity.sessionId, pending.map((task) => task.id));
     return active ?? pending[0].id;
+  }
+
+  /** Resolve the current result target from trusted delivery state, not provider-visible metadata. */
+  function resolveResultTaskId(identity: VerifiedIdentity, requestedTaskId?: string): string {
+    if (requestedTaskId) return requestedTaskId;
+    const handle = roomHandle(identity, identity.handle);
+    const candidates = (inRoom(identity) ? deps.store.tasksFor(handle) : deps.store.tasksForSession(identity.handle, identity.sessionId))
+      .filter((task) => taskIsFreshForIdentity(identity, task)
+        && (task.approval === "approved" || task.approval === "not_needed")
+        && !task.resultSummary
+        && task.deliveredAt
+        && (inRoom(identity) || (task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId) === identity.sessionId));
+    if (candidates.length === 0) throw new Error("No single open M9R work item is currently delivered to this session.");
+    if (candidates.length > 1) throw new Error("This session has multiple open M9R work items; finish the current item before reporting another result.");
+    return candidates[0]!.id;
   }
 
   // The provider-neutral computer-use surface is registered on the same authenticated
@@ -378,7 +427,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           text: goal,
         }).catch(() => false);
       }
-      return { content: [{ type: "text", text: `Sent to @${to} as task ${taskId}.` }] };
+      return { content: [{ type: "text", text: `Message sent to @${to}.` }] };
     },
   );
 
@@ -390,6 +439,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const roomHandle = (identity: { sessionId: string }, handle: string) => {
     const plain = handle.replace(/^@/, "").toLowerCase();
     return inRoom(identity) && !plain.startsWith("web-") ? `web-${plain}` : plain;
+  };
+  const taskIsFreshForIdentity = (identity: { sessionId: string }, task: Task): boolean => {
+    const createdAt = Date.parse(task.createdAt);
+    const now = (deps.now ?? (() => new Date()))().getTime();
+    if (!Number.isFinite(createdAt) || now - createdAt < 0 || now - createdAt > inboxMaxAgeMs()) return false;
+    if (inRoom(identity) && deps.roomStartedAt !== undefined && createdAt < deps.roomStartedAt) return false;
+    return true;
   };
   const roomAgentHandle = (handle: string) => normalizeHandle(handle).replace(/^web-/, "");
   async function roomTaskAuthorized(identity: VerifiedIdentity, task: Task): Promise<boolean> {
@@ -428,11 +484,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         const cursor = deps.store.cursorFor(handle, cursorSession);
         const queuedTasks = (inRoom(identity)
           ? deps.store.tasksFor(handle)
-          : deps.store.tasksForSession(identity.handle, identity.sessionId)).filter((task) => {
-          if (!inRoom(identity) || deps.roomStartedAt === undefined) return true;
-          const createdAt = typeof task.createdAt === "string" ? Date.parse(task.createdAt) : Number.NaN;
-          return Number.isFinite(createdAt) && createdAt >= deps.roomStartedAt;
-        });
+          : deps.store.tasksForSession(identity.handle, identity.sessionId)).filter((task) => taskIsFreshForIdentity(identity, task));
         const authorizedTasks = inRoom(identity)
           ? (await Promise.all(queuedTasks.map(async (task) => {
               if (task.seq <= cursor || task.approval === "denied" || task.approval === "expired" ||
@@ -443,7 +495,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
               return authorized ? task : undefined;
             }))).filter((task): task is Task => task !== undefined)
           : queuedTasks;
-        const injection = renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000, now: (deps.now ?? (() => new Date()))().getTime() });
+      const injection = renderInboxInjection(authorizedTasks, cursor, { items: 1, itemChars: 3000, includePending: false, includeTaskIds: false, now: (deps.now ?? (() => new Date()))().getTime() });
         if (injection.text) {
           let delivered = injection;
           if (!inRoom(identity)) {
@@ -457,7 +509,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
             }
             const claimedSet = new Set(claimedIds);
             const claimedTasks = authorizedTasks.filter((task) => claimedSet.has(task.id));
-            delivered = renderInboxInjection(claimedTasks, -1, { items: 10, itemChars: 3000, now: (deps.now ?? (() => new Date()))().getTime() });
+            delivered = renderInboxInjection(claimedTasks, -1, { items: 1, itemChars: 3000, includePending: false, includeTaskIds: false, now: (deps.now ?? (() => new Date()))().getTime() });
             if (!delivered.text) {
               if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
               continue;
@@ -476,6 +528,26 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           }
           return { content: [{ type: "text" as const, text: delivered.text + (stageNotice ? `\n\n${stageNotice}` : "") }] };
         }
+        if (!inRoom(identity)) {
+          // A cursor is only a presentation fence. Do not tell a provider that
+          // it has no work when this exact session was already shown an open
+          // task and has not reported its result yet (the live Claude failure
+          // that motivated this path). This is intentionally separate from
+          // the new-message delta above, so old work is not replayed as fresh.
+          const alreadyPresented = queuedTasks
+            .filter((task) => task.lifecycle?.sessionId === identity.sessionId
+              && task.lifecycle.source === "prompt"
+              && !task.resultSummary
+              && (task.approval === "approved" || task.approval === "not_needed"))
+            .sort((left, right) => left.seq - right.seq);
+          if (alreadyPresented.length > 0) {
+            const lines = alreadyPresented.slice(0, 10).map((task) => {
+              const state = task.lifecycle?.state ?? "presented";
+              return `- [${state}] ${task.goal.slice(0, 200)}${task.goal.length > 200 ? "…" : ""}`;
+            });
+            return { content: [{ type: "text" as const, text: `Inbox is empty for new messages. This session already has open work that was presented earlier; do not claim there is no task. Report the current outcome with m9r_result:\n${lines.join("\n")}` }] };
+          }
+        }
         if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
         await sleep(300);
       }
@@ -493,11 +565,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const { identity } = authenticate(token);
       const handle = roomHandle(identity, identity.handle);
       const pending = (inRoom(identity) ? deps.store.tasksFor(handle) : deps.store.pendingWorkFor(identity.handle, identity.sessionId))
+        .filter((task) => taskIsFreshForIdentity(identity, task))
         .filter((task) => ["approved", "not_needed"].includes(task.approval) && !task.resultSummary)
         .sort((a, b) => a.seq - b.seq);
       if (pending.length === 0) return { content: [{ type: "text" as const, text: "No open tasks owed a result right now." }] };
-      const lines = pending.map((task) => `${task.id}: ${task.goal.slice(0, 200)}${task.goal.length > 200 ? "…" : ""}`);
-      return { content: [{ type: "text" as const, text: `Open tasks awaiting a result:\n${lines.join("\n")}` }] };
+      const lines = pending.slice(0, 10).map((task) => `- [${task.lifecycle?.state ?? "open"}] ${task.goal.slice(0, 200)}${task.goal.length > 200 ? "…" : ""}`);
+      return { content: [{ type: "text" as const, text: `Open M9R work awaiting a result (${pending.length}):\n${lines.join("\n")}` }] };
     },
   );
 
@@ -507,12 +580,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       description: "Report the result of a task you were sent, so it gets recorded and (if the sender is a live Codex session) pushed back to them.",
       inputSchema: {
         ...AUTH_FIELD,
-        taskId: z.string().min(1).max(80).describe("The task id you were given, e.g. \"T12\"."),
+        taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Optional legacy correlation field. Omit it for normal provider-bound delivery; M9R resolves the one current delivered work item automatically."),
         summary: z.string().min(1).max(20_000).describe("What you actually did and found -- concrete, not a vague completion claim. Real structured evidence (an observation payload, a diff, a long error) is fine; prefer a focused excerpt over the entire raw object when it is this large."),
       },
     },
-    async ({ token, taskId, summary }) => {
+    async ({ token, taskId: requestedTaskId, summary }) => {
       const { identity, token: authToken } = authenticate(token);
+      const taskId = resolveResultTaskId(identity, requestedTaskId);
       const existing = deps.store.getTask?.(taskId);
       if (!existing) throw new Error(`No task ${taskId} found.`);
       if (existing.to !== identity.handle && existing.to !== roomHandle(identity, identity.handle)) throw new Error(`Task ${taskId} was not sent to you (@${identity.handle}), refusing to report a result for it.`);
@@ -523,7 +597,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         const recorded = deps.store.recordTaskResult(authToken, taskId, summary);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
       }
-      return { content: [{ type: "text", text: `Recorded result for ${taskId}, visible to @${existing.from} next time they check their results.` }] };
+      return { content: [{ type: "text", text: `Result recorded and delivered to the sender's M9R conversation.` }] };
     },
   );
 

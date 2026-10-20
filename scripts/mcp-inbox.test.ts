@@ -9,7 +9,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { renderInboxInjection } from "@/lib/native/inbox-core";
 import { createLocalStore } from "@/lib/native/local-store";
 import { createM9rMcpServer } from "@/lib/native/mcp-server";
-import { handleHookEvent } from "@/lib/native/hook-handler";
+import { handleHookEvent, type HookInput } from "@/lib/native/hook-handler";
 import type { WebBrokerClient } from "@/lib/native/web-broker-client";
 
 type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ type: string; text: string }> }>; inputSchema: unknown; description?: string }> };
@@ -166,6 +166,31 @@ test("stage activity older than the active-turn window must not hijack a brand-n
   } finally { t.done(); }
 });
 
+test("a stale delivered task is not treated as the current task when a stage call omits taskId", async () => {
+  let clock = Date.parse("2026-10-07T12:00:00.000Z");
+  const web: WebBrokerClient = {
+    taskStageApp: async (_token, taskId) => ({ ok: true, result: { taskId, running: true } }),
+    run: async () => ({ ok: false, error: "unused" }),
+  };
+  const t = setup({ web, now: () => new Date(clock) });
+  try {
+    const stale = t.store.addTask({
+      from: "you", to: "codex", goal: "old delivered task", origin: "human_typed", idempotencyKey: "old-delivered-task",
+    }).task;
+    assert.ok(t.store.bindTaskToSession(stale.id, t.codex));
+    clock += 31 * 60_000;
+
+    const appHandler = (t.server as unknown as ToolServer)._registeredTools["m9r_stage_app"]!.handler as (
+      args: unknown, extra: { requestId: string | number },
+    ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    await assert.rejects(
+      appHandler({ token: t.codex, operation: "launch", appId: "chrome" }, { requestId: 1 }),
+      /no currently pending task/i,
+      "a task-less stage call must not resurrect a delivered task outside the inbox freshness window",
+    );
+  } finally { t.done(); }
+});
+
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -189,8 +214,15 @@ test("each inbox check shows only messages not seen before, then reports empty",
 
   const first = await t.call("m9r_inbox", { token: t.codex });
   assert.match(first, /first finding/);
-  assert.match(first, /second finding/);
-  assert.equal(await t.call("m9r_inbox", { token: t.codex }), "Inbox is empty.", "already-seen messages are not repeated");
+  assert.doesNotMatch(first, /T\d+|session token|get_task/i);
+  const second = await t.call("m9r_inbox", { token: t.codex });
+  assert.match(second, /second finding/);
+  assert.doesNotMatch(second, /T\d+|session token|get_task/i);
+  const alreadySeen = await t.call("m9r_inbox", { token: t.codex });
+  assert.match(alreadySeen, /Inbox is empty for new messages/, "already-seen messages are not replayed as new");
+  assert.match(alreadySeen, /first finding/);
+  assert.match(alreadySeen, /second finding/);
+  assert.doesNotMatch(alreadySeen, /T\d+|session token|get_task/i);
 
   await t.call("m9r_send", { token: t.claude, to: "codex", goal: "third finding" });
   const later = await t.call("m9r_inbox", { token: t.codex });
@@ -210,15 +242,54 @@ test("m9r_pending_work still surfaces a task after the inbox has already deliver
     await t.call("m9r_send", { token: t.claude, to: "codex", goal: "open file explorer and type hello" });
     const first = await t.call("m9r_inbox", { token: t.codex });
     assert.match(first, /open file explorer/);
-    assert.equal(await t.call("m9r_inbox", { token: t.codex }), "Inbox is empty.", "the task was already delivered once");
+    const alreadyDelivered = await t.call("m9r_inbox", { token: t.codex });
+    assert.match(alreadyDelivered, /Inbox is empty for new messages/, "the task was already delivered once, not replayed as new");
+    assert.match(alreadyDelivered, /open file explorer and type hello/);
+    assert.doesNotMatch(alreadyDelivered, /T\d+|session token|get_task/i);
 
     const pending = await t.call("m9r_pending_work", { token: t.codex });
     assert.match(pending, /open file explorer/, "pending work must still list a delivered-but-unresolved task");
 
-    const taskId = /^(T\d+):/m.exec(pending)?.[1];
-    assert.ok(taskId, "pending work must expose the real task id so m9r_result can close it");
-    await t.call("m9r_result", { token: t.codex, taskId, summary: "done" });
+    assert.doesNotMatch(pending, /T\d+|session token|get_task/i);
+    await t.call("m9r_result", { token: t.codex, summary: "done" });
     assert.equal(await t.call("m9r_pending_work", { token: t.codex }), "No open tasks owed a result right now.", "a reported result must no longer count as pending");
+  } finally { t.done(); }
+});
+
+test("native inbox does not re-present already-delivered work after it becomes stale", async () => {
+  let clock = Date.parse("2026-10-07T12:00:00.000Z");
+  const t = setup({ now: () => new Date(clock) });
+  try {
+    await t.call("m9r_send", { token: t.claude, to: "codex", goal: "old provider task" });
+    assert.match(await t.call("m9r_inbox", { token: t.codex }), /old provider task/);
+
+    // The task was genuinely shown once, but it was never completed. A later
+    // provider reconnect must not turn that historical receipt into fresh work.
+    clock += 31 * 60_000;
+    assert.equal(await t.call("m9r_inbox", { token: t.codex }), "Inbox is empty.");
+    assert.equal(await t.call("m9r_pending_work", { token: t.codex }), "No open tasks owed a result right now.");
+  } finally { t.done(); }
+});
+
+test("browser-room pending work ignores stale tasks instead of handing an old task to a replacement provider session", async () => {
+  let clock = Date.parse("2026-10-07T12:00:00.000Z");
+  const t = setup({
+    now: () => new Date(clock),
+    web: { authorizeRoomMessage: async () => ({ ok: true }) } as unknown as WebBrokerClient,
+  });
+  const roomToken = t.store.issueIdentity("codex", "codex", "web-codex-room").token;
+  try {
+    t.store.addTask({
+      from: "you", to: "web-codex", goal: "historical room task", origin: "human_typed", idempotencyKey: "historical-room-task",
+    });
+    clock += 31 * 60_000;
+    t.store.addTask({
+      from: "you", to: "web-codex", goal: "current room task", origin: "human_typed", idempotencyKey: "current-room-task",
+    });
+
+    const pending = await t.call("m9r_pending_work", { token: roomToken });
+    assert.doesNotMatch(pending, /historical room task/);
+    assert.match(pending, /current room task/);
   } finally { t.done(); }
 });
 
@@ -284,8 +355,20 @@ test("one task is claimed by one provider session and another session cannot tak
   assert.match(await t.call("m9r_inbox", { token: t.codex }), /shared finding/);
   assert.equal(await t.call("m9r_inbox", { token: second }), "Inbox is empty.");
   await assert.rejects(t.call("m9r_result", { token: second, taskId: "T1", summary: "wrong session" }), /belongs to another session/);
-  assert.match(await t.call("m9r_result", { token: t.codex, taskId: "T1", summary: "right session" }), /Recorded result/);
+  assert.match(await t.call("m9r_result", { token: t.codex, taskId: "T1", summary: "right session" }), /Result recorded/);
   assert.equal(t.store.getTask("T1")?.resultSummary, "right session");
+  t.done();
+});
+
+test("a single delivered work item can be completed without exposing or requiring its internal task id", async () => {
+  const t = setup();
+  await t.call("m9r_send", { token: t.claude, to: "codex", goal: "report the one delivered finding" });
+  const inbox = await t.call("m9r_inbox", { token: t.codex });
+  assert.match(inbox, /report the one delivered finding/);
+  assert.doesNotMatch(inbox, /T\d+|session token|get_task/i);
+  const result = await t.call("m9r_result", { token: t.codex, summary: "The delivered finding was recorded." });
+  assert.match(result, /Result recorded/i);
+  assert.equal(t.store.tasksFor("codex")[0]?.resultSummary, "The delivered finding was recorded.");
   t.done();
 });
 
@@ -368,7 +451,7 @@ test("plain inbox task reaches Codex with its SessionStart identity, scoped git_
   const t = setup({ allowRule: false });
   const project = mkdtempSync(join(tmpdir(), "m9r-plain-inbox-codex-"));
   const codexSession = "x1";
-  const hook = (provider: string, input: { hook_event_name: string; session_id: string; cwd: string; prompt?: string }, lastAnswer?: string) =>
+  const hook = (provider: string, input: HookInput, lastAnswer?: string) =>
     handleHookEvent(input, {
       provider,
       store: t.store,
@@ -398,18 +481,31 @@ test("plain inbox task reaches Codex with its SessionStart identity, scoped git_
       cwd: project,
       prompt: "Please check the task that arrived in my M9R inbox.",
     });
-    assert.match(delivered?.hookSpecificOutput.additionalContext ?? "", new RegExp(task.id));
+    assert.doesNotMatch(delivered?.hookSpecificOutput.additionalContext ?? "", new RegExp(task.id));
     assert.match(delivered?.hookSpecificOutput.additionalContext ?? "", /Read task\.txt with your scoped M9R tools/);
+    assert.match(delivered?.hookSpecificOutput.additionalContext ?? "", /m9r_result/);
+    assert.doesNotMatch(delivered?.hookSpecificOutput.additionalContext ?? "", /session token/i);
     assert.equal(t.store.getTask(task.id)?.deliveredSession, codexSession);
     assert.notEqual(t.store.getTask(task.id)?.delivery?.state, "queued", "this path is inbox delivery, not native codex queue");
 
     assert.match(await t.call("m9r_git_read", { token, operation: "status", limit: 10 }), /task\.txt/);
     assert.match(await t.call("m9r_read_file", { token, path: "task.txt" }), /plain inbox task evidence/);
 
-    hook("codex", { hook_event_name: "Stop", session_id: codexSession, cwd: project }, "I read task.txt; it contains plain inbox task evidence.");
-    assert.equal(t.store.getTask(task.id)?.resultSummary, "I read task.txt; it contains plain inbox task evidence.");
+    // With exactly one delivered task, the provider can report the result without
+    // carrying an internal task id through its visible prompt or reply.
+    hook("codex", { hook_event_name: "Stop", session_id: codexSession, cwd: project }, "ignored because no task id was supplied");
+    assert.equal(t.store.getTask(task.id)?.resultSummary, "ignored because no task id was supplied");
+    const second = t.store.addTask({ from: "claude", to: "codex", goal: "second independent task", origin: "human_typed", idempotencyKey: "second-stop-task" }).task;
+    const third = t.store.addTask({ from: "claude", to: "codex", goal: "third independent task", origin: "human_typed", idempotencyKey: "third-stop-task" }).task;
+    t.store.setDelivery(second.id, { state: "queued", threadId: codexSession });
+    t.store.setDelivery(third.id, { state: "queued", threadId: codexSession });
+    t.store.markDelivered([second.id, third.id], codexSession);
+    const ambiguousStop = hook("codex", { hook_event_name: "Stop", session_id: codexSession, cwd: project }, "must not guess");
+    assert.equal(ambiguousStop, null);
+    assert.equal(t.store.getTask(second.id)?.resultSummary, undefined);
+    assert.equal(t.store.getTask(third.id)?.resultSummary, undefined);
     const returned = hook("claude-code", { hook_event_name: "UserPromptSubmit", session_id: "c1", cwd: project, prompt: "Any update from Codex?" });
-    assert.match(returned?.hookSpecificOutput.additionalContext ?? "", new RegExp(`finished by @codex.*plain inbox task evidence`));
+    assert.match(returned?.hookSpecificOutput.additionalContext ?? "", new RegExp(`finished by @codex.*ignored because no task id was supplied`));
   } finally {
     rmSync(project, { recursive: true, force: true });
     t.done();
@@ -474,7 +570,7 @@ test("MCP-delivered Codex task reads only its own repository through the governe
       goal: "Read codex-only.txt with your governed Git tool and report the finding.",
     },
   });
-  assert.match(mcpText(sendResult), /Sent to @codex as task T\d+\./);
+  assert.match(mcpText(sendResult), /Message sent to @codex\./);
   const task = store.tasksFor("codex").find((item) => item.goal.includes("governed Git tool"));
   assert.ok(task);
   assert.equal(task.approval, "approved", "the standing rule authorizes this delivered task");
@@ -486,8 +582,9 @@ test("MCP-delivered Codex task reads only its own repository through the governe
     prompt: "Check the task that arrived in my M9R inbox.",
   });
   const injectedTask = delivered?.hookSpecificOutput.additionalContext ?? "";
-  assert.match(injectedTask, new RegExp(task.id));
+  assert.doesNotMatch(injectedTask, new RegExp(task.id));
   assert.match(injectedTask, /Read codex-only\.txt with your governed Git tool/);
+  assert.match(injectedTask, /m9r_result/);
   assert.equal(injectedTask.includes(sessionToken), false, "the session token stays in the SessionStart identity context, not the task text");
   assert.equal(injectedTask.includes(senderToken), false, "the sender's token is never copied into the recipient task");
   assert.equal(store.getTask(task.id)?.deliveredSession, codexSession);

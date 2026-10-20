@@ -31,9 +31,13 @@ import {
   type McpServerSpec,
 } from "./install-core";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
-import { hasPendingRuntimeTransaction, installRuntimeTransaction, recoverRuntimeTransactions } from "./runtime-install-transaction";
+import { inboxMaxAgeMs } from "./inbox-core";
+import { hasPendingRuntimeTransaction, installRuntimeTransaction, pruneCommittedRuntimeBackups, recoverRuntimeTransactions } from "./runtime-install-transaction";
 import { createPageNotesStore } from "./page-notes-store";
 import { projectRoomId } from "./project-room";
+import { planOpenCodeModelStateRepair, resolveOpenCodeModelFiles, type OpenCodeModelRepairResult } from "./opencode-model-core";
+import { refreshManagedOpenCodeIdentityPlugin } from "./opencode-plugin-refresh";
+import { renameStateFile } from "./atomic-file";
 import { DEFAULT_CLOUD_URL, clearCloudConfig, cloudUrlProblem, loadCloudConfig, pullCloudNotes, pushCloudNote, saveCloudConfig } from "./cloud-memory";
 import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type DeliveryDeps } from "./codex-delivery";
 import { codexNoteInEffect, createCodexWatcher } from "./codex-watch";
@@ -45,6 +49,18 @@ import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runR
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
 import { USER_STEPS } from "./onboarding-steps";
 import { readRuntimeBuildId, readRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
+import { checkEngineUpdate, parseUpdateConfig } from "./update-lifecycle";
+import {
+  buildOpenCodeIdentityPluginSource,
+  OPENCODE_IDENTITY_PLUGIN_FILENAME,
+  planOpenCodeIdentityPluginInstall,
+  removeOpenCodeWebMcp,
+  resolveOpenCodeGlobalPaths,
+  resolveOpenCodeHookInvocation,
+  webOpenCodeLayout,
+  mergeOpenCodeWebMcp,
+  type WebOpenCodeLayout,
+} from "./web-setup-core";
 
 export interface NativeIo {
   env: Record<string, string | undefined>;
@@ -86,7 +102,7 @@ export const registryAutostart: Autostart = {
 };
 const autostartOf = (io: NativeIo): Autostart => io.autostart ?? registryAutostart;
 
-type Kind = "hooks-json" | "markdown-block" | "mcp-json" | "mcp-toml";
+type Kind = "hooks-json" | "markdown-block" | "mcp-json" | "mcp-toml" | "opencode-json" | "opencode-plugin";
 interface ActiveRuntimeManifest {
   schemaVersion: 1;
   buildId: string;
@@ -101,7 +117,7 @@ interface ActiveRuntimeManifest {
 interface Manifest {
   version: 1;
   installedAt: string;
-  entries: Array<ManifestEntry & { kind: Kind }>;
+  entries: Array<ManifestEntry & { kind: Kind; openCodeLayout?: WebOpenCodeLayout }>;
   /** Bundled runtimes installed by M9R, including retired images retained by still-running agent sessions. */
   runtimeFiles?: string[];
   /** M9R starts when you sign in to Windows (removed on uninstall). */
@@ -114,7 +130,33 @@ export function nativePaths(io: Pick<NativeIo, "env" | "homeDir">) {
   const m9r = defaultStoreRoot(io.homeDir, io.env);
   const claude = io.env.CLAUDE_CONFIG_DIR?.trim() || join(io.homeDir, ".claude");
   const codex = io.env.CODEX_HOME?.trim() || join(io.homeDir, ".codex");
-  return { m9r, claude, codex, codexHooks: join(codex, "hooks.json"), codexAgents: join(codex, "AGENTS.md"), codexConfig: join(codex, "config.toml"), settings: join(claude, "settings.json"), claudeMd: join(claude, "CLAUDE.md"), claudeMcp: join(claude, ".mcp.json"), manifest: join(m9r, "install-manifest.json"), backups: join(m9r, "backups") };
+  const openCode = resolveOpenCodeGlobalPaths({
+    home: io.homeDir,
+    xdgConfigHome: io.env.XDG_CONFIG_HOME,
+    appData: io.env.APPDATA,
+    exists: existsSync,
+  });
+  return {
+    m9r,
+    claude,
+    codex,
+    opencode: dirname(openCode.configPath),
+    opencodeConfig: openCode.configPath,
+    opencodePluginDirectory: openCode.pluginDirectory,
+    opencodePlugin: join(openCode.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME),
+    codexHooks: join(codex, "hooks.json"),
+    codexAgents: join(codex, "AGENTS.md"),
+    codexConfig: join(codex, "config.toml"),
+    settings: join(claude, "settings.json"),
+    claudeMd: join(claude, "CLAUDE.md"),
+    claudeMcp: join(claude, ".mcp.json"),
+    // Claude also has a user-level config beside the `.claude` directory. It
+    // can win over the scoped file, so setup must reconcile both locations.
+    claudeGlobalMcp: join(io.env.CLAUDE_CONFIG_DIR?.trim() || io.homeDir, ".claude.json"),
+    manifest: join(m9r, "install-manifest.json"),
+    webSetupManifest: join(m9r, "web-setup-manifest.json"),
+    backups: join(m9r, "backups"),
+  };
 }
 
 /** The tiny hook entry sits next to this module in `cli/dist`; tests and dev can override it. */
@@ -268,6 +310,7 @@ function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { fr
     const files = [plan.engine, ...(plan.shim ? [plan.shim] : []), ...(plan.nativeInputHost ? [plan.nativeInputHost] : []), ...(plan.companions ?? [])];
     const written = installRuntimeTransaction(plan.targetDir, files, replaceRuntimeFile);
     for (const file of files) pruneRetiredRuntimeFile(file.to);
+    pruneCommittedRuntimeBackups(plan.targetDir);
     return written;
   }
   const written: string[] = [];
@@ -313,8 +356,12 @@ function mcpServerSpec(io: NativeIo, provider: string): McpServerSpec | null {
   const entry = activeHookEntry(io);
   if (!/m9r-engine(\.exe)?$/i.test(entry)) return null;
   const m9r = nativePaths(io).m9r;
+  const launcher = shimSource(io.env) ? shimTarget(io) : entry;
   return {
-    command: slash(entry),
+    // A provider must not hold the replaceable engine image as its long-lived
+    // MCP parent. The native shim is a stable handoff boundary; it forwards
+    // the provider PID and starts the current engine from the installed bin.
+    command: slash(launcher),
     args: ["mcp"],
     env: {
       M9R_HOME: m9r,
@@ -324,7 +371,171 @@ function mcpServerSpec(io: NativeIo, provider: string): McpServerSpec | null {
   };
 }
 
-interface PlannedFile { path: string; kind: Kind; before: string | null; after: string; changed: boolean; summary: string }
+function openCodeVersionLine(io: NativeIo): string | undefined {
+  const configured = io.env.M9R_OPENCODE_VERSION?.trim();
+  if (configured) return configured;
+  try {
+    const result = spawnSync("opencode", ["--version"], { encoding: "utf8", timeout: 2000, windowsHide: true });
+    if (result.status !== 0) return undefined;
+    return String(result.stdout ?? "").split(/\r?\n/, 1)[0]?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function openCodeLayoutFor(io: NativeIo, existing: string | null): WebOpenCodeLayout {
+  const versionLayout = webOpenCodeLayout(openCodeVersionLine(io));
+  if (versionLayout === "servers") return versionLayout;
+  // If version probing is unavailable, an existing modern config still gives
+  // us an unambiguous layout signal. Never rewrite it into the legacy shape.
+  return existing && /["']servers["']\s*:/u.test(existing) ? "servers" : "legacy";
+}
+
+function nativeOpenCodeHookInvocation(
+  io: NativeIo,
+  event: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" | "OpenCodeExecutionFailed",
+): { command: string; args: readonly string[] } {
+  const stableShim = shimFor(io) ? shimTarget(io) : null;
+  if (stableShim) return { command: stableShim, args: [event, "opencode"] };
+  const entry = activeHookEntry(io);
+  const name = basename(entry);
+  if (/^m9r-engine(?:\.exe)?$/i.test(name)) {
+    return resolveOpenCodeHookInvocation({ nodeCommand: process.execPath, engineExecutable: entry, event });
+  }
+  if (/\.js$/i.test(name)) {
+    return resolveOpenCodeHookInvocation({ nodeCommand: process.execPath, compiledHookPath: entry, event });
+  }
+  // An explicitly supplied native hook is already the per-event entrypoint;
+  // do not guess a second subcommand around it.
+  return { command: entry, args: [event, "opencode"] };
+}
+
+interface ManagedWebSetupPluginRefresh {
+  manifestPath: string;
+  pluginPath: string;
+  desiredContent: string;
+}
+
+interface PlannedFile {
+  path: string;
+  kind: Kind;
+  before: string | null;
+  after: string;
+  changed: boolean;
+  summary: string;
+  openCodeLayout?: WebOpenCodeLayout;
+  managedWebSetupPlugin?: ManagedWebSetupPluginRefresh;
+}
+
+interface NativeOpenCodeModelRepair {
+  statePath: string;
+  plan: OpenCodeModelRepairResult;
+}
+
+/**
+ * Plan the same conservative model-state repair used by web setup for native
+ * setup too. OpenCode's model.json is user state, so a native runtime update
+ * must never guess a replacement: it only removes references that the local
+ * cached catalog explicitly marks unavailable and selects another usable
+ * model from that catalog.
+ */
+function planNativeOpenCodeModelRepair(io: NativeIo, selectedAgents: readonly string[] | undefined, includeMcp: boolean): NativeOpenCodeModelRepair | null {
+  if (!includeMcp) return null;
+  const p = nativePaths(io);
+  const wantsOpenCode = selectedAgents === undefined ? existsSync(p.opencodeConfig) : selectedAgents.includes("opencode");
+  if (!wantsOpenCode) return null;
+  const paths = resolveOpenCodeModelFiles({
+    home: io.homeDir,
+    xdgStateHome: io.env.XDG_STATE_HOME,
+    xdgCacheHome: io.env.XDG_CACHE_HOME,
+  });
+  if (!existsSync(paths.statePath) || !existsSync(paths.catalogPath)) return null;
+  try {
+    const state = JSON.parse(readFileSync(paths.statePath, "utf8")) as unknown;
+    const catalog = JSON.parse(readFileSync(paths.catalogPath, "utf8")) as unknown;
+    const plan = planOpenCodeModelStateRepair(state, catalog);
+    return { statePath: paths.statePath, plan };
+  } catch {
+    return {
+      statePath: paths.statePath,
+      plan: { status: "blocked", reason: "persisted OpenCode model state or its cached provider catalog is not valid JSON", removedModelIDs: [] },
+    };
+  }
+}
+
+/** Replace a managed state file with a same-directory temporary file, retaining the old bytes separately first. */
+function applyNativeOpenCodeModelRepair(repair: NativeOpenCodeModelRepair): string | null {
+  if (repair.plan.status !== "updated" || !repair.plan.state) return null;
+  const backupPath = `${repair.statePath}.m9r-backup-${randomUUID()}.json`;
+  const temporaryPath = `${repair.statePath}.m9r-next-${process.pid}-${randomUUID()}.tmp`;
+  const displacedPath = `${repair.statePath}.m9r-displaced-${process.pid}-${randomUUID()}.tmp`;
+  copyFileSync(repair.statePath, backupPath);
+  try {
+    writeFileSync(temporaryPath, JSON.stringify(repair.plan.state, null, 2) + "\n", "utf8");
+    try {
+      renameStateFile(temporaryPath, repair.statePath);
+    } catch (error) {
+      // Node's Windows rename does not replace an existing file. Move the
+      // original only after the rollback copy exists, then install the staged
+      // replacement and restore the original if the second move fails.
+      if (process.platform !== "win32" || !existsSync(repair.statePath)) throw error;
+      renameStateFile(repair.statePath, displacedPath);
+      try {
+        renameStateFile(temporaryPath, repair.statePath);
+        rmSync(displacedPath, { force: true });
+      } catch (installError) {
+        try { if (!existsSync(repair.statePath) && existsSync(displacedPath)) renameStateFile(displacedPath, repair.statePath); } catch { /* backupPath remains the recovery boundary */ }
+        throw installError;
+      }
+    }
+    return backupPath;
+  } catch (error) {
+    rmSync(temporaryPath, { force: true });
+    throw error;
+  } finally {
+    rmSync(displacedPath, { force: true });
+  }
+}
+
+function managedWebSetupPluginOwnership(manifestPath: string, pluginPath: string): { ownedPath: string; ownedHash: string } | null {
+  const text = readText(manifestPath);
+  if (text == null) return null;
+  try {
+    const record = JSON.parse(text) as { openCodeIdentityPluginPath?: unknown; openCodeIdentityPluginHash?: unknown };
+    if (typeof record.openCodeIdentityPluginPath !== "string" || typeof record.openCodeIdentityPluginHash !== "string") return null;
+    return { ownedPath: record.openCodeIdentityPluginPath, ownedHash: record.openCodeIdentityPluginHash };
+  } catch {
+    // A malformed web manifest is not proof of ownership. Preserve the plugin
+    // rather than adopting or overwriting an unverified file.
+    return null;
+  }
+}
+
+/** Atomically replace a small managed text/JSON file, including the Windows existing-file case. */
+function writeBytesAtomically(path: string, bytes: Buffer): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporaryPath = `${path}.m9r-next-${process.pid}-${randomUUID()}.tmp`;
+  const displacedPath = `${path}.m9r-displaced-${process.pid}-${randomUUID()}.tmp`;
+  writeFileSync(temporaryPath, bytes);
+  try {
+    try {
+      renameStateFile(temporaryPath, path);
+    } catch (error) {
+      if (process.platform !== "win32" || !existsSync(path)) throw error;
+      renameStateFile(path, displacedPath);
+      try {
+        renameStateFile(temporaryPath, path);
+        rmSync(displacedPath, { force: true });
+      } catch (installError) {
+        try { if (!existsSync(path) && existsSync(displacedPath)) renameStateFile(displacedPath, path); } catch { /* keep the displaced copy for manual recovery */ }
+        throw installError;
+      }
+    }
+  } finally {
+    rmSync(temporaryPath, { force: true });
+    rmSync(displacedPath, { force: true });
+  }
+}
 
 function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = true): PlannedFile[] {
   const p = nativePaths(io);
@@ -346,6 +557,9 @@ function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = tru
     const claudeMcpBefore = readText(p.claudeMcp);
     const claudeMcp = mergeMcpServerJson(claudeMcpBefore, MCP_SERVER_NAME, claudeMcpSpec, p.claudeMcp);
     files.push({ path: p.claudeMcp, kind: "mcp-json", before: claudeMcpBefore, after: claudeMcp.content, changed: claudeMcp.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.claudeMcp}` });
+    const claudeGlobalBefore = readText(p.claudeGlobalMcp);
+    const claudeGlobal = mergeMcpServerJson(claudeGlobalBefore, MCP_SERVER_NAME, claudeMcpSpec, p.claudeGlobalMcp);
+    files.push({ path: p.claudeGlobalMcp, kind: "mcp-json", before: claudeGlobalBefore, after: claudeGlobal.content, changed: claudeGlobal.changed, summary: `reconcile the user-level Claude MCP registration in ${p.claudeGlobalMcp}` });
   }
   if (wantsCodex) {
     const hooksBefore = readText(p.codexHooks);
@@ -362,6 +576,62 @@ function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = tru
       const codexConfig = mergeMcpServerToml(codexConfigBefore, MCP_SERVER_NAME, codexMcpSpec);
       files.push({ path: p.codexConfig, kind: "mcp-toml", before: codexConfigBefore, after: codexConfig.content, changed: codexConfig.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.codexConfig}` });
     }
+  }
+  const wantsOpenCode = selectedAgents === undefined ? existsSync(p.opencodeConfig) : selectedAgents.includes("opencode");
+  const openCodeMcpSpec = includeMcp && wantsOpenCode ? mcpServerSpec(io, "opencode") : null;
+  if (openCodeMcpSpec) {
+    const configBefore = readText(p.opencodeConfig);
+    const layout = openCodeLayoutFor(io, configBefore);
+    const pluginBefore = readText(p.opencodePlugin);
+    const pluginInvocation = nativeOpenCodeHookInvocation(io, "SessionStart");
+    const pluginSource = buildOpenCodeIdentityPluginSource(
+      pluginInvocation,
+      nativeOpenCodeHookInvocation(io, "UserPromptSubmit"),
+      nativeOpenCodeHookInvocation(io, "OpenCodePoll"),
+      nativeOpenCodeHookInvocation(io, "OpenCodeDelivered"),
+      nativeOpenCodeHookInvocation(io, "OpenCodeDeliveryFailed"),
+      nativeOpenCodeHookInvocation(io, "OpenCodeExecutionFailed"),
+    );
+    const priorManifest = readManifest(p.manifest);
+    const priorPlugin = priorManifest?.entries.find((entry) => entry.path === p.opencodePlugin);
+    const webPlugin = managedWebSetupPluginOwnership(p.webSetupManifest, p.opencodePlugin);
+    const pluginOwnership = priorPlugin ? { ownedPath: priorPlugin.path, ownedHash: priorPlugin.sha256After } : webPlugin;
+    const pluginAction = planOpenCodeIdentityPluginInstall({
+      targetPath: p.opencodePlugin,
+      currentHash: pluginBefore == null ? null : sha256(pluginBefore),
+      desiredHash: sha256(pluginSource),
+      ...(pluginOwnership ?? {}),
+    });
+    const managePlugin = pluginAction === "install" || pluginAction === "upgrade" || pluginAction === "unchanged";
+    if (pluginAction === "install" || pluginAction === "upgrade") {
+      files.push({
+        path: p.opencodePlugin,
+        kind: "opencode-plugin",
+        before: pluginBefore,
+        after: pluginSource,
+        changed: true,
+        summary: `${pluginAction} the M9R OpenCode identity/delivery plugin at ${p.opencodePlugin}`,
+        ...(webPlugin && !priorPlugin && webPlugin.ownedPath === p.opencodePlugin
+          ? { managedWebSetupPlugin: { manifestPath: p.webSetupManifest, pluginPath: p.opencodePlugin, desiredContent: pluginSource } }
+          : {}),
+      });
+    }
+    const command = {
+      command: openCodeMcpSpec.command,
+      args: openCodeMcpSpec.args,
+      m9rHome: openCodeMcpSpec.env?.M9R_HOME ?? p.m9r,
+      brokerPort: Number(openCodeMcpSpec.env?.M9R_WEB_BROKER_PORT ?? 47821),
+    };
+    const configAfter = mergeOpenCodeWebMcp(configBefore ?? "", layout, command, managePlugin);
+    files.push({
+      path: p.opencodeConfig,
+      kind: "opencode-json",
+      openCodeLayout: layout,
+      before: configBefore,
+      after: configAfter,
+      changed: configAfter !== (configBefore ?? ""),
+      summary: `register the M9R MCP server and identity plugin in ${p.opencodeConfig}`,
+    });
   }
   return files;
 }
@@ -412,6 +682,7 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
     throw error;
   }
   const p = nativePaths(io);
+  const modelRepair = planNativeOpenCodeModelRepair(io, flags.agents, !flags.identityOnly);
   const todo = files.filter((f) => f.changed);
   const runtime = runtimePlan(io);
   const manifestBefore = readManifest(p.manifest);
@@ -437,13 +708,15 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   // A previously installed user can opt into startup without reinstalling hooks.
   const startupRequested = flags.autostart === true && !!runtime.engine && !!runtime.shim
     && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
-  if (todo.length === 0 && !runtime.needed && !startupRequested && !identityNeedsReconcile) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
+  if (todo.length === 0 && !runtime.needed && !startupRequested && !identityNeedsReconcile && modelRepair?.plan.status !== "updated") { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
   io.out("This will:");
   if (startupRequested) io.out("  - start the M9R desktop pill when this Windows user signs in (uninstall removes this entry)");
   if (runtime.needed) io.out(`  - copy the small hook program to ${runtime.targetDir} (so the hooks keep working even if this CLI moves or is updated)`);
   if (runtime.engine && runtime.shim) io.out("  - start the M9R background engine, which answers your agents' hooks in milliseconds (uninstall stops it)");
   if (identityNeedsReconcile) io.out(`  - reconcile the verified installed runtime identity in ${p.manifest}`);
   for (const f of todo) io.out(`  - ${f.summary}`);
+  if (modelRepair?.plan.status === "updated") io.out(`  - repair stale OpenCode model references in ${modelRepair.statePath} using the cached provider catalog (a rollback copy will be retained)`);
+  if (modelRepair?.plan.status === "blocked") io.out(`  [WAIT] OpenCode model state was not changed: ${modelRepair.plan.reason}`);
   if (todo.some((f) => f.before != null)) io.out(`  - back up each existing file to ${p.backups} first`);
   io.out("Undo anytime with: m9r-cli uninstall");
   if (flags.dryRun) { io.out("Dry run: nothing was written."); return 0; }
@@ -462,20 +735,35 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
       // records; keep any image still on disk because a running provider MCP process may have it mapped.
       .filter((file) => !isRetiredRuntimePath(file) || existsSync(file));
   }
+  if (modelRepair?.plan.status === "updated") {
+    const backupPath = applyNativeOpenCodeModelRepair(modelRepair);
+    if (backupPath) io.out(`[PASS] OpenCode model selection repaired using the cached provider catalog; rollback kept at ${backupPath}`);
+  }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   for (const f of todo) {
     const existing = manifest.entries.find((e) => e.path === f.path);
-    let entry: ManifestEntry & { kind: Kind };
+    let entry: ManifestEntry & { kind: Kind; openCodeLayout?: WebOpenCodeLayout };
     if (existing) {
-      entry = { ...existing, sha256After: sha256(f.after) };
+      entry = { ...existing, sha256After: sha256(f.after), ...(f.openCodeLayout ? { openCodeLayout: f.openCodeLayout } : {}) };
       manifest.entries = manifest.entries.filter((e) => e.path !== f.path);
     } else {
       let backupPath: string | null = null;
       if (f.before != null) { backupPath = join(p.backups, `${stamp}-${basename(f.path)}`); copyFileSync(f.path, backupPath); }
-      entry = { path: f.path, kind: f.kind, existedBefore: f.before != null, backupPath, sha256After: sha256(f.after) };
+      entry = { path: f.path, kind: f.kind, existedBefore: f.before != null, backupPath, sha256After: sha256(f.after), ...(f.openCodeLayout ? { openCodeLayout: f.openCodeLayout } : {}) };
     }
     mkdirSync(dirname(f.path), { recursive: true });
-    writeFileSync(f.path, f.after, "utf8");
+    if (f.managedWebSetupPlugin) {
+      const refreshed = await refreshManagedOpenCodeIdentityPlugin(f.managedWebSetupPlugin, {
+        readFile: async (path) => existsSync(path) ? readFileSync(path) : null,
+        writeAtomic: async (path, bytes) => writeBytesAtomically(path, bytes),
+        removeFile: async (path) => { rmSync(path, { force: true }); },
+      });
+      if (!refreshed.updated) {
+        throw new Error(`The web-owned OpenCode plugin changed during setup (${refreshed.action}); refusing to overwrite it.`);
+      }
+    } else {
+      writeFileSync(f.path, f.after, "utf8");
+    }
     manifest.entries.push(entry);
   }
   if (wantAutostart && runtime.engine) {
@@ -547,9 +835,14 @@ export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?:
       io.out(`Removed ${e.path} (M9R had created it).`);
     } else if (decision.action === "restore_backup" || decision.action === "remove_our_entries") {
       if (current == null) continue;
+      if (e.kind === "opencode-plugin" && decision.action === "remove_our_entries") {
+        io.out(`Preserved user-edited OpenCode plugin ${e.path}.`);
+        continue;
+      }
       const result = e.kind === "hooks-json" ? removeHooks(current, e.path)
         : e.kind === "mcp-json" ? removeMcpServerJson(current, MCP_SERVER_NAME, e.path)
         : e.kind === "mcp-toml" ? removeMcpServerToml(current, MCP_SERVER_NAME)
+        : e.kind === "opencode-json" ? { content: removeOpenCodeWebMcp(current, e.openCodeLayout ?? openCodeLayoutFor(io, current)), changed: true }
         : removeStandingInstruction(current);
       if (result.changed) writeFileSync(e.path, result.content, "utf8");
       io.out(`Removed M9R's entries from ${e.path}; your own edits were kept.`);
@@ -639,7 +932,16 @@ export function nativeStatus(io: NativeIo): StatusRow[] {
   rows.push(missingIdentity.length > 0
     ? { id: "target-identities", state: "todo", label: `${missingIdentity.length} provider session(s) lack a live M9R identity; targeted delivery will fail visibly`, fix: "restart that agent session so M9R can issue its session token" }
     : { id: "target-identities", state: sessions.length > 0 ? "ok" : "info", label: sessions.length > 0 ? "All observed provider sessions have live M9R identities" : "No provider session identities to check yet" });
-  const pending = endpoints.reduce((n, e) => n + store.tasksFor(e.handle).filter((t) => t.approval !== "denied" && t.approval !== "expired" && store.cursorFor(e.handle) < t.seq).length, 0);
+  const statusNow = Date.now();
+  const inboxCutoff = statusNow - inboxMaxAgeMs();
+  const pending = endpoints.reduce((n, e) => n + store.tasksFor(e.handle).filter((t) => {
+    const createdAt = Date.parse(t.createdAt);
+    return t.approval !== "denied" && t.approval !== "expired"
+      && !t.resultSummary
+      && t.delivery?.state !== "queued" && t.delivery?.state !== "done"
+      && Number.isFinite(createdAt) && createdAt <= statusNow && createdAt >= inboxCutoff
+      && store.cursorFor(e.handle) < t.seq;
+  }).length, 0);
   if (pending > 0) rows.push({ id: "pending", state: "info", label: `${pending} task(s) waiting in inboxes` });
   return rows;
 }
@@ -712,6 +1014,30 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
       agents: value("--agents")?.split(",").map((agent) => agent.trim()).filter(Boolean),
       identityOnly: has("--identity-only"),
     });
+  }
+  if (command === "update") {
+    if (positionals[0] !== "check") {
+      io.err("Usage: m9r-cli update check");
+      return 1;
+    }
+    const configPath = io.env.M9R_UPDATE_CONFIG?.trim() || join(nativePaths(io).m9r, "update-config.json");
+    let config: ReturnType<typeof parseUpdateConfig>;
+    try {
+      config = parseUpdateConfig(JSON.parse(readFileSync(configPath, "utf8")) as unknown);
+    } catch (error) {
+      io.err(`M9R update metadata is not configured or is invalid (${error instanceof Error ? error.message : "unknown error"}).`);
+      return 1;
+    }
+    const currentVersion = io.env.M9R_RUNTIME_VERSION?.trim() || config.currentVersion;
+    const result = await checkEngineUpdate({ currentVersion, source: config.source });
+    io.out(JSON.stringify({
+      phase: result.state.phase,
+      currentVersion: result.state.currentVersion,
+      availableVersion: result.state.availableVersion,
+      checkedAt: result.state.checkedAt,
+      error: result.state.error,
+    }));
+    return result.state.phase === "failed" ? 1 : 0;
   }
   if (command === "uninstall") return runUninstall(io, { yes: has("--yes", "-y"), purge: has("--purge") });
   if (command === "note") return runNote(io, positionals.join(" "));

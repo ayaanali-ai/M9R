@@ -3329,6 +3329,7 @@ Usage:
   m9r launch claude --resume <session-id> Resume an explicit Claude Code session
   m9r-cli setup [--dry-run] [--yes] [--status]
                                          Set up this machine locally (no account): hooks and a standing instruction, with backups
+  m9r-cli update check                    Check the signed M9R runtime manifest without applying an update
   m9r-cli uninstall [--yes] [--purge]       Remove everything setup added and restore your files exactly
   m9r-cli tasks                             List tasks and what is waiting for your approval
   m9r-cli approvals purge [--apply]         Dry-run stale approvals; apply expires them but keeps history
@@ -3448,6 +3449,7 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "connect":
       return cmdConnect(deps, parsed);
     case "setup":
+    case "update":
     case "uninstall":
     case "send":
     case "note":

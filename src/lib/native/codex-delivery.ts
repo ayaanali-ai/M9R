@@ -182,7 +182,7 @@ export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps:
 /** Reads back answers for every pushed task that has none yet. Cheap when nothing is waiting (no file is opened). */
 export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, "readRolloutTail">): number {
   let collected = 0;
-  for (const task of store.awaitingResults()) {
+  for (const task of store.awaitingResults("codex")) {
     if (task.delivery?.correlation === "internal-context") continue;
     const threadId = task.delivery?.threadId;
     if (!threadId) continue;

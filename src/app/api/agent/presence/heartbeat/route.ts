@@ -5,7 +5,11 @@ import { handleAgentError } from "../../_shared";
 
 export async function POST(req: NextRequest) {
   try {
-    const agent = await authenticateAgent(bearerFrom(req.headers.get("authorization")));
+    // Liveness must be refreshed only after the heartbeat payload passes
+    // validation and the atomic sequence/lease write succeeds. Otherwise a
+    // malformed or replayed request can keep an offline connection looking
+    // online merely by presenting a valid old bearer token.
+    const agent = await authenticateAgent(bearerFrom(req.headers.get("authorization")), { touchLastSeen: false });
     if (!agent) return NextResponse.json({ error: "Invalid or missing agent token." }, { status: 401 });
     if (!agent.scopes.includes("session:submit")) {
       return NextResponse.json({ error: "Token lacks session:submit scope." }, { status: 403 });

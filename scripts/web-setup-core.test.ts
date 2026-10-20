@@ -141,6 +141,7 @@ test("Codex web MCP merge is idempotent, updates a pre-existing m9r table, and p
   assert.equal((once.match(/^\[mcp_servers\.m9r\]$/gm) ?? []).length, 1);
   assert.equal((once.match(/^\[mcp_servers\.m9r\.env\]$/gm) ?? []).length, 1);
   assert.match(once, /M9R_HOME = "C:\/Users\/Ada\/\.m9r"/);
+  assert.match(once, /M9R_PROVIDER = "codex"/);
   assert.match(once, /\[mcp_servers\.github\][\s\S]*command = "gh-mcp"/);
   assert.match(once, /\[profiles\.work\][\s\S]*model = "codex"/);
   const uninstalled = removeCodexWebMcp(once);
@@ -167,6 +168,7 @@ test("OpenCode JSONC merge uses legacy or v2 layout without rewriting unrelated 
   const parsed = JSON.parse(modern.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1"));
   assert.deepEqual(parsed.mcp.servers.m9r.command, [command.command, "mcp"]);
   assert.equal(parsed.mcp.servers.m9r.environment.M9R_HOME, command.m9rHome);
+  assert.equal(parsed.mcp.servers.m9r.environment.M9R_PROVIDER, "opencode");
   const uninstalled = removeOpenCodeWebMcp(modern, "servers");
   assert.doesNotMatch(uninstalled, /"m9r"/);
   assert.match(uninstalled, /\/\/ user comment stays/);

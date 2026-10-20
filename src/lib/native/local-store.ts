@@ -9,7 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
-import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type Task, type TaskDelivery } from "./inbox-core";
+import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle } from "./inbox-core";
 import { canQueue } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, newConnectionId, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
@@ -57,6 +57,9 @@ export interface EventRecord {
 const MAX_EVENTS = 500;
 /** Keep receipts for recent stage actions so an MCP retry cannot repeat an OS input. */
 const MAX_STAGE_OPERATION_RECEIPTS = 10_000;
+/** Keep durable phase history bounded even for a long-running task/session. */
+const MAX_STAGE_TIMING_EVENTS_PER_TASK = 256;
+const MAX_STAGE_TIMING_DETAIL_CHARS = 240;
 /** Keep generic computer-use receipts across broker/client restarts; fail closed rather than evicting replay protection. */
 const MAX_COMPUTER_OPERATION_RECEIPTS = 10_000;
 /** Hard ceiling for the complete local snapshot, including extensible cursor and rule maps. */
@@ -64,6 +67,14 @@ export const MAX_LOCAL_STATE_BYTES = 16 * 1024 * 1024;
 /** Keep each rewritten local state file within a predictable task count when user work can be retired safely. */
 export const MAX_STORED_TASKS = 2_000;
 const RESOLVED_TASK_RETENTION_MS = 7 * 24 * 60 * 60_000;
+/**
+ * Result collectors are reconciliation workers, not an authority to resurrect
+ * an old delivery. Keep a generous window for genuinely long provider turns,
+ * but stop polling records that have been waiting for a result for a day. The
+ * task remains in state.json as history; a separate lifecycle policy can retire
+ * it later only with stronger evidence that the provider session is gone.
+ */
+export const RESULT_RECONCILIATION_MAX_AGE_MS = 24 * 60 * 60_000;
 /** How long a task's last recorded stage activity still counts as "the current turn" for
  *  mostRecentlyActiveTaskId -- a real turn's calls happen seconds to low minutes apart. */
 const ACTIVE_TURN_WINDOW_MS = 5 * 60_000;
@@ -209,12 +220,20 @@ const dropInstallCwd = <T extends { cwd?: string }>(storeRoot: string, record: T
   return withoutCwd as T;
 };
 
+/** Older runtimes serialized an absent optional process id as JSON null. Keep that
+ * legacy representation from looking like a live owner during reconnect. */
+const normalizeConnectionOwner = <T extends { ownerProcessId?: number | null }>(record: T): T => {
+  if (record.ownerProcessId !== null) return record;
+  const { ownerProcessId: _ignoredOwnerProcessId, ...withoutOwner } = record;
+  return withoutOwner as T;
+};
+
 const normalizeStoredScopes = (storeRoot: string, state: StoreState): StoreState => {
   state.endpoints = Object.fromEntries(Object.entries(state.endpoints).map(([key, value]) => [key, dropInstallCwd(storeRoot, value)]));
   state.sessions = state.sessions.map((session) => dropInstallCwd(storeRoot, session));
   state.tasks = state.tasks.map((task) => dropInstallCwd(storeRoot, task));
-  state.connectionClaims = state.connectionClaims.map((claim) => dropInstallCwd(storeRoot, claim));
-  state.connectionBindings = state.connectionBindings.map((binding) => dropInstallCwd(storeRoot, binding));
+  state.connectionClaims = state.connectionClaims.map((claim) => normalizeConnectionOwner(dropInstallCwd(storeRoot, claim)));
+  state.connectionBindings = state.connectionBindings.map((binding) => normalizeConnectionOwner(dropInstallCwd(storeRoot, binding)));
   state.links = state.links.map((link) => ({
     ...link,
     a: dropInstallCwd(storeRoot, link.a),
@@ -261,12 +280,31 @@ const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuf
 
 export interface LocalStoreDeps {
   now?: () => Date;
+  /**
+   * Determines whether an unbound provider claim still belongs to a live
+   * provider host. Tests inject this so claim lifecycle behavior is
+   * deterministic; production uses the local process table through
+   * `process.kill(pid, 0)`.
+   */
+  isProcessAlive?: (pid: number) => boolean;
   /** Tests and embedded callers may choose a lower limit; the production maximum cannot be raised. */
   maxStateBytes?: number;
 }
 
 export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
   const now = deps.now ?? (() => new Date());
+  const isProcessAlive = deps.isProcessAlive ?? ((pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      // ESRCH/ENOENT mean the host is gone. Permission errors are treated as
+      // alive because the process may exist outside this user's inspection
+      // rights; cleanup must never turn uncertainty into data loss.
+      const code = (error as NodeJS.ErrnoException).code;
+      return code !== "ESRCH" && code !== "ENOENT";
+    }
+  });
   const statePath = join(root, "state.json");
   const lockPath = join(root, "state.lock");
   const maxStateBytes = Math.min(MAX_LOCAL_STATE_BYTES, Math.max(1, Math.floor(deps.maxStateBytes ?? MAX_LOCAL_STATE_BYTES)));
@@ -378,6 +416,83 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       rmSync(join(lockPath, ownerName));
       try { rmdirSync(lockPath); } catch { /* never recursively remove a replacement lock */ }
     }
+  }
+
+  /**
+   * Retire only unbound claims that cannot still represent a provider process.
+   * Expiry is sufficient evidence for any scope; a live-process probe is used
+   * only for the requested provider (and, during SessionStart, its exact
+   * project/handle scope). Unknown or inaccessible owner PIDs are preserved so
+   * provider-only discovery never turns uncertainty into a guessed binding.
+   */
+  function pruneStaleUnboundConnectionClaims(
+    state: StoreState,
+    at: Date,
+    options: { provider?: string; handle?: string; cwd?: string; deadOnlySameScope?: boolean } = {},
+  ): void {
+    const provider = options.provider?.trim();
+    const handle = options.handle ? normalizeHandle(options.handle) : undefined;
+    const project = options.cwd === undefined ? undefined : normalizeSessionFolder(projectCwd(root, options.cwd));
+    state.connectionClaims = state.connectionClaims.filter((candidate) => {
+      if (candidate.bindingId) return true;
+      const expiresAt = Date.parse(candidate.expiresAt);
+      if (!Number.isFinite(expiresAt) || expiresAt <= at.getTime()) return false;
+      if (!provider || !sameConnectionProvider(candidate.provider, provider)) return true;
+      if (options.deadOnlySameScope) {
+        if (!handle || normalizeHandle(candidate.handle) !== handle
+          || normalizeSessionFolder(projectCwd(root, candidate.cwd)) !== project) return true;
+      }
+      if (candidate.ownerProcessId === undefined) return true;
+      return isProcessAlive(candidate.ownerProcessId);
+    });
+  }
+
+  /**
+   * Retire a prior durable binding only when a new session is starting in the
+   * same provider/project scope and its recorded owner is demonstrably gone.
+   * Durable bindings normally survive a worker restart, so this is deliberately
+   * narrower than the unbound-claim sweep and never treats an unknown owner as
+   * stale.
+   */
+  function pruneStaleBoundConnectionClaims(
+    state: StoreState,
+    at: Date,
+    options: { provider: string; handle: string; cwd?: string; replacementProcessId: number },
+  ): void {
+    const provider = options.provider.trim();
+    const handle = normalizeHandle(options.handle);
+    const project = normalizeSessionFolder(projectCwd(root, options.cwd));
+    const retiredBindingIds = new Set<string>();
+    const retiredSessionIds = new Set<string>();
+    state.connectionClaims = state.connectionClaims.filter((claim) => {
+      if (!claim.bindingId
+        || normalizeHandle(claim.handle) !== handle
+        || !sameConnectionProvider(claim.provider, provider)
+        || normalizeSessionFolder(projectCwd(root, claim.cwd)) !== project
+        || claim.ownerProcessId === undefined
+        || claim.ownerProcessId === options.replacementProcessId
+        || isProcessAlive(claim.ownerProcessId)) return true;
+      const binding = state.connectionBindings.find((candidate) => candidate.bindingId === claim.bindingId);
+      if (!binding) return true;
+      retiredBindingIds.add(binding.bindingId);
+      retiredSessionIds.add(claim.sessionId);
+      return false;
+    });
+    if (retiredBindingIds.size > 0) {
+      state.connectionBindings = state.connectionBindings.filter((binding) => !retiredBindingIds.has(binding.bindingId));
+      const retiredAt = at.toISOString();
+      for (const identity of state.identities) {
+        if (retiredSessionIds.has(identity.sessionId) && !identity.revokedAt) identity.revokedAt = retiredAt;
+      }
+    }
+  }
+
+  function applyTaskLifecycle(task: Task, patch: Partial<TaskLifecycle> & Pick<TaskLifecycle, "state">): void {
+    task.lifecycle = {
+      ...task.lifecycle,
+      ...patch,
+      ...(patch.error ? { error: redactSecrets(patch.error).slice(0, 240) } : {}),
+    };
   }
 
   return {
@@ -561,6 +676,37 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
+    /**
+     * Persist one phase boundary on the task itself. This is deliberately best-effort at the
+     * stage boundary: a timing write must never turn a successful desktop action into a failed
+     * action, but malformed events are rejected rather than being allowed into state.json.
+     */
+    recordStageTiming(taskId: string, event: StageTimingEvent): boolean {
+      if (!/^T[0-9]{1,12}$/.test(taskId)
+        || !["queue_wait", "prepare", "launch", "action", "close", "stop", "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion"].includes(event.phase)
+        || !["ok", "error"].includes(event.status)
+        || !Number.isFinite(event.durationMs) || event.durationMs < 0
+        || Number.isNaN(Date.parse(event.startedAt)) || Number.isNaN(Date.parse(event.endedAt))) return false;
+      if (event.operationId !== undefined && !/^[a-zA-Z0-9._:-]{1,128}$/.test(event.operationId)) return false;
+      const detail = event.detail === undefined ? undefined : redactSecrets(event.detail).slice(0, MAX_STAGE_TIMING_DETAIL_CHARS);
+      const stored: StageTimingEvent = {
+        phase: event.phase,
+        startedAt: event.startedAt,
+        endedAt: event.endedAt,
+        durationMs: Math.round(event.durationMs),
+        status: event.status,
+        ...(event.operationId ? { operationId: event.operationId } : {}),
+        ...(detail ? { detail } : {}),
+      };
+      return update((s) => {
+        const task = s.tasks.find((candidate) => candidate.id === taskId);
+        if (!task) return false;
+        const prior = Array.isArray(task.stageTiming) ? task.stageTiming : [];
+        task.stageTiming = [...prior, stored].slice(-MAX_STAGE_TIMING_EVENTS_PER_TASK);
+        return true;
+      });
+    },
+
     /** Same idempotency key for the same recipient returns the existing task, so a repeated send delivers once. */
     addTask(input: NewTaskInput): { task: Task; created: boolean } {
       const scopedCwd = projectCwd(root, input.cwd);
@@ -720,6 +866,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       if (input.ownerProcessId !== undefined && !validConnectionProcessId(input.ownerProcessId)) throw new Error("A connection claim process id must be a positive integer.");
       return update((s) => {
         const at = now();
+        const cwd = projectCwd(root, input.cwd);
         const activeIdentity = s.identities.find((identity) => !identity.revokedAt
           && identity.sessionId === input.sessionId
           && normalizeHandle(identity.handle) === handle
@@ -730,7 +877,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           && normalizeHandle(claim.handle) === handle
           && sameConnectionProvider(claim.provider, provider));
         if (existing) {
-          existing.cwd = projectCwd(root, input.cwd);
+          existing.cwd = cwd;
           existing.ownerProcessId = input.ownerProcessId;
           existing.expiresAt = new Date(at.getTime() + CONNECTION_CLAIM_TTL_MS).toISOString();
           const bound = existing.bindingId ? s.connectionBindings.find((candidate) => candidate.bindingId === existing.bindingId) : undefined;
@@ -741,17 +888,84 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           return existing;
         }
 
+        if (!input.continuation && input.ownerProcessId !== undefined) {
+          pruneStaleBoundConnectionClaims(s, at, {
+            provider,
+            handle,
+            cwd,
+            replacementProcessId: input.ownerProcessId,
+          });
+        }
+
+        // A continuation/compaction can issue a new provider session id while
+        // the provider keeps the same parent process and project alive. The
+        // process id is the trusted lineage proof here: only a hook that has
+        // both explicit continuation intent and the exact same provider PID
+        // may carry a private claim/binding forward. Ordinary store callers
+        // still retain the fail-closed behavior for two live sessions sharing
+        // one process id.
+        if (input.continuation && input.ownerProcessId !== undefined) {
+          const lineage = s.connectionClaims
+            .filter((claim) => claim.sessionId !== input.sessionId
+              && normalizeHandle(claim.handle) === handle
+              && sameConnectionProvider(claim.provider, provider)
+              && claim.cwd === cwd
+              && claim.ownerProcessId === input.ownerProcessId)
+            .sort((left, right) => {
+              const leftBound = left.bindingId ? 1 : 0;
+              const rightBound = right.bindingId ? 1 : 0;
+              if (leftBound !== rightBound) return rightBound - leftBound;
+              return Date.parse(right.issuedAt) - Date.parse(left.issuedAt);
+            });
+          const prior = lineage[0];
+          if (prior) {
+            const priorSessionIds = new Set(lineage.map((claim) => claim.sessionId));
+            const retiredClaimIds = new Set(lineage.map((claim) => claim.claimId));
+            const binding = prior.bindingId
+              ? s.connectionBindings.find((candidate) => candidate.bindingId === prior.bindingId)
+              : undefined;
+            const retiredAt = at.toISOString();
+            for (const identity of s.identities) {
+              if (priorSessionIds.has(identity.sessionId) && !identity.revokedAt) identity.revokedAt = retiredAt;
+            }
+
+            prior.sessionId = input.sessionId;
+            prior.cwd = cwd;
+            prior.ownerProcessId = input.ownerProcessId;
+            prior.expiresAt = new Date(at.getTime() + CONNECTION_CLAIM_TTL_MS).toISOString();
+            if (binding) {
+              binding.sessionId = input.sessionId;
+              binding.cwd = cwd;
+              binding.ownerProcessId = input.ownerProcessId;
+            }
+
+            // If a polluted store already has several claims from this exact
+            // provider process, keep one canonical record and its durable
+            // binding. They are the same trusted process lineage; retaining
+            // the extras would recreate the ambiguity on the next worker
+            // reconnect.
+            s.connectionClaims = s.connectionClaims.filter((claim) => !retiredClaimIds.has(claim.claimId) || claim.claimId === prior.claimId);
+            s.connectionBindings = s.connectionBindings.filter((candidate) => !retiredClaimIds.has(candidate.claimId) || candidate.bindingId === prior.bindingId);
+            return prior;
+          }
+        }
+
         const claim: ConnectionClaim = {
           claimId: newConnectionId(),
           handle,
           provider,
           sessionId: input.sessionId,
-          ...(projectCwd(root, input.cwd) ? { cwd: projectCwd(root, input.cwd) } : {}),
+          ...(cwd ? { cwd } : {}),
           ...(input.ownerProcessId !== undefined ? { ownerProcessId: input.ownerProcessId } : {}),
           issuedAt: at.toISOString(),
           expiresAt: new Date(at.getTime() + CONNECTION_CLAIM_TTL_MS).toISOString(),
         };
-        s.connectionClaims = [...s.connectionClaims.filter((candidate) => candidate.expiresAt > at.toISOString() || candidate.bindingId), claim].slice(-MAX_CONNECTION_RECORDS);
+        // A new SessionStart may safely retire only claims that are already
+        // expired or whose recorded provider host is demonstrably dead. Live
+        // competing sessions remain, so provider-only discovery still fails
+        // closed instead of silently choosing a winner.
+        pruneStaleUnboundConnectionClaims(s, at, { provider, handle, cwd: input.cwd, deadOnlySameScope: true });
+        s.connectionClaims = [...s.connectionClaims, claim].slice(-MAX_CONNECTION_RECORDS);
         return claim;
       });
     },
@@ -794,34 +1008,139 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const provider = expected.provider?.trim();
         const processId = expected.processId;
+        const at = now();
         const active = (sessionId: string, handle: string, claimProvider: string) => s.identities.some((identity) => !identity.revokedAt
           && identity.sessionId === sessionId
           && normalizeHandle(identity.handle) === normalizeHandle(handle)
           && sameConnectionProvider(identity.provider, claimProvider));
+        const createBinding = (claim: ConnectionClaim): ConnectionBinding => {
+          const binding: ConnectionBinding = {
+            bindingId: newConnectionId(),
+            claimId: claim.claimId,
+            handle: claim.handle,
+            provider: claim.provider,
+            sessionId: claim.sessionId,
+            ...(claim.cwd ? { cwd: claim.cwd } : {}),
+            ...(claim.ownerProcessId !== undefined ? { ownerProcessId: claim.ownerProcessId } : {}),
+            boundAt: at.toISOString(),
+          };
+          claim.bindingId = binding.bindingId;
+          claim.boundAt = binding.boundAt;
+          s.connectionBindings = [...s.connectionBindings, binding].slice(-MAX_CONNECTION_RECORDS);
+          return binding;
+        };
+
+        // A fresh provider session must take precedence over a durable binding
+        // left by an older session whose owner has exited.  Without this
+        // guard, the restart-recovery branch below can reassign the old
+        // binding to the new process before the new claim is considered,
+        // making the provider silently operate as the previous session.
+        const exactProcessClaims = processId === undefined
+          ? []
+          : s.connectionClaims.filter((claim) => !claim.bindingId
+            && claim.ownerProcessId === processId
+            && usableConnectionClaim(claim, at.getTime(), expected)
+            && active(claim.sessionId, claim.handle, claim.provider));
+        if (exactProcessClaims.length > 1) return null;
+        if (exactProcessClaims.length === 1) {
+          const binding = createBinding(exactProcessClaims[0]!);
+          pruneStaleUnboundConnectionClaims(s, at, { provider });
+          return binding;
+        }
+
+        // A provider MCP worker can outlive the parent process that issued its
+        // claim. Keep a sole active claim usable across that restart, while
+        // preserving fail-closed behavior when more than one live session is
+        // eligible or the previous owner is still demonstrably alive.
+        const activeBindings = s.connectionBindings.filter((binding) => {
+          if (provider && !sameConnectionProvider(binding.provider, provider)) return false;
+          const claim = s.connectionClaims.find((candidate) => candidate.claimId === binding.claimId);
+          return claim?.bindingId === binding.bindingId && active(binding.sessionId, binding.handle, binding.provider);
+        });
+        if (activeBindings.length > 1) {
+          // A provider process can survive a compaction/reconnect boundary while
+          // the old durable binding remains in state.json. If the current
+          // provider endpoint has published exactly one fresh session heartbeat,
+          // that heartbeat is stronger evidence than an old active identity. We
+          // may retire duplicates only when every candidate is the same provider,
+          // handle/project, and process lineage; two genuinely live sessions or
+          // different owners remain fail-closed.
+          const scope = activeBindings[0]!;
+          const sameLineage = provider !== undefined
+            && activeBindings.every((binding) => sameConnectionProvider(binding.provider, scope.provider)
+              && normalizeHandle(binding.handle) === normalizeHandle(scope.handle)
+              && normalizeSessionFolder(projectCwd(root, binding.cwd)) === normalizeSessionFolder(projectCwd(root, scope.cwd))
+              && processId !== undefined
+              && (binding.ownerProcessId === undefined || binding.ownerProcessId === processId || !isProcessAlive(binding.ownerProcessId)));
+          if (sameLineage) {
+            const freshSessionIds = new Set(Object.values(s.endpoints)
+              .filter((endpoint) => endpoint.sessionId
+                && sameConnectionProvider(endpoint.provider, scope.provider)
+                && normalizeHandle(endpoint.handle) === normalizeHandle(scope.handle)
+                && normalizeSessionFolder(projectCwd(root, endpoint.cwd)) === normalizeSessionFolder(projectCwd(root, scope.cwd))
+                && Number.isFinite(Date.parse(endpoint.lastSeenAt))
+                && at.getTime() - Date.parse(endpoint.lastSeenAt) <= CONNECTION_CLAIM_TTL_MS)
+              .map((endpoint) => endpoint.sessionId!));
+            if (freshSessionIds.size === 1) {
+              const winner = activeBindings.find((binding) => freshSessionIds.has(binding.sessionId));
+              if (winner) {
+                const retiredBindingIds = new Set(activeBindings.filter((binding) => binding !== winner).map((binding) => binding.bindingId));
+                const retiredClaimIds = new Set(activeBindings.filter((binding) => binding !== winner).map((binding) => binding.claimId));
+                s.connectionBindings = s.connectionBindings.filter((binding) => !retiredBindingIds.has(binding.bindingId));
+                s.connectionClaims = s.connectionClaims.filter((claim) => !retiredClaimIds.has(claim.claimId));
+                const winnerClaim = s.connectionClaims.find((claim) => claim.claimId === winner.claimId && claim.bindingId === winner.bindingId);
+                if (!winnerClaim) return null;
+                winner.ownerProcessId = processId;
+                winnerClaim.ownerProcessId = processId;
+                return winner;
+              }
+            }
+          }
+          return null;
+        }
+        if (activeBindings.length === 1) {
+          const binding = activeBindings[0]!;
+          if (processId === undefined || binding.ownerProcessId === processId) return binding;
+          if (binding.ownerProcessId == null || !isProcessAlive(binding.ownerProcessId)) {
+            const claim = s.connectionClaims.find((candidate) => candidate.claimId === binding.claimId && candidate.bindingId === binding.bindingId);
+            if (!claim) return null;
+            claim.ownerProcessId = processId;
+            binding.ownerProcessId = processId;
+            return binding;
+          }
+          return null;
+        }
+
+        const providerOnlyExpected: BindConnectionInput = provider ? { provider } : {};
+        const activeClaims = s.connectionClaims.filter((claim) => !claim.bindingId
+          && usableConnectionClaim(claim, at.getTime(), providerOnlyExpected)
+          && active(claim.sessionId, claim.handle, claim.provider));
+        if (activeClaims.length === 1) {
+          const claim = activeClaims[0]!;
+          const ownerCanBeAdopted = processId === undefined
+            || claim.ownerProcessId == null
+            || claim.ownerProcessId === processId
+            || !isProcessAlive(claim.ownerProcessId);
+          if (ownerCanBeAdopted) {
+            if (processId !== undefined) claim.ownerProcessId = processId;
+            return createBinding(claim);
+          }
+        }
+
+        // This is also the recovery path for an already-running provider MCP
+        // process. Do not require another SessionStart just to remove a claim
+        // whose owner is demonstrably gone; live competitors remain fail-closed.
+        pruneStaleUnboundConnectionClaims(s, at, { provider });
         const matchingBindings = s.connectionBindings.filter((binding) => (!provider || sameConnectionProvider(binding.provider, provider))
           && (processId === undefined || binding.ownerProcessId === processId)
           && active(binding.sessionId, binding.handle, binding.provider));
         if (matchingBindings.length === 1) return matchingBindings[0];
         if (matchingBindings.length > 1) return null;
 
-        const candidates = s.connectionClaims.filter((claim) => usableConnectionClaim(claim, now().getTime(), expected)
+        const candidates = s.connectionClaims.filter((claim) => usableConnectionClaim(claim, at.getTime(), expected)
           && active(claim.sessionId, claim.handle, claim.provider));
         if (candidates.length !== 1) return null;
-        const claim = candidates[0];
-        const binding: ConnectionBinding = {
-          bindingId: newConnectionId(),
-          claimId: claim.claimId,
-          handle: claim.handle,
-          provider: claim.provider,
-          sessionId: claim.sessionId,
-          ...(claim.cwd ? { cwd: claim.cwd } : {}),
-          ...(claim.ownerProcessId !== undefined ? { ownerProcessId: claim.ownerProcessId } : {}),
-          boundAt: now().toISOString(),
-        };
-        claim.bindingId = binding.bindingId;
-        claim.boundAt = binding.boundAt;
-        s.connectionBindings = [...s.connectionBindings, binding].slice(-MAX_CONNECTION_RECORDS);
-        return binding;
+        return createBinding(candidates[0]!);
       });
     },
 
@@ -1047,7 +1366,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return readState().tasks.filter((task) => normalizeHandle(task.to) === normalizedHandle
         && (!(task.targetSession ?? task.deliveredSession) || (task.targetSession ?? task.deliveredSession) === sessionId)
         && !task.resultSummary
-        && task.approval !== "denied" && task.approval !== "expired"
+        && (task.approval === "approved" || task.approval === "not_needed")
         && Date.parse(task.createdAt) >= cutoff);
     },
 
@@ -1081,6 +1400,10 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
             cursor = Math.max(cursor, task.seq);
             continue;
           }
+          // Approval is a delivery gate, not merely an instruction to the
+          // provider. Never mark pending work presented or move the cursor
+          // past it; the next approved inbox read must be able to claim it.
+          if (task.approval === "pending") continue;
           // Explicit routing wins over a stale incidental delivery record. Without an
           // explicit target, the first real inbox read owns the task from then on.
           const owner = task.targetSession ?? task.deliveredSession;
@@ -1100,6 +1423,12 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           task.deliveredAt ??= at.toISOString();
           task.deliveredSession = task.targetSession ?? sessionId;
           task.deliverySource = "prompt";
+          applyTaskLifecycle(task, {
+            state: "presented",
+            sessionId: task.targetSession ?? sessionId,
+            source: "prompt",
+            presentedAt: task.deliveredAt,
+          });
           cursor = Math.max(cursor, task.seq);
           claimed.push(task);
           if (firstDelivery) pushEvent(s, { kind: "task.delivered", taskId: task.id, handle: task.to, text: `${task.id} was read by @${task.to}'s session` });
@@ -1126,7 +1455,9 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         const task = s.tasks.find((item) => item.id === id);
         if (!task || task.to !== "codex" || task.resultSummary || task.deliveredAt || !canQueue(task)) return undefined;
         if (task.delivery && task.delivery.state !== "failed" && task.delivery.state !== "deferred") return undefined;
-        task.delivery = { state: "sending", attempts: (task.delivery?.attempts ?? 0) + 1, claimedAt: now().toISOString() };
+        const claimedAt = now().toISOString();
+        task.delivery = { state: "sending", attempts: (task.delivery?.attempts ?? 0) + 1, claimedAt };
+        applyTaskLifecycle(task, { state: "queued", source: "push", queuedAt: claimedAt });
         return task;
       });
     },
@@ -1139,6 +1470,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (t.delivery?.state === "done" || t.resultSummary) return t;
         t.delivery = { attempts: 0, ...t.delivery, ...patch,
           ...(patch.error ? { error: redactSecrets(patch.error).slice(0, 500) } : {}) };
+        if (patch.state === "sending") {
+          applyTaskLifecycle(t, { state: "queued", sessionId: patch.threadId ?? t.deliveredSession, source: "push", queuedAt: t.delivery.claimedAt ?? now().toISOString() });
+        } else if (patch.state === "queued") {
+          applyTaskLifecycle(t, { state: "acknowledged", sessionId: patch.threadId ?? t.deliveredSession, source: "push", acknowledgedAt: t.delivery.queuedAt ?? now().toISOString() });
+        } else if (patch.state === "failed") {
+          applyTaskLifecycle(t, { state: "failed", sessionId: t.deliveredSession, source: t.deliverySource, error: patch.error, completedAt: now().toISOString() });
+        }
         if (patch.state === "uncertain") pushEvent(s, { kind: "task.delivery_uncertain", taskId: id, handle: t.to,
           text: `${id} delivery to @${t.to} could not be confirmed; it will not be resent automatically` });
         if (patch.state === "queued" && patch.threadId && !t.deliveredSession) t.deliveredSession = patch.threadId;
@@ -1179,6 +1517,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (!Number.isFinite(createdAt) || at.getTime() - createdAt < 0 || at.getTime() - createdAt > input.maxAgeMs) return undefined;
         task.delivery = { attempts: 1, state: "sending", threadId: input.sessionId, claimedAt: at.toISOString() };
         task.deliveredSession = input.sessionId;
+        applyTaskLifecycle(task, { state: "presented", sessionId: input.sessionId, source: "poll", presentedAt: at.toISOString() });
         s.cursors[cursorKey(handle, input.sessionId, folder)] = Math.max(cursor, task.seq);
         return task;
       });
@@ -1198,14 +1537,21 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (outcome.state === "queued" && (delivery.state === "queued" || delivery.state === "done")) return true;
         if (outcome.state === "failed" && delivery.state === "failed") return true;
         if (outcome.state === "uncertain" && delivery.state === "uncertain") return true;
-        if (delivery.state !== "sending") return false;
+        // A provider can accept promptAsync (queued) and fail later inside its
+        // model/session loop. That is a terminal provider failure, not an
+        // uncertain transport result, and must be closable without replaying
+        // the already-created provider turn.
+        const canRecordExecutionFailure = outcome.state === "failed" && (delivery.state === "sending" || delivery.state === "queued");
+        if (delivery.state !== "sending" && !canRecordExecutionFailure) return false;
         const at = now().toISOString();
         if (outcome.state === "queued") {
           task.delivery = { ...delivery, state: "queued", queuedAt: at };
           task.deliveredAt = at;
+          applyTaskLifecycle(task, { state: "acknowledged", sessionId, source: "poll", acknowledgedAt: at });
           pushEvent(s, { kind: "task.delivered", taskId: id, handle, text: `${id} accepted by @opencode's session` });
         } else if (outcome.state === "failed") {
           task.delivery = { ...delivery, state: "failed", failedAt: at, error: redactSecrets(outcome.error).slice(0, 240) };
+          applyTaskLifecycle(task, { state: "failed", sessionId, source: "poll", error: outcome.error, completedAt: at });
           pushEvent(s, { kind: "task.delivery_failed", taskId: id, handle, text: `${id} was rejected by @opencode's session` });
         } else {
           task.delivery = { ...delivery, state: "uncertain", uncertainAt: at, error: redactSecrets(outcome.error).slice(0, 240) };
@@ -1215,10 +1561,22 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
-    /** Tasks pushed into a session that have not produced a result yet. */
-    awaitingResults(): Task[] {
-      return readState().tasks.filter((t) => !t.resultSummary && (t.delivery?.state === "queued"
-        || (t.to === "codex" && Boolean(t.delivery?.threadId) && (t.delivery?.state === "sending" || t.delivery?.state === "uncertain"))));
+    /**
+     * Tasks pushed into a provider session that have not produced a result yet.
+     * This is intentionally a read-only eligibility filter: stale records are
+     * retained for evidence, but no result collector may keep reopening them.
+     */
+    awaitingResults(provider?: string): Task[] {
+      const at = now().getTime();
+      const requestedProvider = provider ? normalizeHandle(provider) : undefined;
+      return readState().tasks.filter((t) => {
+        if (t.resultSummary || (requestedProvider && normalizeHandle(t.to) !== requestedProvider)) return false;
+        const createdAt = Date.parse(t.createdAt);
+        if (!Number.isFinite(createdAt) || createdAt > at || at - createdAt > RESULT_RECONCILIATION_MAX_AGE_MS) return false;
+        return t.delivery?.state === "queued"
+          || (normalizeHandle(t.to) === "codex" && Boolean(t.delivery?.threadId)
+            && (t.delivery?.state === "sending" || t.delivery?.state === "uncertain"));
+      });
     },
 
     /** Clears items from the overlay's "needs you" list. Never touches approval, delivery or results. */
@@ -1246,6 +1604,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (!t) return undefined;
         const clean = redactSecrets(summary.trim());
         if (t.delivery?.state === "queued") t.delivery = { ...t.delivery, state: "done" };
+        applyTaskLifecycle(t, { state: "completed", sessionId: t.deliveredSession, source: t.deliverySource, completedAt: now().toISOString() });
         t.resultSummary = clean.length > MAX_RESULT_SUMMARY_CHARS ? clean.slice(0, MAX_RESULT_SUMMARY_CHARS - TRUNCATION_MARKER.length) + TRUNCATION_MARKER : clean;
         pushEvent(s, { kind: "task.result", taskId: id, handle: t.from, text: `${id} finished: ${t.resultSummary.slice(0, 120)}` });
         return t;
@@ -1278,8 +1637,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           if (task.resultSummary === bounded) return { ok: true, alreadyRecorded: true };
           return { ok: false, error: `Task ${id} already has a recorded result; it was not overwritten.` };
         }
+        const inFlightStage = s.stageOperations.find((operation) => operation.taskId === id && operation.state === "running");
+        if (inFlightStage) {
+          return { ok: false, error: `Task ${id} still has an in-flight desktop-stage operation; wait for operation ${inFlightStage.key} to settle before recording the result.` };
+        }
         if (task.targetSession && task.targetSession === identity.sessionId) task.deliveredSession = identity.sessionId;
         if (task.delivery?.state === "queued") task.delivery = { ...task.delivery, state: "done" };
+        applyTaskLifecycle(task, { state: "completed", sessionId: identity.sessionId, source: task.deliverySource, completedAt: now().toISOString() });
         task.resultSummary = bounded;
         pushEvent(s, { kind: "task.result", taskId: id, handle: task.from, text: `${id} finished: ${task.resultSummary.slice(0, 120)}` });
         return { ok: true };

@@ -12,7 +12,7 @@
  * M9R identity (store.issueIdentity), revoked when the session ends. Config: `agents.json` in the M9R store root.
  */
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
@@ -246,7 +246,7 @@ export function webMcpServerCommand(launcher: string, execPath: string = process
  * runs the source from the repo root (it needs the path alias loader). The broker's own working folder must never decide this:
  * started at login it runs from the M9R folder, and an agent whose MCP server cannot start silently loses every M9R tool.
  */
-export function writeWebMcpConfig(dir: string, options: { repoRoot: string; storeRoot: string; brokerPort: number; roomStartedAt: number }): { configPath: string; launcher: string } {
+export function writeWebMcpConfig(dir: string, options: { repoRoot: string; storeRoot: string; brokerPort: number; roomStartedAt: number; provider?: string }): { configPath: string; launcher: string } {
   mkdirSync(dir, { recursive: true });
   const launcher = join(dir, "launch-m9r-mcp.cjs");
   const packaged = packagedMcpEntry();
@@ -264,6 +264,7 @@ child.on("exit", (code) => process.exit(code ?? 0));
           M9R_HOME: options.storeRoot,
           M9R_WEB_BROKER_PORT: String(options.brokerPort),
           M9R_ROOM_STARTED_AT: String(options.roomStartedAt),
+          ...(options.provider ? { M9R_PROVIDER: options.provider } : {}),
         },
       },
     },
@@ -275,7 +276,7 @@ const toml = (value: string) => JSON.stringify(value);
 
 export function codexWorkerArgs(options: { prompt: string; folder: string; launcher: string; storeRoot: string; brokerPort: number; roomStartedAt: number; threadId?: string; model?: string; effort?: string }): string[] {
   const server = webMcpServerCommand(options.launcher);
-  const mcp = `mcp_servers={m9r={command=${toml(server.command)},args=[${server.args.map(toml).join(",")}],env={M9R_HOME=${toml(options.storeRoot)},M9R_WEB_BROKER_PORT=${toml(String(options.brokerPort))},M9R_ROOM_STARTED_AT=${toml(String(options.roomStartedAt))}},default_tools_approval_mode="approve"}}`;
+  const mcp = `mcp_servers={m9r={command=${toml(server.command)},args=[${server.args.map(toml).join(",")}],env={M9R_HOME=${toml(options.storeRoot)},M9R_WEB_BROKER_PORT=${toml(String(options.brokerPort))},M9R_ROOM_STARTED_AT=${toml(String(options.roomStartedAt))},M9R_PROVIDER="codex"},default_tools_approval_mode="approve"}}`;
   // A browser worker must only ever touch the browser through M9R. Codex ships its own computer-use, browser, app and plugin
   // tools (on by default); a worker that reaches for them takes over the owner's real screen, so they are all switched off.
   const noOwnControl = ["computer_use", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser", "in_app_local_automation", "apps", "plugins", "remote_plugin", "multi_agent", "image_generation", "view_image", "tool_suggest", "skill_search"].flatMap((feature) => ["-c", `features.${feature}=false`]);
@@ -319,6 +320,9 @@ export interface WebLiveSessionsDeps {
     /** The task methods let teammates in the room message each other directly; a store without them simply has no bridge. */
     tasksFor?(handle: string): Task[];
     tasksFrom?(handle: string): Task[];
+    getTask?(id: string): Task | undefined;
+    /** Close a room task when its provider reports a terminal failure before m9r_result can run. */
+    setResult?(id: string, summary: string): unknown;
     setApproval?(id: string, approval: Approval): unknown;
     markDelivered?(ids: readonly string[], sessionId?: string): void;
     setAnswerPushed?(id: string): void;
@@ -362,6 +366,8 @@ interface Slot {
   generation: number;
   /** A provider-reported usage limit must not be retried until its reset time. */
   cooldownUntil?: number;
+  /** Only room-relayed asks populate this; owner messages remain intentionally uncorrelated. */
+  activeTaskId?: string;
 }
 
 interface PersistedProviderCooldown {
@@ -457,6 +463,32 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   const state = (slot: Slot, status: SessionStatus, doing: string) => { slot.status = status; slot.doing = doing; emit({ kind: "state", handle: slot.config.handle }); };
   const say = (slot: Slot, kind: "system", text: string) => emit({ kind, handle: slot.config.handle, provider: slot.config.provider, text });
 
+  function clearActiveTask(slot: Slot): void {
+    slot.activeTaskId = undefined;
+  }
+
+  function finalizeFailedTask(slot: Slot, reason: string): void {
+    const taskId = slot.activeTaskId;
+    if (!taskId) return;
+    const existing = deps.store.getTask?.(taskId);
+    if (existing?.resultSummary) {
+      clearActiveTask(slot);
+      return;
+    }
+    const clean = redactSession(reason).redactedText.replace(/\s+/g, " ").trim().slice(0, 500) || "provider session failed";
+    if (!deps.store.setResult) {
+      say(slot, "system", "M9R could not close room task " + taskId + " after the provider failure because task-result storage is unavailable.");
+      return;
+    }
+    try {
+      deps.store.setResult(taskId, "Provider session failed: " + clean);
+      clearActiveTask(slot);
+    } catch {
+      // Keep the association so a later lifecycle callback can retry the durable close.
+      say(slot, "system", "M9R could not persist the failure result for room task " + taskId + ".");
+    }
+  }
+
   function activeCooldownUntil(slot: Slot): number | undefined {
     if (slot.config.provider !== "codex" || slot.cooldownUntil === undefined) return undefined;
     if (now().getTime() < slot.cooldownUntil) return slot.cooldownUntil;
@@ -497,7 +529,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   }
 
   function mcpFor(slot: Slot) {
-    return writeWebMcpConfig(join(deps.storeRoot, "web-sessions", slot.config.handle), { repoRoot: deps.repoRoot, storeRoot: deps.storeRoot, brokerPort: deps.brokerPort, roomStartedAt: bridgeStartedAt });
+    return writeWebMcpConfig(join(deps.storeRoot, "web-sessions", slot.config.handle), { repoRoot: deps.repoRoot, storeRoot: deps.storeRoot, brokerPort: deps.brokerPort, roomStartedAt: bridgeStartedAt, provider: slot.config.provider });
   }
 
   const teammates = (slot: Slot) => [...slots.keys()].filter((h) => h !== slot.config.handle);
@@ -528,6 +560,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
           if (slot.sessionId) deps.store.revokeIdentity(slot.sessionId);
           if (slot.stopping) return state(slot, "stopped", "Stopped by you");
           const why = stderr.trim().split(/\r?\n/).pop()?.slice(0, 200);
+          finalizeFailedTask(slot, why || "Claude session exited unexpectedly.");
           state(slot, "failed", "Its session ended unexpectedly");
           say(slot, "system", `@${slot.config.handle}'s session ended unexpectedly (exit ${code ?? "unknown"}${why ? `: ${why}` : ""}). Your next message restarts it${slot.resumeId ? " with its memory" : ""}.`);
         });
@@ -543,6 +576,8 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
           rememberResumeId(slot, event.sessionId);
           recordUsage(slot,event.usage,"claude-result");
           if (slot.abortedResults > 0) { slot.abortedResults -= 1; return state(slot, "working", "Working on your new message"); }
+          if (event.isError) finalizeFailedTask(slot, event.text || "Claude reported a provider failure.");
+          else clearActiveTask(slot);
           emit({ ...base, kind: "result", text: event.text, isError: event.isError });
           const finished = live.status === "idle";
           state(slot, finished ? "idle" : "working", finished ? `Done${PERSISTENCE[slot.config.provider]}` : "Working on your new message");
@@ -601,9 +636,11 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
       try { if (slot.sessionId) deps.store.revokeIdentity(slot.sessionId); } catch { /* a busy state file must not take the broker down */ }
       if (slot.stopping) return state(slot, "stopped", "Stopped by you");
       if (code === 0) {
+        clearActiveTask(slot);
         emit({ ...base, kind: "result", text: lastSay, isError: false });
         return state(slot, "idle", `Done${PERSISTENCE.codex}`);
       }
+      finalizeFailedTask(slot, failureEvidence || "Codex exited with code " + (code ?? "unknown") + ".");
       const cooldownUntil = detectProviderUsageLimitCooldownUntil(failureEvidence, now().getTime());
       if (cooldownUntil !== null) {
         slot.cooldownUntil = cooldownUntil;
@@ -621,7 +658,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
       say(slot, "system", `@${slot.config.handle}'s run ended with exit ${code ?? "unknown"}${diagnostic ? `: ${diagnostic}` : ""}.`);
     };
     child.on("exit", (code: number | null) => { finish(code); });
-    child.on("error", (error: Error) => { if (generation === slot.generation) { slot.worker = undefined; state(slot, "failed", "Could not start"); say(slot, "system", `@${slot.config.handle} could not start: ${error.message}`); } });
+    child.on("error", (error: Error) => { if (generation === slot.generation) { slot.worker = undefined; finalizeFailedTask(slot, error.message); state(slot, "failed", "Could not start"); say(slot, "system", `@${slot.config.handle} could not start: ${error.message}`); } });
     state(slot, "working", `Working${PERSISTENCE.codex}`);
   }
 
@@ -640,7 +677,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
     const off = Object.fromEntries(["bash", "edit", "write", "read", "grep", "glob", "list", "webfetch", "websearch", "task", "todowrite", "todoread", "patch", "codesearch", "skill"].map((tool) => [tool, false]));
     writeFileSync(join(xdg, "opencode", "opencode.json"), JSON.stringify({
       $schema: "https://opencode.ai/config.json",
-      mcp: { m9r: { type: "local", command: [server.command, ...server.args], environment: { M9R_HOME: deps.storeRoot, M9R_WEB_BROKER_PORT: String(deps.brokerPort), M9R_ROOM_STARTED_AT: String(bridgeStartedAt) }, enabled: true } },
+      mcp: { m9r: { type: "local", command: [server.command, ...server.args], environment: { M9R_HOME: deps.storeRoot, M9R_WEB_BROKER_PORT: String(deps.brokerPort), M9R_ROOM_STARTED_AT: String(bridgeStartedAt), M9R_PROVIDER: "opencode" }, enabled: true } },
       tools: off,
     }));
     // Bun/OpenCode also writes logs and cache below XDG_DATA_HOME/XDG_CACHE_HOME.
@@ -717,6 +754,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
         if (requestVersion !== slot.openCodeRequestVersion) continue;
         if (failure || !completed || !answer.trim()) {
           const message = failure || (!completed ? "OpenCode ended the turn without a completion event." : "OpenCode finished without a readable answer.");
+          finalizeFailedTask(slot, message);
           runtime.close();
           if (slot.openCodeRuntime === runtime) slot.openCodeRuntime = undefined;
           revokeOpenCodeIdentity(slot);
@@ -724,6 +762,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
           say(slot, "system", `@${slot.config.handle} could not complete the task: ${message}`);
           return;
         }
+        clearActiveTask(slot);
         emit({ handle: slot.config.handle, provider: slot.config.provider, kind: "result", text: answer.trim(), isError: false });
         state(slot, "idle", `Done${PERSISTENCE.opencode}`);
       }
@@ -732,6 +771,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
       slot.openCodeRuntime?.close();
       slot.openCodeRuntime = undefined;
       revokeOpenCodeIdentity(slot);
+      finalizeFailedTask(slot, error instanceof Error ? error.message : String(error));
       state(slot, "failed", "OpenCode session failed");
       say(slot, "system", `@${slot.config.handle} could not start its persistent session: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -769,7 +809,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   // someone again (that is a real, deliberate resume, unlike a stale ask sitting in an inbox).
   let haltedByOwner = false;
 
-  function deliver(handle: string, text: string): ReturnType<SessionsPort["deliver"]> {
+  function deliver(handle: string, text: string, taskId?: string): ReturnType<SessionsPort["deliver"]> {
     const slot = slots.get(handle);
     if (!slot) return { ok: false, error: `no agent called @${handle}` };
     haltedByOwner = false;
@@ -782,6 +822,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
     const blocked = apiKeyLaunchBlock(env, deps.allowApiKey === true);
     if (blocked) return { ok: false, error: blocked };
     try {
+      if (taskId) slot.activeTaskId = taskId;
       if (slot.config.provider === "claude-code") {
         let mode: "sent" | "interrupted" | "started" = "sent";
         if (!slot.live || slot.live.state().status === "exited") { startClaude(slot); mode = "started"; }
@@ -796,6 +837,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
       startCodexWorker(slot, text);
       return { ok: true, mode: running ? "restarted-worker" : "started" };
     } catch (error) {
+      finalizeFailedTask(slot, error instanceof Error ? error.message : String(error));
       state(slot, "failed", "Could not start");
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -805,6 +847,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
     const slot = slots.get(handle);
     if (!slot) return false;
     slot.stopping = true;
+    clearActiveTask(slot);
     if (slot.openCodeRuntime || slot.openCodeBusy) {
       slot.generation += 1;
       slot.openCodePendingText = undefined;
@@ -894,7 +937,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
           const text = `@${from.handle} messaged you (${ask.id}): ${ask.goal}
 
 Answer with m9r_result for ${ask.id}, in a sentence or two, so @${from.handle} sees it right away. If you need something from them, ask with m9r_send.`;
-          const sent = deliver(handle, text);
+          const sent = deliver(handle, text, ask.id);
           if (sent.ok) { store.markDelivered([ask.id], slot.sessionId); exchanges.push(at); capNoted = false; }
           continue;
         }

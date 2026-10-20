@@ -36,6 +36,13 @@ export interface ConnectionClaimInput {
   sessionId: string;
   cwd?: string;
   ownerProcessId?: number;
+  /**
+   * A trusted provider SessionStart/UserPromptSubmit continuation. When the
+   * provider reuses its parent process across compaction, this permits the
+   * hook to carry the existing private binding forward to the new session
+   * instead of creating a competing claim. Direct callers remain fail-closed.
+   */
+  continuation?: boolean;
 }
 
 export interface BindConnectionInput {

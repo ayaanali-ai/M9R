@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
 const installedBin = join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".m9r", "bin");
-const engine = join(installedBin, process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
+const engine = process.env.M9R_ENGINE_UNDER_TEST || join(installedBin, process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
 const hook = join(installedBin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native");
+const hookUnderTest = process.env.M9R_HOOK_UNDER_TEST || hook;
 
 function sleep(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
@@ -27,7 +28,7 @@ async function stopChild(child, label) {
 }
 
 function runHook(home, provider, input) {
-  const result = spawnSync(hook, ["SessionStart", provider], {
+  const result = spawnSync(hookUnderTest, ["SessionStart", provider], {
     cwd: resolve("."),
     env: { ...process.env, M9R_HOME: home },
     input: JSON.stringify(input),
@@ -125,7 +126,8 @@ test("installed provider connection binds without a credential and survives priv
     mcp.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
     const listed = await request(2, "tools/list", {});
     for (const tool of listed.result?.tools ?? []) {
-      assert.equal(tool.inputSchema?.properties?.token, undefined, `${tool.name} must not advertise a per-call token`);
+      const required = tool.inputSchema?.required ?? [];
+      assert.equal(required.includes("token"), false, `${tool.name} must not require a per-call token`);
     }
 
     const first = await request(3, "tools/call", { name: "m9r_whoami", arguments: {} });
@@ -149,6 +151,112 @@ test("installed provider connection binds without a credential and survives priv
   } finally {
     await stopChild(mcp, "installed MCP");
     await stopChild(feed, "installed feed");
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("packaged provider-only MCP recovery retires a dead competing claim without a new session", async () => {
+  assert.ok(process.platform === "win32", "this acceptance harness targets the installed Windows runtime");
+  assert.ok(existsSync(engine), "the installed engine must be present");
+
+  const home = mkdtempSync(join(tmpdir(), "m9r-item6-packaged-recovery-"));
+  const oldSession = "22222222-2222-4222-8222-222222222222";
+  const currentSession = "33333333-3333-4333-8333-333333333333";
+  const oldProviderInput = {
+    hook_event_name: "SessionStart",
+    session_id: oldSession,
+    canonical_session_id: oldSession,
+    cwd: resolve("."),
+  };
+  let mcp = null;
+  try {
+    let oldHook = null;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      oldHook = runHook(home, "claude-code", oldProviderInput);
+      if (oldHook.stdout.trim()) break;
+      await sleep(250);
+    }
+    assert.ok(oldHook?.stdout.trim(), "the packaged hook must issue the initial private claim");
+
+    const state = readState(home);
+    const oldClaim = state.connectionClaims.find((claim) => claim.sessionId === oldSession);
+    assert.ok(oldClaim, "the old session claim must be present");
+    // Use a real process that was alive while both claims were issued, then
+    // terminate it. This exercises the packaged runtime's actual Windows
+    // liveness probe instead of relying on a guessed invalid PID.
+    const exitedOwner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+    const exitedOwnerPid = exitedOwner.pid;
+    assert.ok(exitedOwnerPid, "the dead-owner fixture must have a PID");
+    await stopChild(exitedOwner, "dead-owner fixture");
+    assert.throws(() => process.kill(exitedOwnerPid, 0), "the dead-owner fixture must no longer be observable");
+    oldClaim.ownerProcessId = exitedOwnerPid;
+
+    // SessionStart continuation is intentionally same-PID and reuses the
+    // existing claim. To exercise provider-only recovery with two distinct
+    // sessions, add the current session as the state shape produced by the
+    // second provider process. The current test process is the real parent of
+    // the packaged MCP child, so its PID is the exact selector for recovery.
+    const issuedAt = new Date().toISOString();
+    state.identities.push({
+      token: "packaged-current-session-token",
+      handle: "claude",
+      provider: "claude-code",
+      sessionId: currentSession,
+      issuedAt,
+    });
+    state.connectionClaims.push({
+      claimId: "packaged-current-session-claim",
+      handle: "claude",
+      provider: "claude-code",
+      sessionId: currentSession,
+      cwd: resolve("."),
+      ownerProcessId: process.pid,
+      issuedAt,
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    });
+    assert.equal(state.connectionClaims.length, 2, "the old and current claims must exist before the simulated old process exits");
+    writeFileSync(join(home, "state.json"), JSON.stringify(state), "utf8");
+
+    const providerOnlyEnv = { ...process.env };
+    delete providerOnlyEnv.M9R_CONNECTION_PROCESS_ID;
+    delete providerOnlyEnv.M9R_CONNECTION_BINDING_ID;
+    delete providerOnlyEnv.M9R_MCP_WORKER;
+
+    mcp = spawn(engine, ["mcp"], {
+      cwd: resolve("."),
+      // Start the packaged supervisor as the provider child.  It must infer
+      // this test process as the provider parent, then explicitly carry that
+      // identity into its private worker.  Starting with M9R_MCP_WORKER=1
+      // would intentionally skip the supervisor's parent-PID resolution and
+      // would test the worker contract without the real provider boundary.
+      env: { ...providerOnlyEnv, M9R_HOME: home, M9R_PROVIDER: "claude-code" },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const messages = [];
+    let stdout = "";
+    mcp.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      while (stdout.includes("\n")) {
+        const end = stdout.indexOf("\n");
+        const line = stdout.slice(0, end);
+        stdout = stdout.slice(end + 1);
+        if (line.trim()) messages.push(JSON.parse(line));
+      }
+    });
+    const request = async (id, method, params) => {
+      mcp.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      return waitForJson(messages, id, mcp);
+    };
+
+    assert.equal((await request(1, "initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "packaged-recovery", version: "1" } })).result?.serverInfo?.name, "m9r-mcp");
+    mcp.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+    const result = await request(2, "tools/call", { name: "m9r_whoami", arguments: {} });
+    const text = result.result?.content?.[0]?.text ?? "";
+    assert.match(text, new RegExp(currentSession), `the existing provider-only connection must recover the current session; mcpPid=${mcp.pid}; state=${JSON.stringify(readState(home))}`);
+    assert.deepEqual(readState(home).connectionClaims.map((claim) => claim.sessionId), [currentSession]);
+  } finally {
+    await stopChild(mcp, "packaged recovery MCP");
     rmSync(home, { recursive: true, force: true });
   }
 });

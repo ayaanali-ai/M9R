@@ -73,6 +73,7 @@ import {
   webConfigUninstallMode, webExtensionFileAction, WEB_EXTENSION_ID,
   type OpenCodeIdentityPluginInstallAction, type OpenCodeIdentityPluginRemovalAction, type WebSetupBrowser,
 } from "@/lib/native/web-setup-core";
+import { planOpenCodeModelStateRepair, resolveOpenCodeModelFiles } from "@/lib/native/opencode-model-core";
 import { loadOrCreateBrokerKey } from "@/lib/native/web-broker-server";
 import { parseBrokerUpdateRecord } from "@/lib/native/broker-update-record";
 import {
@@ -1358,6 +1359,33 @@ const writeAtomic = async (path: string, value: string | Uint8Array) => {
   await rename(temporary, path);
 };
 
+/** Repair only stale OpenCode model references, using the locally cached provider catalog. */
+async function repairOpenCodeModelState(home: string): Promise<ReturnType<typeof planOpenCodeModelStateRepair> & { backupPath?: string }> {
+  const paths = resolveOpenCodeModelFiles({
+    home,
+    xdgStateHome: process.env.XDG_STATE_HOME,
+    xdgCacheHome: process.env.XDG_CACHE_HOME,
+  });
+  const [stateBytes, catalogBytes] = await Promise.all([readOptional(paths.statePath), readOptional(paths.catalogPath)]);
+  if (!stateBytes || !catalogBytes) {
+    return { status: "blocked", reason: "OpenCode model state or its provider catalog is not present", removedModelIDs: [] };
+  }
+  let state: unknown;
+  let catalog: unknown;
+  try {
+    state = JSON.parse(stateBytes.toString("utf8"));
+    catalog = JSON.parse(catalogBytes.toString("utf8"));
+  } catch {
+    return { status: "blocked", reason: "OpenCode model state or its provider catalog is not valid JSON", removedModelIDs: [] };
+  }
+  const plan = planOpenCodeModelStateRepair(state, catalog);
+  if (plan.status !== "updated" || !plan.state) return plan;
+  const backupPath = `${paths.statePath}.m9r-backup-${randomUUID()}.json`;
+  await writeAtomic(backupPath, stateBytes);
+  await writeAtomic(paths.statePath, JSON.stringify(plan.state, null, 2) + "\n");
+  return { ...plan, backupPath };
+}
+
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index < 0 ? undefined : args[index + 1];
@@ -1394,7 +1422,7 @@ function webMcpRuntime(): { command: string; args: readonly string[] } {
 
 function webOpenCodeHookInvocation(
   runtime: { command: string },
-  event: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" = "SessionStart",
+  event: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" | "OpenCodeExecutionFailed" = "SessionStart",
 ): { command: string; args: readonly string[] } {
   const entry = fileURLToPath(import.meta.url);
   const engineName = runtime.command.split(/[\\/]/).pop() ?? "";
@@ -2225,8 +2253,9 @@ async function runWebSetup(args: string[]): Promise<number> {
       const pollHook = webOpenCodeHookInvocation(runtime, "OpenCodePoll");
       const deliveredHook = webOpenCodeHookInvocation(runtime, "OpenCodeDelivered");
       const deliveryFailedHook = webOpenCodeHookInvocation(runtime, "OpenCodeDeliveryFailed");
+      const executionFailedHook = webOpenCodeHookInvocation(runtime, "OpenCodeExecutionFailed");
       const path = join(openCodePaths.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME);
-      const bytes = Buffer.from(buildOpenCodeIdentityPluginSource(hook, promptHook, pollHook, deliveredHook, deliveryFailedHook));
+      const bytes = Buffer.from(buildOpenCodeIdentityPluginSource(hook, promptHook, pollHook, deliveredHook, deliveryFailedHook, executionFailedHook));
       const current = await readOptional(path);
       openCodePlugin = {
         path,
@@ -2448,6 +2477,14 @@ async function runWebSetup(args: string[]): Promise<number> {
         process.stdout.write(`  [KEEP] Preserved unowned or user-edited OpenCode plugin: ${openCodePlugin.path}\n`);
       } else {
         throw new Error("The OpenCode config root changed since the M9R identity plugin was installed; run m9r web uninstall before selecting the new root.");
+      }
+      const modelRepair = await repairOpenCodeModelState(home);
+      if (modelRepair.status === "updated") {
+        process.stdout.write(`[PASS] OpenCode model selection repaired to ${modelRepair.selection?.providerID}/${modelRepair.selection?.modelID}; rollback kept at ${modelRepair.backupPath}\n`);
+      } else if (modelRepair.status === "unchanged") {
+        process.stdout.write("[PASS] OpenCode model selection already matches the cached provider catalog\n");
+      } else {
+        process.stdout.write(`[WAIT] OpenCode model selection was not changed: ${modelRepair.reason}\n`);
       }
     }
     const identityManifestPath = join(root, "install-manifest.json");

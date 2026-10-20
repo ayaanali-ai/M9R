@@ -4,15 +4,21 @@
 // "M9R browser tools are unavailable" as a result. This runs the real built exe through a real MCP handshake and
 // confirms the web tools are actually present, not just that the process didn't crash.
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 const exe = join(process.cwd(), "engine", "dist", process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
 
 test("the built engine exe's `mcp` subcommand completes a real MCP handshake and exposes the web tools", { skip: !existsSync(exe) ? "engine/dist/m9r-engine.exe was not built (run: node scripts/build-engine.mjs)" : false }, async () => {
-  const child = spawn(exe, ["mcp"], { stdio: ["pipe", "pipe", "pipe"] });
+  // The packaged supervisor intentionally resolves an installed stable runtime
+  // when M9R_HOME points at a real installation.  A package smoke test must be
+  // hermetic: otherwise it can launch the old installed image and compare that
+  // image's identity with the candidate manifest beside engine/dist.
+  const smokeHome = mkdtempSync(join(tmpdir(), "m9r-engine-smoke-"));
+  const child = spawn(exe, ["mcp"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, M9R_HOME: smokeHome } });
   let out = "";
   let err = "";
   child.stdout.on("data", (d) => (out += d.toString()));
@@ -62,11 +68,13 @@ test("the built engine exe's `mcp` subcommand completes a real MCP handshake and
     }
   } finally {
     child.kill();
+    rmSync(smokeHome, { recursive: true, force: true });
   }
 });
 
 test("the built engine exe's `dev-mcp-server` subcommand starts the packaged governed MCP server", { skip: !existsSync(exe) ? "engine/dist/m9r-engine.exe was not built (run: node scripts/build-engine.mjs)" : false }, async () => {
-  const child = spawn(exe, ["dev-mcp-server", process.cwd()], { stdio: ["pipe", "pipe", "pipe"] });
+  const smokeHome = mkdtempSync(join(tmpdir(), "m9r-engine-smoke-"));
+  const child = spawn(exe, ["dev-mcp-server", process.cwd()], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, M9R_HOME: smokeHome } });
   let out = "";
   let err = "";
   child.stdout.on("data", (d) => (out += d.toString()));
@@ -91,5 +99,6 @@ test("the built engine exe's `dev-mcp-server` subcommand starts the packaged gov
     }
   } finally {
     child.kill();
+    rmSync(smokeHome, { recursive: true, force: true });
   }
 });

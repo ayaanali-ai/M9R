@@ -142,6 +142,22 @@ test("a pending task is flagged so the agent does not act; denied and expired ar
   assert.match(r.text, /T4 from @claude, approved by the user/);
 });
 
+test("provider delivery holds at a pending task instead of skipping it and advancing the cursor", () => {
+  const pending = mk({ origin: "agent_initiated" }, 1);
+  const approved = mk({ origin: "agent_initiated", standingRuleApplies: true }, 2);
+  const r = renderInboxInjection([pending, approved], 0, { includePending: false });
+  assert.deepEqual(r.includedIds, [], "unapproved work must not be presented to a provider");
+  assert.equal(r.newCursor, 0, "approval must leave the task at the delivery frontier");
+  assert.equal(renderInboxInjection([pending, approved], 0).includedIds[0], "T1", "owner-facing cards still show pending work");
+});
+
+test("provider delivery carries work text without exposing internal task or credential metadata", () => {
+  const task = mk({ goal: "Open the safe app and report the visible result." }, 1);
+  const rendered = renderInboxInjection([task], 0, { includePending: false, includeTaskIds: false, items: 1 });
+  assert.match(rendered.text, /Open the safe app and report the visible result/);
+  assert.doesNotMatch(rendered.text, /T1|get_task|session token|session id/i);
+});
+
 test("the session card is a few lines of pointers within its cap, and never carries memory content", () => {
   const card = renderSessionCard({ handle: "claude", others: [{ handle: "codex", activity: "editing relay/hub.ts" }], pendingCount: 2, memoryDir: ".m9r/memory" });
   assert.match(card, /M9R connected as @claude\./);
@@ -160,4 +176,8 @@ test("the sent acknowledgement tells the sender not to do the work itself", () =
   assert.match(ack, /task T12/);
   assert.match(ack, /do not do that work yourself/i);
   assert.match(ack, /tell the user it was sent to @codex/);
+
+  const providerAck = renderSentAck("T12", "codex", false);
+  assert.doesNotMatch(providerAck, /T12/);
+  assert.match(providerAck, /sent to @codex/);
 });

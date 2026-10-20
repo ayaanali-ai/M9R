@@ -8,7 +8,7 @@ test("the real runtime rejects unauthenticated HTTP state mutation and accepts s
   const port = 43119;
   const child = spawn(process.execPath, ["--import", "tsx", "scripts/oathlock-terminal-bridge.ts"], {
     cwd: process.cwd(),
-    env: { ...process.env, OATHLOCK_BRIDGE_PORT: String(port), OATHLOCK_BRIDGE_ORIGINS: "http://localhost:3000" },
+    env: { ...process.env, M9R_BRIDGE_PORT: String(port), M9R_BRIDGE_ORIGINS: "http://localhost:3000" },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });

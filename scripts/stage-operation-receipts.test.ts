@@ -40,3 +40,31 @@ test("an interrupted stage operation remains uncertain and cannot be reclaimed",
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a task result cannot finalize while its desktop-stage operation is still running", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-stage-result-fence-"));
+  try {
+    const store = createLocalStore(root);
+    const identity = store.issueIdentity("codex", "codex", "session-one");
+    const task = store.addTask({ from: "you", to: "codex", goal: "Use stage", origin: "human_typed", idempotencyKey: "stage-result-fence" }).task;
+    assert.equal(store.claimInboxTasks("codex", identity.sessionId, [task.id]).length, 1);
+    const operation = {
+      handle: "codex",
+      sessionId: identity.sessionId,
+      taskId: task.id,
+      operationId: "mcp-call-result-fence",
+      fingerprint: "d".repeat(64),
+    };
+    assert.equal(store.claimStageOperation(operation).state, "claimed");
+
+    const refused = store.recordTaskResult(identity.token, task.id, "finished");
+    assert.equal(refused.ok, false);
+    assert.match(refused.error ?? "", /in-flight desktop-stage operation/i);
+    assert.equal(store.getTask(task.id)?.resultSummary, undefined);
+
+    assert.equal(store.settleStageOperation({ ...operation, state: "applied" }), true);
+    assert.equal(store.recordTaskResult(identity.token, task.id, "finished").ok, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

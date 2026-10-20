@@ -1,6 +1,5 @@
 import type { Task } from "./inbox-core";
-import type { LocalStore } from "./local-store";
-import { renderSessionCard } from "./inbox-core";
+import { RESULT_RECONCILIATION_MAX_AGE_MS, type LocalStore } from "./local-store";
 
 /** Internal correlation belongs in the provider context channel, not task text. */
 export const taskCorrelationMarker = (taskId: string) => `[M9R ${taskId}]`;
@@ -25,7 +24,12 @@ export function resolveHookSessionMetadata(store: LocalStore, provider: string, 
 }
 
 export function renderTaskExecutionContext(task: Pick<Task, "id">, handle: string, identityToken: string): string {
-  return `${taskCorrelationMarker(task.id)}\n${renderSessionCard({ handle, others: [], pendingCount: 0, awaitingApproval: 0, identityToken })}\nThis internal reference binds the approved task in the user message. Call m9r_result for this task with its actual outcome; a completed turn alone does not record the result. Do not claim success without observed evidence. Keep internal identifiers and credentials out of replies.`;
+  // Keep the stable signature for adapters while intentionally excluding the
+  // values from provider-visible context. Correlation stays in the store.
+  void task;
+  void handle;
+  void identityToken;
+  return "M9R assigned one approved work item to this turn. Work only on the message above. When finished or blocked, call m9r_result with the concrete outcome; the connected M9R session supplies internal correlation automatically. Keep routing metadata and credentials out of your reply.";
 }
 
 /**
@@ -33,16 +37,20 @@ export function renderTaskExecutionContext(task: Pick<Task, "id">, handle: strin
  * session metadata and persisted ownership. No provider name, recency guess,
  * or task text supplied by another session can select a credential.
  */
-export function deliveredTaskContext(store: LocalStore, input: { handle: string; provider: string; sessionId?: string; taskId?: string; prompt: string }): string | undefined {
+export function deliveredTaskContext(store: LocalStore, input: { handle: string; provider: string; sessionId?: string; taskId?: string; prompt: string; now?: number }): string | undefined {
   if (!input.sessionId) return undefined;
   const token = store.identityTokenFor(input.handle, input.sessionId);
   const identity = token ? store.verifyIdentity(token) : null;
   if (!token || !identity || identity.provider.toLowerCase() !== input.provider.toLowerCase()) return undefined;
+  const at = input.now ?? Date.now();
   const matches = store.tasksForSession(input.handle, input.sessionId).filter(task => {
     const owner = task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId;
+    const createdAt = Date.parse(task.createdAt);
+    const ageMs = at - createdAt;
     return owner === input.sessionId && (input.taskId ? task.id === input.taskId : task.goal === input.prompt) && !task.resultSummary
       && (task.approval === "approved" || task.approval === "not_needed")
-      && (task.delivery?.state === "sending" || task.delivery?.state === "queued");
+      && Number.isFinite(createdAt) && ageMs >= 0 && ageMs <= RESULT_RECONCILIATION_MAX_AGE_MS
+      && (task.delivery?.state === "sending" || task.delivery?.state === "queued" || task.deliverySource === "prompt");
   });
   if (matches.length > 1) return "M9R cannot uniquely bind this delivered prompt to its approved task. Do not dispatch desktop work until the delivery adapter supplies an unambiguous internal task reference.";
   return matches.length === 1 ? renderTaskExecutionContext(matches[0], input.handle, token) : undefined;
