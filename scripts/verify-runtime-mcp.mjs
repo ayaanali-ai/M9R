@@ -34,14 +34,26 @@ try {
   if (init.result?.serverInfo?.version !== expectedVersion) throw new Error("Running MCP version does not match installed manifest");
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
   const list = await request(2, "tools/list", {});
-  for (const name of [
+  const requiredTools = [
     "m9r_stage_prepare", "m9r_stage_app", "m9r_stage_action",
     "m9r_computer_observe", "m9r_computer_action",
-    "m9r_web_open", "m9r_web_click", "m9r_web_read",
-  ]) {
+  ];
+  for (const name of requiredTools) {
     if (!list.result?.tools?.some((tool) => tool.name === name)) throw new Error(`Missing installed tool: ${name}`);
   }
-  console.log(JSON.stringify({ executable, installedBuildId: manifest.buildId, mcpVersion: expectedVersion, stageToolsPresent: true, computerUseToolsPresent: true, webToolsPresent: true }));
+  const legacyWebExtensionTools = ["m9r_web_open", "m9r_web_click", "m9r_web_read"];
+  const legacyWebToolsPresent = legacyWebExtensionTools.filter((name) => list.result?.tools?.some((tool) => tool.name === name));
+  if (legacyWebToolsPresent.length > 0) {
+    throw new Error(`Retired browser-extension tools are still exposed: ${legacyWebToolsPresent.join(", ")}`);
+  }
+  console.log(JSON.stringify({
+    executable,
+    installedBuildId: manifest.buildId,
+    mcpVersion: expectedVersion,
+    stageToolsPresent: true,
+    computerUseToolsPresent: true,
+    legacyWebExtensionToolsPresent: false,
+  }));
 } finally {
   clearTimeout(timeout);
   await stopChildProcess(child);
