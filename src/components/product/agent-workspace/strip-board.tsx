@@ -24,7 +24,7 @@ export function MobileAgentRail({
   selected: Selected;
   onSelect: (next: Selected) => void;
 }) {
-  const entries: Array<[string, string, string]> = [["all", "All agents", "other"], ...agents.filter((agent) => agent.key !== "codex").map((agent) => [agent.id, agent.label, agent.key] as [string, string, string])];
+  const entries: Array<[string, string, string, string | null]> = [["all", "All agents", "other", null], ...agents.filter((agent) => agent.key !== "codex").map((agent) => [agent.id, agent.label, agent.key, agent.connectionId] as [string, string, string, string | null])];
   return (
     <nav
       aria-label="Agent filters"
@@ -35,7 +35,7 @@ export function MobileAgentRail({
       // there's more to see.
       className="flex gap-1.5 overflow-x-auto pb-2 [-webkit-overflow-scrolling:touch] [scroll-snap-type:x_proximity] lg:hidden"
     >
-      {entries.map(([id, label, agentKey]) => (
+      {entries.map(([id, label, agentKey, connectionId]) => (
         <button
           key={id}
           type="button"
@@ -44,7 +44,7 @@ export function MobileAgentRail({
           className="wf-micro flex flex-none items-center gap-1.5 rounded border px-2 py-1.5 text-[color:var(--ol-text-muted)] aria-pressed:text-[color:var(--ol-text-primary)] [scroll-snap-align:start]"
           style={{ borderColor: selected === id ? "var(--ol-border-default)" : "var(--ol-border-subtle)" }}
         >
-          <AgentMark agentKey={agentKey} size={15} />
+          <AgentMark agentKey={agentKey} connectionId={connectionId} size={15} />
           {label}
         </button>
       ))}
@@ -139,7 +139,7 @@ export function ControlStrip({
         {agent ? (
           <>
             <span className="flex min-w-0 items-center gap-2">
-              <AgentMark agentKey={agent.key} size={24} status={!agent.registered ? undefined : agent.connected ? "active" : "idle"} />
+              <AgentMark agentKey={agent.key} connectionId={agent.connectionId} size={24} status={!agent.registered ? undefined : agent.connected ? "active" : "idle"} />
               <span className="truncate text-[length:var(--ol-text-sm)] font-medium text-[color:var(--ol-text-primary)]">{agent.label}</span>
             </span>
             <span className="ol-mono text-[length:var(--ol-text-2xs)] text-[color:var(--ol-text-muted)]">
@@ -339,22 +339,6 @@ export function NotifyOptIn() {
 
 const MODEL_OVERRIDE_PROVIDERS = new Set(["codex", "claude-code"]);
 
-// Real, current model ids only -- no guessed/stale names. Anthropic's list is
-// confirmed current (Claude 5 family, GA); Codex's list is intentionally
-// empty until OpenAI's current model ids are confirmed, so that provider
-// falls back to free text rather than a dropdown of made-up names.
-const MODEL_CATALOG: Record<string, { id: string; label: string }[]> = {
-  "claude-code": [
-    { id: "claude-opus-5", label: "Opus 5" },
-    { id: "claude-sonnet-5", label: "Sonnet 5" },
-    { id: "claude-fable-5", label: "Fable 5" },
-    { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
-  ],
-  // Only the one value confirmed live in this workspace (the strip's own
-  // "Model: gpt-5.5" readout) -- not a guessed full catalog. Extend once
-  // the real list is confirmed.
-  codex: [{ id: "gpt-5.5", label: "GPT-5.5" }],
-};
 
 /** Lets a person continue the newest M9R-started session in their own terminal, with the provider's own CLI. */
 function NativeSessionControl({ agent }: { agent: AgentView | null }) {
@@ -375,11 +359,11 @@ function ModelOverrideControl({ agent }: { agent: AgentView | null }) {
   const [error, setError] = useState<string | null>(null);
 
   if (!agent?.connected || !agent.connectionId || !MODEL_OVERRIDE_PROVIDERS.has(agent.key)) return null;
-  // Prefer the real, live list this connection's own ACP session already
-  // reported (agent.availableModels) over the hardcoded catalog -- the
-  // catalog only exists as a fallback for a connection that hasn't started
-  // a session yet, so there's nothing real to show.
-  const knownModels = (agent.availableModels && agent.availableModels.length > 0) ? agent.availableModels : (MODEL_CATALOG[agent.key] ?? []);
+  // Only provider-reported options are selectable. A hardcoded fallback would
+  // be a false affordance: the PATCH endpoint deliberately rejects a model
+  // that this connection has not reported, so showing guessed IDs here would
+  // make the picker look functional while every save fails.
+  const knownModels = agent.availableModels ?? [];
 
   async function save(nextModel: string | null) {
     if (busy || !agent?.connectionId) return;
@@ -426,16 +410,11 @@ function ModelOverrideControl({ agent }: { agent: AgentView | null }) {
           ))}
         </select>
       ) : (
-        <input
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-          placeholder="Provider default"
-          aria-label={`Model override for ${agent.label}`}
-          disabled={busy}
-          className="w-40 rounded border border-[color:var(--ol-border-default)] bg-[color:var(--ol-surface-2)] px-2 py-1 text-[length:var(--ol-text-xs)] text-[color:var(--ol-text-primary)]"
-        />
+        <span role="status" className="ol-mono text-[length:var(--ol-text-2xs)] text-[color:var(--ol-text-muted)]">
+          Provider model list unavailable; start a session to discover it.
+        </span>
       )}
-      <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => void save(value.trim() || null)}>
+      <Button type="button" variant="secondary" size="sm" disabled={busy || knownModels.length === 0} onClick={() => void save(value.trim() || null)}>
         {busy ? "Saving…" : "Save"}
       </Button>
       {agent.model && (
@@ -666,7 +645,7 @@ export function StripBoard({
                 data-selected={run.id === selectedRunId}
                 onClick={() => onSelect(run.id)}
               >
-                <AgentMark agentKey={owner?.key ?? run.agent_kind ?? "other"} size={18} />
+                <AgentMark agentKey={owner?.key ?? run.agent_kind ?? "other"} connectionId={owner?.connectionId} size={18} />
                 <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-[color:var(--ol-text-primary)]">
                   {run.task_title || "Run"}
                 </span>

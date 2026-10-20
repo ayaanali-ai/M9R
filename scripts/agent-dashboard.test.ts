@@ -1175,14 +1175,11 @@ test("public homepage is never a live runtime socket", () => {
   assert.doesNotMatch(hero, /WatchfloorOps|LocalAgentTerminal|new WebSocket/);
 });
 
-test("top nav drops the vaporware Future Expansions dropdown; those concepts live on the honest roadmap ledger", () => {
+test("top nav drops the vaporware Future Expansions dropdown and the deleted roadmap is not advertised", () => {
   const nav = read("src/components/Nav.tsx");
   assert.doesNotMatch(nav, /Future Expansions/);
   assert.doesNotMatch(nav, /EXPANSIONS/);
-  const roadmap = read("src/app/roadmap/page.tsx");
-  for (const name of ["OathExchange", "OathLedger", "OathGuard"]) {
-    assert.match(roadmap, new RegExp(name));
-  }
+  assert.doesNotMatch(read("src/app/sitemap.ts"), /\"\/roadmap\"/);
 });
 
 test("top nav items share one row, baseline, and padding/radius scale — the Agents chip is not a mismatched pill", () => {
@@ -1735,7 +1732,7 @@ test("submit-session persists the later-run Rule Health and behavior snapshots o
   assert.match(route, /behavior: \{/);
   assert.match(join, /rule_health: meta\.ruleHealth \?\? null/);
   assert.match(join, /behavior: meta\.behavior \?\? null/);
-  assert.match(join, /agent_sessions snapshot columns missing; retrying session insert without compare snapshots\./);
+  assert.match(join, /agent_sessions optional columns missing; retrying session insert with the legacy column set\./);
   assert.match(read("src/lib/agent-run-service.ts"), /const corePatch: Record<string, unknown> = \{/);
   assert.match(read("src/lib/agent-run-service.ts"), /const snapshotPatch: Record<string, unknown> = \{\}/);
   assert.match(read("src/lib/agent-run-service.ts"), /snapshot update failed/);
@@ -1827,7 +1824,22 @@ test("recordAgentSession persists the real attestation columns alongside the leg
   assert.match(svc, /submission_origin: meta\.submissionOrigin \?\? null/);
   assert.match(svc, /attachment_status: meta\.attachmentStatus \?\? null/);
   assert.match(svc, /human_attestation: meta\.humanAttestation \?\? null/);
-  assert.match(svc, /submission_digest: meta\.submissionDigest \?\? null/);
+  assert.match(svc, /submission_digest: submissionDigest/);
+  assert.match(svc, /agent_sessions optional columns missing; retrying session insert with the legacy column set\./);
+});
+
+test("recordAgentSession makes dashboard evidence submissions idempotent per workspace and connection", () => {
+  const svc = read("src/lib/agent-join-service.ts");
+  const migration = read("supabase/migrations/20261018010000_agent_session_submission_idempotency.sql");
+  assert.match(svc, /\.eq\("workspace_id", agent\.workspaceId\)/);
+  assert.match(svc, /\.eq\("connection_id", agent\.connectionId\)/);
+  assert.match(svc, /\.eq\("submission_digest", digest\)/);
+  assert.match(svc, /existing\.state === "found"/);
+  assert.match(svc, /insertResult\.error\?\.code === "23505"/);
+  assert.match(migration, /create unique index if not exists agent_sessions_submission_idempotency_idx/);
+  assert.match(migration, /workspace_id, connection_id, submission_digest/);
+  assert.match(migration, /having count\(\*\) > 1/);
+  assert.match(migration, /reconcile them before enabling idempotency/);
 });
 
 test("linkSessionToRun returns a structured result and never silently swallows a link failure", () => {

@@ -68,7 +68,7 @@ function AgentSettings({ agent, conversationId }: { agent: AgentView; conversati
     } catch (error) { setNotice(error instanceof Error ? error.message : "Could not save settings."); }
     finally { setBusy(false); }
   }
-  return <section className="p-3"><h3><AgentMark agentKey={agent.key} size={16} />{agent.label}</h3>
+  return <section className="p-3"><h3><AgentMark agentKey={agent.key} connectionId={agent.connectionId} size={16} />{agent.label}</h3>
     {data && <fieldset disabled={busy} className="grid gap-2"><label className="text-xs">Apply to<select className="product-input" value={scope} onChange={event => changeScope(event.target.value)}><option value="connection">Agent defaults</option>{conversationId && <option value="channel">This channel only</option>}</select></label>
       <label className="text-xs">Model<select className="product-input" value={model} onChange={event => { setModel(event.target.value); setEffort(""); }}><option value="">Provider default</option>{data.models?.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
       <label className="text-xs">Reasoning effort<select className="product-input" value={effort} onChange={event => setEffort(event.target.value)}><option value="">Provider default</option>{efforts?.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>

@@ -250,7 +250,7 @@ export function ApprovalCenter({
     return (
       <div key={agentKey} className="border-b border-[color:var(--ol-border-subtle)] last:border-b-0">
         <div className="flex items-center gap-2 bg-[color:var(--ol-surface-2)] px-3.5 py-1.5">
-          <AgentMark agentKey={agentKey} size={20} />
+          <AgentMark agentKey={agentKey} connectionId={agent?.connectionId} size={20} />
           <span className="text-[10px] font-semibold uppercase tracking-wide text-[color:var(--ol-text-secondary)]">
             {agent?.label ?? items[0]?.agent_label}
           </span>

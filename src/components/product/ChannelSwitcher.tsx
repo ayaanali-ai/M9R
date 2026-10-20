@@ -316,7 +316,7 @@ function NewChannelForm({
               return (
                 <li key={agent.connectionId}>
                   <button type="button" className="wf-channel-switcher-picker-row" data-checked={checked} onClick={() => toggleAgent(agent.connectionId)}>
-                    <AgentMark agentKey={agent.agentKind} size={20} />
+                    <AgentMark agentKey={agent.agentKind} connectionId={agent.connectionId} size={20} />
                     <span className="truncate">{agent.label}</span>
                     <span className="wf-channel-switcher-picker-check" aria-hidden>{checked && <Check size={13} strokeWidth={3} />}</span>
                   </button>

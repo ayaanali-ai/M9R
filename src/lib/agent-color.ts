@@ -7,8 +7,8 @@
  * map -- unchanged from before this file existed.
  *
  * This only resolves the color for one connection at a time; it does not decide where it's
- * displayed. Wiring it into the dashboard's actual color-reading components (WorkspaceUI.tsx,
- * task-card.tsx, ConversationPanel.tsx, globals.css) is separate, deliberately not done here.
+ * displayed. The dashboard/pill-facing components resolve this through the shared connection
+ * color hook, while native feed snapshots use the same allocator directly.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";

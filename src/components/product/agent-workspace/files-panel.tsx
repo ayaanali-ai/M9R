@@ -305,7 +305,7 @@ export function LiveFileView({ agents, filePath, liveSteps, onBack }: {
         )}
         {latestAgent && (
           <span className="wf-livefile-active-agent">
-            <AgentMark agentKey={latestAgent.key} size={16} status="active" />
+            <AgentMark agentKey={latestAgent.key} connectionId={latestAgent.connectionId} size={16} status="active" />
             {latestAgent.label} touched this last
           </span>
         )}
@@ -430,7 +430,7 @@ export function WhispersPanel({ agents, onClose }: { agents: AgentView[]; onClos
               const recipient = agentFor(agents, message.recipientConnectionId);
               return (
                 <li key={message.id} className="wf-activity-row">
-                  {sender ? <AgentMark agentKey={sender.key} size={20} /> : <span className="wf-activity-row-icon" />}
+                  {sender ? <AgentMark agentKey={sender.key} connectionId={sender.connectionId} size={20} /> : <span className="wf-activity-row-icon" />}
                   <div className="min-w-0 flex-1">
                     <div className="truncate">
                       <strong>{sender?.label ?? "An agent"}</strong> → <strong>{recipient?.label ?? "an agent"}</strong>
@@ -1089,7 +1089,7 @@ export function ActivityPanel({ agents, onClose }: { agents: AgentView[]; onClos
             const agent = event.connectionId ? byConnection.get(event.connectionId) : undefined;
             return (
               <li key={`${event.kind}-${event.id}`}>
-                {agent ? <AgentMark agentKey={agent.key} size={16} /> : <span aria-hidden className="m9r-activity-dot" />}
+                {agent ? <AgentMark agentKey={agent.key} connectionId={agent.connectionId} size={16} /> : <span aria-hidden className="m9r-activity-dot" />}
                 <span><strong>{agent?.label ?? "An agent"}</strong> {activityLine(event)}</span>
                 <time className="ol-mono" dateTime={event.at}>{relAt(event.at, clock)}</time>
               </li>
