@@ -125,6 +125,57 @@ test("explicit app view targets the selected window while remaining in owner-pre
   assert.deepEqual(calls, ["app capture", "app click", "app type"]);
   assert.throws(() => parseTaskStageAction({ kind: "capture", view: "other-user-window" }), /Invalid stage action view/);
 });
+
+test("owner-preview app input requests foreground delivery by default", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() }, outcome: { status: "confirmed" as const } };
+  const driver = {
+    click: async (...args: unknown[]) => { calls.push({ method: "click", args }); return proof; },
+    typeText: async (...args: unknown[]) => { calls.push({ method: "typeText", args }); return proof; },
+    clickElement: async (...args: unknown[]) => { calls.push({ method: "clickElement", args }); return proof; },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "session" };
+
+  await runTaskStageAction(driver, "preview", { kind: "click", view: "app", x: 12, y: 18 }, identity, "owner-preview");
+  await runTaskStageAction(driver, "preview", { kind: "type", view: "app", text: "hello" }, identity, "owner-preview");
+  await runTaskStageAction(driver, "preview", { kind: "click_element", view: "app", ref: "uia:button" }, identity, "owner-preview");
+
+  assert.deepEqual(calls.map((call) => call.args.at(-1)), [
+    { deliveryMode: "owner-preview", confirmFocusForeground: true },
+    { deliveryMode: "owner-preview", confirmFocusForeground: true },
+    { deliveryMode: "owner-preview", confirmFocusForeground: true },
+  ]);
+});
+
+test("stage policy and cancellation reach semantic and clipboard actions", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() }, outcome: { status: "confirmed" as const } };
+  const driver = {
+    replaceElement: async (...args: unknown[]) => { calls.push({ method: "replaceElement", args }); return proof; },
+    windowFrame: async (...args: unknown[]) => { calls.push({ method: "windowFrame", args }); return proof; },
+    invokeMenu: async (...args: unknown[]) => { calls.push({ method: "invokeMenu", args }); return proof; },
+    clipboardRead: async (...args: unknown[]) => { calls.push({ method: "clipboardRead", args }); return { ...proof, clipboard: { text: "fixture" } }; },
+    clipboardWrite: async (...args: unknown[]) => { calls.push({ method: "clipboardWrite", args }); return proof; },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "session" };
+  const controller = new AbortController();
+
+  await runTaskStageAction(driver, "preview", { kind: "replace_element", view: "app", ref: "uia:field", text: "hello", expectedRole: "Edit" }, identity, "owner-preview", controller.signal);
+  await runTaskStageAction(driver, "preview", { kind: "window_frame", view: "app", x: 10, y: 20, width: 800, height: 600 }, identity, "owner-preview", controller.signal);
+  await runTaskStageAction(driver, "preview", { kind: "invoke_menu", view: "app", path: ["Edit", "Select All"] }, identity, "owner-preview", controller.signal);
+  await runTaskStageAction(driver, "preview", { kind: "clipboard_read", view: "app", includeText: false }, identity, "owner-preview", controller.signal);
+  await runTaskStageAction(driver, "preview", { kind: "clipboard_write", view: "app", text: "hello", confirmSharedClipboard: true }, identity, "owner-preview", controller.signal);
+
+  assert.deepEqual(calls.map((call) => call.method), ["replaceElement", "windowFrame", "invokeMenu", "clipboardRead", "clipboardWrite"]);
+  assert.deepEqual(calls.map((call) => call.args.at(-1)), [
+    { expectedRole: "Edit", deliveryMode: "owner-preview", signal: controller.signal },
+    { deliveryMode: "owner-preview", signal: controller.signal },
+    { deliveryMode: "owner-preview", signal: controller.signal },
+    { deliveryMode: "owner-preview", signal: controller.signal },
+    { deliveryMode: "owner-preview", signal: controller.signal },
+  ]);
+});
+
 test("window placement accepts signed screen origins without allowing negative click coordinates", () => {
   assert.deepEqual(parseTaskStageAction({ kind: "window_frame", view: "app", x: -1200, y: -80, width: 800, height: 600 }),
     { kind: "window_frame", view: "app", x: -1200, y: -80, width: 800, height: 600 });

@@ -139,7 +139,7 @@ test("pending approvals lapse after a day instead of waiting forever, and the se
   const store = createLocalStore(mkdtempSync(join(tmpdir(), "m9r-n5-clock-")), { now: () => clock });
   store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "agent_initiated", idempotencyKey: "a" });
   assert.equal(store.pendingApprovals().length, 1);
-  assert.match(renderSessionCard({ handle: "claude", others: [], pendingCount: 0, awaitingApproval: 1 }), /1 task\(s\) are waiting for the user's approval/);
+  assert.match(renderSessionCard({ handle: "claude", others: [], pendingCount: 0, awaitingApproval: 1 }), /awaiting owner approval/i);
   assert.doesNotMatch(renderSessionCard({ handle: "claude", others: [], pendingCount: 0 }), /approval/);
   clock = new Date("2026-09-21T13:00:00Z");
   assert.equal(store.pendingApprovals().length, 0);

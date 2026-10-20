@@ -8,7 +8,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
-import { lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
+import { isProtectedAction, lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
 import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle } from "./inbox-core";
 import { canQueue } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
@@ -1368,6 +1368,33 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         && !task.resultSummary
         && (task.approval === "approved" || task.approval === "not_needed")
         && Date.parse(task.createdAt) >= cutoff);
+    },
+
+    /**
+     * Finds the one active owner-approved turn that authorizes an ordinary delegation.
+     *
+     * This is deliberately fail-closed: a provider session may inherit approval only when
+     * it is actively carrying exactly one fresh, delivered, unfinished task. Protected work
+     * never inherits approval, and ambiguous/stale state remains pending for an owner decision.
+     */
+    delegationParentFor(handle: string, sessionId: string, goal: string): Task | undefined {
+      if (!sessionId || isProtectedAction(goal)) return undefined;
+      const normalizedHandle = normalizeHandle(handle);
+      const cutoff = now().getTime() - inboxMaxAgeMs();
+      const candidates = readState().tasks.filter((task) => {
+        if (normalizeHandle(task.to) !== normalizedHandle || task.resultSummary) return false;
+        if (task.approval !== "approved" && task.approval !== "not_needed") return false;
+        if (task.lifecycle?.state === "failed" || task.lifecycle?.state === "completed") return false;
+        const owner = task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId;
+        if (owner !== sessionId || !task.deliveredAt) return false;
+        const createdAt = Date.parse(task.createdAt);
+        const deliveredAt = Date.parse(task.deliveredAt);
+        const current = now().getTime();
+        return Number.isFinite(createdAt) && Number.isFinite(deliveredAt)
+          && createdAt >= cutoff && deliveredAt <= current;
+      });
+      if (candidates.length !== 1) return undefined;
+      return candidates[0];
     },
 
     /**

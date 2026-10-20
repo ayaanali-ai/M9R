@@ -1987,8 +1987,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     }, cursorIdentity);
   }
 
-  async function replaceElement(name: string, ref: string, text: string, cursorIdentity?: CuaAgentCursorIdentity, options: { expectedRole?: string; expectedLabel?: string } = {}): Promise<CuaStageActionProof> {
+  async function replaceElement(name: string, ref: string, text: string, cursorIdentity?: CuaAgentCursorIdentity,
+    options: CuaStageInputOptions & { expectedRole?: string; expectedLabel?: string } = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementByToken }) => {
+      options.signal?.throwIfAborted();
       const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel });
       if (!selected?.element.elementToken || selected.element.enabled === false || !selected.element.actions?.includes("set_value")) {
         throw new DesktopInputNotDispatchedError("The accessibility element is stale, disabled, could not be confirmed as the same control, or does not support value replacement; no text was sent.");
@@ -1997,7 +1999,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       if (cursorIdentity && point) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
       const outcome = actionOutcome(await driver.callTool("set_value", JSON.stringify({
         pid, window_id: Number(windowId), element_token: selected.element.elementToken, value: text, session,
-      })), "Cua Driver could not replace the selected accessibility value.");
+      }), options.signal ? { signal: options.signal } : undefined), "Cua Driver could not replace the selected accessibility value.");
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -2021,9 +2023,12 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     }, cursorIdentity);
   }
 
-  async function windowFrame(name: string, x: number, y: number, width: number, height: number, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
+  async function windowFrame(name: string, x: number, y: number, width: number, height: number,
+    cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, session, pid, windowId, capture: captureWindow }) => {
-      const outcome = actionOutcome(await driver.setWindowFrame({ pid, windowId, x, y, width, height, session }), "Cua Driver could not set the selected window frame.");
+      options.signal?.throwIfAborted();
+      const outcome = actionOutcome(await driver.setWindowFrame({ pid, windowId, x, y, width, height, session },
+        options.signal ? { signal: options.signal } : undefined), "Cua Driver could not set the selected window frame.");
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -2040,9 +2045,12 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       }), cursorIdentity);
   }
 
-  async function invokeMenu(name: string, path: string[], cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageActionProof> {
+  async function invokeMenu(name: string, path: string[], cursorIdentity?: CuaAgentCursorIdentity,
+    options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, session, pid, windowId, capture: captureWindow }) => {
-      const outcome = actionOutcome(await driver.invokeMenu({ pid, windowId, path, session }), "Cua Driver could not invoke the selected application menu.");
+      options.signal?.throwIfAborted();
+      const outcome = actionOutcome(await driver.invokeMenu({ pid, windowId, path, session },
+        options.signal ? { signal: options.signal } : undefined), "Cua Driver could not invoke the selected application menu.");
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -2053,18 +2061,23 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     try { return JSON.parse(encoded) as unknown; } catch { return undefined; }
   }
 
-  async function clipboardRead(name: string, includeText: boolean, cursorIdentity?: CuaAgentCursorIdentity) {
+  async function clipboardRead(name: string, includeText: boolean, cursorIdentity?: CuaAgentCursorIdentity,
+    options: CuaStageInputOptions = {}) {
     return withRegisteredWindow(name, async ({ driver, session, capture: captureWindow }) => {
-      const result = await driver.clipboardRead({ includeText, session });
+      options.signal?.throwIfAborted();
+      const result = await driver.clipboardRead({ includeText, session }, options.signal ? { signal: options.signal } : undefined);
       const outcome = actionOutcome(result, "Cua Driver could not read the shared clipboard.");
       return { capture: stageCapture(await captureWindow(), now), outcome, clipboard: clipboardValue(result) };
     }, cursorIdentity);
   }
 
-  async function clipboardWrite(name: string, text: string, cursorIdentity?: CuaAgentCursorIdentity, payload?: { imagePath?: string; filePath?: string }) {
+  async function clipboardWrite(name: string, text: string, cursorIdentity?: CuaAgentCursorIdentity,
+    payload?: { imagePath?: string; filePath?: string }, options: CuaStageInputOptions = {}) {
     return withRegisteredWindow(name, async ({ driver, session, capture: captureWindow }) => {
+      options.signal?.throwIfAborted();
       const result = await driver.clipboardWrite({ ...(payload?.imagePath ? { imagePath: payload.imagePath }
-        : payload?.filePath ? { filePath: payload.filePath } : { text }), session });
+        : payload?.filePath ? { filePath: payload.filePath } : { text }), session },
+      options.signal ? { signal: options.signal } : undefined);
       const outcome = actionOutcome(result, "Cua Driver could not write the shared clipboard.");
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);

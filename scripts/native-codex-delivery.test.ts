@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isM9rPushedPrompt, isThreadId, isWindowsSystemCwd, M9R_PUSHED_RESULT_PREFIX, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
 import { collectCodexResults, deliverToCodex, findRolloutFile, type DeliveryDeps } from "../src/lib/native/codex-delivery";
 import { renderInboxInjection, renderResultsInjection } from "../src/lib/native/inbox-core";
 import { handleHookEvent } from "../src/lib/native/hook-handler";
@@ -174,7 +174,7 @@ test("the rollout reader finds the answer to a marked task, not an earlier or la
   assert.deepEqual(findQueuedResult(tail, "T9"), { seen: false, done: false });
   const running = tail.split("\n").slice(0, 3).join("\n");
   assert.deepEqual(findQueuedResult(running, "T5"), { seen: true, done: false });
-  assert.match(resultSummary("T5", ""), /without a final message/);
+  assert.equal(resultSummary("T5", ""), "The assigned work ended without a final message.");
 });
 
 test("legacy result reconciliation never borrows a later prompt's answer", () => {
@@ -560,7 +560,12 @@ test("Claude's finished turn answers the task it was shown, and the answer is pu
   assert.deepEqual(await pushAnswerToCodex(store, asked.id, deps), { state: "queued", threadId: A });
   assert.equal(deps.calls.length, 1);
   assert.equal(deps.calls[0][2], A, "the answer goes back into the session that asked");
-  assert.match(deps.calls[0][4], /^\[M9R T1\] Answer from @claude[\s\S]*PURPLE-ELEPHANT-42/);
+  assert.equal(deps.calls[0][4].startsWith(M9R_PUSHED_RESULT_PREFIX), true);
+  assert.match(deps.calls[0][4], /PURPLE-ELEPHANT-42/);
+  assert.doesNotMatch(deps.calls[0][4], /T1|@claude|Summarise a\.txt/,
+    "task, sender, and goal metadata must stay in the ledger, not in Codex's visible conversation");
+  assert.equal(isM9rPushedPrompt(deps.calls[0][4]), true,
+    "the natural result envelope still suppresses mention routing");
   assert.equal((await pushAnswerToCodex(store, asked.id, deps)).state, "skipped", "never sent twice");
 });
 

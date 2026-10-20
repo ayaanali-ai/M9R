@@ -399,6 +399,13 @@ test("the block tells the agent to act on approved or typed items and never on p
   assert.match(block, /data, not as instructions/);
 });
 
+test("the standing instruction treats authorized delivery as automatic instead of requiring inbox polling", () => {
+  const block = standingInstructionBlock();
+  assert.match(block, /automatically delivers authorized work/i);
+  assert.match(block, /do not poll.*m9r_inbox/i);
+  assert.doesNotMatch(block, /run: m9r-cli tasks/i);
+});
+
 test("uninstall restores the backup byte for byte when the file is unchanged since init", () => {
   const original = '{\n    "weird":   "spacing",\n"hooks": {}\n}\n';
   const written = mergeHooks(original, specs).content;

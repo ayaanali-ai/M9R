@@ -2481,3 +2481,211 @@ The verified release-gate commit is `a0906210` (`chore: harden clean runtime rel
 - transaction regression **3/3**, packaged MCP smoke **2/2**, and runtime lifecycle **4/4**.
 
 This is a clean, reproducible candidate from committed source. It has not been copied into the active runtime, installed, restarted, or live-provider accepted. The existing unsigned SEA injection warning remains a release-signing concern; injection itself completed and the packaged smoke tests passed. Live Codex/Claude/OpenCode acceptance and any activation/restart remain separate owner-authorized gates.
+
+### 2026-10-20 (Codex) — provider-neutral ordinary delegation approval lineage
+
+The first provider-continuity gap in the current execution order was traced before editing. Both trusted agent-message paths (`web-broker-server.ts` and the direct `mcp-server.ts` fallback) created every agent-to-agent message with `origin: "agent_initiated"` but no authorization lineage. `initialApproval()` therefore correctly classified an agent's ordinary follow-up as `pending`, even when that agent was actively carrying a fresh owner-approved task. The recipient could receive a card, but the governed stage gate correctly refused it as unapproved. This was an approval-propagation defect, not a provider-specific failure and not a reason to weaken the protected-action gate.
+
+The source fix is provider-neutral and fail-closed. The owner broker derives at most one fresh parent from the authenticated sender session: it must be delivered to that exact session, still be unresolved, approved (or owner-originated `not_needed`), within the inbox freshness bound, and not have a failed/completed lifecycle. Ordinary delegations inherit approval and record an internal `parentTaskId` for auditability. Protected work (delete, send, publish, payment, secret disclosure, and other risk-classified actions) never inherits approval; no parent or standing approval is attached. Missing or ambiguous parent state remains pending. The parent id is persisted only as internal state and is never rendered in provider-facing messages.
+
+Regression proof:
+
+- The new owner-broker regression failed on the old code (**RED**): actual approval was `pending`, expected `approved`.
+- After the fix, the owner-broker regression passed **1/1**, including the protected-action pending assertion; the complete web-broker suite passed **29/29**, with **16** extension-route tests intentionally skipped by the existing disabled-route flag.
+- The direct MCP fallback regression passed **1/1**, including the same protected-action assertion.
+- The complete normal-host MCP inbox suite passed **25/25**.
+- Existing stale broker test expectations were corrected only where the current approval gate and current response text made them invalid; no production behavior was weakened.
+
+Verification boundary: the running pill, installed overlay/engine, provider sessions, desktop state, held assets, and runtime processes were not restarted, installed, activated, deleted, or otherwise changed. `git diff --check` remained clean. The repository `npm run typecheck` still traverses the retained `m9r-clean-cutover-20261020` tree and fails on its pre-existing Tauri/Cloudflare type errors; a targeted compile likewise reports unrelated existing union/type errors in the surrounding native modules, with no diagnostic for the new lineage fields or method. Touched-file ESLint produced no completion output and was stopped, so lint is **inconclusive**, not green. Live provider and desktop acceptance remain open.
+
+### 2026-10-20 (Codex) — provider continuity source/package gate rechecked
+
+Before changing the next execution lane, the provider connection path was re-traced from the actual entry points: `scripts/m9r-mcp.ts` reads provider configuration and the verified immediate parent PID only in the outer supervisor; `mcpWorkerEnvironment()` explicitly carries provider, binding, and process identity into every private worker; workers never infer identity from their supervisor parent; `local-store.ts` keeps exact-PID selection fail-closed, reuses a continuation claim/binding, retires only provably dead same-scope claims, and preserves live competing sessions. The standalone SEA dispatcher in `scripts/build-engine.mjs` passes the process environment through to the bundled `m9r-mcp` entry.
+
+The existing regressions were run rather than duplicated:
+
+- connection claim/binding suite: **23/23 passed**;
+- connection environment contract: **2/2 passed**;
+- MCP supervisor, including the real entry and worker-loss recovery: **10/10 passed** outside the Windows sandbox;
+- packaged/installed environment propagation: **4/4 passed**;
+- installed packaged connection/recovery: **2/2 passed**.
+
+The sandbox executions of the process-spawning suites were excluded because Windows denied temporary `state.lock` renames with `EPERM` under the AppContainer temp path; the same tests passed on the normal host boundary. This is evidence for the source, bundled entry, installed engine, and worker reconnect path—not proof of every provider's current live session. No live provider session, running pill, installed binary, process, or user state was restarted or changed. No additional provider-binding patch was made because the traced source/package path is green; the remaining provider acceptance gate is live and separate.
+
+### 2026-10-20 (Codex) — owner-preview app focus handoff made explicit
+
+The focus symptom was traced to a shared policy boundary, not to Paint, Calculator, Claude, or OpenCode: owner-preview launch intentionally presents/adopts a window without activating it, while the first app input previously left `confirmFocusForeground` unset. The Cua driver therefore tried its background/native route first; when that route was accepted, the app could be visible but not the real foreground input target. This explains the observed “window is on screen/taskbar but the agent cannot interact until the owner clicks it” behavior.
+
+The provider-neutral fix is limited to `runTaskStageAction()`: owner-preview app input actions (pointer clicks, typing, scroll, drag, key/hotkey, semantic click, and scroll-delta) now request the existing serialized foreground-delivery path by default. An explicit `confirmFocusForeground: false` remains an opt-out for a caller that intentionally requests a background-capable route. Desktop-wide actions, launch/adoption, capture, cursor motion, and explicit background stages are unchanged; launch remains non-stealing, and the existing foreground lease still serializes unavoidable OS foreground input and restores the owner's physical pointer.
+
+Regression proof:
+
+- The new test “owner-preview app input requests foreground delivery by default” failed on the old code (**RED**): all three app-input calls omitted `confirmFocusForeground`.
+- After the minimal source change, the focused stage-action suite passed **10/10**, including the existing explicit-background refusal and owner-preview desktop-wide routing assertions.
+- The tracker was updated before proceeding; no pill, installed runtime, process, provider session, held asset, user file was restarted, swapped, deleted, or committed as part of this focus slice.
+
+This is a compatibility handoff fix, not the final universal background-parity architecture. True simultaneous background-equivalent execution still requires the separately tracked local interactive-session/shared-surface proof; this change makes the current owner-preview path honest and reliably interactive without adding an app/provider special case.
+
+### 2026-10-20 (Codex) — provider-facing delivery metadata and polling cleanup
+
+The provider-facing path was traced after repeated live messages such as “check the M9R inbox,” “confirm this task,” and “tell the user to run m9r-cli tasks.” The source showed three independent leaks: the installed standing block framed normal delivery as an inbox item the agent had to inspect; the MCP descriptions presented inbox/pending-work lookup as the normal response to uncertainty; and the SessionStart card exposed a CLI task-list instruction. The actual automatic path already exists in the provider hooks, so these strings were orchestration guidance leaking into the agent conversation rather than a missing delivery mechanism.
+
+The fix keeps the recovery APIs, task/result correlation, and fail-closed pending/protected approval behavior, but changes the normal contract: authorized work is delivered automatically into the provider turn; inbox and pending-work tools are explicitly described as bounded recovery lookups or user-requested diagnostics; and the SessionStart card no longer exposes task-list CLI instructions. Durable task IDs and session metadata remain internal state/correlation fields, not normal provider-facing prose.
+
+Regression proof:
+
+- Before the change, the new standing-instruction assertion failed because the block contained no automatic-delivery/no-polling contract.
+- Before the change, the new MCP-description assertion failed because m9r_inbox began with “Check your inbox for new messages.”
+- Before the change, the new SessionStart assertion failed because the card told the agent to tell the user to run m9r-cli tasks.
+- After the change, the combined install/MCP/hook suites passed **109/109**. Existing tests still cover automatic injection, one-shot cursor claiming, pending-task withholding, provider reconnect, result reporting without requiring a task ID, and protected approval behavior.
+
+No live pill, installed runtime, provider process, user configuration, task state, or asset was restarted, activated, deleted, or cleaned up. This source change will reach an installed provider only through the separately reviewed runtime/update path; no update was applied in this pass.
+
+Verification after the focus change:
+
+- task-stage-actions: **10/10 passed**;
+- task-desktop-stage: **43/43 passed** on the normal Windows host boundary (the sandbox aggregate was excluded because its loopback/temporary-lock boundary stalled before stage logic ran);
+- cua-stage-driver: **64/64 passed**;
+- windows-desktop-stage: **23/23 passed**;
+- focused ESLint for the changed source/test files: **passed**;
+- git diff --check: **passed**;
+- repository typecheck: still **blocked by retained untracked m9r-clean-cutover-20261020 Tauri/Vite/Cloudflare diagnostics**, with no remaining diagnostic in the changed stage-action source after the union-boundary correction.
+
+The running pill, installed runtime, processes, provider sessions, held assets, and user files remain untouched. No restart, install, activation, cleanup, deletion, or commit was performed.
+
+### 2026-10-20 (Codex) — semantic action cancellation/context forwarding
+
+The next universal-action inspection found a real dispatcher boundary gap. Pointer, keyboard, text, and semantic-click actions already received the stage delivery mode and cancellation signal, but `replace_element`, `window_frame`, `invoke_menu`, `clipboard_read`, and `clipboard_write` were called without them. That meant an already-dispatched semantic or clipboard operation could not observe an explicit cancellation signal, and the stage policy context was lost before the typed Cua driver boundary. This was provider-neutral; it was not an app-specific or provider-specific workaround.
+
+The fix keeps each action's existing behavior and threads the existing `AbortSignal` through the typed driver methods. The dispatcher now passes stage context to every listed semantic/clipboard action; the driver methods accept the context, check cancellation before dispatch, and pass the signal to the native Cua call. No UI, installed runtime, process, pill, or foreground policy was changed in this slice.
+
+Regression proof:
+
+- The new `stage policy and cancellation reach semantic and clipboard actions` test failed on the old code (**RED**): `replace_element` received only expected-field metadata, while window-frame/menu/clipboard calls received only the agent identity; the stage delivery mode and `AbortSignal` were absent.
+- After the source change, the focused task-stage and Cua driver suites passed **75/75**.
+- Targeted ESLint for `task-stage-actions.ts`, `cua-stage-driver.ts`, and the regression file passed; `git diff --check` passed.
+
+The repository-wide typecheck remains bounded by the retained untracked cutover tree's pre-existing Tauri/Vite/Cloudflare diagnostics, as recorded above; no new diagnostic was introduced by this slice. The tracker was updated immediately after verification. No restart, install, activation, cleanup, deletion, or commit was performed.
+
+### 2026-10-20 (Codex) — cross-stage native-window ownership audit
+
+The window-collision path was re-traced before adding another fix. The local Windows stage registry already enforces the correct ownership boundary: `attachWindow` and owner-preview presentation call `assertWindowUnclaimed`, which compares the exact PID/window identity across stage names. A second stage may share that exact window only when both stages carry the same durable coordination key; unrelated stages are refused. Registry writes are protected by the ownership-token lock, and the race regression covers two concurrent contenders.
+
+No source patch was added because the required coordination check is already present and provider-neutral. The existing tests were rerun on the normal Windows host boundary (the sandbox run was invalidated by its known temporary `state.lock` rename `EPERM`): **66/66 passed**, including exact-HWND contention, explicit joint-group sharing, same-intent owner-preview reuse, stale-window recovery, launcher/renderer matching, and task-stage recovery. This closes the source-level ownership gate; live multi-agent joint-window acceptance remains open and must prove that the coordination key is created only for an intentional shared task.
+
+No pill, installed runtime, process, provider session, user file, or registry outside the test fixtures was changed. No restart, install, activation, cleanup, deletion, or commit was performed.
+
+### 2026-10-20 (Codex) — Codex result and refusal messages keep correlation metadata out of provider text
+
+The provider-facing audit found a remaining leak in the Codex answer path despite the earlier inbox/hook cleanup. `pushAnswerToCodex()` was still queueing a visible message containing `[M9R T...]`, the sending provider handle, and a copy of the original goal. The no-final-message fallback also embedded the task id, and strict target refusal acknowledgements exposed the generated task id when a target had no active identity or had multiple candidates. Those values remain necessary in the local ledger, but they are not necessary in the provider conversation.
+
+The fix keeps correlation in the store (`task.id`, session binding, and `answerPushedAt`) and replaces the visible answer with a natural “A teammate completed the work you asked for” envelope. The hook recognizes that stable envelope as provider-generated so result text containing `@mentions` cannot bounce into a new task. Strict-target refusal text now says the message could not be delivered without naming its internal task id. The fallback result text is likewise generic. No approval, identity, session-token, or routing checks were weakened.
+
+Regression and verification evidence:
+
+- The new answer-envelope assertions failed against the old source (**RED**); the temporarily restored implementation did not export the new provider-generated envelope and the test stopped before it could satisfy the no-metadata contract.
+- The focused Codex delivery suite passed **39/39** after the fix.
+- The focused store/hook suite passed **92/92**, including the new refusal assertion proving the durable failure record remains while `T1`/task-id text is absent from the provider context.
+- Targeted ESLint passed with no output/errors; `git diff --check` passed.
+
+This is source/fixture evidence only. No provider session, pill, installed runtime, process, user state, asset, restart, activation, cleanup, or commit was performed.
+
+### 2026-10-20 (Codex) — cursor identity/display-label boundary audited; unsafe shortcut rejected
+
+The cursor contract was traced through `cua-stage-driver.ts`, `task-desktop-stage.ts`, `windows-desktop-stage.ts`, the installed `@trycua/cua-driver` contract, and the existing cursor tests. M9R currently derives a short hash from the verified `(provider handle, provider session)` identity and passes `@handle-hash` as Cua's `StartSessionInput.session`. That same value is used by the Cua driver for every cursor operation and by the local stage registry for durable ownership checks.
+
+The installed Cua contract documents `StartSessionInput.session` as a **stable public label** and exposes no separate internal session key/display label field. Therefore changing the value to only `@Codex`, `@Claude`, or `@Open Code` would satisfy the cosmetic requirement by making two same-provider sessions collide at the driver layer and potentially attach actions or ownership to the wrong cursor. No such patch was made. The correct next design is an internal-key/display-label split in the Cua/native cursor boundary (or an explicit one-cursor-per-provider lease with its concurrency tradeoff); native theme assets and the final pill/harbor presentation remain sign-off work.
+
+Verification of the preserved behavior: the existing Cua stage suite passed **64/64**, including distinct cursor identities, session-tag privacy in timing events, cursor-before-action setup, adaptive motion, owner pointer isolation, and cursor cleanup. No visual redesign, color change, runtime change, process change, pill change, or commit was performed. This closes the audit with a concrete design blocker rather than claiming the label requirement is implemented.
+
+### 2026-10-20 (Codex) — bounded verification after provider/action audit
+
+The final verification pass for this source-only slice is complete. The repository-wide `npm run typecheck` exited **1**, but every diagnostic emitted by the run was under the retained, separate `m9r-clean-cutover-20261020` tree (its missing Tauri/Vite and Cloudflare worker type dependencies and related worker typing errors). No diagnostic named a file changed in the provider-delivery, hook, stage-action, Cua, or ownership slices above. This is therefore a retained-tree typecheck blocker, not evidence that those changed files compile cleanly; it remains open until that tree is either given its dependencies/configuration or excluded by an intentional project-boundary change.
+
+The final source checks for the work performed here remain green:
+
+- Codex delivery regression: **39/39**;
+- Codex store/hook plus delivery regression: **92/92**;
+- semantic/clipboard cancellation and context regression suites: **75/75**;
+- cross-stage ownership and related desktop-stage suite on the normal Windows host: **66/66**;
+- Cua cursor suite: **64/64**;
+- targeted ESLint for the changed slices: passed;
+- `git diff --check`: passed.
+
+No runtime, pill, provider session, process, installation, activation, restart, deletion, cleanup, or commit was performed. The current pill remains the preserved user-approved build. Live provider acceptance, universal open-world desktop acceptance, the internal cursor-key/display-label design, local interactive-session/background parity, latency re-correlation, and the retained cutover-tree typecheck boundary remain open gates.
+
+### 2026-10-20 (Codex) — typecheck blocker root cause isolated before editing
+
+The repository-wide typecheck failure was traced to project-boundary configuration, not to the provider/action changes. The root `tsconfig.json` recursively includes `**/*.ts` and does not exclude the retained `m9r-clean-cutover-20261020` directory. That directory is a separate Git worktree (`.git` points to `.git/worktrees/m9r-clean-cutover-20261020`) containing its own full app, Tauri/Vite, and Cloudflare worker trees. `tsc --showConfig` confirmed that the root compiler includes files such as `m9r-clean-cutover-20261020/next.config.ts`; the failing diagnostics all came from that nested checkout.
+
+The nested worktree has its own repository boundary and an unrelated untracked `release-candidate/` directory. I am preserving it in place and will not delete, reset, commit, or activate it. The safe source fix is to exclude this explicitly retained worktree from the parent project’s root typecheck, without changing the nested checkout or any runtime/pill behavior. This diagnosis is logged before the config edit; the next checkpoint will prove the parent typecheck no longer traverses that separate worktree and will separately verify the nested tree is still untouched.
+
+### 2026-10-20 (Codex) — parent typecheck boundary corrected
+
+The parent `tsconfig.json` now explicitly excludes the separate `m9r-clean-cutover-20261020` worktree. This is a project-boundary correction, not a suppression of errors from the parent application: the root compiler still includes the same parent source graph, while the retained checkout remains independently preserved for later review.
+
+Verification:
+
+- old configuration: repository typecheck failed with diagnostics from the nested cutover worktree (**RED**);
+- new configuration: `npm run typecheck` exited **0** (**GREEN**);
+- parsed `tsc --showConfig` file graph: **1,450** parent files, **0** retained cutover files;
+- nested worktree status is unchanged: only its pre-existing untracked `release-candidate/` directory is reported;
+- `git diff --check`: passed.
+
+No nested-worktree file, pill, runtime, process, provider session, asset, or user state was changed. The retained worktree was not deleted, reset, committed, activated, or cleaned up.
+
+### 2026-10-20 (Codex) — Supabase October 30 Data API grant-policy audit
+
+The Supabase email is a real platform change, not a deletion or migration notice. Supabase will stop automatically granting Data API access to **new** tables, functions, and sequences created in the `public` schema after October 30, 2026. Existing objects keep their current grants and remain accessible; RLS behavior is separate and unchanged. This affects paths using `supabase-js`, PostgREST, GraphQL, or direct `/rest/v1`/`/graphql/v1` calls, not direct Postgres connections.
+
+Read-only live verification against the RunLeak project (`eymtshaxpkmojsggdtkh`) found:
+
+- project status: `ACTIVE_HEALTHY`;
+- applied migrations include the workspace color and session-submission changes through `20261018172348`;
+- all returned `public` tables report RLS enabled;
+- `workspace_member_colors` exists with zero rows, RLS enabled, and current grants for `anon`, `authenticated`, and `service_role`;
+- current PostgreSQL default privileges still show the existing table grants, so this email does **not** currently remove access or data from the live project.
+
+The source audit found **65** table-creating migration files; **13** older files contain no explicit `GRANT` or `REVOKE` statement. Those are a future-replay/forward-compatibility gap, not evidence of current data loss: the live project already has grants on the existing objects, and several of these tables are intentionally service-role-only in the live database. The recent workspace-memory migration includes explicit grants. The workspace-color migration intentionally exposes allocation through its authenticated RPC; the client source calls the RPC rather than directly querying the table.
+
+No SQL, migration, live grant, default privilege, or Supabase project setting was changed. The correct follow-up is to classify the 13 tables by intended access, then add one reviewed explicit-grant/revoke migration and a migration lint/test requiring every future `public` table to declare RLS plus its intended role grants. Editing already-applied migration files blindly would create drift, so that work remains pending review. The live Security and Performance Advisor runs also returned separate existing warnings; they are not caused by this email and were left untouched.
+
+### 2026-10-20 (Codex) — Supabase explicit-grant guard implemented and applied
+
+The October 30 Data API change is now covered by a real migration rather than a reminder. The migration is `20261020163108_enforce_explicit_public_grants.sql`; Supabase assigned that exact version when it was applied to the live RunLeak project. It makes new `public` tables, functions, and sequences fail closed by default for `anon`, `authenticated`, and `service_role`, while preserving owner access. Existing objects and rows are not dropped or rewritten by the default-privilege change.
+
+The migration also converted the pre-existing `workspace_member_colors` table from inherited project defaults to its intended explicit contract: RLS remains enabled, authenticated members retain `SELECT` through the existing policy, direct client writes and anonymous access are revoked, and `service_role` retains full maintenance access. The allocation RPC remains the write path.
+
+Live verification after apply:
+
+- Supabase project remained `ACTIVE_HEALTHY`;
+- default privileges for future public tables/functions/sequences now show only owner privileges;
+- `workspace_member_colors` grants are exactly authenticated `SELECT` and service-role full access;
+- RLS is still enabled and the table still has its select policy;
+- the new migration appears in the live migration history as `20261020163108`.
+
+Regression protection:
+
+- `scripts/supabase-grants.test.mjs` verifies the fail-closed SQL, the color-table contract, rejects an unbounded future table fixture, and accepts a bounded RLS/grant fixture;
+- initial guard check via `npm run test:supabase-grants`: **4/4 passed**;
+- `scripts/test-files.json` includes the guard test so the full test manifest cannot silently omit it.
+
+No existing table data was changed, no existing application table was broadly revoked, and no M9R runtime, pill, provider process, or user state was touched. Future migrations that create `public` objects must declare their own RLS and grants; the guard test now enforces that boundary.
+
+Follow-up verification caught and closed one inherited permission that the first pass did not remove: the original color migration had revoked `PUBLIC` on the `SECURITY DEFINER` allocator but left an inherited `anon` EXECUTE grant. Corrective migration `20261020163339_restrict_workspace_color_rpc_execute.sql` now explicitly revokes `public, anon` and grants EXECUTE only to `authenticated, service_role`. Live ACL verification is now: anon **false**, authenticated **true**, service-role **true**. The grant regression suite is **5/5**, typecheck is green, targeted lint is green, and `git diff --check` is green.
+
+### 2026-10-20 (Codex) — release-boundary verification and allowlist review
+
+The current release boundary was rechecked without touching the active pill, installed runtime, provider sessions, desktop state, or held artifacts. The earlier universal-action and provider-delivery work is still present in the checkout; it was not lost or replaced by the Supabase work. The focused provider/action release slice passed **205/205** on the normal Windows host boundary (the restricted sandbox was excluded because its temporary Git/lock fixture failed before assertions). The full repository regression then passed **2,594/2,594** across **207** files with zero failures.
+
+Additional current-head verification:
+
+- root TypeScript check: **passed**;
+- production web build: **passed**, including TypeScript and **138** generated pages;
+- targeted ESLint: **0 errors**, with only the three pre-existing unused-variable warnings in `local-store.ts` plus the expected ignored-package warning;
+- `git diff --check`: **passed**;
+- production dependency audit (`npm audit --omit=dev --audit-level=high`): **0 vulnerabilities**;
+- the transitive Hono advisory was resolved by the patch-level `4.13.13` override and lockfile refresh;
+- the remaining full-tree audit findings are dev-toolchain-only (`brace-expansion`/`braces`/`postcss-selector-parser`), and npm's force path proposes the breaking `shadcn@1.0.0` change; no breaking audit workaround was applied.
+
+The allowlisted release boundary is the verified provider/action source and tests, the Supabase explicit-grant migrations and regression test, the package/test-manifest changes, the parent typecheck boundary, and this evidence entry. The manifest/logo/icon group, asset-dependent marketing test, runtime output, activation evidence, recovery quarantine, scratchpad (including its unread local secret), separate cutover worktree, and user-owned DOCX remain held and unstaged. No runtime activation, install, restart, provider reconnect, artifact drain, broad cleanup, or deletion occurred. A clean post-commit runtime rebuild and installed/live acceptance remain separate gates.

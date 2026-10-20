@@ -206,6 +206,40 @@ test("restricted agent MCP writes go through the owner broker and are identity-s
   } finally { await ctx.done(); }
 });
 
+test("an ordinary delegation inherits the owner's active approval without exposing a manual approval step", async () => {
+  const ctx = await setup();
+  try {
+    const sender = await ctx.issueIdentity("sender", "codex", "session-sender");
+    await ctx.issueIdentity("recipient", "claude-code", "session-recipient");
+    const ownerTask = ctx.store.addTask({
+      from: "you",
+      to: "sender",
+      goal: "Coordinate the harmless verification with the other agent.",
+      origin: "human_typed",
+      targetSession: sender.sessionId,
+      idempotencyKey: "owner-approval-parent",
+    }).task;
+    ctx.store.markDelivered([ownerTask.id], sender.sessionId);
+
+    const web = createWebBrokerClient({
+      keyPath: brokerKeyPath(ctx.root), ownerPipePath: ownerPipePath(ctx.root), port: ctx.broker.port,
+      fetchImpl: async () => { throw new Error("M9R agent task-state writes must not use loopback HTTP"); },
+    });
+    const delegated = await web.submitAgentTask!(sender.token, "recipient", "Read the harmless verification and report the result.");
+
+    assert.equal(delegated.ok, true);
+    const child = ctx.store.getTask(delegated.taskId!);
+    assert.equal(child?.approval, "approved", "ordinary work delegated from an owner-approved active turn must not stall for a second manual approval");
+    assert.equal(child?.parentTaskId, ownerTask.id, "the authorization parent stays internal and auditable");
+
+    const protectedDelegated = await web.submitAgentTask!(sender.token, "recipient", "Delete the build folder permanently.");
+    assert.equal(protectedDelegated.ok, true);
+    const protectedChild = ctx.store.getTask(protectedDelegated.taskId!);
+    assert.equal(protectedChild?.approval, "pending", "protected work must still require a fresh owner decision");
+    assert.equal(protectedChild?.parentTaskId, undefined, "protected work must not inherit the ordinary delegation lineage");
+  } finally { await ctx.done(); }
+});
+
 test("a slow owner state write stays acknowledged instead of looking like a lost m9r_result", async () => {
   const ctx = await setup();
   try {
@@ -242,6 +276,7 @@ test("owner broker atomically claims a native inbox task for one session", async
     });
     const sent = await web.submitAgentTask!(sender.token, "claude", "continue the T37 diagnosis");
     assert.equal(sent.ok, true);
+    ctx.store.setApproval(sent.taskId!, "approved");
 
     const claimedA = await web.claimAgentInbox!(first.token, [sent.taskId!]);
     assert.deepEqual(claimedA, { ok: true, taskIds: [sent.taskId!] });
@@ -640,7 +675,7 @@ test("room m9r_send works for local agents with no admission step, and the autho
     assert.equal((await ownerRequest(t.broker.port, t.key, "/web/aware/messages/authorize", "POST", { sender: "claude", recipient: "codex" }, "https://attacker.test")).status, 403);
     assert.equal((await ownerRequest(t.broker.port, t.key, "/web/aware/messages/authorize", "POST", { sender: "claude", recipient: "codex" })).status, 200);
 
-    assert.match((await send()).content[0]?.text ?? "", /Sent to @codex/);
+    assert.match((await send()).content[0]?.text ?? "", /(?:Sent|Message sent) to @codex/);
     assert.equal(t.store.tasksFor("web-codex").filter((task) => task.goal === "Coordinate the shared browser task.").length, 1);
   } finally {
     await t.done();

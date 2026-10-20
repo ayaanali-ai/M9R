@@ -28,8 +28,12 @@ export const isBrokerAgentPrompt = (prompt: string) => /You are @[a-z0-9-]+, an 
   || /^\s*Your current M9R session token is \S+\. Use it only on M9R tools/.test(prompt)
   || prompt.includes("M9R tools may only be reachable as deferred tools through your exec/code gateway");
 
+/** Stable, human-readable envelope prefix for an answer queued back into Codex. It carries no task/session identity. */
+export const M9R_PUSHED_RESULT_PREFIX = "A teammate completed the work you asked for:";
+
 /** True for a prompt M9R itself pushed into a session. Its @mentions are the sender's name, not a new request to route. */
 export const isM9rPushedPrompt = (prompt: string) => /^\s*\[M9R T\d+\]/.test(prompt)
+  || prompt.trimStart().startsWith(M9R_PUSHED_RESULT_PREFIX)
   || isBrokerAgentPrompt(prompt)
   || isM9rWorkspaceEnvelope(prompt);
 
@@ -218,5 +222,6 @@ function assistantText(line: string): string | undefined {
 /** Result text placed in the caller's inbox: short, and honest when Codex gave no final message. */
 export function resultSummary(taskId: string, message: string | undefined): string {
   const text = (message ?? "").trim();
-  return text ? text : `@codex finished ${taskId} without a final message.`;
+  void taskId;
+  return text || "The assigned work ended without a final message.";
 }

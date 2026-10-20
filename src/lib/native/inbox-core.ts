@@ -82,6 +82,8 @@ export interface Task {
   targetSession?: string;
   /** The sender's own session (a Codex thread id, say), so the answer can be pushed back to exactly that session. */
   fromSession?: string;
+  /** Internal authorization lineage; never included in provider-facing task text. */
+  parentTaskId?: string;
   /** The session the task was shown in (its inbox delivery), so its answer is read from that session's transcript. */
   deliveredSession?: string;
   /** Set when the answer was pushed back into the sender's session. */
@@ -135,6 +137,8 @@ export interface NewTaskInput {
   cwd?: string;
   targetSession?: string;
   fromSession?: string;
+  /** Internal authorization lineage; trusted broker code derives this from an active owner-approved task. */
+  parentTaskId?: string;
 }
 
 /** Approximate token count; good enough to enforce a budget without a tokenizer dependency. */
@@ -190,6 +194,7 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(input.targetSession ? { targetSession: input.targetSession } : {}),
     ...(input.fromSession ? { fromSession: input.fromSession } : {}),
+    ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
   };
 }
 
@@ -319,8 +324,8 @@ export function renderSessionCard(input: CardInput): string {
     `M9R connected as @${input.handle}.`,
     input.identityToken ? `M9R session token (for the M9R MCP server, "m9r_whoami" and friends; keep it out of anything you post publicly): ${input.identityToken}` : "",
     others.length ? `Active now: ${others.join(", ")}.` : "No other agents active.",
-    input.pendingCount > 0 ? `${input.pendingCount} pending inbox item(s); they appear at your next prompt.` : "",
-    input.awaitingApproval ? `${input.awaitingApproval} task(s) are waiting for the user's approval; if it comes up, tell the user to run: m9r-cli tasks.` : "",
+    input.pendingCount > 0 ? "M9R has incoming work; authorized work is delivered automatically when this session is ready." : "",
+    input.awaitingApproval ? "Some M9R work is awaiting owner approval; do not act until M9R delivers it as authorized." : "",
     input.memoryDir ? `Earlier agent sessions on this project are indexed in ${input.memoryDir}/index.md; read a short summary there before re-deriving earlier work.` : "",
   ].filter(Boolean);
   const card = lines.join(" ");

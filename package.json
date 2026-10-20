@@ -65,6 +65,7 @@
     "test:ui": "tsx --test scripts/ui-button.test.ts",
     "test:runtime-core": "tsx --test packages/runtime-core/test/runtime-core.test.ts",
     "test:installer": "node --test ./scripts/install-m9r.test.mjs",
+    "test:supabase-grants": "node --test ./scripts/supabase-grants.test.mjs",
     "test:cron-scheduler": "tsx --test scripts/cloudflare-scheduler.test.ts",
     "export:aware-spec": "node ./scripts/export-aware-spec.mjs",
     "test:aware-spec": "node --test ./scripts/export-aware-spec.test.mjs",
@@ -166,6 +167,7 @@
   "overrides": {
     "@hono/node-server": "2.0.12",
     "@modelcontextprotocol/sdk": "1.31.0",
+    "hono": "4.13.13",
     "dompurify": "3.4.16",
     "fast-uri": "3.1.8",
     "ip-address": "10.7.3",

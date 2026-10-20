@@ -9,6 +9,7 @@
   "email.test.ts",
   "notify.test.ts",
   "auth-integration.test.ts",
+  "supabase-grants.test.mjs",
   "raw-trace-parser.test.ts",
   "agent-instructions.test.ts",
   "agent-instruction-channel.test.ts",

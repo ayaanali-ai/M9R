@@ -407,6 +407,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         if (!result.ok || !result.taskId) throw new Error(result.error ?? "The owner broker did not accept the M9R task.");
         taskId = result.taskId;
       } else {
+        const parent = deps.store.delegationParentFor(identity.handle, identity.sessionId, goal);
         const result = deps.store.addTask({
           to: roomHandle(identity, to),
           from: roomHandle(identity, identity.handle),
@@ -414,6 +415,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           fromSession: identity.sessionId,
           origin: "agent_initiated",
           idempotencyKey: `mcp:${identity.sessionId}:${to}:${goal.slice(0, 200)}`,
+          ...(parent ? { standingRuleApplies: true, parentTaskId: parent.id } : {}),
         });
         taskId = result.task.id;
       }
@@ -464,7 +466,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_inbox",
     {
       description:
-        "Check your inbox for new messages from teammates. Each call shows only messages you have not seen yet, and marks them seen. If you are a web-room agent (working in the shared browser), a teammate's answer is pushed to you automatically as your next message -- end your turn after m9r_send instead of calling this to wait. waitSeconds (up to 30) is for a native/terminal session with no such push: it waits once instead of polling in a loop.",
+        "Manual recovery only: inspect new teammate messages when M9R reports a delivery gap or the user explicitly asks. Normal authorized work is delivered automatically into the provider turn; do not poll this tool in a loop or as part of ordinary work. Each call shows only messages not yet seen and marks them seen. For a web-room agent, teammate answers are pushed automatically as the next message; for a native/terminal session, waitSeconds (up to 30) performs one bounded recovery wait.",
       inputSchema: {
         ...AUTH_FIELD,
         waitSeconds: z.number().int().min(0).max(30).default(0).describe("How long to wait for a new message before giving up. 0 checks once."),
@@ -558,7 +560,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_pending_work",
     {
       description:
-        "List your own currently open tasks -- ones you still owe a result for -- regardless of whether they show up in your inbox. The inbox only shows messages you have not been shown yet; a task you were already sent (in this session, in an earlier session, or across a provider reconnect) never reappears there once delivered, even if it is still open and you have no memory of it. Call this whenever you're unsure whether you actually have open work, instead of treating an empty inbox as proof there is none.",
+        "Recovery lookup only: use this when M9R reports that work was presented earlier but the current context is missing, after a provider reconnect, or when the user explicitly asks. Normal authorized delivery is automatic, and an empty inbox is not a reason to poll this tool routinely. It lists your own currently open work that still needs a result without exposing durable task identifiers.",
       inputSchema: { ...AUTH_FIELD },
     },
     async ({ token }) => {

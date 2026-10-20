@@ -24,6 +24,11 @@ type TaskStageActionBody =
   | { kind: "clipboard_write"; text?: string; imagePath?: string; filePath?: string; confirmSharedClipboard: true };
 export type TaskStageAction = TaskStageActionBody & { view?: "desktop" | "app" };
 
+const OWNER_PREVIEW_FOREGROUND_ACTIONS = new Set<TaskStageAction["kind"]>([
+  "click", "double_click", "middle_click", "right_click", "type", "scroll", "drag",
+  "press_key", "hotkey", "click_element", "scroll_delta",
+]);
+
 const KEY_NAMES = new Set([
   "Ctrl", "Control", "Alt", "Shift", "Meta", "Win", "Enter", "Return", "Escape", "Esc", "Tab", "Space",
   "Backspace", "Delete", "Insert", "Home", "End", "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft",
@@ -108,6 +113,14 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
 
 export async function runTaskStageAction(driver: ReturnType<typeof createCuaStageDriver>, name: string, action: TaskStageAction,
   identity: CuaAgentCursorIdentity, mode: "background" | "owner-preview" = "owner-preview", signal?: AbortSignal) {
+  // Launch/adoption is intentionally non-stealing, but an owner-visible app input must
+  // still be delivered to the selected window. Otherwise the native/background route can
+  // report success while the app remains behind another window and the next action lands
+  // nowhere useful. An explicit false remains an opt-out for callers that deliberately
+  // request background-capable delivery.
+  const requestedFocus = "confirmFocusForeground" in action ? action.confirmFocusForeground : undefined;
+  const confirmFocusForeground = requestedFocus
+    ?? (mode === "owner-preview" && action.view === "app" && OWNER_PREVIEW_FOREGROUND_ACTIONS.has(action.kind) ? true : undefined);
   const stageOptions = <T extends Record<string, unknown>>(options: T): T | undefined => {
     const normalized = { ...options, deliveryMode: mode, ...(signal ? { signal } : {}) } as Record<string, unknown>;
     for (const key of Object.keys(normalized)) if (normalized[key] === undefined) delete normalized[key];
@@ -131,12 +144,12 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "stop": throw new Error("Stop is handled outside the stage action queue.");
     case "window_state": return driver.windowState(name, action.state);
     case "cursor": return cursor(action.x, action.y);
-    case "click": return click(action.x, action.y, { confirmFocusForeground: action.confirmFocusForeground });
-    case "double_click": return click(action.x, action.y, { count: 2, confirmFocusForeground: action.confirmFocusForeground });
-    case "middle_click": return click(action.x, action.y, { button: "middle", confirmFocusForeground: action.confirmFocusForeground });
-    case "right_click": return click(action.x, action.y, { button: "right", confirmFocusForeground: action.confirmFocusForeground });
+    case "click": return click(action.x, action.y, { confirmFocusForeground });
+    case "double_click": return click(action.x, action.y, { count: 2, confirmFocusForeground });
+    case "middle_click": return click(action.x, action.y, { button: "middle", confirmFocusForeground });
+    case "right_click": return click(action.x, action.y, { button: "right", confirmFocusForeground });
     case "type": {
-      const options = stageOptions({ confirmFocusForeground: action.confirmFocusForeground, mode: action.mode,
+      const options = stageOptions({ confirmFocusForeground, mode: action.mode,
         x: action.x, y: action.y, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel });
       if (desktopWide) return options
         ? driver.typeTextDesktop(name, action.text, identity, options)
@@ -145,21 +158,25 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
         ? driver.typeText(name, action.text, identity, options)
         : driver.typeText(name, action.text, identity);
     }
-    case "scroll": return desktopWide ? driver.scrollDesktop(name, action.x, action.y, action.direction, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground }))
-      : driver.scroll(name, action.x, action.y, action.direction, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground }));
-    case "scroll_delta": return desktopWide ? driver.scrollDeltaDesktop(name, action.x, action.y, action.deltaX, action.deltaY, action.unit, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground }))
-      : driver.scrollDelta(name, action.x, action.y, action.deltaX, action.deltaY, action.unit, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground }));
-    case "drag": return desktopWide ? driver.dragDesktop(name, action.fromX, action.fromY, action.toX, action.toY, identity, stageOptions({ durationMs: action.durationMs, confirmFocusForeground: action.confirmFocusForeground }))
-      : driver.drag(name, action.fromX, action.fromY, action.toX, action.toY, identity, stageOptions({ durationMs: action.durationMs, confirmFocusForeground: action.confirmFocusForeground }));
-    case "press_key": return desktopWide ? driver.pressKeyDesktop(name, action.key, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground })) : driver.pressKey(name, action.key, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground }));
-    case "hotkey": return desktopWide ? driver.hotkeyDesktop(name, action.keys, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground })) : driver.hotkey(name, action.keys, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground }));
-    case "click_element": return driver.clickElement(name, action.ref, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel }));
-    case "replace_element": return driver.replaceElement(name, action.ref, action.text, identity, { expectedRole: action.expectedRole, expectedLabel: action.expectedLabel });
-    case "window_frame": return driver.windowFrame(name, action.x, action.y, action.width, action.height, identity);
+    case "scroll": return desktopWide ? driver.scrollDesktop(name, action.x, action.y, action.direction, identity, stageOptions({ confirmFocusForeground }))
+      : driver.scroll(name, action.x, action.y, action.direction, identity, stageOptions({ confirmFocusForeground }));
+    case "scroll_delta": return desktopWide ? driver.scrollDeltaDesktop(name, action.x, action.y, action.deltaX, action.deltaY, action.unit, identity, stageOptions({ confirmFocusForeground }))
+      : driver.scrollDelta(name, action.x, action.y, action.deltaX, action.deltaY, action.unit, identity, stageOptions({ confirmFocusForeground }));
+    case "drag": return desktopWide ? driver.dragDesktop(name, action.fromX, action.fromY, action.toX, action.toY, identity, stageOptions({ durationMs: action.durationMs, confirmFocusForeground }))
+      : driver.drag(name, action.fromX, action.fromY, action.toX, action.toY, identity, stageOptions({ durationMs: action.durationMs, confirmFocusForeground }));
+    case "press_key": return desktopWide ? driver.pressKeyDesktop(name, action.key, identity, stageOptions({ confirmFocusForeground })) : driver.pressKey(name, action.key, identity, stageOptions({ confirmFocusForeground }));
+    case "hotkey": return desktopWide ? driver.hotkeyDesktop(name, action.keys, identity, stageOptions({ confirmFocusForeground })) : driver.hotkey(name, action.keys, identity, stageOptions({ confirmFocusForeground }));
+    case "click_element": return driver.clickElement(name, action.ref, identity, stageOptions({ confirmFocusForeground, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel }));
+    case "replace_element": return driver.replaceElement(name, action.ref, action.text, identity,
+      stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, confirmFocusForeground }));
+    case "window_frame": return driver.windowFrame(name, action.x, action.y, action.width, action.height, identity,
+      stageOptions({ confirmFocusForeground }));
     case "focus": return driver.focusWindow(name, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground }));
-    case "invoke_menu": return driver.invokeMenu(name, action.path, identity);
-    case "clipboard_read": return driver.clipboardRead(name, action.includeText, identity);
-    case "clipboard_write": return driver.clipboardWrite(name, action.text ?? "", identity, action.imagePath || action.filePath ? { imagePath: action.imagePath, filePath: action.filePath } : undefined);
+    case "invoke_menu": return driver.invokeMenu(name, action.path, identity, stageOptions({ confirmFocusForeground }));
+    case "clipboard_read": return driver.clipboardRead(name, action.includeText, identity, stageOptions({ confirmFocusForeground }));
+    case "clipboard_write": return driver.clipboardWrite(name, action.text ?? "", identity,
+      action.imagePath || action.filePath ? { imagePath: action.imagePath, filePath: action.filePath } : undefined,
+      stageOptions({ confirmFocusForeground }));
   }
 }
 

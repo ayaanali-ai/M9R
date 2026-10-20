@@ -162,7 +162,7 @@ test("the session card is a few lines of pointers within its cap, and never carr
   const card = renderSessionCard({ handle: "claude", others: [{ handle: "codex", activity: "editing relay/hub.ts" }], pendingCount: 2, memoryDir: ".m9r/memory" });
   assert.match(card, /M9R connected as @claude\./);
   assert.match(card, /@codex \(editing relay\/hub\.ts\)/);
-  assert.match(card, /2 pending inbox item/);
+  assert.match(card, /authorized work is delivered automatically/i);
   assert.match(card, /indexed in \.m9r\/memory\/index\.md/);
   assert.doesNotMatch(renderSessionCard({ handle: "claude", others: [], pendingCount: 0 }), /memory/i, "no memory line when there is no folder");
   assert.equal(approxTokens(card) <= CAPS.cardTokens, true);

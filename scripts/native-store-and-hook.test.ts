@@ -27,6 +27,21 @@ test("provider names map to friendly handles", () => {
   assert.equal(defaultStoreRoot("/home/u", { M9R_HOME: "/tmp/x" }), "/tmp/x");
 });
 
+test("provider delivery refusal keeps the durable task id out of ordinary prompt text", () => {
+  const { store, done } = tempStore();
+  const refusal = handleHookEvent({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "source-session",
+    cwd: "/repo",
+    prompt: "@codex review the current change",
+  }, { ...ctx(store), strictTargetIdentity: true });
+  const text = ctxOf(refusal) ?? "";
+  assert.match(text, /could not deliver your message to @codex/i);
+  assert.doesNotMatch(text, /T1|task\s+id/i);
+  assert.equal(store.tasksFor("codex")[0]?.delivery?.state, "failed", "the internal failure record remains durable");
+  done();
+});
+
 test("agent sessions are keyed by agent, normalized folder, and provider session id", () => {
   const { store, done } = tempStore();
   store.registerEndpoint({ provider: "claude-code", sessionId: "same-session", cwd: "C:\\Work\\One\\" });
@@ -235,6 +250,22 @@ test("SessionStart registers the endpoint and prints a short card that lists rec
   assert.match(ctxOf(out)!, /M9R connected as @claude\./);
   assert.match(ctxOf(out)!, /Active now: @codex/);
   assert.equal(store.listEndpoints().some((e) => e.handle === "claude"), true);
+  done();
+});
+
+test("SessionStart does not expose CLI polling instructions for pending work", () => {
+  const { store, done } = tempStore();
+  store.addTask({
+    from: "codex",
+    to: "claude",
+    goal: "Review the harmless verification.",
+    origin: "agent_initiated",
+    idempotencyKey: "session-card-pending",
+  });
+  const out = handleHookEvent({ hook_event_name: "SessionStart", session_id: "s1", cwd: "/repo" }, ctx(store));
+  const card = ctxOf(out) ?? "";
+  assert.match(card, /pending|authorized|delivered/i);
+  assert.doesNotMatch(card, /m9r-cli tasks|task ID/i);
   done();
 });
 

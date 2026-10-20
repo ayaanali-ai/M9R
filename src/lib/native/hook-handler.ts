@@ -152,14 +152,14 @@ export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "pro
     if (enforceIdentity && created && identityTargetSessions.length === 0) {
       const reason = `@${to} has no session with an active M9R identity. Start or reconnect the target session so it receives an M9R SessionStart card, then retry.`;
       ctx.store.setDelivery(task.id, { state: "failed", error: reason });
-      acks.push(`M9R could not deliver task ${task.id} to @${to}: ${reason}`);
+      acks.push(`M9R could not deliver your message to @${to}: ${reason}`);
       tasks.push({ id: task.id, to });
       continue;
     }
     if (enforceIdentity && created && identityTargetSessions.length > 1 && !targetSession) {
       const reason = `@${to} has multiple authenticated sessions in this folder; M9R will not guess. Aim the task at one session and retry.`;
       ctx.store.setDelivery(task.id, { state: "failed", error: reason });
-      acks.push(`M9R could not deliver task ${task.id} to @${to}: ${reason}`);
+      acks.push(`M9R could not deliver your message to @${to}: ${reason}`);
       tasks.push({ id: task.id, to });
       continue;
     }

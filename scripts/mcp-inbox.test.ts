@@ -42,6 +42,14 @@ test("desktop stage MCP tools default to the current owner desktop", () => {
   } finally { t.done(); }
 });
 
+test("inbox tools describe manual recovery, not a routine provider polling requirement", () => {
+  const tools = (setup().server as unknown as ToolServer)._registeredTools;
+  assert.match(tools["m9r_inbox"]?.description ?? "", /manual recovery|explicitly asked|delivery/i);
+  assert.doesNotMatch(tools["m9r_inbox"]?.description ?? "", /Check your inbox for new messages/i);
+  assert.match(tools["m9r_pending_work"]?.description ?? "", /recovery|explicitly asked/i);
+  assert.doesNotMatch(tools["m9r_pending_work"]?.description ?? "", /Call this whenever you're unsure/i);
+});
+
 test("desktop stage input derives a private one-shot receipt ID from the MCP request identity", async () => {
   let receivedOperationId = "";
   const web: WebBrokerClient = {
@@ -229,6 +237,33 @@ test("each inbox check shows only messages not seen before, then reports empty",
   assert.match(later, /third finding/);
   assert.doesNotMatch(later, /first finding|second finding/);
   t.done();
+});
+
+test("an ordinary direct MCP delegation inherits one active owner-approved turn, but protected work stays pending", async () => {
+  const t = setup({ allowRule: false });
+  try {
+    const sender = t.store.verifyIdentity(t.claude);
+    assert.ok(sender);
+    const ownerTask = t.store.addTask({
+      from: "you",
+      to: "claude",
+      goal: "Coordinate the harmless verification with the other agent.",
+      origin: "human_typed",
+      targetSession: sender.sessionId,
+      idempotencyKey: "direct-owner-approval-parent",
+    }).task;
+    t.store.markDelivered([ownerTask.id], sender.sessionId);
+
+    await t.call("m9r_send", { token: t.claude, to: "codex", goal: "Read the harmless verification and report the result." });
+    const child = t.store.tasksFor("codex").find((task) => task.goal.includes("Read the harmless verification"));
+    assert.equal(child?.approval, "approved");
+    assert.equal(child?.parentTaskId, ownerTask.id);
+
+    await t.call("m9r_send", { token: t.claude, to: "codex", goal: "Delete the build folder permanently." });
+    const protectedChild = t.store.tasksFor("codex").find((task) => task.goal.includes("Delete the build folder"));
+    assert.equal(protectedChild?.approval, "pending");
+    assert.equal(protectedChild?.parentTaskId, undefined);
+  } finally { t.done(); }
 });
 
 test("m9r_pending_work still surfaces a task after the inbox has already delivered it and moved on", async () => {

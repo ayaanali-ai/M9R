@@ -157,7 +157,7 @@ export interface WebBrokerServerOptions {
   taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>;
     launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
-  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">;
+  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">;
   /** Dedicated browser transport. Extension connections are disabled on this broker. */
   browserTransport?: BrowserTransport;
   key: string;
@@ -204,7 +204,7 @@ type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string
  * own user ACL. This is intentionally not a generic store/RPC endpoint.
  */
 export function applyAgentMcpStoreMutation(
-  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">,
+  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">,
   input: unknown,
 ): AgentMcpStoreResult {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { status: 400, body: { ok: false, error: "request body must be an object" } };
@@ -228,6 +228,7 @@ export function applyAgentMcpStoreMutation(
       if (!/^[a-z][a-z0-9_-]{0,39}$/.test(to) || to === "you") return { status: 400, body: { ok: false, error: "Recipient must be a valid M9R agent handle." } };
       const taskTo = inRoom && !to.startsWith("web-") ? `web-${to}` : to;
       const taskFrom = inboxHandle;
+      const parent = store.delegationParentFor(ownHandle, identity.sessionId, value.goal);
       const result = store.addTask({
         to: taskTo,
         from: taskFrom,
@@ -235,6 +236,7 @@ export function applyAgentMcpStoreMutation(
         fromSession: identity.sessionId,
         origin: "agent_initiated",
         idempotencyKey: `mcp:${identity.sessionId}:${to}:${createHash("sha256").update(value.goal).digest("hex")}`,
+        ...(parent ? { standingRuleApplies: true, parentTaskId: parent.id } : {}),
       });
       return { status: 200, body: { ok: true, taskId: result.task.id, created: result.created } };
     }

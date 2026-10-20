@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, M9R_PUSHED_RESULT_PREFIX, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
 import { windowsFileHolders, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
 import { defaultStoreRoot } from "./local-store";
@@ -171,8 +171,10 @@ export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps:
   if (askerSessions.length !== 1) return { state: "failed", reason: askerSessions.length === 0 ? "the originating Codex session is no longer registered in its folder" : "the originating Codex session is ambiguous; no answer was pushed" };
   const command = deps.resolveCodex();
   if (!command) return { state: "failed", reason: "The codex command was not found on this machine." };
-  const goal = task.goal.length > 90 ? `${task.goal.slice(0, 89)}…` : task.goal;
-  const message = `[M9R ${task.id}] Answer from @${task.to} to your task "${goal}":\n${task.resultSummary}\n\nThis is the answer you asked for. Acknowledge it in one short line.`;
+  // The task/session/sender identity remains in the local ledger and answerPushedAt
+  // receipt. Codex sees only a natural result envelope; the stable prefix lets the
+  // hook suppress mention routing without exposing backend correlation metadata.
+  const message = `${M9R_PUSHED_RESULT_PREFIX}\n\n${task.resultSummary}`;
   const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(task.fromSession, message)));
   if (!outcome.ok) return { state: "failed", reason: outcome.error ?? "codex queue failed" };
   store.setAnswerPushed(task.id);
