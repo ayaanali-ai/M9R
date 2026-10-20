@@ -2437,3 +2437,5 @@ Allowlist decision:
 - **Retain, never stage as source:** `engine/` runtime output and rollback backup, `.m9r-live-activation-20261018/`, `.m9r-recovery-quarantine-20261014/`, `scratchpad/` (including an unread local relay secret), and `docs/Convenience_Store_Replacement_Plan.docx`. These are runtime/evidence, recoverable history, local secret material, or user-owned content—not release source.
 
 No runtime activation, restart, provider reconnect, automatic artifact drain, broad worktree prune, or deletion was performed. The exact disposable worktree and its admin record were removed; unrelated worktrees, evidence, and held items remain. Full scoped lint and `npm audit --audit-level=high` remain open as previously recorded, and live provider/matrix acceptance remains open.
+
+The verified two-file boundary from this review is committed as `9b6e01c9` (`chore: bound lint to source and record held review`).
