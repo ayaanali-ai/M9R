@@ -67,7 +67,7 @@ check does not close a live, installed, provider, or production gate by itself.
 | 18 | Pill/dashboard/workspace UX | Provider-visible text no longer needs internal routing metadata; concise delivery, color wiring, and public consistency boundaries are verified. | Live mention UX, taskbar artifact ownership, cursor harbor/presentation, and intentional update UI. |
 | 19 | Runtime safety/cleanup | Recoverable quarantine, rollback retention, stale-build convergence, duplicate-watchdog prevention, and bounded cleanup rules are verified without blanket killing. | Evidence-backed stale-worker retirement, restart/reboot persistence, and user-safe cleanup behavior. Automatic artifact draining remains deferred. |
 | 20 | Updater/release | Signed check-only contract and Tauri updater plan exist; implementation is not represented as shipped. | Hosted manifest/endpoint, signing, check/download/apply/restart/rollback, UX specification, packaged acceptance, and final icon assets. |
-| 21 | Public readiness | Signup age gate, pricing/Terms consistency, PWA correction, public-content checks, and typecheck are verified. | Live homepage/workspace audit, billing/webhook proof, legal/operator sign-off, deployment, and onboarding acceptance. |
+| 21 | Public readiness | Signup age gate, pricing/Terms consistency, public-content checks, and typecheck are verified; the focused marketing regression is 8/8. The PWA manifest/logo correction passes in the working tree but remains held as an asset-dependent review set. | Live homepage/workspace audit, billing/webhook proof, legal/operator sign-off, deployment, onboarding acceptance, and an allowlisted PWA asset commit. |
 | 22 | Architecture/roadmap | Active roadmap versus historical material is reconciled; local-session, joint-window, takeover, replay, wallets, and federation boundaries are documented. | Local disposable-session proof, resource measurements, recovery semantics, and later product implementation decisions. No provider-specific or cloud-session assumption closes this item. |
 | 23 | Demo/release gates | The ordered gate register and evidence boundaries are documented. | Full live demo/release run from a clean, allowlisted, rebuilt package with all provider and open-world gates recorded. |
 
@@ -82,10 +82,12 @@ check does not close a live, installed, provider, or production gate by itself.
    files. **In progress.**
 4. Stage and review logical commits separately. The documentation boundary is
    committed as `7f806b79` plus tracker correction `f600bd92`, and the verified
-   foreground/package reliability group is committed as `5f447ba7`, and the
-   provider-neutral delivery/runtime group is committed as `61469d95`. The
-   durable per-connection color/dashboard group is committed as `be19dc38`.
-   The remaining mixed source and product edits are not staged or committed.
+   foreground/package reliability group is committed as `5f447ba7`, the
+   provider-neutral delivery/runtime group is committed as `61469d95`, the
+   durable per-connection color/dashboard group is committed as `be19dc38`,
+   and the public pricing/legal source group is committed as `29e0f445`.
+   The asset-dependent PWA test/manifest/logo set, icon binaries, and the
+   remaining mixed source and product edits are not staged or committed.
    **In progress.**
 5. Rebuild from the resulting clean commit, run the release manifest/checks,
    and compare the complete artifact set. **Open.**
