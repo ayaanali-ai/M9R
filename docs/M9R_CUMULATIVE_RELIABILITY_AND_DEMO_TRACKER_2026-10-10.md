@@ -2775,3 +2775,15 @@ The verified source-check slice was committed as **`c84aa7e4`** (`Harden release
 The commit was amended to include this boundary note and is now **`185b6437`**. A read-only held-item review confirms the remaining dirty paths are intentionally separate: generated Tauri icon files and the PWA manifest/logo/marketing assertions are the deferred branding group; `engine/` is runtime output; `.m9r-live-activation-20261018/` and `.m9r-recovery-quarantine-20261014/` are retained evidence; `m9r-clean-cutover-20261020/` is separate cutover material; `scratchpad/` and the user-owned DOCX are not release inputs. None of these were staged, deleted, or modified.
 
 After the release-boundary regression was added to `scripts/test-files.json`, the complete repository manifest passed **2,595/2,595 tests across 208 files, zero failed batches**. This is source/regression evidence only; it does not activate a runtime or prove live provider behavior.
+
+### 2026-10-20 (Codex) — clean release-candidate boundary completed
+
+An isolated detached candidate was created from the verified head, checked without the active checkout's retained artifacts, and removed after verification. The clean candidate passed all release-boundary checks:
+
+- strict open-core policy: **pass**;
+- public-surface allowlist and secret scan: **pass**;
+- release manifest: **2,138 eligible files hashed, 28 intentional exclusions, pass**;
+- historical high-confidence secret audit: **14 matches, all reviewed synthetic fixtures, pass**;
+- whitespace/diff check: **pass**.
+
+The historical gate's prior false blocker was traced to three synthetic fixture paths missing from its reviewed allowlist while the public-surface gate already recognized them. The paths were added with a regression fixture and committed in **`99653cd8`** (`Align historical secret fixture allowlist`). The temporary candidate worktree was then removed; no pre-existing worktree, held artifact, icon, manifest, runtime output, pill state, or provider process was touched.
