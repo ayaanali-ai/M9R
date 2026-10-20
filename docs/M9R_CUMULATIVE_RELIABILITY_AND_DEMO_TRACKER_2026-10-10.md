@@ -2892,6 +2892,8 @@ The clean **engine runtime package** is verified. The optional Windows installer
 
 The previously unavailable NSIS dependency became reachable. The Tauri Windows installer completed and produced `M9R Overlay_0.1.0_x64-setup.exe`. The full standalone package was also assembled and independently verified: ZIP SHA-256 `d1a582f7e8e573dcb21e8bf3912b12ba0ccba3dcd775e00fa2c67ff301035750`, **217** entries, and all required engine, broker, hook, native-input, overlay, Cua runtime, extension, and reversible-installer files present.
 
+The NSIS artifact itself is **1,203,969 bytes**, SHA-256 `34257b05c0f7435b3bc0e95b1adb55e6e8975e7722ad3d9d6fd1d2599f732c52`.
+
 The exact ZIP was activated through `scripts/install-m9r.ps1 -PackagePath ...` after the installer displayed its setup plan and the owner-approved consent was supplied. The installer reported:
 
 - managed broker stop receipt: `ok=true`, `phase=stop`;
