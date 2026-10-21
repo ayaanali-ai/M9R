@@ -39,8 +39,15 @@ const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua
 // still blocks a clean runtime build.
 const heldLocalProvenancePatterns = [
   /^\.m9r-(?:live-activation|recovery-quarantine|runtime-package|coordinator-worker|web-broker|installer)-[^/]+(?:\/|$)/i,
+  /^\.codex-stage-build-[^/]+(?:\/|$)/i,
+  /^\.codex-verify-temp(?:\/|$)/i,
+  /^\.opencode(?:\/|$)/i,
+  /^\.test-tmp(?:\/|$)/i,
+  /^\.tmp(?:\/|$)/i,
   /^engine(?:\/|$)/i,
+  /^docs\/research(?:\/|$)/i,
   /^m9r-clean-cutover-[^/]+(?:\/|$)/i,
+  /^m9r-runtime-clean-[^/]+(?:\/|$)/i,
   /^scratchpad(?:\/|$)/i,
   /^docs\/Convenience_Store_Replacement_Plan\.docx$/i,
   /^public\/reference-innerwebs\/m9r-logo-transparent\.png$/i,
