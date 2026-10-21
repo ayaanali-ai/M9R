@@ -1,11 +1,21 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { stopChildProcess } from "./runtime-child-shutdown.mjs";
 
 const executable = resolve(process.argv[2] ?? "engine/dist/m9r-engine.exe");
 const manifest = JSON.parse(readFileSync(join(dirname(executable), "m9r-build-info.json"), "utf8"));
-const child = spawn(executable, ["mcp"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+// The packaged supervisor deliberately resolves the active installed runtime
+// through M9R_HOME so an old provider-owned parent cannot revive a retired
+// engine. A package verifier must use an isolated store; otherwise it tests
+// the user's installed runtime instead of the candidate passed on argv.
+const smokeHome = mkdtempSync(join(tmpdir(), "m9r-runtime-mcp-"));
+const child = spawn(executable, ["mcp"], {
+  stdio: ["pipe", "pipe", "pipe"],
+  windowsHide: true,
+  env: { ...process.env, M9R_HOME: smokeHome },
+});
 let buffer = "";
 const responses = new Map();
 let rejectPending;
@@ -57,4 +67,5 @@ try {
 } finally {
   clearTimeout(timeout);
   await stopChildProcess(child);
+  rmSync(smokeHome, { recursive: true, force: true });
 }
