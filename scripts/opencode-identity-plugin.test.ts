@@ -95,6 +95,7 @@ test("OpenCode setup follows the legacy ~/.opencode config when that is the acti
   });
   assert.deepEqual(paths, {
     configPath: "C:\\Users\\Ada\\.opencode\\opencode.json",
+    configPaths: ["C:\\Users\\Ada\\.opencode\\opencode.json"],
     pluginDirectory: "C:\\Users\\Ada\\.opencode\\plugins",
   });
 });

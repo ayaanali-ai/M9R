@@ -142,6 +142,7 @@ export function nativePaths(io: Pick<NativeIo, "env" | "homeDir">) {
     codex,
     opencode: dirname(openCode.configPath),
     opencodeConfig: openCode.configPath,
+    opencodeConfigPaths: openCode.configPaths,
     opencodePluginDirectory: openCode.pluginDirectory,
     opencodePlugin: join(openCode.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME),
     codexHooks: join(codex, "hooks.json"),
@@ -442,7 +443,7 @@ interface NativeOpenCodeModelRepair {
 function planNativeOpenCodeModelRepair(io: NativeIo, selectedAgents: readonly string[] | undefined, includeMcp: boolean): NativeOpenCodeModelRepair | null {
   if (!includeMcp) return null;
   const p = nativePaths(io);
-  const wantsOpenCode = selectedAgents === undefined ? existsSync(p.opencodeConfig) : selectedAgents.includes("opencode");
+  const wantsOpenCode = selectedAgents === undefined ? p.opencodeConfigPaths.some((path) => existsSync(path)) : selectedAgents.includes("opencode");
   if (!wantsOpenCode) return null;
   const paths = resolveOpenCodeModelFiles({
     home: io.homeDir,
@@ -577,11 +578,9 @@ function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = tru
       files.push({ path: p.codexConfig, kind: "mcp-toml", before: codexConfigBefore, after: codexConfig.content, changed: codexConfig.changed, summary: `register the M9R MCP server (whoami/agents/send/inbox/result) in ${p.codexConfig}` });
     }
   }
-  const wantsOpenCode = selectedAgents === undefined ? existsSync(p.opencodeConfig) : selectedAgents.includes("opencode");
+  const wantsOpenCode = selectedAgents === undefined ? p.opencodeConfigPaths.some((path) => existsSync(path)) : selectedAgents.includes("opencode");
   const openCodeMcpSpec = includeMcp && wantsOpenCode ? mcpServerSpec(io, "opencode") : null;
   if (openCodeMcpSpec) {
-    const configBefore = readText(p.opencodeConfig);
-    const layout = openCodeLayoutFor(io, configBefore);
     const pluginBefore = readText(p.opencodePlugin);
     const pluginInvocation = nativeOpenCodeHookInvocation(io, "SessionStart");
     const pluginSource = buildOpenCodeIdentityPluginSource(
@@ -622,16 +621,20 @@ function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = tru
       m9rHome: openCodeMcpSpec.env?.M9R_HOME ?? p.m9r,
       brokerPort: Number(openCodeMcpSpec.env?.M9R_WEB_BROKER_PORT ?? 47821),
     };
-    const configAfter = mergeOpenCodeWebMcp(configBefore ?? "", layout, command, managePlugin);
-    files.push({
-      path: p.opencodeConfig,
-      kind: "opencode-json",
-      openCodeLayout: layout,
-      before: configBefore,
-      after: configAfter,
-      changed: configAfter !== (configBefore ?? ""),
-      summary: `register the M9R MCP server and identity plugin in ${p.opencodeConfig}`,
-    });
+    for (const configPath of p.opencodeConfigPaths) {
+      const configBefore = readText(configPath);
+      const layout = openCodeLayoutFor(io, configBefore);
+      const configAfter = mergeOpenCodeWebMcp(configBefore ?? "", layout, command, managePlugin);
+      files.push({
+        path: configPath,
+        kind: "opencode-json",
+        openCodeLayout: layout,
+        before: configBefore,
+        after: configAfter,
+        changed: configAfter !== (configBefore ?? ""),
+        summary: `register the M9R MCP server and identity plugin in ${configPath}`,
+      });
+    }
   }
   return files;
 }

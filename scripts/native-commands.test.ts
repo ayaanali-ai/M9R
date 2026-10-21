@@ -556,6 +556,49 @@ test("with the engine, native setup maintains OpenCode's MCP entry and identity 
   s.done();
 });
 
+test("native setup reconciles both OpenCode config spellings in the active directory", async () => {
+  const s = sandbox();
+  const opencodeDirectory = join(s.home, ".config", "opencode");
+  mkdirSync(opencodeDirectory, { recursive: true });
+  const modernPath = join(opencodeDirectory, "opencode.jsonc");
+  const legacyPath = join(opencodeDirectory, "opencode.json");
+  const modernBefore = JSON.stringify({ mcp: { github: { type: "local", command: ["gh-mcp"] } }, theme: "dark" }, null, 2) + "\n";
+  const legacyBefore = JSON.stringify({ mcp: { m9r: { type: "local", command: ["old-m9r-engine", "mcp"], environment: { M9R_HOME: s.p.m9r } } }, theme: "dark" }, null, 2) + "\n";
+  writeFileSync(modernPath, modernBefore, "utf8");
+  writeFileSync(legacyPath, legacyBefore, "utf8");
+
+  const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, "m9r-hook.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in stable launcher", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  s.io.env.M9R_OPENCODE_VERSION = "2.1.1";
+
+  assert.equal(await s.run("setup", ["--agents", "opencode", "--yes"]), 0);
+  for (const path of [modernPath, legacyPath]) {
+    const config = JSON.parse(readFileSync(path, "utf8")) as {
+      mcp: { servers?: Record<string, { enabled?: boolean; command?: string[]; environment?: Record<string, string> }>; m9r?: { enabled?: boolean; command?: string[]; environment?: Record<string, string> } };
+      theme: string;
+    };
+    const m9r = config.mcp.servers?.m9r;
+    assert.equal(config.theme, "dark");
+    assert.equal(m9r?.enabled, true);
+    assert.match(m9r?.command?.[0] ?? "", /m9r-hook(?:\.exe)?$/i);
+    assert.equal(m9r?.environment?.M9R_PROVIDER, "opencode");
+  }
+  assert.equal(existsSync(s.p.opencodePlugin), true);
+  const manifest = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { entries: Array<{ path: string; kind: string }> };
+  assert.equal(manifest.entries.filter((entry) => entry.kind === "opencode-json").map((entry) => entry.path).sort().join("|"), [modernPath, legacyPath].sort().join("|"));
+
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(readFileSync(modernPath, "utf8"), modernBefore);
+  assert.equal(readFileSync(legacyPath, "utf8"), legacyBefore);
+  assert.equal(existsSync(s.p.opencodePlugin), false);
+  s.done();
+});
+
 test("native setup refreshes a stale OpenCode plugin that is owned by web setup", async () => {
   const s = sandbox();
   const p = s.p as typeof s.p & { opencodeConfig: string; opencodePlugin: string; webSetupManifest: string };

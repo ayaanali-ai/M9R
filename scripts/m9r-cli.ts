@@ -1473,36 +1473,49 @@ async function refreshProviderConfigAfterUpdate(input: ProviderConfigRefreshInpu
     appData: process.env.APPDATA,
     exists: awaitableExists,
   });
-  const currentBytes = await readOptional(paths.configPath);
-  if (!currentBytes) return;
-  const before = currentBytes.toString("utf8");
-  // Do not adopt or rewrite an arbitrary OpenCode config. M9R must be visible
-  // in both its route and home marker before this adapter may mutate it.
-  if (!/(["']|\b)m9r(["']|\b)/i.test(before) || !/M9R_HOME/i.test(before)) return;
-
+  const configPaths = paths.configPaths;
   const pluginPath = join(paths.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME);
-  const hasIdentityEntry = before.includes(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY);
   const hasIdentityPlugin = await canRead(pluginPath);
-  if (hasIdentityEntry && !hasIdentityPlugin) {
-    throw new Error(`M9R OpenCode identity plugin is referenced but missing at ${pluginPath}`);
-  }
-
   const runtime = webMcpRuntime();
-  const merged = mergeOpenCodeWebMcp(before, webOpenCodeLayout(input.current.versionLine), {
-    command: runtime.command,
-    args: runtime.args,
-    m9rHome: defaultStoreRoot(home, process.env),
-    brokerPort: Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT,
-  }, hasIdentityPlugin);
-  if (merged === before) return;
+  for (const configPath of configPaths) {
+    const currentBytes = await readOptional(configPath);
+    if (!currentBytes) continue;
+    const before = currentBytes.toString("utf8");
+    // Do not adopt or rewrite an arbitrary OpenCode config. M9R must be
+    // visibly present in its own route plus either its home marker, a known
+    // M9R executable, or its identity plugin before this adapter may mutate
+    // the file. This also recognizes older M9R configs that predate the
+    // provider environment marker.
+    const hasM9rRoute = /["']m9r["']\s*:/iu.test(before);
+    const isM9rOwned = hasM9rRoute && (
+      /M9R_HOME/iu.test(before)
+      || /m9r-(?:engine|hook)(?:\.exe|\.js)?/iu.test(before)
+      || /m9r-identity\.js/iu.test(before)
+    );
+    if (!isM9rOwned) continue;
 
-  // Re-read immediately before the atomic replacement. A user/provider setup
-  // change racing this repair is preserved and retried on the next cycle.
-  const latest = await readOptional(paths.configPath);
-  if (!latest || latest.toString("utf8") !== before) {
-    throw new Error("OpenCode config changed during provider reconciliation; no config was overwritten");
+    const hasIdentityEntry = before.includes(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY);
+    if (hasIdentityEntry && !hasIdentityPlugin) {
+      throw new Error(`M9R OpenCode identity plugin is referenced but missing at ${pluginPath}`);
+    }
+
+    const merged = mergeOpenCodeWebMcp(before, webOpenCodeLayout(input.current.versionLine), {
+      command: runtime.command,
+      args: runtime.args,
+      m9rHome: defaultStoreRoot(home, process.env),
+      brokerPort: Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT,
+    }, hasIdentityPlugin);
+    if (merged === before) continue;
+
+    // Re-read immediately before the atomic replacement. A user/provider
+    // setup change racing this repair is preserved and retried on the next
+    // cycle rather than being overwritten by M9R.
+    const latest = await readOptional(configPath);
+    if (!latest || latest.toString("utf8") !== before) {
+      throw new Error(`OpenCode config changed during provider reconciliation (${configPath}); no config was overwritten`);
+    }
+    await writeAtomic(configPath, merged);
   }
-  await writeAtomic(paths.configPath, merged);
 }
 
 function awaitableExists(path: string): boolean {

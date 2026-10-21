@@ -14,13 +14,21 @@ export const WEB_EXTENSION_ID = "mahhaigfogjneccbmbpbedlnkhgdcmhb";
 export const WEB_STORE_EXTENSION_ID_ENV = "M9R_WEB_STORE_EXTENSION_ID";
 
 /** Prefer the active OpenCode config layout (including the legacy ~/.opencode layout),
- * then XDG/APPDATA fallbacks, with plugins beside the selected config. */
+ * then XDG/APPDATA fallbacks, with plugins beside the selected config.
+ *
+ * OpenCode updates can leave both supported config spellings in the same
+ * directory. The provider may select either spelling on its next start, so
+ * returning only the first file would leave a stale M9R route behind. The
+ * selected directory is still a single, deterministic boundary; callers can
+ * reconcile every existing config in that directory without touching an
+ * unrelated fallback directory.
+ */
 export function resolveOpenCodeGlobalPaths(input: {
   home: string;
   xdgConfigHome?: string;
   appData?: string;
   exists?: (path: string) => boolean;
-}): { configPath: string; pluginDirectory: string } {
+}): { configPath: string; configPaths: string[]; pluginDirectory: string } {
   const configHome = input.xdgConfigHome?.trim() || join(input.home, ".config");
   const configDirectory = join(configHome, "opencode");
   const configDirectories = [
@@ -28,12 +36,18 @@ export function resolveOpenCodeGlobalPaths(input: {
     ...(input.appData?.trim() ? [join(input.appData.trim(), "opencode")] : []),
     join(input.home, ".opencode"),
   ];
-  const supportedConfig = configDirectories
-    .flatMap((directory) => ["opencode.jsonc", "opencode.json"].map((name) => join(directory, name)))
-    .find((path) => input.exists?.(path) ?? false);
-  const configPath = supportedConfig ?? join(configDirectory, "opencode.json");
+  const supportedNames = ["opencode.jsonc", "opencode.json"] as const;
+  const exists = input.exists ?? (() => false);
+  const selectedDirectory = configDirectories.find((directory) =>
+    supportedNames.some((name) => exists(join(directory, name)))
+  ) ?? configDirectory;
+  const configPaths = supportedNames
+    .map((name) => join(selectedDirectory, name))
+    .filter((path) => exists(path));
+  const configPath = configPaths[0] ?? join(selectedDirectory, "opencode.json");
   return {
     configPath,
+    configPaths: configPaths.length > 0 ? configPaths : [configPath],
     pluginDirectory: join(dirname(configPath), "plugins"),
   };
 }

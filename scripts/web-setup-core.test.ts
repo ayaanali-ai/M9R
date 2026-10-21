@@ -57,7 +57,23 @@ test("OpenCode global paths follow XDG or ~/.config and preserve an existing sup
     exists: (path) => existing.has(path),
   });
   assert.equal(paths.configPath, join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc"));
+  assert.deepEqual(paths.configPaths, [join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc")]);
   assert.equal(paths.pluginDirectory, join("C:/Users/Ada", ".config", "opencode", "plugins"));
+
+  const dualConfigPaths = resolveOpenCodeGlobalPaths({
+    home: "C:/Users/Ada",
+    appData: "C:/Users/Ada/AppData/Roaming",
+    exists: (path) => [
+      join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc"),
+      join("C:/Users/Ada", ".config", "opencode", "opencode.json"),
+    ].includes(path),
+  });
+  assert.equal(dualConfigPaths.configPath, join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc"));
+  assert.deepEqual(dualConfigPaths.configPaths, [
+    join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc"),
+    join("C:/Users/Ada", ".config", "opencode", "opencode.json"),
+  ]);
+  assert.equal(dualConfigPaths.pluginDirectory, join("C:/Users/Ada", ".config", "opencode", "plugins"));
 
   const xdgPaths = resolveOpenCodeGlobalPaths({
     home: "C:/Users/Ada",
@@ -65,6 +81,7 @@ test("OpenCode global paths follow XDG or ~/.config and preserve an existing sup
     exists: () => false,
   });
   assert.equal(xdgPaths.configPath, join("D:/Agent Config", "opencode", "opencode.json"));
+  assert.deepEqual(xdgPaths.configPaths, [join("D:/Agent Config", "opencode", "opencode.json")]);
   assert.equal(xdgPaths.pluginDirectory, join("D:/Agent Config", "opencode", "plugins"));
 
   const legacyConfig = resolveOpenCodeGlobalPaths({
@@ -73,6 +90,7 @@ test("OpenCode global paths follow XDG or ~/.config and preserve an existing sup
     exists: (path) => path === join("C:/Users/Ada", "AppData", "Roaming", "opencode", "opencode.json"),
   });
   assert.equal(legacyConfig.configPath, join("C:/Users/Ada", "AppData", "Roaming", "opencode", "opencode.json"));
+  assert.deepEqual(legacyConfig.configPaths, [join("C:/Users/Ada", "AppData", "Roaming", "opencode", "opencode.json")]);
   assert.equal(legacyConfig.pluginDirectory, join("C:/Users/Ada", "AppData", "Roaming", "opencode", "plugins"));
 });
 
