@@ -77,6 +77,23 @@ test("an unchanged provider is reused without a refresh or reconnect", async () 
   assert.equal(reconnects, 0);
 });
 
+test("the first provider observation runs the configured initialization callback before becoming healthy", async () => {
+  const events: string[] = [];
+  const first = await reconcileProviderUpdate({
+    providerId: "claude-code",
+    state: createInitialProviderUpdateState(),
+    current: observation(),
+    nowMs: 100,
+    actions: {
+      refreshAdapter: async () => { events.push("refresh"); },
+      reconnect: async () => { events.push("reconnect"); return { healthy: true }; },
+    },
+  });
+  assert.equal(first.status, "healthy");
+  assert.deepEqual(events, ["refresh", "reconnect"]);
+  assert.equal(first.state.providers["claude-code"]?.lastGoodObservation?.version, "1.2.3");
+});
+
 test("a provider update persists a pending candidate before refresh and retires old state only after health", async () => {
   const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100 });
   const events: string[] = [];

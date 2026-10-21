@@ -3055,3 +3055,79 @@ Release verification:
 The exact ZIP was installed through the consent-driven installer. It reported the managed broker stop and `running-current-build` start receipts; the installed manifest and MCP verifier match the package build. The installed OpenCode plugin contains the active-session `SessionStart` reconciliation path.
 
 Live OpenCode proof was dispatched once through M9R. It is **not yet passed**: the recent M9R roster is empty, and state evidence shows the two historical OpenCode sessions have not published activity since the provider update; their stored claims are expired. No retry or older queued work was consumed. The package/activation gate is green; live provider acceptance remains open until an active OpenCode session receives and completes this one proof. Claude/Codex live acceptance and the broad matrix remain separate gates.
+
+### 2026-10-21 (Codex) — T305 Chrome trace and obsolete browser-route audit
+
+The attached T305 trace was reviewed as an open-world native-browser diagnostic, not as a named-app acceptance pass. The native route did reach a real Chrome window and eventually produced a visible Google News result, but the path exposed several independent latency and routing defects:
+
+- the initial native structured observation took about **2.0 seconds** and returned a real `chrome.exe` target with `structure: partial` and a same-capture screenshot fallback;
+- an attempted navigation was correctly refused because the selected target was a desktop app window rather than a browser-tab target;
+- a later observation waited about **30.65 seconds** for the obsolete browser-extension readiness path and returned `the browser extension did not become ready before the connection wait expired`;
+- later actions were refused for stale/occluded observations and invalid action/locator shapes, including missing snapshot and coordinate-space fields;
+- a subsequent desktop-stage observation waited about **15.08 seconds** and returned `The local desktop-stage IPC endpoint did not return a valid response. No HTTP fallback was attempted.`;
+- after fresh observations, the native path still reached the intended Google News result and captured the Washington Post headline, proving the generic native route can work but that the trace is not within the demo latency budget.
+
+Source audit found that current `mcp-server.ts` sets `WEB_EXTENSION_ROUTE_ENABLED = false` and does not register `m9r_web_*`; the extension implementation remains only as retained legacy plumbing. The trace therefore points to a stale installed runtime/tool surface or an explicitly invoked legacy benchmark path, not a reason to re-enable the route or add a Chrome-specific branch. The correct next proof is a fresh package/activation plus an installed `tools/list` assertion that the retired tools remain absent, followed by a fresh OS-only arbitrary-browser run. No live process, provider session, desktop state, or user browser data was changed by this audit.
+
+Status: **diagnosed; source route already guarded; installed/live re-proof OPEN**. The focus/occlusion recovery and IPC timeout remain part of the universal live action gate; the obsolete extension wait must not appear in a current runtime trace.
+
+### 2026-10-21 (Codex) — provider-update schema drift repair added behind the neutral compatibility boundary
+
+The provider-update layer had a concrete gap: it verified the stable M9R MCP route but had no callback boundary for provider configuration/schema reconciliation, and it treated a first provider observation as healthy without running initialization. That allowed a provider update to leave a working M9R route attached to stale provider config. The repair keeps the core provider-neutral and injects an adapter callback only after route verification; first-seen providers now persist a pending candidate and must pass refresh plus reconnect before becoming healthy.
+
+The OpenCode adapter now repairs only visible M9R-owned drift after an observed provider update or first initialization: OpenCode v2 uses the modern root `plugins` key and `mcp.servers.m9r`, while legacy layouts retain `plugin` and `mcp.m9r`. Migration removes only M9R's stale entry and preserves unrelated plugins, MCP servers, comments, credentials, model state, and the existing CLI/MCP route. A missing referenced M9R plugin or a concurrent config change fails closed; it is not overwritten.
+
+Verification:
+
+- web-setup/config migration regressions plus provider-update lifecycle/route/monitor regressions: **50/50 passed**;
+- `npm run typecheck`: **passed**;
+- `npm run build:cli`: **passed**;
+- `git diff --check`: **clean** (only existing line-ending normalization warnings);
+- targeted ESLint invocation did not produce a completion result in the Windows command boundary and was stopped; no lint pass is claimed from that run;
+- no user OpenCode/Claude/Codex config, provider session, task, process, or runtime activation was changed by this source step.
+
+Status: **source/package GREEN; installed provider proof OPEN**. The current machine's OpenCode config is known to contain the legacy M9R spelling, but it was deliberately not mutated in this source step. The next safe proof is to build/activate the exact current package, start or resume OpenCode, and verify that the updater performs the owned migration and the loaded plugin automatically publishes identity and delivers a fresh task. Claude's idle-session delivery limitation remains a separate live/provider-adapter gate; normal future prompts must not require manual `m9r_inbox` polling, but a truly idle existing Claude session still requires a provider turn-capable adapter or the managed background session path.
+
+### 2026-10-21 (Codex) — OpenCode lifecycle rebind and no-stale-poller repair
+
+The generated OpenCode plugin previously handled provider execution events only
+after a task was already active. A session created or resumed after plugin setup
+could therefore remain transport-connected without an M9R poller, and a
+compaction boundary did not repeat the trusted identity hook. The lifecycle
+handler now reconciles `session.created` and `session.compacted` immediately;
+compaction refreshes the idempotent SessionStart path and wakes the existing
+poller without creating a second poller. `session.deleted` removes the poller,
+clears the bootstrap cache, and closes an active task with a terminal provider
+failure rather than leaving it queued forever.
+
+Verification:
+
+- OpenCode identity-plugin regression: **20/20 passed**, including created,
+  compacted, and deleted-session lifecycle behavior;
+- `npm run typecheck`: **passed**;
+- `npm run build:cli`: **passed**; the generated CLI/plugin bundle was rebuilt
+  from the current checkout;
+- no live provider config, session, task, process, or runtime activation was
+  changed by this source step;
+- installed OpenCode acceptance, provider-update proof, and Claude's idle
+  user-owned-session delivery adapter remain **OPEN**.
+
+The normal-host native action/stage regression boundary was also rerun after
+the restricted-sandbox `EPERM` result. The combined stage-operation,
+desktop-stage, stage-action, and Windows-desktop-stage suites passed **80/80**
+with no failures. This confirms the earlier lock-file failures were a
+managed-sandbox filesystem artifact, not a product regression. The tests cover
+generic app discovery, owner-preview focus policy, existing-window adoption,
+background/foreground separation, recovery, stage ownership, cancellation,
+window state, clipboard/semantic actions, and durable receipts. This remains
+source/fixture evidence; arbitrary open-world live acceptance and the fresh
+installed browser trace are still open.
+
+The coordination/ownership regression boundary was also rerun on the normal
+Windows host: inbox routing and session-scoped result fencing passed **26/26**;
+approval, owner-lineage inheritance, protected-action refusal, and deferred
+delivery-pump tests passed **15/15**; managed Claude/OpenCode/Codex session
+continuity and room A2A exchange tests passed **27/27**. These results confirm
+the existing A2A/A2A-to-human primitives are reusable for the multiplayer
+slice. They do not turn an arbitrary idle native Claude CLI into a push target;
+that still needs a real turn-capable adapter or the M9R-managed session path.

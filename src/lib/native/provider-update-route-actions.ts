@@ -5,11 +5,24 @@ import {
 } from "./mcp-runtime-path";
 import { readRuntimeBuildIdentity } from "./runtime-build-identity";
 import type { ProviderUpdateActions } from "./provider-update-lifecycle-core";
+import type { ProviderReconciliationPlan, ProviderRuntimeComparison, ProviderRuntimeObservation } from "./provider-update-compatibility-core";
+
+export interface ProviderConfigRefreshInput {
+  providerId: string;
+  previous: ProviderRuntimeObservation | null;
+  current: ProviderRuntimeObservation;
+  comparison: ProviderRuntimeComparison;
+  plan: ProviderReconciliationPlan;
+  /** The verified stable M9R MCP route; provider adapters may reuse it without discovering another binary. */
+  route: string;
+}
 
 export interface ProviderUpdateRouteOptions {
   env?: Record<string, string | undefined>;
   execPath?: string;
   platform?: NodeJS.Platform;
+  /** Optional provider-specific config/schema reconciliation behind a provider-neutral boundary. */
+  refreshProviderConfig?: (input: ProviderConfigRefreshInput) => Promise<void> | void;
 }
 
 function currentMcpRoute(options: ProviderUpdateRouteOptions): string {
@@ -42,7 +55,10 @@ export function createProviderNeutralUpdateActions(options: ProviderUpdateRouteO
   };
 
   return {
-    refreshAdapter: () => { verifyRoute(); },
+    refreshAdapter: async (input) => {
+      const route = verifyRoute();
+      await options.refreshProviderConfig?.({ ...input, route });
+    },
     reconnect: () => {
       try {
         const route = verifyRoute();

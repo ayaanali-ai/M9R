@@ -228,7 +228,12 @@ export async function reconcileProviderUpdate(input: ReconcileProviderUpdateInpu
     return { state, status: "waiting", plan, comparison, error: record.lastError };
   }
 
-  if (comparison.kind === "first_seen" || comparison.kind === "unchanged") {
+  // A first observation is only immediately healthy when the caller has no
+  // activation boundary. The resident runtime supplies refresh/reconnect
+  // actions, so it must initialize the provider route before declaring it
+  // healthy; otherwise a newly observed provider could remain on stale
+  // configuration while durable state claimed success.
+  if (comparison.kind === "unchanged" || (comparison.kind === "first_seen" && (!input.actions?.refreshAdapter || !input.actions.reconnect))) {
     record.status = "healthy";
     record.lastGoodObservation = cloneObservation(current);
     record.pendingObservation = null;

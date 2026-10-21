@@ -60,7 +60,7 @@ import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
 import { createInterface } from "node:readline/promises";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { startProviderUpdateMonitor } from "@/lib/native/provider-update-monitor";
-import { createProviderNeutralUpdateActions } from "@/lib/native/provider-update-route-actions";
+import { createProviderNeutralUpdateActions, type ProviderConfigRefreshInput } from "@/lib/native/provider-update-route-actions";
 import { isAgentContext, isHumanContext } from "@/lib/native/approval-core";
 import { DEFAULT_BROKER_PORT, brokerKeyPath } from "@/lib/native/web-broker-paths";
 import { standaloneWebBrokerRuntime } from "@/lib/native/web-broker-runtime";
@@ -69,8 +69,8 @@ import { apiKeyLaunchBlock, buildVendorLaunchPlan, type M9rLaunchProfile, type M
 import { buildAgentVersionProbeEnv, detectInstalledAgents, type DetectedAgent, type DetectableAgentKind } from "@/lib/agent-detection-core";
 import {
   buildClaudeMcpAddArgs, buildClaudeMcpRemoveArgs, buildPowerShellInvocation, extensionIdFromManifestKey, formatCommandPreview, mergeCodexWebMcp, mergeOpenCodeWebMcp, parseWebSetupList,
-  planWebSetup, planManagedWebExtensionRefresh, removeCodexWebMcp, removeOpenCodeWebMcp, resolveWebMcpRuntime, selectWebSetupAgents,
-  buildOpenCodeIdentityPluginSource, OPENCODE_IDENTITY_PLUGIN_FILENAME, planOpenCodeIdentityPluginInstall,
+  planWebSetup, planManagedWebExtensionRefresh, removeCodexWebMcp, removeOpenCodeWebMcp, resolveWebMcpRuntime, selectWebSetupAgents, webOpenCodeLayout,
+  buildOpenCodeIdentityPluginSource, OPENCODE_IDENTITY_PLUGIN_FILENAME, OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY, planOpenCodeIdentityPluginInstall,
   planOpenCodeIdentityPluginRemoval, resolveOpenCodeHookInvocation, resolveOpenCodeGlobalPaths, shouldOpenBrowserSetup,
   webConfigUninstallMode, webExtensionFileAction, WEB_EXTENSION_ID,
   type OpenCodeIdentityPluginInstallAction, type OpenCodeIdentityPluginRemovalAction, type WebSetupBrowser,
@@ -833,7 +833,12 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
   const providerUpdateMonitor = localOnly ? null : startProviderUpdateMonitor({
     root: defaultStoreRoot(homedir(), process.env),
     probe: probeVersion,
-    actions: createProviderNeutralUpdateActions({ env: process.env, execPath: process.execPath, platform: process.platform }),
+    actions: createProviderNeutralUpdateActions({
+      env: process.env,
+      execPath: process.execPath,
+      platform: process.platform,
+      refreshProviderConfig: refreshProviderConfigAfterUpdate,
+    }),
     onError: (error) => {
       process.stderr.write(`[provider-update] compatibility cycle deferred: ${error instanceof Error ? error.message : String(error)}\n`);
     },
@@ -1448,6 +1453,56 @@ function webOpenCodeHookInvocation(
     ...(awaitableExists(sourceHookPath) ? { sourceHookPath, sourceNodeArgs: process.execArgv } : {}),
     event,
   });
+}
+
+/**
+ * Reconcile only M9R-owned OpenCode schema drift after a provider update.
+ *
+ * The provider-update layer remains provider-neutral: this callback is an
+ * adapter behind that boundary. It never touches credentials, model state, or
+ * unrelated user config. It only runs when the current config visibly contains
+ * M9R's own route and identity plugin, then migrates those owned entries to
+ * the config spelling required by the observed OpenCode version.
+ */
+async function refreshProviderConfigAfterUpdate(input: ProviderConfigRefreshInput): Promise<void> {
+  if (input.providerId !== "opencode") return;
+  const home = homeDirectory();
+  const paths = resolveOpenCodeGlobalPaths({
+    home,
+    xdgConfigHome: process.env.XDG_CONFIG_HOME,
+    appData: process.env.APPDATA,
+    exists: awaitableExists,
+  });
+  const currentBytes = await readOptional(paths.configPath);
+  if (!currentBytes) return;
+  const before = currentBytes.toString("utf8");
+  // Do not adopt or rewrite an arbitrary OpenCode config. M9R must be visible
+  // in both its route and home marker before this adapter may mutate it.
+  if (!/(["']|\b)m9r(["']|\b)/i.test(before) || !/M9R_HOME/i.test(before)) return;
+
+  const pluginPath = join(paths.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME);
+  const hasIdentityEntry = before.includes(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY);
+  const hasIdentityPlugin = await canRead(pluginPath);
+  if (hasIdentityEntry && !hasIdentityPlugin) {
+    throw new Error(`M9R OpenCode identity plugin is referenced but missing at ${pluginPath}`);
+  }
+
+  const runtime = webMcpRuntime();
+  const merged = mergeOpenCodeWebMcp(before, webOpenCodeLayout(input.current.versionLine), {
+    command: runtime.command,
+    args: runtime.args,
+    m9rHome: defaultStoreRoot(home, process.env),
+    brokerPort: Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT,
+  }, hasIdentityPlugin);
+  if (merged === before) return;
+
+  // Re-read immediately before the atomic replacement. A user/provider setup
+  // change racing this repair is preserved and retried on the next cycle.
+  const latest = await readOptional(paths.configPath);
+  if (!latest || latest.toString("utf8") !== before) {
+    throw new Error("OpenCode config changed during provider reconciliation; no config was overwritten");
+  }
+  await writeAtomic(paths.configPath, merged);
 }
 
 function awaitableExists(path: string): boolean {

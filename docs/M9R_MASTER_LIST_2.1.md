@@ -64,6 +64,20 @@ Current conclusion:
   and identity gates are verified.
 - Local heartbeat, provider-neutral relay/mention routing, liveness freshness,
   idempotency, provenance, and queue/dead-letter bounds are verified.
+- Provider-update compatibility now has a provider-neutral refresh boundary:
+  configured adapters run only after the stable M9R route is verified, and a
+  first provider observation cannot be recorded healthy until initialization
+  and reconnect succeed. The OpenCode adapter migrates only M9R-owned schema
+  drift (`plugin` to `plugins` and `mcp.m9r` to `mcp.servers.m9r`) while
+  preserving unrelated user entries and credentials. Focused regression
+  evidence is 50/50 plus a clean typecheck and CLI build.
+- OpenCode session lifecycle continuity now rebinds identity and wakes the
+  existing delivery poller on `session.created` and `session.compacted`, while
+  `session.deleted` retires the poller and terminalizes an active task instead
+  of leaving it stale. The compaction path repeats the trusted SessionStart
+  hook so the native store can reuse the existing claim rather than minting a
+  competing one. The generated-plugin regression is 20/20; installed and
+  live-provider proof remain open.
 - Local sessions, takeover, joint windows, recovery anchors, replay, wallets,
   and federation boundaries are documented as product architecture. They are
   intentionally moved up here as foundational multiplayer work, not left as a
@@ -74,6 +88,10 @@ Still required:
 - Fresh clean installed OpenCode acceptance, including no stale task selection.
 - Current-runtime continuity for Claude, Codex, and OpenCode, including
   reconnect, reboot, update, and heartbeat presence proof.
+- Installed provider-update proof is still required: the active OpenCode
+  process must load the reconciled modern config without manual inbox polling,
+  and Claude/Codex must show the same update/reconnect contract. Source and
+  fixture evidence does not close this live gate.
 - Live active-work drain, replacement/retirement, reboot persistence, and
   no-orphan proof.
 - Coordinated live failure/reconnect and ordinary user-facing lifecycle proof.
@@ -120,6 +138,12 @@ Still required:
   installed-provider acceptance.
 - Fresh OS-only browser proof, cursor attribution, pointer isolation, and
   opt-in shared-tab acceptance.
+- The owner-reported T305 Chrome trace must be rerun against a fresh current
+  package: the old extension wait, stale/occluded window references, malformed
+  action shapes, and desktop-stage IPC timeout are diagnostic findings, not a
+  named-app acceptance pass. The current source keeps the extension tools
+  unregistered; installed-runtime proof must show they cannot leak back into
+  an agent tool list.
 - Real event-level capture of the owner-reported arbitrary-paste symptom, or a
   documented non-reproduction covering the attempted input classes.
 

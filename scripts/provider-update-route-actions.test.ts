@@ -4,8 +4,18 @@ import test from "node:test";
 import { createProviderNeutralUpdateActions } from "../src/lib/native/provider-update-route-actions.ts";
 
 test("provider updates reuse the current source MCP route without touching vendor configuration", async () => {
-  const actions = createProviderNeutralUpdateActions({ execPath: process.execPath, platform: process.platform });
   let refreshed = false;
+  let callbackProvider = "";
+  let callbackRoute = "";
+  const actions = createProviderNeutralUpdateActions({
+    execPath: process.execPath,
+    platform: process.platform,
+    refreshProviderConfig: (input) => {
+      refreshed = true;
+      callbackProvider = input.providerId;
+      callbackRoute = input.route;
+    },
+  });
   await actions.refreshAdapter?.({
     providerId: "claude-code",
     previous: null,
@@ -40,8 +50,9 @@ test("provider updates reuse the current source MCP route without touching vendo
       reason: "test",
     },
   });
-  refreshed = true;
   assert.equal(refreshed, true);
+  assert.equal(callbackProvider, "claude-code");
+  assert.equal(callbackRoute, process.execPath);
   const health = await actions.reconnect?.({ providerId: "claude-code", previous: null, current: {} as never });
   assert.equal(health?.healthy, true);
 });

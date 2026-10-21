@@ -434,6 +434,22 @@ function startOpenCodePoller(sessionID, cwd, client) {
   void pollOpenCodeSession(sessionID, cwd, client, entry);
 }
 
+function stopOpenCodePoller(sessionID) {
+  const entry = M9R_SESSION_POLLERS.get(sessionID);
+  if (!entry) return;
+  clearInterval(entry.timer);
+  M9R_SESSION_POLLERS.delete(sessionID);
+}
+
+function wakeOpenCodePoller(sessionID, cwd, client) {
+  const entry = M9R_SESSION_POLLERS.get(sessionID);
+  if (!entry) {
+    startOpenCodePoller(sessionID, cwd, client);
+    return;
+  }
+  void pollOpenCodeSession(sessionID, cwd, client, entry);
+}
+
 // OpenCode loads a plugin once per server, while a user can keep several
 // sessions open. Discover the live sessions at plugin startup and reconcile
 // each session's identity before starting its poller, so a task sent from the
@@ -507,6 +523,28 @@ async function handleOpenCodeEvent(cwd, client, event) {
   const normalized = event?.details ?? event;
   const sessionID = eventSessionID(normalized);
   if (!sessionID) return;
+
+  // A plugin can remain loaded while OpenCode creates, resumes, or compacts a
+  // session. Reconcile those lifecycle boundaries immediately so delivery does
+  // not depend on a later user prompt or an explicit inbox check. Compaction
+  // deliberately refreshes the hook card: the native store treats the repeat
+  // as a trusted continuation and reuses the existing claim instead of
+  // issuing a competing provider identity.
+  if (normalized?.type === "session.created" || normalized?.type === "session.compacted") {
+    if (normalized.type === "session.compacted") M9R_SESSION_BOOTSTRAPS.delete(sessionID);
+    await bootstrapSession(sessionID, cwd);
+    wakeOpenCodePoller(sessionID, cwd, client);
+    return;
+  }
+
+  if (normalized?.type === "session.deleted") {
+    stopOpenCodePoller(sessionID);
+    M9R_SESSION_BOOTSTRAPS.delete(sessionID);
+    const deleted = M9R_ACTIVE_TASKS.get(sessionID);
+    if (deleted) await reportOpenCodeExecutionFailure(sessionID, cwd, deleted, "session_deleted", "OpenCode session was deleted before the M9R task completed.");
+    return;
+  }
+
   const active = M9R_ACTIVE_TASKS.get(sessionID);
   if (!active) return;
   if (normalized?.type === "session.error") {
@@ -1023,12 +1061,22 @@ function jsoncArrayItemText(source: string, item: JsoncNode): string {
   return source.slice(item.start, item.end).trim();
 }
 
-/** Add one string to OpenCode's plugin array without rewriting the surrounding JSONC. */
-function addOpenCodeIdentityPluginEntry(source: string, root: JsoncNode): string {
-  const plugin = objectProperty(root, "plugin");
-  if (!plugin) return setJsoncProperty(source, root, "plugin", [OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY]);
+type OpenCodePluginConfigKey = "plugin" | "plugins";
+
+function openCodePluginConfigKey(root: JsoncNode, layout: WebOpenCodeLayout): OpenCodePluginConfigKey {
+  // Prefer an explicitly present modern key. For v2, never create or continue
+  // using the legacy singular key: OpenCode silently ignores it.
+  if (objectProperty(root, "plugins")) return "plugins";
+  if (layout === "servers") return "plugins";
+  return "plugin";
+}
+
+/** Add one string to an OpenCode plugin array without rewriting surrounding JSONC. */
+function addOpenCodePluginEntry(source: string, root: JsoncNode, key: OpenCodePluginConfigKey): string {
+  const plugin = objectProperty(root, key);
+  if (!plugin) return setJsoncProperty(source, root, key, [OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY]);
   if (plugin.value.kind !== "array" || plugin.value.closeOffset === undefined || plugin.value.openOffset === undefined) {
-    throw new Error("OpenCode config `plugin` must be an array; it was not changed.");
+    throw new Error(`OpenCode config \`${key}\` must be an array; it was not changed.`);
   }
   const items = plugin.value.items ?? [];
   if (items.some((item) => jsoncArrayItemText(source, item) === JSON.stringify(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY))) return source;
@@ -1051,8 +1099,8 @@ function addOpenCodeIdentityPluginEntry(source: string, root: JsoncNode): string
 }
 
 /** Remove only the M9R-owned plugin entry, preserving every other plugin and comment. */
-function removeOpenCodeIdentityPluginEntry(source: string, root: JsoncNode): string {
-  const plugin = objectProperty(root, "plugin");
+function removeOpenCodePluginEntry(source: string, root: JsoncNode, key: OpenCodePluginConfigKey): string {
+  const plugin = objectProperty(root, key);
   if (!plugin || plugin.value.kind !== "array" || plugin.value.openOffset === undefined || plugin.value.closeOffset === undefined) return source;
   const items = plugin.value.items ?? [];
   const index = items.findIndex((item) => jsoncArrayItemText(source, item) === JSON.stringify(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY));
@@ -1064,6 +1112,28 @@ function removeOpenCodeIdentityPluginEntry(source: string, root: JsoncNode): str
     return source.slice(0, items[0]!.start) + source.slice(comma + 1);
   }
   return source.slice(0, items[index - 1]!.end) + source.slice(items[index]!.end);
+}
+
+/**
+ * Install the M9R plugin using the provider's active config contract. OpenCode
+ * v2 uses `plugins`; older releases use `plugin`. If a provider update leaves
+ * our entry in the obsolete key, remove only that M9R-owned entry while
+ * preserving every unrelated user plugin and comment.
+ */
+function addOpenCodeIdentityPluginEntry(source: string, root: JsoncNode, layout: WebOpenCodeLayout): string {
+  const key = openCodePluginConfigKey(root, layout);
+  source = addOpenCodePluginEntry(source, root, key);
+  if (key !== "plugins") return source;
+  const modernRoot = parseJsonc(source);
+  return removeOpenCodePluginEntry(source, modernRoot, "plugin");
+}
+
+/** Remove M9R's entry from both config spellings without touching user entries. */
+function removeOpenCodeIdentityPluginEntry(source: string): string {
+  for (const key of ["plugins", "plugin"] as const) {
+    source = removeOpenCodePluginEntry(source, parseJsonc(source), key);
+  }
+  return source;
 }
 
 function removeJsoncProperty(source: string, node: JsoncNode, key: string): string {
@@ -1093,6 +1163,15 @@ function mcpTarget(node: JsoncNode, layout: WebOpenCodeLayout): { parent: JsoncN
   if (!servers) return { parent: mcpProperty.value, key: "servers" };
   if (servers.value.kind !== "object") throw new Error("OpenCode config `mcp.servers` must be an object; it was not changed.");
   return { parent: servers.value, key: "m9r" };
+}
+
+/** Remove M9R's entry from the config spelling that is inactive for this OpenCode release. */
+function removeOpenCodeStaleMcpEntry(source: string, root: JsoncNode, activeLayout: WebOpenCodeLayout): string {
+  const mcp = objectProperty(root, "mcp")?.value;
+  if (!mcp || mcp.kind !== "object") return source;
+  if (activeLayout === "servers") return removeJsoncProperty(source, mcp, "m9r");
+  const servers = objectProperty(mcp, "servers")?.value;
+  return servers?.kind === "object" ? removeJsoncProperty(source, servers, "m9r") : source;
 }
 
 function openCodeEntry(command: WebMcpCommand): Record<string, unknown> {
@@ -1126,8 +1205,9 @@ export function mergeOpenCodeWebMcp(existing: string, layout: WebOpenCodeLayout,
   if (!mcp || mcp.value.kind !== "object") throw new Error("OpenCode config `mcp` must be an object; it was not changed.");
   const target = mcpTarget(root, layout);
   source = setJsoncProperty(source, target.parent, target.key, layout === "servers" && target.key === "servers" ? { m9r: openCodeEntry(command) } : openCodeEntry(command));
+  source = removeOpenCodeStaleMcpEntry(source, parseJsonc(source), layout);
   if (!includeIdentityPlugin) return source;
-  return addOpenCodeIdentityPluginEntry(source, parseJsonc(source));
+  return addOpenCodeIdentityPluginEntry(source, parseJsonc(source), layout);
 }
 
 export function removeOpenCodeWebMcp(existing: string, layout: WebOpenCodeLayout, removeIdentityPlugin = false): string {
@@ -1135,7 +1215,7 @@ export function removeOpenCodeWebMcp(existing: string, layout: WebOpenCodeLayout
   let source = existing;
   let root = parseJsonc(source);
   if (removeIdentityPlugin) {
-    source = removeOpenCodeIdentityPluginEntry(source, root);
+    source = removeOpenCodeIdentityPluginEntry(source);
     root = parseJsonc(source);
   }
   if (root.kind !== "object") return existing;
