@@ -43,9 +43,29 @@ function evaluateGeneratedPlugin(
 ) {
   const executable = source
     .replace(/^import \{ spawn \} from "node:child_process";\r?\n/m, "")
-    .replace(/^export const M9rIdentity = /m, "const M9rIdentity = ");
+    .replace(/^export const M9rIdentity = /m, "const M9rIdentity = ")
+    .replace(/^export default M9rOpenCodePlugin;\r?\n/m, "");
   return new Function("spawn", "process", "setInterval", "clearInterval", `${executable}\nreturn M9rIdentity;`)(mockedSpawn, { cwd: () => "C:/process-cwd" }, setIntervalFn, clearIntervalFn) as
     (context: { directory?: string; client?: { config?: { providers?: () => Promise<unknown> }; session?: { prompt?: (input: unknown) => Promise<unknown>; promptAsync?: (input: unknown) => Promise<unknown>; list?: (input?: unknown) => Promise<unknown>; status?: (input?: unknown) => Promise<unknown>; messages?: (input?: unknown) => Promise<unknown> } } }) => Promise<{ "experimental.chat.system.transform": (input: { sessionID?: string }, output: { system: string[] }) => Promise<void>; event?: (input: { event?: unknown }) => Promise<void> }>;
+}
+
+function evaluateGeneratedPluginV2(
+  source: string,
+  mockedSpawn: ReturnType<typeof createMockSpawn>,
+  setIntervalFn: typeof setInterval = setInterval,
+  clearIntervalFn: typeof clearInterval = clearInterval,
+) {
+  const executable = source
+    .replace(/^import \{ spawn \} from "node:child_process";\r?\n/m, "")
+    .replace(/^export const M9rIdentity = /m, "const M9rIdentity = ")
+    .replace(/^export default M9rOpenCodePlugin;\r?\n/m, "");
+  return new Function("spawn", "process", "setInterval", "clearInterval", `${executable}\nreturn M9rOpenCodePlugin;`)(mockedSpawn, { cwd: () => "C:/process-cwd" }, setIntervalFn, clearIntervalFn) as {
+    setup: (context: {
+      location?: { directory?: string };
+      session?: { hook?: (name: string, callback: (event: { sessionID?: string; system?: Array<{ type: string; text: string }> }) => Promise<void>) => Promise<unknown> };
+      event?: { subscribe?: (input?: { signal?: AbortSignal }) => AsyncIterable<unknown> };
+    }) => Promise<(() => void) | undefined>;
+  };
 }
 
 test("OpenCode identity invocation runs the installed engine SessionStart hook", () => {
@@ -118,6 +138,58 @@ test("generated plugin uses sessionID and appends only parsed additionalContext 
   assert.match(source, /OpenCodeExecutionFailed/);
   assert.match(source, /event:\s*async/);
   assert.doesNotMatch(source, /\b__name\b/, "standalone plugin must not depend on a bundler helper");
+});
+
+test("generated plugin exports the OpenCode V2 default setup definition while retaining the V1 server bridge", () => {
+  const source = buildOpenCodeIdentityPluginSource({
+    command: "C:/Users/Ada/.m9r/bin/m9r-engine.exe",
+    args: ["m9r-hook", "SessionStart", "opencode"],
+  });
+  assert.match(source, /const M9rOpenCodePlugin = \{[\s\S]*?id:\s*["']m9r-identity["']/);
+  assert.match(source, /async function setupM9rOpenCodeV2\(/);
+  assert.match(source, /setup:\s*setupM9rOpenCodeV2/);
+  assert.match(source, /ctx\??\.session\??\.hook\??\("context"/);
+  assert.match(source, /server:\s*M9rIdentity/);
+  assert.match(source, /export default M9rOpenCodePlugin;/);
+});
+
+test("OpenCode V2 setup registers a context hook and preserves typed M9R system context", async () => {
+  const hook = (event: string, additionalContext: string) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  const source = buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] });
+  const plugin = evaluateGeneratedPluginV2(source, createMockSpawn([
+    { code: 0, output: hook("SessionStart", "connected") },
+    { code: 0, output: hook("UserPromptSubmit", "M9R inbox delta") },
+  ], calls));
+  const registrations: Array<{ name: string; callback: (event: { sessionID?: string; system?: Array<{ type: string; text: string }> }) => Promise<void> }> = [];
+  const cleanup = await plugin.setup({
+    location: { directory: "C:/repo" },
+    session: {
+      hook: async (name, callback) => {
+        registrations.push({ name, callback });
+      },
+    },
+    event: {
+      subscribe: () => ({
+        async *[Symbol.asyncIterator]() {
+          // The event stream is intentionally empty for this setup contract test.
+        },
+      }),
+    },
+  });
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0]!.name, "context");
+  const request = { sessionID: "v2-session", system: [] as Array<{ type: string; text: string }> };
+  await registrations[0]!.callback(request);
+  assert.deepEqual(request.system, [
+    { type: "text", text: "connected" },
+    { type: "text", text: "M9R inbox delta" },
+  ]);
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["m9r-hook", "SessionStart", "opencode"],
+    ["m9r-hook", "UserPromptSubmit", "opencode"],
+  ]);
+  cleanup?.();
 });
 
 test("OpenCode live polling creates one real session turn and records receipt only after it completes", async () => {

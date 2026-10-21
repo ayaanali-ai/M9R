@@ -198,6 +198,7 @@
   "provider-update-lifecycle.test.ts",
   "provider-update-monitor.test.ts",
   "provider-update-route-actions.test.ts",
+  "opencode-identity-plugin.test.ts",
   "memory-hint.test.ts",
   "memory-command.test.ts",
   "memory-distill-core.test.ts",

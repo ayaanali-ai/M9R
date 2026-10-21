@@ -2951,3 +2951,22 @@ Verification after integration:
 - packaged engine smoke/runtime transaction/identity checks: **15/15 passed**.
 
 No installation, activation, restart, provider reconnect, process cleanup, or live provider task was performed. The candidate build reports `sourceDirty=true` because the active checkout still contains unrelated held/untracked work and these updater changes are not yet committed. The next release boundary is a scoped review/commit of only the verified updater files, followed by a clean package fingerprint and then owner-approved installation/activation. The signed M9R release updater remains a separate check-only path and is not claimed as implemented by this provider-compatibility slice.
+
+### 2026-10-20 (Codex) — OpenCode 2.x identity-plugin contract compatibility repair
+
+OpenCode 2.1.1 was independently reproduced rejecting the generated M9R identity plugin before SessionStart could publish a claim. The installed plugin exported the legacy V1 handler only; OpenCode logged that the plugin must export a default definition with an `id` and `setup` or `effect`. The MCP transport was reachable, but no current OpenCode claim could be created, which explains the three-second binding failures after the provider update.
+
+The generated plugin now has a provider-neutral V2 default definition with `id: "m9r-identity"` and `setup`, while retaining the legacy `server` bridge. V2 setup registers the context hook using typed system parts, forwards the existing event stream to the shared execution-failure/idle handler, and preserves the existing CLI/MCP route. This is an additive contract repair; it does not replace the provider session or alter user credentials/configuration.
+
+Verification:
+
+- OpenCode identity-plugin regression: **18/18 passed**;
+- combined web-setup, plugin refresh, and OpenCode identity tests: **42/42 passed**;
+- full repository regression: **2,642/2,642 tests passed across 215 files, 0 failed batches**;
+- `npm run typecheck`: **passed**;
+- `git diff --check`: **passed**;
+- native command suite was not counted as green: **21/38** cases hit managed-sandbox Windows `EPERM` rename/junction failures unrelated to this plugin change;
+- targeted lint did not complete within the command boundary and remains unverified;
+- no installation, activation, provider restart, duplicate task, or live acceptance was performed yet.
+
+The next release boundary is a scoped commit of this plugin repair, its regression test, the test-manifest entry, and this tracker entry; then a clean package fingerprint, activation, and verification that the already-open OpenCode session publishes a fresh identity without requiring manual inbox polling. Future unknown provider contract changes remain a compatibility-monitoring concern rather than something this single OpenCode 2.1.1 repair can mathematically guarantee.

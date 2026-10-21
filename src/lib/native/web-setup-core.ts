@@ -495,24 +495,73 @@ function bootstrapSession(sessionID, cwd) {
   return promise;
 }
 
+async function handleOpenCodeEvent(cwd, client, event) {
+  const normalized = event?.details ?? event;
+  const sessionID = eventSessionID(normalized);
+  if (!sessionID) return;
+  const active = M9R_ACTIVE_TASKS.get(sessionID);
+  if (!active) return;
+  if (normalized?.type === "session.error") {
+    await reportOpenCodeExecutionFailure(sessionID, cwd, active, "provider_execution_failed", eventError(normalized));
+    return;
+  }
+  if (normalized?.type === "message.updated" && normalized?.properties?.info?.role === "assistant" && normalized?.properties?.info?.error) {
+    await reportOpenCodeExecutionFailure(sessionID, cwd, active, "provider_execution_failed", eventError(normalized));
+    return;
+  }
+  if (normalized?.type === "session.idle") inspectOpenCodeIdle(sessionID, cwd, client, active);
+}
+
+async function setupM9rOpenCodeV2(ctx = {}) {
+  const cwd = typeof ctx?.location?.directory === "string" && ctx.location.directory.length > 0
+    ? ctx.location.directory
+    : typeof ctx?.directory === "string" && ctx.directory.length > 0
+      ? ctx.directory
+      : process.cwd();
+  const client = ctx?.client ?? ctx;
+  const legacy = await M9rIdentity({ directory: cwd, client });
+
+  if (typeof ctx?.session?.hook === "function") {
+    await ctx.session.hook("context", async (event) => {
+      const sessionID = event?.sessionID;
+      if (typeof sessionID !== "string" || sessionID.length === 0) return;
+      const output = { system: [] };
+      await legacy["experimental.chat.system.transform"]({ sessionID }, output);
+      if (!Array.isArray(event?.system)) return;
+      for (const context of output.system) {
+        if (typeof context === "string" && context.length > 0) event.system.push({ type: "text", text: context });
+      }
+    });
+  }
+
+  const subscribe = ctx?.event?.subscribe;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  if (typeof subscribe === "function") {
+    try {
+      const stream = await subscribe.call(ctx.event, controller ? { signal: controller.signal } : undefined);
+      if (stream && typeof stream[Symbol.asyncIterator] === "function") {
+        void (async () => {
+          try {
+            for await (const event of stream) await handleOpenCodeEvent(cwd, client, event);
+          } catch {
+            // Event delivery is advisory; the session hook remains the source of truth for task work.
+          }
+        })();
+      }
+    } catch {
+      // A server can expose the V2 event stream after setup; do not block prompt handling on it.
+    }
+  }
+
+  return () => controller?.abort();
+}
+
 export const M9rIdentity = async ({ directory, client } = {}) => {
   const cwd = typeof directory === "string" && directory.length > 0 ? directory : process.cwd();
   void startKnownOpenCodeSessions(cwd, client);
   return {
   event: async ({ event } = {}) => {
-    const sessionID = eventSessionID(event);
-    if (!sessionID) return;
-    const active = M9R_ACTIVE_TASKS.get(sessionID);
-    if (!active) return;
-    if (event?.type === "session.error") {
-      await reportOpenCodeExecutionFailure(sessionID, cwd, active, "provider_execution_failed", eventError(event));
-      return;
-    }
-    if (event?.type === "message.updated" && event?.properties?.info?.role === "assistant" && event?.properties?.info?.error) {
-      await reportOpenCodeExecutionFailure(sessionID, cwd, active, "provider_execution_failed", eventError(event));
-      return;
-    }
-    if (event?.type === "session.idle") inspectOpenCodeIdle(sessionID, cwd, client, active);
+    await handleOpenCodeEvent(cwd, client, event);
   },
   "experimental.chat.system.transform": async (input, output) => {
     const sessionID = input?.sessionID;
@@ -529,6 +578,14 @@ export const M9rIdentity = async ({ directory, client } = {}) => {
   },
   };
 };
+
+const M9rOpenCodePlugin = {
+  id: "m9r-identity",
+  setup: setupM9rOpenCodeV2,
+  server: M9rIdentity,
+};
+
+export default M9rOpenCodePlugin;
 `;
 }
 
