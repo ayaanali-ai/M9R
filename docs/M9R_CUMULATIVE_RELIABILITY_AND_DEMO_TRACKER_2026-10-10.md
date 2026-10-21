@@ -2970,3 +2970,20 @@ Verification:
 - no installation, activation, provider restart, duplicate task, or live acceptance was performed yet.
 
 The next release boundary is a scoped commit of this plugin repair, its regression test, the test-manifest entry, and this tracker entry; then a clean package fingerprint, activation, and verification that the already-open OpenCode session publishes a fresh identity without requiring manual inbox polling. Future unknown provider contract changes remain a compatibility-monitoring concern rather than something this single OpenCode 2.1.1 repair can mathematically guarantee.
+
+### 2026-10-20 (Codex) — clean OpenCode-compatibility package activated
+
+The scoped commit `a1bbf812cc7694abe4bb7f6c2d2a04c7aae4da97` was packaged from a detached clean worktree. The standalone ZIP contains **217** release entries; SHA-256 is `360b236d469b3da696c4d5d89d7729b20017cc3bf245527563bee53241525b59`. Its runtime manifest reports build ID `a2b4a95a2f373511ae4395c6bfc66d51a966f6500a832c64ac1c313d9786af86`, source commit `a1bbf812cc7694abe4bb7f6c2d2a04c7aae4da97`, and `sourceDirty=false` across **185** engine artifacts.
+
+Release verification:
+
+- extracted-package MCP verifier: **passed** with the expected build/version and native stage/computer-use tools;
+- packaged engine MCP smoke: **2/2 passed**;
+- runtime transaction and identity tests outside the managed temp boundary: **12/12 passed**;
+- full repository regression before packaging: **2,642/2,642 passed across 215 files**;
+- `npm run typecheck`: **passed**;
+- `npm audit --omit=dev --audit-level=high`: **0 vulnerabilities**.
+
+The exact ZIP was installed through the consent-driven installer. It reported the managed broker stop receipt, installed the current build, reported `running-current-build`, refreshed the M9R-owned OpenCode identity plugin, restarted the managed Web broker, and started the desktop pill/autostart. Installed postconditions match the package manifest, and the installed MCP verifier passed. The optional NSIS bundle is not claimed from this run because the host could not resolve the external NSIS download; the standalone package is complete.
+
+Live provider boundary: OpenCode has **not** been marked live-passed yet. After activation, the local state contained only expired OpenCode claims, no OpenCode process was running, and the M9R active roster showed Claude only. No duplicate task was sent and no old task was consumed. The repaired runtime is installed and ready; the remaining proof is to open/resume any OpenCode session and verify that it automatically publishes a fresh claim and handles the existing proof task without manual inbox polling.
