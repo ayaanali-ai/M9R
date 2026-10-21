@@ -252,6 +252,9 @@ test("status does not repeat first-time new-session guidance after an endpoint i
   await s.run("setup", ["--status"]);
 
   assert.doesNotMatch(s.out.join("\n"), /Start a new Claude Code session/);
+  s.out.length = 0;
+  await s.run("setup", ["--yes"]);
+  assert.doesNotMatch(s.out.join("\n"), /Start a new Claude Code session/);
   s.done();
 });
 

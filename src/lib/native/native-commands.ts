@@ -816,7 +816,8 @@ function warmUpAndStart(io: NativeIo, shim: string, engine: string): void {
 
 function printOpenSteps(io: NativeIo): void {
   io.out("Still yours to do:");
-  for (const s of USER_STEPS.filter((x) => x.id !== "install")) io.out(`  - ${s.title}${s.fix ? `: ${s.fix}` : ""}`);
+  const hasKnownEndpoint = createLocalStore(nativePaths(io).m9r).listEndpoints().length > 0;
+  for (const s of USER_STEPS.filter((x) => x.id !== "install" && (x.id !== "new-session" || !hasKnownEndpoint))) io.out(`  - ${s.title}${s.fix ? `: ${s.fix}` : ""}`);
 }
 
 export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?: boolean }): Promise<number> {
