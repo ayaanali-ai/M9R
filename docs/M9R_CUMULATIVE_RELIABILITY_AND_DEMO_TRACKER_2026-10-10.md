@@ -3168,6 +3168,13 @@ parent-process retirement. Evidence-backed retirement of idle parent
 supervisors, reboot persistence, and cleanup of only provably unreferenced
 retired images remain open release-hygiene work.
 
+Installed-runtime connection harness: **2/2 passed** using disposable
+temporary M9R stores. The exact installed engine bound a provider session
+without a credential, survived private-worker loss/reconnect while preserving
+the same session, and retired a dead competing claim in favor of the current
+claim without minting a replacement session. This is installed-runtime
+evidence, not live OpenCode/Claude acceptance.
+
 The full native installer fixture did not produce a trustworthy completion
 summary in the Windows child-process boundary and was stopped; it is **not**
 claimed green. No provider task, credential, browser state, or desktop task was

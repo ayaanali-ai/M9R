@@ -328,7 +328,8 @@ foundational follow-up and is not falsely marked complete by the demo.
    `sourceDirty: false`, 185 artifact identities, exact ZIP checksum
    `047c2256845d96d97ca80c8ffbac15bbf4498267f78fcf1c37ef6c3ea62e3b19`,
    installed manifest/hash comparison green, packaged MCP verifier green,
-   engine smoke 2/2, transaction checks 3/3, and bounded installer checks 4/4.
+   engine smoke 2/2, transaction checks 3/3, bounded installer checks 4/4,
+   and installed connection/reconnect harness 2/2 using disposable stores.
    The full installer fixture remains inconclusive and is not promoted to
    green.
 6. Exact package activation is **verified**: managed broker stop/start and
