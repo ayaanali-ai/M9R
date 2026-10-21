@@ -3038,3 +3038,20 @@ Verification from the current source:
 - no provider task was dispatched and no live acceptance was claimed from this source-only step.
 
 The next release boundary is a scoped commit of this startup reconciliation, its regression fixture, and this tracker entry, followed by a new `sourceDirty=false` package, installation, process/state recheck, and one OpenCode live proof. Claude/Codex live acceptance and the broad matrix remain separate gates.
+
+### 2026-10-20 (Codex) — reconciled runtime packaged and activated; OpenCode live boundary remains open
+
+The startup-reconciliation commit `6b4e50a9882779908b32cd228ba7a4c1c2c2fbb3` was built in a fresh detached worktree with no source changes. The exact standalone package is `release-package-v4/m9r-engine-windows-x64.zip`, SHA-256 `013c77fb682145fc192afeaac411af2555c28774f3a90358f9637d3288c7dbac`, build ID `cb3adc1664f7837b0d60d4d2b058d2f5c4c0e88a4f7aa2e928687a4ebbad2a59`, and its manifest reports `sourceDirty=false` with the exact source commit.
+
+Release verification:
+
+- checksum sidecar: **matched**;
+- isolated extracted-package MCP verifier: **passed**; required stage/computer-use tools present and retired web-extension tools absent;
+- Windows runtime publish/rollback tests: **3/3 passed** outside the managed temp boundary;
+- OpenCode identity-plugin regression: **18/18 passed**;
+- `npm run typecheck`: **passed**;
+- `git diff --check`: **passed** before the scoped source commit.
+
+The exact ZIP was installed through the consent-driven installer. It reported the managed broker stop and `running-current-build` start receipts; the installed manifest and MCP verifier match the package build. The installed OpenCode plugin contains the active-session `SessionStart` reconciliation path.
+
+Live OpenCode proof was dispatched once through M9R. It is **not yet passed**: the recent M9R roster is empty, and state evidence shows the two historical OpenCode sessions have not published activity since the provider update; their stored claims are expired. No retry or older queued work was consumed. The package/activation gate is green; live provider acceptance remains open until an active OpenCode session receives and completes this one proof. Claude/Codex live acceptance and the broad matrix remain separate gates.
