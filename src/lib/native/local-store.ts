@@ -13,6 +13,7 @@ import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inbo
 import { canQueue } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, newConnectionId, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
+import { createInitialProviderUpdateState, normalizeProviderUpdateState, type ProviderUpdateState } from "./provider-update-lifecycle-core";
 
 /**
  * Findings I/AD: this is the one place a cursor/pill color is chosen for an agent handle.
@@ -157,6 +158,8 @@ interface StoreState {
   connectionClaims: ConnectionClaim[];
   /** Durable MCP bindings; a worker restart may reuse one while the provider identity is active. */
   connectionBindings: ConnectionBinding[];
+  /** Provider-neutral compatibility observations; this contains no credentials or raw provider config. */
+  providerUpdates: ProviderUpdateState["providers"];
   /**
    * Findings I/AD: one durable color per agent handle, allocated once and shared by every
    * surface that shows that agent's identity (the pill, the native cursor overlay once it
@@ -176,7 +179,7 @@ export interface SessionLink {
   updatedAt: string;
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], connectionClaims: [], connectionBindings: [], cursorColors: {} });
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], connectionClaims: [], connectionBindings: [], providerUpdates: createInitialProviderUpdateState().providers, cursorColors: {} });
 
 const stageOperationKey = (input: StageOperationInput): string => createHash("sha256")
   .update(JSON.stringify([normalizeHandle(input.handle), input.sessionId, input.taskId, input.operationId]))
@@ -497,6 +500,18 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
   return {
     root,
+
+    /** Read provider compatibility state without exposing any local credentials. */
+    providerUpdateState(): ProviderUpdateState {
+      const state = readState();
+      return normalizeProviderUpdateState({ schemaVersion: 1, providers: state.providerUpdates });
+    },
+
+    /** Atomically publish provider compatibility state under the same lock as tasks and bindings. */
+    saveProviderUpdateState(next: ProviderUpdateState): void {
+      const normalized = normalizeProviderUpdateState(next);
+      update((state) => { state.providerUpdates = normalized.providers; });
+    },
 
     /** Adds a line to the activity log shown as "Recent" on the pill. */
     noteEvent(kind: EventRecord["kind"], text: string, taskId?: string): void {

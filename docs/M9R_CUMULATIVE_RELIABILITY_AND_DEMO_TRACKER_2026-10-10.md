@@ -2909,3 +2909,45 @@ Installed postcondition:
 - installed MCP handshake/version/tool verification passed, including native stage/computer tools and absence of retired browser-extension tools.
 
 No provider task or live acceptance task was dispatched during activation. A read-only post-install process audit found the current feed/broker/pill running from the installed path, but also found pre-existing provider-owned `m9r-engine.exe mcp`/hook workers attached to Codex and OpenCode parents from earlier session times, plus newly spawned child workers. No process was killed blindly. Provider continuity/live acceptance therefore remains open until those workers are reconciled against the current runtime and live sessions are verified.
+
+### 2026-10-20 (Codex) — provider-neutral update-compatibility core and pre-demo audit
+
+The first implementation slice for provider-update resilience is now present as a provider-neutral core at `src/lib/native/provider-update-compatibility-core.ts`. It does not alter the existing CLI/MCP registration or transport path. It consumes the existing side-effect-free provider version probes through an additive bridge and records only non-secret compatibility facts:
+
+- normalized provider slug, binary, version line, optional executable identity, transport, adapter/capability contract versions, and a SHA-256-only configuration fingerprint; raw configuration and credentials are rejected;
+- stable SHA-256 observation fingerprint with timestamps excluded;
+- semver-aware provider version comparison, including prerelease ordering;
+- explicit lifecycle classification for first observation, unchanged, provider update, downgrade, installation replacement, adapter/configuration change, provider change, and temporary unavailability;
+- conservative reconciliation plans that preserve durable task state, preserve the current CLI/MCP boundary, avoid manual reconnect requirements, and retire a replacement only after healthy replacement evidence.
+
+Regression proof for this slice:
+
+- new provider-compatibility regression: **10/10 passed**;
+- focused compatibility/detection/adapter/update/plugin run: **37/37 passed**;
+- full repository regression after adding the test to `scripts/test-files.json`: **2,609/2,609 tests passed across 211 files, 0 failed batches**;
+- `npm run typecheck`: **passed**;
+- `npm run build`: **passed**, including TypeScript and all **138** generated routes;
+- `npm audit --omit=dev --audit-level=high`: **0 vulnerabilities**;
+- `git diff --check`: **passed**.
+
+This slice is intentionally **not** marked as complete provider-update resilience. Automatic persistence of observations, provider-specific adapter refresh/reconnect execution, task/session recovery, capability-diff presentation, rollback, and live update/restart/reboot proof remain open. No provider session, installed runtime, pill, desktop state, process, credential, or live task was restarted or changed, and no commit was created. The new source/test/manifest files remain uncommitted for deliberate review.
+
+A single GPT-6 Luna read-only pre-demo audit also completed with no file changes or live actions. It confirmed that the pre-demo source/fixture gates are substantial but not live acceptance, and identified these remaining universal-action/focus gaps: the generic action contract does not expose the lower-level `window_state` and cancellation surface; the stale-window test title overstates moved/minimized coverage; positive maximize/restore and movement/resize postconditions are thin; Unicode/multiline input coverage is missing; explicit foreground-HWND equality and physical-pointer isolation are not proven. These findings are recorded for the ordered desktop-action slice and were not mixed into the provider-compatibility implementation.
+
+### 2026-10-20 (Codex) — automatic provider-update reconciliation wired into the runtime
+
+The provider-update slice is now wired into the long-lived terminal runtime rather than remaining test-only. The new monitor performs an immediate boot check and a bounded five-minute periodic check using the existing side-effect-free `--version` probes. It persists observations through the existing atomic local store, preserves durable tasks/claims/bindings when a provider is absent, and serializes only non-secret compatibility evidence. Provider updates do not rewrite vendor configuration, credentials, MCP registrations, or the existing CLI/MCP transport.
+
+The automatic route action verifies the current stable M9R MCP executable and, for packaged engines, the complete runtime build identity before accepting a changed provider observation. If the route is missing or unverified, the candidate remains pending and the previous known-good observation is retained. M9R's existing private MCP supervisor remains responsible for replacing an idle M9R worker when its runtime generation changes; no provider-owned process is killed or guessed at.
+
+Verification after integration:
+
+- provider compatibility, lifecycle, monitor, route-action, persistence-order, and redaction tests: **25/25 passed**;
+- full repository regression: **2,624/2,624 tests passed across 214 files, 0 failed batches**;
+- `npm run typecheck`: **passed**;
+- `npm audit --omit=dev --audit-level=high`: **0 vulnerabilities**;
+- `git diff --check`: **passed**;
+- `npm run build:engine`: **passed**, with the new monitor and route-action modules included in the CLI bundle; runtime identity verified across **185 artifacts**;
+- packaged engine smoke/runtime transaction/identity checks: **15/15 passed**.
+
+No installation, activation, restart, provider reconnect, process cleanup, or live provider task was performed. The candidate build reports `sourceDirty=true` because the active checkout still contains unrelated held/untracked work and these updater changes are not yet committed. The next release boundary is a scoped review/commit of only the verified updater files, followed by a clean package fingerprint and then owner-approved installation/activation. The signed M9R release updater remains a separate check-only path and is not claimed as implemented by this provider-compatibility slice.

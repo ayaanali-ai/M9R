@@ -59,6 +59,8 @@ import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, 
 import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
 import { createInterface } from "node:readline/promises";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
+import { startProviderUpdateMonitor } from "@/lib/native/provider-update-monitor";
+import { createProviderNeutralUpdateActions } from "@/lib/native/provider-update-route-actions";
 import { isAgentContext, isHumanContext } from "@/lib/native/approval-core";
 import { DEFAULT_BROKER_PORT, brokerKeyPath } from "@/lib/native/web-broker-paths";
 import { standaloneWebBrokerRuntime } from "@/lib/native/web-broker-runtime";
@@ -828,10 +830,21 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
     },
   });
   let stopPromise: Promise<void> | null = null;
+  const providerUpdateMonitor = localOnly ? null : startProviderUpdateMonitor({
+    root: defaultStoreRoot(homedir(), process.env),
+    probe: probeVersion,
+    actions: createProviderNeutralUpdateActions({ env: process.env, execPath: process.execPath, platform: process.platform }),
+    onError: (error) => {
+      process.stderr.write(`[provider-update] compatibility cycle deferred: ${error instanceof Error ? error.message : String(error)}\n`);
+    },
+  });
   const stop = () => {
-    stopPromise ??= supervisor.stopGracefully().catch((error) => {
-      process.stderr.write(`[resident-supervisor] graceful drain failed: ${error instanceof Error ? error.message : String(error)}\n`);
-    });
+    stopPromise ??= Promise.all([
+      supervisor.stopGracefully().catch((error) => {
+        process.stderr.write(`[resident-supervisor] graceful drain failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      }),
+      providerUpdateMonitor?.stop(),
+    ]).then(() => undefined);
     return stopPromise;
   };
   process.once("SIGINT", stop);
