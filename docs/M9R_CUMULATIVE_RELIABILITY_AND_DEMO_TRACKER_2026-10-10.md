@@ -3023,3 +3023,18 @@ The installed OpenCode 2.1.1 CLI was checked directly before live proof. It acce
 The correction is provider-compatibility code, not an OpenCode-only task or state workaround: both `session list` and `export` now use `--log-level error`, and the exact-argument regression test rejects both the removed `--pure` flag and the invalid uppercase value. Direct CLI evidence: `opencode session list --format json --max-count 1 --log-level ERROR` failed with `Invalid value for flag --log-level`; the same command with `error` returned JSON session data. No provider task, credential, task state, or live session was changed by this diagnostic.
 
 The clean package/activation boundary is consequently reopened for this small source correction. Live OpenCode acceptance remains unclaimed until this correction is packaged, installed, and the existing provider-owned MCP process is safely reconciled against the current runtime.
+
+### 2026-10-20 (Codex) — OpenCode active-session identity reconciliation
+
+The post-update audit found a separate lifecycle gap: the OpenCode plugin could discover an already-open active session and start its poller, but after a provider/plugin hot reload it did not re-run the idempotent `SessionStart` identity hook for that session. That left the MCP transport connected while the session had no fresh provider claim, producing the recurring binding timeout even when the current plugin and engine were correct on disk.
+
+The startup discovery path now reconciles each live session with `SessionStart` before starting its poller. This preserves resumed sessions, reuses the existing claim where applicable, and keeps the CLI/MCP route and provider configuration unchanged. It is a provider-update compatibility fix, not a manual reconnect workaround. The regression fixture now proves the required `SessionStart`-then-`OpenCodePoll` order.
+
+Verification from the current source:
+
+- OpenCode identity-plugin regression: **18/18 passed**;
+- `npm run typecheck`: **passed**;
+- `git diff --check`: **passed**;
+- no provider task was dispatched and no live acceptance was claimed from this source-only step.
+
+The next release boundary is a scoped commit of this startup reconciliation, its regression fixture, and this tracker entry, followed by a new `sourceDirty=false` package, installation, process/state recheck, and one OpenCode live proof. Claude/Codex live acceptance and the broad matrix remain separate gates.

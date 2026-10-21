@@ -435,9 +435,12 @@ function startOpenCodePoller(sessionID, cwd, client) {
 }
 
 // OpenCode loads a plugin once per server, while a user can keep several
-// sessions open. Discover the live sessions at plugin startup so a task sent
-// from the pill is delivered without waiting for the user to type a prompt or
-// say "check the M9R inbox". The status endpoint filters out old, closed
+// sessions open. Discover the live sessions at plugin startup and reconcile
+// each session's identity before starting its poller, so a task sent from the
+// pill is delivered without waiting for the user to type a prompt or say
+// "check the M9R inbox". The identity refresh is deliberately idempotent for
+// resumed sessions: the native store reuses the existing session claim instead
+// of creating a competing claim. The status endpoint filters out old, closed
 // sessions; the current transform remains the fallback when an older SDK does
 // not expose these methods.
 async function startKnownOpenCodeSessions(cwd, client) {
@@ -456,6 +459,11 @@ async function startKnownOpenCodeSessions(cwd, client) {
     for (const session of sessions) {
       const sessionID = session?.id;
       if (typeof sessionID !== "string" || sessionID.length === 0 || session?.directory !== cwd || !activeIDs.has(sessionID)) continue;
+      // A provider service can hot-reload this plugin without recreating its
+      // already-open sessions. Re-publish the session claim before polling so
+      // the MCP connection cannot remain transport-connected but anonymous
+      // after an M9R or provider update.
+      await bootstrapSession(sessionID, cwd);
       startOpenCodePoller(sessionID, cwd, client);
     }
   } catch {

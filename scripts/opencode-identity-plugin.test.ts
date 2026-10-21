@@ -264,7 +264,8 @@ test("OpenCode startup discovers active sessions so inbox delivery does not wait
     return timer as unknown as ReturnType<typeof setInterval>;
   }) as typeof setInterval;
   const factory = evaluateGeneratedPlugin(buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }), createMockSpawn([
-    { code: 0, output: JSON.stringify({ hookSpecificOutput: { hookEventName: "OpenCodePoll", additionalContext: "" } }) },
+    { code: 0, output: hook("SessionStart", "connected") },
+    { code: 0, output: hook("OpenCodePoll", "") },
   ], calls), setIntervalMock);
   const prompts: unknown[] = [];
   const plugin = await factory({
@@ -280,8 +281,10 @@ test("OpenCode startup discovers active sessions so inbox delivery does not wait
   for (let attempt = 0; attempt < 20 && timers.length === 0; attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(timers.length, 1);
   assert.equal(timers[0]!.ms, 1500);
-  assert.deepEqual(calls[0]?.args, ["m9r-hook", "OpenCodePoll", "opencode"]);
+  assert.deepEqual(calls[0]?.args, ["m9r-hook", "SessionStart", "opencode"]);
   assert.deepEqual(JSON.parse(calls[0]!.input), { session_id: "open-session", cwd: "C:/repo" });
+  assert.deepEqual(calls[1]?.args, ["m9r-hook", "OpenCodePoll", "opencode"]);
+  assert.deepEqual(JSON.parse(calls[1]!.input), { session_id: "open-session", cwd: "C:/repo" });
   assert.equal(prompts.length, 0);
   void plugin;
 });
