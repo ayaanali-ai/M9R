@@ -3015,3 +3015,11 @@ Verification from the current source:
 - no provider task was dispatched, no old task was consumed, and no installation or live acceptance was claimed for this uncommitted fix.
 
 The next release boundary is to review and commit only this recovery fix, its regression test, and this tracker entry, then create a fresh `sourceDirty=false` package and activate that exact package. Live OpenCode proof remains separate: the repaired plugin must publish a fresh claim from an actually active OpenCode session, and the recovery path must then be observed without manual inbox polling.
+
+### 2026-10-20 (Codex) — OpenCode 2.1.1 recovery flag spelling correction
+
+The installed OpenCode 2.1.1 CLI was checked directly before live proof. It accepts the removed-flag-free recovery commands only when the global log-level value is lowercase `error`; `ERROR` is rejected as an invalid enum value. The earlier recovery repair removed `--pure` but retained the wrong case, so it was incomplete even though its source regression test passed.
+
+The correction is provider-compatibility code, not an OpenCode-only task or state workaround: both `session list` and `export` now use `--log-level error`, and the exact-argument regression test rejects both the removed `--pure` flag and the invalid uppercase value. Direct CLI evidence: `opencode session list --format json --max-count 1 --log-level ERROR` failed with `Invalid value for flag --log-level`; the same command with `error` returned JSON session data. No provider task, credential, task state, or live session was changed by this diagnostic.
+
+The clean package/activation boundary is consequently reopened for this small source correction. Live OpenCode acceptance remains unclaimed until this correction is packaged, installed, and the existing provider-owned MCP process is safely reconciled against the current runtime.

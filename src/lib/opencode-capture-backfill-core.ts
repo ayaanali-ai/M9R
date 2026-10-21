@@ -3,10 +3,9 @@
  * plugin observed `session.idle`.
  *
  * OpenCode persists sessions locally and exposes two supported CLI operations
- * for reading them: `session list --format json` and `export <id>`. The
- * resident invokes those operations with `--pure`, so recovery is local-only,
- * does not authenticate with a provider, and does not load the M9R plugin
- * recursively. OpenCode's optional `--sanitize` export mode replaces ordinary
+ * for reading them: `session list --format json` and `export <id>`. Recovery is
+ * local-only, does not authenticate with a provider, and does not load the M9R
+ * plugin recursively. OpenCode's optional `--sanitize` export mode replaces ordinary
  * transcript text with opaque redaction tokens in the current release; M9R
  * therefore preserves useful text and applies its own secret redaction in the
  * existing drainer. Recovered exports enter that spool, and the normal
@@ -212,17 +211,17 @@ function isMissingCommand(error: unknown): boolean {
 
 /**
  * OpenCode 2.x removed the old `--pure` flag from both `session list` and
- * `export`. It was only an output/logging convenience; the parser already
- * ignores the CLI's human-readable preamble, and `--log-level ERROR` keeps
- * diagnostics out of the JSON stream. Keep these argument builders in one
- * place so a provider CLI update cannot leave two recovery paths stale.
+ * `export`. Its log-level enum is also lowercase (`error`, not `ERROR`). The
+ * flag was only an output/logging convenience; the parser already ignores the
+ * CLI's human-readable preamble. Keep these argument builders in one place so
+ * a provider CLI update cannot leave two recovery paths stale.
  */
 export function openCodeSessionListArgs(maxCount: number): string[] {
-  return ["session", "list", "--format", "json", "--max-count", String(maxCount), "--log-level", "ERROR"];
+  return ["session", "list", "--format", "json", "--max-count", String(maxCount), "--log-level", "error"];
 }
 
 export function openCodeSessionExportArgs(sessionId: string): string[] {
-  return ["export", sessionId, "--log-level", "ERROR"];
+  return ["export", sessionId, "--log-level", "error"];
 }
 
 /**

@@ -32,12 +32,12 @@ test("OpenCode session list/export parsers tolerate the CLI's status preamble", 
   assert.deepEqual(exported, { info: { id: "ses_1" }, messages: [] });
 });
 
-test("OpenCode recovery uses the current CLI contract and does not send the removed pure flag", () => {
+test("OpenCode recovery uses the current CLI contract and does not send removed or invalid flags", () => {
   assert.deepEqual(openCodeSessionListArgs(20), [
-    "session", "list", "--format", "json", "--max-count", "20", "--log-level", "ERROR",
+    "session", "list", "--format", "json", "--max-count", "20", "--log-level", "error",
   ]);
   assert.deepEqual(openCodeSessionExportArgs("ses_1"), [
-    "export", "ses_1", "--log-level", "ERROR",
+    "export", "ses_1", "--log-level", "error",
   ]);
 });
 
