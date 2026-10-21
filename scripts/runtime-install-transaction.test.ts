@@ -37,9 +37,17 @@ test("a failed component replacement restores all previous runtime files", () =>
   writeFileSync(files[0]!.to, "old-engine"); writeFileSync(files[1]!.to, "old-broker");
   let calls = 0;
   try {
-    assert.throws(() => installRuntimeTransaction(bin, files, (from, to) => {
-      copyFileSync(from, to); if (++calls === 3) throw new Error("simulated third-component failure"); return [];
-    }), /previous runtime was restored/);
+    let failure: unknown;
+    try {
+      installRuntimeTransaction(bin, files, (from, to) => {
+        copyFileSync(from, to); if (++calls === 3) throw new Error("simulated third-component failure"); return [];
+      });
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok(failure instanceof Error);
+    assert.match(failure.message, /previous runtime was restored/);
+    assert.match(failure.message, /simulated third-component failure/);
     assert.equal(readFileSync(files[0]!.to, "utf8"), "old-engine");
     assert.equal(readFileSync(files[1]!.to, "utf8"), "old-broker");
     assert.equal(existsSync(files[2]!.to), false);

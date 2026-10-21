@@ -5,6 +5,8 @@ import test from "node:test";
 import {
   ADAPTER_CONTRACT_VERSION,
   CAPABILITY_MANIFEST_VERSION,
+  PROVIDER_NEUTRAL_EXECUTION_CONTRACT_VERSION,
+  PROVIDER_NEUTRAL_EXECUTION_OPERATIONS,
   KNOWN_ADAPTER_ACTIONS,
   adapterContractManifest,
   negotiateAdapterActions,
@@ -20,6 +22,14 @@ test("the manifest is versioned and lists the known actions", () => {
 test("the manifest publishes per-provider capability truth without implying live verification", () => {
   const manifest = adapterContractManifest();
   assert.equal(manifest.capabilityManifestVersion, CAPABILITY_MANIFEST_VERSION);
+  assert.equal(manifest.providerNeutralExecution.version, PROVIDER_NEUTRAL_EXECUTION_CONTRACT_VERSION);
+  assert.deepEqual(manifest.providerNeutralExecution.operations, PROVIDER_NEUTRAL_EXECUTION_OPERATIONS);
+  assert.deepEqual(manifest.providerNeutralExecution.updatePolicy, {
+    automaticDetection: true,
+    preserveDurableWork: true,
+    preserveCliMcpRoute: true,
+    healthyReplacementBeforeRetirement: true,
+  });
   assert.deepEqual(
     manifest.providers.map((provider) => provider.id),
     ["codex", "claude-code", "grok-build", "other"],
@@ -28,6 +38,8 @@ test("the manifest publishes per-provider capability truth without implying live
   for (const provider of manifest.providers) {
     assert.equal(provider.executionMode, "linked");
     assert.equal(provider.transport, "generic_cli");
+    assert.equal(provider.executionContractVersion, PROVIDER_NEUTRAL_EXECUTION_CONTRACT_VERSION);
+    assert.deepEqual(provider.executionOperations, PROVIDER_NEUTRAL_EXECUTION_OPERATIONS);
     assert.equal(provider.liveLifecycleVerified, false);
     assert.equal(provider.residentExecutionSupported, false);
     assert.ok(provider.supportedActions.every((action) => KNOWN_ADAPTER_ACTIONS.some((known) => known.id === action)));

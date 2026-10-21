@@ -69,9 +69,23 @@ if (runtimeCore.license === "Apache-2.0" && runtimeCore.private === false) {
 
 const tracked = gitFiles(["ls-files"]);
 const untracked = gitFiles(["ls-files", "--others", "--exclude-standard"]);
+const heldLocalEvidencePrefixes = [
+  /^\.m9r-recovery-quarantine-[^/]+(?:\/|$)/i,
+];
+const isHeldLocalEvidence = (path) => heldLocalEvidencePrefixes.some((pattern) => pattern.test(path.replaceAll("\\", "/")));
+const heldTracked = tracked.filter(isHeldLocalEvidence);
+const heldUntracked = untracked.filter(isHeldLocalEvidence);
+if (heldTracked.length > 0) {
+  fail("held local evidence is tracked", heldTracked.join(", "));
+} else if (heldUntracked.length > 0) {
+  const roots = [...new Set(heldUntracked.map((path) => path.replaceAll("\\", "/").split("/")[0]))];
+  pass(`excluded ${heldUntracked.length} untracked retained recovery-evidence files from the release candidate (${roots.join(", ")}); they remain held for owner review`);
+} else {
+  pass("no untracked retained recovery-evidence roots are present");
+}
 const candidateFiles = [...new Set([...tracked, ...untracked])]
   .map((path) => path.replaceAll("\\", "/"))
-  .filter((path) => isRegularFile(path) && !path.startsWith(".git/"));
+  .filter((path) => isRegularFile(path) && !path.startsWith(".git/") && !isHeldLocalEvidence(path));
 const initialSnapshotExcluded = new Set([
   "M9R_MASTER_BUILD_PLAN.md",
   "OathLock_Realtime_Multi_Agent_Execution_Plan_v1_0.md",
@@ -153,6 +167,7 @@ if (process.argv.includes("--staged")) {
   const missingRequired = required.filter((path) => !staged.includes(path));
   const forbiddenStaged = staged.filter((path) =>
     isInitialSnapshotExcluded(path)
+    || isHeldLocalEvidence(path)
     || path.startsWith("artifacts/")
     || /(?:^|[\\/])(?:\.env(?:\..*)?|.*\.pem|.*\.key|(?:\.m9r|\.oathlock)[\\/]local\.json)$/i.test(path),
   );

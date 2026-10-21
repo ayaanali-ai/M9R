@@ -51,11 +51,17 @@ test("a revoked connection's owner does not count toward the human total", async
 test("a failed allocator call falls back to per-agent color instead of throwing", async () => {
   const supabase = fakeSupabase({ connections: [{ created_by: "u1", revoked_at: null }, { created_by: "u2", revoked_at: null }], rpcError: true });
   const color = await resolveAgentColor(supabase, { workspaceId: "w1", connectedBy: "u1", agentKind: "codex" });
-  assert.equal(color, "#F2EFE9", "an allocator failure must not crash rendering; it falls back to the static per-agent color");
+  assert.equal(color, "#4F7CFF", "an allocator failure must not crash rendering; it falls back to the static per-agent color");
 });
 
 test("an agent with no connecting user (connectedBy null) always uses per-agent color", async () => {
   const supabase = fakeSupabase({ connections: [{ created_by: "u1", revoked_at: null }, { created_by: "u2", revoked_at: null }] });
   const color = await resolveAgentColor(supabase, { workspaceId: "w1", connectedBy: null, agentKind: "claude-code" });
   assert.equal(color, "#D97757");
+});
+
+test("solo OpenCode uses the approved fixed light-gray identity color", async () => {
+  const supabase = fakeSupabase({ connections: [{ created_by: "u1", revoked_at: null }] });
+  const color = await resolveAgentColor(supabase, { workspaceId: "w1", connectedBy: "u1", agentKind: "opencode" });
+  assert.equal(color, "#9CA3AF");
 });

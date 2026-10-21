@@ -21,6 +21,7 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   const { task } = store.addTask({ from: "you", to: "codex", goal: "Use a stage", origin: "human_typed", idempotencyKey: "stage-one", targetSession: "session-one" });
   let creations = 0;
   const desktopActions: Array<{ kind: string; x?: number; y?: number }> = [];
+  const cursorPrepares: Array<{ stageName: string; handle: string; sessionId: string }> = [];
   const currentDesktopId = "33333333-3333-4333-8333-333333333333";
   // Lets a test swap in a different "inspect" native response after setup,
   // without touching every other test's default always-fresh behavior.
@@ -29,6 +30,10 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   const driver = {
     capture: async () => previewCapture,
     captureDesktop: async () => { desktopActions.push({ kind: "capture" }); return previewCapture; },
+    showAgentCursor: async (stageName: string, cursorIdentity: { handle: string; sessionId: string }) => {
+      cursorPrepares.push({ stageName, handle: cursorIdentity.handle, sessionId: cursorIdentity.sessionId });
+      return { label: "Codex", visible: true as const };
+    },
     moveDesktopCursor: async (_name: string, x: number, y: number) => {
       desktopActions.push({ kind: "cursor", x, y });
       return { capture: previewCapture, outcome: { status: "confirmed" as const } };
@@ -50,7 +55,7 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     },
   } });
   const service = recreateService();
-  return { root, store, identity, task, service, recreateService, driver, creations: () => creations, desktopActions,
+  return { root, store, identity, task, service, recreateService, driver, creations: () => creations, desktopActions, cursorPrepares,
     setInspectOverride: (fn: typeof inspectOverride) => { inspectOverride = fn; },
     cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -462,6 +467,16 @@ test("owner-preview preparation does not create or switch to a background deskto
     assert.equal(prepared.hasAnchor, false);
     assert.equal("roomDesktopId" in prepared, false);
     assert.equal(f.creations(), 0, "preview preparation must not call createDesktop");
+  } finally { f.cleanup(); }
+});
+
+test("approved preparation makes the labeled cursor visible before any app action and keeps session metadata private", async () => {
+  const f = fixture();
+  try {
+    const prepared = await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    assert.deepEqual(f.cursorPrepares, [{ stageName: prepared.name, handle: "codex", sessionId: "session-one" }]);
+    assert.equal(JSON.stringify(prepared).includes("sessionTag"), false);
+    assert.equal(JSON.stringify(prepared).includes("session-one"), false, "provider session IDs must not enter stage responses");
   } finally { f.cleanup(); }
 });
 

@@ -401,8 +401,16 @@ export function createTaskDesktopStageService(input: {
         // including for a fresh broker that must recover from disk.
         assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
       }
+      // Publish the agent's labeled overlay before launch or the first input
+      // action. The native cursor is visual-only here: it does not focus a
+      // window or move the owner's physical pointer. Test drivers may omit the
+      // optional visual seam; the production driver always provides it.
+      const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
+        showAgentCursor?: (stageName: string, cursorIdentity: CuaAgentCursorIdentity) => Promise<unknown>;
+      }).showAgentCursor;
+      if (typeof showAgentCursor === "function") await showAgentCursor(name, identity);
       // Return opaque coordination IDs only, never desktop GUIDs or owner-window identifiers.
-      return { name, mode, agent: normalizeHandle(identity.handle), sessionTag, taskId, hasAnchor: Boolean(assignedStage?.anchor),
+      return { name, mode, agent: normalizeHandle(identity.handle), taskId, hasAnchor: Boolean(assignedStage?.anchor),
         ...(mode === "background" && assignedStage ? { roomDesktopId: assignedStage.roomDesktopId } : {}),
         controlEnabled: readPolicy().controlHandles?.includes(normalizeHandle(identity.handle)) === true };
     };

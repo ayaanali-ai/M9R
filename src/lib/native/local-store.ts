@@ -16,18 +16,21 @@ import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, newConnectionId, sameC
 import { createInitialProviderUpdateState, normalizeProviderUpdateState, type ProviderUpdateState } from "./provider-update-lifecycle-core";
 
 /**
- * Findings I/AD: this is the one place a cursor/pill color is chosen for an agent handle.
- * Claude's real brand color is the preferred first pick for "claude" specifically; Codex's and
- * OpenCode's current brand colors (near-white, near-black) are deliberately NOT reused here --
- * too little contrast against an arbitrary desktop background to work as a filled cursor shape --
- * they get the next free palette color instead, same as any other handle.
+ * Findings I/AD: this is the one place a native cursor/feed color is chosen for an agent handle.
+ * The current owner-approved demo palette is fixed by provider identity: Codex blue, Claude
+ * terracotta, and OpenCode light gray. Unknown providers use the overflow palette and retain
+ * their first assignment. Reserved provider colors are skipped by overflow allocation so a newly
+ * seen provider cannot steal a color that belongs to a known provider.
  */
 const CURSOR_BRAND_COLORS: Readonly<Record<string, string>> = {
+  codex: "#4F7CFF",
   claude: "#D97757",
+  opencode: "#9CA3AF",
 };
 const CURSOR_COLOR_PALETTE: readonly string[] = [
-  "#D97757", "#7AA2F7", "#34D399", "#F59E0B", "#EC4899", "#38BDF8", "#A78BFA", "#FB7185",
+  "#34D399", "#F59E0B", "#EC4899", "#38BDF8", "#A78BFA", "#FB7185",
 ];
+const RESERVED_CURSOR_COLORS = new Set(Object.values(CURSOR_BRAND_COLORS));
 
 export interface EndpointRecord {
   handle: string;
@@ -1351,24 +1354,39 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
      * audit asked for, independent of the inbox's replay semantics.
      */
     /**
-     * One durable color per agent handle (Findings I/AD): allocated once, on first request, from
-     * a fixed accessible palette; never reassigned afterward, so every surface that calls this
-     * for the same handle always gets the same answer. Claude and Codex get their real/chosen
-     * brand colors first if those are still free; every other handle (and an overflow past the
-     * two brand colors) gets the next unused color in the shared palette, so concurrently active
-     * agents are never assigned the same color as each other.
+     * One durable color per agent handle (Findings I/AD): known provider identities use the
+     * owner-approved fixed palette, while unknown handles receive one stable overflow color.
+     * Existing known-provider assignments are migrated once to the approved fixed color; this
+     * prevents an older local state file from silently preserving the previous rotating palette.
      */
     colorFor(handle: string): string {
       const normalized = normalizeHandle(handle);
+      const fixed = CURSOR_BRAND_COLORS[normalized];
       // Rendering an existing assignment must not acquire a write lock or rewrite state.
       const assigned = readState().cursorColors[normalized];
-      if (assigned) return assigned;
+      if (assigned && (!fixed || assigned === fixed)) return assigned;
       return update((s) => {
         const existing = s.cursorColors[normalized];
+        if (fixed) {
+          if (existing === fixed) return fixed;
+          // A legacy/unknown handle may have received this now-reserved color before the
+          // provider palette was finalized. Move only that non-provider handle to an overflow
+          // color before installing the fixed identity color.
+          const conflicting = Object.entries(s.cursorColors).find(([other, color]) => other !== normalized && color === fixed);
+          if (conflicting) {
+            const used = new Set(Object.values(s.cursorColors));
+            used.delete(fixed);
+            const replacement = CURSOR_COLOR_PALETTE.find((color) => !used.has(color))
+              ?? CURSOR_COLOR_PALETTE[used.size % CURSOR_COLOR_PALETTE.length]!;
+            s.cursorColors[conflicting[0]] = replacement;
+          }
+          s.cursorColors[normalized] = fixed;
+          return fixed;
+        }
         if (existing) return existing;
         const used = new Set(Object.values(s.cursorColors));
-        const brand = CURSOR_BRAND_COLORS[normalized];
-        const chosen = brand && !used.has(brand) ? brand : CURSOR_COLOR_PALETTE.find((color) => !used.has(color)) ?? CURSOR_COLOR_PALETTE[used.size % CURSOR_COLOR_PALETTE.length]!;
+        const chosen = CURSOR_COLOR_PALETTE.find((color) => !used.has(color) && !RESERVED_CURSOR_COLORS.has(color))
+          ?? CURSOR_COLOR_PALETTE[used.size % CURSOR_COLOR_PALETTE.length]!;
         s.cursorColors[normalized] = chosen;
         return chosen;
       });

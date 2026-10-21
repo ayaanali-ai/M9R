@@ -18,8 +18,9 @@ test("Claude web-only launch disables built-in tools and browser, and loads only
     mcpServers: { m9r: { command: config.mcpCommand, args: config.mcpArgs, env: config.mcpEnv } },
   });
   assert.ok(plan.promptFileContent?.includes(config.sessionToken));
-  assert.match(plan.promptFileContent ?? "", /m9r_web_scroll[\s\S]*m9r_web_wait[\s\S]*m9r_web_back[\s\S]*m9r_web_forward[\s\S]*m9r_web_tabs[\s\S]*m9r_web_extract/);
-  assert.match(plan.promptFileContent ?? "", /Do not navigate to ungranted URLs.*never work around a refusal/);
+  assert.match(plan.promptFileContent ?? "", /retired browser-extension\/shared-tab route is not registered/);
+  assert.match(plan.promptFileContent ?? "", /Never call or invent m9r_web_\* tools/);
+  assert.doesNotMatch(plan.promptFileContent ?? "", /m9r_web_(?:open|snapshot|read|click|type)/);
 });
 
 test("Claude hands profile enables only the requested local tool set plus M9R", () => {
@@ -27,8 +28,8 @@ test("Claude hands profile enables only the requested local tool set plus M9R", 
   assert.deepEqual(plan.args.slice(plan.args.indexOf("--tools"), plan.args.indexOf("--tools") + 2), ["--tools", "Bash,Read,Edit,Glob,Grep"]);
   assert.ok(plan.args.includes("mcp__m9r"));
   assert.match(plan.promptFileContent ?? "", /For a local desktop task, use that task's desktop and OS input route/);
-  assert.match(plan.promptFileContent ?? "", /Use m9r_web_\* only when the owner explicitly asks for an M9R shared browser/);
-  assert.match(plan.promptFileContent ?? "", /Never open a separate browser window\/profile or switch to the M9R shared browser/);
+  assert.match(plan.promptFileContent ?? "", /retired browser-extension\/shared-tab route is not registered/);
+  assert.doesNotMatch(plan.promptFileContent ?? "", /Use m9r_web_\* only when/);
   assert.doesNotMatch(plan.promptFileContent ?? "", /M9R is your only browser\/web interaction layer/);
 });
 
@@ -48,7 +49,8 @@ test("Codex launch disables web search, overrides MCP servers with M9R, and keep
   assert.ok(plan.args.some((arg) => arg.includes("mcp_servers={m9r=")));
   assert.equal(plan.args.join(" ").includes(config.sessionToken), false);
   assert.ok(plan.stdinPrompt?.includes(config.sessionToken));
-  assert.match(plan.stdinPrompt ?? "", /m9r_web_screenshot[\s\S]*m9r_web_extract/);
+  assert.match(plan.stdinPrompt ?? "", /Never call or invent m9r_web_\* tools/);
+  assert.doesNotMatch(plan.stdinPrompt ?? "", /m9r_web_(?:open|snapshot|read|click|type)/);
 });
 
 test("Codex hands profile stays workspace-write and does not re-enable web search", () => {
@@ -57,7 +59,7 @@ test("Codex hands profile stays workspace-write and does not re-enable web searc
   assert.ok(plan.args.includes('web_search="disabled"'));
   assert.equal(plan.args.includes("shell_tool"), false);
   assert.match(plan.stdinPrompt ?? "", /For a local desktop task, use that task's desktop and OS input route/);
-  assert.match(plan.stdinPrompt ?? "", /Use m9r_web_\* only when the owner explicitly asks for an M9R shared browser/);
+  assert.match(plan.stdinPrompt ?? "", /retired browser-extension\/shared-tab route is not registered/);
 });
 
 test("launcher blocks either API key unless the user explicitly overrides", () => {

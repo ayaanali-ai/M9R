@@ -33,6 +33,24 @@ const cuaDriverVersion = "0.34.0";
 const cuaDriverArchiveSha256 = "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b408608b0ea4423a8b888";
 const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua-driver-rs-v${cuaDriverVersion}/cua-driver-rs-${cuaDriverVersion}-windows-x86_64-binary.zip`;
 
+// These are recoverable, owner-reviewed local evidence roots. They are not
+// source and must not make an otherwise committed release appear dirty, but
+// the list is deliberately narrow so an unexpected untracked source file
+// still blocks a clean runtime build.
+const heldLocalProvenancePatterns = [
+  /^\.m9r-(?:live-activation|recovery-quarantine|runtime-package|coordinator-worker|web-broker|installer)-[^/]+(?:\/|$)/i,
+  /^engine(?:\/|$)/i,
+  /^m9r-clean-cutover-[^/]+(?:\/|$)/i,
+  /^scratchpad(?:\/|$)/i,
+  /^docs\/Convenience_Store_Replacement_Plan\.docx$/i,
+  /^public\/reference-innerwebs\/m9r-logo-transparent\.png$/i,
+];
+
+function isHeldLocalProvenancePath(path) {
+  const normalized = path.replaceAll("\\", "/");
+  return heldLocalProvenancePatterns.some((pattern) => pattern.test(normalized));
+}
+
 if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle)) throw new Error("cli/dist is missing: run `npm run build:cli` first.");
 if (process.platform === "win32" && !existsSync(overlayExe)) {
   throw new Error("The Windows desktop pill is missing: build it with `npm --prefix overlay run build` before building the standalone engine.");
@@ -79,7 +97,13 @@ function sourceProvenance() {
   const worktreeDiff = runGitCleanCheck(["diff", "--quiet", "--no-ext-diff", "--ignore-submodules"]);
   const indexDiff = runGitCleanCheck(["diff", "--cached", "--quiet", "--no-ext-diff", "--ignore-submodules"]);
   const untracked = runGitCleanCheck(["ls-files", "--others", "--exclude-standard", "--directory"]);
-  const sourceDirty = worktreeDiff.status === 1 || indexDiff.status === 1 || String(untracked.stdout).trim().length > 0;
+  const untrackedPaths = String(untracked.stdout).split(/\r?\n/g).map((path) => path.trim()).filter(Boolean);
+  const heldLocalEvidence = untrackedPaths.filter(isHeldLocalProvenancePath);
+  const untrackedSource = untrackedPaths.filter((path) => !isHeldLocalProvenancePath(path));
+  if (heldLocalEvidence.length > 0) {
+    console.log(`Excluded ${heldLocalEvidence.length} retained local-evidence root(s) from source provenance.`);
+  }
+  const sourceDirty = worktreeDiff.status === 1 || indexDiff.status === 1 || untrackedSource.length > 0;
   return { sourceCommit, sourceDirty };
 }
 

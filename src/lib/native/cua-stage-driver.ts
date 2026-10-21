@@ -15,7 +15,7 @@ import { createForegroundInputLease, type ForegroundInputLease } from "./foregro
 
 const CUA_PACKAGE = "@trycua/cua-driver";
 const CUA_DRIVER_VERSION = "0.34.0";
-const CURSOR_SESSION_LABEL_MAX_LENGTH = 28;
+const PUBLIC_CURSOR_LABEL_MAX_LENGTH = 28;
 const MAX_IMAGE_DIMENSION = 1024;
 // Keep the base64 JSON response comfortably below the native pill's 4 MiB stdout cap.
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
@@ -346,6 +346,28 @@ function safeSessionName(stageName: string): string {
   return `${SESSION_PREFIX}${stageName}`.slice(0, 64);
 }
 
+/**
+ * Cua renders the named session below the native cursor.  That is a user-facing
+ * label, not an identity/debug channel: provider session IDs and derived
+ * ownership tags stay in the broker's private registry only.
+ */
+function publicCursorLabel(handle: string): string {
+  const normalized = handle.trim().toLowerCase();
+  const known: Record<string, string> = {
+    claude: "Claude",
+    "claude-code": "Claude",
+    codex: "Codex",
+    opencode: "OpenCode",
+    "open-code": "OpenCode",
+  };
+  const label = known[normalized] ?? normalized
+    .split(/[-_\s]+/g)
+    .filter(Boolean)
+    .map((part) => part.length <= 3 ? part.toUpperCase() : `${part[0]!.toUpperCase()}${part.slice(1).toLowerCase()}`)
+    .join(" ");
+  return (label || "Agent").slice(0, PUBLIC_CURSOR_LABEL_MAX_LENGTH).trim() || "Agent";
+}
+
 function agentCursorDetails(identity: CuaAgentCursorIdentity): AgentCursorSession {
   const handle = identity.handle.trim().toLowerCase();
   if (!/^[a-z0-9_-]{1,40}$/.test(handle) || typeof identity.sessionId !== "string"
@@ -354,15 +376,14 @@ function agentCursorDetails(identity: CuaAgentCursorIdentity): AgentCursorSessio
   }
   const digest = createHash("sha256").update(`${handle}\0${identity.sessionId}`).digest("hex");
   const sessionTag = digest.slice(0, 8);
-  const visibleHandle = handle.slice(0, CURSOR_SESSION_LABEL_MAX_LENGTH - sessionTag.length - 2);
   return {
     key: `${handle}\0${identity.sessionId}`,
     handle,
     sessionId: identity.sessionId,
-    // Cua shows the session name in the native desktop cursor badge and
-    // shortens labels longer than 28 characters. Keep the agent recognizable
-    // while retaining a session-specific suffix inside that display limit.
-    session: `@${visibleHandle}-${sessionTag}`,
+    // Keep the session-specific tag private. Cua displays `session` in the
+    // cursor badge, so it must remain a clean provider label with no session
+    // ID, hash, token, or @-prefixed internal handle.
+    session: publicCursorLabel(handle),
     sessionTag,
   };
 }
@@ -638,7 +659,10 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   const loadSdk = deps.loadSdk ?? loadCuaSdk;
   const now = deps.now ?? (() => new Date());
   const root = deps.stage?.root ?? defaultStoreRoot(homedir(), deps.stage?.env ?? process.env);
-  const foregroundLease = deps.foregroundLease ?? createForegroundInputLease();
+  // Provider workers are separate processes, but Windows still exposes one
+  // foreground input stream. Share the lease through the M9R store so Paint,
+  // Calculator, or any other target cannot be focused by two workers at once.
+  const foregroundLease = deps.foregroundLease ?? createForegroundInputLease({ lockPath: join(root, "foreground-input-lease") });
   const agentSessions = new Map<string, AgentCursorSession>();
   const desktopCaptures = new Map<string, CachedDesktopCapture>();
   const desktopInputTargets = new Map<string, DesktopInputTarget>();
@@ -763,6 +787,21 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       throw error;
     }
     return { runtime, session: agentSessions.get(details.key)! };
+  }
+
+  /**
+   * Make the provider cursor visible as soon as an approved stage is prepared,
+   * before launch, capture, or the first input action.  This is intentionally
+   * a cursor-overlay operation only: it does not focus a window or move the
+   * owner's physical pointer.
+   */
+  async function showAgentCursor(name: string, identity: CuaAgentCursorIdentity): Promise<{ label: string; visible: true }> {
+    const { runtime, session } = await ensureAgentSession(identity, name);
+    resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not show the agent cursor before the first desktop action.");
+    if ((await runtime.driver.getSession({ session: session.session })).cursorVisible !== true) {
+      throw new Error("Cua Driver enabled the agent cursor but did not confirm that its desktop overlay is visible.");
+    }
+    return { label: session.session, visible: true };
   }
 
   async function inspectOwnerDesktop(name: string, identity: CuaAgentCursorIdentity) {
@@ -1739,38 +1778,31 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
   async function listWindowOptionsOnce(ownedPid: number | undefined, onScreenOnly: boolean): Promise<CuaStageWindowOption[]> {
     const runtime = await agentRuntime();
     const { driver } = runtime;
-    const session = safeSessionName(ownedPid === undefined ? "owner-visible" : `owned-${ownedPid}`);
-    let started = false;
-    try {
-      await driver.startSession({ session });
-      started = true;
-      const result = await driver.listWindows({ onScreenOnly });
-      return result.windows
-        .filter((window) => Number.isSafeInteger(window.pid) && (window.pid ?? 0) > 0 && window.pid !== process.pid
-          && typeof window.windowId === "bigint" && window.windowId > BigInt(0)
-          && (ownedPid === undefined ? (!onScreenOnly || window.isOnScreen === true) : window.pid === ownedPid)
-          && (!onScreenOnly || window.minimized !== true)
-          && Number.isFinite(window.bounds.width) && Number.isFinite(window.bounds.height)
-          && (window.minimized === true && !onScreenOnly || window.bounds.width >= 80 && window.bounds.height >= 60)
-          && typeof window.title === "string" && window.title.trim().length > 0
-          && !/m9r[- ]overlay/i.test(`${window.appName} ${window.title}`)
-          && !/^m9r(?: overlay)?$/i.test(window.title.trim()))
-        .slice(0, MAX_WINDOW_OPTIONS)
-        .map((window) => ({
-          pid: window.pid!,
-          windowId: window.windowId.toString(),
-          appName: window.appName.slice(0, 80),
-          title: window.title.replace(/[\r\n\t]+/g, " ").slice(0, 160),
-          width: Math.trunc(window.bounds.width),
-          height: Math.trunc(window.bounds.height),
-        }));
-    } finally {
-      if (started) {
-        try { await driver.endSession({ session }); } catch { /* preserve the primary operation result */ }
-      }
-      // Window enumeration shares the broker's host. Closing it on every
-      // launch poll repeatedly cold-started Cua and exceeded the RPC deadline.
-    }
+    // Window enumeration is read-only and uses the already-connected driver
+    // transport. Starting and ending a named session for every launch poll
+    // repeatedly cold-started Cua and made ordinary app discovery needlessly
+    // slow. Agent cursor sessions remain explicit and persistent in
+    // ensureAgentSession; this path must not create a throwaway one.
+    const result = await driver.listWindows({ onScreenOnly });
+    return result.windows
+      .filter((window) => Number.isSafeInteger(window.pid) && (window.pid ?? 0) > 0 && window.pid !== process.pid
+        && typeof window.windowId === "bigint" && window.windowId > BigInt(0)
+        && (ownedPid === undefined ? (!onScreenOnly || window.isOnScreen === true) : window.pid === ownedPid)
+        && (!onScreenOnly || window.minimized !== true)
+        && Number.isFinite(window.bounds.width) && Number.isFinite(window.bounds.height)
+        && (window.minimized === true && !onScreenOnly || window.bounds.width >= 80 && window.bounds.height >= 60)
+        && typeof window.title === "string" && window.title.trim().length > 0
+        && !/m9r[- ]overlay/i.test(`${window.appName} ${window.title}`)
+        && !/^m9r(?: overlay)?$/i.test(window.title.trim()))
+      .slice(0, MAX_WINDOW_OPTIONS)
+      .map((window) => ({
+        pid: window.pid!,
+        windowId: window.windowId.toString(),
+        appName: window.appName.slice(0, 80),
+        title: window.title.replace(/[\r\n\t]+/g, " ").slice(0, 160),
+        width: Math.trunc(window.bounds.width),
+        height: Math.trunc(window.bounds.height),
+      }));
   }
 
   async function listVisibleWindows(options: { onScreenOnly?: boolean } = {}): Promise<CuaStageWindowOption[]> {
@@ -2120,7 +2152,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     } catch { /* the runtime never initialized */ }
   }
 
-  return { capture, readStructure, describeTarget, describeElementTarget, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, drag,
+  return { capture, readStructure, describeTarget, describeElementTarget, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, drag,
     clickElement, replaceElement, windowFrame, windowState, focusWindow, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown };

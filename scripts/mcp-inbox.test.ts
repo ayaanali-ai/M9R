@@ -341,6 +341,8 @@ test("colorFor allocates one durable color per handle, never a collision between
 
     const codex = t.store.colorFor("codex");
     const opencode = t.store.colorFor("opencode");
+    assert.equal(codex, "#4F7CFF", "Codex uses the owner-approved Balanced blue");
+    assert.equal(opencode, "#9CA3AF", "OpenCode uses the owner-approved Balanced-C light gray");
     assert.notEqual(codex, claude);
     assert.notEqual(opencode, claude);
     assert.notEqual(codex, opencode, "two concurrently active agents must never be assigned the same color");

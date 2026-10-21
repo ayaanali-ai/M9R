@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   BridgeSessionRegistry,
 } from "@/lib/bridge/bridge-session-registry";
-import { interactiveCapabilityAvailable } from "@/lib/bridge/interactive-provider-adapter";
+import { interactiveCapabilityAvailable, type InteractiveProviderAdapter } from "@/lib/bridge/interactive-provider-adapter";
 import { AcpSessionController } from "@/lib/bridge/acp-client";
 import { AcpProviderRegistry } from "@/lib/bridge/acp-provider-registry";
 import { createDefaultAcpProviderRegistry } from "@/lib/bridge/acp-provider-registry";
@@ -253,6 +253,30 @@ test("controller.respondToPermission refuses a session id that isn't actually li
 
 test("the default Bridge registry exposes the official ACP providers", () => {
   assert.deepEqual(createDefaultAcpProviderRegistry().list(), ["claude-agent-acp", "codex-acp", "opencode-acp"]);
+});
+
+test("the provider registry accepts an arbitrary provider through the shared adapter surface", () => {
+  const registry = new AcpProviderRegistry();
+  const futureProvider = {
+    id: "future-agent-acp",
+    discoverCapabilities: async () => ({}) as never,
+    launchServer: async () => ({ serverId: "server", adapterId: "future-agent-acp" }),
+    initialize: async () => ({ protocolVersion: "1", agentName: "future-agent", capabilities: {} }) as never,
+    createSession: async () => ({ sessionId: "session", providerSessionRef: "provider-session" }),
+    resumeSession: async () => ({ sessionId: "session", providerSessionRef: "provider-session" }),
+    prompt: async function* () {},
+    cancelTurn: async () => {},
+    respondToPermission: async () => {},
+    closeSession: async () => {},
+    shutdown: async () => {},
+  } satisfies InteractiveProviderAdapter;
+
+  registry.register(futureProvider);
+  assert.deepEqual(registry.list(), ["future-agent-acp"]);
+  assert.throws(
+    () => registry.register({ id: "broken-provider" } as unknown as InteractiveProviderAdapter),
+    /not provider-neutral.*missing discoverCapabilities\(\).*missing shutdown\(\)/i,
+  );
 });
 
 test("official ACP providers expose the same normalized observability and control contract", async () => {

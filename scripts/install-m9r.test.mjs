@@ -113,6 +113,15 @@ function canonicalPath(path) {
   return realpathSync.native(path).replace(/^\\\\\?\\/, "").toLowerCase();
 }
 
+function nativeInstallerTemp() {
+  // The Codex/Windows test host exposes an AppContainer-scoped %TEMP% where
+  // renaming an executable is denied even when the destination is writable.
+  // Keep the native fixture on the short, writable checkout path instead; the
+  // production installer still uses the user's normal Windows temp directory.
+  const parent = process.platform === "win32" ? root : tmpdir();
+  return mkdtempSync(join(parent, ".m9r-installer-"));
+}
+
 test("installer contains no Node/npm dependency and changes no saved PowerShell policy", () => {
   const source = readFileSync(installer, "utf8");
   assert.doesNotMatch(source, /(?:&\s*|Get-Command\s+)(?:npm|node)(?:\.exe)?\b/i);
@@ -158,6 +167,10 @@ test("standalone release packages runtime companions from the canonical engine d
     "source cleanliness must compare tracked content instead of trusting file mtimes");
   assert.match(builderSource, /runGitCleanCheck\(\["ls-files", "--others", "--exclude-standard", "--directory"\]\)/,
     "source cleanliness must still account for non-ignored untracked paths");
+  assert.match(builderSource, /heldLocalProvenancePatterns/,
+    "source cleanliness may exclude only the explicitly classified local-evidence roots");
+  assert.match(builderSource, /untrackedSource\.length > 0/,
+    "unknown untracked source must still block a clean runtime build");
   assert.match(builderSource, /m9r-web-broker\.cjs[\s\S]*m9r-web-broker\.exe/, "the build must turn the bundled broker into its own executable");
   assert.match(builderSource, /copyFileSync\(overlayExe, join\(out, "m9r-overlay\.exe"\)\)/, "the engine distribution must capture the just-built desktop pill");
   assert.match(builderSource, /writeRuntimeBuildManifest\(out(?:, [^\n]*)?\)[\s\S]*verifyRuntimeBuildManifest\(out, \{ exact: true \}\)[\s\S]*publishRuntimeBuild\(out, output, managedRuntimePaths\)/,
@@ -222,7 +235,7 @@ test("release ZIP contains the built standalone broker", { skip: skipNative }, (
 });
 
 test("standalone package consent, setup, integrity, and uninstall paths", { skip: skipNative }, async (t) => {
-  const temp = mkdtempSync(join(tmpdir(), "m9r-real-installer-"));
+  const temp = nativeInstallerTemp();
   t.after(() => rmSync(temp, { recursive: true, force: true }));
   const zipPath = createPackage(temp);
 

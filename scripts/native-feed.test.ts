@@ -22,6 +22,22 @@ test("reading an allocated color neither rewrites state nor reallocates on anoth
     assert.equal(statSync(path).mtimeMs, before, "rendering an existing identity is read-only");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("known provider colors migrate from a legacy assignment without colliding with an overflow handle", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-color-migrate-"));
+  try {
+    const store = createLocalStore(root);
+    store.colorFor("legacy-provider");
+    const statePath = join(root, "state.json");
+    const state = JSON.parse(readFileSync(statePath, "utf8")) as { cursorColors: Record<string, string> };
+    state.cursorColors = { "legacy-provider": "#4F7CFF", codex: "#7AA2F7" };
+    writeFileSync(statePath, JSON.stringify(state));
+
+    assert.equal(createLocalStore(root).colorFor("codex"), "#4F7CFF");
+    const migrated = JSON.parse(readFileSync(statePath, "utf8")) as { cursorColors: Record<string, string> };
+    assert.notEqual(migrated.cursorColors["legacy-provider"], "#4F7CFF");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 const S1 = "01a0c010-9e03-7152-a1d2-039c92c32e05";
 const S2 = "01a0c011-1111-7152-a1d2-039c92c32e06";
 

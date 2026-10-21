@@ -1178,9 +1178,9 @@ test("shows a distinct agent label on each native cursor and configures adaptive
 
   const sessions = calls.filter((call) => call.method === "startSession").map((call) => (call.value as { session: string }).session);
   assert.equal(new Set(sessions).size, 2, "each verified agent session gets a separate Cua overlay identity");
-  assert.match(sessions[0]!, /^@codex-[0-9a-f]{8}$/);
-  assert.match(sessions[1]!, /^@claude-code-[0-9a-f]{8}$/);
-  assert.ok(sessions.every((session) => session.length <= 28), "the complete identity and suffix fit Cua's visible badge limit");
+  assert.deepEqual(sessions, ["Codex", "Claude"], "native cursor badges use stable provider labels");
+  assert.ok(sessions.every((session) => !session.includes("@") && !/[0-9a-f]{8}/i.test(session)), "native cursor badges must not expose session IDs or derived tags");
+  assert.ok(sessions.every((session) => session.length <= 28), "public cursor labels fit Cua's visible badge limit");
   const motion = calls.filter((call) => call.method === "setAgentCursorMotion").map((call) => call.value as Record<string, unknown>);
   assert.deepEqual(motion.map(({ session, style, timing, effects, dwellAfterClickMs, idleHideMs }) => ({
     session, style, timing, effects, dwellAfterClickMs, idleHideMs,
@@ -1195,6 +1195,17 @@ test("shows a distinct agent label on each native cursor and configures adaptive
   assert.equal(calls.filter((call) => call.method === "moveCursor").length, 2);
   assert.equal(calls.some((call) => call.method === "callTool"), false);
   for (const identity of identities) await driver.closeAgentCursor(identity);
+}));
+
+test("shows the clean provider cursor before the first movement", async () => withRoot(async (root) => {
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never });
+
+  const shown = await driver.showAgentCursor("preview-stage", { handle: "opencode", sessionId: "private-session-id" });
+  assert.deepEqual(shown, { label: "OpenCode", visible: true });
+  assert.deepEqual(calls.map((call) => call.method), ["create", "startSession", "setAgentCursorMotion", "setAgentCursorEnabled", "getSession"]);
+  assert.equal(JSON.stringify(calls).includes("private-session-id"), false, "cursor setup calls must not expose the provider session ID");
+  await driver.shutdown();
 }));
 
 test("cursor acquisition exposes privacy-safe phase timings without leaking session identity", async () => withRoot(async (root) => {
@@ -1303,7 +1314,7 @@ test("lists only eligible visible app windows and keeps the result local and bou
     { pid: 7777, windowId: "106", appName: "browser.exe", title: "A private title", width: 900, height: 700 },
   ]);
   assert.deepEqual(calls.find((call) => call.method === "listWindows")?.value, { onScreenOnly: true });
-  assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession"]);
+  assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), [], "window enumeration must not create throwaway Cua sessions");
   const all = await driver.listVisibleWindows({ onScreenOnly: false });
   assert.ok(all.some((window) => window.windowId === "102"), "restoration discovery includes windows outside the visible screen");
   assert.equal(calls.filter((call) => call.method === "shutdown").length, 0, "launch polling must keep its host alive");
@@ -1530,7 +1541,7 @@ test("surfaces a persistent Cua Driver refusal after the bounded foreground retr
   const cursorStateCalls = calls.filter((call) => call.method === "setAgentCursorEnabled");
   const lastCursorState = cursorStateCalls.at(-1)?.value as { session?: string; enabled?: boolean };
   assert.equal(lastCursorState.enabled, false, "a failed action leaves the agent cursor in a deliberate hidden state");
-  assert.match(lastCursorState.session ?? "", /^@codex-/);
+  assert.equal(lastCursorState.session, "Codex");
   await driver.shutdown();
   assert.ok(calls.some((call) => call.method === "shutdown"));
 }));

@@ -151,9 +151,13 @@ export function installRuntimeTransaction(targetDir: string, files: readonly Run
     }
     record.status = failures.length ? "rollback_failed" : "rolled_back";
     journal();
-    throw new Error(failures.length
+    const recoveryMessage = failures.length
       ? `Runtime update failed and rollback requires recovery for ${failures.join(", ")}. Preserved transaction: ${transaction}`
-      : `Runtime update failed; the previous runtime was restored. Preserved transaction: ${transaction}`, { cause: error });
+      : `Runtime update failed; the previous runtime was restored. Preserved transaction: ${transaction}`;
+    const causeMessage = error instanceof Error && error.message
+      ? ` Cause: ${error.message.slice(0, 512)}`
+      : "";
+    throw new Error(`${recoveryMessage}${causeMessage}`, { cause: error });
   }
 }
 

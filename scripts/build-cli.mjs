@@ -295,6 +295,7 @@ function build() {
       .replace(/["']\.\/m9r-prompt-markers["']/g, '"./m9r-prompt-markers.js"')
       .replace(/["']\.\.\/bridge\/governed-agent-tools["']/g, '"./governed-agent-tools.js"')
       .replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"')
+      .replace(/["']\.\.\/adapter-contract["']/g, '"./adapter-contract.js"')
       .replace(/["']\.\.\/agent-detection-core["']/g, '"./agent-detection-core.js"');
     writeFileSync(resolve(outDir, `${name}.js`), js);
   }

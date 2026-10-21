@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { detectInstalledAgents, type VersionProbe } from "../agent-detection-core";
+import { ADAPTER_CONTRACT_VERSION, CAPABILITY_MANIFEST_VERSION } from "../adapter-contract";
 
 /**
  * Provider-neutral compatibility evidence. This module deliberately does not
@@ -328,6 +329,12 @@ export function observationFromDetectedAgent(
     binary: agent.binary,
     versionLine: agent.versionLine,
     transport: "cli-mcp",
+    // Carry the M9R contract versions observed with the provider probe.  A
+    // provider update monitor must notice M9R plumbing drift as well as a
+    // vendor version change, otherwise an existing provider could remain
+    // attached to stale compatibility code after an M9R update.
+    adapterContractVersion: ADAPTER_CONTRACT_VERSION,
+    capabilityManifestVersion: CAPABILITY_MANIFEST_VERSION,
     observedAtMs,
   });
 }

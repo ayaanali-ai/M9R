@@ -117,6 +117,8 @@ test("the compatibility bridge consumes the existing side-effect-free probes wit
   assert.deepEqual(observed.map((item) => item.providerId), ["codex", "opencode"]);
   assert.deepEqual(observed.map((item) => item.version), ["0.42.0", "2.1.1"]);
   assert.ok(observed.every((item) => item.transport === "cli-mcp" && item.observedAtMs === 456));
+  assert.ok(observed.every((item) => item.adapterContractVersion === "m9r.adapter-contract.v1"));
+  assert.ok(observed.every((item) => item.capabilityManifestVersion === "m9r.provider-capabilities.v1"));
 });
 
 test("provider version comparison is semver-aware, including prereleases", () => {

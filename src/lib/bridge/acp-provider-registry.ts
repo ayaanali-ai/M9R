@@ -1,4 +1,5 @@
 import type { InteractiveProviderAdapter } from "./interactive-provider-adapter";
+import { assertProviderNeutralInteractiveAdapter } from "./provider-neutral-contract";
 import { createClaudeAcpAdapter, createCodexAcpAdapter, createGenericAcpAdapter, createOpenCodeAcpAdapter } from "./acp-stdio-adapter";
 import { createCodexAppServerAdapter } from "./codex-app-server-adapter";
 import type { ProviderAdapterConfig } from "@/lib/provider-adapter-config";
@@ -7,6 +8,7 @@ export class AcpProviderRegistry {
   private readonly adapters = new Map<string, InteractiveProviderAdapter>();
 
   register(adapter: InteractiveProviderAdapter): void {
+    assertProviderNeutralInteractiveAdapter(adapter);
     if (this.adapters.has(adapter.id)) throw new Error(`ACP adapter '${adapter.id}' is already registered.`);
     this.adapters.set(adapter.id, adapter);
   }
