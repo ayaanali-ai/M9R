@@ -32,6 +32,7 @@ import {
 } from "./install-core";
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
 import { inboxMaxAgeMs } from "./inbox-core";
+import { CONNECTION_CLAIM_TTL_MS } from "./mcp-connection-core";
 import { hasPendingRuntimeTransaction, installRuntimeTransaction, pruneCommittedRuntimeBackups, recoverRuntimeTransactions } from "./runtime-install-transaction";
 import { createPageNotesStore } from "./page-notes-store";
 import { projectRoomId } from "./project-room";
@@ -930,12 +931,19 @@ export function nativeStatus(io: NativeIo): StatusRow[] {
   const store = createLocalStore(p.m9r);
   const endpoints = store.listEndpoints();
   rows.push({ id: "endpoints", state: "info", label: endpoints.length ? `Agents seen on this machine: ${endpoints.map((e) => `@${e.handle}`).join(", ")}` : "No agent sessions seen yet. Start a new Claude Code session." });
-  const sessions = endpoints.flatMap((endpoint) => store.sessionsFor(endpoint.handle));
-  const missingIdentity = sessions.filter((session) => !store.sessionsWithIdentity(session.handle, session.cwd).some((live) => live.sessionId === session.sessionId));
-  rows.push(missingIdentity.length > 0
-    ? { id: "target-identities", state: "todo", label: `${missingIdentity.length} provider session(s) lack a live M9R identity; targeted delivery will fail visibly`, fix: "restart that agent session so M9R can issue its session token" }
-    : { id: "target-identities", state: sessions.length > 0 ? "ok" : "info", label: sessions.length > 0 ? "All observed provider sessions have live M9R identities" : "No provider session identities to check yet" });
   const statusNow = Date.now();
+  const sessions = endpoints.flatMap((endpoint) => store.sessionsFor(endpoint.handle));
+  // `sessions` is intentionally retained for continuity and recovery. It is
+  // not an inventory of currently open provider processes, so historical
+  // records must not produce a misleading "restart your session" warning.
+  const activeSessions = sessions.filter((session) => {
+    const lastSeen = Date.parse(session.lastSeenAt);
+    return Number.isFinite(lastSeen) && lastSeen <= statusNow && statusNow - lastSeen <= CONNECTION_CLAIM_TTL_MS;
+  });
+  const missingIdentity = activeSessions.filter((session) => !store.sessionsWithIdentity(session.handle, session.cwd).some((live) => live.sessionId === session.sessionId));
+  rows.push(missingIdentity.length > 0
+    ? { id: "target-identities", state: "todo", label: `${missingIdentity.length} recently active provider session(s) lack a live M9R identity; targeted delivery will fail visibly`, fix: "continue that existing provider session so M9R can issue its session token" }
+    : { id: "target-identities", state: activeSessions.length > 0 ? "ok" : "info", label: activeSessions.length > 0 ? "All recently active provider sessions have live M9R identities" : "No recently active provider sessions to check; retained session history is preserved" });
   const inboxCutoff = statusNow - inboxMaxAgeMs();
   const pending = endpoints.reduce((n, e) => n + store.tasksFor(e.handle).filter((t) => {
     const createdAt = Date.parse(t.createdAt);

@@ -234,6 +234,18 @@ test("status flags provider sessions that cannot receive targeted delivery witho
   s.done();
 });
 
+test("status does not tell the owner to restart retained historical sessions", () => {
+  const s = sandbox();
+  const store = createLocalStore(s.p.m9r);
+  store.registerEndpoint({ provider: "opencode", sessionId: "opencode-old", cwd: s.home, seenAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString() });
+
+  const identity = nativeStatus(s.io).find((row) => row.id === "target-identities");
+  assert.equal(identity?.state, "info");
+  assert.match(identity?.label ?? "", /No recently active provider sessions/);
+  assert.equal(identity?.fix, undefined);
+  s.done();
+});
+
 test("status does not count expired or already-pushed history as waiting inbox work", () => {
   const s = sandbox();
   const store = createLocalStore(s.p.m9r);
