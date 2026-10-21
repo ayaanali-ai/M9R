@@ -2999,3 +2999,19 @@ Decision: **do not add Harness² to the production runtime or provider setup now
 The installed provider binary was verified outside the restricted shell as **OpenCode v2.1.1**. OpenCode's read-only config diagnostic resolves the active `.jsonc` configuration, sees the M9R MCP server, and normalizes the identity plugin entry; this separates the earlier sandbox-only log-file `EPERM` from an actual provider failure.
 
 The live boundary is still open: the current process audit found no OpenCode process, no current OpenCode claim, and no OpenCode entry in the recent M9R roster. The exact installed pill process is resident at the marker PID, and its executable hash matches the installed current pill; the marker is therefore valid runtime liveness evidence, not stale state. No provider session was launched, no task was duplicated or consumed, and no state cleanup was performed. A fresh OpenCode session is still required solely to produce live provider evidence for the already-installed runtime; source/package evidence must not be promoted to live acceptance.
+
+### 2026-10-20 (Codex) — OpenCode 2.1.1 recovery-command compatibility repair
+
+The fresh OpenCode 2.1.1 log exposed a second, separate provider-update regression after the identity plugin loaded successfully: M9R's session-recovery loop was invoking `opencode session list` and `opencode export` with the removed `--pure` flag. OpenCode answered with help text every minute, so recovery could not discover or export sessions even though the MCP plugin contract itself was repaired. This is a provider-neutral recovery-contract issue, not a model-selection issue and not evidence that the user's sessions or tasks should be discarded.
+
+The recovery core now builds the current OpenCode 2.x argument vectors without `--pure` and keeps the existing bounded JSON/status parsing and durable recovery cursor. The CLI/MCP registration path, task state, claims, credentials, and provider configuration were not changed. Regression coverage verifies the exact argument contract, preamble-tolerant parsing, queue/drain behavior, restart deduplication, and retryability.
+
+Verification from the current source:
+
+- combined OpenCode identity, recovery, adapter, provider-update, and web-setup regressions: **72/72 passed**;
+- `npm run typecheck`: **passed**;
+- `git diff --check`: **passed**;
+- the broad `web-all` wrapper did not emit a trustworthy completion summary in this Windows command boundary and was stopped; it is **not** counted as passed;
+- no provider task was dispatched, no old task was consumed, and no installation or live acceptance was claimed for this uncommitted fix.
+
+The next release boundary is to review and commit only this recovery fix, its regression test, and this tracker entry, then create a fresh `sourceDirty=false` package and activate that exact package. Live OpenCode proof remains separate: the repaired plugin must publish a fresh claim from an actually active OpenCode session, and the recovery path must then be observed without manual inbox polling.

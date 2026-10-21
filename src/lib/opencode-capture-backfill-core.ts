@@ -211,6 +211,21 @@ function isMissingCommand(error: unknown): boolean {
 }
 
 /**
+ * OpenCode 2.x removed the old `--pure` flag from both `session list` and
+ * `export`. It was only an output/logging convenience; the parser already
+ * ignores the CLI's human-readable preamble, and `--log-level ERROR` keeps
+ * diagnostics out of the JSON stream. Keep these argument builders in one
+ * place so a provider CLI update cannot leave two recovery paths stale.
+ */
+export function openCodeSessionListArgs(maxCount: number): string[] {
+  return ["session", "list", "--format", "json", "--max-count", String(maxCount), "--log-level", "ERROR"];
+}
+
+export function openCodeSessionExportArgs(sessionId: string): string[] {
+  return ["export", sessionId, "--log-level", "ERROR"];
+}
+
+/**
  * Lists recent local OpenCode sessions, exports only sessions belonging to
  * this repository, and appends recoverable sessions to the existing spool.
  * The cursor is deliberately a per-session ledger rather than a destructive
@@ -235,7 +250,7 @@ export async function backfillOpenCodeCapture(options: {
 
   let listOutput: OpenCodeCommandResult;
   try {
-    listOutput = await runCommand(["session", "list", "--format", "json", "--max-count", String(maxCount), "--pure", "--log-level", "ERROR"], repositoryRoot);
+    listOutput = await runCommand(openCodeSessionListArgs(maxCount), repositoryRoot);
   } catch (error) {
     if (!isMissingCommand(error)) {
       result.failed = 1;
@@ -282,7 +297,7 @@ export async function backfillOpenCodeCapture(options: {
 
     let exportOutput: OpenCodeCommandResult;
     try {
-      exportOutput = await runCommand(["export", session.id, "--pure", "--log-level", "ERROR"], session.directory);
+      exportOutput = await runCommand(openCodeSessionExportArgs(session.id), session.directory);
       const exported = parseOpenCodeExportOutput(exportOutput.stdout);
       if (!exported) throw new Error("OpenCode export did not contain JSON");
       const exportedId = isRecord(exported.info) && typeof exported.info.id === "string" ? exported.info.id : null;

@@ -6,6 +6,8 @@ import { join } from "node:path";
 
 import {
   backfillOpenCodeCapture,
+  openCodeSessionExportArgs,
+  openCodeSessionListArgs,
   parseOpenCodeExportOutput,
   parseOpenCodeSessionListOutput,
   opencodeBackfillCursorPath,
@@ -28,6 +30,15 @@ test("OpenCode session list/export parsers tolerate the CLI's status preamble", 
 
   const exported = parseOpenCodeExportOutput('Exporting session: ses_1\n{"info":{"id":"ses_1"},"messages":[]}');
   assert.deepEqual(exported, { info: { id: "ses_1" }, messages: [] });
+});
+
+test("OpenCode recovery uses the current CLI contract and does not send the removed pure flag", () => {
+  assert.deepEqual(openCodeSessionListArgs(20), [
+    "session", "list", "--format", "json", "--max-count", "20", "--log-level", "ERROR",
+  ]);
+  assert.deepEqual(openCodeSessionExportArgs("ses_1"), [
+    "export", "ses_1", "--log-level", "ERROR",
+  ]);
 });
 
 test("backfill queues a persisted OpenCode session after the process is gone, then the normal drainer writes memory", async () => {
