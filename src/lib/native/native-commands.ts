@@ -959,8 +959,10 @@ export function nativeStatus(io: NativeIo): StatusRow[] {
 
 export function printNativeStatus(io: NativeIo): void {
   io.out("Native front door (local mode)");
-  for (const r of nativeStatus(io)) io.out(`[${r.state === "ok" ? "PASS" : r.state === "todo" ? "TODO" : "INFO"}] ${r.label}${r.fix ? `  ->  ${r.fix}` : ""}`);
-  for (const s of USER_STEPS.filter((x) => x.id === "new-session" || x.id === "codex-trust")) io.out(`[YOU ] ${s.title}${s.fix ? `  ->  ${s.fix}` : ""}`);
+  const rows = nativeStatus(io);
+  for (const r of rows) io.out(`[${r.state === "ok" ? "PASS" : r.state === "todo" ? "TODO" : "INFO"}] ${r.label}${r.fix ? `  ->  ${r.fix}` : ""}`);
+  const hasKnownEndpoint = rows.some((row) => row.id === "endpoints" && row.label.startsWith("Agents seen on this machine:"));
+  for (const s of USER_STEPS.filter((x) => (x.id === "new-session" && !hasKnownEndpoint) || x.id === "codex-trust")) io.out(`[YOU ] ${s.title}${s.fix ? `  ->  ${s.fix}` : ""}`);
 }
 
 /**

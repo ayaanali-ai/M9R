@@ -246,6 +246,15 @@ test("status does not tell the owner to restart retained historical sessions", (
   s.done();
 });
 
+test("status does not repeat first-time new-session guidance after an endpoint is known", async () => {
+  const s = sandbox();
+  createLocalStore(s.p.m9r).registerEndpoint({ provider: "opencode", sessionId: "opencode-existing", cwd: s.home });
+  await s.run("setup", ["--status"]);
+
+  assert.doesNotMatch(s.out.join("\n"), /Start a new Claude Code session/);
+  s.done();
+});
+
 test("status does not count expired or already-pushed history as waiting inbox work", () => {
   const s = sandbox();
   const store = createLocalStore(s.p.m9r);
