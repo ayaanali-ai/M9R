@@ -241,9 +241,14 @@ Still required:
 - The current manifest/logo pair, icon binaries, asset-dependent marketing
   test, ESLint config cleanup, runtime outputs, quarantine, scratchpad, and
   user document remain held until individually reviewed. No automatic artifact
-  draining is part of this pass. The clean packaged runtime boundary is now
-  verified separately; activation/install and live-provider acceptance remain
-  open.
+  draining is part of this pass. The clean packaged runtime boundary and exact
+  activation are now verified for build
+  `02b96a7e05c762588e9f7180a44aa9ed3efdef286f96e3541756bf72f7dc1d25` from
+  source commit `27af26cc`; the installed 185-artifact manifest matches the
+  package. Provider-owned parent supervisors from earlier sessions remain
+  intentionally untouched while current-generation workers are handed off;
+  idle-parent retirement and reboot persistence still require evidence. Live
+  provider acceptance remains open.
 
 ### Lane 7 — Live acceptance and multiplayer demo gates
 
@@ -317,17 +322,24 @@ foundational follow-up and is not falsely marked complete by the demo.
    tracker evidence commit `580a3705`; held asset/config/runtime categories
    remain unstaged and uncommitted. **Done for this boundary.**
 5. Rebuild from the resulting clean commit, run release manifest/checks, and
-   compare the complete artifact set. **Verified for the packaged candidate:**
-   fresh build ID `381ec554b922aefb673c3f19e306aa15ad86cc897a7eaf7bb1b7a88a80e09190`,
-   `sourceDirty: false`, 185 artifact identities, packaged MCP 2/2,
-   transaction tests 3/3, and packaged binding/reconnect tests 4/4. Live
-   install/activation is intentionally separate.
-6. Only after that, activate/reconnect as an explicitly authorized live change,
-   run the two difficult dry runs, rehearse the multiplayer demo, and record
-   the final demo. **Open.**
+   compare the complete artifact set. **Verified:** clean source commit
+   `27af26cc`, build ID
+   `02b96a7e05c762588e9f7180a44aa9ed3efdef286f96e3541756bf72f7dc1d25`,
+   `sourceDirty: false`, 185 artifact identities, exact ZIP checksum
+   `047c2256845d96d97ca80c8ffbac15bbf4498267f78fcf1c37ef6c3ea62e3b19`,
+   installed manifest/hash comparison green, packaged MCP verifier green,
+   engine smoke 2/2, transaction checks 3/3, and bounded installer checks 4/4.
+   The full installer fixture remains inconclusive and is not promoted to
+   green.
+6. Exact package activation is **verified**: managed broker stop/start and
+   current-build receipts, installed runtime identity, and pill start all
+   succeeded. Current-generation workers were handed off beneath the existing
+   provider supervisors without blanket process termination. Idle-parent
+   retirement, reboot persistence, installed-provider proof, the two difficult
+   dry runs, multiplayer rehearsal, and final demo recording remain **open**.
 
 The next safe action is therefore held-item review and live-acceptance
-planning—not automatic deletion, blanket committing, runtime activation, or
-provider acceptance. The release-boundary source/package work is complete for
+planning—not automatic deletion, blanket committing, or unverified provider
+acceptance. The release-boundary source/package/activation work is complete for
 this checkpoint; the remaining gates are explicitly live, visual, provider,
 or held-product work.

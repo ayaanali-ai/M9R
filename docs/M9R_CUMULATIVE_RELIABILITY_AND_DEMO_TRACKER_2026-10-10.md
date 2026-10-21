@@ -3131,3 +3131,47 @@ continuity and room A2A exchange tests passed **27/27**. These results confirm
 the existing A2A/A2A-to-human primitives are reusable for the multiplayer
 slice. They do not turn an arbitrary idle native Claude CLI into a push target;
 that still needs a real turn-capable adapter or the M9R-managed session path.
+
+### 2026-10-21 (Codex) — provider-neutral runtime package activated and reconciled
+
+The verifier itself had a release-boundary defect: when it launched a candidate
+engine without an isolated `M9R_HOME`, the candidate could resolve the already
+installed runtime and report the wrong build. The verifier now creates a
+disposable isolated store root for the spawned MCP process and removes it in a
+`finally` path. Its regression test covers both isolation and cleanup. This
+preserves the CLI/MCP contract; it changes only the verification boundary so a
+candidate cannot accidentally prove an older installed runtime.
+
+Release evidence for the corrected boundary:
+
+- verifier regression and source typecheck: **passed**;
+- clean source commit: `27af26cc2fe74a9c6abea2688863714eb89acf70`;
+- runtime manifest: build ID `02b96a7e05c762588e9f7180a44aa9ed3efdef286f96e3541756bf72f7dc1d25`,
+  `sourceDirty=false`, **185** artifact identities;
+- standalone ZIP: `release-package-20261021/m9r-engine-windows-x64.zip`,
+  SHA-256 `047c2256845d96d97ca80c8ffbac15bbf4498267f78fcf1c37ef6c3ea62e3b19`;
+- extracted-package MCP verifier: **passed**; native stage/computer-use tools
+  present and retired web-extension tools absent;
+- packaged engine/transaction checks: engine MCP smoke **2/2** and runtime
+  transaction checks **3/3**; bounded installer contract checks **4/4**;
+- exact ZIP was installed through the consent-driven installer. The installed
+  manifest and every one of its **185** artifact hashes match the package;
+  managed broker health/start and current-build receipts were observed, and the
+  desktop pill was started.
+
+Process handoff evidence after activation: provider-owned parent MCP
+supervisors from earlier sessions were not killed or blindly replaced. Each
+observed old parent had a new child MCP worker created at activation time, so
+the current stable runtime path is serving the replaceable worker without
+discarding the provider session. This proves current-worker handoff, not full
+parent-process retirement. Evidence-backed retirement of idle parent
+supervisors, reboot persistence, and cleanup of only provably unreferenced
+retired images remain open release-hygiene work.
+
+The full native installer fixture did not produce a trustworthy completion
+summary in the Windows child-process boundary and was stopped; it is **not**
+claimed green. No provider task, credential, browser state, or desktop task was
+sent or consumed during activation. Live provider acceptance remains separate:
+OpenCode must prove automatic post-update identity/delivery, Claude's idle
+native-session delivery limitation remains open, and the three-provider
+open-world matrix is not yet signed off.
