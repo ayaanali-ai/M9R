@@ -169,7 +169,7 @@ test("standalone release packages runtime companions from the canonical engine d
     "source cleanliness must still account for non-ignored untracked paths");
   assert.match(builderSource, /heldLocalProvenancePatterns/,
     "source cleanliness may exclude only the explicitly classified local-evidence roots");
-  assert.match(builderSource, /\.codex-stage-build-|docs\\/research|m9r-runtime-clean-/,
+  assert.match(builderSource, /\.codex-stage-build-|docs\/research|m9r-runtime-clean-/,
     "known local build, research, and runtime evidence roots must remain outside source provenance");
   assert.match(builderSource, /untrackedSource\.length > 0/,
     "unknown untracked source must still block a clean runtime build");
