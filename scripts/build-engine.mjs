@@ -51,6 +51,7 @@ const heldLocalProvenancePatterns = [
   // source checkout into a dirty runtime solely because progress was logged.
   /^docs\/M9R_(?:CUMULATIVE_RELIABILITY_AND_DEMO_TRACKER_2026-10-10|MASTER_LIST_2\.1)\.md$/i,
   /^m9r-clean-cutover-[^/]+(?:\/|$)/i,
+  /^m9r-release-package-[^/]+(?:\/|$)/i,
   /^m9r-runtime-clean-[^/]+(?:\/|$)/i,
   /^scratchpad(?:\/|$)/i,
   /^docs\/Convenience_Store_Replacement_Plan\.docx$/i,

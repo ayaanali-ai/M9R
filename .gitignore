@@ -142,6 +142,7 @@ skills-lock.json
 /.m9r-chrome-probe-*/
 /.m9r-coordinator-worker-*/
 /.m9r-web-broker-*/
+/m9r-release-package-*/
 
 # local tool scratch caches, never committed
 .workcache/
