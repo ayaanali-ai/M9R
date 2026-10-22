@@ -13,7 +13,7 @@ export default function manifest(): MetadataRoute.Manifest {
     orientation: "any",
     icons: [
       {
-        src: "/oathlock-logo-transparent.png",
+        src: "/reference-innerwebs/m9r-logo-transparent.png",
         sizes: "1360x1360",
         type: "image/png",
         purpose: "any",

@@ -252,6 +252,11 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             }
         },
         #[cfg(windows)]
+        Some("inspectDesktopStructure") => match crate::shell_accessibility::desktop_structure(value) {
+            Ok(structure) => json!({"ok":true,"requestId":request_id,"desktopStructure":structure}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
         Some("windowStatus") => match platform::window_status(value) {
             Ok(state) => json!({"ok":true,"requestId":request_id,"windowState":state}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),

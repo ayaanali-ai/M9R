@@ -147,3 +147,4 @@ skills-lock.json
 .workcache/
 .worktrees/
 .n3-proof/
+.test-tmp/

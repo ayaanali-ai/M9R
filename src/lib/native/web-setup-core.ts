@@ -193,9 +193,11 @@ const M9R_HOOK_TIMEOUT_MS = 5000;
 const M9R_MAX_CACHED_SESSIONS = 256;
 const M9R_POLL_INTERVAL_MS = 1500;
 const M9R_POLL_RETRY_MS = 5000;
+const M9R_SESSION_DISCOVERY_INTERVAL_MS = 5000;
 const M9R_IDLE_FAILURE_GRACE_MS = 2000;
 const M9R_SESSION_BOOTSTRAPS = new Map();
 const M9R_SESSION_POLLERS = new Map();
+const M9R_SESSION_DISCOVERY_TIMERS = new Map();
 const M9R_ACTIVE_TASKS = new Map();
 
 ${parser}
@@ -476,8 +478,12 @@ function wakeOpenCodePoller(sessionID, cwd, client) {
 async function startKnownOpenCodeSessions(cwd, client) {
   const list = client?.session?.list;
   const status = client?.session?.status;
-  if (typeof list !== "function" || typeof status !== "function") return;
   try {
+    // OpenCode can load the plugin before its session API is ready, and a
+    // provider update can briefly replace that API while keeping the process
+    // and its sessions alive. Do not make the first failed discovery a
+    // permanent loss of automatic delivery.
+    if (typeof list !== "function" || typeof status !== "function") return;
     const listed = await list({ query: { directory: cwd } });
     if (listed?.error) return;
     const sessions = Array.isArray(listed?.data) ? listed.data : Array.isArray(listed) ? listed : [];
@@ -499,7 +505,24 @@ async function startKnownOpenCodeSessions(cwd, client) {
   } catch {
     // A server can be ready before its session endpoint; the active transform
     // will still start a poller for the session that is actually in use.
+  } finally {
+    // Keep discovery alive while the provider process is resident. This is a
+    // bounded local reconciliation loop, not inbox polling: it only asks the
+    // provider for its active sessions and starts an M9R poller for sessions
+    // that the provider itself reports as live. The timer is unref'd so it
+    // cannot keep a shutting-down provider alive.
+    scheduleKnownOpenCodeSessions(cwd, client);
   }
+}
+
+function scheduleKnownOpenCodeSessions(cwd, client, delay = M9R_SESSION_DISCOVERY_INTERVAL_MS) {
+  if (M9R_SESSION_DISCOVERY_TIMERS.has(cwd)) return;
+  const timer = setTimeout(() => {
+    M9R_SESSION_DISCOVERY_TIMERS.delete(cwd);
+    void startKnownOpenCodeSessions(cwd, client);
+  }, delay);
+  timer.unref?.();
+  M9R_SESSION_DISCOVERY_TIMERS.set(cwd, timer);
 }
 
 function bootstrapSession(sessionID, cwd) {
@@ -613,7 +636,12 @@ async function setupM9rOpenCodeV2(ctx = {}) {
     }
   }
 
-  return () => controller?.abort();
+  return () => {
+    controller?.abort();
+    const timer = M9R_SESSION_DISCOVERY_TIMERS.get(cwd);
+    if (timer) clearTimeout(timer);
+    M9R_SESSION_DISCOVERY_TIMERS.delete(cwd);
+  };
 }
 
 export const M9rIdentity = async ({ directory, client } = {}) => {

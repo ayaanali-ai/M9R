@@ -11,6 +11,7 @@ test("desktop action parser accepts common pointer and keyboard actions but reje
   assert.deepEqual(parseTaskStageAction({ kind: "double_click", x: 24, y: 68 }), { kind: "double_click", x: 24, y: 68 });
   assert.deepEqual(parseTaskStageAction({ kind: "right_click", x: 24, y: 68 }), { kind: "right_click", x: 24, y: 68 });
   assert.deepEqual(parseTaskStageAction({ kind: "read_structure", view: "app" }), { kind: "read_structure", view: "app" });
+  assert.deepEqual(parseTaskStageAction({ kind: "read_structure", view: "desktop" }), { kind: "read_structure", view: "desktop" });
   assert.deepEqual(parseTaskStageAction({ kind: "press_key", key: "Enter" }), { kind: "press_key", key: "Enter" });
   assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L"] }), { kind: "hotkey", keys: ["Control", "L"] });
   assert.throws(() => parseTaskStageAction({ kind: "press_key", key: "not-a-key" }), /Invalid key/);
@@ -32,18 +33,20 @@ test("stage parser accepts the provider-neutral semantic action contract", () =>
   for (const action of actions) assert.deepEqual(parseTaskStageAction(action), action);
 });
 
-test("structure observation is app-window-only and does not use desktop coordinates", async () => {
+test("structure observation selects the exact app or generic desktop route", async () => {
   const calls: string[] = [];
   const driver = {
     readStructure: async (...args: unknown[]) => { calls.push(JSON.stringify(args)); return { status: "complete", capturedAt: new Date(0).toISOString(), elements: [] }; },
-    captureDesktop: async () => { throw new Error("desktop-wide structure is not allowed"); },
+    readDesktopStructure: async (...args: unknown[]) => { calls.push(`desktop:${JSON.stringify(args)}`); return { scope: "desktop", status: "partial", capturedAt: new Date(0).toISOString(), windows: [], elements: [], shell: { status: "visual-fallback", reason: "fixture" }, fallbackCapture: {} }; },
   } as unknown as ReturnType<typeof createCuaStageDriver>;
   const identity = { handle: "codex", sessionId: "session" };
   const structure = await runTaskStageAction(driver, "preview", { kind: "read_structure", view: "app" }, identity, "owner-preview");
   assert.equal((structure as { status: string }).status, "complete");
-  assert.deepEqual(calls, [["preview", identity]].map((value) => JSON.stringify(value)));
+  const desktop = await runTaskStageAction(driver, "preview", { kind: "read_structure", view: "desktop" }, identity, "owner-preview");
+  assert.equal((desktop as { scope: string }).scope, "desktop");
+  assert.deepEqual(calls, [JSON.stringify(["preview", identity]), `desktop:${JSON.stringify(["preview", identity])}`]);
   assert.throws(() => parseTaskStageAction({ kind: "read_structure" }), /Invalid stage action fields/);
-  assert.throws(() => parseTaskStageAction({ kind: "read_structure", view: "desktop" }), /exact app view/);
+  assert.throws(() => parseTaskStageAction({ kind: "read_structure", view: "other" }), /Invalid stage action view/);
 });
 
 test("owner-preview actions route through desktop-wide driver methods", async () => {

@@ -158,6 +158,13 @@ test("provider delivery carries work text without exposing internal task or cred
   assert.doesNotMatch(rendered.text, /T1|get_task|session token|session id/i);
 });
 
+test("human-originated provider work is labeled as owner work, never as a synthetic @you agent", () => {
+  const task = mk({ from: "you", origin: "human_typed", goal: "Do the owner task." }, 1);
+  const rendered = renderInboxInjection([task], 0, { includePending: false, includeTaskIds: false, items: 1 });
+  assert.match(rendered.text, /M9R work from the owner: Do the owner task\./);
+  assert.doesNotMatch(rendered.text, /@you/);
+});
+
 test("the session card is a few lines of pointers within its cap, and never carries memory content", () => {
   const card = renderSessionCard({ handle: "claude", others: [{ handle: "codex", activity: "editing relay/hub.ts" }], pendingCount: 2, memoryDir: ".m9r/memory" });
   assert.match(card, /M9R connected as @claude\./);

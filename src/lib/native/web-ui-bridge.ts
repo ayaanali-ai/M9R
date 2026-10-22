@@ -284,7 +284,7 @@ export function composeAgentMessage(text: string, context: UiPageContext, recipi
       "",
       `Shared task: the owner sent this to ${others.map((h) => `@${h}`).join(" and ")} too. Work together without collisions, cheaply:`,
       "1. First, send each teammate ONE line with the part you are taking (m9r_send). Do not repeat a teammate's part.",
-      "2. Read only what you need. You may read or switch to any tab a teammate opened (m9r_web_tabs). Work on the same page a teammate is on unless you truly need a second page at the same time. Typing into a field is claimed for you; if a field is refused, work on another part and come back.",
+      "2. Read only what you need. Use the same owner-visible browser window and desktop surface a teammate is using through M9R's native observation/action tools; do not create a second profile or silently switch surfaces. Work on the same page a teammate is on unless you truly need a second page at the same time. Typing into a field is claimed for you; if a field is refused, work on another part and come back.",
       "3. Post short findings to teammates (one or two lines) with m9r_send. Never poll and never sit waiting: after you send something you need an answer to, END YOUR TURN with one line saying what you are waiting for. The teammate's reply is delivered to you automatically as your next message.",
       "4. At a hand-off point send 'ready: <one line>' to teammates, then end your turn; carry on when their reply arrives.",
       "5. Never repeat an action that already worked. Stop as soon as the task is done and give a two-sentence summary.",

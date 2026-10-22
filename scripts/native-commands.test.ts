@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { HOOK_RUNTIME_FILES, nativeStatus, nativePaths, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
+import { HOOK_RUNTIME_FILES, createNativeDeliveryPump, nativeStatus, nativePaths, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
 import { createLocalStore } from "@/lib/native/local-store";
 import { createPageNotesStore } from "@/lib/native/page-notes-store";
 import { projectRoomId } from "@/lib/native/project-room";
@@ -782,6 +782,35 @@ test("a watched feed drains on runtime generation change and releases its writer
     assert.equal(await running, 0);
     assert.match(s.err.join("\n"), /runtime generation changed on disk; draining the feed/i);
     assert.equal(existsSync(join(s.p.m9r, "feed.lock")), false, "the stale watcher must not strand the single-writer lock");
+  } finally { s.done(); }
+});
+
+test("the native feed exposes deferred delivery through the provider-neutral adapter pump", async () => {
+  const s = sandbox();
+  try {
+    const store = createLocalStore(s.p.m9r);
+    const { task } = store.addTask({
+      from: "you",
+      to: "codex",
+      goal: "resume the held owner task",
+      origin: "human_typed",
+      idempotencyKey: "deferred-pump",
+    });
+    store.setDelivery(task.id, { state: "deferred", threadId: "codex-session" });
+    const sent: string[] = [];
+    const pump = createNativeDeliveryPump(s.p.m9r, {
+      env: s.io.env,
+      deliveryAdapters: new Map([[
+        "codex",
+        async (taskId: string) => {
+          sent.push(taskId);
+          store.setDelivery(taskId, { state: "queued", threadId: "codex-session", queuedAt: new Date().toISOString() });
+        },
+      ]]),
+    });
+    await pump.tick();
+    assert.deepEqual(sent, [task.id]);
+    assert.equal(store.getTask(task.id)?.delivery?.state, "queued");
   } finally { s.done(); }
 });
 

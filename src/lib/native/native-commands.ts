@@ -44,10 +44,13 @@ import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type Delivery
 import { codexNoteInEffect, createCodexWatcher } from "./codex-watch";
 import { hookPipePath, requestShutdown, startHookServer } from "./hook-server";
 import { runHookRequest } from "./hook-run";
+import { requestOwnerPipe } from "./owner-pipe";
+import { ownerPipePath } from "./web-broker-paths";
 import { canQueue, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
+import { createTaskDeliveryPump } from "./task-delivery-pump";
 import { USER_STEPS } from "./onboarding-steps";
 import { readRuntimeBuildId, readRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
 import { checkEngineUpdate, parseUpdateConfig } from "./update-lifecycle";
@@ -72,12 +75,33 @@ export interface NativeIo {
   confirm?(question: string): Promise<boolean>;
   /** Codex delivery dependencies; tests inject fakes, production uses the real `codex queue`. */
   codexDeps?: DeliveryDeps;
+  /** Provider-neutral delivery transports. The scheduler owns retry/fencing; adapters own provider I/O. */
+  deliveryAdapters?: ReadonlyMap<string, (taskId: string) => Promise<unknown>>;
   /** The caller's working folder, used to pick a session. M9R's own install directory is never a project folder. */
   cwd?: string;
   /** Runtime image path; production defaults to the current executable, tests may use an isolated image. */
   executablePath?: string;
   /** Start-with-Windows switch; tests inject a fake so nothing ever touches the real registry. */
   autostart?: Autostart;
+}
+
+/**
+ * Build the feed's provider-neutral delivery scheduler.
+ *
+ * The scheduler is deliberately transport-agnostic. The native runtime wires
+ * the currently supported Codex queue adapter by default and accepts future
+ * provider adapters through NativeIo without changing the scheduler or the
+ * feed lifecycle. Deferred work remains durable until its adapter settles it;
+ * this function never invents a provider session or retries uncertain sends.
+ */
+export function createNativeDeliveryPump(root: string, io: Pick<NativeIo, "env" | "codexDeps" | "deliveryAdapters">) {
+  const store = createLocalStore(root);
+  const adapters = new Map(io.deliveryAdapters ?? []);
+  if (!adapters.has("codex")) {
+    const deps = io.codexDeps ?? realDeps(io.env);
+    adapters.set("codex", (taskId) => deliverToCodex(store, taskId, deps));
+  }
+  return createTaskDeliveryPump(store, adapters);
 }
 
 export interface Autostart {
@@ -905,6 +929,20 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
     io.out(`Tell the user to run: m9r-cli approve ${task.id}${isProtectedAction(task.goal) ? "  (it looks like a protected action, so a standing rule would not cover it)" : ""}`);
     return 0;
   }
+  // The owner-launched broker owns the Cua surface.  Ask it to show the
+  // recipient's logical cursor immediately after a human task is accepted;
+  // this is fire-and-forget so task delivery never waits on a visual overlay.
+  // The owner-pipe endpoint accepts only owner-originated human tasks and
+  // performs no desktop focus or physical-pointer operation.
+  if (created && task.origin === "human_typed" && task.from === "you") {
+    const pipe = ownerPipePath(nativePaths(io).m9r);
+    // `existsSync` is a cheap no-op for the normal CLI/test path when the
+    // broker is not running; do not leave a five-second named-pipe probe
+    // behind every standalone send.
+    if (existsSync(pipe)) void requestOwnerPipe(pipe, {
+      method: "POST", path: "/web/stage/prime-cursor-owner", body: { taskId: task.id },
+    }, 5_000);
+  }
   if (task.to === "codex" && created && canQueue(task)) {
     const outcome = await deliverToCodex(store, task.id, io.codexDeps ?? realDeps(io.env));
     if (outcome.state === "queued") { io.out(`Sent to @codex as task ${task.id} and accepted by its session. That confirms delivery, not that work has started. The answer reaches ${task.from === "you" ? "your" : `@${task.from}'s`} inbox.`); return 0; }
@@ -1096,7 +1134,11 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
       // Finding Codex sessions (so `@codex` has somewhere to go) always runs while watching. Forwarding what a person types in Codex only
       // happens for sessions where Codex was told to stand down (its AGENTS.md carries the note), or when a test forces it on.
       const routeMentions = io.env.M9R_CODEX_WATCH === "1" ? true : (cwd: string | undefined) => codexNoteInEffect(cwd, codexHome(io.env));
-      const watcher = watching && !io.env.M9R_NO_CODEX_WATCH ? createCodexWatcher(createLocalStore(root), { codexHome: codexHome(io.env), routeMentions, dispatch: (id) => spawnDeliveryRunner(activeHookEntry(io), id, io.env) }) : undefined;
+      const store = createLocalStore(root);
+      const watcher = watching && !io.env.M9R_NO_CODEX_WATCH ? createCodexWatcher(store, { codexHome: codexHome(io.env), routeMentions, dispatch: (id) => spawnDeliveryRunner(activeHookEntry(io), id, io.env) }) : undefined;
+      // The feed is the resident owner of deferred delivery retries. Keep the
+      // scheduler generic and let provider adapters own their transport.
+      const deliveryPump = watching ? createNativeDeliveryPump(root, io) : undefined;
       server = watching && has("--serve-hooks")
         ? startHookServer({
             path: hookPipePath(root),
@@ -1104,7 +1146,7 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
             onShutdown: () => controller.abort(),
           })
         : undefined;
-      await runFeed({ root, watch: watching, codexWatcher: watcher, signal: controller.signal, onWrite: watching ? (f) => io.out(`feed #${f.seq}: ${f.needsYou.length} need you`) : undefined });
+      await runFeed({ root, watch: watching, codexWatcher: watcher, deliveryPump, signal: controller.signal, onWrite: watching ? (f) => io.out(`feed #${f.seq}: ${f.needsYou.length} need you`) : undefined });
       if (!watching) io.out(`Wrote ${feedPath(root)}`);
       return 0;
     } finally {

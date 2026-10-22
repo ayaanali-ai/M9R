@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
 import test from "node:test";
 import { COMMANDS, SIGNUP_URL, SOURCE_URL } from "../src/lib/marketing-content.ts";
+import { FOUNDING_COHORT_SIZE, FOUNDING_MONTHLY_PRICE_USD, STANDARD_MONTHLY_PRICE_USD } from "../src/lib/stripe.ts";
 
 test("documented CLI commands use a package binary and implemented top-level command", () => {
   const pkg = JSON.parse(readFileSync("cli/package.json", "utf8"));
@@ -24,8 +25,9 @@ test("public setup commands are all supported CLI steps", () => {
 });
 
 test("homepage and docs share the same guide rather than independent command copies", () => {
-  for (const path of ["src/components/world/WorldHome.tsx", "src/app/docs/get-started/page.tsx", "src/app/how-it-works/page.tsx"]) {
-    assert.match(readFileSync(path, "utf8"), /<Guide\s*\/>/);
+  assert.match(readFileSync("src/components/world/WorldHome.tsx", "utf8"), /<Guide\s*\/>/);
+  for (const path of ["src/app/docs/get-started/page.tsx", "src/app/how-it-works/page.tsx"]) {
+    assert.match(readFileSync(path, "utf8"), /<ReferenceGuide\s*\/>/);
   }
 });
 
@@ -46,6 +48,27 @@ test("new public destinations resolve to actual pages", () => {
     assert.ok(existsSync(`src/app/${route}/page.tsx`));
   }
   assert.equal(SOURCE_URL, "https://github.com/ayaanali-ai/M9R");
+});
+
+test("public pricing and terms describe the same current per-computer plan", () => {
+  const pricing = readFileSync("src/components/reference/ReferencePricing.tsx", "utf8");
+  const terms = readFileSync("src/app/terms/page.tsx", "utf8");
+  assert.match(pricing, /per computer/);
+  assert.match(terms, /priced per computer, not per seat/);
+  assert.match(terms, /FOUNDING_COHORT_SIZE/);
+  assert.match(terms, /FOUNDING_MONTHLY_PRICE_USD/);
+  assert.match(terms, /STANDARD_MONTHLY_PRICE_USD/);
+  assert.equal(FOUNDING_COHORT_SIZE, 500);
+  assert.equal(FOUNDING_MONTHLY_PRICE_USD, 17);
+  assert.equal(STANDARD_MONTHLY_PRICE_USD, 27);
+  assert.doesNotMatch(terms, /Relationship Memory|Team costs|7-day free trial/);
+});
+
+test("the PWA manifest points to an existing current M9R asset", () => {
+  const manifest = readFileSync("src/app/manifest.ts", "utf8");
+  assert.match(manifest, /\/reference-innerwebs\/m9r-logo-transparent\.png/);
+  assert.doesNotMatch(manifest, /oathlock-logo-transparent|OathLock/);
+  assert.equal(existsSync("public/reference-innerwebs/m9r-logo-transparent.png"), true);
 });
 
 test("license summary matches repository parameters", () => {

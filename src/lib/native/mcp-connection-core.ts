@@ -51,6 +51,14 @@ export interface BindConnectionInput {
 }
 
 export const CONNECTION_CLAIM_TTL_MS = 15 * 60_000;
+/**
+ * A provider-owned process can survive an M9R/provider update without emitting
+ * another SessionStart event. Recovery is still fail-closed (one provider,
+ * one project, one session, and no revocation), but the session record must
+ * outlive the short claim-publication window so an update does not force a
+ * fresh provider conversation.
+ */
+export const PROVIDER_SESSION_RECOVERY_TTL_MS = 7 * 24 * 60 * 60_000;
 export const MAX_CONNECTION_RECORDS = 512;
 
 export function newConnectionId(): string {

@@ -12,7 +12,7 @@ import { isProtectedAction, lapsedPending, ruleCovers, type StandingRule } from 
 import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle } from "./inbox-core";
 import { canQueue } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
-import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, newConnectionId, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
+import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, PROVIDER_SESSION_RECOVERY_TTL_MS, newConnectionId, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
 import { createInitialProviderUpdateState, normalizeProviderUpdateState, type ProviderUpdateState } from "./provider-update-lifecycle-core";
 
 /**
@@ -1162,6 +1162,53 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
+    /**
+     * Recover the one provider session already known in this project when a
+     * provider-owned hook/plugin did not republish its claim after an update
+     * or process replacement. This is deliberately narrower than discovery:
+     * it requires one recoverable session, one provider, one project, and (when
+     * supplied) one explicit session id. Ambiguous or explicitly revoked
+     * sessions remain fail-closed. Identity and claim values stay private.
+     */
+    recoverProviderConnection(input: {
+      provider: string;
+      cwd?: string;
+      sessionId?: string;
+      processId?: number;
+    }): ConnectionBinding | null {
+      const provider = input.provider.trim();
+      if (!provider) return null;
+      const handle = handleForProvider(provider);
+      const folder = input.cwd === undefined ? undefined : normalizeSessionFolder(projectCwd(root, input.cwd));
+      const requestedSession = input.sessionId?.trim() || undefined;
+      const at = now().getTime();
+      const sessions = readState().sessions.filter((session) => {
+        const seenAt = Date.parse(session.lastSeenAt);
+        return normalizeHandle(session.handle) === handle
+          && sameConnectionProvider(session.provider, provider)
+          && (folder === undefined || normalizeSessionFolder(session.cwd) === folder)
+          && (!requestedSession || session.sessionId === requestedSession)
+          && Number.isFinite(seenAt)
+          && seenAt <= at
+          && at - seenAt <= PROVIDER_SESSION_RECOVERY_TTL_MS;
+      });
+      if (sessions.length !== 1) return null;
+      const session = sessions[0]!;
+      if (this.identityWasRevoked(handle, session.sessionId)) return null;
+
+      // Each operation is atomic and idempotent. A racing worker either sees
+      // the identity/claim just published or fails the same one-candidate
+      // check; it never receives a guessed token or a second assignment.
+      this.registerEndpoint({ provider, sessionId: session.sessionId, cwd: folder, seenAt: new Date(at).toISOString() });
+      if (!this.identityTokenFor(handle, session.sessionId)) this.issueIdentity(handle, provider, session.sessionId);
+      try {
+        this.issueConnectionClaim({ handle, provider, sessionId: session.sessionId, cwd: folder, ownerProcessId: input.processId, continuation: true });
+      } catch {
+        return null;
+      }
+      return this.bindConnectionForProcess({ provider, processId: input.processId });
+    },
+
     /** Returns the verified provider identity behind a private binding, or null if it was revoked. */
     verifyConnectionBinding(bindingId: string): VerifiedIdentity | null {
       const state = readState();
@@ -1399,6 +1446,12 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return readState().tasks.filter((task) => normalizeHandle(task.to) === normalizedHandle
         && (!(task.targetSession ?? task.deliveredSession) || (task.targetSession ?? task.deliveredSession) === sessionId)
         && !task.resultSummary
+        // Terminal delivery/lifecycle failures are history, not a reason to
+        // block provider identity repair or make an incidental prompt look
+        // like it is carrying live delegated work.
+        && task.delivery?.state !== "failed"
+        && task.lifecycle?.state !== "failed"
+        && task.lifecycle?.state !== "completed"
         && (task.approval === "approved" || task.approval === "not_needed")
         && Date.parse(task.createdAt) >= cutoff);
     },
@@ -1454,6 +1507,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           if (task.seq <= cursor) continue;
           // A push may already be executing. Inbox fallback must not race or replay it.
           if (task.delivery?.state === "sending" || task.delivery?.state === "uncertain") continue;
+          const failedPush = task.delivery?.state === "failed";
           if (task.approval === "denied" || task.approval === "expired"
             || task.delivery?.state === "queued" || task.delivery?.state === "done" || task.resultSummary
             || at.getTime() - Date.parse(task.createdAt) > maxAge) {
@@ -1475,12 +1529,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           // projects. A delivery receipt is still a global one-shot fence for the task.
           // Legacy explicitly-targeted rows with a conflicting deliveredSession are
           // allowed through once so the intended session can repair the old receipt.
-          if (task.deliveredAt && owner === sessionId && !(task.targetSession === sessionId && task.deliverySource === undefined)) {
+          if (!failedPush && task.deliveredAt && owner === sessionId && !(task.targetSession === sessionId && task.deliverySource === undefined)) {
             cursor = Math.max(cursor, task.seq);
             continue;
           }
-          const firstDelivery = !task.deliveredAt;
-          task.deliveredAt ??= at.toISOString();
+          const firstDelivery = !task.deliveredAt || failedPush;
+          if (failedPush) task.deliveredAt = at.toISOString();
+          else task.deliveredAt ??= at.toISOString();
           task.deliveredSession = task.targetSession ?? sessionId;
           task.deliverySource = "prompt";
           applyTaskLifecycle(task, {
@@ -1568,7 +1623,9 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         // `delivery` is the durable at-most-once fence. `deliveredAt` also
         // fences records created by older releases that advanced the inbox
         // cursor before delivery metadata existed. Neither may be replayed.
-        if (!task || normalizeHandle(task.to) !== handle || task.delivery || task.deliveredAt || task.resultSummary || !canQueue(task)) return undefined;
+        if (!task || normalizeHandle(task.to) !== handle
+          || (task.delivery && task.delivery.state !== "deferred")
+          || task.deliveredAt || task.resultSummary || !canQueue(task)) return undefined;
         const cursor = s.cursors[cursorKey(handle, input.sessionId, folder)] ?? 0;
         if (task.seq <= cursor || !(task.targetSession === input.sessionId
           || (!task.targetSession && activeSessions.length === 1))

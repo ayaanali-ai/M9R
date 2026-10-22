@@ -23,6 +23,8 @@ const MAX_TEXT_ACTION_LENGTH = 500;
 const DEFAULT_TYPE_DELAY_MS = 30;
 const MAX_TYPE_DELAY_MS = 200;
 const MAX_WINDOW_OPTIONS = 40;
+const MAX_DESKTOP_STRUCTURE_WINDOWS = 12;
+const MAX_DESKTOP_STRUCTURE_ELEMENTS = 256;
 const SESSION_PREFIX = "m9r-stage-";
 
 type WindowTargetFactory = {
@@ -45,9 +47,78 @@ type CuaSdk = {
   ScrollBy: { Line: number };
   VisualRegionKind: { Text: number; Icon: number };
   CursorReducedMotion: { Auto: number };
-  CursorMotionStyle: typeof import("@trycua/cua-driver").CursorMotionStyle;
-  CursorMotionTiming: typeof import("@trycua/cua-driver").CursorMotionTiming;
+  /** Optional presentation features; their absence must never block stage boot. */
+  CursorMotionStyle?: typeof import("@trycua/cua-driver").CursorMotionStyle;
+  CursorMotionTiming?: typeof import("@trycua/cua-driver").CursorMotionTiming;
 };
+
+type RuntimeModuleRecord = Record<string, unknown>;
+
+function runtimeModuleRecord(value: unknown): RuntimeModuleRecord | undefined {
+  return (typeof value === "object" && value !== null) || typeof value === "function"
+    ? value as RuntimeModuleRecord
+    : undefined;
+}
+
+/**
+ * Dynamic imports are not guaranteed to have the same namespace shape in a
+ * tsx test process, a Node package install, and the bundled Windows runtime.
+ * Flatten only the module namespaces that can contain the Cua exports; this
+ * keeps the adapter provider-neutral while avoiding a blind `as CuaSdk` cast.
+ */
+function collectRuntimeExports(value: unknown, output: RuntimeModuleRecord, seen: Set<unknown>, depth = 0): void {
+  const record = runtimeModuleRecord(value);
+  if (!record || seen.has(record) || depth > 3) return;
+  seen.add(record);
+  for (const [key, child] of Object.entries(record)) {
+    if (key !== "default" && output[key] === undefined) output[key] = child;
+  }
+  for (const key of ["default", "cua_driver_contract", "cua_driver_sdk"]) {
+    collectRuntimeExports(record[key], output, seen, depth + 1);
+  }
+}
+
+function hasFunction(record: RuntimeModuleRecord | undefined, key: string): boolean {
+  return typeof record?.[key] === "function";
+}
+
+function hasNumericMembers(record: RuntimeModuleRecord | undefined, keys: readonly string[]): boolean {
+  return Boolean(record) && keys.every((key) => typeof record?.[key] === "number" && Number.isFinite(record[key]));
+}
+
+/**
+ * Validate and normalize the Cua Driver runtime boundary before a native
+ * session is created. TypeScript casts cannot validate a dynamic import at
+ * runtime; without this check an absent motion enum throws later in
+ * ensureAgentSession(), before the agent can observe or focus anything.
+ */
+export function normalizeCuaSdk(moduleValue: unknown, source = CUA_PACKAGE): CuaSdk {
+  const exports: RuntimeModuleRecord = {};
+  collectRuntimeExports(moduleValue, exports, new Set());
+  const cuaDriver = runtimeModuleRecord(exports.CuaDriver);
+  const actionTarget = runtimeModuleRecord(exports.ActionTarget);
+  const clickPosition = runtimeModuleRecord(exports.ClickPosition);
+  const missing: string[] = [];
+  if (!hasFunction(cuaDriver, "create")) missing.push("CuaDriver.create");
+  if (!hasFunction(cuaDriver, "connect")) missing.push("CuaDriver.connect");
+  if (!hasFunction(actionTarget, "Window")) missing.push("ActionTarget.Window");
+  if (!hasFunction(clickPosition, "Coordinates")) missing.push("ClickPosition.Coordinates");
+  if (!hasFunction(clickPosition, "CapturedCoordinates")) missing.push("ClickPosition.CapturedCoordinates");
+  if (!hasNumericMembers(runtimeModuleRecord(exports.InputDeliveryMode), ["Background", "Foreground"])) missing.push("InputDeliveryMode");
+  if (!hasNumericMembers(runtimeModuleRecord(exports.CaptureScope), ["Desktop"])) missing.push("CaptureScope.Desktop");
+  if (!hasNumericMembers(runtimeModuleRecord(exports.ClickButton), ["Left", "Right", "Middle"])) missing.push("ClickButton");
+  if (!hasNumericMembers(runtimeModuleRecord(exports.ScrollDirection), ["Up", "Down"])) missing.push("ScrollDirection");
+  if (!hasNumericMembers(runtimeModuleRecord(exports.ScrollBy), ["Line"])) missing.push("ScrollBy.Line");
+  if (!hasNumericMembers(runtimeModuleRecord(exports.VisualRegionKind), ["Text", "Icon"])) missing.push("VisualRegionKind");
+  if (!hasNumericMembers(runtimeModuleRecord(exports.CursorReducedMotion), ["Auto"])) missing.push("CursorReducedMotion.Auto");
+  // Cursor motion is presentation-only. Older/newer Cua runtimes may omit
+  // these enums; ensureAgentSession feature-detects them and keeps the
+  // logical cursor and native stage usable without the animation preference.
+  if (missing.length) {
+    throw new Error(`Cua Driver ${CUA_DRIVER_VERSION} loaded from ${source} has an incompatible runtime contract; missing or invalid ${missing.join(", ")}. Reinstall the matching M9R Cua Driver runtime.`);
+  }
+  return exports as unknown as CuaSdk;
+}
 
 export type CuaAgentCursorIdentity = Pick<VerifiedIdentity, "handle" | "sessionId">;
 
@@ -140,6 +211,56 @@ export interface CuaStageStructure {
   }>;
   /** Same-call visual fallback when the accessibility tree is incomplete. */
   fallbackCapture?: CuaStageCapture;
+}
+
+/**
+ * Provider-neutral composite observation of the owner's visible desktop.
+ * Cua's native `getDesktopState` is intentionally pixel-only; this composite
+ * pairs that exact capture with bounded accessibility reads for the visible
+ * application windows. Window handles, PIDs, and driver element tokens never
+ * leave the native stage boundary.
+ */
+export interface CuaDesktopStructureElement {
+  ref: string;
+  windowRef: string;
+  rect?: { x: number; y: number; width: number; height: number };
+  parentRef?: string;
+  depth?: number;
+  role?: string;
+  label?: string;
+  enabled?: boolean;
+  selected?: boolean;
+  actions?: string[];
+  canReplaceValue?: boolean;
+}
+
+export interface CuaDesktopStructureWindow {
+  ref: string;
+  appName: string;
+  title: string;
+  rect: { x: number; y: number; width: number; height: number };
+  frontmost?: boolean;
+  minimized?: boolean;
+  onCurrentSpace?: boolean;
+  status: "complete" | "partial" | "unavailable";
+  elements: CuaDesktopStructureElement[];
+}
+
+export interface CuaDesktopStructure {
+  scope: "desktop";
+  status: "complete" | "partial" | "unavailable";
+  capturedAt: string;
+  windows: CuaDesktopStructureWindow[];
+  elements: CuaDesktopStructureElement[];
+  /** The shell is represented by the same capture plus the native UIA tree when available. */
+  shell: {
+    status: "complete" | "partial" | "unavailable" | "visual-fallback";
+    reason: string;
+    elements?: CuaDesktopStructureElement[];
+    truncated?: true;
+  };
+  /** The exact desktop pixels used for coordinate fallback and taskbar/Start recovery. */
+  fallbackCapture: CuaStageCapture;
 }
 
 /** Private handle to one immutable desktop image; only the broker uses this to bind a click to its capture. */
@@ -330,16 +451,21 @@ function bundledSdkUrl(): string | null {
 }
 
 async function loadCuaSdk(): Promise<CuaSdk> {
+  let packageError: unknown;
   try {
-    return await import(CUA_PACKAGE) as CuaSdk;
-  } catch (packageError) {
-    const url = bundledSdkUrl();
-    if (url) {
-      try { return await import(url) as CuaSdk; } catch { /* report the actionable package error below */ }
-    }
-    const reason = packageError instanceof Error ? packageError.message : "module could not be loaded";
-    throw new Error(`Cua Driver ${CUA_DRIVER_VERSION} is unavailable in this M9R runtime (${reason}). Reinstall the M9R Windows runtime with its Cua Driver files.`);
+    return normalizeCuaSdk(await import(CUA_PACKAGE), CUA_PACKAGE);
+  } catch (error) {
+    packageError = error;
   }
+  const url = bundledSdkUrl();
+  let bundledError: unknown;
+  if (url) {
+    try { return normalizeCuaSdk(await import(url), url); }
+    catch (error) { bundledError = error; }
+  }
+  const reason = packageError instanceof Error ? packageError.message : "module could not be loaded";
+  const bundledReason = bundledError instanceof Error ? ` Bundled runtime check: ${bundledError.message}` : "";
+  throw new Error(`Cua Driver ${CUA_DRIVER_VERSION} is unavailable in this M9R runtime (${reason}).${bundledReason} Reinstall the M9R Windows runtime with its Cua Driver files.`);
 }
 
 function safeSessionName(stageName: string): string {
@@ -514,6 +640,30 @@ function screenSizeFromResult(result: ToolResult): DesktopScreenSize {
     for (const child of Object.values(record)) if (child && typeof child === "object") pending.push(child);
   }
   throw new Error("Cua Driver returned no valid screen coordinate dimensions; no input was sent.");
+}
+
+/**
+ * Convert a native screen-space rectangle into the pixel space of the one
+ * desktop capture that will be handed to the provider. The Cua desktop image
+ * can be scaled relative to the Windows coordinate space, so raw UIA frames
+ * must never be exposed as if they were already screenshot coordinates.
+ */
+function desktopRectInCapture(
+  rect: { x: number; y: number; width: number; height: number },
+  screen: DesktopScreenSize,
+  capture: Pick<CuaStageCapture, "width" | "height">,
+  origin: { x: number; y: number } = { x: 0, y: 0 },
+): { x: number; y: number; width: number; height: number } | undefined {
+  if (![rect.x, rect.y, rect.width, rect.height, screen.width, screen.height, origin.x, origin.y,
+    capture.width, capture.height].every(Number.isFinite)
+    || rect.width <= 0 || rect.height <= 0 || screen.width <= 0 || screen.height <= 0
+    || capture.width <= 0 || capture.height <= 0) return undefined;
+  const left = Math.max(0, Math.min(capture.width, (rect.x - origin.x) * capture.width / screen.width));
+  const top = Math.max(0, Math.min(capture.height, (rect.y - origin.y) * capture.height / screen.height));
+  const right = Math.max(0, Math.min(capture.width, (rect.x + rect.width - origin.x) * capture.width / screen.width));
+  const bottom = Math.max(0, Math.min(capture.height, (rect.y + rect.height - origin.y) * capture.height / screen.height));
+  if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) return undefined;
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
 function windowCoversPoint(window: CuaWindowInfo, x: number, y: number): boolean {
@@ -768,17 +918,30 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         },
       }), { stageName, cached: alreadyTracked });
       started = true;
-      // Configure adaptive motion before showing the cursor and reapply it in
-      // case Cua reclaimed this named session while M9R was idle.
-      const motion = await timed("cursor-motion", () => runtime.driver.setAgentCursorMotion({
-        session: details.session,
-        style: runtime.sdk.CursorMotionStyle.Adaptive,
-        timing: runtime.sdk.CursorMotionTiming.Fitts,
-        effects: { trail: true, glow: true },
-        dwellAfterClickMs: 100,
-        idleHideMs: 60_000,
-      }), { stageName, cached: alreadyTracked });
-      resultError(motion, "Cua Driver could not configure the agent cursor motion.");
+      // Motion is presentation-only. A driver that cannot apply the optional
+      // style must not prevent the logical cursor from appearing or prevent
+      // the stage from observing/focusing its target. The loader has already
+      // validated the contract; this catch covers a runtime capability or
+      // version mismatch returned by the native host itself. A later cursor
+      // enable/session-state check still fails closed if the transport died.
+      const motionStyle = runtime.sdk.CursorMotionStyle?.Adaptive;
+      const motionTiming = runtime.sdk.CursorMotionTiming?.Fitts;
+      if (typeof motionStyle === "number" && typeof motionTiming === "number") {
+        try {
+          const motion = await timed("cursor-motion", () => runtime.driver.setAgentCursorMotion({
+            session: details.session,
+            style: motionStyle,
+            timing: motionTiming,
+            effects: { trail: true, glow: true },
+            dwellAfterClickMs: 100,
+            idleHideMs: 60_000,
+          }), { stageName, cached: alreadyTracked });
+          resultError(motion, "Cua Driver could not configure the optional agent cursor motion.");
+        } catch {
+          // The native default motion remains valid; do not turn a visual
+          // preference failure into a desktop-stage failure.
+        }
+      }
       agentSessions.set(details.key, details);
     } catch (error) {
       if (started && !alreadyTracked) {
@@ -1510,6 +1673,189 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     return captureOwnerDesktop(name, cursorIdentity, true);
   }
 
+  /**
+   * Read one generic desktop snapshot. The native Windows layer supplies a
+   * bounded whole-desktop UIA tree when available; Cua's per-window trees and
+   * the exact same desktop pixels remain the complementary fallback. There is
+   * one provider-neutral target model, not an app or provider route.
+   */
+  async function readDesktopStructure(name: string, identity: CuaAgentCursorIdentity): Promise<CuaDesktopStructure> {
+    await captureOwnerDesktop(name, identity, true);
+    return withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
+      const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
+      const fallbackCapture = stageCapture(capture, now);
+      let shell: CuaDesktopStructure["shell"] = {
+        status: "visual-fallback" as const,
+        reason: "Native Windows UI Automation was unavailable; the same desktop capture remains the bounded visual fallback.",
+      };
+      let listed: Awaited<ReturnType<CuaDriverLike["listWindows"]>>;
+      try {
+        listed = await runtime.driver.listWindows({ onScreenOnly: true });
+      } catch {
+        return {
+          scope: "desktop" as const,
+          status: "unavailable" as const,
+          capturedAt: capture.capturedAt,
+          windows: [],
+          elements: [],
+          shell,
+          fallbackCapture,
+        };
+      }
+
+      const candidates = (listed.windows ?? []).filter((window): window is CuaWindowInfo => {
+        const bounds = window.bounds;
+        return window.isOnScreen === true && window.onCurrentSpace !== false && window.minimized !== true
+          && Number.isSafeInteger(window.pid) && (window.pid ?? 0) > 0
+          && typeof window.windowId === "bigint" && window.windowId > BigInt(0)
+          && [bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
+          && bounds.width > 0 && bounds.height > 0
+          && !/m9r(?:[- ]overlay)?|agent cursor overlay|cua cursor overlay/i.test(`${window.appName} ${window.title}`);
+      }).slice(0, MAX_DESKTOP_STRUCTURE_WINDOWS);
+      const zIndexed = candidates.filter((window) => typeof window.zIndex === "bigint");
+      let frontmostWindowId: bigint | undefined;
+      if (zIndexed.length > 0 && zIndexed.every((window) => typeof window.zIndex === "bigint")) {
+        const highest = zIndexed.reduce((current, window) => window.zIndex! > current ? window.zIndex! : current, zIndexed[0]!.zIndex!);
+        if (zIndexed.filter((window) => window.zIndex === highest).length === 1) frontmostWindowId = zIndexed.find((window) => window.zIndex === highest)!.windowId;
+      }
+
+      const windows: CuaDesktopStructureWindow[] = [];
+      const elements: CuaDesktopStructureElement[] = [];
+      const fallbackControls: CuaStageTargetDescription[] = [];
+
+      // Native UIA is the structure-first shell and whole-screen route. The
+      // native response contains screen-space rectangles, so map them into the
+      // one exact Cua desktop capture before exposing them to the broker.
+      try {
+        const nativeStructure = await manager.desktopStructure({ maxElements: 64, maxDepth: 10 });
+        const nativeElements: CuaDesktopStructureElement[] = [];
+        for (const nativeElement of nativeStructure.elements) {
+          const rect = desktopRectInCapture(nativeElement.rect, screen, capture, nativeStructure.screen);
+          if (!rect) continue;
+          const publicElement: CuaDesktopStructureElement = {
+            ref: `desktop-shell:${nativeElement.ref}`,
+            windowRef: "desktop-shell",
+            rect,
+            depth: nativeElement.depth,
+            ...(nativeElement.role.trim() ? { role: nativeElement.role.slice(0, 80) } : {}),
+            ...(nativeElement.label.trim() ? { label: nativeElement.label.replace(/[\r\n\t]+/g, " ").slice(0, 160) } : {}),
+            enabled: nativeElement.enabled,
+          };
+          nativeElements.push(publicElement);
+          fallbackControls.push({
+            ...(publicElement.label ? { label: publicElement.label } : {}),
+            ...(publicElement.role ? { role: publicElement.role } : {}),
+            rect,
+          });
+        }
+        elements.push(...nativeElements.slice(0, MAX_DESKTOP_STRUCTURE_ELEMENTS));
+        shell = {
+          status: nativeStructure.status,
+          reason: nativeStructure.truncated
+            ? "Native Windows UI Automation captured a bounded whole-desktop control tree; the tree was capped and the exact capture remains available for fallback."
+            : "Native Windows UI Automation captured the bounded whole-desktop control tree in the same observation cycle.",
+          ...(nativeElements.length ? { elements: nativeElements } : {}),
+          ...(nativeStructure.truncated ? { truncated: true as const } : {}),
+        };
+      } catch {
+        // Native UIA is optional at this boundary. Keep one bounded visual
+        // fallback rather than probing another route or failing observation.
+      }
+
+      for (let index = 0; index < candidates.length; index++) {
+        const window = candidates[index]!;
+        const windowRect = desktopRectInCapture(window.bounds, screen, capture);
+        if (!windowRect) continue;
+        const ref = `desktop-window-${index + 1}`;
+        const baseWindow = {
+          ref,
+          appName: window.appName.slice(0, 120),
+          title: window.title.slice(0, 240),
+          rect: windowRect,
+          ...(frontmostWindowId === window.windowId ? { frontmost: true } : {}),
+          ...(window.minimized !== undefined ? { minimized: window.minimized } : {}),
+          ...(window.onCurrentSpace !== undefined ? { onCurrentSpace: window.onCurrentSpace } : {}),
+        };
+        fallbackControls.push({ label: window.title.slice(0, 160) || window.appName.slice(0, 160), role: "desktop-window", rect: windowRect });
+        try {
+          const state = await runtime.driver.getWindowState({
+            pid: window.pid!,
+            windowId: window.windowId,
+            session: session.session,
+            includeAccessibilityTree: true,
+            includeScreenshot: false,
+            maxElements: 128,
+            maxDepth: 16,
+            timeoutMs: 900,
+          });
+          if (state.pid !== window.pid || state.windowId !== window.windowId) throw new Error("window identity changed");
+          const sourceElements = Array.isArray(state.elements) ? state.elements.slice(0, 128) : [];
+          const byIndex = new Map(sourceElements.map((element) => [String(element.elementIndex), element]));
+          const refByIndex = new Map<string, string>();
+          const remainingElements = Math.max(0, MAX_DESKTOP_STRUCTURE_ELEMENTS - elements.length);
+          const pending = sourceElements.filter((element) => typeof element.elementToken === "string").slice(0, remainingElements);
+          for (let elementIndex = 0; elementIndex < pending.length; elementIndex++) {
+            refByIndex.set(String(pending[elementIndex]!.elementIndex), `${ref}:element-${elementIndex + 1}`);
+          }
+          const windowElements: CuaDesktopStructureElement[] = [];
+          for (const element of pending) {
+            const actions = Array.isArray(element.actions)
+              ? element.actions.filter((action): action is string => typeof action === "string" && action.length > 0)
+                .slice(0, 16).map((action) => action.slice(0, 40))
+              : [];
+            const parent = element.parentIndex === undefined ? undefined : byIndex.get(String(element.parentIndex));
+            const rect = element.frame ? desktopRectInCapture({ x: element.frame.x, y: element.frame.y, width: element.frame.w, height: element.frame.h }, screen, capture) : undefined;
+            const publicElement: CuaDesktopStructureElement = {
+              ref: refByIndex.get(String(element.elementIndex))!,
+              windowRef: ref,
+              ...(rect ? { rect } : {}),
+              ...(parent?.elementToken && refByIndex.has(String(parent.elementIndex)) ? { parentRef: refByIndex.get(String(parent.elementIndex))! } : {}),
+              ...(Number.isSafeInteger(element.depth) && element.depth >= 0 ? { depth: element.depth } : {}),
+              ...(typeof element.role === "string" && element.role ? { role: element.role.slice(0, 80) } : {}),
+              ...(typeof element.label === "string" && element.label.trim() ? { label: element.label.replace(/[\r\n\t]+/g, " ").slice(0, 160) } : {}),
+              ...(typeof element.enabled === "boolean" ? { enabled: element.enabled } : {}),
+              ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
+              ...(actions.length ? { actions } : {}),
+              ...(actions.includes("set_value") ? { canReplaceValue: true } : {}),
+            };
+            windowElements.push(publicElement);
+            elements.push(publicElement);
+            if (rect && (publicElement.label || publicElement.role)) {
+              fallbackControls.push({
+                ...(publicElement.label ? { label: publicElement.label } : {}),
+                ...(publicElement.role ? { role: publicElement.role } : {}),
+                rect,
+              });
+            }
+          }
+          const complete = Array.isArray(state.elements) && state.truncated !== true && state.elementsComplete !== false
+            && state.degraded !== true;
+          windows.push({ ...baseWindow, status: complete ? "complete" : "partial", elements: windowElements });
+        } catch {
+          windows.push({ ...baseWindow, status: "unavailable", elements: [] });
+        }
+        if (elements.length >= MAX_DESKTOP_STRUCTURE_ELEMENTS) break;
+      }
+      const controls = fallbackControls.slice(0, 200);
+      const capped = fallbackControls.length > controls.length;
+      const boundedFallback: CuaStageCapture = {
+        ...fallbackCapture,
+        ...(controls.length ? { controls } : {}),
+        ...(capped ? { controlsTruncated: true as const } : {}),
+      };
+      return {
+        scope: "desktop" as const,
+        status: shell.status === "complete" && windows.every((window) => window.status === "complete") && !capped
+          ? "complete" as const : "partial" as const,
+        capturedAt: capture.capturedAt,
+        windows,
+        elements,
+        shell,
+        fallbackCapture: boundedFallback,
+      };
+    });
+  }
+
   async function describeDesktopTarget(name: string, x: number, y: number, cursorIdentity: CuaAgentCursorIdentity): Promise<CuaStageTargetDescription | undefined> {
     return withOwnerDesktop(name, cursorIdentity, async ({ runtime, session, capture }) => {
       if (!validPoint(x, y, capture)) throw new Error("Target coordinates must fall inside the latest desktop screenshot.");
@@ -2152,7 +2498,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     } catch { /* the runtime never initialized */ }
   }
 
-  return { capture, readStructure, describeTarget, describeElementTarget, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, drag,
+  return { capture, readStructure, readDesktopStructure, describeTarget, describeElementTarget, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, drag,
     clickElement, replaceElement, windowFrame, windowState, focusWindow, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown };

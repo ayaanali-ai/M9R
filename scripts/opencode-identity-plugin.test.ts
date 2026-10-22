@@ -40,12 +40,14 @@ function evaluateGeneratedPlugin(
   mockedSpawn: ReturnType<typeof createMockSpawn>,
   setIntervalFn: typeof setInterval = setInterval,
   clearIntervalFn: typeof clearInterval = clearInterval,
+  setTimeoutFn: typeof setTimeout = setTimeout,
+  clearTimeoutFn: typeof clearTimeout = clearTimeout,
 ) {
   const executable = source
     .replace(/^import \{ spawn \} from "node:child_process";\r?\n/m, "")
     .replace(/^export const M9rIdentity = /m, "const M9rIdentity = ")
     .replace(/^export default M9rOpenCodePlugin;\r?\n/m, "");
-  return new Function("spawn", "process", "setInterval", "clearInterval", `${executable}\nreturn M9rIdentity;`)(mockedSpawn, { cwd: () => "C:/process-cwd" }, setIntervalFn, clearIntervalFn) as
+  return new Function("spawn", "process", "setInterval", "clearInterval", "setTimeout", "clearTimeout", `${executable}\nreturn M9rIdentity;`)(mockedSpawn, { cwd: () => "C:/process-cwd" }, setIntervalFn, clearIntervalFn, setTimeoutFn, clearTimeoutFn) as
     (context: { directory?: string; client?: { config?: { providers?: () => Promise<unknown> }; session?: { prompt?: (input: unknown) => Promise<unknown>; promptAsync?: (input: unknown) => Promise<unknown>; list?: (input?: unknown) => Promise<unknown>; status?: (input?: unknown) => Promise<unknown>; messages?: (input?: unknown) => Promise<unknown> } } }) => Promise<{ "experimental.chat.system.transform": (input: { sessionID?: string }, output: { system: string[] }) => Promise<void>; event?: (input: { event?: unknown }) => Promise<void> }>;
 }
 
@@ -287,6 +289,56 @@ test("OpenCode startup discovers active sessions so inbox delivery does not wait
   assert.deepEqual(calls[1]?.args, ["m9r-hook", "OpenCodePoll", "opencode"]);
   assert.deepEqual(JSON.parse(calls[1]!.input), { session_id: "open-session", cwd: "C:/repo" });
   assert.equal(prompts.length, 0);
+  void plugin;
+});
+
+test("OpenCode startup retries discovery when the provider session API is not ready yet", async () => {
+  const hook = (event: string, additionalContext: string) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  const intervalTimers: Array<{ callback: () => void; ms: number; unref: () => void }> = [];
+  const timeoutTimers: Array<{ callback: () => void; ms: number; unref: () => void; cleared: boolean }> = [];
+  const setIntervalMock = ((callback: () => void, ms = 0) => {
+    const timer = { callback, ms, unref: () => undefined };
+    intervalTimers.push(timer);
+    return timer as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval;
+  const clearIntervalMock = (() => undefined) as typeof clearInterval;
+  const setTimeoutMock = ((callback: () => void, ms = 0) => {
+    const timer = { callback, ms, unref: () => undefined, cleared: false };
+    timeoutTimers.push(timer);
+    return timer as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const clearTimeoutMock = ((timer: unknown) => {
+    if (timer && typeof timer === "object" && "cleared" in timer) (timer as { cleared: boolean }).cleared = true;
+  }) as typeof clearTimeout;
+  const factory = evaluateGeneratedPlugin(buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }), createMockSpawn([
+    { code: 0, output: hook("SessionStart", "connected after provider startup") },
+  ], calls), setIntervalMock, clearIntervalMock, setTimeoutMock, clearTimeoutMock);
+  let listAttempts = 0;
+  const plugin = await factory({
+    directory: "C:/repo",
+    client: {
+      session: {
+        list: async () => {
+          listAttempts += 1;
+          return listAttempts === 1 ? { error: "session API warming up" } : { data: [{ id: "recovered-session", directory: "C:/repo" }] };
+        },
+        status: async () => ({ data: { "recovered-session": { type: "idle" } } }),
+        promptAsync: async () => ({}),
+      },
+    },
+  });
+  for (let attempt = 0; attempt < 20 && (listAttempts < 1 || !timeoutTimers.some((timer) => !timer.cleared && timer.ms === 5000)); attempt += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(listAttempts, 1);
+  const retry = timeoutTimers.find((timer) => !timer.cleared && timer.ms === 5000);
+  assert.ok(retry, "a failed startup discovery must schedule a bounded retry");
+  retry!.callback();
+  for (let attempt = 0; attempt < 20 && calls.length < 1; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(listAttempts, 2);
+  assert.deepEqual(calls[0]?.args, ["m9r-hook", "SessionStart", "opencode"]);
+  assert.equal(intervalTimers.length, 1, "the recovered session must receive its poller without a user prompt");
   void plugin;
 });
 

@@ -498,21 +498,22 @@ test("with two sessions the push goes to the one that is open, and the machine i
   assert.equal(r.state, "failed", "a failing liveness check falls back to the safe ambiguous path");
 });
 
-test("an older inbox item is not mixed into a prompt M9R pushed; it waits for the user's next real prompt", () => {
+test("an older inbox item is not mixed into a prompt M9R pushed; SessionStart delivers it once", () => {
   const store = newStore(); seedCodex(store);
   const waiting = store.addTask({ from: "claude", to: "codex", goal: "Older item that fell back to the inbox", origin: "human_typed", idempotencyKey: "old" }).task;
   store.setDelivery(waiting.id, { state: "failed", error: "ambiguous" });
   const pushedTask = store.addTask({ from: "claude", to: "codex", goal: "Reply with only: pushed-one", origin: "human_typed", idempotencyKey: "new" }).task;
   store.setDelivery(pushedTask.id, { state: "queued", threadId: THREAD });
   const ctx = { provider: "codex", store, pathExists: () => false, readIndex: () => null };
-  handleHookEvent({ hook_event_name: "SessionStart", session_id: THREAD, cwd: "C:/p" }, ctx);
+  const started = handleHookEvent({ hook_event_name: "SessionStart", session_id: THREAD, cwd: "C:/p" }, ctx);
+  assert.match(started?.hookSpecificOutput.additionalContext ?? "", /Older item that fell back to the inbox/, "reconnecting sessions receive fallback work automatically");
   const pushed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: buildQueueMessage(pushedTask) }, ctx);
   const pushedContext = pushed?.hookSpecificOutput.additionalContext ?? "";
   assert.match(pushedContext, /approved work item/i, "the pushed task receives internal execution guidance");
   assert.doesNotMatch(pushedContext, new RegExp(queueMarker(pushedTask.id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the provider-visible context does not expose the task id");
   assert.ok(!pushedContext.includes(waiting.goal), "older inbox work is not mixed into the pushed task");
   const real = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "what next?" }, ctx);
-  assert.match(real?.hookSpecificOutput.additionalContext ?? "", /Older item that fell back to the inbox/, "it arrives at the user's own next prompt");
+  assert.equal(real, null, "the fallback was already delivered at SessionStart and is not replayed");
 });
 
 test("a task is only ever pushed into a Codex session in the sender's own folder: not a parent, not a child, not another project", async () => {

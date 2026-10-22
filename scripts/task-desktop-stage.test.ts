@@ -18,6 +18,7 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "session-one");
+  store.registerEndpoint({ provider: "codex", sessionId: "session-one" });
   const { task } = store.addTask({ from: "you", to: "codex", goal: "Use a stage", origin: "human_typed", idempotencyKey: "stage-one", targetSession: "session-one" });
   let creations = 0;
   const desktopActions: Array<{ kind: string; x?: number; y?: number }> = [];
@@ -50,6 +51,7 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
       }
       if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: String(request.desktopId) === currentDesktopId } };
       if (request.op === "presentOwnerWindow") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } };
+      if (request.op === "move") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } };
       if (request.op === "inspect") return inspectOverride?.() ?? { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } };
       throw new Error("Unexpected native operation; preparation must not move or activate windows.");
     },
@@ -173,14 +175,26 @@ test("a native target inspection failure is returned immediately instead of beco
   } finally { f.cleanup(); }
 });
 
-test("approved task preparation is idempotent and does not expose desktop GUIDs", async () => {
+test("owner-authorized task preparation is idempotent and does not expose desktop GUIDs", async () => {
   const f = fixture();
   try {
+    assert.equal(f.task.approval, "not_needed", "a direct owner task must not wait for an agent approval echo");
     const [a, b] = await Promise.all([f.service.prepare(f.identity.token, f.task.id, "background"), f.service.prepare(f.identity.token, f.task.id, "background")]);
     assert.deepEqual(a, b);
     assert.equal(f.creations(), 1);
     assert.equal(JSON.stringify(a).includes("11111111-1111"), false);
     assert.equal(a.hasAnchor, false);
+  } finally { f.cleanup(); }
+});
+
+test("delivery-time cursor prime shows the logical cursor before stage preparation or desktop input", async () => {
+  const f = fixture();
+  try {
+    const result = await f.service.primeCursor(f.identity.token, f.task.id);
+    assert.deepEqual(result, { shown: true, agent: "codex" });
+    assert.equal(f.cursorPrepares.length, 1, "the visual cursor is shown at delivery time");
+    assert.equal(f.creations(), 0, "priming never creates or switches a Windows desktop");
+    assert.deepEqual(f.desktopActions, [], "priming never moves the owner's physical pointer or sends input");
   } finally { f.cleanup(); }
 });
 
@@ -355,6 +369,44 @@ test("owner-preview launch presents an existing app without stealing the owner's
   } finally { f.cleanup(); }
 });
 
+test("owner-preview re-presents the exact live window after it moves desktops without relaunching it", async () => {
+  const f = fixture(true, (root, appId) => {
+    assert.equal(appId, "paint");
+    return { executable: join(root, "mspaint.exe"), args: [] };
+  });
+  try {
+    const window = { pid: 321, windowId: "654", appName: "mspaint.exe", title: "Paint", width: 1000, height: 700 };
+    f.driver.listVisibleWindows = async () => [window];
+    await f.service.launch(f.identity.token, f.task.id, "paint", "owner-preview");
+
+    let inspectCalls = 0;
+    f.setInspectOverride(() => {
+      inspectCalls += 1;
+      const moved = inspectCalls <= 2;
+      return {
+        ok: true,
+        window: {
+          pid: window.pid,
+          windowId: window.windowId,
+          desktopId: moved ? "44444444-4444-4444-8444-444444444444" : "33333333-3333-4333-8333-333333333333",
+          onCurrentDesktop: !moved,
+        },
+      };
+    });
+
+    const recovered = await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview") as {
+      recoveryNotice?: string;
+    };
+    assert.match(String(recovered.recoveryNotice), /exact application window.*re-presented/i);
+    assert.match(String(recovered.recoveryNotice), /state was preserved/i);
+    assert.ok(inspectCalls >= 3, "recovery must re-inspect the exact window before and after re-presentation");
+
+    const stage = createWindowsDesktopStageManager({ root: f.root, platform: "win32", terminal: true, env: {} }).list()[0];
+    assert.deepEqual(stage?.anchor, { pid: window.pid, windowId: window.windowId });
+    assert.equal(stage?.appId, "paint", "re-presenting a moved window must preserve the selected app identity");
+  } finally { f.cleanup(); }
+});
+
 test("same-intent owner-preview stages join one native app window instead of launching duplicates", async () => {
   const f = fixture(true, (root, appId) => {
     assert.equal(appId, "calculator");
@@ -523,9 +575,9 @@ test("pending and finished tasks cannot provision stages", async () => {
   const f = fixture();
   try {
     const { task: pending } = f.store.addTask({ from: "claude", to: "codex", goal: "Pending", origin: "agent_initiated", idempotencyKey: "pending" });
-    await assert.rejects(f.service.prepare(f.identity.token, pending.id), /approved, unfinished/);
+    await assert.rejects(f.service.prepare(f.identity.token, pending.id), /owner-authorized or approved task/);
     f.store.setResult(f.task.id, "Done");
-    await assert.rejects(f.service.prepare(f.identity.token, f.task.id), /approved, unfinished/);
+    await assert.rejects(f.service.prepare(f.identity.token, f.task.id), /owner-authorized or approved task/);
     assert.equal(f.creations(), 0);
   } finally { f.cleanup(); }
 });
@@ -714,7 +766,7 @@ test("prepare preserves the durable recovery anchor across repeated missing-wind
   } finally { f.cleanup(); }
 });
 
-test("act() recovery relaunches only when the window is genuinely gone, not on other inspection failures", async () => {
+test("act() re-presents a moved window and relaunches only when it is genuinely gone", async () => {
   const f = fixture(true, (root, appId) => {
     assert.equal(appId, "chrome");
     return { executable: join(root, "chrome.exe"), args: [] };
@@ -734,15 +786,18 @@ test("act() recovery relaunches only when the window is genuinely gone, not on o
     const recovered = await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview");
     assert.ok(recovered, "a genuinely closed window must still recover via the existing relaunch path");
 
-    // An anchor that simply resolved to a different desktop ("anchor moved to
-    // another desktop") is NOT a closed window -- relaunching here would leave a
-    // needless second instance running alongside a window that is still alive.
-    f.setInspectOverride(() => ({ ok: true, window: { pid: 123, windowId: "456", desktopId: "99999999-9999-4999-8999-999999999999", onCurrentDesktop: false } }));
+    // An anchor that simply resolved to a different desktop is still live. The
+    // generic recovery path re-presents that exact window; the fake native
+    // response changes back to the current desktop after the simulated move.
+    let movedChecks = 0;
+    f.setInspectOverride(() => {
+      movedChecks += 1;
+      const moved = movedChecks <= 2;
+      return { ok: true, window: { pid: 123, windowId: "456", desktopId: moved ? "99999999-9999-4999-8999-999999999999" : "33333333-3333-4333-8333-333333333333", onCurrentDesktop: !moved } };
+    });
     const creationsBefore = f.creations();
-    await assert.rejects(
-      f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview"),
-      /anchor moved to another desktop/,
-    );
+    const movedRecovery = await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview") as { recoveryNotice?: string };
+    assert.match(String(movedRecovery.recoveryNotice), /exact application window.*re-presented/i);
     assert.equal(f.creations(), creationsBefore, "a non-'gone' inspection failure must not trigger a relaunch");
   } finally { f.cleanup(); }
 });

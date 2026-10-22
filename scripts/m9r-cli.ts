@@ -76,6 +76,8 @@ import {
   type OpenCodeIdentityPluginInstallAction, type OpenCodeIdentityPluginRemovalAction, type WebSetupBrowser,
 } from "@/lib/native/web-setup-core";
 import { planOpenCodeModelStateRepair, resolveOpenCodeModelFiles } from "@/lib/native/opencode-model-core";
+import { refreshManagedOpenCodeIdentityPlugin } from "@/lib/native/opencode-plugin-refresh";
+import { renameStateFile } from "@/lib/native/atomic-file";
 import { loadOrCreateBrokerKey } from "@/lib/native/web-broker-server";
 import { parseBrokerUpdateRecord } from "@/lib/native/broker-update-record";
 import {
@@ -1377,6 +1379,43 @@ const writeAtomic = async (path: string, value: string | Uint8Array) => {
   await rename(temporary, path);
 };
 
+/**
+ * Replace a provider-owned compatibility file without relying on Node's
+ * rename(existing-file) behavior on Windows. The displaced copy is retained
+ * only for the duration of the replacement and is restored if the second
+ * rename fails; the caller's existing file is never deleted first.
+ */
+const writeManagedAtomic = async (path: string, value: string | Uint8Array) => {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.m9r-next-${process.pid}-${randomUUID()}.tmp`;
+  const displaced = `${path}.m9r-displaced-${process.pid}-${randomUUID()}.tmp`;
+  let keepDisplaced = false;
+  await writeFile(temporary, value);
+  try {
+    try {
+      renameStateFile(temporary, path);
+    } catch (error) {
+      if (process.platform !== "win32" || !existsSync(path)) throw error;
+      renameStateFile(path, displaced);
+      try {
+        renameStateFile(temporary, path);
+        await unlink(displaced).catch(() => undefined);
+      } catch (installError) {
+        try {
+          if (!existsSync(path) && existsSync(displaced)) renameStateFile(displaced, path);
+        } catch {
+          // The original remains at `displaced` as the recoverable boundary.
+          keepDisplaced = true;
+        }
+        throw installError;
+      }
+    }
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+    if (!keepDisplaced) await unlink(displaced).catch(() => undefined);
+  }
+};
+
 /** Repair only stale OpenCode model references, using the locally cached provider catalog. */
 async function repairOpenCodeModelState(home: string): Promise<ReturnType<typeof planOpenCodeModelStateRepair> & { backupPath?: string }> {
   const paths = resolveOpenCodeModelFiles({
@@ -1475,8 +1514,9 @@ async function refreshProviderConfigAfterUpdate(input: ProviderConfigRefreshInpu
   });
   const configPaths = paths.configPaths;
   const pluginPath = join(paths.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME);
-  const hasIdentityPlugin = await canRead(pluginPath);
+  let hasIdentityPlugin = await canRead(pluginPath);
   const runtime = webMcpRuntime();
+  let pluginReconciled = false;
   for (const configPath of configPaths) {
     const currentBytes = await readOptional(configPath);
     if (!currentBytes) continue;
@@ -1493,6 +1533,31 @@ async function refreshProviderConfigAfterUpdate(input: ProviderConfigRefreshInpu
       || /m9r-identity\.js/iu.test(before)
     );
     if (!isM9rOwned) continue;
+
+    if (!pluginReconciled) {
+      const desiredPlugin = buildOpenCodeIdentityPluginSource(
+        webOpenCodeHookInvocation(runtime, "SessionStart"),
+        webOpenCodeHookInvocation(runtime, "UserPromptSubmit"),
+        webOpenCodeHookInvocation(runtime, "OpenCodePoll"),
+        webOpenCodeHookInvocation(runtime, "OpenCodeDelivered"),
+        webOpenCodeHookInvocation(runtime, "OpenCodeDeliveryFailed"),
+        webOpenCodeHookInvocation(runtime, "OpenCodeExecutionFailed"),
+      );
+      const refreshed = await refreshManagedOpenCodeIdentityPlugin({
+        manifestPath: join(defaultStoreRoot(home, process.env), WEB_SETUP_MANIFEST),
+        pluginPath,
+        desiredContent: desiredPlugin,
+      }, {
+        readFile: async (path) => await readOptional(path),
+        writeAtomic: writeManagedAtomic,
+        removeFile: async (path) => { await unlink(path).catch(() => undefined); },
+      });
+      if (refreshed.action === "preserve" || refreshed.action === "path-changed") {
+        throw new Error(`M9R OpenCode identity plugin changed outside its recorded ownership (${refreshed.action}); provider reconciliation stopped without overwriting it`);
+      }
+      pluginReconciled = true;
+      hasIdentityPlugin = await canRead(pluginPath);
+    }
 
     const hasIdentityEntry = before.includes(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY);
     if (hasIdentityEntry && !hasIdentityPlugin) {
@@ -1514,7 +1579,7 @@ async function refreshProviderConfigAfterUpdate(input: ProviderConfigRefreshInpu
     if (!latest || latest.toString("utf8") !== before) {
       throw new Error(`OpenCode config changed during provider reconciliation (${configPath}); no config was overwritten`);
     }
-    await writeAtomic(configPath, merged);
+    await writeManagedAtomic(configPath, merged);
   }
 }
 

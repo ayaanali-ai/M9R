@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { hookPipePath, requestShutdown, startHookServer } from "@/lib/native/hook-server";
 import { runHookRequest } from "@/lib/native/hook-run";
+import { createLocalStore } from "@/lib/native/local-store";
 
 const roundTrip = (path: string, line: string) => new Promise<string>((resolve) => {
   const s = connect(path);
@@ -47,4 +48,33 @@ test("a resident-engine hook request carries the verified provider parent instea
   }, "unused", {}, true);
   const state = JSON.parse(readFileSync(join(home, "state.json"), "utf8")) as { connectionClaims: Array<{ ownerProcessId?: number }> };
   assert.equal(state.connectionClaims[0]?.ownerProcessId, 4545);
+});
+
+test("an OpenCode poll carries the native stage contract after its task is claimed", async () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-opencode-stage-"));
+  writeFileSync(join(home, "task-stage-policy.json"), JSON.stringify({ version: 1, handles: ["opencode"] }));
+  await runHookRequest({
+    event: "SessionStart",
+    provider: "opencode",
+    input: { hook_event_name: "SessionStart", session_id: "opencode-session", cwd: home },
+    env: { M9R_HOME: home },
+  }, "unused");
+  createLocalStore(home).addTask({
+    from: "you",
+    to: "opencode",
+    goal: "open the named app",
+    origin: "human_typed",
+    idempotencyKey: "opencode-stage-poll-envelope",
+  });
+  const text = await runHookRequest({
+    event: "OpenCodePoll",
+    provider: "opencode",
+    input: { hook_event_name: "OpenCodePoll", session_id: "opencode-session", cwd: home },
+    env: { M9R_HOME: home },
+  }, "unused");
+  const outer = JSON.parse(text) as { hookSpecificOutput?: { additionalContext?: string } };
+  const envelope = JSON.parse(outer.hookSpecificOutput?.additionalContext ?? "{}") as { task_id?: string; prompt?: string };
+  assert.equal(envelope.task_id, "T1");
+  assert.match(envelope.prompt ?? "", /M9R desktop tools are available/);
+  assert.match(envelope.prompt ?? "", /open the named app/);
 });

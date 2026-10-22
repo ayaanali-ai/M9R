@@ -250,8 +250,10 @@ test("a bound MCP connection answers without a tool-call credential, even though
     assert.ok(binding);
     const server = createM9rMcpServer({ store, connectionBindingId: binding!.bindingId });
     const tools = (server as unknown as { _registeredTools: Record<string, { inputSchema: { shape?: Record<string, { optional?: unknown }> }; handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
-    // m9r_web_open deliberately excluded: the browser extension route is disabled
-    // (mcp-server.ts WEB_EXTENSION_ROUTE_ENABLED), so it is not registered at all.
+    // The native MCP surface must never re-expose the retired browser-extension
+    // route. The implementation remains in the repository for explicit legacy
+    // fixtures, but no active provider connection may discover or call it.
+    assert.deepEqual(Object.keys(tools).filter((toolName) => toolName.startsWith("m9r_web_")), []);
     for (const toolName of ["m9r_whoami", "m9r_stage_app", "m9r_stage_action", "m9r_computer_observe", "m9r_computer_action"]) {
       // The field itself is always present now (one uniform schema for every connection, see
       // mcp-server.ts's OPTIONAL_TOKEN_FIELD) -- what must hold is that it is never required.
@@ -260,7 +262,8 @@ test("a bound MCP connection answers without a tool-call credential, even though
       assert.equal((tokenSchema as { type?: string }).type, "optional", `${toolName}'s token field must be optional, not required`);
     }
     const result = await tools.m9r_whoami.handler({});
-    assert.match(result.content[0]!.text, /@codex \(codex\), session session-1/);
+    assert.equal(result.content[0]!.text, "You are @codex (codex).");
+    assert.doesNotMatch(result.content[0]!.text, /session|token/i);
   } finally { done(); }
 });
 
@@ -277,7 +280,26 @@ test("a provider that starts MCP before its hook binds later without guessing", 
     store.issueIdentity("local-provider", "Local-Provider", "session-1");
     store.issueConnectionClaim({ handle: "local-provider", provider: "local-provider", sessionId: "session-1", ownerProcessId: 4545 });
     const result = await tools.m9r_whoami.handler({});
-    assert.match(result.content[0]!.text, /@local-provider \(Local-Provider\), session session-1/);
+    assert.equal(result.content[0]!.text, "You are @local-provider (Local-Provider).");
+  } finally { done(); }
+});
+
+test("a delayed provider binding wait does not block unrelated local work", async () => {
+  const { store, done } = tempStore();
+  try {
+    const server = createM9rMcpServer({
+      store,
+      connectionProcessId: 4546,
+      connectionProvider: "local-provider",
+      connectionWaitMs: 120,
+      connectionPollMs: 20,
+    });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+    let timerFired = false;
+    const timer = setTimeout(() => { timerFired = true; }, 10);
+    await assert.rejects(() => tools.m9r_whoami.handler({}), /Automatic M9R provider binding did not become ready/);
+    clearTimeout(timer);
+    assert.equal(timerFired, true, "the async binding wait must yield the event loop");
   } finally { done(); }
 });
 
@@ -298,8 +320,73 @@ test("an existing provider-only MCP connection self-heals a dead competing claim
     const server = createM9rMcpServer({ store, connectionProvider: "claude-code" });
     const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
     const result = await tools.m9r_whoami.handler({});
-    assert.match(result.content[0]!.text, /@claude \(claude-code\), session current-session/);
+    assert.equal(result.content[0]!.text, "You are @claude (claude-code).");
     assert.deepEqual(persistedClaims(store.root).map((claim) => claim.sessionId), ["current-session"]);
+  } finally { done(); }
+});
+
+test("a provider update recovers the sole recent session without a new SessionStart or manual token", async () => {
+  const { store, done } = tempStore();
+  try {
+    // The provider process survived or was replaced while its updated
+    // plugin skipped the hook. One fresh endpoint makes recovery
+    // deterministic and keeps all identity material inside the host.
+    store.registerEndpoint({ provider: "opencode", sessionId: "existing-session", cwd: "C:/work" });
+    const server = createM9rMcpServer({
+      store,
+      connectionProvider: "opencode",
+      connectionProcessId: 7777,
+      connectionCwd: "C:/work",
+    });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+    const result = await tools.m9r_whoami.handler({});
+    assert.equal(result.content[0]!.text, "You are @opencode (opencode).");
+    assert.ok(store.identityTokenFor("opencode", "existing-session"), "recovery creates a private identity, never a provider-visible token");
+    assert.ok(persistedClaims(store.root)[0]?.bindingId, "recovery binds the current MCP worker");
+  } finally { done(); }
+});
+
+test("a provider update recovers a sole session older than the claim window without a fresh session", async () => {
+  let current = new Date("2026-10-15T18:00:00.000Z");
+  const { store, done } = tempStore(() => current);
+  try {
+    store.registerEndpoint({ provider: "opencode", sessionId: "surviving-session", cwd: "C:/work" });
+    current = new Date("2026-10-15T19:00:00.000Z");
+    const server = createM9rMcpServer({
+      store,
+      connectionProvider: "opencode",
+      connectionProcessId: 7780,
+      connectionCwd: "C:/work",
+    });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+    const result = await tools.m9r_whoami.handler({});
+    assert.equal(result.content[0]!.text, "You are @opencode (opencode).");
+    assert.ok(persistedClaims(store.root)[0]?.bindingId);
+  } finally { done(); }
+});
+
+test("provider reconnect refuses to guess when more than one recent session is eligible", async () => {
+  const { store, done } = tempStore();
+  try {
+    store.registerEndpoint({ provider: "opencode", sessionId: "session-a", cwd: "C:/work" });
+    store.registerEndpoint({ provider: "opencode", sessionId: "session-b", cwd: "C:/work" });
+    const server = createM9rMcpServer({ store, connectionProvider: "opencode", connectionProcessId: 7778, connectionCwd: "C:/work" });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+    await assert.rejects(() => tools.m9r_whoami.handler({}), /Automatic M9R provider binding did not become ready/);
+    assert.equal(persistedClaims(store.root).length, 0, "ambiguous recovery must not issue a claim");
+  } finally { done(); }
+});
+
+test("provider reconnect does not revive an explicitly revoked session", async () => {
+  const { store, done } = tempStore();
+  try {
+    store.registerEndpoint({ provider: "opencode", sessionId: "revoked-session", cwd: "C:/work" });
+    store.issueIdentity("opencode", "opencode", "revoked-session");
+    store.revokeIdentity("revoked-session");
+    const server = createM9rMcpServer({ store, connectionProvider: "opencode", connectionProcessId: 7779, connectionCwd: "C:/work" });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+    await assert.rejects(() => tools.m9r_whoami.handler({}), /Automatic M9R provider binding did not become ready/);
+    assert.equal(persistedClaims(store.root).length, 0);
   } finally { done(); }
 });
 
@@ -322,7 +409,7 @@ test("a provider-only connection adopts its sole active claim after the previous
     const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
     const result = await tools.m9r_whoami.handler({});
 
-    assert.match(result.content[0]!.text, /@claude \(claude-code\), session continued-session/);
+    assert.match(result.content[0]!.text, /@claude \(claude-code\)\./);
     const claims = persistedClaims(store.root);
     assert.equal(claims.length, 1);
     assert.equal(claims[0]!.ownerProcessId, 9002);
@@ -429,7 +516,7 @@ test("a provider-only MCP connection adopts its sole unbound claim after the own
     const server = createM9rMcpServer({ store, connectionProvider: "claude-code" });
     const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
     const result = await tools.m9r_whoami.handler({});
-    assert.match(result.content[0]!.text, /@claude \(claude-code\), session provider-only-restart/);
+    assert.match(result.content[0]!.text, /@claude \(claude-code\)\./);
     assert.ok(persistedClaims(store.root)[0]!.bindingId);
   } finally { done(); }
 });
@@ -453,7 +540,7 @@ test("an already-running worker with lost launch metadata adopts only one unboun
     const server = createM9rMcpServer({ store, connectionWorkerFallback: true });
     const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
     const result = await tools.m9r_whoami.handler({});
-    assert.match(result.content[0]!.text, /@claude \(claude-code\), session worker-recovery/);
+    assert.match(result.content[0]!.text, /@claude \(claude-code\)\./);
     assert.ok(persistedClaims(store.root)[0]!.bindingId);
   } finally { done(); }
 });
@@ -500,7 +587,7 @@ test("the first provider tool call waits for a SessionStart claim published afte
     const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
     const result = await tools.m9r_whoami.handler({});
 
-    assert.match(result.content[0]!.text, /@claude \(claude-code\), session late-session/);
+    assert.match(result.content[0]!.text, /@claude \(claude-code\)\./);
     assert.ok(attempts >= 2, "the connection must be retried after the hook has time to publish its claim");
   } finally { done(); }
 });
@@ -525,6 +612,6 @@ test("managed SessionStart creates a private claim and keeps credentials out of 
     const server = createM9rMcpServer({ store, connectionProcessId: 4545, connectionProvider: "codex" });
     const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
     const result = await tools.m9r_whoami.handler({});
-    assert.match(result.content[0]!.text, /@codex \(codex\), session session-1/);
+    assert.equal(result.content[0]!.text, "You are @codex (codex).");
   } finally { done(); }
 });

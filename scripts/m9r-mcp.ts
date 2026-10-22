@@ -97,6 +97,8 @@ async function main(): Promise<void> {
     ...(connection.bindingId ? { connectionBindingId: connection.bindingId } : {}),
     ...(connection.processId ? { connectionProcessId: connection.processId } : {}),
     ...(connection.provider ? { connectionProvider: connection.provider } : {}),
+    connectionCwd: process.env.M9R_PROJECT_ROOT?.trim() || process.cwd(),
+    ...(connection.sessionId ? { connectionSessionId: connection.sessionId } : {}),
     // A worker can be refreshed by a newer engine while its provider-owned
     // outer supervisor still carries an older environment. In that narrow
     // private-worker mode the server may adopt exactly one active local claim;

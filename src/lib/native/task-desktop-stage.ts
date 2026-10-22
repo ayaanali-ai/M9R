@@ -29,6 +29,18 @@ import { discoverInstalledWindowsApp, discoverInstalledWindowExecutable } from "
 export const TASK_STAGE_POLICY_FILE = "task-stage-policy.json";
 export type TaskStageMode = "background" | "owner-preview";
 
+/**
+ * Result of the delivery-time visual cursor prime.  This is deliberately a
+ * small, non-sensitive result: provider sessions must never receive session
+ * ids, Cua session names, or broker credentials just because a cursor was
+ * requested.
+ */
+export interface AgentCursorPrimeResult {
+  shown: boolean;
+  agent?: string;
+  reason?: string;
+}
+
 /** Legacy policy values are parsed for migration but ignored for enabled agents. */
 export type TaskStageAccessMode = "full" | "scoped" | "request";
 const ACCESS_MODES: readonly TaskStageAccessMode[] = ["full", "scoped", "request"];
@@ -60,6 +72,16 @@ function stageCoordinationKey(goal: string): string {
  */
 function isStageWindowGoneError(error: unknown): boolean {
   return error instanceof Error && /anchor is unavailable/i.test(error.message);
+}
+
+/**
+ * A live window can move to another virtual desktop while the owner is away
+ * from the M9R preview. That is recoverable presentation state, not proof
+ * that the process or document disappeared. Keep this separate from the
+ * genuinely-gone predicate so a live window is never duplicated by a launch.
+ */
+function isStageWindowMovedError(error: unknown): boolean {
+  return error instanceof Error && /anchor moved to another desktop/i.test(error.message);
 }
 
 export function setTaskStagePermission(root: string, handle: string, enabled: boolean, context: { terminal: boolean; env: Record<string, string | undefined> }, control = false, mode?: TaskStageAccessMode) {
@@ -330,6 +352,91 @@ export function createTaskDesktopStageService(input: {
     return `${normalizeHandle(identity.handle)}\0${identity.sessionId}`;
   }
 
+  function cursorStageName(identity: CuaAgentCursorIdentity, mode: TaskStageMode = "owner-preview"): string {
+    const prefix = mode === "owner-preview" ? "preview-agent" : "agent";
+    return `${prefix}-${createHash("sha256").update(`${identity.handle}\0${identity.sessionId}`).digest("hex").slice(0, 24)}`;
+  }
+
+  type CursorTarget = { identity: CuaAgentCursorIdentity; taskId: string; stageName: string };
+
+  /**
+   * Resolve the recipient session for a delivery-time cursor without guessing.
+   * The bearer may be either the authenticated sender (the task-creation path)
+   * or the authenticated recipient (the reconnect/session-start path).  The
+   * owner-only variant is used only by the local owner pipe for a human task.
+   */
+  function resolveCursorTarget(token: string | undefined, taskId: string, ownerOnly = false): CursorTarget | undefined {
+    const task = input.store.getTask(taskId);
+    if (!task || task.resultSummary || task.approval === "pending" || task.approval === "denied" || task.approval === "expired"
+      || task.lifecycle?.state === "completed" || task.lifecycle?.state === "failed") return undefined;
+    if (ownerOnly && (task.origin !== "human_typed" || normalizeHandle(task.from) !== "you")) return undefined;
+    const bearer = token ? input.store.verifyIdentity(token) : null;
+    if (!ownerOnly && !bearer) return undefined;
+    const targetHandle = normalizeHandle(task.to);
+    if (!targetHandle || targetHandle.startsWith("web-")) return undefined;
+
+    const targetSessions = input.store.sessionsWithIdentity(targetHandle, task.cwd);
+    const requestedSession = task.targetSession ?? task.deliveredSession;
+    const targetSession = requestedSession
+      ? targetSessions.find((session) => session.sessionId === requestedSession)
+      : targetSessions.length === 1 ? targetSessions[0] : undefined;
+    if (!targetSession) return undefined;
+
+    if (!ownerOnly && bearer) {
+      const bearerHandle = normalizeHandle(bearer.handle);
+      const sourceAuthorized = bearerHandle === normalizeHandle(task.from)
+        && (!task.fromSession || task.fromSession === bearer.sessionId);
+      const targetAuthorized = bearerHandle === targetHandle
+        && (!requestedSession || requestedSession === bearer.sessionId);
+      if (!sourceAuthorized && !targetAuthorized) return undefined;
+    }
+    const policy = readPolicy();
+    if (!policy.handles.includes(targetHandle)) return undefined;
+    const identity: CuaAgentCursorIdentity = { handle: targetHandle, sessionId: targetSession.sessionId };
+    return { identity, taskId, stageName: cursorStageName(identity) };
+  }
+
+  async function primeCursor(token: string, taskId: string): Promise<AgentCursorPrimeResult> {
+    const target = resolveCursorTarget(token, taskId);
+    if (!target) return { shown: false, reason: "The recipient session is not connected, authorized, or eligible for a cursor." };
+    return primeResolvedCursor(target);
+  }
+
+  async function primeCursorForOwner(taskId: string): Promise<AgentCursorPrimeResult> {
+    const target = resolveCursorTarget(undefined, taskId, true);
+    if (!target) return { shown: false, reason: "The owner task has no one eligible recipient session for a cursor." };
+    return primeResolvedCursor(target);
+  }
+
+  async function primeResolvedCursor(target: CursorTarget): Promise<AgentCursorPrimeResult> {
+    const key = cursorIdentityKey(target.identity);
+    activeAgentCursors.set(key, target.identity);
+    const run = async (): Promise<AgentCursorPrimeResult> => {
+      const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
+        showAgentCursor?: (stageName: string, cursorIdentity: CuaAgentCursorIdentity) => Promise<unknown>;
+      }).showAgentCursor;
+      if (typeof showAgentCursor !== "function") {
+        activeAgentCursors.delete(key);
+        return { shown: false, reason: "The installed Cua runtime has no cursor presentation capability." };
+      }
+      try {
+        await showAgentCursor(target.stageName, target.identity);
+        return { shown: true, agent: target.identity.handle };
+      } catch {
+        // A visual prime is intentionally best-effort.  It must never turn a
+        // durable task send into a failed task or strand a half-created cursor.
+        activeAgentCursors.delete(key);
+        return { shown: false, reason: "The local cursor surface could not be shown." };
+      }
+    };
+    try {
+      return await enqueueStage(target.stageName, run);
+    } catch {
+      activeAgentCursors.delete(key);
+      return { shown: false, reason: "The local cursor surface could not be shown." };
+    }
+  }
+
   function authorize(token: string, taskId: string, mode: TaskStageMode) {
     if (isAgentContext(stageDeps.env ?? process.env)) {
       throw new Error("Task stages require the owner-launched M9R broker; an agent process cannot host this service.");
@@ -349,12 +456,11 @@ export function createTaskDesktopStageService(input: {
     }
     if (!(["approved", "not_needed"] as string[]).includes(task.approval)
       || task.resultSummary !== undefined || task.delivery?.state === "done") {
-      throw new Error("Only an approved, unfinished task can use an agent stage.");
+      throw new Error("Only an unfinished owner-authorized or approved task can use an agent stage.");
     }
     activeAgentCursors.set(cursorIdentityKey(identity), { handle, sessionId: identity.sessionId });
     // Session-scoped reuse bounds desktop creation; task text never becomes a desktop name.
-    const prefix = mode === "owner-preview" ? "preview-agent" : "agent";
-    const name = `${prefix}-${createHash("sha256").update(`${identity.handle}\0${identity.sessionId}`).digest("hex").slice(0, 24)}`;
+    const name = cursorStageName(identity, mode);
     return { identity, task, name, mode };
   }
 
@@ -446,17 +552,39 @@ export function createTaskDesktopStageService(input: {
         if (!selected) throw new Error("This session has no selected application window.");
         return { windowState: await manager.windowStatus(selected.pid, selected.windowId) };
       }
+      const rePresentLiveWindow = async (selected: OwnedStageApp): Promise<Awaited<ReturnType<typeof manager.inspectStage>>> => {
+        // Verify the exact saved window first. If this fails, the caller must
+        // take the closed-window recovery path instead of moving a guessed
+        // replacement onto the owner's desktop.
+        await manager.inspectWindow(String(selected.pid), selected.windowId);
+        const previousStage = manager.list().find((stage) => stage.name === name);
+        const coordinationKey = previousStage?.coordinationKey;
+        await manager.adoptCurrentDesktop(name);
+        await manager.presentOwnerWindow(name, selected.pid, selected.windowId, coordinationKey);
+        await manager.attachWindow(name, String(selected.pid), selected.windowId, selected.appId || undefined, coordinationKey);
+        return manager.inspectStage(name);
+      };
       let inspected: Awaited<ReturnType<typeof manager.inspectStage>>;
       try {
         inspected = await manager.inspectStage(name);
       } catch (error) {
-        // Only a genuinely closed/gone window justifies relaunching a replacement --
-        // "anchor moved to another desktop", a helper timeout, or any other inspection
-        // failure means the window may still be alive; relaunching those would leave a
-        // needless second instance running alongside a perfectly live one. This also
-        // means a pure `capture`/`read_structure` read no longer spawns an app as a side
-        // effect unless the window is actually gone, not just momentarily unreachable.
-        if (!isStageWindowGoneError(error)) throw error;
+        // A moved window is recoverable without a relaunch: verify the same
+        // PID/window identity, rebind the owner-preview desktop, and present
+        // that exact window. Only a genuinely closed/gone window justifies
+        // launching a replacement. A helper timeout or malformed response
+        // remains an error; it is never guessed to be a closed app.
+        const ownedBeforeFailure = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
+        if (isStageWindowMovedError(error) && mode === "owner-preview" && ownedBeforeFailure) {
+          const recoveryStartedAt = Date.now();
+          process.stderr.write(`[stage-recovery] ${taskId}: exact window moved desktops; re-presenting it on the owner desktop\n`);
+          inspected = await rePresentLiveWindow(ownedBeforeFailure);
+          process.stderr.write(`[stage-recovery] ${taskId}: re-presentation completed after ${Date.now() - recoveryStartedAt}ms\n`);
+          recoveryNotice = "The exact application window was on another Windows desktop and was re-presented on the owner’s current desktop; its state was preserved.";
+        } else {
+          // "anchor moved to another desktop", a helper timeout, or any other
+          // inspection failure means a live window may still exist; do not
+          // create a needless second instance alongside it.
+          if (!isStageWindowGoneError(error)) throw error;
         // The window this stage previously owned is gone -- closed, crashed, or
         // otherwise invalid. Relaunch the exact same app once and retry, instead
         // of failing the whole action just because the target disappeared since
@@ -473,7 +601,6 @@ export function createTaskDesktopStageService(input: {
         // does or should have to do. authorize() above has already proven this
         // request belongs to the same identity/session that owns this stage;
         // that is the actual ownership boundary, not which taskId is attached.
-        const ownedBeforeFailure = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
         if (ownedBeforeFailure?.appId) {
           const recoveryStartedAt = Date.now();
           process.stderr.write(`[stage-recovery] ${taskId}: inspectStage failed (${error instanceof Error ? error.message : String(error)}), relaunching ${ownedBeforeFailure.appId}\n`);
@@ -489,6 +616,7 @@ export function createTaskDesktopStageService(input: {
             : "The application window was closed and relaunched; its on-screen state (open file, search, scroll position) was not restored.";
         } else {
           throw error;
+        }
         }
       }
       const selected = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
@@ -513,7 +641,11 @@ export function createTaskDesktopStageService(input: {
       if (effectiveAction.view === "app" && (!selected || !inspected.anchor)) {
         throw new Error("This task has no selected application window. Open the requested app before using the app view.");
       }
-      if (mode === "owner-preview" && !inspected.desktop.isCurrent) throw new Error("The owner-visible preview stage is not on the owner's current desktop.");
+      if (mode === "owner-preview" && !inspected.desktop.isCurrent) {
+        if (!selected) throw new Error("The owner-visible preview stage is not on the owner's current desktop.");
+        inspected = await rePresentLiveWindow(selected);
+        recoveryNotice = "The exact application window was on another Windows desktop and was re-presented on the owner’s current desktop; its state was preserved.";
+      }
       // Recheck after inspection and at dequeue time: queued work cannot survive revocation.
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
@@ -979,8 +1111,7 @@ export function createTaskDesktopStageService(input: {
           const policy = readPolicy();
           authorized = Boolean(current && current.sessionId === identity.sessionId
             && normalizeHandle(current.handle) === normalizeHandle(identity.handle)
-            && policy.handles.includes(normalizeHandle(identity.handle))
-            && policy.controlHandles?.includes(normalizeHandle(identity.handle)));
+            && policy.handles.includes(normalizeHandle(identity.handle)));
         } catch { /* policy or identity storage failure revokes the visual agent session */ }
         if (!authorized) {
           try {
@@ -1003,5 +1134,5 @@ export function createTaskDesktopStageService(input: {
     await driver.shutdown();
   }
 
-  return { prepare, act, launch, closeApp, close };
+  return { prepare, primeCursor, primeCursorForOwner, act, launch, closeApp, close };
 }

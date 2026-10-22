@@ -80,6 +80,28 @@ test("task stage app/action routes require loopback key, reject origins and extr
   } finally { await broker.close(); }
 });
 
+test("delivery cursor prime is a narrow authenticated quick-stage route", async () => {
+  const key = randomBytes(32).toString("hex");
+  const calls: Array<{ token: string; taskId: string }> = [];
+  const broker = await startWebBroker({ key, port: 0, taskStages: {
+    prepare: async () => ({}),
+    primeCursor: async (token, taskId) => { calls.push({ token, taskId }); return { shown: true, agent: "codex" }; },
+  } });
+  try {
+    const url = `http://127.0.0.1:${broker.port}/web/stage/prime-cursor`;
+    const request = (headers: Record<string, string>, body: unknown) => fetch(url, {
+      method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body),
+    });
+    assert.equal((await request({}, { token: "session-token", taskId: "T1" })).status, 401);
+    assert.equal((await request({ "x-m9r-key": key, origin: "https://untrusted.example" }, { token: "session-token", taskId: "T1" })).status, 403);
+    assert.equal((await request({ "x-m9r-key": key }, { token: "session-token", taskId: "T1", mode: "owner-preview" })).status, 403);
+    const accepted = await request({ "x-m9r-key": key }, { token: "session-token", taskId: "T1" });
+    assert.equal(accepted.status, 200);
+    assert.deepEqual(await accepted.json(), { ok: true, result: { shown: true, agent: "codex" } });
+    assert.deepEqual(calls, [{ token: "session-token", taskId: "T1" }]);
+  } finally { await broker.close(); }
+});
+
 test("mutating stage requests require an operation receipt before the broker dispatches input", async () => {
   const key = randomBytes(32).toString("hex");
   const operationIds: string[] = [];

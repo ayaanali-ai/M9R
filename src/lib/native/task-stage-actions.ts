@@ -3,7 +3,7 @@ import { classifyWebActionRisk } from "./risk-core";
 
 type TaskStageActionBody =
   | { kind: "capture" }
-  | { kind: "read_structure"; view: "app" }
+  | { kind: "read_structure"; view: "app" | "desktop" }
   | { kind: "window_status"; view: "app" }
   | { kind: "stop" }
   | { kind: "window_state"; view: "app"; state: "minimized" | "maximized" | "restored" }
@@ -59,7 +59,7 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (Object.keys(action).some((key) => key !== "kind" && !commonOptionalFields.includes(key) && !allowedFields.includes(key))
     || requiredFields.some((key) => !Object.hasOwn(action, key))) throw new Error("Invalid stage action fields.");
   if (action.view !== undefined && action.view !== "desktop" && action.view !== "app") throw new Error("Invalid stage action view.");
-  if (action.kind === "read_structure" && action.view !== "app") throw new Error("Structure observation requires the exact app view.");
+  if (action.kind === "read_structure" && action.view !== "app" && action.view !== "desktop") throw new Error("Structure observation requires an exact app or desktop view.");
   if (action.kind === "window_state" && (action.view !== "app" || !["minimized", "maximized", "restored"].includes(String(action.state)))) throw new Error("Invalid exact-app window state.");
   if (["click_element", "replace_element", "window_frame", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write"].includes(action.kind)
     && action.view !== "app") throw new Error("This semantic stage action requires the exact app view.");
@@ -138,8 +138,9 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
   switch (action.kind) {
     case "capture": return { capture: await capture() };
     case "read_structure":
-      if (!desktopWide) return driver.readStructure(name, identity);
-      throw new Error("Structure-first observation requires one exact app window; desktop-wide observation remains visual.");
+      return action.view === "app"
+        ? driver.readStructure(name, identity)
+        : driver.readDesktopStructure(name, identity);
     case "window_status": throw new Error("Window status is handled by the stage service before recovery.");
     case "stop": throw new Error("Stop is handled outside the stage action queue.");
     case "window_state": return driver.windowState(name, action.state);

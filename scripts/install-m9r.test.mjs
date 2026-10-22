@@ -171,6 +171,9 @@ test("standalone release packages runtime companions from the canonical engine d
     "source cleanliness may exclude only the explicitly classified local-evidence roots");
   assert.match(builderSource, /\.codex-stage-build-|docs\/research|m9r-runtime-clean-/,
     "known local build, research, and runtime evidence roots must remain outside source provenance");
+  assert.ok(builderSource.includes("CUMULATIVE_RELIABILITY_AND_DEMO_TRACKER_2026-10-10")
+    && builderSource.includes("MASTER_LIST_2\\.1"),
+    "private M9R tracker edits must not make an otherwise verified release source appear dirty");
   assert.match(builderSource, /untrackedSource\.length > 0/,
     "unknown untracked source must still block a clean runtime build");
   assert.match(builderSource, /m9r-web-broker\.cjs[\s\S]*m9r-web-broker\.exe/, "the build must turn the bundled broker into its own executable");

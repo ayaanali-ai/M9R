@@ -18,25 +18,57 @@ export async function prepareTaskStageNotice(root: string, web: WebBrokerClient 
   } catch { return "M9R task stage permission settings could not be read; computer access remains disabled."; }
 }
 
+/** Add the native stage contract to an already-claimed OpenCode poll envelope. */
+export function addOpenCodeTaskStageNotice(context: string, stageNotice: string): string {
+  if (!stageNotice) return context;
+  try {
+    const parsed: unknown = JSON.parse(context);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return context;
+    const envelope = parsed as Record<string, unknown>;
+    if (typeof envelope.prompt !== "string" || envelope.prompt.length === 0) return context;
+    return JSON.stringify({ ...envelope, prompt: `${stageNotice}\n\n${envelope.prompt}` });
+  } catch {
+    // A malformed provider envelope must remain untouched; the poller will
+    // reject it rather than receiving a partially rewritten task.
+    return context;
+  }
+}
+
 /** Prepare the current session's first approved inbox task before its hook injects that task into the prompt. */
 export async function prepareHookInboxTaskStageNotice(input: {
   root: string;
   store: LocalStore;
   web: WebBrokerClient;
   handle: string;
+  provider: string;
   event: string;
+  /** SessionStart auto-delivery is enabled by the provider hook that owns that transport. */
+  autoDeliverOnSessionStart?: boolean;
   sessionId?: string;
   cwd?: string;
   prompt?: string;
   timeoutMs?: number;
 }): Promise<string> {
   try {
-    if (input.event !== "UserPromptSubmit" || !input.sessionId || isM9rPushedPrompt(input.prompt ?? "")) return "";
-    const token = input.store.identityTokenFor(input.handle, input.sessionId);
+    const isPromptDelivery = input.event === "UserPromptSubmit";
+    const isSessionStartDelivery = input.event === "SessionStart" && input.autoDeliverOnSessionStart === true;
+    if ((!isPromptDelivery && !isSessionStartDelivery) || !input.sessionId) return "";
+    if (isPromptDelivery && isM9rPushedPrompt(input.prompt ?? "")) return "";
+    // SessionStart is evaluated before handleHookEvent issues the identity for
+    // a genuinely new provider session. Bootstrap the same exact-session
+    // identity here so the first delivered task gets its native desktop
+    // contract too. An explicitly revoked session remains fail-closed; this
+    // is not a discovery or recovery path.
+    let token = input.store.identityTokenFor(input.handle, input.sessionId);
+    if (!token && isSessionStartDelivery && !input.store.identityWasRevoked(input.handle, input.sessionId)) {
+      token = input.store.issueIdentity(input.handle, input.provider, input.sessionId).token;
+    }
     if (!token) return "";
     const tasks = input.store.tasksForSession(input.handle, input.sessionId);
     const cursor = input.store.cursorFor(input.handle, input.sessionId, input.cwd);
-    const injection = renderInboxInjection(tasks, cursor);
+    // Match the trusted provider-delivery path: pending owner approvals must
+    // remain at the frontier and must not cause a stage notice for later work.
+    const injection = renderInboxInjection(tasks, cursor, { includePending: false, items: 1 });
     if (!injection.text) return "";
     const task = injection.includedIds
       .map((id) => input.store.getTask(id))

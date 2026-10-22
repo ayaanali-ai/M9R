@@ -96,6 +96,25 @@ test("shell point inspection and invocation preserve exact control identity with
   await assert.rejects(manager.windowAtPoint(NaN, 10), /Invalid/);
   await assert.rejects(manager.pointControl(0.5, 10), /Invalid/);
 }));
+
+test("whole-desktop UI Automation snapshots stay bounded and handle-free", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => {
+    requests.push(request);
+    return { ok: true, desktopStructure: {
+      scope: "desktop", status: "complete", truncated: false,
+      screen: { x: -1920, y: 0, width: 3840, height: 1080 },
+      elements: [{ ref: "desktop-ui-element-1", label: "Start", role: "button", className: "Start", depth: 2,
+        enabled: true, focused: false, rect: { x: -10, y: 1040, width: 48, height: 40 } }],
+    } } as never;
+  } });
+  const structure = await manager.desktopStructure({ maxElements: 64, maxDepth: 10 });
+  assert.equal(structure.status, "complete");
+  assert.equal(structure.screen.x, -1920);
+  assert.equal(structure.elements[0]?.label, "Start");
+  assert.deepEqual(requests, [{ op: "inspectDesktopStructure", maxElements: 64, maxDepth: 10 }]);
+  await assert.rejects(manager.desktopStructure({ maxElements: 65 }), /bounds are invalid/);
+}));
 const anchor = { pid: 4_321, windowId: "9223372036854775807", desktopId: stageDesktop, onCurrentDesktop: false };
 
 test("owned launch discovery accepts hidden windows only from the exact child process", async () => withRoot(async (root) => {

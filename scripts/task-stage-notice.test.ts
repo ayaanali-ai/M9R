@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { prepareTaskStageNotice } from "../src/lib/native/task-stage-notice";
+import { createLocalStore } from "../src/lib/native/local-store";
+import { addOpenCodeTaskStageNotice, prepareTaskStageNotice } from "../src/lib/native/task-stage-notice";
+import { prepareHookInboxTaskStageNotice } from "../src/lib/native/task-stage-notice";
 import type { WebBrokerClient } from "../src/lib/native/web-broker-client";
 
 function withPolicyRoot(handle: string, run: (root: string) => Promise<void> | void) {
@@ -48,4 +50,92 @@ test("the stage notice is empty for a handle without task-stage access", () => w
 test("the stage notice reports an unavailable broker instead of throwing", () => withPolicyRoot("codex", async (root) => {
   const notice = await prepareTaskStageNotice(root, undefined, "tok", "codex", "T1");
   assert.match(notice, /owner-launched broker is not connected/);
+}));
+
+test("the OpenCode poll envelope receives the stage contract only in its prompt field", () => {
+  const original = JSON.stringify({ task_id: "T7", prompt: "open the named app" });
+  const updated = addOpenCodeTaskStageNotice(original, "M9R desktop tools are available for T7.");
+  const parsed = JSON.parse(updated) as { task_id: string; prompt: string };
+  assert.equal(parsed.task_id, "T7");
+  assert.match(parsed.prompt, /^M9R desktop tools are available for T7\./);
+  assert.match(parsed.prompt, /open the named app$/);
+  assert.equal(addOpenCodeTaskStageNotice(original, ""), original);
+  assert.equal(addOpenCodeTaskStageNotice("not-json", "notice"), "not-json");
+});
+
+test("trusted SessionStart delivery carries the native stage contract with the task", () => withPolicyRoot("claude", async (root) => {
+  const store = createLocalStore(root);
+  store.issueIdentity("claude", "claude-code", "session-1");
+  store.addTask({
+    from: "you",
+    to: "claude",
+    goal: "open the named app",
+    origin: "human_typed",
+    idempotencyKey: "session-start-stage-notice",
+  });
+  const web = { prepareTaskStage: async () => {} } as unknown as WebBrokerClient;
+  const notice = await prepareHookInboxTaskStageNotice({
+    root,
+    store,
+    web,
+    handle: "claude",
+    provider: "claude-code",
+    event: "SessionStart",
+    autoDeliverOnSessionStart: true,
+    sessionId: "session-1",
+    cwd: "C:/project",
+  });
+  assert.match(notice, /M9R desktop tools are available/);
+  assert.match(notice, /never your own provider's built-in computer-use/);
+}));
+
+test("a fresh trusted SessionStart bootstraps its exact identity before preparing the stage contract", () => withPolicyRoot("claude", async (root) => {
+  const store = createLocalStore(root);
+  store.addTask({
+    from: "you",
+    to: "claude",
+    goal: "open the named app",
+    origin: "human_typed",
+    idempotencyKey: "fresh-session-start-stage-notice",
+  });
+  const web = { prepareTaskStage: async () => {} } as unknown as WebBrokerClient;
+  const notice = await prepareHookInboxTaskStageNotice({
+    root,
+    store,
+    web,
+    handle: "claude",
+    provider: "claude-code",
+    event: "SessionStart",
+    autoDeliverOnSessionStart: true,
+    sessionId: "fresh-session",
+    cwd: "C:/project",
+  });
+  assert.match(notice, /M9R desktop tools are available/);
+  assert.match(notice, /never your own provider's built-in computer-use/);
+  assert.ok(store.identityTokenFor("claude", "fresh-session"), "the exact fresh session should now have a private identity");
+}));
+
+test("a provider-owned poller does not receive a pre-delivery SessionStart stage notice", () => withPolicyRoot("opencode", async (root) => {
+  const store = createLocalStore(root);
+  store.issueIdentity("opencode", "opencode", "session-1");
+  store.addTask({
+    from: "you",
+    to: "opencode",
+    goal: "open the named app",
+    origin: "human_typed",
+    idempotencyKey: "opencode-session-start-stage-notice",
+  });
+  const web = { prepareTaskStage: async () => {} } as unknown as WebBrokerClient;
+  const notice = await prepareHookInboxTaskStageNotice({
+    root,
+    store,
+    web,
+    handle: "opencode",
+    provider: "opencode",
+    event: "SessionStart",
+    autoDeliverOnSessionStart: false,
+    sessionId: "session-1",
+    cwd: "C:/project",
+  });
+  assert.equal(notice, "");
 }));

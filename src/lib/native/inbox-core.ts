@@ -288,7 +288,12 @@ export function renderInboxInjection(tasks: readonly Task[], cursor: number, opt
   if (shown.length === 0) return { text: "", includedIds: [], newCursor: cursor, omitted: 0 };
   const perItemChars = options.itemChars ? options.itemChars + 200 : CAPS.inboxItemTokens * 4;
   const lines = shown.map((t) => {
-    const head = includeTaskIds ? `[${t.id} from @${t.from}, ${approvalLabel(t)}] ` : `M9R work from @${t.from}: `;
+    // Human-originated work is authorized by the owner who typed the mention,
+    // not by a synthetic @you agent. Keep that distinction provider-visible so
+    // a connected agent cannot mistake the sender label for another M9R agent
+    // or ask the owner to re-authorize an ordinary direct task.
+    const sender = t.origin === "human_typed" ? "the owner" : `@${t.from}`;
+    const head = includeTaskIds ? `[${t.id} from ${sender}, ${approvalLabel(t)}] ` : `M9R work from ${sender}: `;
     const tail = includeTaskIds ? ` Details: get_task ${t.id}.` : " More detail is available through the connected M9R context.";
     const room = Math.max(40, Math.min(goalChars, perItemChars - head.length - tail.length));
     // The pointer is only useful (and only safe to mention) when the text shown is not the whole goal.

@@ -10,8 +10,8 @@ import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-s
 import { handleHookEvent, type HookInput } from "./hook-handler";
 import { collectCodexResults, deliverToCodex, pushAnswerToCodex, realDeps, spawnDeliveryRunner } from "./codex-delivery";
 import { createWebBrokerClient } from "./web-broker-client";
-import { brokerKeyPath } from "./web-broker-paths";
-import { prepareHookInboxTaskStageNotice } from "./task-stage-notice";
+import { brokerKeyPath, ownerPipePath } from "./web-broker-paths";
+import { addOpenCodeTaskStageNotice, prepareHookInboxTaskStageNotice, prepareTaskStageNotice } from "./task-stage-notice";
 import { resolveHookSessionMetadata } from "./task-execution-context";
 
 export interface HookRequest {
@@ -115,7 +115,7 @@ export async function runHookRequest(req: HookRequest, runnerEntry: string, base
   const sessionMetadata = resolveHookSessionMetadata(store, req.provider, handleForProvider(req.provider), input);
   input.session_id = sessionMetadata.sessionId;
   if (!input.hook_event_name && req.event) input.hook_event_name = req.event;
-  const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
+  const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
   // Task-stage setup is opt-in and local. Keep it below the provider's hook budget; if the broker is slow,
   // the normal inbox path still succeeds and the agent can prepare the stage through MCP on its next check.
   const stageNotice = await prepareHookInboxTaskStageNotice({
@@ -123,7 +123,13 @@ export async function runHookRequest(req: HookRequest, runnerEntry: string, base
     store,
     web,
     handle: handleForProvider(req.provider),
+    provider: req.provider,
     event: input.hook_event_name ?? req.event,
+    // The common hook claims one exact-session task at SessionStart for every
+    // provider except OpenCode. OpenCode's resident plugin owns its own live
+    // prompt transport, so it must not receive a notice for work that has not
+    // been claimed by that poller yet.
+    autoDeliverOnSessionStart: handleForProvider(req.provider) !== "opencode",
     sessionId: input.session_id,
     cwd: input.cwd,
     prompt: input.prompt,
@@ -159,11 +165,45 @@ export async function runHookRequest(req: HookRequest, runnerEntry: string, base
       }
       captureArmedRawMentionPayloadOnce(root, req.provider, targets, rawPayload);
     },
+    onTaskCreated: (taskId) => {
+      const token = input.session_id ? store.identityTokenFor(handleForProvider(req.provider), input.session_id) : null;
+      if (token && web.primeAgentCursor) void web.primeAgentCursor(token, taskId).catch(() => undefined);
+    },
     dispatch: (id) => { if (inProcess) void deliverToCodex(store, id, deps).catch(() => undefined); else spawnDeliveryRunner(runnerEntry, id, env); },
     collect: () => { collectCodexResults(store, deps); },
     lastAnswer: (i) => lastClaudeAnswer(i, env),
     answerBack: (id) => { if (inProcess) void pushAnswerToCodex(store, id, deps).catch(() => undefined); else spawnDeliveryRunner(runnerEntry, id, env, "answer"); },
   });
+  // OpenCode's resident poller owns the real prompt transport. It claims the
+  // task atomically first, so prepare the same native stage contract only for
+  // the exact envelope that was actually claimed; never prepare a candidate
+  // task before ownership is settled.
+  if (result && (input.hook_event_name ?? req.event) === "OpenCodePoll" && input.session_id) {
+    try {
+      const envelope = JSON.parse(result.hookSpecificOutput.additionalContext) as { task_id?: unknown };
+      const taskId = typeof envelope.task_id === "string" ? envelope.task_id : undefined;
+      const token = taskId ? store.identityTokenFor(handleForProvider(req.provider), input.session_id) : null;
+      if (taskId && token) {
+        const taskStageNotice = await prepareTaskStageNotice(root, web, token, handleForProvider(req.provider), taskId, 2_000);
+        result.hookSpecificOutput.additionalContext = addOpenCodeTaskStageNotice(result.hookSpecificOutput.additionalContext, taskStageNotice);
+      }
+    } catch {
+      // A stage-notice failure must never turn a successfully claimed task
+      // into a delivery failure; the provider can still use its native tools.
+    }
+  }
+  // A task may have been queued while this provider was closed.  Once its
+  // existing session reconnects, prime every fresh eligible task before the
+  // provider's first desktop action; this is visual-only and never delays the
+  // SessionStart hook or exposes the target session id.
+  if ((input.hook_event_name ?? req.event) === "SessionStart" && input.session_id && web.primeAgentCursor) {
+    const token = store.identityTokenFor(handleForProvider(req.provider), input.session_id);
+    if (token) {
+      for (const task of store.pendingWorkFor(handleForProvider(req.provider), input.session_id)) {
+        void web.primeAgentCursor(token, task.id).catch(() => undefined);
+      }
+    }
+  }
   // A Stop hook is the only authoritative native-session completion signal. Wait for the local broker to publish it
   // before this hook process/pipe request exits; a fire-and-forget fetch can be abandoned as the provider shuts down.
   if ((input.hook_event_name ?? req.event) === "Stop" && input.session_id) {

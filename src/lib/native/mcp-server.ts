@@ -48,6 +48,9 @@ export interface McpServerDeps {
   /** Provider parent process used to resolve a claim after hook/MCP startup races. */
   connectionProcessId?: number;
   connectionProvider?: string;
+  /** Private project/session hints supplied by a provider adapter. */
+  connectionCwd?: string;
+  connectionSessionId?: string;
   /**
    * A private worker refreshed underneath an already-running provider-owned
    * supervisor may no longer have the launch environment that identified the
@@ -96,7 +99,10 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   let connectionBindingId = deps.connectionBindingId;
   const connectionWaitMs = Math.max(0, Math.min(10_000, Math.floor(deps.connectionWaitMs ?? 3_000)));
   const connectionPollMs = Math.max(10, Math.min(250, Math.floor(deps.connectionPollMs ?? 50)));
-  const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const sleepAsync = (ms: number) => new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 
   function resolveConnectionBinding(): ConnectionBinding | null {
     if (connectionBindingId) {
@@ -105,25 +111,33 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         : null;
     }
     if (deps.connectionProcessId === undefined && !deps.connectionProvider && !deps.connectionWorkerFallback) return null;
-    const binding = deps.store.bindConnectionForProcess({ provider: deps.connectionProvider, processId: deps.connectionProcessId });
+    let binding = deps.store.bindConnectionForProcess({ provider: deps.connectionProvider, processId: deps.connectionProcessId });
+    if (!binding && deps.connectionProvider && deps.store.recoverProviderConnection) {
+      binding = deps.store.recoverProviderConnection({
+        provider: deps.connectionProvider,
+        ...(deps.connectionCwd ? { cwd: deps.connectionCwd } : {}),
+        ...(deps.connectionSessionId ? { sessionId: deps.connectionSessionId } : {}),
+        ...(deps.connectionProcessId !== undefined ? { processId: deps.connectionProcessId } : {}),
+      });
+    }
     if (binding) connectionBindingId = binding.bindingId;
     return binding;
   }
 
-  function waitForConnectionBinding(): ConnectionBinding | null {
+  async function waitForConnectionBinding(): Promise<ConnectionBinding | null> {
     const immediate = resolveConnectionBinding();
     if (immediate || connectionWaitMs === 0) return immediate;
 
     const deadline = Date.now() + connectionWaitMs;
     while (Date.now() < deadline) {
-      sleepSync(Math.min(connectionPollMs, Math.max(1, deadline - Date.now())));
+      await sleepAsync(Math.min(connectionPollMs, Math.max(1, deadline - Date.now())));
       const binding = resolveConnectionBinding();
       if (binding) return binding;
     }
     return resolveConnectionBinding();
   }
 
-  function requireIdentity(token?: string): VerifiedIdentity {
+  async function requireIdentity(token?: string): Promise<VerifiedIdentity> {
     // Always try connection-mode resolution fresh when this process has any connection-mode
     // configuration at all, before ever falling back to a manual token -- a claim that did not
     // exist yet on an earlier call (the hook had not fired) can exist now, and this picks it up
@@ -131,7 +145,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     // process with no connection-mode configuration, or while a connection genuinely has none
     // bound yet and the caller supplied one anyway (legacy/manual use).
     if (connectionConfigured) {
-      const binding = waitForConnectionBinding();
+      const binding = await waitForConnectionBinding();
       const identity = binding ? deps.store.verifyConnectionBinding(binding.bindingId) : null;
       if (identity) return identity;
       if (typeof token !== "string") {
@@ -163,8 +177,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
    * credential never crosses the MCP tool boundary and is never rendered in a
    * task card.
    */
-  function authenticate(token?: string): { identity: VerifiedIdentity; token: string } {
-    const identity = requireIdentity(token);
+  async function authenticate(token?: string): Promise<{ identity: VerifiedIdentity; token: string }> {
+    const identity = await requireIdentity(token);
     // A manually presented token is already the right credential -- requireIdentity just
     // verified it against the store -- so use it directly rather than looking it up again.
     // Only when no token was presented (the normal connection-mode case) does this need to ask
@@ -229,7 +243,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     store: deps.store,
     web: deps.web,
     requireIdentity,
-    identityToken: (identity, presented) => authenticate(presented as string | undefined).token,
+    identityToken: async (_identity, presented) => (await authenticate(presented as string | undefined)).token,
     resolveTaskId,
     now: deps.now,
     monotonicNow: deps.monotonicNow,
@@ -259,7 +273,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       inputSchema: { ...AUTH_FIELD, operation: z.enum(["status", "log", "diff_stat", "branch"]), limit: z.number().int().min(1).max(20).default(10) },
     },
     async ({ token, operation, limit }) => {
-      const identity = requireIdentity(token);
+      const identity = await requireIdentity(token);
       await requireRoomFileAccess(identity);
       return { content: [{ type: "text", text: await gitRead(workingDirectory(identity), operation, limit) }] };
     },
@@ -272,7 +286,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       inputSchema: { ...AUTH_FIELD, path: z.string().min(1).max(1_000) },
     },
     async ({ token, path }) => {
-      const identity = requireIdentity(token);
+      const identity = await requireIdentity(token);
       await requireRoomFileAccess(identity);
       return { content: [{ type: "text", text: await readGovernedFile(workingDirectory(identity), path) }] };
     },
@@ -281,12 +295,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_whoami",
     {
-      description: "Confirm your own verified M9R identity (handle, provider, session) for this connection. Use this once if you're unsure whether M9R recognizes this session.",
+      description: "Confirm your stable verified M9R identity (agent label and provider) for this connection. The private session key is never returned to the agent or owner-facing UI.",
       inputSchema: { ...AUTH_FIELD },
     },
     async ({ token }) => {
-      const identity = requireIdentity(token);
-      return { content: [{ type: "text", text: `You are @${identity.handle} (${identity.provider}), session ${identity.sessionId}.` }] };
+      const identity = await requireIdentity(token);
+      return { content: [{ type: "text", text: `You are @${identity.handle} (${identity.provider}).` }] };
     },
   );
 
@@ -294,7 +308,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     description: "Stage mode defaults to owner-preview: open a normal installed app on the current desktop or restore the existing personal browser without an extra browser window or separate profile. Use m9r_stage_action for explicitly requested icon clicks. Pass mode \"background\" only for an explicitly requested isolated desktop. In background mode, launch an installed app using the owner's active access policy or discard an app owned by this task; preserve the task result first.",
     inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Omit to use this session's current pending task."), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), appId: STAGE_APP_REF.optional(), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional() },
   }, async ({ token, taskId: requestedTaskId, operation, mode, appId, operationId: requestedOperationId }, extra) => {
-    const { identity, token: authToken } = authenticate(token);
+    const { identity, token: authToken } = await authenticate(token);
     const taskId = resolveTaskId(identity, requestedTaskId);
     if ((operation === "launch") !== (appId !== undefined)) throw new Error("Launch requires an app ID; discard takes no app ID.");
     const operationId = operation === "launch"
@@ -306,10 +320,10 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   });
 
   server.registerTool("m9r_stage_action", {
-    description: "Capture, inspect, or control this task's desktop; mode defaults to owner-preview. After m9r_stage_app selects an app, omitted action.view uses that exact app window; otherwise it uses the owner's current desktop. Set action.view to app or desktop to explicitly choose screenshot coordinates. Use read_structure with view=app for one bounded accessibility-tree observation of the selected window; desktop-wide structure is refused and remains visual. Desktop icons, taskbar apps, Start, windows, and controls are supported. Pass background mode only for an explicitly requested isolated desktop. Supports capture, structure read, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Mutating inputs carry a durable one-shot receipt: if the receipt says already_applied, in_progress, or uncertain, do not repeat the action; capture and inspect first. Input remains bound to the exact window and does not activate the app as a fallback. If a target class rejects background input, the action reports the target and fails without sending text; add an accessibility value adapter or app-specific background route for that control. Capture before input, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Verify effects; a driver receipt alone is not proof of the application state.",
+    description: "Capture, inspect, or control this task's desktop; mode defaults to owner-preview. After m9r_stage_app selects an app, omitted action.view uses that exact app window; otherwise it uses the owner's current desktop. Set action.view to app or desktop to explicitly choose screenshot coordinates. Use read_structure with view=app for the selected window or view=desktop for one bounded composite of visible windows and controls; the same desktop capture remains the visual fallback for taskbar, Start, and shell-owned controls. Desktop icons, taskbar apps, Start, windows, and controls are supported. Pass background mode only for an explicitly requested isolated desktop. Supports capture, structure read, cursor move, left/double/right click, type, scroll, drag, key press, and hotkeys. Mutating inputs carry a durable one-shot receipt: if the receipt says already_applied, in_progress, or uncertain, do not repeat the action; capture and inspect first. Input remains bound to the exact window and does not activate the app as a fallback. If a target class rejects background input, the action reports the target and fails without sending text; add an accessibility value adapter or app-specific background route for that control. Capture before input, inspect the image, and use its coordinates. Money-like clicks wait for owner approval. Verify effects; a driver receipt alone is not proof of the application state.",
     inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Omit to use this session's current pending task."), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional().describe("Stable ID for one intended input. Reuse this ID when reconciling a lost response; never generate a new ID to retry an uncertain action."), action: z.discriminatedUnion("kind", [
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("capture") }).strict(),
-      z.object({ view: z.literal("app"), kind: z.literal("read_structure") }).strict(),
+      z.object({ view: z.enum(["desktop", "app"]), kind: z.literal("read_structure") }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["click", "cursor"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), confirmFocusForeground: z.boolean().optional() }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.enum(["double_click", "middle_click", "right_click"]), x: z.number().int().min(0).max(16383), y: z.number().int().min(0).max(16383), confirmFocusForeground: z.boolean().optional() }).strict(),
       z.object({ view: z.enum(["desktop", "app"]).optional(), kind: z.literal("type"), text: z.string().min(1).max(500), mode: z.enum(["insert", "replace"]).optional(), x: z.number().int().min(0).max(16383).optional(), y: z.number().int().min(0).max(16383).optional(), expectedRole: z.string().max(160).optional(), expectedLabel: z.string().max(160).optional(), confirmFocusForeground: z.boolean().optional() }).strict(),
@@ -330,7 +344,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       z.object({ view: z.literal("app"), kind: z.literal("clipboard_write"), text: z.string().min(1).max(500).optional(), imagePath: z.string().max(1024).optional(), filePath: z.string().max(1024).optional(), confirmSharedClipboard: z.literal(true) }).strict(),
   ]) },
   }, async ({ token, taskId: requestedTaskId, mode, action, operationId: requestedOperationId }, extra) => {
-    const { identity, token: authToken } = authenticate(token);
+    const { identity, token: authToken } = await authenticate(token);
     const taskId = resolveTaskId(identity, requestedTaskId);
     const operationId = requestedOperationId ?? createHash("sha256").update(`${operationNamespace}\0${String(extra.requestId)}`).digest("hex");
     const response = deps.web?.taskStageAction ? await deps.web.taskStageAction(authToken, taskId, action, mode, operationId)
@@ -349,10 +363,10 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   });
 
   server.registerTool("m9r_stage_prepare", {
-    description: "Bind an approved unfinished task to the desktop the owner is currently viewing; mode defaults to owner-preview. Preparation never creates, switches, moves, or closes desktops or windows. Pass mode \"background\" only when the task explicitly requests an isolated Windows desktop. Use the same mode on each m9r_stage_action call; preparation itself does not prove an action succeeded.",
+    description: "Bind an unfinished owner-authorized or approved task to the desktop the owner is currently viewing; a direct task from the owner needs no extra approval. Mode defaults to owner-preview. Preparation never creates, switches, moves, or closes desktops or windows. Pass mode \"background\" only when the task explicitly requests an isolated Windows desktop. Use the same mode on each m9r_stage_action call; preparation itself does not prove an action succeeded.",
     inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Omit to use this session's current pending task."), mode: z.enum(["background", "owner-preview"]).default("owner-preview") },
   }, async ({ token, taskId: requestedTaskId, mode }) => {
-    const { identity, token: authToken } = authenticate(token);
+    const { identity, token: authToken } = await authenticate(token);
     const taskId = resolveTaskId(identity, requestedTaskId);
     const result = deps.web?.prepareTaskStage
       ? await deps.web.prepareTaskStage(authToken, taskId, mode)
@@ -367,7 +381,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       inputSchema: { ...AUTH_FIELD, activeWindowMinutes: z.number().int().min(1).max(1440).default(10) },
     },
     async ({ token, activeWindowMinutes }) => {
-      const identity = requireIdentity(token);
+      const identity = await requireIdentity(token);
       // A web-room agent's teammates are its room roster, never an unrelated native Claude Code/Codex session that
       // happens to be open elsewhere on the machine -- checking the endpoint registry first could return those instead.
       if (inRoom(identity) && deps.web?.listRoomAgents) {
@@ -393,7 +407,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       },
     },
     async ({ token, to: rawTo, goal }) => {
-      const { identity, token: authToken } = authenticate(token);
+      const { identity, token: authToken } = await authenticate(token);
       const to = rawTo.replace(/^@+/, "").trim().toLowerCase();
       if (inRoom(identity)) {
         const authorization = await deps.web?.authorizeRoomMessage?.(identity.handle, to);
@@ -473,7 +487,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       },
     },
     async ({ token, waitSeconds }) => {
-      const { identity, token: authToken } = authenticate(token);
+      const { identity, token: authToken } = await authenticate(token);
       // A web-room agent has one durable room inbox even when its provider process/session is restarted; using a
       // cursor keyed by that session ID would replay its ENTIRE delivered history after recovery, including old
       // "stop all work" messages. The cursor belongs to the stable room handle, never to a process or provider session.
@@ -564,7 +578,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       inputSchema: { ...AUTH_FIELD },
     },
     async ({ token }) => {
-      const { identity } = authenticate(token);
+      const { identity } = await authenticate(token);
       const handle = roomHandle(identity, identity.handle);
       const pending = (inRoom(identity) ? deps.store.tasksFor(handle) : deps.store.pendingWorkFor(identity.handle, identity.sessionId))
         .filter((task) => taskIsFreshForIdentity(identity, task))
@@ -587,7 +601,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       },
     },
     async ({ token, taskId: requestedTaskId, summary }) => {
-      const { identity, token: authToken } = authenticate(token);
+      const { identity, token: authToken } = await authenticate(token);
       const taskId = resolveResultTaskId(identity, requestedTaskId);
       const existing = deps.store.getTask?.(taskId);
       if (!existing) throw new Error(`No task ${taskId} found.`);
@@ -618,7 +632,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       },
     },
     async ({ token, action, room, text, source, sourceUrl, selector }) => {
-      const identity = requireIdentity(token);
+      const identity = await requireIdentity(token);
       if (action === "append") {
         if (!text?.trim() || !source || (source === "page" && !sourceUrl)) {
           return { content: [{ type: "text" as const, text: "For append, text and source are required; page-derived notes also require sourceUrl." }], isError: true };
@@ -653,7 +667,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   }
 
   async function runWeb(token: string | undefined, partial: Pick<WebRequest, "action"> & Partial<WebRequest>) {
-    const { identity } = authenticate(token);
+    const { identity } = await authenticate(token);
     if (!deps.web) {
       return { content: [{ type: "text" as const, text: "Browser tools are not available in this M9R setup." }], isError: true };
     }
@@ -673,7 +687,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   }
 
   async function runWebBatch(token: string | undefined, input: Omit<WebBatchRequest, "agent" | "provider" | "sessionId">) {
-    const { identity } = authenticate(token);
+    const { identity } = await authenticate(token);
     if (!deps.web?.runBatch) return { content: [{ type: "text" as const, text: "Browser batch tools are not available in this M9R setup." }], isError: true };
     const result = await deps.web.runBatch({ ...input, agent: identity.handle, provider: identity.provider, sessionId: identity.sessionId });
     return { content: [{ type: "text" as const, text: JSON.stringify(result) }], ...(result.ok ? {} : { isError: true }) };
@@ -713,7 +727,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       inputSchema: { ...AUTH_FIELD, ...TAB_FIELD, url: z.string().min(1).max(2_000), newTab: z.boolean().optional().describe("Always create a distinct named tab; normally M9R reuses a named tab and opens a new one automatically if another agent holds the current tab.") },
     },
     async ({ token, tab, url, newTab, shareWith }) => {
-      const identity = requireIdentity(token);
+      const identity = await requireIdentity(token);
       const name = newTab ? `${identity.handle.slice(0, 10)}_new_${Date.now().toString(36)}`.slice(0, 40) : tab;
       return runWeb(token, { action: "open", tab: name, url, shareWith });
     },
@@ -931,7 +945,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       inputSchema: { ...AUTH_FIELD, ...POWER_TAB_FIELD, ...TARGET_FIELDS },
     },
     async ({ token, tab, selector, ref }) => {
-      const identity = requireIdentity(token);
+      const identity = await requireIdentity(token);
       if (!deps.web) return { content: [{ type: "text" as const, text: "Browser tools are not available in this M9R setup." }], isError: true };
       const link = await deps.web.run({
         agent: identity.handle, provider: identity.provider, sessionId: identity.sessionId,

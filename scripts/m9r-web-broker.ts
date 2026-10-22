@@ -64,7 +64,9 @@ async function main(): Promise<void> {
   // state.lock directory themselves; the owner-only store ACL stays intact.
   const store = createLocalStore(root);
   const taskStages = createTaskDesktopStageService({ store, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
-  const broker = await startWebBroker({ key, port, taskStages, agentMcpStore: store, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
+  const broker = await startWebBroker({ key, port, taskStages, agentMcpStore: store,
+    onAgentTaskCreated: (token, taskId) => { void taskStages.primeCursor(token, taskId); },
+    allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
   stageApprovals.requestApproval = (request) => broker.requestStageApproval(request);
   const config = loadAgentsConfig(root, { cwd: projectRoot });
   const sessions = createWebLiveSessions({

@@ -24,6 +24,7 @@ test("window geometry, menus, and shared clipboard are distinct capabilities wit
   const envelope = { operationId: "system-action", targetId: "target_1", targetRevision: "revision_1" };
   for (const action of [
     { ...envelope, kind: "window_frame", x: -100, y: 100, width: 800, height: 600 },
+    { ...envelope, kind: "window_state", state: "minimized" },
     { ...envelope, kind: "invoke_menu", path: ["Edit", "Select All"] },
     { ...envelope, kind: "clipboard", mode: "read", includeText: false },
     { ...envelope, kind: "clipboard", mode: "write", text: "scratch", confirmSharedClipboard: true },
@@ -252,6 +253,8 @@ test("other common intents share one envelope without requiring an app-specific 
   assert.deepEqual(computerUseActionRequirements(selectAll), { capabilities: ["input.select-text.all"], match: "all" });
   const selectPhrase = parseComputerUseAction({ ...envelope, kind: "select_text", locator: { kind: "element", ref: "e1", snapshotId: "revision_1" }, selection: { kind: "text", text: "phrase" } });
   assert.deepEqual(computerUseActionRequirements(selectPhrase), { capabilities: ["input.select-text.text"], match: "all" });
+  const windowState = parseComputerUseAction({ ...envelope, kind: "window_state", state: "restored" });
+  assert.deepEqual(computerUseActionRequirements(windowState), { capabilities: ["window.state"], match: "all" });
   assert.equal(computerUseActionSchema.safeParse({ ...envelope, kind: "select_text", selection: { kind: "all" } }).success, false);
   assert.equal(computerUseActionSchema.safeParse({ ...envelope, kind: "navigate", url: "javascript:alert(1)" }).success, false);
   assert.equal(computerUseActionSchema.safeParse({ ...envelope, kind: "scroll", unit: "pixel", deltaX: 0, deltaY: 0 }).success, false);

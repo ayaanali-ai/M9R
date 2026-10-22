@@ -15,6 +15,7 @@ const REF_PREFIX = "e0123456789abcdef01234567";
 
 type ToolReply = {
   content: Array<{ type: string; text?: string; data?: string }>;
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 };
 type ToolServer = {
@@ -176,10 +177,16 @@ test("app-window observations are structure-first and semantic clicks stay on th
   const h = createHarness(web);
   t.after(async () => { await h.server.close(); });
 
-  const observed = body(await h.call("m9r_computer_observe", {
+  const observedReply = await h.call("m9r_computer_observe", {
     token: TOKEN_A, target: "app-window", taskId: "T902", mode: "owner-preview",
-  }));
+  });
+  const observed = body(observedReply);
   assert.equal(observed.observation.structure.status, "complete");
+  const structuredTarget = observedReply.structuredContent?.target as { targetId?: unknown } | undefined;
+  assert.equal(structuredTarget?.targetId, observed.target.targetId,
+    "modern MCP clients receive the same target in structuredContent without parsing text");
+  assert.equal("dataUrl" in (observedReply.structuredContent ?? {}), false,
+    "structuredContent does not expose raw screenshot data URLs");
   assert.equal(observed.observation.structure.windowTitle, "Example Domain");
   assert.equal("data" in observed.observation, false);
   assert.equal(observed.image, undefined);
@@ -204,6 +211,31 @@ test("app-window observations are structure-first and semantic clicks stay on th
   assert.equal(clicked.result.effectStatus, "verified");
   assert.deepEqual(stageActions.map(({ action }) => (action as { kind: string }).kind), ["read_structure", "window_status", "click_element"]);
   assert.equal(stageActions[2]?.operationId, "semantic-site-link");
+});
+
+test("a provider bridge that stringifies the structured action still reaches the same canonical validator", async (t) => {
+  const requests: Array<Record<string, unknown>> = [];
+  const web: WebBrokerClient = {
+    run: async (request) => {
+      requests.push(request as unknown as Record<string, unknown>);
+      if (request.action === "snapshot") return { ok: true, data: browserSnapshot(2) };
+      return { ok: true, data: { clicked: true } };
+    },
+  };
+  const h = createHarness(web);
+  t.after(async () => { await h.server.close(); });
+
+  const observed = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "browser-tab", tab: "stringified-action" }));
+  const action = {
+    operationId: "stringified-action-1",
+    targetId: observed.target.targetId,
+    targetRevision: observed.target.revision,
+    kind: "click",
+    locator: { kind: "element", ref: observed.observation.elements[0].ref, snapshotId: observed.target.revision },
+  };
+  const clicked = body(await h.call("m9r_computer_action", { token: TOKEN_A, action: JSON.stringify(action) }));
+  assert.equal(clicked.result.dispatchStatus, "dispatched");
+  assert.equal(requests.filter((request) => request.action === "click").length, 1);
 });
 
 test("same-target observations report semantic change status without treating fresh revisions as UI changes", async (t) => {
@@ -895,6 +927,12 @@ test("generic computer-use reports phase timings and whether a durable receipt w
   assert.ok(Number.isFinite(initial.telemetry.timingsMs.totalMs));
   assert.ok(Number.isFinite(initial.telemetry.timingsMs.observationMs));
 
+  const initialReply = await h.call("m9r_computer_observe", {
+    token: TOKEN_A, target: "browser-tab", tab: "timing-structured",
+  });
+  assert.equal(computerUseTelemetrySchema.safeParse(initialReply.structuredContent?.telemetry).success, true,
+    "structuredContent carries the same validated telemetry as the compatibility text envelope");
+
   const action = {
     operationId: "timing-click-1",
     targetId: initial.target.targetId,
@@ -1208,7 +1246,7 @@ test("the registered desktop-wide target uses the actual desktop-stage route", a
   const h = createHarness(web);
   t.after(async () => { await h.server.close(); });
 
-  const observed = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "desktop", taskId: "T22", mode: "owner-preview" }));
+  const observed = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "desktop", taskId: "T22", mode: "owner-preview", representation: "visual" }));
   assert.equal(observed.target.kind, "desktop");
   assert.equal(observed.target.capabilities.includes("input.key"), false, "desktop-wide keys require a confirmed target window");
   assert.equal(observed.target.capabilities.includes("input.text.insert"), false, "desktop-wide typing requires a confirmed target window");
@@ -1231,6 +1269,37 @@ test("the registered desktop-wide target uses the actual desktop-stage route", a
   assert.deepEqual(stageActions[1], { action: { kind: "click", x: 22, y: 34, view: "desktop" }, mode: "owner-preview" });
 });
 
+test("desktop structured observe requests one generic composite and keeps shell pixels as fallback", async (t) => {
+  const stageActions: Array<{ action: unknown; mode?: string }> = [];
+  const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 160, height: 90, capturedAt: new Date().toISOString() });
+  const web: WebBrokerClient = {
+    prepareTaskStage: async () => ({ ok: true }),
+    taskStageAction: async (_token, _taskId, action, mode) => {
+      stageActions.push({ action, mode });
+      if ((action as { kind?: string }).kind === "read_structure") return { ok: true, result: {
+        scope: "desktop", status: "partial", capturedAt: new Date().toISOString(),
+        windows: [{ ref: "desktop-window-1", appName: "notepad.exe", title: "Untitled", rect: { x: 10, y: 12, width: 90, height: 60 }, status: "complete", elements: [
+          { ref: "desktop-window-1:element-1", windowRef: "desktop-window-1", role: "Button", label: "Safe action", rect: { x: 20, y: 24, width: 20, height: 10 }, actions: ["click"] },
+        ] }],
+        elements: [{ ref: "desktop-window-1:element-1", windowRef: "desktop-window-1", role: "Button", label: "Safe action", rect: { x: 20, y: 24, width: 20, height: 10 }, actions: ["click"] }],
+        shell: { status: "visual-fallback", reason: "The shell is represented by the same desktop capture." },
+        fallbackCapture: { ...capture(), controls: [{ role: "desktop-window", label: "Untitled", rect: { x: 10, y: 12, width: 90, height: 60 } }] },
+      } };
+      return { ok: true, result: { capture: capture(), actionExecuted: true, outcome: { status: "confirmed" } } };
+    },
+    run: async () => ({ ok: false, error: "unused browser broker" }),
+  };
+  const h = createHarness(web);
+  t.after(async () => { await h.server.close(); });
+
+  const observed = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "desktop", taskId: "T24", mode: "owner-preview", representation: "structured" }));
+  assert.equal(observed.observation.representation, "structured");
+  assert.equal(observed.observation.structure.status, "partial");
+  assert.equal(observed.observation.structure.windows[0].elements[0].label, "Safe action");
+  assert.equal(observed.observation.structure.shell.status, "visual-fallback");
+  assert.deepEqual(stageActions, [{ action: { kind: "read_structure", view: "desktop" }, mode: "owner-preview" }]);
+});
+
 test("desktop-stage drag preserves an explicitly requested duration", async (t) => {
   const stageActions: Array<{ action: unknown; mode?: string }> = [];
   const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 160, height: 90, capturedAt: new Date().toISOString() });
@@ -1247,7 +1316,7 @@ test("desktop-stage drag preserves an explicitly requested duration", async (t) 
   const h = createHarness(web);
   t.after(async () => { await h.server.close(); });
 
-  const observed = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "desktop", taskId: "T23", mode: "owner-preview" }));
+  const observed = body(await h.call("m9r_computer_observe", { token: TOKEN_A, target: "desktop", taskId: "T23", mode: "owner-preview", representation: "visual" }));
   assert.ok(observed.target.capabilities.includes("input.drag.duration"));
   const reply = await h.call("m9r_computer_action", { token: TOKEN_A, action: {
     operationId: "desktop-timed-drag", targetId: observed.target.targetId,
@@ -1905,6 +1974,9 @@ test("system actions use the same exact-window route for both provider identitie
     let current = body(await h.call("m9r_computer_observe", { token, target: "app-window", taskId: "system-fixture", representation: "visual" }));
     for (const action of [
       { kind: "window_frame", x: -100, y: 100, width: 800, height: 600 },
+      { kind: "window_state", state: "minimized" },
+      { kind: "window_state", state: "restored" },
+      { kind: "window_state", state: "maximized" },
       { kind: "invoke_menu", path: ["Edit", "Select All"] },
       { kind: "clipboard", mode: "read", includeText: false },
       { kind: "clipboard", mode: "write", text: "scratch", confirmSharedClipboard: true },
@@ -1917,7 +1989,8 @@ test("system actions use the same exact-window route for both provider identitie
     }
   }
   assert.deepEqual(inputs.filter(({ action }) => action.kind !== "capture" && action.kind !== "window_status").map(({ action }) => action.kind),
-    ["window_frame", "invoke_menu", "clipboard_read", "clipboard_write", "window_frame", "invoke_menu", "clipboard_read", "clipboard_write"]);
+    ["window_frame", "window_state", "window_state", "window_state", "invoke_menu", "clipboard_read", "clipboard_write",
+      "window_frame", "window_state", "window_state", "window_state", "invoke_menu", "clipboard_read", "clipboard_write"]);
 });
 
 test("exact app-window capabilities expose supported right and double clicks without claiming middle click", async (t) => {

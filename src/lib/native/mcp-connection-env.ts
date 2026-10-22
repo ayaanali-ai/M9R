@@ -2,6 +2,8 @@ export interface M9rMcpConnectionConfig {
   provider?: string;
   bindingId?: string;
   processId?: number;
+  /** Optional provider-supplied canonical session id; private host metadata only. */
+  sessionId?: string;
 }
 
 function positiveProcessId(value: unknown): number | undefined {
@@ -27,6 +29,9 @@ export function readM9rMcpConnectionConfig(
   const provider = env.M9R_PROVIDER?.trim() || undefined;
   const bindingId = env.M9R_CONNECTION_BINDING_ID?.trim() || undefined;
   const explicitProcessId = positiveProcessId(env.M9R_CONNECTION_PROCESS_ID);
+  const rawSessionId = env.M9R_PROVIDER_SESSION_ID?.trim() || env.M9R_SESSION_ID?.trim();
+  const sessionId = rawSessionId && rawSessionId.length <= 256 && !/[\u0000-\u001f\u007f]/.test(rawSessionId)
+    ? rawSessionId : undefined;
   const isWorker = env.M9R_MCP_WORKER === "1";
   const processId = explicitProcessId
     ?? (!isWorker && !bindingId ? positiveProcessId(parentProcessId) : undefined);
@@ -34,6 +39,7 @@ export function readM9rMcpConnectionConfig(
     ...(provider ? { provider } : {}),
     ...(bindingId ? { bindingId } : {}),
     ...(processId ? { processId } : {}),
+    ...(sessionId ? { sessionId } : {}),
   };
 }
 
@@ -53,5 +59,6 @@ export function mcpWorkerEnvironment(
     ...(connection.provider ? { M9R_PROVIDER: connection.provider } : {}),
     ...(connection.bindingId ? { M9R_CONNECTION_BINDING_ID: connection.bindingId } : {}),
     ...(connection.processId ? { M9R_CONNECTION_PROCESS_ID: String(connection.processId) } : {}),
+    ...(connection.sessionId ? { M9R_PROVIDER_SESSION_ID: connection.sessionId } : {}),
   };
 }

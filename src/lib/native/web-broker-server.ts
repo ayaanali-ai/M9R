@@ -155,7 +155,9 @@ function readBody(req: IncomingMessage): Promise<string | null> {
 export interface WebBrokerServerOptions {
   /** Owner-hosted, task-authorized desktop preparation; absent means desktop access is unavailable. */
   taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>;
-    launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown> };
+    launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>;
+    primeCursor?(token: string, taskId: string): Promise<unknown>;
+    primeCursorForOwner?(taskId: string): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
   agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">;
   /** Dedicated browser transport. Extension connections are disabled on this broker. */
@@ -193,6 +195,8 @@ export interface WebBrokerServerOptions {
   onShutdownRequested?: () => void | Promise<void>;
   /** When set, this local endpoint exposes read-only status; mutations use the broker-key HTTP API after CLI confirmation. */
   ownerPipePath?: string;
+  /** Best-effort delivery-time cursor prime for a task created through the authenticated agent-store pipe. */
+  onAgentTaskCreated?: (token: string, taskId: string) => void | Promise<void>;
 }
 
 type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string; taskId?: string; created?: boolean; taskIds?: string[]; alreadyRecorded?: boolean } };
@@ -571,22 +575,33 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (!persist()) return ownerReply(false, { error: "could not persist web authority state" });
     return ownerReply(true, { revoked });
   };
-  const agentStagePaths = new Set(["/web/stage/prepare", "/web/stage/launch", "/web/stage/close", "/web/stage/action"]);
+  const agentStagePaths = new Set(["/web/stage/prepare", "/web/stage/launch", "/web/stage/close", "/web/stage/action", "/web/stage/prime-cursor"]);
+  const ownerCursorPath = "/web/stage/prime-cursor-owner";
+  const quickStagePath = (path: string): boolean => path === "/web/stage/prime-cursor" || path === ownerCursorPath;
   // Both transports share validation and the task service's identity/approval checks.
   // The local pipe does not grant access to owner approval or authority mutations.
   const handleAgentStage = async (path: string, body: unknown) => {
     try {
       if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid stage request.");
       const value = body as Record<string, unknown>;
+      if (path === ownerCursorPath) {
+        if (Object.keys(value).some((key) => key !== "taskId") || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
+          || !options.taskStages?.primeCursorForOwner) return { status: 503, body: { ok: false, error: "Task cursor presentation is unavailable on this broker." } };
+        return { status: 200, body: { ok: true, result: await options.taskStages.primeCursorForOwner(value.taskId) } };
+      }
       const extraFields = path.endsWith("/launch") ? ["appId", "operationId"] : path.endsWith("/action") ? ["action", "operationId"] : [];
-      const fields = ["token", "taskId", "mode", ...extraFields];
+      const fields = path.endsWith("/prime-cursor") ? ["token", "taskId"] : ["token", "taskId", "mode", ...extraFields];
       if (!agentStagePaths.has(path) || Object.keys(value).some((key) => !fields.includes(key))
         || typeof value.token !== "string" || value.token.length > 128
         || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
-        || (value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
+        || (path !== "/web/stage/prime-cursor" && value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
       const mode = value.mode as "background" | "owner-preview" | undefined;
       const unavailable = () => ({ status: 503, body: { ok: false, error: "Task stage operations are unavailable on this broker." } });
       if (!options.taskStages) return unavailable();
+      if (path.endsWith("/prime-cursor")) {
+        if (!options.taskStages.primeCursor) return unavailable();
+        return { status: 200, body: { ok: true, result: await options.taskStages.primeCursor(value.token, value.taskId) } };
+      }
       if (path.endsWith("/prepare")) return { status: 200, body: { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, mode) } };
       if (value.operationId !== undefined && (typeof value.operationId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.operationId))) throw new Error("Invalid stage request.");
       const kind = value.action && typeof value.action === "object" && !Array.isArray(value.action) ? (value.action as { kind?: unknown }).kind : undefined;
@@ -611,15 +626,23 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   };
   const ownerServer = options.ownerPipePath ? await startOwnerPipe({
     path: options.ownerPipePath,
-    requestTimeoutMs: (request) => request.method === "POST" && agentStagePaths.has(request.path) ? 70_000
+    requestTimeoutMs: (request) => request.method === "POST" && agentStagePaths.has(request.path) ? (quickStagePath(request.path) ? 5_000 : 70_000)
       : request.method === "POST" && request.path === "/web/mcp/store" ? 15_000
+      : request.method === "POST" && request.path === ownerCursorPath ? 5_000
       : 2_000,
     handle: (request) => {
       if (request.method === "GET") return handleOwnerRequest(request);
       if (request.method === "POST" && request.path === "/web/mcp/store") {
         if (!options.agentMcpStore) return { ok: false, error: "Owner-brokered M9R task state writes are unavailable." };
-        return applyAgentMcpStoreMutation(options.agentMcpStore, request.body).body;
+        const result = applyAgentMcpStoreMutation(options.agentMcpStore, request.body);
+        const body = request.body && typeof request.body === "object" ? request.body as Record<string, unknown> : undefined;
+        if (result.body.ok && result.body.created === true && typeof result.body.taskId === "string"
+          && body?.action === "send" && typeof body.token === "string") {
+          void Promise.resolve(options.onAgentTaskCreated?.(body.token, result.body.taskId)).catch(() => undefined);
+        }
+        return result.body;
       }
+      if (request.method === "POST" && request.path === ownerCursorPath) return handleAgentStage(request.path, request.body).then((result) => result.body);
       if (request.method === "POST" && agentStagePaths.has(request.path)) return handleAgentStage(request.path, request.body).then((result) => result.body);
       return ownerReply(false, { error: "the local pipe only accepts read-only status and authenticated agent task-state operations" });
     },

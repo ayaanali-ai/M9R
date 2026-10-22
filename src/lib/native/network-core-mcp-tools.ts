@@ -29,7 +29,7 @@ function networkProvider(provider: string): string {
 export function registerNetworkCoreTools(input: {
   server: McpServer;
   client: NetworkCoreClient;
-  requireIdentity(token?: string): VerifiedIdentity;
+  requireIdentity(token?: string): Promise<VerifiedIdentity>;
   authField?: AuthField;
 }): void {
   const { server, client, requireIdentity } = input;
@@ -46,7 +46,7 @@ export function registerNetworkCoreTools(input: {
       },
     },
     async ({ token, pairing_code, agent_name }) => {
-      const identity = requireIdentity(token);
+      const identity = await requireIdentity(token);
       const registration = await client.registerAgent({
         pairing_code,
         agent_name: agent_name ?? identity.handle,
@@ -75,7 +75,7 @@ export function registerNetworkCoreTools(input: {
       inputSchema: { ...authField, ...NETWORK_ID_FIELD },
     },
     async ({ token, network_id }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       return { content: [{ type: "text", text: asText(await client.roster(network_id)) }] };
     },
   );
@@ -95,7 +95,7 @@ export function registerNetworkCoreTools(input: {
       },
     },
     async ({ token, network_id, to, body, type, thread_id, idempotency_key }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       const result = await client.sendEvent(network_id, { to, body, type, thread_id, idempotency_key });
       return { content: [{ type: "text", text: asText(result) }] };
     },
@@ -113,7 +113,7 @@ export function registerNetworkCoreTools(input: {
       },
     },
     async ({ token, network_id, since, limit }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       return { content: [{ type: "text", text: asText(await client.inbox(network_id, { since, limit })) }] };
     },
   );
@@ -130,7 +130,7 @@ export function registerNetworkCoreTools(input: {
       },
     },
     async ({ token, network_id, since, limit }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       return { content: [{ type: "text", text: asText(await client.history(network_id, { since, limit })) }] };
     },
   );
@@ -148,7 +148,7 @@ export function registerNetworkCoreTools(input: {
       },
     },
     async ({ token, network_id, action, detail, thread_id }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       return { content: [{ type: "text", text: asText(await client.requestApproval(network_id, { action, detail, thread_id })) }] };
     },
   );
@@ -160,7 +160,7 @@ export function registerNetworkCoreTools(input: {
       inputSchema: { ...authField, ...NETWORK_ID_FIELD },
     },
     async ({ token, network_id }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       return { content: [{ type: "text", text: asText(await client.revokeSelf(network_id)) }] };
     },
   );

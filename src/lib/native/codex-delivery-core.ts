@@ -23,7 +23,7 @@ export const queueMarker = taskCorrelationMarker;
  * The prompt the broker builds for a web-room agent (webAgentPrompt) lists its teammates as @handles and carries its session token.
  * It is machine-written, never something the owner typed, so a hook or watcher that sees it must not turn those mentions into tasks.
  */
-export const isBrokerAgentPrompt = (prompt: string) => /You are @[a-z0-9-]+, an agent working for the owner in their own web browser through M9R/.test(prompt)
+export const isBrokerAgentPrompt = (prompt: string) => /You are @[a-z0-9-]+, an agent working for the owner on (?:their own web browser|their local, owner-visible desktop) through M9R\./.test(prompt)
   // The shorter prompt a resumed web worker gets: it only refreshes the session token and restates the room rules.
   || /^\s*Your current M9R session token is \S+\. Use it only on M9R tools/.test(prompt)
   || prompt.includes("M9R tools may only be reachable as deferred tools through your exec/code gateway");

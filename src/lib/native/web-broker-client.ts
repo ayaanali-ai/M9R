@@ -6,6 +6,7 @@ import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import type { TaskStageMode } from "./task-desktop-stage";
 
 const MAX_STAGE_REQUEST_TIMEOUT_MS = 70_000;
+const CURSOR_PRIME_TIMEOUT_MS = 5_000;
 /** State writes use the same owner pipe but may serialize a large, locked local snapshot. */
 const AGENT_STORE_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -30,6 +31,8 @@ export interface WebBrokerClient {
   taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
   taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
   prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
+  /** Best-effort delivery-time cursor prime; never blocks the task transport. */
+  primeAgentCursor?(token: string, taskId: string): Promise<StageClientResult>;
   run(request: WebRequest): Promise<WebResponse>;
   runBatch?(request: WebBatchRequest): Promise<WebBatchResponse>;
   notifyMessage?(message: WebAgentMessage): Promise<boolean>;
@@ -175,6 +178,10 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
     async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/prepare`,
         body: { token, taskId, mode }, timeoutMs });
+    },
+    async primeAgentCursor(token, taskId) {
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,
+        url: `${baseUrl}/web/stage/prime-cursor`, body: { token, taskId }, timeoutMs: CURSOR_PRIME_TIMEOUT_MS });
     },
     async run(request) {
       let key: string;

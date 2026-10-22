@@ -443,6 +443,8 @@ test("helpers: codex JSONL parsing, resume args, and the agent prompt", () => {
   assert.match(prompt, /do not assume each message starts a fresh paid run/i);
   assert.match(prompt, /both you and the recipient must be active room members/i);
   assert.doesNotMatch(prompt, /fresh paid run each turn/i);
+  assert.match(prompt, /m9r_stage_app[\s\S]*m9r_computer_observe[\s\S]*m9r_computer_action/i);
+  assert.doesNotMatch(prompt, /m9r_web_/i, "the active managed-session prompt must not advertise the retired browser route");
 });
 
 test("web agent prompt uses phase updates while browser activity remains visible", () => {

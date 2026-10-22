@@ -41,6 +41,11 @@ const BROWSER_REF = /^e[a-f0-9]{24}_\d{1,3}$/;
 // UUIDs. They stay private inside the desktop record; providers receive the
 // generated control_* ref below instead.
 const STAGE_REF = /^[A-Za-z0-9._:-]{1,512}$/;
+// Modern MCP clients can consume this directly instead of asking the model to
+// parse the compatibility text envelope. The text block remains below for
+// older provider bridges, so this additive field does not change the
+// authorization or evidence contract.
+const COMPUTER_USE_OUTPUT_SCHEMA = z.object({}).passthrough();
 
 // Fallback only, for a caller that has not been updated to pass its real authField (see
 // ComputerUseMcpDeps.authField above) -- an always-empty object kept any such caller's tools
@@ -48,6 +53,28 @@ const STAGE_REF = /^[A-Za-z0-9._:-]{1,512}$/;
 // own AUTH_FIELD had. Do not use this directly; see buildInputSchemas below.
 const LEGACY_TOKEN_FIELD_FALLBACK = {} as { token?: z.ZodOptional<z.ZodString> };
 const COMPUTER_USE_OBSERVE_TARGETS = ["desktop", "app-window", "browser-tab"] as const;
+
+/**
+ * Some provider MCP bridges serialize a discriminated-union object argument
+ * before sending it over their tool transport. Keep the canonical schema and
+ * validation, but accept that transport representation at the boundary so a
+ * bridge quirk cannot turn a valid provider-neutral action into a schema error.
+ */
+const computerUseActionWireSchema = z.union([
+  computerUseActionSchema,
+  z.string().min(2).max(32_768),
+]);
+
+function normalizeComputerUseActionWire(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : value;
+  } catch {
+    return value;
+  }
+}
+
 function buildInputSchemas(authField: ComputerUseMcpDeps["authField"]) {
   const tokenField = authField ?? LEGACY_TOKEN_FIELD_FALLBACK;
   return {
@@ -56,10 +83,10 @@ function buildInputSchemas(authField: ComputerUseMcpDeps["authField"]) {
       target: z.enum(COMPUTER_USE_OBSERVE_TARGETS),
       taskId: z.string().regex(/^T[0-9]{1,12}$/).optional(),
       mode: z.enum(["owner-preview", "background"]).default("owner-preview"),
-      representation: z.enum(["structured", "visual"]).optional().describe("App windows default to structured accessibility; request visual only as a fallback. Desktop-wide targets are visual."),
+      representation: z.enum(["structured", "visual"]).optional().describe("App windows default to structured accessibility; desktop targets default to a bounded composite of visible windows and controls. Request visual when pixels are the intended route; incomplete structure carries the same-capture visual fallback."),
       tab: z.string().min(1).max(40).optional(),
     },
-    action: { ...tokenField, action: computerUseActionSchema },
+    action: { ...tokenField, action: computerUseActionWireSchema },
   };
 }
 
@@ -141,8 +168,8 @@ interface ObservationChange {
 interface ComputerUseMcpDeps {
   web?: WebBrokerClient;
   store: Pick<LocalStore, "claimComputerOperation" | "inspectComputerOperation" | "releaseComputerOperation" | "settleComputerOperation">;
-  requireIdentity(token?: unknown): VerifiedIdentity;
-  identityToken(identity: VerifiedIdentity, presented?: unknown): string;
+  requireIdentity(token?: unknown): Promise<VerifiedIdentity>;
+  identityToken(identity: VerifiedIdentity, presented?: unknown): Promise<string>;
   /** Resolve the internal stage task only when the provider omitted it. */
   resolveTaskId(identity: VerifiedIdentity, taskId?: string): string;
   now?: () => Date;
@@ -172,7 +199,7 @@ type ComputerUseObserveArgs = {
   representation?: "structured" | "visual";
   tab?: string;
 };
-type ComputerUseActionArgs = { token?: unknown; action: ComputerUseAction };
+type ComputerUseActionArgs = { token?: unknown; action: ComputerUseAction | string };
 
 function identityKey(identity: VerifiedIdentity): string {
   return JSON.stringify([identity.handle, identity.provider, identity.sessionId]);
@@ -328,8 +355,21 @@ function toolResponse(value: unknown, image?: ImageBlock, isError = false) {
   const body = omittedImages > 0 && recordOf(value)
     ? { ...recordOf(value), imageDelivery: { status: "bounded", delivered: images.length, omitted: omittedImages, maxBytes: MAX_RESPONSE_IMAGE_BYTES } }
     : value;
-  const content: Array<TextBlock | ImageBlock> = [{ type: "text", text: JSON.stringify(body, (key, item) => key === "dataUrl" ? undefined : item) }, ...images];
-  return { content, ...(isError ? { isError: true } : {}) };
+  // Keep structuredContent byte-for-byte aligned with the compatibility text
+  // envelope, including deliberate dataUrl redaction. This prevents the new
+  // MCP field from becoming a second path for raw screenshots or popup data.
+  const serialized = JSON.stringify(body, (key, item) => key === "dataUrl" ? undefined : item);
+  const structuredContent = (() => {
+    if (isError || !serialized) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(serialized);
+      return recordOf(parsed);
+    } catch {
+      return undefined;
+    }
+  })();
+  const content: Array<TextBlock | ImageBlock> = [{ type: "text", text: serialized ?? "null" }, ...images];
+  return { content, ...(structuredContent ? { structuredContent } : {}), ...(isError ? { isError: true } : {}) };
 }
 
 function elapsedMs(startedAt: number, endedAt: number): number {
@@ -376,7 +416,10 @@ function attachComputerUseTelemetry(response: ToolResponse, telemetry: ComputerU
   const content = response.content.map((block, index) => index === textIndex
     ? { type: "text" as const, text: JSON.stringify({ ...object, telemetry: validatedTelemetry }) }
     : block);
-  return { ...response, content };
+  const structuredContent = response.structuredContent
+    ? { ...response.structuredContent, telemetry: validatedTelemetry }
+    : undefined;
+  return { ...response, content, ...(structuredContent ? { structuredContent } : {}) };
 }
 
 function withComputerUseTelemetry<Args>(
@@ -420,7 +463,7 @@ function capabilitiesForDesktop(controls: readonly DesktopControl[], view: "desk
     // explicit foreground confirming click -- never the desktop-wide view,
     // which has no single bounded target to momentarily focus.
     ...(view === "app" ? ["input.shared-os" as const, "input.focus" as const] : []),
-    ...(view === "app" ? ["window.frame" as const, "menu.invoke" as const, "clipboard.read" as const, "clipboard.write" as const] : []),
+    ...(view === "app" ? ["window.frame" as const, "window.state" as const, "menu.invoke" as const, "clipboard.read" as const, "clipboard.write" as const] : []),
     ...(controls.some((control) => control.enabled !== false && control.canReplaceValue && Boolean(control.role?.trim()))
       ? ["input.text.replace" as const] : []),
     ...(visualAvailable ? ["input.scroll.line.horizontal" as const, "input.scroll.line.vertical" as const,
@@ -601,10 +644,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (!deps.web.prepareTaskStage) throw new Error("The owner-launched desktop stage broker cannot prepare a target.");
       const prepared = await deps.web.prepareTaskStage(input.token, input.taskId, input.mode);
       if (!prepared.ok) throw new Error(prepared.error ?? "The desktop stage could not be prepared.");
-      if (input.view === "app" && input.representation === "structured") {
-        const response = await deps.web.taskStageAction(input.token, input.taskId, { kind: "read_structure", view: "app" }, input.mode);
+      if (input.representation === "structured") {
+        const response = await deps.web.taskStageAction(input.token, input.taskId, { kind: "read_structure", view: input.view }, input.mode);
         if (response.ok) {
-          structure = recordOf(response.result);
+          const candidate = recordOf(response.result);
+          structure = candidate && (typeof candidate.status === "string" || candidate.scope === "desktop" || Array.isArray(candidate.elements))
+            ? candidate : undefined;
           const sameCallFallback = recordOf(structure?.fallbackCapture);
           if (sameCallFallback && typeof sameCallFallback.dataUrl === "string") capture = sameCallFallback;
         }
@@ -624,15 +669,16 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     if (structureStatus && !["complete", "partial", "unknown", "unavailable", "not-requested"].includes(structureStatus)) {
       structureStatus = "unknown";
     }
+    if (!structure && capture && input.representation === "structured") structureStatus = "unavailable";
     let visibleCapture = input.representation === "visual" ? capture : undefined;
-    if (input.view === "app" && input.representation === "structured" && structureStatus !== "complete" && !visibleCapture) {
+    if (input.representation === "structured" && structureStatus !== "complete" && !visibleCapture) {
       const sameCallFallback = recordOf(structure?.fallbackCapture);
       if (sameCallFallback && typeof sameCallFallback.dataUrl === "string") visibleCapture = sameCallFallback;
       else if (capture && typeof capture.dataUrl === "string") visibleCapture = capture;
       else {
         // Older broker builds may return a partial tree without carrying its screenshot.
         // This is one bounded fallback capture, never a route-probing loop.
-        const fallback = await deps.web.taskStageAction(input.token, input.taskId, { kind: "capture", view: "app" }, input.mode);
+        const fallback = await deps.web.taskStageAction(input.token, input.taskId, { kind: "capture", view: input.view }, input.mode);
         if (fallback.ok) {
           visibleCapture = stageCapture(fallback);
           structure = recordOf(visibleCapture?.structure) ?? structure;
@@ -685,6 +731,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
         ...(actions.length ? { actions } : {}),
         ...(element.canReplaceValue === true ? { canReplaceValue: true } : {}),
+        ...(validRect(element.rect) ? { rect: element.rect } : {}),
       });
     }
     const structuredControls = [...controls];
@@ -721,7 +768,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     const logicalKey = input.logicalKey ?? `desktop:${input.taskId}:${input.mode}:${input.view}`;
     const inputSelectionConfirmed = input.inputSelectionConfirmed === true;
     const kind = input.view === "app" ? "desktop-window" : "desktop";
-    const contextRepresentation = input.view === "desktop" ? "visual" : input.representation;
+    const contextRepresentation = input.representation;
     const rectByStageRef = new Map(controls.filter((control) => control.stageRef && control.rect).map((control) => [control.stageRef!, control.rect!]));
     const fingerprintElements = structuredControls.map((element) => ({
       ...element,
@@ -738,17 +785,58 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ...(structureStatus ? { structureStatus } : {}), width: width ?? 0, height: height ?? 0, controls: map, inputSelectionConfirmed },
       fingerprint,
     });
-    const publicElements = structuredControls.map(({ ref, parentRef, depth, role, label, enabled, selected, actions, canReplaceValue }) => ({
+    const publicElements = structuredControls.map(({ ref, parentRef, depth, role, label, enabled, selected, actions, canReplaceValue, rect }) => ({
       ref, ...(parentRef ? { parentRef } : {}), ...(depth !== undefined ? { depth } : {}), ...(role ? { role } : {}), ...(label ? { label } : {}),
       ...(enabled !== undefined ? { enabled } : {}), ...(selected !== undefined ? { selected } : {}), ...(actions ? { actions } : {}),
       ...(canReplaceValue ? { canReplaceValue: true } : {}),
+      ...(rect ? { rect } : {}),
     }));
+    const publicWindows = Array.isArray(structure?.windows) ? structure.windows.slice(0, 12).map((value) => {
+      const window = recordOf(value);
+      if (!window || typeof window.ref !== "string" || typeof window.appName !== "string"
+        || typeof window.title !== "string" || !validRect(window.rect)) return undefined;
+      const windowElements = Array.isArray(window.elements) ? window.elements.slice(0, 256).map(recordOf)
+        .filter((element): element is Record<string, unknown> => Boolean(element))
+        .map((element) => ({
+          ...(typeof element.ref === "string" ? { ref: element.ref.slice(0, 512) } : {}),
+          ...(typeof element.windowRef === "string" ? { windowRef: element.windowRef.slice(0, 128) } : {}),
+          ...(validRect(element.rect) ? { rect: element.rect } : {}),
+          ...(typeof element.parentRef === "string" ? { parentRef: element.parentRef.slice(0, 512) } : {}),
+          ...(Number.isSafeInteger(element.depth) && (element.depth as number) >= 0 ? { depth: element.depth as number } : {}),
+          ...(typeof element.role === "string" ? { role: element.role.slice(0, 80) } : {}),
+          ...(typeof element.label === "string" ? { label: element.label.slice(0, 160) } : {}),
+          ...(typeof element.enabled === "boolean" ? { enabled: element.enabled } : {}),
+          ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
+          ...(Array.isArray(element.actions) ? { actions: element.actions.filter((action): action is string => typeof action === "string").slice(0, 16).map((action) => action.slice(0, 40)) } : {}),
+          ...(element.canReplaceValue === true ? { canReplaceValue: true } : {}),
+        })) : undefined;
+      return {
+        ref: window.ref.slice(0, 128),
+        appName: window.appName.slice(0, 120),
+        title: window.title.slice(0, 240),
+        rect: window.rect,
+        ...(window.frontmost === true ? { frontmost: true } : {}),
+        ...(typeof window.minimized === "boolean" ? { minimized: window.minimized } : {}),
+        ...(typeof window.onCurrentSpace === "boolean" ? { onCurrentSpace: window.onCurrentSpace } : {}),
+        ...(window.status === "complete" || window.status === "partial" || window.status === "unavailable" ? { status: window.status } : {}),
+        elements: windowElements,
+      };
+    }).filter((value) => value !== undefined) : undefined;
+    const publicShell = recordOf(structure?.shell);
     const structuredObservation = structure && structureStatus ? {
       status: structureStatus,
       capturedAt: typeof structure.capturedAt === "string" ? structure.capturedAt : new Date(observedAt).toISOString(),
       ...(typeof structure.appName === "string" ? { appName: structure.appName.slice(0, 120) } : {}),
       ...(typeof structure.windowTitle === "string" ? { windowTitle: structure.windowTitle.slice(0, 240) } : {}),
       elements: publicElements,
+      ...(publicWindows ? { windows: publicWindows } : {}),
+      ...(publicShell?.status === "visual-fallback" ? {
+        shell: {
+          status: "visual-fallback" as const,
+          reason: typeof publicShell.reason === "string" ? publicShell.reason.slice(0, 240)
+            : "The Windows shell is available through the same-capture visual fallback.",
+        },
+      } : {}),
       change: record.change,
     } : undefined;
     const publicControls = controls.filter((control) => control.stageRef || control.rect || control.canReplaceValue).map((control) => ({
@@ -764,7 +852,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       ...(control.rect ? { rect: control.rect } : {}),
     }));
     const image = visibleCapture ? dataUrlImage(visibleCapture.dataUrl) : undefined;
-    const observation = input.representation === "structured" && input.view === "app"
+    const observation = input.representation === "structured"
       ? { representation: "structured", ...(structuredObservation ? { structure: structuredObservation } : {}), controls: publicControls,
           change: record.change,
           ...(visibleCapture ? { capture: publicStageCapture(visibleCapture) } : {}) }
@@ -1136,6 +1224,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
     } else if (action.kind === "window_frame") {
       stageAction = { kind: "window_frame", view: "app", x: action.x, y: action.y, width: action.width, height: action.height };
+    } else if (action.kind === "window_state") {
+      stageAction = { kind: "window_state", view: "app", state: action.state };
     } else if (action.kind === "focus") {
       stageAction = { kind: "focus", view: "app", confirmFocusForeground: true };
     } else if (action.kind === "invoke_menu") {
@@ -1289,11 +1379,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   server.registerTool("m9r_computer_observe", {
-    description: "Observe one M9R-managed target and return an opaque target ID, fresh revision, and only the capabilities that route currently advertises. Selected app windows default to a value-redacted UI Automation tree; request representation=visual when pixels are needed, and incomplete trees may include a same-capture screenshot fallback. Desktop-wide observations are visual. Browser tabs return structured DOM controls; if that route cannot expose a needed capability, explicitly select/restore the browser and observe its exact app-window rather than silently switching routes. Use m9r_stage_app before app-window; this tool never launches an app. Re-observe after visible state changes; raw HWNDs and browser-process IDs are never exposed. Returns phase timing telemetry; timing is diagnostic, not proof of an effect.",
+    description: "Observe one M9R-managed target and return an opaque target ID, fresh revision, and only the capabilities that route currently advertises. Selected app windows default to a value-redacted UI Automation tree; desktop-wide targets default to a bounded composite of visible windows and controls with the same-capture visual fallback for taskbar, Start, and shell-owned controls. Request representation=visual when pixels are needed. Browser tabs return structured DOM controls; if that route cannot expose a needed capability, explicitly select/restore the browser and observe its exact app-window rather than silently switching routes. Use m9r_stage_app before app-window; this tool never launches an app. Re-observe after visible state changes; raw HWNDs and browser-process IDs are never exposed. Returns phase timing telemetry; timing is diagnostic, not proof of an effect.",
     inputSchema: inputSchemas.observe,
+    outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, withComputerUseTelemetry<ComputerUseObserveArgs>(async ({ token, target, taskId, mode, representation, tab }, timing) => {
-    const identity = deps.requireIdentity(token);
-    const authToken = deps.identityToken(identity, token);
+    const identity = await deps.requireIdentity(token);
+    const authToken = await deps.identityToken(identity, token);
     const at = now().getTime();
     pruneTargets(at);
     try {
@@ -1305,10 +1396,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (target === "browser-tab" && representation === "visual") {
         throw new Error("The browser-tab route provides structured DOM observations. For a visual fallback, select or restore that exact browser window and observe it as app-window with representation 'visual'.");
       }
-      if (target === "desktop" && representation === "structured") {
-        throw new Error("Desktop-wide UI Automation is not registered. Select one exact app window and observe target 'app-window' for a structured tree.");
-      }
-      const resolvedRepresentation = target === "desktop" ? "visual" : representation ?? "structured";
+      const resolvedRepresentation = representation ?? "structured";
       const resolvedTaskId = target === "browser-tab" ? undefined : deps.resolveTaskId(identity, taskId);
       const observed = await timing.measure("observationMs", async () => target === "browser-tab"
         ? observeBrowser({ identity, tab })
@@ -1326,11 +1414,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   server.registerTool("m9r_computer_action", {
     description: "Route one provider-neutral action to the observed target's compatible M9R broker capability. The action must contain the exact target ID/revision and a stable operation ID. Mutations use durable one-shot receipts; reconcile a lost response with the same ID, never a new ID. Optional postconditions are checked against a fresh observation; transport success alone is never verified success. Route affinity, stale refs, broker claims/risk/owner approvals, and input-lease safety remain enforced; unsupported semantics refuse without fallback. Returns per-call phase timing and whether an earlier receipt was found; timing is diagnostic, not proof of an effect.",
     inputSchema: inputSchemas.action,
+    outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, withComputerUseTelemetry<ComputerUseActionArgs>(async ({ token, action: actionValue }, timing) => {
-    const identity = deps.requireIdentity(token);
-    const authToken = deps.identityToken(identity, token);
+    const identity = await deps.requireIdentity(token);
+    const authToken = await deps.identityToken(identity, token);
     let action: ComputerUseAction;
-    try { action = parseComputerUseAction(actionValue); }
+    try { action = parseComputerUseAction(normalizeComputerUseActionWire(actionValue)); }
     catch (error) { return toolResponse({ error: error instanceof Error ? error.message : "Invalid computer-use action." }, undefined, true); }
     const receiptInput = action.kind === "observe" ? undefined : operationInput(identity, action);
     if (receiptInput) {

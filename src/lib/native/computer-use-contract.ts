@@ -36,6 +36,7 @@ export const computerUseCapabilitySchema = z.enum([
   "input.shared-os",
   "browser.navigate",
   "window.frame",
+  "window.state",
   "menu.invoke",
   "clipboard.read",
   "clipboard.write",
@@ -222,6 +223,7 @@ export const computerUseActionSchema = z.discriminatedUnion("kind", [
   z.object({ ...actionEnvelope, kind: z.literal("navigate"), url: navigationUrl }).strict(),
   z.object({ ...actionEnvelope, kind: z.literal("window_frame"), x: coordinate, y: coordinate,
     width: z.number().int().min(1).max(16383), height: z.number().int().min(1).max(16383) }).strict(),
+  z.object({ ...actionEnvelope, kind: z.literal("window_state"), state: z.enum(["minimized", "maximized", "restored"]) }).strict(),
   z.object({ ...actionEnvelope, kind: z.literal("invoke_menu"), path: z.array(z.string().trim().min(1).max(160)).min(1).max(16) }).strict(),
   z.object({ ...actionEnvelope, kind: z.literal("clipboard"), mode: z.enum(["read", "write"]), includeText: z.boolean().optional(),
     text: z.string().min(1).max(500).optional(), confirmSharedClipboard: z.literal(true).optional() }).strict().superRefine((action, context) => {
@@ -319,6 +321,7 @@ export function computerUseActionRequirements(action: ComputerUseAction): Comput
     };
     case "navigate": return { capabilities: ["browser.navigate"], match: "all" };
     case "window_frame": return { capabilities: ["window.frame"], match: "all" };
+    case "window_state": return { capabilities: ["window.state"], match: "all" };
     case "invoke_menu": return { capabilities: ["menu.invoke"], match: "all" };
     case "clipboard": return { capabilities: [action.mode === "read" ? "clipboard.read" : "clipboard.write"], match: "all" };
   }

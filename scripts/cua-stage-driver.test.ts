@@ -3,13 +3,53 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { createCuaStageDriver as createCuaStageDriverCore, topmostWindowAtScreenPoint, type CuaStageDriverDependencies, type CuaStageTimingEvent } from "../src/lib/native/cua-stage-driver";
+import { createCuaStageDriver as createCuaStageDriverCore, normalizeCuaSdk, topmostWindowAtScreenPoint, type CuaStageDriverDependencies, type CuaStageTimingEvent } from "../src/lib/native/cua-stage-driver";
 import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
 import { parseTaskStageAction } from "../src/lib/native/task-stage-actions";
 
 const desktopId = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
 const windowId = "9223372036854775807";
 const imageData = Buffer.from("stage-window-image").toString("base64");
+
+function validCuaRuntimeExports(): Record<string, unknown> {
+  class Window {}
+  class Coordinates {}
+  class CapturedCoordinates {}
+  return {
+    CuaDriver: { create() {}, connect() {} },
+    ActionTarget: { Window },
+    ClickPosition: { Coordinates, CapturedCoordinates },
+    InputDeliveryMode: { Background: 0, Foreground: 1 },
+    CaptureScope: { Desktop: 2 },
+    ClickButton: { Left: 0, Right: 1, Middle: 2 },
+    ScrollDirection: { Up: 0, Down: 1 },
+    ScrollBy: { Line: 0 },
+    VisualRegionKind: { Text: 0, Icon: 1 },
+    CursorReducedMotion: { Auto: 0 },
+    CursorMotionStyle: { Adaptive: 4 },
+    CursorMotionTiming: { Fitts: 1 },
+  };
+}
+
+test("normalizes named Cua exports nested under a bundled default namespace", () => {
+  const source = validCuaRuntimeExports();
+  const normalized = normalizeCuaSdk({ default: {
+    cua_driver_sdk: { CuaDriver: source.CuaDriver },
+    cua_driver_contract: Object.fromEntries(Object.entries(source).filter(([key]) => key !== "CuaDriver")),
+  } }, "fixture-default");
+  assert.equal(normalized.CuaDriver, source.CuaDriver);
+  assert.equal(normalized.CursorMotionStyle?.Adaptive, 4);
+  assert.equal(normalized.CursorMotionTiming?.Fitts, 1);
+});
+
+test("accepts a Cua runtime without optional cursor-motion enums", () => {
+  const source = validCuaRuntimeExports();
+  delete source.CursorMotionStyle;
+  delete source.CursorMotionTiming;
+  const normalized = normalizeCuaSdk(source, "fixture-missing-motion");
+  assert.equal(normalized.CursorMotionStyle, undefined);
+  assert.equal(normalized.CursorMotionTiming, undefined);
+});
 
 function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   let connected: Awaited<ReturnType<NonNullable<CuaStageDriverDependencies["connectRuntime"]>>>;
@@ -527,6 +567,82 @@ test("untitled taskbar controls use exact accessibility invocation and the overl
   await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No agent input window/);
 }));
 
+test("desktop structure composes visible windows without exposing native handles", async () => withRoot(async (root) => {
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await registerOwnerPreview(root, identity);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const notepadId = BigInt(456);
+  const browserId = BigInt(789);
+  const windows = [
+    { pid: 4321, windowId: notepadId, appName: "notepad.exe", title: "Untitled - Notepad",
+      bounds: { x: 100, y: 50, width: 800, height: 500 }, isOnScreen: true, zIndex: BigInt(20), onCurrentSpace: true },
+    { pid: 8765, windowId: browserId, appName: "chrome.exe", title: "Browser test",
+      bounds: { x: 300, y: 140, width: 1000, height: 700 }, isOnScreen: true, zIndex: BigInt(10), onCurrentSpace: true },
+    { pid: 9999, windowId: BigInt(999), appName: "m9r-overlay.exe", title: "M9R",
+      bounds: { x: 0, y: 0, width: 100, height: 40 }, isOnScreen: true, zIndex: BigInt(30), onCurrentSpace: true },
+  ];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls, windows, screenSize: { width: 1920, height: 1080 },
+      stateForRequest: (input) => {
+        const window = windows.find((item) => item.windowId === (input as { windowId?: bigint }).windowId)!;
+        return {
+          pid: window.pid, windowId: window.windowId, screenshotFrameValid: true,
+          screenshotWidth: 200, screenshotHeight: 100, windowBounds: window.bounds,
+          images: [{ mimeType: "image/png", dataBase64: imageData }], elements: [
+            { elementIndex: 1, elementToken: `raw-${window.pid}-secret`, parentIndex: undefined, depth: 0,
+              role: "Window", label: window.title, enabled: true, frame: window.bounds, actions: ["focus"] },
+            { elementIndex: 2, elementToken: `raw-${window.pid}-button-secret`, parentIndex: 1, depth: 1,
+              role: "Button", label: "Safe action", enabled: true,
+              frame: { x: window.bounds.x + 20, y: window.bounds.y + 20, w: 120, h: 32 }, actions: ["click"] },
+          ], elementsComplete: true,
+        };
+      },
+    }) as never });
+
+  const structure = await driver.readDesktopStructure("preview", identity);
+  assert.equal(structure.scope, "desktop");
+  assert.equal(structure.status, "partial", "the shell is intentionally a same-capture visual fallback");
+  assert.equal(structure.windows.length, 2, "the M9R overlay is not presented as an agent target");
+  assert.equal(structure.windows[0]?.frontmost, true);
+  assert.equal(structure.elements.length, 4);
+  assert.equal(structure.windows[0]?.elements[1]?.parentRef, structure.windows[0]?.elements[0]?.ref);
+  assert.ok(structure.fallbackCapture.controls?.some((control) => control.role === "desktop-window"));
+  assert.doesNotMatch(JSON.stringify(structure), /pid|windowId|elementToken|raw-.*secret/i);
+  assert.equal(calls.filter((call) => call.method === "getDesktopState").length, 1);
+  assert.equal(calls.filter((call) => call.method === "listWindows").length, 1);
+  assert.equal(calls.filter((call) => call.method === "getWindowState").length, 2);
+}));
+
+test("desktop structure folds native whole-screen UIA into the same capture", async () => withRoot(async (root) => {
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await registerOwnerPreview(root, identity);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const stage = stageDependencies(root);
+  const invokeNative = stage.invokeNative!;
+  stage.invokeNative = async (request) => {
+    if (request.op === "inspectDesktopStructure") return { ok: true, desktopStructure: {
+      scope: "desktop", status: "complete", truncated: false,
+      screen: { x: 0, y: 0, width: 1920, height: 1080 },
+      elements: [{ ref: "desktop-ui-element-1", label: "Start", role: "button", className: "Start", depth: 1,
+        enabled: true, focused: false, rect: { x: 10, y: 1040, width: 48, height: 40 } }],
+    } } as never;
+    return invokeNative(request);
+  };
+  const driver = createCuaStageDriver({ stage,
+    loadSdk: async () => makeSdk({ calls, windows: [], screenSize: { width: 1920, height: 1080 },
+      state: { screenshotWidth: 192, screenshotHeight: 108, windowBounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        images: [{ mimeType: "image/png", dataBase64: imageData }] } }) as never,
+  });
+  const structure = await driver.readDesktopStructure("preview", identity);
+  assert.equal(structure.status, "complete");
+  assert.equal(structure.shell.status, "complete");
+  assert.equal(structure.shell.elements?.[0]?.label, "Start");
+  assert.equal(structure.elements[0]?.windowRef, "desktop-shell");
+  assert.ok(structure.elements[0]?.rect);
+  assert.doesNotMatch(JSON.stringify(structure), /pid|windowId|elementToken/i);
+  assert.equal(calls.filter((call) => call.method === "getDesktopState").length, 1);
+}));
+
 function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies["stage"]> {
   return {
     platform: "win32",
@@ -572,6 +688,7 @@ function makeSdk(options: {
   callToolResult?: Record<string, unknown>;
   callToolResultByName?: Record<string, Record<string, unknown>>;
   callToolHook?: (name: string, args: string, signal?: AbortSignal) => Promise<never>;
+  motionError?: Error;
   calls: Array<{ method: string; value?: unknown }>;
 }) {
   const actionResult = options.actionResult ?? { effect: 0, route: 1, summary: "action confirmed" };
@@ -579,7 +696,7 @@ function makeSdk(options: {
   const driver = {
     async metadata() { options.calls.push({ method: "metadata" }); return { driverVersion: "0.34.0", embedded: false }; },
     async startSession(input: unknown) { options.calls.push({ method: "startSession", value: input }); },
-    async setAgentCursorMotion(input: unknown) { options.calls.push({ method: "setAgentCursorMotion", value: input }); return { isError: false }; },
+    async setAgentCursorMotion(input: unknown) { options.calls.push({ method: "setAgentCursorMotion", value: input }); if (options.motionError) throw options.motionError; return { isError: false }; },
     async getWindowState(input: unknown) {
       options.calls.push({ method: "getWindowState", value: input });
       if (options.stateForRequest) return options.stateForRequest(input);
@@ -1205,6 +1322,30 @@ test("shows the clean provider cursor before the first movement", async () => wi
   assert.deepEqual(shown, { label: "OpenCode", visible: true });
   assert.deepEqual(calls.map((call) => call.method), ["create", "startSession", "setAgentCursorMotion", "setAgentCursorEnabled", "getSession"]);
   assert.equal(JSON.stringify(calls).includes("private-session-id"), false, "cursor setup calls must not expose the provider session ID");
+  await driver.shutdown();
+}));
+
+test("optional cursor motion failure does not block the logical cursor or stage boot", async () => withRoot(async (root) => {
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, motionError: new Error("motion style unavailable") }) as never });
+
+  const shown = await driver.showAgentCursor("preview-stage", { handle: "codex", sessionId: "motion-failure-session" });
+  assert.deepEqual(shown, { label: "Codex", visible: true });
+  assert.deepEqual(calls.map((call) => call.method), ["create", "startSession", "setAgentCursorMotion", "setAgentCursorEnabled", "getSession"]);
+  await driver.shutdown();
+}));
+
+test("missing cursor-motion exports do not block the logical cursor or stage boot", async () => withRoot(async (root) => {
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const sdk = makeSdk({ calls }) as Record<string, unknown>;
+  delete sdk.CursorMotionStyle;
+  delete sdk.CursorMotionTiming;
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => sdk as never });
+
+  const shown = await driver.showAgentCursor("preview-stage", { handle: "codex", sessionId: "missing-motion-session" });
+  assert.deepEqual(shown, { label: "Codex", visible: true });
+  assert.equal(calls.some((call) => call.method === "setAgentCursorMotion"), false);
+  assert.equal(calls.some((call) => call.method === "setAgentCursorEnabled"), true);
   await driver.shutdown();
 }));
 

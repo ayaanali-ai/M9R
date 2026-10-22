@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 type AgentState = "open_working" | "open_idle" | "offline" | "unknown" | "seen" | "not_connected";
-interface Agent { handle: string; state: AgentState; since?: string; evidence: string; sessions: Array<{ id: string; cwd?: string; live: boolean | null }> }
+interface Agent { handle: string; color?: string; state: AgentState; since?: string; evidence: string; sessions: Array<{ id: string; cwd?: string; live: boolean | null }> }
 type NeedsYou =
   | { kind: "approval"; taskId: string; from: string; to: string; goal: string; protected: boolean }
   | { kind: "push_failed"; taskId: string; from: string; fromSession?: string; to: string; reason: string; fix: string; linkable: boolean }
@@ -64,10 +64,24 @@ const providerOf = (s: string): Provider => {
   return "agent";
 };
 const handleOf = (s: string) => s.replace(/^@/, "").trim().toLowerCase();
+const PROVIDER_COLORS: Record<Provider, string> = {
+  codex: "#4F7CFF",
+  claude: "#D97757",
+  opencode: "#9CA3AF",
+  agent: "#9CA3AF",
+};
+const validColor = (color: unknown): color is string => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color);
+const colorForProvider = (provider: Provider) => PROVIDER_COLORS[provider];
+const colorForHandle = (handle: string, provider = providerOf(handle)): string => {
+  const match = feed?.agents.find((agent) => handleOf(agent.handle) === handleOf(handle));
+  return validColor(match?.color) ? match.color! : colorForProvider(provider);
+};
+const applyColor = (node: HTMLElement, color: string) => node.style.setProperty("--agent-color", color);
 
 /** The provider's own mark, drawn as a mask so it takes the surface's ink colour. */
-function logo(provider: Provider, cls = "chip") {
+function logo(provider: Provider, cls = "chip", color = colorForProvider(provider)) {
   const chip = el("span", cls);
+  applyColor(chip, color);
   chip.append(el("span", `logo p-${provider}`));
   return chip;
 }
@@ -81,7 +95,7 @@ function webEvents(): WebEvent[] {
 
 type Ring = "blocked" | "waiting" | "working" | "idle" | "off";
 const RING_LABEL: Record<Ring, string> = { blocked: "blocked", waiting: "waiting for you", working: "working", idle: "open, idle", off: "not active" };
-interface Presence { key: string; provider: Provider; state: AgentState | "web"; ring: Ring; label: string }
+interface Presence { key: string; provider: Provider; color: string; state: AgentState | "web"; ring: Ring; label: string }
 
 /** One entry per agent, from the agents list and from anyone acting on the web, with the ring that best says what it is doing now. */
 function presence(): Presence[] {
@@ -90,14 +104,18 @@ function presence(): Presence[] {
   const out = new Map<string, Presence>();
   for (const a of feed?.agents ?? []) {
     const ring: Ring = a.state === "open_working" ? "working" : a.state === "open_idle" || a.state === "seen" ? "idle" : "off";
-    out.set(handleOf(a.handle), { key: handleOf(a.handle), provider: providerOf(a.handle), state: a.state, ring, label: `@${a.handle}: ${stateText(a)}` });
+    const provider = providerOf(a.handle);
+    out.set(handleOf(a.handle), { key: handleOf(a.handle), provider, color: validColor(a.color) ? a.color : colorForProvider(provider), state: a.state, ring, label: `${PROVIDER_NAME[provider]}: ${stateText(a)}` });
   }
   const latest = new Map<string, WebEvent>();
   for (const e of web) { const k = handleOf(e.agent); if (!latest.has(k)) latest.set(k, e); }
   for (const [k, e] of latest) {
     const age = now - Date.parse(e.at);
-    const p = out.get(k) ?? { key: k, provider: providerOf(e.provider || e.agent), state: "web" as const, ring: "off" as Ring, label: "" };
-    if (e.provider) p.provider = providerOf(e.provider);
+    const p = out.get(k) ?? (() => {
+      const provider = providerOf(e.provider || e.agent);
+      return { key: k, provider, color: colorForHandle(k, provider), state: "web" as const, ring: "off" as Ring, label: "" };
+    })();
+    if (e.provider) { p.provider = providerOf(e.provider); p.color = colorForHandle(k, p.provider); }
     if (e.kind === "blocked" && age < BLOCKED_MS) p.ring = "blocked";
     else if (age < WORKING_MS && p.ring !== "blocked") p.ring = "working";
     out.set(k, p);
@@ -106,7 +124,7 @@ function presence(): Presence[] {
   for (const n of feed?.needsYou ?? []) if (n.kind === "approval" && !locallyDismissed.has(n.taskId)) waitingOn.add(handleOf(n.from));
   for (const p of feed?.inProgress ?? []) if (p.state === "working") { const x = out.get(handleOf(p.to)); if (x && x.ring !== "blocked") x.ring = "working"; }
   for (const k of waitingOn) { const x = out.get(k); if (x && x.ring !== "blocked") x.ring = "waiting"; }
-  for (const p of out.values()) p.label = `@${p.key} (${PROVIDER_NAME[p.provider]}): ${RING_LABEL[p.ring]}`;
+  for (const p of out.values()) p.label = `${PROVIDER_NAME[p.provider]}: ${RING_LABEL[p.ring]}`;
   return [...out.values()];
 }
 
@@ -117,7 +135,8 @@ function drawDots() {
   const byKey = new Map(Array.from(dots.querySelectorAll<HTMLElement>(".dot")).map((d) => [d.dataset.key ?? "", d] as const));
   const next: HTMLElement[] = shown.map((p) => {
     let d = byKey.get(p.key);
-    if (!d || d.dataset.provider !== p.provider) { d = logo(p.provider, "dot"); d.dataset.key = p.key; d.dataset.provider = p.provider; }
+    if (!d || d.dataset.provider !== p.provider) { d = logo(p.provider, "dot", p.color); d.dataset.key = p.key; d.dataset.provider = p.provider; }
+    applyColor(d, p.color);
     d.className = `dot ${p.state}`;
     d.dataset.ring = p.ring;
     d.title = p.label;
@@ -327,7 +346,7 @@ function liveItem(e: WebEvent, fresh: boolean) {
   main.append(head, el("div", "text", body));
   const where = [e.tab, hostOf(e.url)].filter(Boolean).join(" · ");
   if (where) { const w = el("div", "where", where); if (e.url) w.title = e.url; main.append(w); }
-  item.append(logo(providerOf(e.provider || e.agent)), main);
+  item.append(logo(providerOf(e.provider || e.agent), "chip", colorForHandle(e.agent, providerOf(e.provider || e.agent))), main);
   return item;
 }
 
@@ -368,11 +387,12 @@ function drawPanel() {
   const rings = new Map(presence().map((p) => [p.key, p.ring]));
   const agents = feed.agents.map((a) => {
     const row = el("div", "row agent");
-    const chip = logo(providerOf(a.handle));
+    const provider = providerOf(a.handle);
+    const chip = logo(provider, "chip", colorForHandle(a.handle, provider));
     chip.dataset.ring = rings.get(handleOf(a.handle)) ?? "off";
     row.append(chip);
     const main = el("div", "main");
-    main.append(el("div", "title", `@${a.handle} · ${stateText(a)}`), el("div", "sub", a.sessions[0]?.cwd ?? a.evidence));
+    main.append(el("div", "title", `${PROVIDER_NAME[provider]} · ${stateText(a)}`), el("div", "sub", a.sessions[0]?.cwd ?? a.evidence));
     row.append(main); return row;
   });
   const recent = feed.recent.slice(0, 6).map((r) => { const row = el("div", "row"); const main = el("div", "main"); main.append(el("div", "sub", `${hhmm(r.at)}  ${r.text}`)); row.append(main); return row; });

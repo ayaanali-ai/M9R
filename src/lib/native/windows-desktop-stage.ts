@@ -54,6 +54,7 @@ interface NativeStageResponse {
   error?: string;
   window?: NativeWindowStageInfo;
   desktop?: NativeDesktopStageInfo;
+  desktopStructure?: NativeDesktopStructure;
   input?: { childWindowId: string };
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
   control?: NativePointControl;
@@ -71,6 +72,26 @@ export interface NativePointControl {
   rect: { x: number; y: number; width: number; height: number };
   invoked: boolean;
   confirmed?: boolean;
+}
+
+/** Public, handle-free result from the native Windows UI Automation desktop snapshot. */
+export interface NativeDesktopStructureElement {
+  ref: string;
+  label: string;
+  role: string;
+  className: string;
+  rect: { x: number; y: number; width: number; height: number };
+  depth: number;
+  enabled: boolean;
+  focused: boolean;
+}
+
+export interface NativeDesktopStructure {
+  scope: "desktop";
+  status: "complete" | "partial";
+  screen: { x: number; y: number; width: number; height: number };
+  elements: NativeDesktopStructureElement[];
+  truncated: boolean;
 }
 
 interface NativeDesktopStageInfo {
@@ -359,6 +380,46 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return control;
   }
 
+  /**
+   * Read the bounded Windows control-view tree rooted at the virtual desktop.
+   * This is one shared observation capability for shell, taskbar, and visible
+   * app controls; it is not a provider- or application-specific route.
+   */
+  async function desktopStructure(options: { maxElements?: number; maxDepth?: number } = {}): Promise<NativeDesktopStructure> {
+    assertWindows();
+    assertOwner();
+    const maxElements = options.maxElements ?? 64;
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isSafeInteger(maxElements) || maxElements < 1 || maxElements > 64
+      || !Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 10) {
+      throw new Error("Windows desktop structure bounds are invalid.");
+    }
+    const result = await invokeNative({ op: "inspectDesktopStructure", maxElements, maxDepth });
+    if (!result.ok) throw new Error(result.error ?? "Windows UI Automation could not inspect the desktop structure.");
+    const structure = result.desktopStructure;
+    const screen = structure?.screen;
+    if (!structure || structure.scope !== "desktop" || !["complete", "partial"].includes(structure.status)
+      || !screen || ![screen.x, screen.y, screen.width, screen.height].every(Number.isSafeInteger)
+      || screen.width < 1 || screen.height < 1 || screen.width > 65_536 || screen.height > 65_536
+      || !Array.isArray(structure.elements) || structure.elements.length > maxElements
+      || typeof structure.truncated !== "boolean") {
+      throw new Error("Windows returned an invalid desktop UI Automation structure.");
+    }
+    for (const element of structure.elements) {
+      if (!element || typeof element.ref !== "string" || !/^desktop-ui-element-\d+$/.test(element.ref)
+        || typeof element.label !== "string" || element.label.length > 160
+        || typeof element.role !== "string" || element.role.length > 80
+        || typeof element.className !== "string" || element.className.length > 120
+        || !Number.isSafeInteger(element.depth) || element.depth < 0 || element.depth > maxDepth
+        || typeof element.enabled !== "boolean" || typeof element.focused !== "boolean"
+        || !element.rect || ![element.rect.x, element.rect.y, element.rect.width, element.rect.height].every(Number.isFinite)
+        || element.rect.width <= 0 || element.rect.height <= 0) {
+        throw new Error("Windows returned an invalid desktop UI Automation element.");
+      }
+    }
+    return structure;
+  }
+
   async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<WindowsStageRecord> {
     assertWindows();
     assertOwner();
@@ -473,6 +534,8 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       if (!existing && registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
       const record: WindowsStageRecord = {
         name,
+        ...(existing?.appId !== undefined ? { appId: existing.appId } : {}),
+        ...(existing?.coordinationKey !== undefined ? { coordinationKey: existing.coordinationKey } : {}),
         desktopId: desktop.desktopId,
         roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
         returnToDesktopId: null,
@@ -807,7 +870,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, setWindowState, ownedPopups };
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, setWindowState, ownedPopups };
 }
 
 function parsePid(value: string): number {

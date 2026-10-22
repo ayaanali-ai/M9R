@@ -46,6 +46,10 @@ const heldLocalProvenancePatterns = [
   /^\.tmp(?:\/|$)/i,
   /^engine(?:\/|$)/i,
   /^docs\/research(?:\/|$)/i,
+  // These are private planning/tracker documents. They are intentionally
+  // kept outside the public release commit and must not turn a verified
+  // source checkout into a dirty runtime solely because progress was logged.
+  /^docs\/M9R_(?:CUMULATIVE_RELIABILITY_AND_DEMO_TRACKER_2026-10-10|MASTER_LIST_2\.1)\.md$/i,
   /^m9r-clean-cutover-[^/]+(?:\/|$)/i,
   /^m9r-runtime-clean-[^/]+(?:\/|$)/i,
   /^scratchpad(?:\/|$)/i,

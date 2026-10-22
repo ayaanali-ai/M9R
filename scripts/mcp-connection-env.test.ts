@@ -7,8 +7,9 @@ test("MCP connection configuration preserves explicit provider, binding, and pro
     M9R_PROVIDER: " claude-code ",
     M9R_CONNECTION_BINDING_ID: "binding-1",
     M9R_CONNECTION_PROCESS_ID: "4242",
+    M9R_PROVIDER_SESSION_ID: "session-1",
   }, 99);
-  assert.deepEqual(connection, { provider: "claude-code", bindingId: "binding-1", processId: 4242 });
+  assert.deepEqual(connection, { provider: "claude-code", bindingId: "binding-1", processId: 4242, sessionId: "session-1" });
 
   const worker = mcpWorkerEnvironment({ ...process.env, M9R_HOME: "C:/m9r", M9R_PROVIDER: "stale", M9R_MCP_WORKER: "0" }, connection);
   assert.equal(worker.M9R_HOME, "C:/m9r");
@@ -16,6 +17,7 @@ test("MCP connection configuration preserves explicit provider, binding, and pro
   assert.equal(worker.M9R_PROVIDER, "claude-code");
   assert.equal(worker.M9R_CONNECTION_BINDING_ID, "binding-1");
   assert.equal(worker.M9R_CONNECTION_PROCESS_ID, "4242");
+  assert.equal(worker.M9R_PROVIDER_SESSION_ID, "session-1");
 });
 
 test("the top-level supervisor recovers provider claims by exact parent PID, while workers do not infer one", () => {
@@ -36,4 +38,5 @@ test("the top-level supervisor recovers provider claims by exact parent PID, whi
     "a worker must not infer ownership from its own supervisor parent",
   );
   assert.deepEqual(readM9rMcpConnectionConfig({ M9R_CONNECTION_BINDING_ID: "binding-1" }, 5151), { bindingId: "binding-1" });
+  assert.deepEqual(readM9rMcpConnectionConfig({ M9R_SESSION_ID: "session-2" }, 5151), { processId: 5151, sessionId: "session-2" });
 });
