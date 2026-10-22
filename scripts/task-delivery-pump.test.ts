@@ -42,6 +42,22 @@ test("deferred recovery does not replay uncertain input or bypass approval", asy
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("the provider-neutral pump does not retry stale deferred work", async () => {
+  let clock = new Date(Date.now() - 31 * 60_000);
+  const root = mkdtempSync(join(tmpdir(), "m9r-delivery-pump-stale-"));
+  try {
+    const store = createLocalStore(root, { now: () => new Date(clock) });
+    const task = store.addTask({ from: "owner", to: "arbitrary", goal: "old deferred work", origin: "human_typed", idempotencyKey: "stale-deferred" }).task;
+    store.setDelivery(task.id, { state: "deferred", threadId: "session" });
+    clock = new Date();
+    const sent: string[] = [];
+    const pump = createTaskDeliveryPump(store, new Map([["arbitrary", async (id: string) => { sent.push(id); }]]));
+
+    await pump.tick();
+    assert.deepEqual(sent, [], "stale deferred work must not reach any provider adapter");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("drain waits for the registered adapter's in-flight send", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-delivery-pump-"));
   try {

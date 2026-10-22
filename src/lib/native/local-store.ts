@@ -9,7 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import { isProtectedAction, lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
-import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle } from "./inbox-core";
+import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, isFreshInboxTask, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle } from "./inbox-core";
 import { canQueue } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, PROVIDER_SESSION_RECOVERY_TTL_MS, newConnectionId, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
@@ -1568,7 +1568,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     claimCodexDelivery(id: string): Task | undefined {
       return update((s) => {
         const task = s.tasks.find((item) => item.id === id);
-        if (!task || task.to !== "codex" || task.resultSummary || task.deliveredAt || !canQueue(task)) return undefined;
+        if (!task || task.to !== "codex" || task.resultSummary || task.deliveredAt || !canQueue(task)
+          || !isFreshInboxTask(task.createdAt, now().getTime(), inboxMaxAgeMs())) return undefined;
         if (task.delivery && task.delivery.state !== "failed" && task.delivery.state !== "deferred") return undefined;
         const claimedAt = now().toISOString();
         task.delivery = { state: "sending", attempts: (task.delivery?.attempts ?? 0) + 1, claimedAt };

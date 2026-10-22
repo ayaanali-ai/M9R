@@ -1,6 +1,6 @@
 import type { LocalStore } from "./local-store";
 import { canQueue } from "./codex-delivery-core";
-import { inboxMaxAgeMs } from "./inbox-core";
+import { inboxMaxAgeMs, isFreshInboxTask } from "./inbox-core";
 
 /**
  * A verbatim retry of a failed/abandoned task (the single most common retry pattern -- resend the
@@ -22,7 +22,7 @@ export function sessionHasUnfinishedDelivery(store: LocalStore, handle: string, 
     && task.goal === goal
     && (task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId) === sessionId
     && ["sending", "queued", "uncertain"].includes(task.delivery?.state ?? "")
-    && now - Date.parse(task.createdAt) <= maxAge);
+    && isFreshInboxTask(task.createdAt, now, maxAge));
 }
 
 /** Adapters own transport; the pump owns bounded scheduling, never computer-use behavior. */
@@ -37,8 +37,11 @@ export function createTaskDeliveryPump(store: LocalStore, adapters: ReadonlyMap<
       busy = true;
       idle = new Promise<void>(resolve => { finishIdle = resolve; });
       try {
+        const now = Date.now();
+        const maxAge = inboxMaxAgeMs();
         const tasks = store.snapshot().tasks.filter(task => task.delivery?.state === "deferred"
-          && !task.resultSummary && !task.deliveredAt && canQueue(task));
+          && !task.resultSummary && !task.deliveredAt && canQueue(task)
+          && isFreshInboxTask(task.createdAt, now, maxAge));
         // One attempt per adapter per pass. Its own atomic claim must prevent
         // cross-process duplicates; never convert uncertain work into a retry.
         const offered = new Set<string>();

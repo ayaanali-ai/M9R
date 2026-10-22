@@ -64,10 +64,26 @@ test("a verbatim retry is not deferred forever behind a stale, never-finalized o
   clock = Date.now(); // the retry itself is sent now, in real time
   const second = typed(store, "open file explorer and type hello in the search bar", "second-attempt");
   const deps = fakeDeps({ requireTargetIdentity: true });
-  assert.equal((await deliverToCodex(store, first.id, deps)).state, "queued");
+  assert.equal((await deliverToCodex(store, first.id, deps)).state, "skipped", "an old original attempt is history, not new provider work");
   // The first attempt never resolves (no setResult, no setDelivery to a terminal state) -- exactly
   // what happens when a task fails over to a different tool or the owner redirects it by hand.
   assert.equal((await deliverToCodex(store, second.id, deps)).state, "queued", "a retry must not be deferred behind an original attempt old enough to be stale");
+});
+
+test("a stale Codex task is never claimed by the direct push path", async () => {
+  let clock = new Date(Date.now() - 31 * 60_000);
+  const store = createLocalStore(mkdtempSync(join(tmpdir(), "m9r-n2-stale-codex-push-")), { now: () => new Date(clock) });
+  seedCodex(store);
+  const stale = typed(store, "an old task that must remain history", "stale-direct-push");
+  clock = new Date();
+  const deps = fakeDeps();
+
+  assert.deepEqual(await deliverToCodex(store, stale.id, deps), {
+    state: "skipped",
+    reason: "not eligible or already claimed for delivery",
+  });
+  assert.equal(deps.calls.length, 0, "stale work must not reach codex queue");
+  assert.equal(store.getTask(stale.id)?.delivery, undefined, "stale history is retained without becoming a live delivery");
 });
 
 test("Codex result collection ignores stale and non-Codex queued deliveries", async () => {

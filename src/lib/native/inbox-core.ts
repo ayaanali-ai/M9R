@@ -248,6 +248,17 @@ export function inboxMaxAgeMs(env: Record<string, string | undefined> = process.
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : INBOX_MAX_AGE_MS;
 }
 
+/**
+ * One freshness predicate for every provider-delivery boundary. A task from
+ * the future is also rejected: clock skew must never turn an untrusted or
+ * malformed timestamp into work that bypasses the stale-work fence.
+ */
+export function isFreshInboxTask(createdAt: string, now = Date.now(), maxAge = inboxMaxAgeMs()): boolean {
+  const createdMs = Date.parse(createdAt);
+  const age = now - createdMs;
+  return Number.isFinite(createdMs) && age >= 0 && age <= maxAge;
+}
+
 export interface InjectionOptions {
   /** Clock for the age limit; defaults to Date.now(). */
   now?: number;
