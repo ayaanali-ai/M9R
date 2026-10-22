@@ -635,7 +635,7 @@ function build() {
 
   // Leaf modules that several compiled files import through the app's `@/` alias. Without this pass the packaged CLI
   // crashes on start with ERR_MODULE_NOT_FOUND ("Cannot find package '@/lib'").
-  for (const [source, name] of [["src/lib/native/m9r-compatibility.ts", "m9r-compatibility"], ["src/lib/native/broker-update-record.ts", "broker-update-record"], ["src/lib/terminal-config.ts", "terminal-config"], ["packages/web-protocol-placeholder/src/index.ts", "web-protocol-placeholder"]]) {
+  for (const [source, name] of [["src/lib/native/m9r-compatibility.ts", "m9r-compatibility"], ["src/lib/native/agent-credential-store.ts", "agent-credential-store"], ["src/lib/native/broker-update-record.ts", "broker-update-record"], ["src/lib/terminal-config.ts", "terminal-config"], ["packages/web-protocol-placeholder/src/index.ts", "web-protocol-placeholder"]]) {
     writeFileSync(resolve(outDir, `${name}.js`), transpile(readFileSync(resolve(repoRoot, source), "utf8")));
   }
   for (const file of readdirSync(outDir)) {
@@ -644,6 +644,7 @@ function build() {
     const before = readFileSync(path, "utf8");
     const after = before
       .replace(/["'](?:@\/lib\/native|(?:\.\.\/)+src\/lib\/native)\/m9r-compatibility["']/g, '"./m9r-compatibility.js"')
+      .replace(/["'](?:@\/lib\/native|(?:\.\.\/)+src\/lib\/native)\/agent-credential-store["']/g, '"./agent-credential-store.js"')
       .replace(/["']@\/lib\/terminal-config["']/g, '"./terminal-config.js"')
       .replace(/["'](?:\.\.\/)+packages\/web-protocol-placeholder\/src\/index["']/g, '"./web-protocol-placeholder.js"');
     if (after !== before) writeFileSync(path, after);
