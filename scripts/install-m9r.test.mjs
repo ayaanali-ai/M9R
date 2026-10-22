@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
@@ -27,6 +27,7 @@ const canRunNativeInstaller = process.platform === "win32"
   && existsSync(join(engineDist, "m9r-overlay.exe"))
   && existsSync(join(engineDist, "m9r-build-info.json"));
 const skipNative = canRunNativeInstaller ? false : "Windows engine binaries are required (CI builds them first).";
+const testM9rHomes = new Set();
 
 function runPowerShell(script, args = [], { input, env = process.env } = {}) {
   const result = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File", script, ...args], {
@@ -76,7 +77,11 @@ function createPackage(directory) {
 
 function makeProfile(parent) {
   const profile = join(parent, "profile");
-  const m9rHome = join(parent, "m9r-data");
+  // M9R deliberately rejects a project-local M9R_HOME because that would put
+  // provider credentials inside the checkout. Keep the fixture outside the
+  // clean repository while retaining the profile/config fixtures beside it.
+  const m9rHome = join(root, "..", `.m9r-installer-home-${randomUUID()}`);
+  testM9rHomes.add(m9rHome);
   const claude = join(parent, "claude-config");
   const codex = join(parent, "codex-home");
   mkdirSync(profile, { recursive: true });
@@ -163,7 +168,7 @@ test("standalone release packages runtime companions from the canonical engine d
   const provenanceIndex = builderSource.indexOf("const provenance = sourceProvenance();");
   assert.ok(overlayPreflightIndex >= 0 && stagingIndex > overlayPreflightIndex, "missing pill input must fail before a new build staging directory is created");
   assert.ok(provenanceIndex >= 0 && provenanceIndex < stagingIndex, "source provenance must be captured before build staging can make a clean checkout look dirty");
-  assert.match(builderSource, /runGitCleanCheck\(\["diff", "--quiet", "--no-ext-diff", "--ignore-submodules"\]\)/,
+  assert.match(builderSource, /runGitCleanCheck\(\["diff", "--quiet", "--no-ext-diff", "--ignore-submodules", "--", "\."\, \.\.\.privateTrackerExclusions\]\)/,
     "source cleanliness must compare tracked content instead of trusting file mtimes");
   assert.match(builderSource, /runGitCleanCheck\(\["ls-files", "--others", "--exclude-standard", "--directory"\]\)/,
     "source cleanliness must still account for non-ignored untracked paths");
@@ -241,7 +246,10 @@ test("release ZIP contains the built standalone broker", { skip: skipNative }, (
 
 test("standalone package consent, setup, integrity, and uninstall paths", { skip: skipNative }, async (t) => {
   const temp = nativeInstallerTemp();
-  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  t.after(() => {
+    rmSync(temp, { recursive: true, force: true });
+    for (const home of testM9rHomes) rmSync(home, { recursive: true, force: true });
+  });
   const zipPath = createPackage(temp);
 
   await t.test("default consent preview includes sign-in startup and decline writes nothing", () => {
