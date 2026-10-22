@@ -219,7 +219,10 @@ test("managed extension refresh changes only owned extension files and preserves
   const fixtureRoot = resolve(repoRoot, ".workcache", "cli-package-fixtures");
   mkdirSync(fixtureRoot, { recursive: true });
   const temporaryRoot = mkdtempSync(join(fixtureRoot, "m9r-extension-refresh-"));
-  const home = join(temporaryRoot, "home");
+  // Keep the fake credential home outside the project. The production store
+  // rejects project-local M9R_HOME values so a checkout cannot become a
+  // credential container by accident.
+  const home = mkdtempSync(resolve(tmpdir(), "m9r-extension-home-"));
   const localAppData = join(temporaryRoot, "local-app-data");
   const source = join(temporaryRoot, "source-extension");
   const extensionPath = join(localAppData, "M9R", "extension");
@@ -291,6 +294,7 @@ test("managed extension refresh changes only owned extension files and preserves
     assert.equal(updatedManifest.extensionFiles.find((file) => file.path === join(extensionPath, "src", "new.js"))?.hash, hash(desiredNew));
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
