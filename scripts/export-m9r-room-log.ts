@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { M9R_ENV_PREFIX, LEGACY_ENV_PREFIX } from "../src/lib/native/m9r-compatibility";
+import { readAgentCredential } from "../src/lib/native/agent-credential-store";
 import { checkRoomLitmus } from "../src/lib/mission/room-litmus-core";
 
 type StoredMessage = {
@@ -22,13 +23,9 @@ const outputPath = outputIndex >= 0 ? args[outputIndex + 1] : undefined;
 if (!roomId || (outputIndex >= 0 && (!outputPath || outputIndex !== args.length - 2)) || args.some((arg, index) => index > 0 && arg !== "--litmus" && arg !== "--out" && !(outputIndex === index - 1))) {
   throw new Error("Usage: npx tsx scripts/export-m9r-room-log.ts <room-id> [--litmus] [--out <new-file.json>]");
 }
-const tokenFile = [".m9r/agents/codex/local.json", ".oathlock/agents/codex/local.json"].find((path) => {
-  try { return Boolean(JSON.parse(readFileSync(path, "utf8")).token); }
-  catch { return false; }
-});
-if (!tokenFile) throw new Error("No local Codex M9R connection file was found.");
-const token = JSON.parse(readFileSync(tokenFile, "utf8")).token as string;
-if (typeof token !== "string" || !token) throw new Error("The local Codex connection file has no token.");
+const credential = await readAgentCredential(resolve(process.cwd()), "codex", process.env);
+if (!credential?.token) throw new Error("No user-scoped Codex M9R connection was found.");
+const token = credential.token;
 const suffix = "API_URL";
 const apiUrl = (process.env[`${M9R_ENV_PREFIX}${suffix}`] ?? process.env[`${LEGACY_ENV_PREFIX}${suffix}`] ?? "https://m9r.dev").replace(/\/+$/, "");
 const response = await fetch(`${apiUrl}/api/agent/conversations/${encodeURIComponent(roomId)}/messages`, {

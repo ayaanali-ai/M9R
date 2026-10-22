@@ -18,11 +18,13 @@ import { parseProviderAdapterConfig } from "../src/lib/provider-adapter-config";
 import { createResidentSupervisor } from "../src/lib/resident-supervisor";
 import { spawn } from "node:child_process";
 import { migrateLegacyM9rDirectory, normalizeLegacyM9rEnvironment } from "../src/lib/native/m9r-compatibility";
+import { agentCredentialPath, agentCredentialRoot, migrateLegacyAgentCredentials } from "../src/lib/native/agent-credential-store";
 
 const repositoryRoot = process.cwd();
 normalizeLegacyM9rEnvironment(process.env);
 try { migrateLegacyM9rDirectory(repositoryRoot); }
 catch (error) { process.stderr.write(`M9R could not copy legacy .oathlock state: ${error instanceof Error ? error.message : "unknown error"}\n`); }
+const credentialRoot = agentCredentialRoot(repositoryRoot, process.env);
 const localOnlyRuntime = process.env.M9R_LOCAL_ONLY === "1";
 const host = DEFAULT_BRIDGE_HOST;
 const requestedPort = Number.parseInt(process.env.M9R_BRIDGE_PORT ?? "", 10);
@@ -311,9 +313,14 @@ server.listen(port, host, () => {
 const LOCAL_PROVIDER_NAMES = ["claude-code", "codex", "opencode"] as const;
 async function connectedLocalProviders(): Promise<string[]> {
   const found: string[] = [];
+  try { await migrateLegacyAgentCredentials(repositoryRoot, process.env); }
+  catch (error) {
+    process.stderr.write(`M9R provider credential migration refused: ${error instanceof Error ? error.message : String(error)}\n`);
+    return found;
+  }
   for (const provider of LOCAL_PROVIDER_NAMES) {
     try {
-      const raw = await readFile(resolve(repositoryRoot, ".m9r", "agents", provider, "local.json"), "utf8");
+      const raw = await readFile(agentCredentialPath(credentialRoot, provider), "utf8");
       const parsed = JSON.parse(raw) as { token?: string };
       if (typeof parsed.token === "string" && parsed.token.trim()) found.push(provider);
     } catch {
@@ -327,7 +334,7 @@ async function connectedLocalProviders(): Promise<string[]> {
 async function anyConnectedProviderToken(): Promise<string | null> {
   for (const provider of LOCAL_PROVIDER_NAMES) {
     try {
-      const raw = await readFile(resolve(repositoryRoot, ".m9r", "agents", provider, "local.json"), "utf8");
+      const raw = await readFile(agentCredentialPath(credentialRoot, provider), "utf8");
       const parsed = JSON.parse(raw) as { token?: string };
       if (typeof parsed.token === "string" && parsed.token.trim()) return parsed.token.trim();
     } catch {

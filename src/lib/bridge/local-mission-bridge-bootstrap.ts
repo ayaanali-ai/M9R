@@ -12,13 +12,14 @@
  * functionality, which has nothing to do with this.
  */
 
-import { readdir, readFile, writeFile, unlink, mkdir, rename } from "node:fs/promises";
+import { readdir, readFile, writeFile, unlink, mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { startMissionBridge, describeConnectionError, type MissionBridgeHandle } from "../../../services/mission-bridge/src/bridge-runtime";
 import { parseProviderAdapterConfig, type ProviderAdapterConfig, PROVIDER_SLUG_PATTERN } from "../provider-adapter-config";
 import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, stillHoldsWatchdogLock } from "../oathlock-watchdog";
 import { M9R_DIR } from "../oathlock-cli-core";
+import { agentCredentialPath, agentCredentialRoot, migrateLegacyAgentCredentials, retireAgentCredentialFile } from "../native/agent-credential-store";
 
 const DEFAULT_RELAY_PUBLIC_URL = "https://m9r-relay.m9r.workers.dev";
 const DEFAULT_APP_URL = "https://m9r.dev";
@@ -29,11 +30,11 @@ interface LocalAgentToken {
 }
 
 /** All connected provider names on this machine, in a stable order -- used to decide how many bridge processes to spawn, before any token is actually read. */
-export async function listLocalConnectedProviders(repositoryRoot: string): Promise<string[]> {
+export async function listLocalConnectedProviders(repositoryRoot: string, credentialRoot = agentCredentialRoot(repositoryRoot)): Promise<string[]> {
   const found = new Set<string>();
   let entries: string[] = [];
   try {
-    entries = await readdir(join(repositoryRoot, M9R_DIR, "agents"));
+    entries = await readdir(join(credentialRoot, "agents"));
   } catch {
     return [];
   }
@@ -41,7 +42,7 @@ export async function listLocalConnectedProviders(repositoryRoot: string): Promi
   for (const provider of ordered) {
     if (!PROVIDER_SLUG_PATTERN.test(provider)) continue;
     try {
-      const raw = await readFile(join(repositoryRoot, M9R_DIR, "agents", provider, "local.json"), "utf8");
+      const raw = await readFile(agentCredentialPath(credentialRoot, provider), "utf8");
       const parsed = JSON.parse(raw) as LocalAgentToken;
       if (typeof parsed.token === "string" && parsed.token.trim()) found.add(provider);
     } catch {
@@ -63,14 +64,14 @@ export async function listLocalConnectedProviders(repositoryRoot: string): Promi
  * started last). Falls back to "first found" only when unset, for any
  * caller that still wants the old single-bridge behavior.
  */
-async function readLocalToken(repositoryRoot: string): Promise<{ provider: string; token: string } | null> {
+async function readLocalToken(repositoryRoot: string, credentialRoot = agentCredentialRoot(repositoryRoot)): Promise<{ provider: string; token: string } | null> {
   const pinned = process.env.M9R_LOCAL_MISSION_BRIDGE_PROVIDER?.trim();
   if (pinned && !PROVIDER_SLUG_PATTERN.test(pinned)) return null;
-  const order = pinned ? [pinned] : await listLocalConnectedProviders(repositoryRoot);
+  const order = pinned ? [pinned] : await listLocalConnectedProviders(repositoryRoot, credentialRoot);
   for (const provider of order) {
     if (!PROVIDER_SLUG_PATTERN.test(provider)) continue;
     try {
-      const raw = await readFile(join(repositoryRoot, ".m9r", "agents", provider, "local.json"), "utf8");
+      const raw = await readFile(agentCredentialPath(credentialRoot, provider), "utf8");
       const parsed = JSON.parse(raw) as LocalAgentToken;
       if (typeof parsed.token === "string" && parsed.token.trim()) return { provider, token: parsed.token.trim() };
     } catch {
@@ -124,18 +125,16 @@ async function resolveWorkspace(appUrl: string, token: string): Promise<WhoamiOu
 }
 
 /**
- * A revoked connection's token can never work again, so leaving it as local.json makes the
- * runtime keep launching a bridge for it forever (and shows the provider as connected).
- * Move it aside rather than delete it: reversible, and `m9r init` writes a fresh local.json.
+ * A revoked connection's token can never work again. Replace it with a
+ * non-secret marker in place so the provider is no longer discovered and the
+ * bearer is not retained in a reversible `local.revoked.json` artifact.
  */
-export async function retireRevokedLocalToken(repositoryRoot: string, provider: string): Promise<string | null> {
+export async function retireRevokedLocalToken(repositoryRoot: string, provider: string, credentialRoot = agentCredentialRoot(repositoryRoot)): Promise<string | null> {
   if (!PROVIDER_SLUG_PATTERN.test(provider)) return null;
-  const dir = join(repositoryRoot, M9R_DIR, "agents", provider);
+  const dir = join(credentialRoot, "agents", provider);
   const from = join(dir, "local.json");
-  const to = join(dir, "local.revoked.json");
   try {
-    await rename(from, to);
-    return to;
+    return await retireAgentCredentialFile(from, provider) ? from : null;
   } catch {
     return null;
   }
@@ -219,7 +218,13 @@ export async function startLocalMissionBridge(repositoryRoot: string): Promise<L
   if (process.env.MISSION_DEV_MCP_TOOLS_ENABLED?.trim().toLowerCase() !== "false") {
     process.env.MISSION_DEV_MCP_TOOLS_ENABLED = "true";
   }
-  const local = await readLocalToken(repositoryRoot);
+  try {
+    await migrateLegacyAgentCredentials(repositoryRoot, process.env);
+  } catch (error) {
+    return { ok: false, reason: "no_local_token", detail: error instanceof Error ? error.message : String(error) };
+  }
+  const credentialRoot = agentCredentialRoot(repositoryRoot);
+  const local = await readLocalToken(repositoryRoot, credentialRoot);
   if (!local) return { ok: false, reason: "no_local_token" };
   // Leader election, before anything about this provider's bridge actually
   // starts -- a losing process must never reach the point of holding a live
@@ -250,11 +255,11 @@ export async function startLocalMissionBridge(repositoryRoot: string): Promise<L
   const workspace = await resolveWorkspace(appUrl, local.token);
   if (workspace.kind === "revoked") {
     await releaseBridgeLock(repositoryRoot, local.provider);
-    const moved = await retireRevokedLocalToken(repositoryRoot, local.provider);
+    const retired = await retireRevokedLocalToken(repositoryRoot, local.provider, credentialRoot);
     return {
       ok: false,
       reason: "connection_revoked",
-      detail: `the ${local.provider} connection was disconnected/revoked${moved ? ` -- its local token was moved to ${moved}` : ""}. Run: m9r init --agent-kind ${local.provider}`,
+      detail: `the ${local.provider} connection was disconnected/revoked${retired ? ` -- its local credential was retired at ${retired}` : ""}. Run: m9r init --agent-kind ${local.provider}`,
     };
   }
   if (workspace.kind !== "ok") { await releaseBridgeLock(repositoryRoot, local.provider); return { ok: false, reason: "workspace_unresolvable" }; }

@@ -4,8 +4,8 @@ import { supabase } from "@/lib/supabase";
 
 /**
  * GET /api/agent/whoami — resolves the bearer token's workspace/connection
- * identity. The local `.m9r/agents/<kind>/local.json` token file
- * (written by `oathlock init`) never stores workspaceId itself; this is
+ * identity. The user-scoped `~/.m9r/workspaces/<workspace>/agents/<kind>/local.json`
+ * token file (written by `oathlock init`) never stores workspaceId itself; this is
  * what lets a local-only process (the terminal bridge's ACP integration)
  * discover it without a separate provisioning step.
  *

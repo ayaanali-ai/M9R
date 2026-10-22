@@ -21,7 +21,7 @@
  * no real network and no writes outside a temp dir.
  *
  * Secrets discipline:
- *  - Each runtime's scoped token is written once to its gitignored agent profile.
+ *  - Each runtime's scoped token is written once to its user-scoped, owner-protected agent profile.
  *  - The full token is never printed after saving — only a masked preview.
  *  - Any token value is redacted from error output before it is shown.
  */
@@ -51,6 +51,7 @@ import {
 import { HEARTBEAT_PROTOCOL_VERSION } from "@/lib/agent-heartbeat";
 import { printNativeStatus, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
 import { runMemory } from "@/lib/native/memory-command";
+import { agentCredentialPath as userScopedAgentCredentialPath, protectAgentCredentialFile } from "@/lib/native/agent-credential-store";
 import { m9rEnvironmentValue, normalizeLegacyM9rEnvironment } from "@/lib/native/m9r-compatibility";
 
 /** Actions this CLI currently implements. */
@@ -74,6 +75,10 @@ export type SupportedAgentKind = (typeof SUPPORTED_AGENT_KINDS)[number];
 export interface CliDeps {
   cwd: string;
   env: Record<string, string | undefined>;
+  /** User-scoped workspace credential root. The real entrypoint must provide this. */
+  credentialRoot?: string;
+  /** Idempotent migration of legacy repository-local credentials. */
+  ensureCredentialStore?(provider?: string): Promise<void>;
   fetch: typeof fetch;
   readFile(path: string): Promise<string>;
   writeFile(path: string, data: string): Promise<void>;
@@ -124,6 +129,8 @@ export function configPath(cwd: string): string {
   return join(cwd, M9R_DIR, "config.json");
 }
 export function agentLocalPath(cwd: string, agentKind: string): string {
+  // Compatibility helper for older injected test fixtures and diagnostics.
+  // Production reads/writes use userScopedAgentPath() below instead.
   return join(cwd, M9R_DIR, "agents", agentKind, "local.json");
 }
 export function agentConfigPath(cwd: string, agentKind: string): string {
@@ -258,23 +265,25 @@ function detectedAgentKind(env: Record<string, string | undefined>): string | nu
 
 async function resolvedLocalPath(deps: CliDeps, explicit?: string): Promise<string> {
   const kind = explicit ?? detectedAgentKind(deps.env);
+  await deps.ensureCredentialStore?.(kind ?? undefined);
+  const root = deps.credentialRoot ?? join(deps.cwd, M9R_DIR);
   // A runtime with a known identity must never borrow the shared legacy
   // profile. That fallback was the concrete path by which a Codex process
   // could authenticate with an OpenCode token and have every run attributed
   // to OpenCode on the server. Missing scoped profiles fail closed instead.
-  if (kind) return agentLocalPath(deps.cwd, kind);
-  const directory = join(deps.cwd, M9R_DIR, "agents");
+  if (kind) return userScopedAgentCredentialPath(root, kind);
+  const directory = join(root, "agents");
   const names = deps.listDirectory ? await deps.listDirectory(directory).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [];
     throw error;
   }) : ["codex", "claude-code", "opencode", "grok-build"];
   const profiles: string[] = [];
   for (const name of names) {
-    if (/^[a-z0-9][a-z0-9-]*$/.test(name) && await deps.fileExists(agentLocalPath(deps.cwd, name))) profiles.push(name);
+    if (/^[a-z0-9][a-z0-9-]*$/.test(name) && await deps.fileExists(userScopedAgentCredentialPath(root, name))) profiles.push(name);
   }
   if (profiles.length > 1) throw new Error(`Multiple agent profiles are connected (${profiles.join(", ")}). Select one with --agent-kind <kind>.`);
-  if (profiles.length === 1) return agentLocalPath(deps.cwd, profiles[0]);
-  return localPath(deps.cwd);
+  if (profiles.length === 1) return userScopedAgentCredentialPath(root, profiles[0]);
+  return join(root, "local.json");
 }
 
 async function readLocal(deps: CliDeps, explicit?: string): Promise<LocalState | null> {
@@ -487,7 +496,8 @@ interface AuthenticatedIdentity {
 
 function localProfileDisplay(deps: CliDeps): string {
   const kind = detectedAgentKind(deps.env);
-  return kind ? `${M9R_DIR}/agents/${kind}/local.json` : `${M9R_DIR}/local.json`;
+  if (!kind) return "the user-scoped M9R credential store";
+  return `the user-scoped M9R credential store for ${kind}`;
 }
 
 /**
@@ -1309,17 +1319,20 @@ async function connectOneAgent(
       }
       const scopes = Array.isArray(poll.json.scopes) ? (poll.json.scopes as string[]) : [];
 
-      // Self-ignoring directory: `.m9r/.gitignore` ignores everything inside, so the plaintext
-      // token can never be committed even if the repo's own .gitignore says nothing about it.
+      // Keep non-secret runtime metadata isolated from the repository's normal
+      // tracked files. The bearer token itself is written outside the repo.
       await ensureSelfIgnoredDir(deps);
 
-      // Store the token ONCE in the gitignored local.json. Never printed in full.
-      await writeJson(deps, agentLocalPath(deps.cwd, agentKind), {
+      // Store the token once in the user-scoped profile, then enforce the
+      // owner-only ACL on Windows before the connection is considered usable.
+      const credentialPath = userScopedAgentCredentialPath(deps.credentialRoot ?? join(deps.cwd, M9R_DIR), agentKind);
+      await writeJson(deps, credentialPath, {
         token,
         scopes,
         claim_id: claimId,
         saved_at: new Date().toISOString(),
       } satisfies LocalState);
+      if (deps.credentialRoot) protectAgentCredentialFile(credentialPath);
 
       // Store non-secret workspace metadata separately.
       await writeJson(deps, agentConfigPath(deps.cwd, agentKind), {
@@ -1336,7 +1349,7 @@ async function connectOneAgent(
 
       deps.out("");
       deps.out("M9R registration approved.");
-      deps.out(`  token  ${maskToken(token)} (saved to ${M9R_DIR}/agents/${agentKind}/local.json)`);
+      deps.out(`  token  ${maskToken(token)} (saved to the user-scoped M9R credential store)`);
       deps.out(`  scopes ${scopes.join(", ") || "(none)"}`);
       deps.out(`Registered agent: ${agentKindLabel(agentKind)}`);
       deps.out(`What leaves this machine: workspace messages and agent replies (including anything an agent quotes from your files), activity and permission events, and heartbeats, sent to ${base}.`);
@@ -3254,6 +3267,7 @@ async function cmdRotateToken(deps: CliDeps): Promise<number> {
 
   const path = await resolvedLocalPath(deps);
   await writeJson(deps, path, { ...local, token: res.json.token, saved_at: new Date().toISOString() });
+  if (deps.credentialRoot) protectAgentCredentialFile(path);
   deps.out(`Token rotated — new token saved to its agent profile (${maskToken(res.json.token)}). The old token is now revoked.`);
   return 0;
 }
@@ -3395,8 +3409,8 @@ workflow (AGENTS.md for Codex/Grok Build, CLAUDE.md for Claude Code) so
 supported agents use M9R during normal tasks without
 "use M9R" in every prompt. M9R does not intercept arbitrary external
 agent sessions — automatic behavior depends on the agent reading those repo
-instructions. A returning workspace (where .m9r/local.json already has a
-token) should use doctor then rules.
+instructions. A returning workspace (where the user-scoped credential store
+already has a provider token) should use doctor then rules.
 
 In every governed task, agents prepare a redacted M9R Evidence Draft automatically;
 humans approve that exact draft; M9R records it only after approval.
@@ -3437,7 +3451,7 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
   if (profileCommands.has(command)) {
     try {
       const profile = await resolvedLocalPath(deps);
-      if (!detectedAgentKind(deps.env) && profile !== localPath(deps.cwd)) {
+      if (!detectedAgentKind(deps.env) && profile !== join(deps.credentialRoot ?? join(deps.cwd, M9R_DIR), "local.json")) {
         deps.env.M9R_AGENT_KIND = profile.split(/[\\/]/).at(-2);
       }
     } catch (error) { deps.err(error instanceof Error ? error.message : "Could not select an agent profile."); return 1; }

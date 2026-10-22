@@ -14,6 +14,7 @@ import { mcpWorkerEnvironment, readM9rMcpConnectionConfig } from "@/lib/native/m
 import { startLocalPresenceHeartbeat } from "@/lib/native/local-presence-heartbeat";
 import { hasPendingRuntimeTransaction } from "@/lib/native/runtime-install-transaction";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
+import { migrateLegacyAgentCredentials, readAgentCredential } from "@/lib/native/agent-credential-store";
 import { createM9rMcpServer } from "@/lib/native/mcp-server";
 import { createNetworkCoreClient, parseNetworkCredentials } from "@/lib/native/network-core-client";
 import { createWebBrokerClient } from "@/lib/native/web-broker-client";
@@ -22,24 +23,27 @@ import { isPackagedMcpExecutable, resolveMcpRuntimeExecutable } from "@/lib/nati
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-function localAgentToken(provider: string, env: NodeJS.ProcessEnv): string | undefined {
+async function localAgentToken(provider: string, env: NodeJS.ProcessEnv, repositoryRoot: string): Promise<string | undefined> {
   const direct = env.M9R_AGENT_TOKEN?.trim();
   if (direct) return direct;
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(provider)) return undefined;
-  const roots = [join(process.cwd(), ".m9r"), defaultStoreRoot(homedir(), env)];
-  for (const root of roots) {
-    const path = join(root, "agents", provider, "local.json");
-    try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as { token?: unknown };
-      if (typeof parsed.token === "string" && parsed.token.trim()) return parsed.token.trim();
-    } catch { /* A missing/corrupt local token must not block MCP startup. */ }
+  try {
+    const migration = await migrateLegacyAgentCredentials(repositoryRoot, env, [provider]);
+    const blocked = migration.find((result) => result.action === "conflict" || result.action === "invalid");
+    if (blocked) {
+      throw new Error(`The ${blocked.provider} credential could not be migrated safely (${blocked.action}); refusing to use a project-local credential.`);
+    }
+    return (await readAgentCredential(repositoryRoot, provider, env))?.token;
+  } catch (error) {
+    process.stderr.write(`M9R refused a project-local credential migration for ${provider}: ${error instanceof Error ? error.message : String(error)}\n`);
+    return undefined;
   }
-  return undefined;
 }
 
-function startMcpPresence(connection: ReturnType<typeof readM9rMcpConnectionConfig>): ReturnType<typeof startLocalPresenceHeartbeat> | null {
+async function startMcpPresence(connection: ReturnType<typeof readM9rMcpConnectionConfig>): Promise<ReturnType<typeof startLocalPresenceHeartbeat> | null> {
   if (process.env.M9R_MCP_WORKER === "1" || !connection.provider) return null;
-  const token = localAgentToken(connection.provider, process.env);
+  const repositoryRoot = process.env.M9R_PROJECT_ROOT?.trim() || process.cwd();
+  const token = await localAgentToken(connection.provider, process.env, repositoryRoot);
   if (!token) return null;
   const appUrl = (process.env.M9R_APP_URL?.trim() || process.env.M9R_API_URL?.trim() || "https://m9r.dev").replace(/\/+$/, "");
   return startLocalPresenceHeartbeat({
@@ -54,7 +58,7 @@ function startMcpPresence(connection: ReturnType<typeof readM9rMcpConnectionConf
 async function main(): Promise<void> {
   const connection = readM9rMcpConnectionConfig(process.env, process.ppid);
   if (process.env.M9R_MCP_WORKER !== "1") {
-    const presence = startMcpPresence(connection);
+    const presence = await startMcpPresence(connection);
     const runtimeExecutable = resolveMcpRuntimeExecutable(process.env, process.execPath);
     const packaged = isPackagedMcpExecutable(runtimeExecutable);
     const executableDirectory = dirname(runtimeExecutable);

@@ -288,7 +288,7 @@ function build() {
 
   // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "foreground-input-lease", "desktop-input-errors", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "mcp-connection-core", "mcp-connection-env", "mcp-runtime-path", "local-store", "runtime-install-transaction", "runtime-build-identity", "engine-update-core", "update-lifecycle-core", "update-lifecycle", "provider-update-compatibility-core", "provider-update-lifecycle-core", "provider-update-monitor", "provider-update-route-actions", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "opencode-model-core", "opencode-plugin-refresh", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server", "m9r-prompt-markers"]) {
+  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "foreground-input-lease", "desktop-input-errors", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "mcp-connection-core", "mcp-connection-env", "mcp-runtime-path", "local-store", "agent-credential-store", "runtime-install-transaction", "runtime-build-identity", "engine-update-core", "update-lifecycle-core", "update-lifecycle", "provider-update-compatibility-core", "provider-update-lifecycle-core", "provider-update-monitor", "provider-update-route-actions", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "opencode-model-core", "opencode-plugin-refresh", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server", "m9r-prompt-markers"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source)
       .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
@@ -419,7 +419,8 @@ function build() {
   const ownerPtyRuntimeTs = readFileSync(resolve(repoRoot, "src/lib/mission/owner-pty-runtime.ts"), "utf8");
   const ownerPtyRuntimeJs = transpile(ownerPtyRuntimeTs)
     .replace('"./mission-relay-client"', '"./mission-relay-client.js"')
-    .replace('"./mission-pty-runtime"', '"./mission-pty-runtime.js"');
+    .replace('"./mission-pty-runtime"', '"./mission-pty-runtime.js"')
+    .replace(/["']\.\.\/native\/agent-credential-store["']/g, '"./agent-credential-store.js"');
   writeFileSync(resolve(outDir, "owner-pty-runtime.js"), ownerPtyRuntimeJs);
 
   // Item #11/#29 local memory exporter — same dynamic-import situation as
@@ -447,7 +448,8 @@ function build() {
   const ownerFsRuntimeJs = transpile(ownerFsRuntimeTs)
     .replace('"./mission-relay-client"', '"./mission-relay-client.js"')
     .replace('"../bridge/fs-tree-host"', '"./fs-tree-host.js"')
-    .replace('"./mission-fs-protocol"', '"./mission-fs-protocol.js"');
+    .replace('"./mission-fs-protocol"', '"./mission-fs-protocol.js"')
+    .replace(/["']\.\.\/native\/agent-credential-store["']/g, '"./agent-credential-store.js"');
   writeFileSync(resolve(outDir, "owner-fs-runtime.js"), ownerFsRuntimeJs);
 
   const localMissionBridgeBootstrapTs = readFileSync(resolve(repoRoot, "src/lib/bridge/local-mission-bridge-bootstrap.ts"), "utf8");
@@ -455,7 +457,8 @@ function build() {
     .replace(/['"]\.\.\/\.\.\/\.\.\/services\/mission-bridge\/src\/bridge-runtime['"]/g, '"./bridge-runtime.js"')
     .replace(/['"]\.\.\/provider-adapter-config['"]/g, '"./provider-adapter-config.js"')
     .replace(/['"]\.\.\/oathlock-watchdog['"]/g, '"./oathlock-watchdog.js"')
-    .replace(/['"]\.\.\/oathlock-cli-core['"]/g, '"./oathlock-cli-core.js"');
+    .replace(/['"]\.\.\/oathlock-cli-core['"]/g, '"./oathlock-cli-core.js"')
+    .replace(/['"]\.\.\/native\/agent-credential-store['"]/g, '"./agent-credential-store.js"');
   writeFileSync(resolve(outDir, "local-mission-bridge-bootstrap.js"), localMissionBridgeBootstrapJs);
 
   const localMissionBridgeRunnerTs = readFileSync(resolve(repoRoot, "src/lib/bridge/local-mission-bridge-runner.ts"), "utf8");
@@ -499,7 +502,8 @@ function build() {
     .replace(/['"]\.\.\/src\/lib\/resident-supervisor['"]/g, '"./resident-supervisor.js"')
     .replace(/['"]\.\.\/src\/lib\/local-terminal-protocol['"]/g, '"./local-terminal-protocol.js"')
     .replace(/['"]\.\.\/src\/lib\/local-provider-workspace-page['"]/g, '"./local-provider-workspace-page.js"')
-    .replace(/['"]\.\.\/src\/lib\/provider-adapter-config['"]/g, '"./provider-adapter-config.js"');
+    .replace(/['"]\.\.\/src\/lib\/provider-adapter-config['"]/g, '"./provider-adapter-config.js"')
+    .replace(/['"]\.\.\/src\/lib\/native\/agent-credential-store['"]/g, '"./agent-credential-store.js"');
   writeFileSync(resolve(outDir, "oathlock-terminal-bridge.js"), terminalBridgeJs);
 
   // 3. Core — node-only imports plus app aliases rewritten to shipped files.
@@ -512,7 +516,8 @@ function build() {
     .replace(/["']@\/lib\/cross-agent-capture-setup-core["']/g, '"./cross-agent-capture-setup-core.js"')
     .replace(/["']@\/lib\/agent-heartbeat["']/g, '"./agent-heartbeat.js"')
     .replace(/["']@\/lib\/native\/native-commands["']/g, '"./native-commands.js"')
-    .replace(/["']@\/lib\/native\/memory-command["']/g, '"./memory-command.js"');
+    .replace(/["']@\/lib\/native\/memory-command["']/g, '"./memory-command.js"')
+    .replace(/["']@\/lib\/native\/agent-credential-store["']/g, '"./agent-credential-store.js"');
   writeFileSync(resolve(outDir, "oathlock-cli-core.js"), coreJs);
 
   // 4. Entry — rewrite the "@/lib/oathlock-cli-core" alias to a relative import,

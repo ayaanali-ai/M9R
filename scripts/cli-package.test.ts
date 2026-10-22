@@ -338,7 +338,13 @@ test("packed CLI entry boots the terminal runtime without printing a pairing sec
 test("packed CLI runtime uses the compiled mission runner for connected providers", { timeout: 20_000 }, async () => {
   const port = await freeLoopbackPort();
   const workspace = mkdtempSync(resolve(tmpdir(), "oathlock-cli-runtime-"));
-  const localTokenPath = resolve(workspace, ".m9r", "agents", "codex", "local.json");
+  const home = mkdtempSync(resolve(tmpdir(), "oathlock-cli-runtime-home-"));
+  const normalizedWorkspace = workspace.replaceAll("\\", "/").replace(/\/+$/, "");
+  const workspaceKey = createHash("sha256")
+    .update(process.platform === "win32" ? normalizedWorkspace.toLowerCase() : normalizedWorkspace)
+    .digest("hex")
+    .slice(0, 32);
+  const localTokenPath = resolve(home, ".m9r", "workspaces", workspaceKey, "agents", "codex", "local.json");
   mkdirSync(dirname(localTokenPath), { recursive: true });
   // The token only exercises provider discovery. ACP is disabled for this
   // fixture, so the child exits before making any network or provider call.
@@ -351,7 +357,7 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
     // metadata sync from the OS home directory, independently of cwd.
     // Do not let startup recovery discover or launch the developer's globally
     // installed provider CLIs while this packaging test is running.
-    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, PATH: workspace, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", M9R_BRIDGE_PORT: String(port) },
+    env: { ...process.env, HOME: home, USERPROFILE: home, PATH: workspace, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", M9R_BRIDGE_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -396,6 +402,7 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
       await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
     }
     await removeTempWorkspace(workspace);
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

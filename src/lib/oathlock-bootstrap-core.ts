@@ -127,7 +127,7 @@ export function buildWorkflowBlock(kind: string): string {
     "   stop and report instead of proceeding uncontrolled.",
     "3. Run `npx m9r-cli whoami`, then check only the current runtime's scoped",
     "   run pointer at `.m9r/agents/<authenticated-kind>/run.json` (never",
-    "   read another provider's pointer or `.m9r/local.json`). If it",
+    "   read another provider's pointer or any credential store). If it",
     "   references a run for THIS task, attach to it and keep reporting under that",
     "   run id. Otherwise start exactly one controlled run:",
     "   `npx m9r-cli run start --task \"<short task title>\"`.",

@@ -59,6 +59,7 @@ import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, 
 import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
 import { createInterface } from "node:readline/promises";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
+import { agentCredentialPath, agentCredentialRoot, migrateLegacyAgentCredentials, protectAgentCredentialFile } from "@/lib/native/agent-credential-store";
 import { startProviderUpdateMonitor } from "@/lib/native/provider-update-monitor";
 import { createProviderNeutralUpdateActions, type ProviderConfigRefreshInput } from "@/lib/native/provider-update-route-actions";
 import { isAgentContext, isHumanContext } from "@/lib/native/approval-core";
@@ -146,12 +147,25 @@ function openUrl(url: string): void {
 const deps: CliDeps = {
   cwd: process.cwd(),
   env: process.env,
+  credentialRoot: agentCredentialRoot(process.cwd(), process.env),
+  ensureCredentialStore: async (provider) => {
+    const results = await migrateLegacyAgentCredentials(
+      process.cwd(),
+      process.env,
+      provider ? [provider] : undefined,
+    );
+    const blocked = results.find((result) => result.action === "conflict" || result.action === "invalid");
+    if (blocked) {
+      throw new Error(`M9R refused to use the ${blocked.provider} credential: its legacy project file could not be migrated safely. Resolve the conflict and reconnect that provider.`);
+    }
+  },
   fetch: globalThis.fetch,
   readFile: (p) => readFile(p, "utf8"),
   writeFile: (p, data) => writeFile(p, data, "utf8"),
   writeSecretFile: async (p, data) => {
     await writeFile(p, data, { encoding: "utf8", mode: 0o600 });
     if (platform() !== "win32") await chmod(p, 0o600);
+    else protectAgentCredentialFile(p);
   },
   removeFile: (p) => unlink(p),
   mkdir: async (p) => {
@@ -589,7 +603,7 @@ async function connectedProviderBridgesAreHealthy(repositoryRoot: string): Promi
   const providers = ["claude-code", "codex", "opencode"] as const;
   const unhealthy: string[] = [];
   for (const provider of providers) {
-    const tokenPath = join(repositoryRoot, ".m9r", "agents", provider, "local.json");
+    const tokenPath = agentCredentialPath(agentCredentialRoot(repositoryRoot, process.env), provider);
     if (!existsSync(tokenPath)) continue; // never connected here -- not this watchdog's concern
     const logPath = join(repositoryRoot, ".m9r", "runtime", "mission-bridge-logs", `${provider}.log`);
     if (!existsSync(logPath)) continue; // bridge has never attempted a start yet
