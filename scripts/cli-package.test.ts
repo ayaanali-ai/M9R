@@ -222,7 +222,7 @@ test("managed extension refresh changes only owned extension files and preserves
   // Keep the fake credential home outside the project. The production store
   // rejects project-local M9R_HOME values so a checkout cannot become a
   // credential container by accident.
-  const home = mkdtempSync(resolve(tmpdir(), "m9r-extension-home-"));
+  const home = mkdtempSync(join(resolve(repoRoot, ".."), "m9r-extension-home-"));
   const localAppData = join(temporaryRoot, "local-app-data");
   const source = join(temporaryRoot, "source-extension");
   const extensionPath = join(localAppData, "M9R", "extension");
