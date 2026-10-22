@@ -105,8 +105,16 @@ function sourceProvenance() {
     }
     return result;
   };
-  const worktreeDiff = runGitCleanCheck(["diff", "--quiet", "--no-ext-diff", "--ignore-submodules"]);
-  const indexDiff = runGitCleanCheck(["diff", "--cached", "--quiet", "--no-ext-diff", "--ignore-submodules"]);
+  // The private tracker is intentionally allowed to advance alongside a
+  // release without becoming part of that release's source fingerprint.
+  // Exclude only those two exact tracked paths; every other tracked change
+  // remains a hard dirty-build failure.
+  const privateTrackerExclusions = [
+    ":(exclude)docs/M9R_CUMULATIVE_RELIABILITY_AND_DEMO_TRACKER_2026-10-10.md",
+    ":(exclude)docs/M9R_MASTER_LIST_2.1.md",
+  ];
+  const worktreeDiff = runGitCleanCheck(["diff", "--quiet", "--no-ext-diff", "--ignore-submodules", "--", ".", ...privateTrackerExclusions]);
+  const indexDiff = runGitCleanCheck(["diff", "--cached", "--quiet", "--no-ext-diff", "--ignore-submodules", "--", ".", ...privateTrackerExclusions]);
   const untracked = runGitCleanCheck(["ls-files", "--others", "--exclude-standard", "--directory"]);
   const untrackedPaths = String(untracked.stdout).split(/\r?\n/g).map((path) => path.trim()).filter(Boolean);
   const heldLocalEvidence = untrackedPaths.filter(isHeldLocalProvenancePath);
