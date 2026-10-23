@@ -26,6 +26,10 @@ Do not add the M9R desktop pill to this Windows user's sign-in startup list.
 
 .PARAMETER NoLaunch
 Install without starting the desktop pill after setup. Intended for automated tests.
+
+.PARAMETER Yes
+Apply the reviewed setup plan without opening the interactive consent prompt.
+Use only with an exact, locally verified package path.
 #>
 [CmdletBinding()]
 param(
@@ -34,7 +38,8 @@ param(
     [switch]$Uninstall,
     [switch]$Web,
     [switch]$NoAutostart,
-    [switch]$NoLaunch
+[switch]$NoLaunch,
+[switch]$Yes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -444,7 +449,7 @@ try {
         Write-Host $text
     }
     Write-Host ''
-    if (-not (Read-Consent 'Do you approve this exact local setup?')) {
+    if (-not $Yes -and -not (Read-Consent 'Do you approve this exact local setup?')) {
         Write-Host 'Cancelled. No agent configuration was changed.'
         exit 0
     }

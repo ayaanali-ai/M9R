@@ -138,6 +138,8 @@ test("installer contains no Node/npm dependency and changes no saved PowerShell 
   assert.match(source, /Get-M9rHome/);
   assert.match(source, /\[switch\]\$NoAutostart/);
   assert.match(source, /\[switch\]\$NoLaunch/);
+  assert.match(source, /\[switch\]\$Yes/);
+  assert.match(source, /if \(-not \$Yes -and -not \(Read-Consent/);
   assert.match(source, /function Stop-InstalledM9rPill/);
   assert.match(source, /--m9r-update-shutdown/, "pill updates must use the app's single-instance shutdown handoff");
   assert.match(source, /WaitForExit\(15000\)/, "the installer must wait for the installed pill to exit before replacing its image");
