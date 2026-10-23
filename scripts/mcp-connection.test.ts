@@ -367,6 +367,44 @@ test("a provider update recovers a sole session older than the claim window with
   } finally { done(); }
 });
 
+test("a live provider adapter rebinds the same durable session after a long outage and PID change", () => {
+  let current = new Date("2026-10-15T18:00:00.000Z");
+  const { store, done } = tempStore(() => current, (pid) => pid === 9002);
+  try {
+    store.registerEndpoint({ provider: "opencode", sessionId: "same-session", cwd: "C:/work" });
+    store.issueIdentity("opencode", "opencode", "same-session");
+    const claim = store.issueConnectionClaim({
+      handle: "opencode",
+      provider: "opencode",
+      sessionId: "same-session",
+      cwd: "C:/work",
+      ownerProcessId: 9001,
+    });
+    const binding = store.bindConnectionClaim(claim.claimId, { provider: "opencode", processId: 9001 });
+    assert.ok(binding);
+
+    // The conversation is still the same, but the old provider process has
+    // gone away and the machine was offline longer than the conservative
+    // stored-session recovery window.
+    current = new Date("2026-10-30T18:00:00.000Z");
+    const rebound = store.reconcileLiveProviderConnection({
+      provider: "opencode",
+      sessionId: "same-session",
+      cwd: "C:/work",
+      processId: 9002,
+    });
+
+    assert.ok(rebound);
+    assert.equal(rebound!.bindingId, binding!.bindingId, "the durable binding remains the same");
+    assert.equal(rebound!.ownerProcessId, 9002, "only the current verified provider process is attached");
+    assert.deepEqual(store.verifyConnectionBinding(rebound!.bindingId), {
+      handle: "opencode",
+      provider: "opencode",
+      sessionId: "same-session",
+    });
+  } finally { done(); }
+});
+
 test("provider reconnect refuses to guess when more than one recent session is eligible", async () => {
   const { store, done } = tempStore();
   try {

@@ -108,7 +108,7 @@ function identityForProviderSession(
   const current = ctx.store.identityTokenFor(handle, sessionId);
   if (current) return current;
   try {
-    ctx.store.recoverProviderConnection({
+    ctx.store.reconcileLiveProviderConnection({
       provider: ctx.provider,
       sessionId,
       ...(cwd ? { cwd } : {}),

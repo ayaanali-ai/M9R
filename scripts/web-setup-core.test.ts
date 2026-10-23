@@ -193,7 +193,7 @@ test("OpenCode JSONC merge uses legacy or v2 layout without rewriting unrelated 
   assert.match(uninstalled, /"github"/);
 });
 
-test("OpenCode setup explicitly loads the M9R identity plugin beside the active config", () => {
+test("OpenCode setup relies on global plugin discovery and removes the legacy file entry", () => {
   const original = `{
   // keep the user's existing plugin path
   "plugin": ["./plugins"],
@@ -202,7 +202,7 @@ test("OpenCode setup explicitly loads the M9R identity plugin beside the active 
   const installed = mergeOpenCodeWebMcp(original, "legacy", command, true);
   const normalized = installed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1");
   const parsed = JSON.parse(normalized) as { plugin: string[] };
-  assert.deepEqual(parsed.plugin, ["./plugins", "./plugins/m9r-identity.js"]);
+  assert.deepEqual(parsed.plugin, ["./plugins"]);
   assert.equal(mergeOpenCodeWebMcp(installed, "legacy", command, true), installed);
   const removed = removeOpenCodeWebMcp(installed, "legacy", true);
   const removedParsed = JSON.parse(removed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1")) as { plugin: string[]; mcp?: Record<string, unknown> };
@@ -210,7 +210,7 @@ test("OpenCode setup explicitly loads the M9R identity plugin beside the active 
   assert.deepEqual(removedParsed.mcp, {});
 });
 
-test("OpenCode v2 setup uses the modern plugins key and removes only the stale M9R legacy entry", () => {
+test("OpenCode v2 setup removes only stale M9R entries and preserves user plugins", () => {
   const original = `{
   // keep unrelated user plugins and comments
   "plugin": ["./plugins/m9r-identity.js", "./plugins/user-plugin.js"],
@@ -220,7 +220,7 @@ test("OpenCode v2 setup uses the modern plugins key and removes only the stale M
   const installed = mergeOpenCodeWebMcp(original, "servers", command, true);
   const normalized = installed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1");
   const parsed = JSON.parse(normalized) as { plugin: string[]; plugins: string[] };
-  assert.deepEqual(parsed.plugins, ["./plugins/existing-v2-plugin.js", "./plugins/m9r-identity.js"]);
+  assert.deepEqual(parsed.plugins, ["./plugins/existing-v2-plugin.js"]);
   assert.deepEqual(parsed.plugin, ["./plugins/user-plugin.js"]);
   assert.equal(mergeOpenCodeWebMcp(installed, "servers", command, true), installed);
 
@@ -231,15 +231,15 @@ test("OpenCode v2 setup uses the modern plugins key and removes only the stale M
   assert.deepEqual(removedParsed.mcp, { servers: {} });
 });
 
-test("OpenCode v2 setup creates plugins when a legacy config has no plugin array", () => {
+test("OpenCode v2 setup does not create a fragile file plugin entry", () => {
   const original = `{
   "mcp": {},
 }`;
   const installed = mergeOpenCodeWebMcp(original, "servers", command, true);
   const normalized = installed.replace(/,\s*([}\]])/g, "$1");
-  const parsed = JSON.parse(normalized) as { plugin?: unknown; plugins: string[] };
+  const parsed = JSON.parse(normalized) as { plugin?: unknown; plugins?: string[] };
   assert.equal(parsed.plugin, undefined);
-  assert.deepEqual(parsed.plugins, ["./plugins/m9r-identity.js"]);
+  assert.equal(parsed.plugins, undefined);
 });
 
 test("OpenCode v2 setup moves the M9R server out of the legacy mcp root without disturbing other servers", () => {

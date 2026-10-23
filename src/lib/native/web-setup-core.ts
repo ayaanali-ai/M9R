@@ -58,7 +58,13 @@ export function shouldOpenBrowserSetup(args: readonly string[]): boolean {
 }
 
 export const OPENCODE_IDENTITY_PLUGIN_FILENAME = "m9r-identity.js";
-/** OpenCode config entry used when the M9R identity plugin sits beside the config. */
+/**
+ * Legacy M9R entry retained only so upgrades/uninstall can remove an entry
+ * written by older installers. Current OpenCode versions auto-discover a
+ * managed plugin placed in the global plugins directory; injecting a
+ * file-shaped config entry makes newer versions warn that the target must be
+ * a directory and can prevent the plugin from loading after an update.
+ */
 export const OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY = `./plugins/${OPENCODE_IDENTITY_PLUGIN_FILENAME}`;
 
 export interface OpenCodeHookInvocation {
@@ -586,13 +592,14 @@ async function listOpenCodeSessions(cwd, client) {
   const session = client?.session;
   const list = session?.list;
   if (typeof list !== "function") return null;
+  const request = { directory: cwd, limit: 100 };
   try {
-    const modern = await list.call(session, { directory: cwd });
-    if (modern?.error && isOpenCodeRequestShapeError(modern)) return list.call(session, { query: { directory: cwd } });
+    const modern = await list.call(session, request);
+    if (modern?.error && isOpenCodeRequestShapeError(modern)) return list.call(session, { query: request });
     return modern;
   } catch (error) {
     if (!isOpenCodeRequestShapeError(error)) return null;
-    return list.call(session, { query: { directory: cwd } }).catch(() => null);
+    return list.call(session, { query: request }).catch(() => null);
   }
 }
 
@@ -1242,45 +1249,8 @@ function jsoncArrayItemText(source: string, item: JsoncNode): string {
   return source.slice(item.start, item.end).trim();
 }
 
-type OpenCodePluginConfigKey = "plugin" | "plugins";
-
-function openCodePluginConfigKey(root: JsoncNode, layout: WebOpenCodeLayout): OpenCodePluginConfigKey {
-  // Prefer an explicitly present modern key. For v2, never create or continue
-  // using the legacy singular key: OpenCode silently ignores it.
-  if (objectProperty(root, "plugins")) return "plugins";
-  if (layout === "servers") return "plugins";
-  return "plugin";
-}
-
-/** Add one string to an OpenCode plugin array without rewriting surrounding JSONC. */
-function addOpenCodePluginEntry(source: string, root: JsoncNode, key: OpenCodePluginConfigKey): string {
-  const plugin = objectProperty(root, key);
-  if (!plugin) return setJsoncProperty(source, root, key, [OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY]);
-  if (plugin.value.kind !== "array" || plugin.value.closeOffset === undefined || plugin.value.openOffset === undefined) {
-    throw new Error(`OpenCode config \`${key}\` must be an array; it was not changed.`);
-  }
-  const items = plugin.value.items ?? [];
-  if (items.some((item) => jsoncArrayItemText(source, item) === JSON.stringify(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY))) return source;
-  const close = plugin.value.closeOffset;
-  const body = source.slice(plugin.value.openOffset + 1, close);
-  const closeIndent = indentAt(source, close);
-  if (!body.trim()) {
-    const multiline = body.includes("\n");
-    const insertion = multiline
-      ? `\n${closeIndent}  ${JSON.stringify(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY)}\n${closeIndent}`
-      : JSON.stringify(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY);
-    return source.slice(0, close) + insertion + source.slice(close);
-  }
-  const hasTrailingComma = /,\s*$/.test(body);
-  const comma = hasTrailingComma ? "" : ",";
-  const insertion = body.includes("\n")
-    ? `${comma}\n${closeIndent}  ${JSON.stringify(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY)}\n${closeIndent}`
-    : `${comma} ${JSON.stringify(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY)}`;
-  return source.slice(0, close) + insertion + source.slice(close);
-}
-
 /** Remove only the M9R-owned plugin entry, preserving every other plugin and comment. */
-function removeOpenCodePluginEntry(source: string, root: JsoncNode, key: OpenCodePluginConfigKey): string {
+function removeOpenCodePluginEntry(source: string, root: JsoncNode, key: "plugin" | "plugins"): string {
   const plugin = objectProperty(root, key);
   if (!plugin || plugin.value.kind !== "array" || plugin.value.openOffset === undefined || plugin.value.closeOffset === undefined) return source;
   const items = plugin.value.items ?? [];
@@ -1296,17 +1266,13 @@ function removeOpenCodePluginEntry(source: string, root: JsoncNode, key: OpenCod
 }
 
 /**
- * Install the M9R plugin using the provider's active config contract. OpenCode
- * v2 uses `plugins`; older releases use `plugin`. If a provider update leaves
- * our entry in the obsolete key, remove only that M9R-owned entry while
- * preserving every unrelated user plugin and comment.
+ * Reconcile the M9R plugin entry left by older installers. OpenCode now
+ * auto-discovers files in the global plugins directory, so the active setup
+ * must not add a fragile file path to `plugins`/`plugin`. Removing only our
+ * old entry leaves every user plugin and comment untouched.
  */
-function addOpenCodeIdentityPluginEntry(source: string, root: JsoncNode, layout: WebOpenCodeLayout): string {
-  const key = openCodePluginConfigKey(root, layout);
-  source = addOpenCodePluginEntry(source, root, key);
-  if (key !== "plugins") return source;
-  const modernRoot = parseJsonc(source);
-  return removeOpenCodePluginEntry(source, modernRoot, "plugin");
+function addOpenCodeIdentityPluginEntry(source: string): string {
+  return removeOpenCodeIdentityPluginEntry(source);
 }
 
 /** Remove M9R's entry from both config spellings without touching user entries. */
@@ -1388,7 +1354,7 @@ export function mergeOpenCodeWebMcp(existing: string, layout: WebOpenCodeLayout,
   source = setJsoncProperty(source, target.parent, target.key, layout === "servers" && target.key === "servers" ? { m9r: openCodeEntry(command) } : openCodeEntry(command));
   source = removeOpenCodeStaleMcpEntry(source, parseJsonc(source), layout);
   if (!includeIdentityPlugin) return source;
-  return addOpenCodeIdentityPluginEntry(source, parseJsonc(source), layout);
+  return addOpenCodeIdentityPluginEntry(source);
 }
 
 export function removeOpenCodeWebMcp(existing: string, layout: WebOpenCodeLayout, removeIdentityPlugin = false): string {

@@ -113,6 +113,14 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     }
     if (deps.connectionProcessId === undefined && !deps.connectionProvider && !deps.connectionWorkerFallback) return null;
     let binding = deps.store.bindConnectionForProcess({ provider: deps.connectionProvider, processId: deps.connectionProcessId });
+    if (!binding && deps.connectionProvider && deps.store.reconcileLiveProviderConnection && deps.connectionSessionId) {
+      binding = deps.store.reconcileLiveProviderConnection({
+        provider: deps.connectionProvider,
+        ...(deps.connectionCwd ? { cwd: deps.connectionCwd } : {}),
+        sessionId: deps.connectionSessionId,
+        ...(deps.connectionProcessId !== undefined ? { processId: deps.connectionProcessId } : {}),
+      });
+    }
     if (!binding && deps.connectionProvider && deps.store.recoverProviderConnection) {
       binding = deps.store.recoverProviderConnection({
         provider: deps.connectionProvider,

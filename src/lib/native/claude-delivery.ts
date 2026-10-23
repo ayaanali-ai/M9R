@@ -90,7 +90,7 @@ function chooseSession(store: LocalStore, task: Task, sessions: readonly ClaudeS
         ? { seenAt: new Date(session.updatedAt).toISOString() }
         : {}),
     });
-    const recovered = store.recoverProviderConnection({
+    const recovered = store.reconcileLiveProviderConnection({
       provider: "claude-code",
       sessionId: session.sessionId,
       cwd: session.cwd,

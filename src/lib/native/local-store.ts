@@ -1209,6 +1209,65 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return this.bindConnectionForProcess({ provider, processId: input.processId });
     },
 
+    /**
+     * Reconcile a session discovered live by a provider adapter.
+     *
+     * `recoverProviderConnection` intentionally has a bounded last-seen
+     * window because it may have to choose a session from local state. A
+     * provider adapter that has just observed an exact live session has
+     * stronger evidence: it supplies the provider's session id, project, and
+     * (when available) current provider process. That evidence must not expire
+     * merely because the same conversation has been idle for more than a
+     * week. This path therefore never chooses among stored sessions and never
+     * accepts a project-wide or provider-wide fallback.
+     */
+    reconcileLiveProviderConnection(input: {
+      provider: string;
+      sessionId: string;
+      cwd?: string;
+      processId?: number;
+    }): ConnectionBinding | null {
+      const provider = input.provider.trim();
+      const sessionId = input.sessionId.trim();
+      if (!provider || !sessionId) return null;
+      if (input.processId !== undefined && !validConnectionProcessId(input.processId)) return null;
+      const handle = handleForProvider(provider);
+      const folder = input.cwd === undefined ? undefined : normalizeSessionFolder(projectCwd(root, input.cwd));
+      const state = readState();
+      const activeIdentity = state.identities.some((identity) => !identity.revokedAt
+        && identity.sessionId === sessionId
+        && normalizeHandle(identity.handle) === normalizeHandle(handle)
+        && sameConnectionProvider(identity.provider, provider));
+      if (this.identityWasRevoked(handle, sessionId)) return null;
+
+      // A healthy provider can reconcile frequently. Avoid rewriting state on
+      // every heartbeat when this exact process already owns the durable link.
+      const existing = state.connectionBindings.find((binding) => sameConnectionProvider(binding.provider, provider)
+        && normalizeHandle(binding.handle) === normalizeHandle(handle)
+        && binding.sessionId === sessionId
+        && (folder === undefined || normalizeSessionFolder(binding.cwd) === folder)
+        && activeIdentity
+        && (input.processId === undefined || binding.ownerProcessId === input.processId));
+      if (existing) return existing;
+
+      this.registerEndpoint({ provider, sessionId, ...(input.cwd ? { cwd: input.cwd } : {}) });
+      if (!this.identityTokenFor(handle, sessionId)) this.issueIdentity(handle, provider, sessionId);
+      try {
+        // This is a live provider observation, not a continuation guess. The
+        // exact session id and current process are the ownership proof.
+        this.issueConnectionClaim({
+          handle,
+          provider,
+          sessionId,
+          ...(folder ? { cwd: folder } : {}),
+          ...(input.processId !== undefined ? { ownerProcessId: input.processId } : {}),
+        });
+      } catch {
+        return null;
+      }
+      return this.bindConnectionForProcess({ provider, ...(input.processId !== undefined ? { processId: input.processId } : {}) });
+    },
+
     /** Returns the verified provider identity behind a private binding, or null if it was revoked. */
     verifyConnectionBinding(bindingId: string): VerifiedIdentity | null {
       const state = readState();

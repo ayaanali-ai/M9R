@@ -329,7 +329,7 @@ test("OpenCode V2 startup uses the current flat session list and live status sur
   });
   for (let attempt = 0; attempt < 30 && timers.length === 0; attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(timers.length, 1, "a live V2 session should receive an automatic poller at setup");
-  assert.deepEqual(listInputs, [{ directory: "C:/repo" }]);
+  assert.deepEqual(listInputs, [{ directory: "C:/repo", limit: 100 }]);
   assert.equal(calls.filter((call) => call.args.includes("OpenCodePoll")).length, 1);
   plugin?.();
 });

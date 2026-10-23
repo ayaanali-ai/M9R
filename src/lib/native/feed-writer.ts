@@ -97,6 +97,19 @@ async function probe(store: ReturnType<typeof createLocalStore>, deps: FeedDeps)
   // Claude Code: its own registry says which sessions are open and whether each is busy. No hook needed.
   for (const c of (deps.claudeSessions ?? (() => readClaudeSessions()))()) {
     if (!store.sessionsFor("claude").some((s) => s.sessionId === c.sessionId)) store.registerEndpoint({ provider: "claude-code", sessionId: c.sessionId, cwd: c.cwd, seenAt: c.updatedAt ? new Date(c.updatedAt).toISOString() : undefined });
+    // The provider-owned session registry is a live, exact observation. Use
+    // it to reattach the durable M9R lease after a reboot or Claude update;
+    // delivery must not wait for a new hook or a manual inbox read.
+    try {
+      store.reconcileLiveProviderConnection({
+        provider: "claude-code",
+        sessionId: c.sessionId,
+        ...(c.cwd ? { cwd: c.cwd } : {}),
+        processId: c.pid,
+      });
+    } catch {
+      // A malformed/ambiguous provider record must not stop the overlay feed.
+    }
     const turn = c.status === "busy" ? "working" : c.status === "idle" ? "idle" : "unknown";
     const text = turn === "working" ? (deps.readClaudeTail ?? readClaudeTail)(c.cwd, c.sessionId) : null;
     out[c.sessionId] = { live: "live", turn, doing: text ? lastClaudeActivity(text) : null };

@@ -42,7 +42,15 @@ async function localAgentToken(provider: string, env: NodeJS.ProcessEnv, reposit
 
 async function startMcpPresence(connection: ReturnType<typeof readM9rMcpConnectionConfig>): Promise<ReturnType<typeof startLocalPresenceHeartbeat> | null> {
   if (process.env.M9R_MCP_WORKER === "1" || !connection.provider) return null;
-  const repositoryRoot = process.env.M9R_PROJECT_ROOT?.trim() || process.cwd();
+  // A provider MCP process is commonly launched from the user's home folder
+  // (or from an arbitrary shell cwd), which is not proof of the project it is
+  // serving. Never treat that cwd as a credential-migration target: doing so
+  // trips the user-scoped M9R_HOME boundary and makes a healthy provider look
+  // disconnected. The native binding/claim path does not depend on this
+  // optional network heartbeat. Migration is only safe when setup supplied a
+  // trusted project root explicitly.
+  const repositoryRoot = process.env.M9R_PROJECT_ROOT?.trim();
+  if (!repositoryRoot) return null;
   const token = await localAgentToken(connection.provider, process.env, repositoryRoot);
   if (!token) return null;
   const appUrl = (process.env.M9R_APP_URL?.trim() || process.env.M9R_API_URL?.trim() || "https://m9r.dev").replace(/\/+$/, "");
