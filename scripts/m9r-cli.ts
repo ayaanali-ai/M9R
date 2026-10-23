@@ -122,7 +122,12 @@ async function readNativeInputRegistration(key: string): Promise<string | null> 
 // deliberately retained so migration is recoverable and non-destructive.
 normalizeLegacyM9rEnvironment(process.env);
 for (const stateRoot of new Set([process.cwd(), homedir()])) {
-  try { migrateLegacyM9rDirectory(stateRoot); }
+  try {
+    const migration = migrateLegacyM9rDirectory(stateRoot);
+    if (migration.skippedGeneratedDirectories || migration.skippedUnreadableEntries) {
+      process.stderr.write(`M9R preserved ${migration.skippedGeneratedDirectories} generated legacy director${migration.skippedGeneratedDirectories === 1 ? "y" : "ies"} and skipped ${migration.skippedUnreadableEntries} unreadable legacy entr${migration.skippedUnreadableEntries === 1 ? "y" : "ies"} under ${stateRoot}.\n`);
+    }
+  }
   catch (error) {
     process.stderr.write(`M9R could not copy legacy .oathlock state from ${stateRoot}: ${error instanceof Error ? error.message : "unknown error"}\n`);
   }

@@ -14,7 +14,7 @@ test("an old .oathlock install upgrades by copying into .m9r, keeps the source, 
     writeFileSync(join(root, ".m9r", "agents", "claude.json"), "new config wins", "utf8");
 
     const result = migrateLegacyM9rDirectory(root);
-    assert.deepEqual(result, { copiedFiles: 0, preservedFiles: 1, skippedSymlinks: 0, legacyDirectoryPresent: true });
+    assert.deepEqual(result, { copiedFiles: 0, preservedFiles: 1, skippedSymlinks: 0, skippedGeneratedDirectories: 0, skippedUnreadableEntries: 0, legacyDirectoryPresent: true });
     assert.equal(readFileSync(join(root, ".m9r", "agents", "claude.json"), "utf8"), "new config wins");
     assert.equal(readFileSync(join(root, ".oathlock", "agents", "claude.json"), "utf8"), "legacy config", "upgrade must not delete the old user data");
   } finally {
@@ -37,7 +37,7 @@ test("legacy environment variables are read as M9R names, while explicit M9R val
 test("an install with no .oathlock directory is a no-op", () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-empty-upgrade-"));
   try {
-    assert.deepEqual(migrateLegacyM9rDirectory(root), { copiedFiles: 0, preservedFiles: 0, skippedSymlinks: 0, legacyDirectoryPresent: false });
+    assert.deepEqual(migrateLegacyM9rDirectory(root), { copiedFiles: 0, preservedFiles: 0, skippedSymlinks: 0, skippedGeneratedDirectories: 0, skippedUnreadableEntries: 0, legacyDirectoryPresent: false });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -54,6 +54,26 @@ test("agent worktrees are not copied during the upgrade", () => {
     assert.equal(result.copiedFiles, 1);
     assert.equal(readFileSync(join(root, ".m9r", "memory", "note.md"), "utf8"), "keep");
     assert.throws(() => readFileSync(join(root, ".m9r", "worktrees", "claude-1", "big.bin"), "utf8"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated legacy runtime directories are not copied into the current M9R state", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-generated-state-"));
+  try {
+    mkdirSync(join(root, ".oathlock", "bin"), { recursive: true });
+    writeFileSync(join(root, ".oathlock", "bin", "stale-engine.exe"), "stale", "utf8");
+    mkdirSync(join(root, ".oathlock", "runtime"), { recursive: true });
+    writeFileSync(join(root, ".oathlock", "runtime", "lock"), "stale", "utf8");
+    mkdirSync(join(root, ".oathlock", "memory"), { recursive: true });
+    writeFileSync(join(root, ".oathlock", "memory", "keep.md"), "keep", "utf8");
+
+    const result = migrateLegacyM9rDirectory(root);
+    assert.equal(result.skippedGeneratedDirectories, 2);
+    assert.equal(result.copiedFiles, 1);
+    assert.equal(readFileSync(join(root, ".m9r", "memory", "keep.md"), "utf8"), "keep");
+    assert.equal(readFileSync(join(root, ".oathlock", "bin", "stale-engine.exe"), "utf8"), "stale");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

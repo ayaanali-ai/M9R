@@ -10,8 +10,16 @@ export interface M9rDirectoryMigrationResult {
   copiedFiles: number;
   preservedFiles: number;
   skippedSymlinks: number;
+  skippedGeneratedDirectories: number;
+  skippedUnreadableEntries: number;
   legacyDirectoryPresent: boolean;
 }
+
+// These directories are generated runtime/evidence material, not portable
+// user state. Copying them can carry stale binaries, locks, or protected files
+// into a new install and can make an otherwise valid upgrade fail on Windows.
+// The legacy tree is retained; these entries are simply not migrated.
+const LEGACY_GENERATED_DIRECTORIES = new Set(["bin", "capture", "runtime", "worktrees"]);
 
 /**
  * Copy old project-local state to the M9R directory without deleting or
@@ -21,7 +29,14 @@ export function migrateLegacyM9rDirectory(rootPath: string): M9rDirectoryMigrati
   const root = resolve(rootPath);
   const legacyRoot = join(root, LEGACY_OATHLOCK_DATA_DIRECTORY);
   const m9rRoot = join(root, M9R_DATA_DIRECTORY);
-  const result: M9rDirectoryMigrationResult = { copiedFiles: 0, preservedFiles: 0, skippedSymlinks: 0, legacyDirectoryPresent: false };
+  const result: M9rDirectoryMigrationResult = {
+    copiedFiles: 0,
+    preservedFiles: 0,
+    skippedSymlinks: 0,
+    skippedGeneratedDirectories: 0,
+    skippedUnreadableEntries: 0,
+    legacyDirectoryPresent: false,
+  };
 
   let legacyStat;
   try { legacyStat = lstatSync(legacyRoot); }
@@ -38,11 +53,22 @@ export function migrateLegacyM9rDirectory(rootPath: string): M9rDirectoryMigrati
   }
 
   const copyDirectory = (source: string, destination: string, top = false): void => {
-    for (const entry of readdirSync(source, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = readdirSync(source, { withFileTypes: true });
+    } catch {
+      result.skippedUnreadableEntries += 1;
+      return;
+    }
+    for (const entry of entries) {
       const from = join(source, entry.name);
       const to = join(destination, entry.name);
-      // Agent worktrees are disposable, tied to absolute paths, and can be gigabytes: they are never copied.
-      if (top && entry.isDirectory() && entry.name === "worktrees") continue;
+      // Generated runtime/evidence directories are disposable or tied to
+      // absolute paths, and can be gigabytes: they are never copied.
+      if (top && entry.isDirectory() && LEGACY_GENERATED_DIRECTORIES.has(entry.name.toLowerCase())) {
+        result.skippedGeneratedDirectories += 1;
+        continue;
+      }
       if (entry.isSymbolicLink()) { result.skippedSymlinks += 1; continue; }
       if (entry.isDirectory()) {
         try {
@@ -52,7 +78,10 @@ export function migrateLegacyM9rDirectory(rootPath: string): M9rDirectoryMigrati
             result.preservedFiles += Number(!destStat.isSymbolicLink());
             continue;
           }
-        } catch { mkdirSync(to, { recursive: true, mode: 0o700 }); }
+        } catch {
+          try { mkdirSync(to, { recursive: true, mode: 0o700 }); }
+          catch { result.skippedUnreadableEntries += 1; continue; }
+        }
         copyDirectory(from, to);
         continue;
       }
@@ -63,8 +92,14 @@ export function migrateLegacyM9rDirectory(rootPath: string): M9rDirectoryMigrati
         else result.preservedFiles += 1;
         continue;
       } catch { /* target does not exist; copy the old file */ }
-      copyFileSync(from, to);
-      result.copiedFiles += 1;
+      try {
+        copyFileSync(from, to);
+        result.copiedFiles += 1;
+      } catch {
+        // A protected or concurrently changing legacy file must not block the
+        // new M9R install. It remains in the original tree for manual review.
+        result.skippedUnreadableEntries += 1;
+      }
     }
   };
 
