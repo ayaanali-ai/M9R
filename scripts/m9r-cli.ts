@@ -1559,17 +1559,31 @@ async function refreshProviderConfigAfterUpdate(input: ProviderConfigRefreshInpu
         webOpenCodeHookInvocation(runtime, "OpenCodeDeliveryFailed"),
         webOpenCodeHookInvocation(runtime, "OpenCodeExecutionFailed"),
       );
-      const refreshed = await refreshManagedOpenCodeIdentityPlugin({
-        manifestPath: join(defaultStoreRoot(home, process.env), WEB_SETUP_MANIFEST),
-        pluginPath,
-        desiredContent: desiredPlugin,
-      }, {
-        readFile: async (path) => await readOptional(path),
-        writeAtomic: writeManagedAtomic,
-        removeFile: async (path) => { await unlink(path).catch(() => undefined); },
-      });
-      if (refreshed.action === "preserve" || refreshed.action === "path-changed") {
-        throw new Error(`M9R OpenCode identity plugin changed outside its recorded ownership (${refreshed.action}); provider reconciliation stopped without overwriting it`);
+      const storeRoot = defaultStoreRoot(home, process.env);
+      // The native install manifest is authoritative once it exists. The web
+      // manifest is a legacy fallback only for installations that predate the
+      // native manifest; consulting both when the native manifest is present
+      // would let stale ownership resurrect an old plugin hash.
+      const nativeManifestPath = join(storeRoot, "install-manifest.json");
+      const ownershipManifestPaths = await canRead(nativeManifestPath)
+        ? [nativeManifestPath]
+        : [join(storeRoot, WEB_SETUP_MANIFEST)];
+      let refreshedAction: string = "not-managed";
+      for (const manifestPath of ownershipManifestPaths) {
+        const refreshed = await refreshManagedOpenCodeIdentityPlugin({
+          manifestPath,
+          pluginPath,
+          desiredContent: desiredPlugin,
+        }, {
+          readFile: async (path) => await readOptional(path),
+          writeAtomic: writeManagedAtomic,
+          removeFile: async (path) => { await unlink(path).catch(() => undefined); },
+        });
+        refreshedAction = refreshed.action;
+        if (refreshed.action !== "not-managed") break;
+      }
+      if (refreshedAction === "preserve" || refreshedAction === "path-changed") {
+        throw new Error(`M9R OpenCode identity plugin changed outside its recorded ownership (${refreshedAction}); provider reconciliation stopped without overwriting it`);
       }
       pluginReconciled = true;
       hasIdentityPlugin = await canRead(pluginPath);

@@ -14,6 +14,66 @@ export interface ManagedOpenCodeIdentityPluginRefreshDependencies {
   removeFile(path: string): Promise<void>;
 }
 
+/**
+ * The installer has had two manifest shapes over time:
+ *
+ * - the older web-setup manifest stores the plugin path/hash at the top level;
+ * - the canonical native install manifest stores it as an `opencode-plugin`
+ *   entry in `entries`.
+ *
+ * Both shapes are supported here so an update does not mistake M9R's own
+ * current plugin for an external edit merely because the older manifest is
+ * stale. A file is still overwritten only when its current hash matches the
+ * hash recorded by the manifest we actually trust.
+ */
+interface ManagedPluginOwnership {
+  path: string;
+  hash: string;
+  entryIndex?: number;
+}
+
+function readManagedPluginOwnership(manifest: Record<string, unknown>): ManagedPluginOwnership | null {
+  if (typeof manifest.openCodeIdentityPluginPath === "string" && typeof manifest.openCodeIdentityPluginHash === "string") {
+    return {
+      path: manifest.openCodeIdentityPluginPath,
+      hash: manifest.openCodeIdentityPluginHash,
+    };
+  }
+
+  if (!Array.isArray(manifest.entries)) return null;
+  const candidates = manifest.entries.flatMap((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    return record.kind === "opencode-plugin"
+      && typeof record.path === "string"
+      && typeof record.sha256After === "string"
+      ? [{ path: record.path, hash: record.sha256After, entryIndex: index }]
+      : [];
+  });
+  return candidates.length === 1 ? candidates[0]! : null;
+}
+
+function updateManagedPluginOwnership(
+  manifest: Record<string, unknown>,
+  ownership: ManagedPluginOwnership,
+  pluginPath: string,
+  hash: string,
+): Record<string, unknown> {
+  if (ownership.entryIndex !== undefined && Array.isArray(manifest.entries)) {
+    const entries = [...manifest.entries];
+    const entry = entries[ownership.entryIndex];
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      entries[ownership.entryIndex] = { ...(entry as Record<string, unknown>), path: pluginPath, sha256After: hash };
+      return { ...manifest, entries };
+    }
+  }
+  return {
+    ...manifest,
+    openCodeIdentityPluginPath: pluginPath,
+    openCodeIdentityPluginHash: hash,
+  };
+}
+
 /** Update only the M9R-owned OpenCode identity plugin; never adopt or overwrite user edits. */
 export async function refreshManagedOpenCodeIdentityPlugin(
   input: {
@@ -36,13 +96,8 @@ export async function refreshManagedOpenCodeIdentityPlugin(
     return { action: "not-managed", updated: false };
   }
 
-  const ownedPath = typeof manifest.openCodeIdentityPluginPath === "string"
-    ? manifest.openCodeIdentityPluginPath
-    : undefined;
-  const ownedHash = typeof manifest.openCodeIdentityPluginHash === "string"
-    ? manifest.openCodeIdentityPluginHash
-    : undefined;
-  if (!ownedPath || !ownedHash) return { action: "not-managed", updated: false };
+  const ownership = readManagedPluginOwnership(manifest);
+  if (!ownership) return { action: "not-managed", updated: false };
 
   const currentBytes = await dependencies.readFile(input.pluginPath);
   const desiredBytes = Buffer.isBuffer(input.desiredContent)
@@ -53,8 +108,8 @@ export async function refreshManagedOpenCodeIdentityPlugin(
     targetPath: input.pluginPath,
     currentHash: currentBytes ? hash(currentBytes) : null,
     desiredHash: hash(desiredBytes),
-    ownedPath,
-    ownedHash,
+    ownedPath: ownership.path,
+    ownedHash: ownership.hash,
   });
 
   if (action === "preserve" || action === "path-changed" || action === "unchanged" || input.dryRun) {
@@ -70,11 +125,7 @@ export async function refreshManagedOpenCodeIdentityPlugin(
       throw new Error("The OpenCode plugin did not verify after its atomic update.");
     }
 
-    const nextManifest = {
-      ...manifest,
-      openCodeIdentityPluginPath: input.pluginPath,
-      openCodeIdentityPluginHash: hash(desiredBytes),
-    };
+    const nextManifest = updateManagedPluginOwnership(manifest, ownership, input.pluginPath, hash(desiredBytes));
     await dependencies.writeAtomic(input.manifestPath, Buffer.from(`${JSON.stringify(nextManifest, null, 2)}\n`, "utf8"));
   } catch (error) {
     if (pluginWritten) {

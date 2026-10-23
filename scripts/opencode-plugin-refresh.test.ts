@@ -91,3 +91,36 @@ test("managed OpenCode plugin refresh rolls back the plugin if the manifest comm
   assert.equal(state.files.get(pluginPath)?.toString(), "old M9R-owned plugin");
   assert.equal(JSON.parse(state.files.get(manifestPath)!.toString("utf8")).openCodeIdentityPluginHash, sha256("old M9R-owned plugin"));
 });
+
+test("canonical native install manifest ownership is refreshed without consulting a stale web manifest", async () => {
+  const nativeManifestPath = "C:/Users/Ada/.m9r/install-manifest.json";
+  const oldPlugin = Buffer.from("old native M9R-owned plugin");
+  const nativeManifest = {
+    version: 1,
+    entries: [
+      { path: pluginPath, kind: "opencode-plugin", sha256After: sha256(oldPlugin), backupPath: null },
+      { path: "C:/Users/Ada/.codex/hooks.json", kind: "hooks-json", sha256After: "keep" },
+    ],
+    activeRuntime: { buildId: "current" },
+  };
+  const files = new Map<string, Buffer>([
+    [pluginPath, oldPlugin],
+    [nativeManifestPath, Buffer.from(JSON.stringify(nativeManifest))],
+  ]);
+  const writes: string[] = [];
+  const result = await refreshManagedOpenCodeIdentityPlugin({
+    manifestPath: nativeManifestPath,
+    pluginPath,
+    desiredContent: "new native plugin",
+  }, {
+    async readFile(path) { return files.get(path) ?? null; },
+    async writeAtomic(path, bytes) { writes.push(path); files.set(path, Buffer.from(bytes)); },
+    async removeFile(path) { files.delete(path); },
+  });
+
+  assert.deepEqual(result, { action: "upgrade", updated: true });
+  assert.deepEqual(writes, [pluginPath, nativeManifestPath]);
+  const updated = JSON.parse(files.get(nativeManifestPath)!.toString("utf8"));
+  assert.equal(updated.entries[0].sha256After, sha256("new native plugin"));
+  assert.equal(updated.entries[1].sha256After, "keep");
+});
