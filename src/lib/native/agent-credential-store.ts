@@ -7,15 +7,18 @@
  * could otherwise inherit it. The repository still owns non-secret adapter,
  * run, and workspace metadata; this module owns only the bearer credential.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
+import { lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { defaultStoreRoot } from "./local-store";
 
 const PROVIDER_SLUG = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/i;
 const MIGRATION_MARKER = "m9r-user-scoped-credential-v1";
+const TERMINAL_BRIDGE_TOKEN_FILENAME = "terminal-bridge.token";
+const BRIDGE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 export interface AgentCredentialFile {
   token: string;
@@ -82,6 +85,65 @@ export function agentCredentialPath(root: string, provider: string): string {
   return join(root, "agents", provider, "local.json");
 }
 
+/** The local PTY bridge credential is workspace-scoped, user-scoped, and never project-local. */
+export function terminalBridgeTokenPath(repositoryRoot: string, env: Record<string, string | undefined> = process.env): string {
+  return join(agentCredentialRoot(repositoryRoot, env), TERMINAL_BRIDGE_TOKEN_FILENAME);
+}
+
+function validBridgeToken(value: string | undefined): string | null {
+  const token = value?.trim() ?? "";
+  return BRIDGE_TOKEN_PATTERN.test(token) ? token : null;
+}
+
+/**
+ * Load or create the local terminal bridge bearer. An explicit test/runtime
+ * value may be supplied through M9R_BRIDGE_TOKEN; normal installs persist one
+ * under the already user-scoped credential root and protect it owner-only.
+ * The token is never returned by health endpoints or written to provider env.
+ */
+export function readOrCreateTerminalBridgeToken(
+  repositoryRoot: string,
+  env: Record<string, string | undefined> = process.env,
+  protection?: CredentialProtectionOptions,
+): string {
+  const configured = validBridgeToken(env.M9R_BRIDGE_TOKEN);
+  if (env.M9R_BRIDGE_TOKEN !== undefined && !configured) {
+    throw new Error("M9R_BRIDGE_TOKEN must be a 43-character URL-safe token when supplied.");
+  }
+  if (configured) return configured;
+
+  const path = terminalBridgeTokenPath(repositoryRoot, env);
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("The terminal bridge token path is not a regular file.");
+    const existing = validBridgeToken(readFileSync(path, "utf8"));
+    if (!existing) throw new Error("The terminal bridge token file is invalid.");
+    protectAgentCredentialFile(path, protection);
+    return existing;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const token = randomBytes(32).toString("base64url");
+  mkdirSync(dirname(path), { recursive: true });
+  try {
+    writeFileSync(path, `${token}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const existing = validBridgeToken(readFileSync(path, "utf8"));
+    if (!existing) throw new Error("The terminal bridge token file is invalid.");
+    protectAgentCredentialFile(path, protection);
+    return existing;
+  }
+  try {
+    protectAgentCredentialFile(path, protection);
+  } catch (error) {
+    try { unlinkSync(path); } catch { /* preserve the original protection failure */ }
+    throw error;
+  }
+  return token;
+}
+
 export function legacyAgentCredentialPath(repositoryRoot: string, provider: string): string {
   assertProvider(provider);
   return join(resolve(repositoryRoot), ".m9r", "agents", provider, "local.json");
@@ -112,7 +174,9 @@ export function protectAgentCredentialFile(path: string, options: CredentialProt
   if ((options.platform ?? process.platform) !== "win32") return;
   const username = (options.username ?? process.env.USERNAME)?.trim();
   if (!username) throw new Error("The current Windows user is unavailable; refusing to store an M9R provider credential.");
-  const run = options.run ?? ((args: string[]) => { execFileSync("icacls.exe", args, { windowsHide: true, stdio: "ignore" }); });
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
+  const icacls = join(systemRoot, "System32", "icacls.exe");
+  const run = options.run ?? ((args: string[]) => { execFileSync(icacls, args, { windowsHide: true, stdio: "ignore" }); });
   try {
     run([path, "/inheritance:r"]);
     // Full control is still owner-only, and is required for rotation,

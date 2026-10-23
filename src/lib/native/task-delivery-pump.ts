@@ -49,8 +49,8 @@ export function createTaskDeliveryPump(store: LocalStore, adapters: ReadonlyMap<
           if (offered.size >= 4) break;
           const adapter = adapters.get(task.to);
           const session = task.delivery?.threadId;
-          if (!adapter || !session || offered.has(task.to)
-            || sessionHasUnfinishedDelivery(store, task.to, session, task.id)) continue;
+          if (!adapter || offered.has(task.to)
+            || (session !== undefined && sessionHasUnfinishedDelivery(store, task.to, session, task.id))) continue;
           offered.add(task.to);
           try { await adapter(task.id); } catch { /* The adapter retains the durable outcome; the pump never assumes a send succeeded. */ }
         }

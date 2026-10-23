@@ -65,7 +65,7 @@ export async function performApprovedPush(input: PerformApprovedPushInput): Prom
   if (!tokenResponse.ok) throw new Error(`Could not mint a Git installation token (HTTP ${tokenResponse.status}). The push candidate may not be human-approved yet.`);
   const tokenBody = await tokenResponse.json() as { token: string; owner: string; repo: string; branch: string; operationId: string };
 
-  pushWithInstallationToken({ repoPath: input.repoPath, branch: tokenBody.branch, owner: tokenBody.owner, repo: tokenBody.repo, token: tokenBody.token });
+  await pushWithInstallationToken({ repoPath: input.repoPath, branch: tokenBody.branch, owner: tokenBody.owner, repo: tokenBody.repo, token: tokenBody.token });
 
   await postJson(`${input.appUrl}/api/missions/${encodeURIComponent(input.missionId)}/git/result`, input.agentToken, {
     operationId: tokenBody.operationId,

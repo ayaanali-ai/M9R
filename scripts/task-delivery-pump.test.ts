@@ -27,6 +27,29 @@ test("deferred work resumes through an arbitrary adapter only after the precedin
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a deferred task without a pinned session is offered to the adapter that owns session selection", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-delivery-pump-fresh-"));
+  try {
+    const store = createLocalStore(root);
+    const task = store.addTask({
+      from: "owner", to: "resident-provider", goal: "deliver this once", origin: "human_typed",
+      idempotencyKey: "fresh-resident-task",
+    }).task;
+    store.setDelivery(task.id, { state: "deferred" });
+    const sent: string[] = [];
+    const pump = createTaskDeliveryPump(store, new Map([[
+      "resident-provider",
+      async (taskId: string) => {
+        sent.push(taskId);
+        store.setDelivery(taskId, { state: "queued", threadId: "provider-session" });
+      },
+    ]]));
+    await pump.tick();
+    assert.deepEqual(sent, [task.id]);
+    assert.equal(store.getTask(task.id)?.delivery?.state, "queued");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("deferred recovery does not replay uncertain input or bypass approval", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-delivery-pump-"));
   try {

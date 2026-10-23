@@ -800,6 +800,7 @@ test("the native feed exposes deferred delivery through the provider-neutral ada
     const sent: string[] = [];
     const pump = createNativeDeliveryPump(s.p.m9r, {
       env: s.io.env,
+      homeDir: s.io.homeDir,
       deliveryAdapters: new Map([[
         "codex",
         async (taskId: string) => {

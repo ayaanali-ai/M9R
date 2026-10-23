@@ -38,6 +38,7 @@ import { createPageNotesStore } from "./page-notes-store";
 import { projectRoomId } from "./project-room";
 import { planOpenCodeModelStateRepair, resolveOpenCodeModelFiles, type OpenCodeModelRepairResult } from "./opencode-model-core";
 import { refreshManagedOpenCodeIdentityPlugin } from "./opencode-plugin-refresh";
+import { opencodeExecutablePath } from "./opencode-executable";
 import { renameStateFile } from "./atomic-file";
 import { DEFAULT_CLOUD_URL, clearCloudConfig, cloudUrlProblem, loadCloudConfig, pullCloudNotes, pushCloudNote, saveCloudConfig } from "./cloud-memory";
 import { codexHome, deliverToCodex, realDeps, spawnDeliveryRunner, type DeliveryDeps } from "./codex-delivery";
@@ -51,6 +52,7 @@ import { isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
 import { createTaskDeliveryPump } from "./task-delivery-pump";
+import { createClaudeDeliveryAdapter } from "./claude-delivery";
 import { USER_STEPS } from "./onboarding-steps";
 import { readRuntimeBuildId, readRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
 import { checkEngineUpdate, parseUpdateConfig } from "./update-lifecycle";
@@ -94,12 +96,22 @@ export interface NativeIo {
  * feed lifecycle. Deferred work remains durable until its adapter settles it;
  * this function never invents a provider session or retries uncertain sends.
  */
-export function createNativeDeliveryPump(root: string, io: Pick<NativeIo, "env" | "codexDeps" | "deliveryAdapters">) {
+export function createNativeDeliveryPump(root: string, io: Pick<NativeIo, "env" | "homeDir" | "cwd" | "codexDeps" | "deliveryAdapters">) {
   const store = createLocalStore(root);
   const adapters = new Map(io.deliveryAdapters ?? []);
   if (!adapters.has("codex")) {
     const deps = io.codexDeps ?? realDeps(io.env);
     adapters.set("codex", (taskId) => deliverToCodex(store, taskId, deps));
+  }
+  if (!adapters.has("claude")) {
+    const paths = nativePaths(io);
+    adapters.set("claude", createClaudeDeliveryAdapter({
+      root,
+      homeDir: io.homeDir,
+      env: io.env,
+      cwd: io.cwd,
+      mcpConfigPaths: [paths.claudeMcp, paths.claudeGlobalMcp],
+    }, store));
   }
   return createTaskDeliveryPump(store, adapters);
 }
@@ -401,7 +413,9 @@ function openCodeVersionLine(io: NativeIo): string | undefined {
   const configured = io.env.M9R_OPENCODE_VERSION?.trim();
   if (configured) return configured;
   try {
-    const result = spawnSync("opencode", ["--version"], { encoding: "utf8", timeout: 2000, windowsHide: true });
+    const executable = opencodeExecutablePath(io.env);
+    if (!executable) return undefined;
+    const result = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 2000, windowsHide: true, shell: false });
     if (result.status !== 0) return undefined;
     return String(result.stdout ?? "").split(/\r?\n/, 1)[0]?.trim() || undefined;
   } catch {
@@ -928,6 +942,12 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
     io.out(`Task ${task.id} to @${task.to} is waiting for the user's approval; nothing was delivered.`);
     io.out(`Tell the user to run: m9r-cli approve ${task.id}${isProtectedAction(task.goal) ? "  (it looks like a protected action, so a standing rule would not cover it)" : ""}`);
     return 0;
+  }
+  // A deferred row is the explicit hand-off to the provider-neutral resident
+  // pump. It is written at task creation time, so enabling a new adapter can
+  // never resurrect an older task that predates that hand-off.
+  if (created && canQueue(task)) {
+    store.setDelivery(task.id, { state: "deferred", ...(input.session ? { threadId: input.session } : {}) });
   }
   // The owner-launched broker owns the Cua surface.  Ask it to show the
   // recipient's logical cursor immediately after a human task is accepted;

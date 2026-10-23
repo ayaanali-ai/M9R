@@ -36,6 +36,7 @@ import { applyResidentCredential, refreshResidentProfile, residentCredentialPath
 import { parseProviderAdapterConfig, type ProviderAdapterConfig } from "@/lib/provider-adapter-config";
 import { isTerminalProvider } from "@/lib/local-terminal-protocol";
 import { BRIDGE_PROTOCOL_VERSION, DEFAULT_BRIDGE_PORT } from "@/lib/local-terminal-protocol";
+import { bridgeTokenProtocol } from "@/lib/local-terminal-bridge-core";
 import { buildWindowsLaunchScript, buildRegAddArgs, buildRegDeleteArgs, buildRegQueryArgs, WINDOWS_RUN_KEY_VALUE_NAME } from "@/lib/oathlock-windows-service";
 import {
   autostartPlatform,
@@ -59,7 +60,7 @@ import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, 
 import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
 import { createInterface } from "node:readline/promises";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
-import { agentCredentialPath, agentCredentialRoot, migrateLegacyAgentCredentials, protectAgentCredentialFile } from "@/lib/native/agent-credential-store";
+import { agentCredentialPath, agentCredentialRoot, migrateLegacyAgentCredentials, protectAgentCredentialFile, readOrCreateTerminalBridgeToken } from "@/lib/native/agent-credential-store";
 import { startProviderUpdateMonitor } from "@/lib/native/provider-update-monitor";
 import { createProviderNeutralUpdateActions, type ProviderConfigRefreshInput } from "@/lib/native/provider-update-route-actions";
 import { isAgentContext, isHumanContext } from "@/lib/native/approval-core";
@@ -846,7 +847,7 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
     },
   });
   let stopPromise: Promise<void> | null = null;
-  const providerUpdateMonitor = localOnly ? null : startProviderUpdateMonitor({
+  const providerUpdateMonitor = localOnly || process.env.M9R_TEST_DISABLE_PROVIDER_UPDATE_MONITOR === "1" ? null : startProviderUpdateMonitor({
     root: defaultStoreRoot(homedir(), process.env),
     probe: probeVersion,
     actions: createProviderNeutralUpdateActions({
@@ -1236,10 +1237,11 @@ async function reportTerminalState(state: string | undefined): Promise<number> {
     return 1;
   }
   try {
+    const bridgeToken = readOrCreateTerminalBridgeToken(process.cwd(), process.env);
     await new Promise<void>((resolveState, rejectState) => {
       const socket = new WebSocket(
         `ws://127.0.0.1:${DEFAULT_BRIDGE_PORT}/terminal`,
-        [BRIDGE_PROTOCOL_VERSION, `oathlock-provider.${provider}`],
+        [BRIDGE_PROTOCOL_VERSION, `oathlock-provider.${provider}`, bridgeTokenProtocol(bridgeToken)],
         { origin: `http://127.0.0.1:${DEFAULT_BRIDGE_PORT}` },
       );
       const timeout = setTimeout(() => {

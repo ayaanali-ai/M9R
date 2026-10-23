@@ -153,7 +153,7 @@ test("moves only the exact broker-owned child to its background stage without ac
 }));
 
 function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
-  const fixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures");
+  const fixtureRoot = resolve(process.cwd(), ".test-tmp", "native-test-fixtures");
   mkdirSync(fixtureRoot, { recursive: true });
   const root = mkdtempSync(join(fixtureRoot, "m9r-windows-stage-"));
   return Promise.resolve(run(root)).finally(() => rmSync(root, { recursive: true, force: true }));

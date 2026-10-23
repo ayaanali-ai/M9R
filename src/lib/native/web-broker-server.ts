@@ -26,6 +26,7 @@ import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import { isStageAppReference } from "./task-stage-apps";
 import { startOwnerPipe, type OwnerPipeRequest } from "./owner-pipe";
 import { isUiMessage, type UiState, type WebUiBridge } from "./web-ui-bridge";
+import { canQueue } from "./codex-delivery-core";
 import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, type ProtocolMessageType } from "../../../packages/web-protocol-placeholder/src/index";
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -159,7 +160,7 @@ export interface WebBrokerServerOptions {
     primeCursor?(token: string, taskId: string): Promise<unknown>;
     primeCursorForOwner?(taskId: string): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
-  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">;
+  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">;
   /** Dedicated browser transport. Extension connections are disabled on this broker. */
   browserTransport?: BrowserTransport;
   key: string;
@@ -208,7 +209,7 @@ type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string
  * own user ACL. This is intentionally not a generic store/RPC endpoint.
  */
 export function applyAgentMcpStoreMutation(
-  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "claimInboxTasks" | "recordTaskResult">,
+  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">,
   input: unknown,
 ): AgentMcpStoreResult {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { status: 400, body: { ok: false, error: "request body must be an object" } };
@@ -242,6 +243,7 @@ export function applyAgentMcpStoreMutation(
         idempotencyKey: `mcp:${identity.sessionId}:${to}:${createHash("sha256").update(value.goal).digest("hex")}`,
         ...(parent ? { standingRuleApplies: true, parentTaskId: parent.id } : {}),
       });
+      if (result.created && canQueue(result.task)) store.setDelivery(result.task.id, { state: "deferred" });
       return { status: 200, body: { ok: true, taskId: result.task.id, created: result.created } };
     }
 

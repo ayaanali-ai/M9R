@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 
 import { createLocalStore } from "../src/lib/native/local-store.ts";
@@ -12,8 +12,9 @@ import {
 } from "../src/lib/native/provider-update-lifecycle-core.ts";
 import { normalizeProviderRuntimeObservation, type ProviderRuntimeObservation } from "../src/lib/native/provider-update-compatibility-core.ts";
 
-const fixtureRoot = resolve(".workcache", "native-test-fixtures", "provider-update-lifecycle");
-mkdirSync(fixtureRoot, { recursive: true });
+const scratchRoot = join(process.cwd(), ".test-tmp");
+mkdirSync(scratchRoot, { recursive: true });
+const fixtureRoot = mkdtempSync(join(scratchRoot, "oathlock-provider-update-lifecycle-"));
 
 function tempStore(prefix: string): string {
   return mkdtempSync(join(fixtureRoot, prefix));

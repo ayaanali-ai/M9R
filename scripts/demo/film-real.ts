@@ -76,7 +76,11 @@ function preparedExtension(dir: string): string {
 }
 
 function opencodeExe(): string | null {
-  const candidates = [process.env.M9R_OPENCODE_EXE, process.env.APPDATA ? join(process.env.APPDATA, "npm", "node_modules", "opencode-ai", "bin", "opencode.exe") : undefined];
+  const candidates = [
+    process.env.M9R_OPENCODE_EXE,
+    process.env.APPDATA ? join(process.env.APPDATA, "npm", "node_modules", "@opencode", "cli", "bin", "opencode.exe") : undefined,
+    process.env.APPDATA ? join(process.env.APPDATA, "npm", "node_modules", "opencode-ai", "bin", "opencode.exe") : undefined,
+  ];
   return candidates.find((p): p is string => Boolean(p && existsSync(p))) ?? null;
 }
 

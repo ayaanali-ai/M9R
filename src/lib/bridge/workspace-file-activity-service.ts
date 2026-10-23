@@ -159,11 +159,12 @@ export async function recordWorkspaceFileActivity(input: WorkspaceFileActivityIn
  * "Current" means the most recent row per connection, not a full history
  * dump -- callers that want history query this table directly by
  * conversation_id instead. */
-export async function listCurrentWorkspaceFileActivity(conversationId: string): Promise<WorkspaceFileActivityRow[]> {
+export async function listCurrentWorkspaceFileActivity(workspaceId: string, conversationId: string): Promise<WorkspaceFileActivityRow[]> {
   const db = requireService();
   const { data, error } = await db
     .from("workspace_file_activity")
     .select(COLUMNS)
+    .eq("workspace_id", workspaceId)
     .eq("conversation_id", conversationId)
     .eq("source", "agent_tool_call")
     .order("created_at", { ascending: false })

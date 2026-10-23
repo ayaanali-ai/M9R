@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, access, rm } from "node:fs/promise
 import { join } from "node:path";
 import { classifyWhoamiResponse, listLocalConnectedProviders, retireRevokedLocalToken } from "../src/lib/bridge/local-mission-bridge-bootstrap.ts";
 
-const testCacheRoot = join(process.cwd(), ".workcache");
+const testCacheRoot = join(process.cwd(), ".test-tmp");
 
 test("only a 401 saying the agent token is invalid/revoked counts as revoked", () => {
   assert.deepEqual(classifyWhoamiResponse(401, JSON.stringify({ error: "Invalid or expired agent token." })), { kind: "revoked" });

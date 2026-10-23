@@ -54,9 +54,11 @@ test("CLI MCP SDK security floor is declared and locked", () => {
 test("published dev-tool dependency floors are locked", () => {
   const lockfile = readJson("package-lock.json");
   const packages = lockfile.packages ?? {};
-  const postcssVersion = packages["node_modules/postcss-selector-parser"]?.version;
-
-  assertAtLeast(postcssVersion, [7, 1, 6], "postcss-selector-parser lockfile");
+  const postcssEntries = Object.entries(packages)
+    .filter(([path]) => path.endsWith("postcss-selector-parser"));
+  for (const [path, entry] of postcssEntries) {
+    assertAtLeast(entry.version, [7, 1, 6], `${path} lockfile`);
+  }
 
   const braceEntries = Object.entries(packages).filter(([path]) => path.endsWith("brace-expansion"));
   assert.ok(braceEntries.length > 0, "expected brace-expansion entries in the root lockfile");

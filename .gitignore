@@ -134,6 +134,7 @@ M9R_COMPLETE_HANDOFF*.docx
 /overlay/src-tauri/target
 /overlay/src-tauri/gen
 engine/dist/
+/engine/.m9r-engine-publish-backup-*/
 /hook/target
 /native-input-host/target/
 runleak-analyzer-mvp/node_modules/
@@ -142,7 +143,16 @@ skills-lock.json
 /.m9r-chrome-probe-*/
 /.m9r-coordinator-worker-*/
 /.m9r-web-broker-*/
+/.m9r-live-activation-*/
+/.m9r-recovery-quarantine-*/
+/.m9r-runtime-package-*/
 /m9r-release-package-*/
+
+# Local runtime cutovers and private scratch captures are generated evidence,
+# not public source inputs. Keep them on disk for local recovery, but keep
+# release, lint, and security inventories out of their protected subtrees.
+/m9r-clean-cutover-*/
+/scratchpad/
 
 # local tool scratch caches, never committed
 .workcache/

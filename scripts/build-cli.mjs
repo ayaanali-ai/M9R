@@ -75,7 +75,8 @@ function build() {
   writeFileSync(resolve(outDir, "memory-distill-core.js"), transpile(distillTs).replace(/["']@\/lib\/session-redaction["']/g, '"./session-redaction.js"'));
   const opencodeBackfillTs = readFileSync(resolve(repoRoot, "src/lib/opencode-capture-backfill-core.ts"), "utf8");
   const opencodeBackfillJs = transpile(opencodeBackfillTs)
-    .replace(/["']@\/lib\/cross-agent-capture-core["']/g, '"./cross-agent-capture-core.js"');
+    .replace(/["']@\/lib\/cross-agent-capture-core["']/g, '"./cross-agent-capture-core.js"')
+    .replace(/["']@\/lib\/native\/opencode-executable["']/g, '"./opencode-executable.js"');
   writeFileSync(resolve(outDir, "opencode-capture-backfill-core.js"), opencodeBackfillJs);
 
   const providerAdapterConfigTs = readFileSync(resolve(repoRoot, "packages/runtime-core/src/provider-adapter-config.ts"), "utf8");
@@ -288,7 +289,7 @@ function build() {
 
   // Native front door (setup, uninstall, send, and the tiny hook entry). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "foreground-input-lease", "desktop-input-errors", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "identity-core", "mcp-connection-core", "mcp-connection-env", "mcp-runtime-path", "local-store", "agent-credential-store", "runtime-install-transaction", "runtime-build-identity", "engine-update-core", "update-lifecycle-core", "update-lifecycle", "provider-update-compatibility-core", "provider-update-lifecycle-core", "provider-update-monitor", "provider-update-route-actions", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "opencode-model-core", "opencode-plugin-refresh", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server", "m9r-prompt-markers"]) {
+  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "foreground-input-lease", "desktop-input-errors", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "claude-delivery", "identity-core", "mcp-connection-core", "mcp-connection-env", "mcp-runtime-path", "local-store", "agent-credential-store", "runtime-install-transaction", "runtime-build-identity", "engine-update-core", "update-lifecycle-core", "update-lifecycle", "provider-update-compatibility-core", "provider-update-lifecycle-core", "provider-update-monitor", "provider-update-route-actions", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "opencode-model-core", "opencode-plugin-refresh", "opencode-executable", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "hook-handler", "hook-run", "hook-server", "install-core", "onboarding-steps", "native-commands", "mcp-server", "m9r-prompt-markers"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source)
       .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
@@ -576,6 +577,10 @@ function build() {
   entryJs = entryJs.replace(
     /["']@\/lib\/local-terminal-protocol["']/g,
     '"./local-terminal-protocol.js"',
+  );
+  entryJs = entryJs.replace(
+    /["']@\/lib\/local-terminal-bridge-core["']/g,
+    '"./local-terminal-bridge-core.js"',
   );
   entryJs = entryJs
     .replace(/["']@\/lib\/native\/local-store["']/g, '"./local-store.js"')

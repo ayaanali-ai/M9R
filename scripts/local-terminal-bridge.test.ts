@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   BRIDGE_PROTOCOL_VERSION,
+  bridgeTokenProtocol,
   DEFAULT_BRIDGE_HOST,
   PROVIDER_LAUNCHERS,
   authorizeUpgrade,
@@ -10,6 +11,7 @@ import {
   providerProcessSpec,
   resolveWorkspaceCwd,
   isIgnoredTerminalWatchPath,
+  isSensitiveTerminalWatchPath,
 } from "../src/lib/local-terminal-bridge-core.ts";
 
 test("source watching excludes generated trees before traversing and retains untracked source", () => {
@@ -18,6 +20,16 @@ test("source watching excludes generated trees before traversing and retains unt
   }
   for (const path of ["", "src/new-file.ts", "untracked/new-feature.ts", "docs/targeting.md", "src/target.ts"]) {
     assert.equal(isIgnoredTerminalWatchPath(path), false, path);
+  }
+});
+
+test("source watching never reads credential or private configuration contents", () => {
+  for (const path of [".env.local", ".npmrc", ".aws/credentials", "config/webhook.json", "ops/private.yaml", "certs/server.pem"]) {
+    assert.equal(isSensitiveTerminalWatchPath(path), true, path);
+    assert.equal(isIgnoredTerminalWatchPath(path), true, path);
+  }
+  for (const path of ["src/webhook-handler.ts", "src/tokenizer.ts", "docs/private-api.md", "public/config.json"]) {
+    assert.equal(isSensitiveTerminalWatchPath(path), false, path);
   }
 });
 
@@ -42,20 +54,30 @@ test("bridge tokens are high entropy and URL-safe", () => {
 });
 
 test("runtime upgrades require the exact protocol and an approved OathLock origin without manual pairing", () => {
+  const token = createBridgeToken();
   assert.deepEqual(authorizeUpgrade({
     origin: "http://localhost:3000",
-    protocols: [BRIDGE_PROTOCOL_VERSION],
+    protocols: [BRIDGE_PROTOCOL_VERSION, bridgeTokenProtocol(token)],
     allowedOrigins: ["http://localhost:3000"],
+    bridgeToken: token,
   }), { ok: true });
   assert.equal(authorizeUpgrade({
     origin: "https://evil.example",
-    protocols: [BRIDGE_PROTOCOL_VERSION],
+    protocols: [BRIDGE_PROTOCOL_VERSION, bridgeTokenProtocol(token)],
     allowedOrigins: ["http://localhost:3000"],
+    bridgeToken: token,
   }).ok, false);
   assert.equal(authorizeUpgrade({
     origin: "http://localhost:3000",
-    protocols: [],
+    protocols: [BRIDGE_PROTOCOL_VERSION],
     allowedOrigins: ["http://localhost:3000"],
+    bridgeToken: token,
+  }).ok, false);
+  assert.equal(authorizeUpgrade({
+    origin: "http://localhost:3000",
+    protocols: [BRIDGE_PROTOCOL_VERSION, bridgeTokenProtocol(createBridgeToken())],
+    allowedOrigins: ["http://localhost:3000"],
+    bridgeToken: token,
   }).ok, false);
 });
 

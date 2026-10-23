@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after as afterTests, test } from "node:test";
 import { readFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { DeliveryLedger, type LedgerEntry } from "@/lib/bridge/delivery-ledger";
 import { RESTART_INTERRUPTED_EVENT, RESTART_INTERRUPTED_NOTE, classifyRestartRecovery, restartInterruptedNotice } from "@/lib/bridge/restart-recovery";
 import { deriveDelivery } from "@/lib/delivery-state";
@@ -10,8 +10,9 @@ const STARTED = 1_000_000;
 const before = STARTED - 5_000;
 const after = STARTED + 5_000;
 const entry = (state: LedgerEntry["state"], at: number, note?: string): LedgerEntry => ({ messageId: "m1", provider: "claude-code", state, at, ...(note ? { note } : {}) });
-const recoveryFixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures", "restart-recovery");
-mkdirSync(recoveryFixtureRoot, { recursive: true });
+const scratchRoot = join(process.cwd(), ".test-tmp");
+mkdirSync(scratchRoot, { recursive: true });
+const recoveryFixtureRoot = mkdtempSync(join(scratchRoot, "oathlock-restart-recovery-"));
 const recoveryFixtureDirectories: string[] = [];
 
 afterTests(() => {

@@ -18,6 +18,7 @@ import { z } from "zod";
 import { readRuntimeBuildIdentity } from "./runtime-build-identity";
 import type { LocalStore } from "./local-store";
 import { inboxMaxAgeMs, normalizeHandle, renderInboxInjection, type Task } from "./inbox-core";
+import { canQueue } from "./codex-delivery-core";
 import type { VerifiedIdentity } from "./identity-core";
 import type { WebBatchRequest, WebRequest } from "./web-broker-core";
 import type { WebBrokerClient } from "./web-broker-client";
@@ -431,6 +432,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           idempotencyKey: `mcp:${identity.sessionId}:${to}:${goal.slice(0, 200)}`,
           ...(parent ? { standingRuleApplies: true, parentTaskId: parent.id } : {}),
         });
+        if (result.created && canQueue(result.task)) deps.store.setDelivery(result.task.id, { state: "deferred" });
         taskId = result.task.id;
       }
       if (deps.web?.notifyMessage) {

@@ -365,10 +365,10 @@ export function renderInboxAck(taskId: string, to: string, includeTaskId = true)
   return `M9R put your message to @${to} in their inbox${reference}; they pick it up at their next prompt, so it is not being worked on this instant. Do not do that work yourself: tell the user it was handed to @${to}, and continue with anything else. The result will arrive in your inbox.`;
 }
 
-/** OpenCode's resident plugin pushes approved work into the exact live session without waiting for another user prompt. */
-export function renderOpenCodePendingAck(taskId: string, includeTaskId = true): string {
+/** Native resident adapters use the same no-polling contract as OpenCode. */
+export function renderAutoDeliveryPendingAck(taskId: string, to: string, includeTaskId = true): string {
   const reference = includeTaskId ? ` task ${taskId}` : " work";
-  return `M9R queued${reference} for @opencode's active session. Its M9R plugin will deliver the task directly without a manual inbox check; delivery is not confirmed until that session acknowledges it. Do not do that work yourself: tell the user it is queued for @opencode, and continue with anything else. The result will arrive in your inbox.`;
+  return `M9R queued${reference} for @${to}'s active session. Its resident provider adapter will deliver the task directly without a manual inbox check; delivery is not confirmed until that session accepts it. Do not do that work yourself: tell the user it is queued for @${to}, and continue with anything else. The result will arrive in your inbox.`;
 }
 
 export function renderHeldAck(taskId: string, to: string, includeTaskId = true): string {

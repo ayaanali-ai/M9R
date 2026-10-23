@@ -380,9 +380,81 @@ function inspectOpenCodeIdle(sessionID, cwd, client, active) {
   active.idleTimer.unref?.();
 }
 
+function openCodeErrorText(value) {
+  const error = value?.error ?? value;
+  if (typeof error === "string") return error.slice(0, 400).toLowerCase();
+  if (error && typeof error === "object") {
+    const message = typeof error.message === "string" ? error.message : "";
+    const name = typeof error.name === "string" ? error.name : "";
+    return (name + " " + message).trim().slice(0, 400).toLowerCase();
+  }
+  return "";
+}
+
+function isOpenCodeRequestShapeError(value) {
+  const text = openCodeErrorText(value);
+  return text.length > 0 && /(?:invalid|missing|required|unknown|unexpected).*?(?:request|parameter|property|field|argument|body|path|session|directory)|(?:request|parameter|property|field|argument|body|path|sessionid|directory).*?(?:invalid|missing|required|unknown|unexpected)/.test(text);
+}
+
+function openCodeSessionTransport(client) {
+  const session = client?.session;
+  if (typeof session?.promptAsync === "function") {
+    return {
+      kind: "promptAsync",
+      send: async (sessionID, cwd, text, model) => {
+        // Current OpenCode SDKs use the flattened v2 request shape. The
+        // directory is part of the session boundary; omitting it can make a
+        // resumed session look like an unrelated project after an update.
+        const modernInput = {
+          sessionID,
+          directory: cwd,
+          ...(model ? { model } : {}),
+          parts: [{ type: "text", text }],
+        };
+        const legacyInput = {
+          path: { id: sessionID },
+          body: { parts: [{ type: "text", text }], ...(model ? { model } : {}) },
+        };
+        const sendLegacy = () => session.promptAsync.call(session, legacyInput);
+        // A short-lived provider update can leave an older v1-compatible
+        // client behind. Only retry the legacy read-validated shape after a
+        // deterministic request-validation error; never retry a network or
+        // provider failure, because that could create a duplicate user turn.
+        try {
+          const modern = await session.promptAsync.call(session, modernInput);
+          if (modern?.error && isOpenCodeRequestShapeError(modern)) return sendLegacy();
+          return modern;
+        } catch (error) {
+          if (!isOpenCodeRequestShapeError(error)) throw error;
+          return sendLegacy();
+        }
+      },
+    };
+  }
+  if (typeof session?.chat === "function") {
+    return {
+      kind: "chat",
+      send: (sessionID, _cwd, text, model) => session.chat.call(session, sessionID, {
+        ...(model ? { providerID: model.providerID, modelID: model.modelID } : {}),
+        parts: [{ type: "text", text }],
+      }),
+    };
+  }
+  if (typeof session?.prompt === "function") {
+    return {
+      kind: "prompt",
+      send: (sessionID, _cwd, text, model) => session.prompt.call(session, {
+        path: { id: sessionID },
+        body: { parts: [{ type: "text", text }], ...(model ? { model } : {}) },
+      }),
+    };
+  }
+  return null;
+}
+
 async function pollOpenCodeSession(sessionID, cwd, client, entry) {
-  const submitPromptAsync = client?.session?.promptAsync;
-  if (entry.polling || Date.now() < entry.retryAfter || typeof submitPromptAsync !== "function") return;
+  const transport = openCodeSessionTransport(client);
+  if (entry.polling || Date.now() < entry.retryAfter || !transport) return;
   entry.polling = true;
   try {
     if (entry.pendingSettlement) {
@@ -406,13 +478,7 @@ async function pollOpenCodeSession(sessionID, cwd, client, entry) {
       } catch {
         model = null;
       }
-      const response = await submitPromptAsync.call(client.session, {
-        path: { id: sessionID },
-        body: {
-          parts: [{ type: "text", text: task.prompt }],
-          ...(model ? { model } : {}),
-        },
-      });
+      const response = await transport.send(sessionID, cwd, task.prompt, model);
       if (response?.error) {
         // A synchronous rejection is already terminal. Do not leave an active
         // watcher behind that could later misclassify an unrelated idle event
@@ -435,7 +501,7 @@ async function pollOpenCodeSession(sessionID, cwd, client, entry) {
 }
 
 function startOpenCodePoller(sessionID, cwd, client) {
-  if (M9R_SESSION_POLLERS.has(sessionID) || typeof client?.session?.promptAsync !== "function") return;
+  if (M9R_SESSION_POLLERS.has(sessionID) || !openCodeSessionTransport(client)) return;
   if (M9R_SESSION_POLLERS.size >= M9R_MAX_CACHED_SESSIONS) {
     const oldest = M9R_SESSION_POLLERS.keys().next().value;
     if (oldest !== undefined) {
@@ -472,29 +538,102 @@ function wakeOpenCodePoller(sessionID, cwd, client) {
 // pill is delivered without waiting for the user to type a prompt or say
 // "check the M9R inbox". The identity refresh is deliberately idempotent for
 // resumed sessions: the native store reuses the existing session claim instead
-// of creating a competing claim. The status endpoint filters out old, closed
-// sessions; the current transform remains the fallback when an older SDK does
-// not expose these methods.
-async function startKnownOpenCodeSessions(cwd, client) {
-  const list = client?.session?.list;
-  const status = client?.session?.status;
+// of creating a competing claim. The provider's live-session status filters
+// out old, closed sessions; the current transform remains the fallback when
+// an older SDK does not expose a safe discovery surface.
+function openCodeSessionDirectory(session) {
+  const location = session?.location;
+  if (typeof session?.directory === "string") return session.directory;
+  if (typeof session?.cwd === "string") return session.cwd;
+  if (typeof location?.directory === "string") return location.directory;
+  if (typeof location?.path === "string") return location.path;
+  if (typeof session?.project?.directory === "string") return session.project.directory;
+  return typeof location === "string" ? location : null;
+}
+
+function normalizeOpenCodeDirectory(value) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  let normalized = value.split(String.fromCharCode(92)).join("/").toLowerCase();
+  while (normalized.endsWith("/")) normalized = normalized.slice(0, -1);
+  return normalized;
+}
+
+function openCodeSessionMatchesDirectory(session, cwd) {
+  const sessionDirectory = normalizeOpenCodeDirectory(openCodeSessionDirectory(session));
+  const targetDirectory = normalizeOpenCodeDirectory(cwd);
+  return sessionDirectory !== null && targetDirectory !== null && sessionDirectory === targetDirectory;
+}
+
+function openCodeSessionList(value) {
+  const root = value?.data ?? value;
+  if (Array.isArray(root)) return root;
+  if (Array.isArray(root?.sessions)) return root.sessions;
+  return [];
+}
+
+function openCodeStatusFor(value, sessionID) {
+  const root = value?.data ?? value;
+  if (!root || typeof root !== "object" || Array.isArray(root)) return root ?? null;
+  return Object.prototype.hasOwnProperty.call(root, sessionID) ? root[sessionID] : root;
+}
+
+function isOpenCodeLiveStatus(value) {
+  const status = typeof value === "string" ? value : value?.type ?? value?.status;
+  return ["idle", "busy", "retry", "running", "active", "connected"].includes(String(status ?? "").toLowerCase());
+}
+
+async function listOpenCodeSessions(cwd, client) {
+  const session = client?.session;
+  const list = session?.list;
+  if (typeof list !== "function") return null;
+  try {
+    const modern = await list.call(session, { directory: cwd });
+    if (modern?.error && isOpenCodeRequestShapeError(modern)) return list.call(session, { query: { directory: cwd } });
+    return modern;
+  } catch (error) {
+    if (!isOpenCodeRequestShapeError(error)) return null;
+    return list.call(session, { query: { directory: cwd } }).catch(() => null);
+  }
+}
+
+async function readOpenCodeSessionStatus(sessionID, cwd, client, data) {
+  const dataStatus = data?.session?.status;
+  if (typeof dataStatus === "function") {
+    try {
+      const value = await dataStatus.call(data.session, sessionID);
+      if (value !== undefined && value !== null) return value;
+    } catch {
+      // Fall through to the client status surface when available.
+    }
+  }
+
+  const session = client?.session;
+  const status = session?.status;
+  if (typeof status !== "function") return null;
+  try {
+    const modern = await status.call(session, { sessionID, directory: cwd });
+    if (modern?.error && isOpenCodeRequestShapeError(modern)) return status.call(session, { query: { directory: cwd } });
+    return modern;
+  } catch (error) {
+    if (!isOpenCodeRequestShapeError(error)) return null;
+    return status.call(session, { query: { directory: cwd } }).catch(() => null);
+  }
+}
+
+async function startKnownOpenCodeSessions(cwd, client, data) {
   try {
     // OpenCode can load the plugin before its session API is ready, and a
     // provider update can briefly replace that API while keeping the process
     // and its sessions alive. Do not make the first failed discovery a
     // permanent loss of automatic delivery.
-    if (typeof list !== "function" || typeof status !== "function") return;
-    const listed = await list({ query: { directory: cwd } });
-    if (listed?.error) return;
-    const sessions = Array.isArray(listed?.data) ? listed.data : Array.isArray(listed) ? listed : [];
-    const statuses = await status({ query: { directory: cwd } });
-    if (statuses?.error) return;
-    const statusMap = statuses?.data && typeof statuses.data === "object" ? statuses.data : statuses;
-    if (!statusMap || typeof statusMap !== "object") return;
-    const activeIDs = new Set(Object.keys(statusMap));
+    const listed = await listOpenCodeSessions(cwd, client);
+    if (listed === null || listed?.error) return;
+    const sessions = openCodeSessionList(listed);
     for (const session of sessions) {
       const sessionID = session?.id;
-      if (typeof sessionID !== "string" || sessionID.length === 0 || session?.directory !== cwd || !activeIDs.has(sessionID)) continue;
+      if (typeof sessionID !== "string" || sessionID.length === 0 || session?.time?.archived || !openCodeSessionMatchesDirectory(session, cwd)) continue;
+      const status = await readOpenCodeSessionStatus(sessionID, cwd, client, data);
+      if (!isOpenCodeLiveStatus(openCodeStatusFor(status, sessionID))) continue;
       // A provider service can hot-reload this plugin without recreating its
       // already-open sessions. Re-publish the session claim before polling so
       // the MCP connection cannot remain transport-connected but anonymous
@@ -511,15 +650,15 @@ async function startKnownOpenCodeSessions(cwd, client) {
     // provider for its active sessions and starts an M9R poller for sessions
     // that the provider itself reports as live. The timer is unref'd so it
     // cannot keep a shutting-down provider alive.
-    scheduleKnownOpenCodeSessions(cwd, client);
+    scheduleKnownOpenCodeSessions(cwd, client, data);
   }
 }
 
-function scheduleKnownOpenCodeSessions(cwd, client, delay = M9R_SESSION_DISCOVERY_INTERVAL_MS) {
+function scheduleKnownOpenCodeSessions(cwd, client, data, delay = M9R_SESSION_DISCOVERY_INTERVAL_MS) {
   if (M9R_SESSION_DISCOVERY_TIMERS.has(cwd)) return;
   const timer = setTimeout(() => {
     M9R_SESSION_DISCOVERY_TIMERS.delete(cwd);
-    void startKnownOpenCodeSessions(cwd, client);
+    void startKnownOpenCodeSessions(cwd, client, data);
   }, delay);
   timer.unref?.();
   M9R_SESSION_DISCOVERY_TIMERS.set(cwd, timer);
@@ -602,7 +741,7 @@ async function setupM9rOpenCodeV2(ctx = {}) {
       ? ctx.directory
       : process.cwd();
   const client = ctx?.client ?? ctx;
-  const legacy = await M9rIdentity({ directory: cwd, client });
+  const legacy = await M9rIdentity({ directory: cwd, client, data: ctx?.data });
 
   if (typeof ctx?.session?.hook === "function") {
     await ctx.session.hook("context", async (event) => {
@@ -644,9 +783,9 @@ async function setupM9rOpenCodeV2(ctx = {}) {
   };
 }
 
-export const M9rIdentity = async ({ directory, client } = {}) => {
+export const M9rIdentity = async ({ directory, client, data } = {}) => {
   const cwd = typeof directory === "string" && directory.length > 0 ? directory : process.cwd();
-  void startKnownOpenCodeSessions(cwd, client);
+  void startKnownOpenCodeSessions(cwd, client, data);
   return {
   event: async ({ event } = {}) => {
     await handleOpenCodeEvent(cwd, client, event);

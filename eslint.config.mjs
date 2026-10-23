@@ -57,6 +57,10 @@ const eslintConfig = defineConfig([
     // directories for audit review; they are not root application source.
     ".m9r-*/**",
     ".codex-*/**",
+    // Private release-excluded marketing/archive material is deliberately kept
+    // outside the public source tree and may have protected ACLs. It must not
+    // be traversed by the root lint command.
+    ".release-excluded/**",
     // Git worktrees are independent checkouts and must be linted from their
     // own roots, never as part of this repository's result.
     ".worktrees/**",

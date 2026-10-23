@@ -26,6 +26,7 @@ import { startLiveSession, type LiveEvent, type LiveProcess, type LiveSession } 
 import { createOpenCodeAcpRuntime, type OpenCodeLiveRuntime } from "./web-opencode-acp";
 import { createPageNotesStore } from "./page-notes-store";
 import { readCachedCloudNotes, renderCloudNotes } from "./cloud-memory";
+import { opencodeExecutablePath } from "./opencode-executable";
 import {reportedTurnUsage, type ReportedTurnUsage} from "./provider-usage-core";
 import { detectProviderUsageLimitCooldownUntil } from "./provider-cooldown-core";
 import { redactSession } from "../session-redaction";
@@ -56,26 +57,7 @@ export function codexCliPath(env: Record<string, string | undefined> = process.e
 }
 
 export function opencodeExePath(env: Record<string, string | undefined> = process.env): string | null {
-  const envValue = (name: string) => env[Object.keys(env).find((key) => key.toLowerCase() === name.toLowerCase()) ?? ""];
-  const pathValue = envValue("PATH") ?? "";
-  const pathCandidates = pathValue.split(delimiter).flatMap((entry) => {
-    const directory = entry.trim().replace(/^(["'])(.*)\1$/, "$2");
-    if (!directory) return [];
-    // npm adds a .cmd/.ps1 shim to its global prefix PATH entry. Spawn the
-    // package's real executable directly instead of invoking that shell shim:
-    // this preserves argv boundaries and works with shell:false on Windows.
-    return [
-      join(directory, "opencode.exe"),
-      join(directory, "node_modules", "opencode-ai", "bin", "opencode.exe"),
-    ];
-  });
-  const appData = envValue("APPDATA");
-  const candidates = [
-    env.M9R_OPENCODE_EXE?.trim(),
-    ...pathCandidates,
-    appData ? join(appData, "npm", "node_modules", "opencode-ai", "bin", "opencode.exe") : undefined,
-  ];
-  return candidates.find((p): p is string => Boolean(p && existsSync(p))) ?? null;
+  return opencodeExecutablePath(env);
 }
 
 /**

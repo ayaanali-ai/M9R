@@ -282,7 +282,7 @@ test("SessionStart claims one authorized task for the exact reconnecting session
 
   assert.match(firstText, /M9R work \(1 new\)/);
   assert.match(firstText, /look at the reconnect bug/);
-  assert.doesNotMatch(firstText, /m9r_inbox|task ID|T1/);
+  assert.doesNotMatch(firstText, /m9r_inbox|task ID|\bT\d{1,12}\b/);
   assert.equal(store.getTask(created.task.id)?.deliveredSession, "claude-reconnected");
   assert.equal(store.getTask(created.task.id)?.deliverySource, "prompt");
   assert.equal(store.getTask(created.task.id)?.lifecycle?.source, "prompt");
@@ -315,7 +315,7 @@ test("SessionStart delivery stays provider-neutral for an unlisted provider slug
   const text = ctxOf(out) ?? "";
   assert.match(text, /M9R work \(1 new\)/);
   assert.match(text, /review the shared change/);
-  assert.doesNotMatch(text, /m9r_inbox|task ID|T1/);
+  assert.doesNotMatch(text, /m9r_inbox|task ID|\bT\d{1,12}\b/);
   assert.equal(store.getTask(created.task.id)?.deliveredSession, "gemini-session");
   assert.equal(store.getTask(created.task.id)?.deliverySource, "prompt");
   done();
@@ -673,13 +673,14 @@ test("a mention states the true delivery state: pushed, inbox pickup, or held", 
   const pushed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "@codex review the relay" }, wire("claude-code"));
   assert.match(ctxOf(pushed)!, /already sent your message to @codex/);
   assert.equal(dispatched.length, 1);
-  // Inbox pickup: a live claude session exists, but nothing pushes to it mid-turn.
+  // Resident delivery: a live authenticated Claude session is handled by its
+  // provider adapter, without asking the sender to make Claude poll an inbox.
   // (Sent from codex so @claude is another agent, not a self-mention.)
   store.registerEndpoint({ provider: "claude-code", sessionId: "cl-live", cwd: "/repo" });
   store.issueIdentity("claude", "claude-code", "cl-live");
   const pickup = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s9", cwd: "/repo", prompt: "@claude check the relay too" }, wire("codex"));
-  assert.match(ctxOf(pickup)!, /in their inbox/);
-  assert.match(ctxOf(pickup)!, /next prompt/);
+  assert.match(ctxOf(pickup)!, /resident provider adapter/i);
+  assert.match(ctxOf(pickup)!, /without a manual inbox check/i);
   assert.match(ctxOf(pickup)!, /Do not do that work yourself/);
   // Held: no live opencode session anywhere.
   const held = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s9", cwd: "/repo", prompt: "@opencode compare notes" }, wire("codex"));

@@ -10,7 +10,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { inboxMaxAgeMs, renderHeldAck, renderInboxAck, renderInboxInjection, renderOpenCodePendingAck, renderResultsInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
+import { inboxMaxAgeMs, renderAutoDeliveryPendingAck, renderHeldAck, renderInboxAck, renderInboxInjection, renderResultsInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
 import { buildQueueMessage, canQueue, isM9rPushedPrompt, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
 import { findEndpointMentions } from "./mention-core";
 import { findMemoryHints, renderMemoryHint } from "./memory-hint-core";
@@ -201,13 +201,23 @@ export function routeTypedMentions(input: HookInput, ctx: Pick<HookContext, "pro
       tasks.push({ id: task.id, to });
       continue;
     }
-    // Codex is pushed by its queue adapter. OpenCode's installed plugin polls the live session and calls its session API;
-    // other providers receive inbox context at their next supported hook. A target without an identity waits until it connects.
+    // Codex is pushed by its queue adapter. OpenCode's installed plugin and
+    // Claude's resident resume adapter both own a provider-native transport;
+    // mark their work deferred so the resident feed pump can claim it exactly
+    // once. The normal hook/inbox path remains the safe fallback if an adapter
+    // is unavailable. A target without an identity waits until it connects.
+    const residentAdapter = to === "claude" || to === "opencode";
+    if (residentAdapter && created && canQueue(task)) {
+      ctx.store.setDelivery(task.id, {
+        state: "deferred",
+        ...(targetSession ? { threadId: targetSession } : {}),
+      });
+    }
     const pushed = created && to === "codex" && canQueue(task) && ctx.dispatch !== undefined;
     if (!pushed && created) {
       const live = ctx.store.sessionsWithIdentity(to, projectCwd);
       acks.push(live.length > 0
-        ? to === "opencode" ? renderOpenCodePendingAck(task.id, false) : renderInboxAck(task.id, to, false)
+        ? residentAdapter ? renderAutoDeliveryPendingAck(task.id, to, false) : renderInboxAck(task.id, to, false)
         : renderHeldAck(task.id, to, false));
     } else {
       acks.push(renderSentAck(task.id, to, false));

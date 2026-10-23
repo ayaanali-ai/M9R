@@ -24,11 +24,21 @@ import {
   spoolPath,
   type CaptureJob,
 } from "@/lib/cross-agent-capture-core";
+import { requireOpenCodeExecutable } from "@/lib/native/opencode-executable";
 
 const execFileAsync = promisify(execFile);
 const CURSOR_FILE_NAME = "opencode-backfill.json";
 const DEFAULT_MAX_COUNT = 100;
 const DEFAULT_INTERVAL_MS = 60_000;
+
+/**
+ * Resolve the provider's real executable instead of invoking npm's `.cmd` or
+ * PowerShell shim. The session id is read from provider-owned local data, so
+ * passing it through a shell would turn a recovery feature into a command
+ * injection boundary. The current package is `@opencode/cli`; the older
+ * `opencode-ai` layout remains a compatibility fallback for existing installs.
+ */
+export const opencodeCaptureExecutable = requireOpenCodeExecutable;
 
 export interface OpenCodeSessionSummary {
   id: string;
@@ -135,9 +145,9 @@ export function opencodeBackfillCursorPath(repositoryRoot: string): string {
 
 function defaultRunOpenCodeCommand(): OpenCodeCommandRunner {
   return async (args, cwd) => {
-    const result = await execFileAsync("opencode", args, {
+    const result = await execFileAsync(opencodeCaptureExecutable(), args, {
       cwd,
-      shell: process.platform === "win32",
+      shell: false,
       // Without this, every `opencode session list`/`export` (one per session, every minute) opens
       // a visible console window on Windows.
       windowsHide: true,

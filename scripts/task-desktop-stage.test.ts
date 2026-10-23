@@ -15,7 +15,9 @@ import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-
 
 function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
   resolveWindowExecutable?: (executable: string) => Promise<string | undefined>) {
-  const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
+  const testRoot = join(process.cwd(), ".test-tmp");
+  mkdirSync(testRoot, { recursive: true });
+  const root = mkdtempSync(join(testRoot, "m9r-task-stage-"));
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "session-one");
   store.registerEndpoint({ provider: "codex", sessionId: "session-one" });
@@ -448,7 +450,7 @@ test("a stage launch operation id prevents a lost response from launching or ado
 });
 
 test("background launch adopts a delegated window after its launcher exits and a fresh service recovers it", async () => {
-  const root = mkdtempSync(join(process.cwd(), ".m9r-stage-handoff-"));
+  const root = mkdtempSync(join(tmpdir(), "m9r-stage-handoff-"));
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "session-handoff");
   const { task } = store.addTask({ from: "you", to: "codex", goal: "Launch a hand-off app", origin: "human_typed", idempotencyKey: "handoff-launch", targetSession: "session-handoff" });

@@ -26,12 +26,24 @@ interface TestRoomTask {
 
 const line = (v: unknown) => `${JSON.stringify(v)}\n`;
 const allowRoomMessage = async () => ({ ok: true as const });
-const fixtureRoot = join(process.cwd(), ".workcache", "web-live-session-tests");
-mkdirSync(fixtureRoot, { recursive: true });
+const scratchRoot = join(process.cwd(), ".test-tmp");
+mkdirSync(scratchRoot, { recursive: true });
+const fixtureRoot = mkdtempSync(join(scratchRoot, "oathlock-web-live-sessions-"));
 const makeFixture = (prefix: string) => mkdtempSync(join(fixtureRoot, prefix));
 
-test("OpenCode resolver finds the executable behind an npm PATH entry without APPDATA", () => {
+test("OpenCode resolver finds the current executable behind an npm PATH entry without APPDATA", () => {
   const root = makeFixture("m9r-opencode-path-");
+  try {
+    const npmPrefix = join(root, "npm");
+    const executable = join(npmPrefix, "node_modules", "@opencode", "cli", "bin", "opencode.exe");
+    mkdirSync(join(npmPrefix, "node_modules", "@opencode", "cli", "bin"), { recursive: true });
+    writeFileSync(executable, "fixture");
+    assert.equal(opencodeExePath({ PATH: npmPrefix }), executable);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("OpenCode resolver preserves the older opencode-ai package layout as a compatibility fallback", () => {
+  const root = makeFixture("m9r-opencode-old-path-");
   try {
     const npmPrefix = join(root, "npm");
     const executable = join(npmPrefix, "node_modules", "opencode-ai", "bin", "opencode.exe");

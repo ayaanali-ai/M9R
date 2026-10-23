@@ -190,6 +190,7 @@
   "native-store-and-hook.test.ts",
   "native-identity.test.ts",
   "native-commands.test.ts",
+  "claude-delivery.test.ts",
   "native-codex-delivery.test.ts",
   "native-approvals.test.ts",
   "native-feed.test.ts",

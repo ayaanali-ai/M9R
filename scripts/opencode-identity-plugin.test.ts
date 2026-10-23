@@ -64,6 +64,8 @@ function evaluateGeneratedPluginV2(
   return new Function("spawn", "process", "setInterval", "clearInterval", `${executable}\nreturn M9rOpenCodePlugin;`)(mockedSpawn, { cwd: () => "C:/process-cwd" }, setIntervalFn, clearIntervalFn) as {
     setup: (context: {
       location?: { directory?: string };
+      data?: { session?: { status?: (sessionID: string) => unknown | Promise<unknown> } };
+      client?: { session?: { list?: (input?: unknown) => Promise<unknown>; promptAsync?: (input: unknown) => Promise<unknown> } };
       session?: { hook?: (name: string, callback: (event: { sessionID?: string; system?: Array<{ type: string; text: string }> }) => Promise<void>) => Promise<unknown> };
       event?: { subscribe?: (input?: { signal?: AbortSignal }) => AsyncIterable<unknown> };
     }) => Promise<(() => void) | undefined>;
@@ -135,7 +137,8 @@ test("generated plugin uses sessionID and appends only parsed additionalContext 
   assert.doesNotMatch(source, /output\.system\.push\(raw\)/);
   assert.match(source, /M9R_HOOK_PROMPT_ARGS[\s\S]*"m9r-hook",\s*"UserPromptSubmit",\s*"opencode"/);
   assert.match(source, /runM9rPrompt\(sessionID, cwd\)/);
-  assert.match(source, /client\?\.session\?\.promptAsync/);
+  assert.match(source, /session\.promptAsync\.call/);
+  assert.match(source, /sessionID,[\s\S]*directory:[\s\S]*parts:/);
   assert.match(source, /M9R_HOOK_POLL_ARGS/);
   assert.match(source, /M9R_HOOK_DELIVERED_ARGS/);
   assert.match(source, /OpenCodeExecutionFailed/);
@@ -234,8 +237,9 @@ test("OpenCode live polling creates one real session turn and records receipt on
   assert.equal(timers.length, 1);
   assert.equal(timers[0]!.ms, 1500);
   assert.deepEqual(prompts[0], {
-    path: { id: "oc-session" },
-    body: { parts: [{ type: "text", text: "[M9R T42]\nReview the staged patch\nM9R token" }] },
+    sessionID: "oc-session",
+    directory: "C:/repo",
+    parts: [{ type: "text", text: "[M9R T42]\nReview the staged patch\nM9R token" }],
   });
   assert.deepEqual(calls.map((call) => call.args), [
     ["m9r-hook", "SessionStart", "opencode"],
@@ -290,6 +294,81 @@ test("OpenCode startup discovers active sessions so inbox delivery does not wait
   assert.deepEqual(JSON.parse(calls[1]!.input), { session_id: "open-session", cwd: "C:/repo" });
   assert.equal(prompts.length, 0);
   void plugin;
+});
+
+test("OpenCode V2 startup uses the current flat session list and live status surface", async () => {
+  const hook = (event: string, additionalContext: string) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  const timers: Array<{ callback: () => void; ms: number; unref: () => void }> = [];
+  const setIntervalMock = ((callback: () => void, ms = 0) => {
+    const timer = { callback, ms, unref: () => undefined };
+    timers.push(timer);
+    return timer as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval;
+  const factory = evaluateGeneratedPluginV2(buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }), createMockSpawn([
+    { code: 0, output: hook("SessionStart", "connected") },
+    { code: 0, output: hook("OpenCodePoll", "") },
+  ], calls), setIntervalMock);
+  const listInputs: unknown[] = [];
+  const plugin = await factory.setup({
+    location: { directory: "C:/repo" },
+    data: {
+      session: {
+        status: (sessionID: string) => sessionID === "v2-session" ? { type: "idle" } : undefined,
+      },
+    },
+    client: {
+      session: {
+        list: async (input) => {
+          listInputs.push(input);
+          return [{ id: "v2-session", location: { directory: "C:/repo" }, time: {} }];
+        },
+        promptAsync: async () => ({}),
+      },
+    },
+  });
+  for (let attempt = 0; attempt < 30 && timers.length === 0; attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(timers.length, 1, "a live V2 session should receive an automatic poller at setup");
+  assert.deepEqual(listInputs, [{ directory: "C:/repo" }]);
+  assert.equal(calls.filter((call) => call.args.includes("OpenCodePoll")).length, 1);
+  plugin?.();
+});
+
+test("OpenCode retries the legacy promptAsync shape only after request validation rejects the modern shape", async () => {
+  const hook = (event: string, additionalContext: string) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  const prompts: unknown[] = [];
+  const factory = evaluateGeneratedPlugin(buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }), createMockSpawn([
+    { code: 0, output: hook("SessionStart", "connected") },
+    { code: 0, output: hook("UserPromptSubmit", "") },
+    { code: 0, output: hook("OpenCodePoll", JSON.stringify({ task_id: "T43", prompt: "legacy-compatible task" })) },
+    { code: 0, output: hook("OpenCodeDelivered", JSON.stringify({ accepted: true, task_id: "T43" })) },
+  ], calls), (() => ({ unref() {} })) as unknown as typeof setInterval);
+  const plugin = await factory({
+    directory: "C:/repo",
+    client: {
+      session: {
+        promptAsync: async (input) => {
+          prompts.push(input);
+          if (input && typeof input === "object" && "sessionID" in input) throw new Error("Invalid request: unknown parameter sessionID");
+          return {};
+        },
+      },
+    },
+  });
+  await plugin["experimental.chat.system.transform"]({ sessionID: "oc-legacy" }, { system: [] });
+  for (let attempt = 0; attempt < 30 && calls.filter((call) => call.args.includes("OpenCodeDelivered")).length === 0; attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(prompts.length, 2);
+  assert.deepEqual(prompts[0], {
+    sessionID: "oc-legacy",
+    directory: "C:/repo",
+    parts: [{ type: "text", text: "legacy-compatible task" }],
+  });
+  assert.deepEqual(prompts[1], {
+    path: { id: "oc-legacy" },
+    body: { parts: [{ type: "text", text: "legacy-compatible task" }] },
+  });
+  assert.equal(calls.filter((call) => call.args.includes("OpenCodeDelivered")).length, 1);
 });
 
 test("OpenCode startup retries discovery when the provider session API is not ready yet", async () => {
@@ -526,11 +605,10 @@ test("an OpenCode task overrides a stale in-memory model only with a live catalo
   await plugin["experimental.chat.system.transform"]({ sessionID: "oc-session-model" }, { system: [] });
   for (let attempt = 0; attempt < 20 && prompts.length === 0; attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(prompts[0], {
-    path: { id: "oc-session-model" },
-    body: {
-      parts: [{ type: "text", text: "[M9R T4]\nuse the current model" }],
-      model: { providerID: "opencode", modelID: "beam-free" },
-    },
+    sessionID: "oc-session-model",
+    directory: "C:/repo",
+    parts: [{ type: "text", text: "[M9R T4]\nuse the current model" }],
+    model: { providerID: "opencode", modelID: "beam-free" },
   });
 });
 

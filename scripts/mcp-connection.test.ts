@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { createLocalStore } from "@/lib/native/local-store";
@@ -11,7 +11,9 @@ function tempStore(
   now: () => Date = () => new Date("2026-10-15T18:00:00.000Z"),
   isProcessAlive?: (pid: number) => boolean,
 ) {
-  const root = mkdtempSync(join(process.cwd(), ".m9r-connection-test-"));
+  const testRoot = join(process.cwd(), ".test-tmp");
+  mkdirSync(testRoot, { recursive: true });
+  const root = mkdtempSync(join(testRoot, "m9r-connection-test-"));
   const deps = { now, ...(isProcessAlive ? { isProcessAlive } : {}) };
   return { root, store: createLocalStore(root, deps), done: () => rmSync(root, { recursive: true, force: true }) };
 }

@@ -27,9 +27,15 @@ const publicBuildDefaults = {
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  // OpenNext runs a nested Next build. Keep that disposable tree beside the
+  // configured OpenNext output so a stale root .next ACL cannot block a
+  // Cloudflare build before the worker bundle is generated.
+  distDir: isCloudflareBuild ? ".workcache/cloudflare-output/.next" : ".next",
   env: Object.fromEntries(Object.entries(publicBuildDefaults).map(([key, value]) => [key, process.env[key] || value])),
-  // Next 16 uses Turbopack for dev and the default production build; keep the
-  // Monaco alias there instead of making the default path depend on webpack.
+  // Next 16 uses Turbopack for development. Production builds are explicitly
+  // pinned to the supported Webpack path in scripts/build.mjs because this
+  // application uses next/font/google and the current Turbopack resolver
+  // cannot resolve its internal font module in the release build.
   turbopack: {
     resolveAlias: {
       "monaco-editor/editor/editor.api": "monaco-editor/esm/vs/editor/editor.api.js",

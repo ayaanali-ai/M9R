@@ -536,7 +536,7 @@ test("owner-preview clears its remembered app target after background text is re
 }));
 
 function withRoot(run: (root: string) => Promise<void>): Promise<void> {
-  const fixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures");
+  const fixtureRoot = resolve(process.cwd(), ".test-tmp", "native-test-fixtures");
   mkdirSync(fixtureRoot, { recursive: true });
   const root = mkdtempSync(join(fixtureRoot, "m9r-cua-stage-"));
   return run(root).finally(() => rmSync(root, { recursive: true, force: true }));
