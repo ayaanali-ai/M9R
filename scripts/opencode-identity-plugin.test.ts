@@ -329,8 +329,56 @@ test("OpenCode V2 startup uses the current flat session list and live status sur
   });
   for (let attempt = 0; attempt < 30 && timers.length === 0; attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(timers.length, 1, "a live V2 session should receive an automatic poller at setup");
-  assert.deepEqual(listInputs, [{ directory: "C:/repo", limit: 100 }]);
+  assert.deepEqual(listInputs, [{ limit: 100 }]);
   assert.equal(calls.filter((call) => call.args.includes("OpenCodePoll")).length, 1);
+  plugin?.();
+});
+
+test("OpenCode startup discovers live sessions across project directories and preserves each session cwd", async () => {
+  const hook = (event: string, additionalContext: string) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  const timers: Array<{ callback: () => void; ms: number; unref: () => void }> = [];
+  const setIntervalMock = ((callback: () => void, ms = 0) => {
+    const timer = { callback, ms, unref: () => undefined };
+    timers.push(timer);
+    return timer as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval;
+  const factory = evaluateGeneratedPluginV2(buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }), createMockSpawn([
+    { code: 0, output: hook("SessionStart", "connected project A") },
+    { code: 0, output: hook("OpenCodePoll", "") },
+    { code: 0, output: hook("SessionStart", "connected project B") },
+    { code: 0, output: hook("OpenCodePoll", "") },
+  ], calls), setIntervalMock);
+  const listInputs: unknown[] = [];
+  const plugin = await factory.setup({
+    location: { directory: "C:/server-root" },
+    data: {
+      session: {
+        status: () => ({ type: "idle" }),
+      },
+    },
+    client: {
+      session: {
+        list: async (input) => {
+          listInputs.push(input);
+          return [
+            { id: "project-a-session", location: { directory: "C:/project-a" }, time: {} },
+            { id: "project-b-session", directory: "C:/project-b", time: {} },
+          ];
+        },
+        promptAsync: async () => ({}),
+      },
+    },
+  });
+  for (let attempt = 0; attempt < 30 && calls.length < 4; attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(listInputs, [{ limit: 100 }]);
+  assert.equal(timers.length, 2, "each live session receives its own poller");
+  assert.deepEqual(calls.map((call) => ({ event: call.args[1], input: JSON.parse(call.input) })), [
+    { event: "SessionStart", input: { session_id: "project-a-session", cwd: "C:/project-a" } },
+    { event: "OpenCodePoll", input: { session_id: "project-a-session", cwd: "C:/project-a" } },
+    { event: "SessionStart", input: { session_id: "project-b-session", cwd: "C:/project-b" } },
+    { event: "OpenCodePoll", input: { session_id: "project-b-session", cwd: "C:/project-b" } },
+  ]);
   plugin?.();
 });
 

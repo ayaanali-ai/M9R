@@ -203,6 +203,7 @@ const M9R_SESSION_DISCOVERY_INTERVAL_MS = 5000;
 const M9R_IDLE_FAILURE_GRACE_MS = 2000;
 const M9R_SESSION_BOOTSTRAPS = new Map();
 const M9R_SESSION_POLLERS = new Map();
+const M9R_SESSION_DIRECTORIES = new Map();
 const M9R_SESSION_DISCOVERY_TIMERS = new Map();
 const M9R_ACTIVE_TASKS = new Map();
 
@@ -557,19 +558,6 @@ function openCodeSessionDirectory(session) {
   return typeof location === "string" ? location : null;
 }
 
-function normalizeOpenCodeDirectory(value) {
-  if (typeof value !== "string" || value.length === 0) return null;
-  let normalized = value.split(String.fromCharCode(92)).join("/").toLowerCase();
-  while (normalized.endsWith("/")) normalized = normalized.slice(0, -1);
-  return normalized;
-}
-
-function openCodeSessionMatchesDirectory(session, cwd) {
-  const sessionDirectory = normalizeOpenCodeDirectory(openCodeSessionDirectory(session));
-  const targetDirectory = normalizeOpenCodeDirectory(cwd);
-  return sessionDirectory !== null && targetDirectory !== null && sessionDirectory === targetDirectory;
-}
-
 function openCodeSessionList(value) {
   const root = value?.data ?? value;
   if (Array.isArray(root)) return root;
@@ -588,19 +576,44 @@ function isOpenCodeLiveStatus(value) {
   return ["idle", "busy", "retry", "running", "active", "connected"].includes(String(status ?? "").toLowerCase());
 }
 
+async function invokeOpenCodeSessionList(list, session, request) {
+  try {
+    const direct = await list.call(session, request);
+    if (!(direct?.error && isOpenCodeRequestShapeError(direct))) return direct;
+  } catch (error) {
+    if (!isOpenCodeRequestShapeError(error)) return null;
+  }
+
+  // Older SDK wrappers exposed the same endpoint through a nested query
+  // object. Only use that shape after the provider explicitly rejects the
+  // current request shape; a transport or provider failure must not be
+  // replayed against another request shape.
+  try {
+    return await list.call(session, { query: request });
+  } catch {
+    return null;
+  }
+}
+
 async function listOpenCodeSessions(cwd, client) {
   const session = client?.session;
   const list = session?.list;
   if (typeof list !== "function") return null;
-  const request = { directory: cwd, limit: 100 };
-  try {
-    const modern = await list.call(session, request);
-    if (modern?.error && isOpenCodeRequestShapeError(modern)) return list.call(session, { query: request });
-    return modern;
-  } catch (error) {
-    if (!isOpenCodeRequestShapeError(error)) return null;
-    return list.call(session, { query: request }).catch(() => null);
+
+  // Current OpenCode exposes a provider-wide session list. Do not scope this
+  // request to the plugin server's cwd: a single server may own sessions from
+  // several projects, and the provider's session record is the authoritative
+  // owner of each session directory.
+  const providerWide = await invokeOpenCodeSessionList(list, session, { limit: 100 });
+  if (providerWide !== null && !(providerWide?.error && isOpenCodeRequestShapeError(providerWide))) {
+    return { value: providerWide, directoryScoped: false };
   }
+
+  // Compatibility path for older SDKs that require a directory on the list
+  // request. This is intentionally bounded to the server cwd and is marked so
+  // callers may safely use that cwd when an older response omits its directory.
+  const scoped = await invokeOpenCodeSessionList(list, session, { directory: cwd, limit: 100 });
+  return scoped === null ? null : { value: scoped, directoryScoped: true };
 }
 
 async function readOpenCodeSessionStatus(sessionID, cwd, client, data) {
@@ -633,20 +646,23 @@ async function startKnownOpenCodeSessions(cwd, client, data) {
     // provider update can briefly replace that API while keeping the process
     // and its sessions alive. Do not make the first failed discovery a
     // permanent loss of automatic delivery.
-    const listed = await listOpenCodeSessions(cwd, client);
-    if (listed === null || listed?.error) return;
-    const sessions = openCodeSessionList(listed);
+    const listedResult = await listOpenCodeSessions(cwd, client);
+    if (listedResult === null || listedResult.value?.error) return;
+    const sessions = openCodeSessionList(listedResult.value);
     for (const session of sessions) {
       const sessionID = session?.id;
-      if (typeof sessionID !== "string" || sessionID.length === 0 || session?.time?.archived || !openCodeSessionMatchesDirectory(session, cwd)) continue;
-      const status = await readOpenCodeSessionStatus(sessionID, cwd, client, data);
+      if (typeof sessionID !== "string" || sessionID.length === 0 || session?.time?.archived) continue;
+      const sessionCwd = openCodeSessionDirectory(session) ?? (listedResult.directoryScoped ? cwd : null);
+      if (!sessionCwd) continue;
+      M9R_SESSION_DIRECTORIES.set(sessionID, sessionCwd);
+      const status = await readOpenCodeSessionStatus(sessionID, sessionCwd, client, data);
       if (!isOpenCodeLiveStatus(openCodeStatusFor(status, sessionID))) continue;
       // A provider service can hot-reload this plugin without recreating its
       // already-open sessions. Re-publish the session claim before polling so
       // the MCP connection cannot remain transport-connected but anonymous
       // after an M9R or provider update.
-      await bootstrapSession(sessionID, cwd);
-      startOpenCodePoller(sessionID, cwd, client);
+      await bootstrapSession(sessionID, sessionCwd);
+      startOpenCodePoller(sessionID, sessionCwd, client);
     }
   } catch {
     // A server can be ready before its session endpoint; the active transform
@@ -672,6 +688,7 @@ function scheduleKnownOpenCodeSessions(cwd, client, data, delay = M9R_SESSION_DI
 }
 
 function bootstrapSession(sessionID, cwd) {
+  if (typeof cwd === "string" && cwd.length > 0) M9R_SESSION_DIRECTORIES.set(sessionID, cwd);
   const cached = M9R_SESSION_BOOTSTRAPS.get(sessionID);
   if (cached) {
     M9R_SESSION_BOOTSTRAPS.delete(sessionID);
@@ -706,6 +723,9 @@ async function handleOpenCodeEvent(cwd, client, event) {
   const normalized = event?.details ?? event;
   const sessionID = eventSessionID(normalized);
   if (!sessionID) return;
+  const eventDirectory = openCodeSessionDirectory(normalized?.properties?.session ?? normalized?.properties ?? normalized);
+  const sessionCwd = eventDirectory ?? M9R_SESSION_DIRECTORIES.get(sessionID) ?? cwd;
+  if (typeof sessionCwd === "string" && sessionCwd.length > 0) M9R_SESSION_DIRECTORIES.set(sessionID, sessionCwd);
 
   // A plugin can remain loaded while OpenCode creates, resumes, or compacts a
   // session. Reconcile those lifecycle boundaries immediately so delivery does
@@ -715,30 +735,31 @@ async function handleOpenCodeEvent(cwd, client, event) {
   // issuing a competing provider identity.
   if (normalized?.type === "session.created" || normalized?.type === "session.compacted") {
     if (normalized.type === "session.compacted") M9R_SESSION_BOOTSTRAPS.delete(sessionID);
-    await bootstrapSession(sessionID, cwd);
-    wakeOpenCodePoller(sessionID, cwd, client);
+    await bootstrapSession(sessionID, sessionCwd);
+    wakeOpenCodePoller(sessionID, sessionCwd, client);
     return;
   }
 
   if (normalized?.type === "session.deleted") {
     stopOpenCodePoller(sessionID);
     M9R_SESSION_BOOTSTRAPS.delete(sessionID);
+    M9R_SESSION_DIRECTORIES.delete(sessionID);
     const deleted = M9R_ACTIVE_TASKS.get(sessionID);
-    if (deleted) await reportOpenCodeExecutionFailure(sessionID, cwd, deleted, "session_deleted", "OpenCode session was deleted before the M9R task completed.");
+    if (deleted) await reportOpenCodeExecutionFailure(sessionID, sessionCwd, deleted, "session_deleted", "OpenCode session was deleted before the M9R task completed.");
     return;
   }
 
   const active = M9R_ACTIVE_TASKS.get(sessionID);
   if (!active) return;
   if (normalized?.type === "session.error") {
-    await reportOpenCodeExecutionFailure(sessionID, cwd, active, "provider_execution_failed", eventError(normalized));
+    await reportOpenCodeExecutionFailure(sessionID, sessionCwd, active, "provider_execution_failed", eventError(normalized));
     return;
   }
   if (normalized?.type === "message.updated" && normalized?.properties?.info?.role === "assistant" && normalized?.properties?.info?.error) {
-    await reportOpenCodeExecutionFailure(sessionID, cwd, active, "provider_execution_failed", eventError(normalized));
+    await reportOpenCodeExecutionFailure(sessionID, sessionCwd, active, "provider_execution_failed", eventError(normalized));
     return;
   }
-  if (normalized?.type === "session.idle") inspectOpenCodeIdle(sessionID, cwd, client, active);
+  if (normalized?.type === "session.idle") inspectOpenCodeIdle(sessionID, sessionCwd, client, active);
 }
 
 async function setupM9rOpenCodeV2(ctx = {}) {
@@ -784,9 +805,12 @@ async function setupM9rOpenCodeV2(ctx = {}) {
 
   return () => {
     controller?.abort();
-    const timer = M9R_SESSION_DISCOVERY_TIMERS.get(cwd);
-    if (timer) clearTimeout(timer);
-    M9R_SESSION_DISCOVERY_TIMERS.delete(cwd);
+    for (const timer of M9R_SESSION_DISCOVERY_TIMERS.values()) clearTimeout(timer);
+    M9R_SESSION_DISCOVERY_TIMERS.clear();
+    for (const entry of M9R_SESSION_POLLERS.values()) clearInterval(entry.timer);
+    M9R_SESSION_POLLERS.clear();
+    M9R_SESSION_BOOTSTRAPS.clear();
+    M9R_SESSION_DIRECTORIES.clear();
   };
 }
 
@@ -800,15 +824,16 @@ export const M9rIdentity = async ({ directory, client, data } = {}) => {
   "experimental.chat.system.transform": async (input, output) => {
     const sessionID = input?.sessionID;
     if (typeof sessionID !== "string" || sessionID.length === 0) return;
-    const context = await bootstrapSession(sessionID, cwd);
+    const sessionCwd = M9R_SESSION_DIRECTORIES.get(sessionID) ?? cwd;
+    const context = await bootstrapSession(sessionID, sessionCwd);
     if (context !== null && Array.isArray(output?.system)) output.system.push(context);
     // Prompt-time delivery: inbox deltas and answers for this session, like other providers' prompt hooks.
     // Fail-silent by design: a broken or slow hook must never block, slow, or pollute the turn.
-    const promptContext = await runM9rPrompt(sessionID, cwd)
+    const promptContext = await runM9rPrompt(sessionID, sessionCwd)
       .then((raw) => typeof raw === "string" ? extractOpenCodeAdditionalContext(raw) : null)
       .catch(() => null);
     if (promptContext !== null && Array.isArray(output?.system)) output.system.push(promptContext);
-    startOpenCodePoller(sessionID, cwd, client);
+    startOpenCodePoller(sessionID, sessionCwd, client);
   },
   };
 };
