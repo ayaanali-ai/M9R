@@ -143,8 +143,11 @@ test("installer contains no Node/npm dependency and changes no saved PowerShell 
   assert.match(source, /function Stop-InstalledM9rPill/);
   assert.match(source, /--m9r-update-shutdown/, "pill updates must use the app's single-instance shutdown handoff");
   assert.match(source, /WaitForExit\(15000\)/, "the installer must wait for the installed pill to exit before replacing its image");
+  assert.match(source, /function Invoke-M9rEngine/);
+  assert.match(source, /\$ErrorActionPreference\s*=\s*'Continue'/, "native engine stderr warnings must not abort an otherwise successful update");
+  assert.match(source, /Invoke-M9rEngine \$engine \$dryRunArgs/);
   assert.match(source, /function Invoke-ManagedBrokerUpdate/);
-  assert.match(source, /Invoke-ManagedBrokerUpdate\s+\$engine\s+'stop'[\s\S]*Stop-InstalledM9rPill[\s\S]*& \$engine \@applyArgs/,
+  assert.match(source, /Invoke-ManagedBrokerUpdate\s+\$engine\s+'stop'[\s\S]*Stop-InstalledM9rPill[\s\S]*Invoke-M9rEngine \$engine \$applyArgs/,
     "updates must authenticate and stop the owned broker before engine setup can replace its runtime image");
   assert.match(source, /Invoke-ManagedBrokerUpdate\s+\$installedEngine\s+'start'/,
     "updates must restart and verify the owned broker using the newly installed engine");
@@ -205,8 +208,10 @@ test("standalone release packages runtime companions from the canonical engine d
   assert.match(installerSource, /claim an identical companion/, "the installer must claim the broker after the engine copies its companion files");
   assert.match(installerSource, /Remove-ManagedWebBroker/, "uninstall must remove only the unchanged installer-owned broker");
   assert.match(installerSource, /web-broker-install\.json/, "the broker ownership record must persist across installer runs");
-  assert.match(installerSource, /& \$installedEngine web setup/, "Web setup must resolve its broker beside the persistent engine");
+  assert.match(installerSource, /Invoke-M9rEngine \$installedEngine @\('web',\s*'setup'\)/, "Web setup must resolve its broker beside the persistent engine");
   assert.match(cliSource, /args\[0\] === "broker-update"/, "the packaged engine must expose the installer's broker lifecycle command");
+  assert.match(cliSource, /buildManagedBrokerTaskRecovery/, "the broker updater must be able to recover a missing M9R-owned login task");
+  assert.match(cliSource, /restoreMissingManagedBrokerTask/, "broker start must reconcile a missing owned task before launching it");
 });
 
 test("runtime updates replace a Windows-locked engine image without stopping active MCP sessions", () => {

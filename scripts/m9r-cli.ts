@@ -1798,6 +1798,25 @@ function runClaudeMcpCommand(binary: string, args: readonly string[]) {
 
 type InspectedLocalBrokerTask = LocalBrokerScheduledTaskSnapshot & { state: string; currentUserId: string };
 
+type ManagedBrokerTaskRecovery = {
+  action: LocalBrokerScheduledTaskAction;
+  port: number;
+  projectRoot: string;
+  workingDirectory: string;
+  taskActionHash: string;
+  taskDefinitionHash?: string;
+};
+
+type ManagedBrokerUpdateTarget = {
+  task: InspectedLocalBrokerTask | null;
+  port: number;
+  brokerPath: string;
+  installManifest: ManagedBrokerInstallManifest | null;
+  taskDefinitionHash?: string;
+  taskActionHash?: string;
+  recovery?: ManagedBrokerTaskRecovery;
+};
+
 async function inspectLocalBrokerTask(taskName: string): Promise<InspectedLocalBrokerTask | null> {
   const { stdout } = await powerShell(buildLocalBrokerScheduledTaskInspectScript(taskName));
   const output = stdout.trim();
@@ -1932,6 +1951,60 @@ function taskTargetsInstalledBroker(task: InspectedLocalBrokerTask, root: string
     && /\\conhost\.exe$/i.test(action.executable.replaceAll("/", "\\"));
 }
 
+function buildManagedBrokerTaskRecovery(
+  root: string,
+  brokerPath: string,
+  setup: Record<string, unknown> | null,
+  marker: Record<string, unknown> | null,
+  brokerConfig: Record<string, unknown> | null,
+): ManagedBrokerTaskRecovery | null {
+  const hasSetupRecord = setup?.version === 1 && Array.isArray(setup.configs);
+  const hasMarkerRecord = marker?.version === 1 && marker.taskName === WEB_TASK_NAME;
+  if (!hasSetupRecord && !hasMarkerRecord) return null;
+
+  const recordedPaths = [marker?.entry, marker?.executable].filter((value): value is string => typeof value === "string");
+  if (recordedPaths.some((path) => normalizeWindowsPath(path) !== normalizeWindowsPath(brokerPath))) {
+    throw new Error("The M9R broker recovery record points at a different executable; refusing to recreate the login task.");
+  }
+
+  const projectRoot = typeof marker?.projectRoot === "string"
+    ? marker.projectRoot
+    : typeof setup?.projectRoot === "string" ? setup.projectRoot : "";
+  const workingDirectory = typeof marker?.workingDirectory === "string" ? marker.workingDirectory : projectRoot;
+  if (!projectRoot || !workingDirectory) {
+    throw new Error("The M9R broker recovery record has no usable project root; refusing to recreate the login task.");
+  }
+
+  const port = validPort(marker?.port ?? brokerConfig?.port);
+  if (port === null) throw new Error("The M9R broker recovery record has no valid port; refusing to recreate the login task.");
+
+  const action = buildLocalBrokerScheduledTaskAction({
+    taskName: WEB_TASK_NAME,
+    executable: brokerPath,
+    args: ["--home", root, "--port", String(port), "--project-root", resolve(projectRoot)],
+    workingDirectory: resolve(workingDirectory),
+    hideConsole: true,
+  });
+  const taskActionHash = hashLocalBrokerScheduledTaskAction(action);
+  const recordedActionHash = typeof marker?.taskActionHash === "string"
+    ? marker.taskActionHash
+    : typeof setup?.brokerTaskActionHash === "string" ? setup.brokerTaskActionHash : "";
+  if (!/^[a-f0-9]{64}$/i.test(recordedActionHash) || recordedActionHash.toLowerCase() !== taskActionHash) {
+    throw new Error("The M9R broker recovery record does not match the current broker task contract; refusing to recreate the login task.");
+  }
+  if (typeof setup?.brokerTaskActionHash === "string" && setup.brokerTaskActionHash.toLowerCase() !== taskActionHash) {
+    throw new Error("The M9R web setup record disagrees with its broker recovery record; refusing to recreate the login task.");
+  }
+
+  const taskDefinitionHash = typeof marker?.taskDefinitionHash === "string"
+    ? marker.taskDefinitionHash
+    : typeof setup?.brokerTaskDefinitionHash === "string" ? setup.brokerTaskDefinitionHash : undefined;
+  if (taskDefinitionHash !== undefined && !/^[a-f0-9]{64}$/i.test(taskDefinitionHash)) {
+    throw new Error("The M9R broker recovery record has an invalid task definition hash; refusing to recreate the login task.");
+  }
+  return { action, port, projectRoot: resolve(projectRoot), workingDirectory: resolve(workingDirectory), taskActionHash, taskDefinitionHash };
+}
+
 async function readManagedBrokerProcessState(brokerPath: string): Promise<{
   fileHash: string;
   fileLastWriteUtc: string;
@@ -1982,24 +2055,19 @@ async function brokerAuthenticated(root: string, port: number): Promise<boolean>
   return Boolean(status?.ok);
 }
 
-async function loadManagedBrokerUpdateTarget(root: string): Promise<{
-  task: InspectedLocalBrokerTask;
-  port: number;
-  brokerPath: string;
-  installManifest: ManagedBrokerInstallManifest | null;
-  taskDefinitionHash?: string;
-  taskActionHash?: string;
-} | null> {
+async function loadManagedBrokerUpdateTarget(root: string): Promise<ManagedBrokerUpdateTarget | null> {
   if (platform() !== "win32") throw new Error("The managed broker update lifecycle is supported on Windows only.");
   const brokerPath = resolve(root, "bin", "m9r-web-broker.exe");
-  const [setupBytes, markerBytes, installBytes] = await Promise.all([
+  const [setupBytes, markerBytes, installBytes, brokerConfigBytes] = await Promise.all([
     readOptional(join(root, WEB_SETUP_MANIFEST)),
     readOptional(join(root, "broker-autostart.json")),
     readOptional(join(root, "web-broker-install.json")),
+    readOptional(join(root, "web-broker.json")),
   ]);
   const setup = parseBrokerUpdateRecord(setupBytes, "web setup");
   const marker = parseBrokerUpdateRecord(markerBytes, "broker startup");
   const installRecord = parseBrokerUpdateRecord(installBytes, "web broker install");
+  const brokerConfig = parseBrokerUpdateRecord(brokerConfigBytes, "broker config");
   let installManifest: ManagedBrokerInstallManifest | null = null;
   if (installRecord) {
     if (installRecord.version !== 1 || typeof installRecord.path !== "string" || typeof installRecord.sha256 !== "string"
@@ -2013,7 +2081,17 @@ async function loadManagedBrokerUpdateTarget(root: string): Promise<{
   if (!task) {
     const image = await readManagedBrokerProcessState(brokerPath).catch(() => null);
     if (image?.processes.length) throw new Error("The installed broker is running without its M9R-owned login task; refusing to replace a live image that cannot be safely restarted.");
-    return null;
+    const recovery = buildManagedBrokerTaskRecovery(root, brokerPath, setup, marker, brokerConfig);
+    if (!recovery) return null;
+    return {
+      task: null,
+      port: recovery.port,
+      brokerPath,
+      installManifest,
+      taskActionHash: recovery.taskActionHash,
+      taskDefinitionHash: recovery.taskDefinitionHash,
+      recovery,
+    };
   }
   const targetsInstalledBroker = taskTargetsInstalledBroker(task, root, brokerPath);
   if (!targetsInstalledBroker) return null;
@@ -2034,6 +2112,46 @@ async function loadManagedBrokerUpdateTarget(root: string): Promise<{
   }
   const port = brokerPortFromTask(task, marker?.version === 1 && marker.taskName === WEB_TASK_NAME ? marker : null);
   return { task, port, brokerPath, installManifest, taskDefinitionHash: ownershipProof.definition, taskActionHash: ownershipProof.action };
+}
+
+async function persistRecoveredManagedBrokerTask(root: string, taskDefinitionHash: string): Promise<void> {
+  const markerPath = join(root, "broker-autostart.json");
+  const markerBytes = await readOptional(markerPath);
+  const marker = parseBrokerUpdateRecord(markerBytes, "broker startup");
+  if (marker?.version === 1 && marker.taskName === WEB_TASK_NAME) {
+    await writeAtomic(markerPath, JSON.stringify({ ...marker, taskDefinitionHash, state: "configured" }) + "\n");
+  }
+
+  const setupPath = join(root, WEB_SETUP_MANIFEST);
+  const setupBytes = await readOptional(setupPath);
+  const setup = parseBrokerUpdateRecord(setupBytes, "web setup");
+  if (setup?.version === 1 && Array.isArray(setup.configs)) {
+    await writeAtomic(setupPath, JSON.stringify({ ...setup, brokerTaskDefinitionHash: taskDefinitionHash }) + "\n");
+  }
+}
+
+async function restoreMissingManagedBrokerTask(
+  root: string,
+  target: ManagedBrokerUpdateTarget,
+): Promise<void> {
+  if (target.task || !target.recovery) return;
+  await powerShell(buildLocalBrokerScheduledTaskRegisterScript({
+    taskName: WEB_TASK_NAME,
+    executable: target.brokerPath,
+    args: ["--home", root, "--port", String(target.recovery.port), "--project-root", target.recovery.projectRoot],
+    workingDirectory: target.recovery.workingDirectory,
+    hideConsole: true,
+  }));
+  const registered = await inspectLocalBrokerTask(WEB_TASK_NAME);
+  if (!registered || localBrokerTaskActionHash(registered) !== target.recovery.taskActionHash
+    || !localBrokerTaskMatchesContract(registered, target.recovery.action)) {
+    throw new Error("M9R recreated the broker task but could not verify its exact current-user definition.");
+  }
+  const definitionHash = hashLocalBrokerScheduledTaskDefinition(registered);
+  await persistRecoveredManagedBrokerTask(root, definitionHash);
+  target.task = registered;
+  target.taskDefinitionHash = definitionHash;
+  target.taskActionHash = target.recovery.taskActionHash;
 }
 
 async function waitForBrokerTaskState(taskName: string, shouldBeActive: boolean, attempts = 24): Promise<InspectedLocalBrokerTask> {
@@ -2099,6 +2217,8 @@ async function startManagedBrokerAfterUpdate(target: NonNullable<Awaited<ReturnT
   if (image.fileHash.toLowerCase() !== target.installManifest.sha256) {
     throw new Error("The installed broker file does not match its ownership hash; the login task was not started.");
   }
+  await restoreMissingManagedBrokerTask(defaultStoreRoot(homeDirectory(), process.env), target);
+  if (!target.task) throw new Error("The M9R broker task is missing and could not be safely recovered; it was not started.");
   const task = await inspectLocalBrokerTask(WEB_TASK_NAME);
   if (!task || !localBrokerTaskDefinitionOwned(task, target.taskDefinitionHash, target.taskActionHash)
     || !taskTargetsInstalledBroker(task, defaultStoreRoot(homeDirectory(), process.env), target.brokerPath)) {
@@ -2151,6 +2271,10 @@ async function runManagedBrokerUpdate(args: string[]): Promise<number> {
       return 0;
     }
     if (phase === "stop") {
+      if (!target.task) {
+        process.stdout.write(JSON.stringify({ ok: true, phase, managedTask: false, result: "no-installed-broker-task" }) + "\n");
+        return 0;
+      }
       await stopManagedBrokerForUpdate(target);
       process.stdout.write(JSON.stringify({ ok: true, phase, managedTask: true, result: "stopped" }) + "\n");
       return 0;
@@ -2365,6 +2489,11 @@ async function runWebExtensionUpdate(args: string[]): Promise<number> {
 async function runWebSetup(args: string[]): Promise<number> {
   if (platform() !== "win32") { process.stderr.write("M9R Web setup currently supports Windows 10/11 only.\n"); return 2; }
   if (args.includes("--broker-only")) {
+    // The standalone engine has no JavaScript CLI entry to persist. Reuse the
+    // provider-neutral broker lifecycle reconciler so a missing M9R-owned task
+    // is rebuilt from its authenticated ownership records instead of asking the
+    // user to reconnect a provider or run a second installer path.
+    if (isStandaloneEngine()) return runManagedBrokerUpdate(["start"]);
     const configuredProjectRoot = valueAfter(args, "--project-root");
     if (configuredProjectRoot) process.env.M9R_PROJECT_ROOT = resolve(configuredProjectRoot);
     const result = await ensureLocalBrokerAutostart();

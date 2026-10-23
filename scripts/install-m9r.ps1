@@ -274,6 +274,25 @@ function Read-Consent([string]$Prompt) {
     return (Read-Host "$Prompt [y/N]") -match '^(?i:y|yes)$'
 }
 
+function Invoke-M9rEngine([string]$Path, [string[]]$Arguments) {
+    # Windows PowerShell promotes redirected native stderr to an ErrorRecord.
+    # The engine uses stderr for non-fatal migration and compatibility notices,
+    # so the installer must inspect the native exit code instead of allowing
+    # $ErrorActionPreference = Stop to mistake a warning for a failed setup.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $Path @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return [pscustomobject]@{
+        Output = @($output)
+        ExitCode = $exitCode
+    }
+}
+
 function Stop-InstalledM9rPill {
     $overlay = Join-Path (Get-M9rHome) 'bin\m9r-overlay.exe'
     if (-not (Test-Path -LiteralPath $overlay -PathType Leaf)) { return }
@@ -318,8 +337,9 @@ function Invoke-ManagedBrokerUpdate([string]$EnginePath, [ValidateSet('stop', 's
     if (-not (Test-Path -LiteralPath $EnginePath -PathType Leaf)) {
         throw "The M9R engine required to manage the broker update is missing: $EnginePath"
     }
-    $output = @(& $EnginePath web broker-update $Phase 2>&1)
-    $code = $LASTEXITCODE
+    $run = Invoke-M9rEngine $EnginePath @('web', 'broker-update', $Phase)
+    $output = @($run.Output)
+    $code = [int]$run.ExitCode
     foreach ($line in $output) { Write-Host ([string]$line) }
     if ($code -ne 0) { throw "M9R could not safely $Phase the managed Web broker (exit $code). No further installer files were replaced." }
     $resultLine = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^\{.*"phase"\s*:\s*"' + [regex]::Escape($Phase) + '".*\}$' } | Select-Object -Last 1)
@@ -440,8 +460,9 @@ try {
         $dryRunArgs += '--autostart'
         $applyArgs += '--autostart'
     }
-    $plan = @(& $engine @dryRunArgs 2>&1)
-    $planExit = $LASTEXITCODE
+    $planRun = Invoke-M9rEngine $engine $dryRunArgs
+    $plan = @($planRun.Output)
+    $planExit = [int]$planRun.ExitCode
     if ($planExit -ne 0) { $plan | ForEach-Object { Write-Host $_ }; throw "M9R could not prepare its setup plan (exit $planExit). Nothing was installed." }
     foreach ($line in $plan) {
         $text = [string]$line
@@ -461,8 +482,9 @@ try {
     $brokerStop = Invoke-ManagedBrokerUpdate $engine 'stop'
     $brokerNeedsResume = $brokerStop.managedTask
     Stop-InstalledM9rPill
-    & $engine @applyArgs
-    $setupExit = $LASTEXITCODE
+    $setupRun = Invoke-M9rEngine $engine $applyArgs
+    foreach ($line in @($setupRun.Output)) { Write-Host ([string]$line) }
+    $setupExit = [int]$setupRun.ExitCode
     if ($setupExit -ne 0) { throw "M9R setup exited with code $setupExit. Review the engine output; do not rerun blindly." }
     $installedEngine = Join-Path $env:M9R_HOME 'bin\m9r-engine.exe'
     $brokerResumeEngine = $installedEngine
@@ -479,8 +501,9 @@ try {
         $env:M9R_EXTENSION_SOURCE = $extensionPackage
         Write-Host ''
         Write-Host 'Starting the separate M9R Web setup. It previews its agent/browser changes and asks before applying them.' -ForegroundColor Cyan
-        & $installedEngine web setup
-        $webExit = $LASTEXITCODE
+        $webRun = Invoke-M9rEngine $installedEngine @('web', 'setup')
+        foreach ($line in @($webRun.Output)) { Write-Host ([string]$line) }
+        $webExit = [int]$webRun.ExitCode
         if ($webExit -ne 0) { throw "M9R Web setup exited with code $webExit. Native setup remains installed and can be removed with -Uninstall." }
     }
     $brokerStart = Invoke-ManagedBrokerUpdate $installedEngine 'start'
