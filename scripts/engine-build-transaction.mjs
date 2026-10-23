@@ -114,6 +114,29 @@ function isCoveredByManagedPath(path, managedPaths) {
 }
 
 /**
+ * Windows security scanners can briefly hold a newly copied directory while
+ * the transactional publisher is swapping it into place. Retry only that
+ * transient rename condition; do not weaken ACLs or fall back to deleting a
+ * live runtime. All other filesystem errors remain fail-closed.
+ */
+function renameWithWindowsRetry(source, destination) {
+  const attempts = process.platform === "win32" ? 20 : 1;
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      renameSync(source, destination);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (process.platform !== "win32" || !["EPERM", "EBUSY"].includes(error?.code) || attempt === attempts - 1) throw error;
+      const waitMs = Math.min(250, 25 * (attempt + 1));
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
+    }
+  }
+  throw lastError;
+}
+
+/**
  * Publish only after the complete staged artifact set has a valid hash manifest.
  * Managed paths are swapped with rollback; unrelated files in engine/dist stay untouched.
  */
@@ -150,10 +173,10 @@ export function publishRuntimeBuild(stagedRoot, outputRoot, managedPaths) {
       mkdirSync(dirname(destination), { recursive: true });
       if (existsSync(destination)) {
         mkdirSync(dirname(previous), { recursive: true });
-        renameSync(destination, previous);
+        renameWithWindowsRetry(destination, previous);
         backedUp.push(path);
       }
-      renameSync(source, destination);
+      renameWithWindowsRetry(source, destination);
       published.push(path);
     }
     const publishedManifest = verifyRuntimeBuildManifest(output);
@@ -194,12 +217,12 @@ export function publishGeneratedDirectory(stagedRoot, outputRoot) {
   if (dirname(staged) !== dirname(output)) throw new Error("Generated output staging and destination must share a parent directory.");
   const backup = join(dirname(output), `.m9r-generated-backup-${process.pid}-${randomUUID()}`);
   const hadPrevious = existsSync(output);
-  if (hadPrevious) renameSync(output, backup);
+  if (hadPrevious) renameWithWindowsRetry(output, backup);
   try {
-    renameSync(staged, output);
+    renameWithWindowsRetry(staged, output);
   } catch (error) {
     if (hadPrevious && existsSync(backup)) {
-      try { renameSync(backup, output); }
+      try { renameWithWindowsRetry(backup, output); }
       catch (rollbackError) {
         throw new Error(`Generated output publish failed; the prior directory remains at ${backup}. ${String(rollbackError)}`, { cause: error });
       }
