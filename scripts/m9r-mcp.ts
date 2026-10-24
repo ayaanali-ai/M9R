@@ -14,6 +14,7 @@ import { mcpWorkerEnvironment, readM9rMcpConnectionConfig } from "@/lib/native/m
 import { startLocalPresenceHeartbeat } from "@/lib/native/local-presence-heartbeat";
 import { hasPendingRuntimeTransaction } from "@/lib/native/runtime-install-transaction";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
+import { reconcileProviderSessions } from "@/lib/native/provider-session-reconciliation";
 import { migrateLegacyAgentCredentials, readAgentCredential } from "@/lib/native/agent-credential-store";
 import { createM9rMcpServer } from "@/lib/native/mcp-server";
 import { createNetworkCoreClient, parseNetworkCredentials } from "@/lib/native/network-core-client";
@@ -111,6 +112,17 @@ async function main(): Promise<void> {
     ...(connection.provider ? { connectionProvider: connection.provider } : {}),
     connectionCwd: process.env.M9R_PROJECT_ROOT?.trim() || process.cwd(),
     ...(connection.sessionId ? { connectionSessionId: connection.sessionId } : {}),
+    ...(connection.provider ? {
+      reconcileProviderConnection: ({ provider, processId, sessionId, cwd }) => reconcileProviderSessions({
+        root,
+        store,
+        providerId: provider,
+        env: process.env,
+        ...(cwd ? { expectedCwd: cwd } : {}),
+        ...(processId !== undefined ? { expectedProcessId: processId } : {}),
+        ...(sessionId ? { expectedSessionId: sessionId } : {}),
+      }),
+    } : {}),
     // A worker can be refreshed by a newer engine while its provider-owned
     // outer supervisor still carries an older environment. In that narrow
     // private-worker mode the server may adopt exactly one active local claim;

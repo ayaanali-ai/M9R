@@ -367,7 +367,7 @@ export function createTaskDesktopStageService(input: {
    */
   function resolveCursorTarget(token: string | undefined, taskId: string, ownerOnly = false): CursorTarget | undefined {
     const task = input.store.getTask(taskId);
-    if (!task || task.resultSummary || task.approval === "pending" || task.approval === "denied" || task.approval === "expired"
+    if (!task || task.resultSummary || task.receipt?.state === "canceled" || task.approval === "pending" || task.approval === "denied" || task.approval === "expired"
       || task.lifecycle?.state === "completed" || task.lifecycle?.state === "failed") return undefined;
     if (ownerOnly && (task.origin !== "human_typed" || normalizeHandle(task.from) !== "you")) return undefined;
     const bearer = token ? input.store.verifyIdentity(token) : null;
@@ -437,6 +437,17 @@ export function createTaskDesktopStageService(input: {
     }
   }
 
+  async function ensureCursorPrimed(stageName: string, identity: CuaAgentCursorIdentity): Promise<void> {
+    const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
+      showAgentCursor?: (stageName: string, cursorIdentity: CuaAgentCursorIdentity) => Promise<unknown>;
+    }).showAgentCursor;
+    // Test-only drivers may omit the visual seam. The production Cua driver
+    // always implements it, so absence here preserves the provider-neutral
+    // stage contract without inventing a fake cursor result in tests.
+    if (typeof showAgentCursor !== "function") return;
+    await showAgentCursor(stageName, identity);
+  }
+
   function authorize(token: string, taskId: string, mode: TaskStageMode) {
     if (isAgentContext(stageDeps.env ?? process.env)) {
       throw new Error("Task stages require the owner-launched M9R broker; an agent process cannot host this service.");
@@ -457,6 +468,9 @@ export function createTaskDesktopStageService(input: {
     if (!(["approved", "not_needed"] as string[]).includes(task.approval)
       || task.resultSummary !== undefined || task.delivery?.state === "done") {
       throw new Error("Only an unfinished owner-authorized or approved task can use an agent stage.");
+    }
+    if (task.receipt?.state === "canceled") {
+      throw new Error("This task was canceled; no desktop work is allowed.");
     }
     activeAgentCursors.set(cursorIdentityKey(identity), { handle, sessionId: identity.sessionId });
     // Session-scoped reuse bounds desktop creation; task text never becomes a desktop name.
@@ -511,10 +525,7 @@ export function createTaskDesktopStageService(input: {
       // action. The native cursor is visual-only here: it does not focus a
       // window or move the owner's physical pointer. Test drivers may omit the
       // optional visual seam; the production driver always provides it.
-      const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
-        showAgentCursor?: (stageName: string, cursorIdentity: CuaAgentCursorIdentity) => Promise<unknown>;
-      }).showAgentCursor;
-      if (typeof showAgentCursor === "function") await showAgentCursor(name, identity);
+      await ensureCursorPrimed(name, identity);
       // Return opaque coordination IDs only, never desktop GUIDs or owner-window identifiers.
       return { name, mode, agent: normalizeHandle(identity.handle), taskId, hasAnchor: Boolean(assignedStage?.anchor),
         ...(mode === "background" && assignedStage ? { roomDesktopId: assignedStage.roomDesktopId } : {}),
@@ -547,6 +558,11 @@ export function createTaskDesktopStageService(input: {
       const { name, identity } = authorize(token, taskId, mode);
       if (stoppedTaskInputs.has(`${name}\0${taskId}`)) throw new DesktopInputNotDispatchedError("This task was explicitly stopped; no input was sent.");
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
+      // A prior native action may have hidden the cursor after a transport or
+      // verification failure. Re-prime immediately before the first real
+      // desktop operation so cursor visibility is a current invariant, not a
+      // stale promise from prepare().
+      await ensureCursorPrimed(name, identity);
       if (action.kind === "window_status") {
         const selected = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
         if (!selected) throw new Error("This session has no selected application window.");
@@ -781,6 +797,10 @@ export function createTaskDesktopStageService(input: {
       const { name, identity, task } = authorize(token, taskId, mode);
       const coordinationKey = mode === "owner-preview" ? stageCoordinationKey(task.goal) : undefined;
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
+      // m9r_stage_app is itself a desktop operation and may be the first tool
+      // call in a task. Establish the provider's visible overlay before any
+      // window discovery, launch, or focus-related work begins.
+      await ensureCursorPrimed(name, identity);
       const receiptInput = operationId ? {
         handle: identity.handle,
         sessionId: identity.sessionId,

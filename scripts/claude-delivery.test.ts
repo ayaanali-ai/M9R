@@ -76,12 +76,14 @@ function adapterFor(
   f: ReturnType<typeof fixture>,
   child: FakeClaudeProcess,
   capture?: { command?: string; args?: string[]; cwd?: string },
+  sessionInitTimeoutMs = 15_000,
 ) {
   return createClaudeDeliveryAdapter({
     root: f.root,
     homeDir: f.homeDir,
     env: { CLAUDE_CONFIG_DIR: f.claudeDir, M9R_HOME: f.root },
     mcpConfigPaths: [f.mcpConfig],
+    sessionInitTimeoutMs,
     spawnClaude: (command, args, cwd) => {
       if (capture) Object.assign(capture, { command, args, cwd });
       return child as unknown as LiveProcess;
@@ -94,7 +96,10 @@ test("Claude delivery resumes the one exact idle session and writes a real user 
   try {
     const child = new FakeClaudeProcess();
     const capture: { command?: string; args?: string[]; cwd?: string } = {};
-    await adapterFor(f, child, capture)(f.task.id);
+    const pending = adapterFor(f, child, capture)(f.task.id);
+    assert.equal(child.writes.length, 0, "task text waits for an exact-session init event");
+    child.stdout.emit("data", `${JSON.stringify({ type: "system", subtype: "init", session_id: f.sessionId })}\n`);
+    assert.equal((await pending).state, "accepted");
 
     assert.equal(capture.command, "claude");
     assert.equal(capture.cwd, f.project);
@@ -106,6 +111,7 @@ test("Claude delivery resumes the one exact idle session and writes a real user 
     assert.equal(message.type, "user");
     assert.match(message.message?.content?.[0]?.text ?? "", /perform the harmless delivery check/);
     assert.equal(f.store.getTask(f.task.id)?.delivery?.state, "queued");
+    assert.equal(f.store.getTask(f.task.id)?.delivery?.transport, "claude-resume");
     assert.equal(f.store.getTask(f.task.id)?.deliveredSession, f.sessionId);
 
     child.stdout.emit("data", `${JSON.stringify({ type: "system", subtype: "init", session_id: f.sessionId })}\n`);
@@ -115,11 +121,26 @@ test("Claude delivery resumes the one exact idle session and writes a real user 
   } finally { f.cleanup(); }
 });
 
+test("Claude delivery waits for the exact resumed-session identity before writing owner text", async () => {
+  const f = fixture();
+  try {
+    const child = new FakeClaudeProcess();
+    const pending = adapterFor(f, child)(f.task.id);
+    assert.equal(child.writes.length, 0, "no task text is written before Claude confirms the resumed session");
+    child.stdout.emit("data", `${JSON.stringify({ type: "system", subtype: "init", session_id: f.sessionId })}\n`);
+    const outcome = await pending;
+    assert.equal(outcome.state, "accepted");
+    assert.equal(child.writes.length, 1);
+  } finally { f.cleanup(); }
+});
+
 test("Claude delivery recovers a missing identity from one exact live registry session", async () => {
   const f = fixture(false);
   try {
     const child = new FakeClaudeProcess();
-    await adapterFor(f, child)(f.task.id);
+    const pending = adapterFor(f, child)(f.task.id);
+    child.stdout.emit("data", `${JSON.stringify({ type: "system", subtype: "init", session_id: f.sessionId })}\n`);
+    await pending;
     assert.equal(child.writes.length, 1);
     assert.ok(f.store.identityTokenFor("claude", f.sessionId), "the exact live session is rebound without opening a new conversation");
     assert.equal(f.store.getTask(f.task.id)?.delivery?.state, "queued");
@@ -154,11 +175,15 @@ test("Claude delivery records uncertainty when the resumed process exits before 
   const f = fixture();
   try {
     const child = new FakeClaudeProcess();
-    await adapterFor(f, child)(f.task.id);
-    child.kill();
+    const pending = adapterFor(f, child)(f.task.id);
+    child.stdout.emit("data", `${JSON.stringify({ type: "system", subtype: "init", session_id: f.sessionId })}\n`);
+    await pending;
+    child.stderr.emit("data", "provider transport unavailable");
+    child.emit("exit", 42);
     const delivery = f.store.getTask(f.task.id)?.delivery;
     assert.equal(delivery?.state, "uncertain");
     assert.match(delivery?.error ?? "", /exited before M9R confirmed/i);
+    assert.match(delivery?.error ?? "", /42.*provider transport unavailable/);
   } finally { f.cleanup(); }
 });
 
@@ -166,10 +191,26 @@ test("Claude delivery fails closed if --resume reports a different conversation"
   const f = fixture();
   try {
     const child = new FakeClaudeProcess();
-    await adapterFor(f, child)(f.task.id);
+    const pending = adapterFor(f, child)(f.task.id);
     child.stdout.emit("data", `${JSON.stringify({ type: "system", subtype: "init", session_id: "unexpected-session" })}\n`);
+    const outcome = await pending;
+    assert.equal(outcome.state, "failed");
+    assert.equal(child.writes.length, 0, "the task is never sent to a different conversation");
     const delivery = f.store.getTask(f.task.id)?.delivery;
-    assert.equal(delivery?.state, "uncertain");
+    assert.equal(delivery?.state, "failed");
     assert.match(delivery?.error ?? "", /different session/i);
+  } finally { f.cleanup(); }
+});
+
+test("Claude delivery times out without writing task text when the resumed session never identifies itself", async () => {
+  const f = fixture();
+  try {
+    const child = new FakeClaudeProcess();
+    const keepAlive = setTimeout(() => undefined, 50);
+    const outcome = await adapterFor(f, child, undefined, 5)(f.task.id);
+    clearTimeout(keepAlive);
+    assert.equal(outcome.state, "failed");
+    assert.equal(child.writes.length, 0);
+    assert.equal(f.store.getTask(f.task.id)?.delivery?.state, "failed");
   } finally { f.cleanup(); }
 });

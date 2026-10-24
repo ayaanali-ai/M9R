@@ -110,6 +110,8 @@ export interface CliDeps {
   drainCapture?(): Promise<{ drained: number; failed: number }>;
   /** Installs and starts the user-scoped local web broker after provider connections succeed. */
   installLocalBrokerAutostart?(): Promise<{ ok: boolean; message: string }>;
+  /** Starts the existing provider lifecycle monitor when the native feed owns its writer lock. */
+  startProviderLifecycle?(root: string): { stop(): Promise<void> } | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -3431,7 +3433,15 @@ Environment:
 /** Adapts the CLI's dependencies for the native front-door commands; undefined without a home directory (tests). */
 function nativeIo(deps: CliDeps): NativeIo {
   const homeDir = deps.env.USERPROFILE ?? deps.env.HOME ?? "";
-  return { env: deps.env, homeDir, cwd: deps.cwd, out: (l) => deps.out(l), err: (l) => deps.err(l), confirm: deps.confirm };
+  return {
+    env: deps.env,
+    homeDir,
+    cwd: deps.cwd,
+    out: (l) => deps.out(l),
+    err: (l) => deps.err(l),
+    confirm: deps.confirm,
+    startProviderLifecycle: deps.startProviderLifecycle,
+  };
 }
 
 /** Run the CLI. Returns a process exit code. */
@@ -3466,6 +3476,9 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "update":
     case "uninstall":
     case "send":
+    case "pill-send":
+    case "pill-decide":
+    case "pill-note":
     case "note":
     case "cloud":
     case "tasks":

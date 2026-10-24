@@ -9,10 +9,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import { isProtectedAction, lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
-import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, isFreshInboxTask, newTask, normalizeHandle, pruneTasks, redactSecrets, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle } from "./inbox-core";
-import { canQueue } from "./codex-delivery-core";
+import { MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, isFreshInboxTask, newTask, normalizeHandle, pruneTasks, redactSecrets, transitionTaskReceipt, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle, type TaskReceiptSource, type TaskReceiptState } from "./inbox-core";
+import { canQueue, normCwd } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
-import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, PROVIDER_SESSION_RECOVERY_TTL_MS, newConnectionId, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
+import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, PROVIDER_SESSION_RECOVERY_TTL_MS, PROVIDER_TURN_TTL_MS, newConnectionId, sameConnectionCwd, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
 import { createInitialProviderUpdateState, normalizeProviderUpdateState, type ProviderUpdateState } from "./provider-update-lifecycle-core";
 
 /**
@@ -31,6 +31,37 @@ const CURSOR_COLOR_PALETTE: readonly string[] = [
   "#34D399", "#F59E0B", "#EC4899", "#38BDF8", "#A78BFA", "#FB7185",
 ];
 const RESERVED_CURSOR_COLORS = new Set(Object.values(CURSOR_BRAND_COLORS));
+
+function rememberDelivery(task: Task): void {
+  if (task.delivery) task.deliveryHistory = [...(task.deliveryHistory ?? []), { ...task.delivery }].slice(-20);
+}
+
+function recordTaskReceipt(task: Task, transition: {
+  state: TaskReceiptState;
+  at: string;
+  attempt?: number;
+  source?: TaskReceiptSource;
+  sessionId?: string;
+  error?: string;
+}): void {
+  task.receipt = transitionTaskReceipt(task.receipt, {
+    ...transition,
+    ...(transition.error ? { error: redactSecrets(transition.error).slice(0, 500) } : {}),
+  });
+}
+
+function receiptStateForDelivery(task: Task, state: TaskDelivery["state"]): TaskReceiptState {
+  if (state === "sending") return "dispatched";
+  if (state === "queued") return "provider_received";
+  if (state === "uncertain") return "uncertain";
+  if (state === "failed") return "failed";
+  if (state === "done") return "completed";
+  // The first deferred write is merely an accepted task waiting for an
+  // adapter. A later deferred write is an explicit retry after a failure.
+  return task.receipt?.state === "failed" || task.receipt?.state === "uncertain" || (task.delivery?.attempts ?? 0) > 0
+    ? "retryable"
+    : "accepted";
+}
 
 export interface EndpointRecord {
   handle: string;
@@ -52,7 +83,7 @@ export interface SessionRecord {
 
 export interface EventRecord {
   at: string;
-  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.delivery_failed" | "task.delivery_uncertain" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked" | "mention.double";
+  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.delivery_failed" | "task.delivery_uncertain" | "task.canceled" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked" | "mention.double";
   handle?: string;
   taskId?: string;
   text: string;
@@ -161,6 +192,8 @@ interface StoreState {
   connectionClaims: ConnectionClaim[];
   /** Durable MCP bindings; a worker restart may reuse one while the provider identity is active. */
   connectionBindings: ConnectionBinding[];
+  /** Exact provider turn context published by trusted hooks for shared MCP processes. */
+  activeProviderTurns: ActiveProviderTurn[];
   /** Provider-neutral compatibility observations; this contains no credentials or raw provider config. */
   providerUpdates: ProviderUpdateState["providers"];
   /**
@@ -173,6 +206,17 @@ interface StoreState {
   cursorColors: Record<string, string>;
 }
 
+interface ActiveProviderTurn {
+  handle: string;
+  provider: string;
+  sessionId: string;
+  turnId?: string;
+  processId: number;
+  cwd?: string;
+  startedAt: string;
+  expiresAt: string;
+}
+
 export interface SessionLink {
   id: string;
   a: { handle: string; sessionId: string; cwd?: string };
@@ -182,7 +226,7 @@ export interface SessionLink {
   updatedAt: string;
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], connectionClaims: [], connectionBindings: [], providerUpdates: createInitialProviderUpdateState().providers, cursorColors: {} });
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], connectionClaims: [], connectionBindings: [], activeProviderTurns: [], providerUpdates: createInitialProviderUpdateState().providers, cursorColors: {} });
 
 const stageOperationKey = (input: StageOperationInput): string => createHash("sha256")
   .update(JSON.stringify([normalizeHandle(input.handle), input.sessionId, input.taskId, input.operationId]))
@@ -240,6 +284,7 @@ const normalizeStoredScopes = (storeRoot: string, state: StoreState): StoreState
   state.tasks = state.tasks.map((task) => dropInstallCwd(storeRoot, task));
   state.connectionClaims = state.connectionClaims.map((claim) => normalizeConnectionOwner(dropInstallCwd(storeRoot, claim)));
   state.connectionBindings = state.connectionBindings.map((binding) => normalizeConnectionOwner(dropInstallCwd(storeRoot, binding)));
+  state.activeProviderTurns = state.activeProviderTurns.map((turn) => dropInstallCwd(storeRoot, turn));
   state.links = state.links.map((link) => ({
     ...link,
     a: dropInstallCwd(storeRoot, link.a),
@@ -555,6 +600,47 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return readState().sessions.filter((x) => normalizeHandle(x.handle) === normalizeHandle(handle) && (folder === undefined || normalizeSessionFolder(x.cwd) === folder)).sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
     },
 
+    /**
+     * Resolve the process recorded for one exact, active provider session.
+     * This is intentionally not provider-wide discovery: stale, unowned,
+     * expired, or internally inconsistent claims are not process evidence.
+     */
+    connectionProcessIdForSession(input: { provider: string; sessionId: string; cwd?: string }): number | undefined {
+      const provider = input.provider.trim();
+      const sessionId = input.sessionId.trim();
+      if (!provider || !sessionId) return undefined;
+      const handle = handleForProvider(provider);
+      const folder = input.cwd === undefined ? undefined : normalizeSessionFolder(projectCwd(root, input.cwd));
+      const state = readState();
+      const identity = state.identities.some((candidate) => !candidate.revokedAt
+        && candidate.sessionId === sessionId
+        && normalizeHandle(candidate.handle) === normalizeHandle(handle)
+        && sameConnectionProvider(candidate.provider, provider));
+      if (!identity) return undefined;
+
+      const nowMs = now().getTime();
+      const claims = state.connectionClaims.filter((claim) => {
+        if (claim.sessionId !== sessionId
+          || normalizeHandle(claim.handle) !== normalizeHandle(handle)
+          || !sameConnectionProvider(claim.provider, provider)
+          || !validConnectionProcessId(claim.ownerProcessId)
+          || !isProcessAlive(claim.ownerProcessId)) return false;
+        if (folder !== undefined && normalizeSessionFolder(projectCwd(root, claim.cwd)) !== folder) return false;
+
+        if (claim.bindingId) {
+          return state.connectionBindings.some((binding) => binding.bindingId === claim.bindingId
+            && binding.claimId === claim.claimId
+            && binding.sessionId === sessionId
+            && normalizeHandle(binding.handle) === normalizeHandle(handle)
+            && sameConnectionProvider(binding.provider, provider)
+            && binding.ownerProcessId === claim.ownerProcessId
+            && (folder === undefined || normalizeSessionFolder(projectCwd(root, binding.cwd)) === folder));
+        }
+        return usableConnectionClaim(claim, nowMs, { provider, sessionId });
+      });
+      return claims.length === 1 ? claims[0]!.ownerProcessId : undefined;
+    },
+
     /** Sessions that have a live M9R identity token. Delivery must never guess a provider session without one. */
     sessionsWithIdentity(handle: string, cwd?: string): SessionRecord[] {
       const folder = cwd === undefined ? undefined : normalizeSessionFolder(projectCwd(root, cwd));
@@ -789,6 +875,12 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           // A sender-pinned session is authoritative. Repair older rows where a
           // hook's incidental deliverySession disagreed with that target.
           if (sessionId && (!targetSession || targetSession === sessionId)) t.deliveredSession = targetSession ?? sessionId;
+          recordTaskReceipt(t, {
+            state: "provider_received",
+            at: now().toISOString(),
+            source: "prompt",
+            ...(sessionId ? { sessionId: targetSession ?? sessionId } : {}),
+          });
           if (firstDelivery) pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `@${t.to} received ${id}` });
         }
       });
@@ -860,6 +952,50 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
+    /** Atomically assign one explicitly deferred owner task to the configured resident provider worker. */
+    claimProviderDelivery(id: string, token: string, expected: { handle: string; provider: string; cwd: string }): Task | undefined {
+      return update((s) => {
+        const identity = s.identities.find((item) => item.token === token && !item.revokedAt);
+        const task = s.tasks.find((item) => item.id === id);
+        const handle = normalizeHandle(expected.handle);
+        const provider = expected.provider.trim().toLowerCase();
+        const folder = normCwd(expected.cwd);
+        if (!identity || !task || !folder
+          || normalizeHandle(identity.handle) !== handle
+          || identity.provider.trim().toLowerCase() !== provider
+          || normalizeHandle(task.to) !== handle
+          || normalizeHandle(task.from) !== "you"
+          || task.origin !== "human_typed"
+          || !canQueue(task)
+          || task.delivery?.state !== "deferred"
+          || task.receipt?.state === "canceled"
+          || task.resultSummary || task.deliveredAt || task.deliveredSession || task.targetSession
+          || task.delivery.threadId
+          || (task.cwd && normCwd(task.cwd) !== folder)
+          || !isFreshInboxTask(task.createdAt, now().getTime(), inboxMaxAgeMs())) return undefined;
+
+        const claimedAt = now().toISOString();
+        task.deliveredSession = identity.sessionId;
+        task.delivery = {
+          ...task.delivery,
+          state: "sending",
+          attempts: task.delivery.attempts + 1,
+          threadId: identity.sessionId,
+          claimedAt,
+          correlation: "internal-context",
+          error: undefined,
+        };
+        recordTaskReceipt(task, {
+          state: "dispatched",
+          at: claimedAt,
+          attempt: task.delivery.attempts,
+          source: "provider-transport",
+          sessionId: identity.sessionId,
+        });
+        return task;
+      });
+    },
+
     /** Ends a session's token early (the person revoked it from the pill, or the session closed). */
     revokeIdentity(sessionId: string): void {
       update((s) => {
@@ -906,66 +1042,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           return existing;
         }
 
-        if (!input.continuation && input.ownerProcessId !== undefined) {
+        if (input.ownerProcessId !== undefined) {
           pruneStaleBoundConnectionClaims(s, at, {
             provider,
             handle,
             cwd,
             replacementProcessId: input.ownerProcessId,
           });
-        }
-
-        // A continuation/compaction can issue a new provider session id while
-        // the provider keeps the same parent process and project alive. The
-        // process id is the trusted lineage proof here: only a hook that has
-        // both explicit continuation intent and the exact same provider PID
-        // may carry a private claim/binding forward. Ordinary store callers
-        // still retain the fail-closed behavior for two live sessions sharing
-        // one process id.
-        if (input.continuation && input.ownerProcessId !== undefined) {
-          const lineage = s.connectionClaims
-            .filter((claim) => claim.sessionId !== input.sessionId
-              && normalizeHandle(claim.handle) === handle
-              && sameConnectionProvider(claim.provider, provider)
-              && claim.cwd === cwd
-              && claim.ownerProcessId === input.ownerProcessId)
-            .sort((left, right) => {
-              const leftBound = left.bindingId ? 1 : 0;
-              const rightBound = right.bindingId ? 1 : 0;
-              if (leftBound !== rightBound) return rightBound - leftBound;
-              return Date.parse(right.issuedAt) - Date.parse(left.issuedAt);
-            });
-          const prior = lineage[0];
-          if (prior) {
-            const priorSessionIds = new Set(lineage.map((claim) => claim.sessionId));
-            const retiredClaimIds = new Set(lineage.map((claim) => claim.claimId));
-            const binding = prior.bindingId
-              ? s.connectionBindings.find((candidate) => candidate.bindingId === prior.bindingId)
-              : undefined;
-            const retiredAt = at.toISOString();
-            for (const identity of s.identities) {
-              if (priorSessionIds.has(identity.sessionId) && !identity.revokedAt) identity.revokedAt = retiredAt;
-            }
-
-            prior.sessionId = input.sessionId;
-            prior.cwd = cwd;
-            prior.ownerProcessId = input.ownerProcessId;
-            prior.expiresAt = new Date(at.getTime() + CONNECTION_CLAIM_TTL_MS).toISOString();
-            if (binding) {
-              binding.sessionId = input.sessionId;
-              binding.cwd = cwd;
-              binding.ownerProcessId = input.ownerProcessId;
-            }
-
-            // If a polluted store already has several claims from this exact
-            // provider process, keep one canonical record and its durable
-            // binding. They are the same trusted process lineage; retaining
-            // the extras would recreate the ambiguity on the next worker
-            // reconnect.
-            s.connectionClaims = s.connectionClaims.filter((claim) => !retiredClaimIds.has(claim.claimId) || claim.claimId === prior.claimId);
-            s.connectionBindings = s.connectionBindings.filter((candidate) => !retiredClaimIds.has(candidate.claimId) || candidate.bindingId === prior.bindingId);
-            return prior;
-          }
         }
 
         const claim: ConnectionClaim = {
@@ -985,6 +1068,134 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         pruneStaleUnboundConnectionClaims(s, at, { provider, handle, cwd: input.cwd, deadOnlySameScope: true });
         s.connectionClaims = [...s.connectionClaims, claim].slice(-MAX_CONNECTION_RECORDS);
         return claim;
+      });
+    },
+
+    /**
+     * Records which exact provider conversation is currently executing a turn.
+     * A provider process may host many conversations, so its PID alone is not
+     * a conversation selector. This is called only from a trusted prompt hook
+     * after that exact session has an active identity and private claim.
+     */
+    beginProviderTurn(input: { provider: string; sessionId: string; turnId?: string; cwd?: string; processId: number }): boolean {
+      const provider = input.provider.trim();
+      const sessionId = input.sessionId.trim();
+      const handle = handleForProvider(provider);
+      const turnId = input.turnId?.trim();
+      if (!provider || !sessionId || sessionId.length > 256 || /[\u0000-\u001f\u007f]/.test(sessionId)
+        || (turnId !== undefined && (!turnId || turnId.length > 256 || /[\u0000-\u001f\u007f]/.test(turnId)))
+        || !validConnectionProcessId(input.processId)) return false;
+      return update((s) => {
+        const at = now();
+        const cwd = normalizeSessionFolder(projectCwd(root, input.cwd));
+        const activeIdentity = s.identities.some((identity) => !identity.revokedAt
+          && identity.sessionId === sessionId
+          && normalizeHandle(identity.handle) === handle
+          && sameConnectionProvider(identity.provider, provider));
+        const claim = s.connectionClaims.find((candidate) => candidate.sessionId === sessionId
+          && normalizeHandle(candidate.handle) === handle
+          && sameConnectionProvider(candidate.provider, provider)
+          && candidate.ownerProcessId === input.processId
+          && (!cwd || normalizeSessionFolder(candidate.cwd) === cwd));
+        if (!activeIdentity || !claim) return false;
+
+        // The same conversation can be reopened by a replacement process. The
+        // newest trusted hook owns that exact session; distinct sessions in the
+        // same PID are intentionally retained so concurrent turns fail closed.
+        s.activeProviderTurns = s.activeProviderTurns.filter((turn) => !(turn.sessionId === sessionId
+          && normalizeHandle(turn.handle) === handle
+          && sameConnectionProvider(turn.provider, provider)));
+        s.activeProviderTurns.push({
+          handle,
+          provider,
+          sessionId,
+          ...(turnId ? { turnId } : {}),
+          ...(cwd ? { cwd } : {}),
+          processId: input.processId,
+          startedAt: at.toISOString(),
+          expiresAt: new Date(at.getTime() + PROVIDER_TURN_TTL_MS).toISOString(),
+        });
+        if (s.activeProviderTurns.length > MAX_CONNECTION_RECORDS) {
+          s.activeProviderTurns = s.activeProviderTurns.slice(-MAX_CONNECTION_RECORDS);
+        }
+        return true;
+      });
+    },
+
+    /** Ends only the exact turn named by a trusted provider Stop event. */
+    endProviderTurn(input: { provider: string; sessionId: string; turnId?: string; processId: number }): void {
+      const provider = input.provider.trim();
+      const handle = handleForProvider(provider);
+      const turnId = input.turnId?.trim();
+      if (!provider || !input.sessionId || !validConnectionProcessId(input.processId)
+        || (input.turnId !== undefined && (!turnId || turnId.length > 256 || /[\u0000-\u001f\u007f]/.test(turnId)))) return;
+      update((s) => {
+        s.activeProviderTurns = s.activeProviderTurns.filter((turn) => !(turn.sessionId === input.sessionId
+          && turn.processId === input.processId
+          && (turnId === undefined || turn.turnId === turnId)
+          && normalizeHandle(turn.handle) === handle
+          && sameConnectionProvider(turn.provider, provider)));
+      });
+    },
+
+    /**
+     * Resolves and binds the single currently active provider turn for a host.
+     * It never chooses by most-recent timestamp: overlapping turns on the same
+     * shared MCP host are ambiguous until the exact Stop hook closes one.
+     */
+    bindActiveProviderTurn(expected: { provider: string; processId: number }):
+      | { status: "none" | "ambiguous" | "unavailable" }
+      | { status: "resolved"; binding: ConnectionBinding } {
+      const provider = expected.provider.trim();
+      if (!provider || !validConnectionProcessId(expected.processId)) return { status: "unavailable" };
+      return update((s) => {
+        const at = now();
+        const atMs = at.getTime();
+        s.activeProviderTurns = s.activeProviderTurns.filter((turn) => {
+          const expiresAt = Date.parse(turn.expiresAt);
+          return Number.isFinite(expiresAt) && expiresAt > atMs && isProcessAlive(turn.processId);
+        });
+        const turns = s.activeProviderTurns.filter((turn) => turn.processId === expected.processId
+          && sameConnectionProvider(turn.provider, provider));
+        if (turns.length === 0) return { status: "none" } as const;
+        if (turns.length !== 1) return { status: "ambiguous" } as const;
+
+        const turn = turns[0]!;
+        const identity = s.identities.find((candidate) => !candidate.revokedAt
+          && candidate.sessionId === turn.sessionId
+          && normalizeHandle(candidate.handle) === normalizeHandle(turn.handle)
+          && sameConnectionProvider(candidate.provider, turn.provider));
+        const claim = s.connectionClaims.find((candidate) => candidate.sessionId === turn.sessionId
+          && normalizeHandle(candidate.handle) === normalizeHandle(turn.handle)
+          && sameConnectionProvider(candidate.provider, turn.provider)
+          && candidate.ownerProcessId === expected.processId);
+        if (!identity || !claim) return { status: "unavailable" } as const;
+
+        let binding = claim.bindingId
+          ? s.connectionBindings.find((candidate) => candidate.bindingId === claim.bindingId
+            && candidate.claimId === claim.claimId
+            && candidate.sessionId === turn.sessionId
+            && normalizeHandle(candidate.handle) === normalizeHandle(turn.handle)
+            && sameConnectionProvider(candidate.provider, turn.provider))
+          : undefined;
+        if (claim.bindingId && !binding) return { status: "unavailable" } as const;
+        if (!binding) {
+          binding = {
+            bindingId: newConnectionId(),
+            claimId: claim.claimId,
+            handle: claim.handle,
+            provider: claim.provider,
+            sessionId: claim.sessionId,
+            ...(claim.cwd ? { cwd: claim.cwd } : {}),
+            ownerProcessId: expected.processId,
+            boundAt: at.toISOString(),
+          };
+          claim.bindingId = binding.bindingId;
+          claim.boundAt = binding.boundAt;
+          s.connectionBindings = [...s.connectionBindings, binding].slice(-MAX_CONNECTION_RECORDS);
+        }
+        turn.expiresAt = new Date(atMs + PROVIDER_TURN_TTL_MS).toISOString();
+        return { status: "resolved", binding } as const;
       });
     },
 
@@ -1072,6 +1283,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         // eligible or the previous owner is still demonstrably alive.
         const activeBindings = s.connectionBindings.filter((binding) => {
           if (provider && !sameConnectionProvider(binding.provider, provider)) return false;
+          if (expected.sessionId && binding.sessionId !== expected.sessionId) return false;
+          if (expected.cwd !== undefined && !sameConnectionCwd(binding.cwd, expected.cwd)) return false;
           const claim = s.connectionClaims.find((candidate) => candidate.claimId === binding.claimId);
           return claim?.bindingId === binding.bindingId && active(binding.sessionId, binding.handle, binding.provider);
         });
@@ -1129,7 +1342,11 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           return null;
         }
 
-        const providerOnlyExpected: BindConnectionInput = provider ? { provider } : {};
+        const providerOnlyExpected: BindConnectionInput = {
+          ...(provider ? { provider } : {}),
+          ...(expected.sessionId ? { sessionId: expected.sessionId } : {}),
+          ...(expected.cwd !== undefined ? { cwd: expected.cwd } : {}),
+        };
         const activeClaims = s.connectionClaims.filter((claim) => !claim.bindingId
           && usableConnectionClaim(claim, at.getTime(), providerOnlyExpected)
           && active(claim.sessionId, claim.handle, claim.provider));
@@ -1151,6 +1368,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         pruneStaleUnboundConnectionClaims(s, at, { provider });
         const matchingBindings = s.connectionBindings.filter((binding) => (!provider || sameConnectionProvider(binding.provider, provider))
           && (processId === undefined || binding.ownerProcessId === processId)
+          && (expected.cwd === undefined || sameConnectionCwd(binding.cwd, expected.cwd))
           && active(binding.sessionId, binding.handle, binding.provider));
         if (matchingBindings.length === 1) return matchingBindings[0];
         if (matchingBindings.length > 1) return null;
@@ -1202,7 +1420,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       this.registerEndpoint({ provider, sessionId: session.sessionId, cwd: folder, seenAt: new Date(at).toISOString() });
       if (!this.identityTokenFor(handle, session.sessionId)) this.issueIdentity(handle, provider, session.sessionId);
       try {
-        this.issueConnectionClaim({ handle, provider, sessionId: session.sessionId, cwd: folder, ownerProcessId: input.processId, continuation: true });
+        this.issueConnectionClaim({ handle, provider, sessionId: session.sessionId, cwd: folder, ownerProcessId: input.processId });
       } catch {
         return null;
       }
@@ -1252,10 +1470,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
       this.registerEndpoint({ provider, sessionId, ...(input.cwd ? { cwd: input.cwd } : {}) });
       if (!this.identityTokenFor(handle, sessionId)) this.issueIdentity(handle, provider, sessionId);
+      let claim: ConnectionClaim;
       try {
         // This is a live provider observation, not a continuation guess. The
-        // exact session id and current process are the ownership proof.
-        this.issueConnectionClaim({
+        // exact session id and current process are the ownership proof. Bind
+        // the claim we just reconciled; provider-wide lookup can otherwise
+        // return another active session's durable binding.
+        claim = this.issueConnectionClaim({
           handle,
           provider,
           sessionId,
@@ -1265,7 +1486,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       } catch {
         return null;
       }
-      return this.bindConnectionForProcess({ provider, ...(input.processId !== undefined ? { processId: input.processId } : {}) });
+      if (claim.sessionId !== sessionId) return null;
+      const binding = this.bindConnectionClaim(claim.claimId, {
+        provider,
+        ...(input.processId !== undefined ? { processId: input.processId } : {}),
+      });
+      if (!binding || binding.sessionId !== sessionId || !sameConnectionProvider(binding.provider, provider)) return null;
+      return binding;
     },
 
     /** Returns the verified provider identity behind a private binding, or null if it was revoked. */
@@ -1568,6 +1795,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           if (task.delivery?.state === "sending" || task.delivery?.state === "uncertain") continue;
           const failedPush = task.delivery?.state === "failed";
           if (task.approval === "denied" || task.approval === "expired"
+            || task.receipt?.state === "canceled"
             || task.delivery?.state === "queued" || task.delivery?.state === "done" || task.resultSummary
             || at.getTime() - Date.parse(task.createdAt) > maxAge) {
             cursor = Math.max(cursor, task.seq);
@@ -1603,6 +1831,12 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
             source: "prompt",
             presentedAt: task.deliveredAt,
           });
+          recordTaskReceipt(task, {
+            state: "provider_received",
+            at: task.deliveredAt,
+            source: "prompt",
+            sessionId: task.targetSession ?? sessionId,
+          });
           cursor = Math.max(cursor, task.seq);
           claimed.push(task);
           if (firstDelivery) pushEvent(s, { kind: "task.delivered", taskId: task.id, handle: task.to, text: `${task.id} was read by @${task.to}'s session` });
@@ -1616,7 +1850,22 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const t = s.tasks.find((x) => x.id === id);
         if (t) {
+          const wasPending = t.approval === "pending";
           t.approval = approval;
+          // Agent-originated native Claude work becomes eligible for the resident
+          // delivery pump only after the owner's explicit approval. Previously
+          // this transition changed only the approval field, so the pump (which
+          // scans deferred work) never saw it; delivery waited for a later prompt
+          // hook or manual inbox read. Keep room tasks, other transports, stale
+          // work, and any task with prior delivery history out of this path.
+          if (approval === "approved" && wasPending
+            && t.origin === "agent_initiated"
+            && normalizeHandle(t.to) === "claude"
+            && !t.delivery && !t.resultSummary && !t.deliveredAt && !t.deliveredSession
+            && t.receipt?.state !== "canceled"
+            && isFreshInboxTask(t.createdAt, now().getTime(), inboxMaxAgeMs())) {
+            t.delivery = { state: "deferred", attempts: 0 };
+          }
           if (approval === "approved" || approval === "denied") pushEvent(s, { kind: approval === "approved" ? "task.approved" : "task.denied", taskId: id, handle: t.to, text: `${id} ${approval}` });
         }
         return t;
@@ -1627,12 +1876,19 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     claimCodexDelivery(id: string): Task | undefined {
       return update((s) => {
         const task = s.tasks.find((item) => item.id === id);
-        if (!task || task.to !== "codex" || task.resultSummary || task.deliveredAt || !canQueue(task)
+        if (!task || task.to !== "codex" || task.resultSummary || task.deliveredAt || task.receipt?.state === "canceled" || !canQueue(task)
           || !isFreshInboxTask(task.createdAt, now().getTime(), inboxMaxAgeMs())) return undefined;
         if (task.delivery && task.delivery.state !== "failed" && task.delivery.state !== "deferred") return undefined;
         const claimedAt = now().toISOString();
         task.delivery = { state: "sending", attempts: (task.delivery?.attempts ?? 0) + 1, claimedAt };
         applyTaskLifecycle(task, { state: "queued", source: "push", queuedAt: claimedAt });
+        recordTaskReceipt(task, {
+          state: "dispatched",
+          at: claimedAt,
+          attempt: task.delivery.attempts,
+          source: "provider-transport",
+          ...(task.delivery.threadId ? { sessionId: task.delivery.threadId } : {}),
+        });
         return task;
       });
     },
@@ -1642,21 +1898,32 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const t = s.tasks.find((x) => x.id === id);
         if (!t) return undefined;
-        if (t.delivery?.state === "done" || t.resultSummary) return t;
+        if (t.delivery?.state === "done" || t.resultSummary || t.receipt?.state === "canceled") return t;
+        const at = now().toISOString();
+        const receiptState = receiptStateForDelivery(t, patch.state);
+        rememberDelivery(t);
         t.delivery = { attempts: 0, ...t.delivery, ...patch,
           ...(patch.error ? { error: redactSecrets(patch.error).slice(0, 500) } : {}) };
         if (patch.state === "sending") {
-          applyTaskLifecycle(t, { state: "queued", sessionId: patch.threadId ?? t.deliveredSession, source: "push", queuedAt: t.delivery.claimedAt ?? now().toISOString() });
+          applyTaskLifecycle(t, { state: "queued", sessionId: patch.threadId ?? t.deliveredSession, source: "push", queuedAt: t.delivery.claimedAt ?? at });
         } else if (patch.state === "queued") {
-          applyTaskLifecycle(t, { state: "acknowledged", sessionId: patch.threadId ?? t.deliveredSession, source: "push", acknowledgedAt: t.delivery.queuedAt ?? now().toISOString() });
+          applyTaskLifecycle(t, { state: "acknowledged", sessionId: patch.threadId ?? t.deliveredSession, source: "push", acknowledgedAt: t.delivery.queuedAt ?? at });
         } else if (patch.state === "failed") {
-          applyTaskLifecycle(t, { state: "failed", sessionId: t.deliveredSession, source: t.deliverySource, error: patch.error, completedAt: now().toISOString() });
+          applyTaskLifecycle(t, { state: "failed", sessionId: t.deliveredSession, source: t.deliverySource, error: patch.error, completedAt: at });
         }
+        recordTaskReceipt(t, {
+          state: receiptState,
+          at,
+          attempt: t.delivery.attempts,
+          source: patch.state === "failed" || patch.state === "uncertain" ? "provider-transport" : "provider-transport",
+          ...(patch.threadId ?? t.deliveredSession ? { sessionId: patch.threadId ?? t.deliveredSession } : {}),
+          ...(patch.error ? { error: patch.error } : {}),
+        });
         if (patch.state === "uncertain") pushEvent(s, { kind: "task.delivery_uncertain", taskId: id, handle: t.to,
           text: `${id} delivery to @${t.to} could not be confirmed; it will not be resent automatically` });
         if (patch.state === "queued" && patch.threadId && !t.deliveredSession) t.deliveredSession = patch.threadId;
         if (patch.state === "queued" && !t.deliveredAt) {
-          t.deliveredAt = now().toISOString();
+          t.deliveredAt = at;
           t.deliverySource = "push";
           pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `${id} pushed into @${t.to}'s session` });
         }
@@ -1685,6 +1952,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         // cursor before delivery metadata existed. Neither may be replayed.
         if (!task || normalizeHandle(task.to) !== handle
           || (task.delivery && task.delivery.state !== "deferred")
+          || task.receipt?.state === "canceled"
           || task.deliveredAt || task.resultSummary || !canQueue(task)) return undefined;
         const cursor = s.cursors[cursorKey(handle, input.sessionId, folder)] ?? 0;
         if (task.seq <= cursor || !(task.targetSession === input.sessionId
@@ -1692,8 +1960,16 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           || (task.cwd && (!folder || normalizeSessionFolder(task.cwd) !== folder))) return undefined;
         const createdAt = Date.parse(task.createdAt);
         if (!Number.isFinite(createdAt) || at.getTime() - createdAt < 0 || at.getTime() - createdAt > input.maxAgeMs) return undefined;
-        task.delivery = { attempts: 1, state: "sending", threadId: input.sessionId, claimedAt: at.toISOString() };
+        rememberDelivery(task);
+        task.delivery = { attempts: 1, state: "sending", threadId: input.sessionId, claimedAt: at.toISOString(), transport: "opencode-session-api" };
         task.deliveredSession = input.sessionId;
+        recordTaskReceipt(task, {
+          state: "dispatched",
+          at: at.toISOString(),
+          attempt: task.delivery.attempts,
+          source: "provider-transport",
+          sessionId: input.sessionId,
+        });
         applyTaskLifecycle(task, { state: "presented", sessionId: input.sessionId, source: "poll", presentedAt: at.toISOString() });
         s.cursors[cursorKey(handle, input.sessionId, folder)] = Math.max(cursor, task.seq);
         return task;
@@ -1709,6 +1985,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (!identity) return false;
         const task = s.tasks.find((candidate) => candidate.id === id);
         if (!task || normalizeHandle(task.to) !== handle) return false;
+        if (task.receipt?.state === "canceled") return false;
         const delivery = task.delivery;
         if (delivery?.threadId !== sessionId) return false;
         if (outcome.state === "queued" && (delivery.state === "queued" || delivery.state === "done")) return true;
@@ -1719,19 +1996,25 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         // uncertain transport result, and must be closable without replaying
         // the already-created provider turn.
         const canRecordExecutionFailure = outcome.state === "failed" && (delivery.state === "sending" || delivery.state === "queued");
-        if (delivery.state !== "sending" && !canRecordExecutionFailure) return false;
+        if (delivery.state !== "sending" && !(outcome.state === "queued" && delivery.state === "uncertain") && !canRecordExecutionFailure) return false;
         const at = now().toISOString();
         if (outcome.state === "queued") {
+          rememberDelivery(task);
           task.delivery = { ...delivery, state: "queued", queuedAt: at };
           task.deliveredAt = at;
+          recordTaskReceipt(task, { state: "provider_received", at, attempt: task.delivery.attempts, source: "provider-transport", sessionId });
           applyTaskLifecycle(task, { state: "acknowledged", sessionId, source: "poll", acknowledgedAt: at });
           pushEvent(s, { kind: "task.delivered", taskId: id, handle, text: `${id} accepted by @opencode's session` });
         } else if (outcome.state === "failed") {
+          rememberDelivery(task);
           task.delivery = { ...delivery, state: "failed", failedAt: at, error: redactSecrets(outcome.error).slice(0, 240) };
+          recordTaskReceipt(task, { state: "failed", at, attempt: task.delivery.attempts, source: "provider-transport", sessionId, error: outcome.error });
           applyTaskLifecycle(task, { state: "failed", sessionId, source: "poll", error: outcome.error, completedAt: at });
           pushEvent(s, { kind: "task.delivery_failed", taskId: id, handle, text: `${id} was rejected by @opencode's session` });
         } else {
+          rememberDelivery(task);
           task.delivery = { ...delivery, state: "uncertain", uncertainAt: at, error: redactSecrets(outcome.error).slice(0, 240) };
+          recordTaskReceipt(task, { state: "uncertain", at, attempt: task.delivery.attempts, source: "provider-transport", sessionId, error: outcome.error });
           pushEvent(s, { kind: "task.delivery_uncertain", taskId: id, handle, text: `${id} delivery to @opencode could not be confirmed; it will not be resent automatically` });
         }
         return true;
@@ -1775,13 +2058,33 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
+    /**
+     * Closes a task without pretending that its provider transport failed.
+     * The canonical receipt is the cancellation fence used by every delivery
+     * claimant and by the provider-neutral delivery pump.
+     */
+    cancelTask(id: string, reason = "Task canceled by the owner."): Task | undefined {
+      return update((s) => {
+        const task = s.tasks.find((candidate) => candidate.id === id);
+        if (!task || task.resultSummary || task.receipt?.state === "completed" || task.receipt?.state === "canceled") return task;
+        const at = now().toISOString();
+        recordTaskReceipt(task, { state: "canceled", at, source: "owner-broker", error: reason });
+        pushEvent(s, { kind: "task.canceled", taskId: id, handle: task.to, text: `${id} was canceled: ${redactSecrets(reason).slice(0, 160)}` });
+        return task;
+      });
+    },
+
     setResult(id: string, summary: string): Task | undefined {
       return update((s) => {
         const t = s.tasks.find((x) => x.id === id);
         if (!t) return undefined;
+        if (t.receipt?.state === "canceled") return t;
         const clean = redactSecrets(summary.trim());
-        if (t.delivery?.state === "queued") t.delivery = { ...t.delivery, state: "done" };
-        applyTaskLifecycle(t, { state: "completed", sessionId: t.deliveredSession, source: t.deliverySource, completedAt: now().toISOString() });
+        const at = now().toISOString();
+        rememberDelivery(t);
+        if (t.delivery) t.delivery = { ...t.delivery, state: "done" };
+        recordTaskReceipt(t, { state: "completed", at, source: "provider-session", ...(t.deliveredSession ? { sessionId: t.deliveredSession } : {}) });
+        applyTaskLifecycle(t, { state: "completed", sessionId: t.deliveredSession, source: t.deliverySource, completedAt: at });
         t.resultSummary = clean.length > MAX_RESULT_SUMMARY_CHARS ? clean.slice(0, MAX_RESULT_SUMMARY_CHARS - TRUNCATION_MARKER.length) + TRUNCATION_MARKER : clean;
         pushEvent(s, { kind: "task.result", taskId: id, handle: t.from, text: `${id} finished: ${t.resultSummary.slice(0, 120)}` });
         return t;
@@ -1814,13 +2117,17 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           if (task.resultSummary === bounded) return { ok: true, alreadyRecorded: true };
           return { ok: false, error: `Task ${id} already has a recorded result; it was not overwritten.` };
         }
+        if (task.receipt?.state === "canceled") return { ok: false, error: `Task ${id} was canceled; its late result was refused.` };
         const inFlightStage = s.stageOperations.find((operation) => operation.taskId === id && operation.state === "running");
         if (inFlightStage) {
           return { ok: false, error: `Task ${id} still has an in-flight desktop-stage operation; wait for operation ${inFlightStage.key} to settle before recording the result.` };
         }
         if (task.targetSession && task.targetSession === identity.sessionId) task.deliveredSession = identity.sessionId;
-        if (task.delivery?.state === "queued") task.delivery = { ...task.delivery, state: "done" };
-        applyTaskLifecycle(task, { state: "completed", sessionId: identity.sessionId, source: task.deliverySource, completedAt: now().toISOString() });
+        const at = now().toISOString();
+        rememberDelivery(task);
+        if (task.delivery) task.delivery = { ...task.delivery, state: "done" };
+        recordTaskReceipt(task, { state: "completed", at, source: "provider-session", sessionId: identity.sessionId });
+        applyTaskLifecycle(task, { state: "completed", sessionId: identity.sessionId, source: task.deliverySource, completedAt: at });
         task.resultSummary = bounded;
         pushEvent(s, { kind: "task.result", taskId: id, handle: task.from, text: `${id} finished: ${task.resultSummary.slice(0, 120)}` });
         return { ok: true };

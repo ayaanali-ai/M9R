@@ -139,6 +139,33 @@ test("desktop transport maps decisions and typed messages onto the overlay's com
   if (typeof stop === "function") stop();
 });
 
+test("desktop transport prefers the broker-owned state and sends decisions through the owner broker", async () => {
+  const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+  const brokerState = JSON.stringify({
+    type: "ui-state",
+    agents: [{ id: "claude", provider: "claude", folder: "C:/demo", state: "idle", doing: "" }],
+    thread: [],
+    approvals: [{ id: "A1", agent: "claude", provider: "claude", text: "Approve the harmless action." }],
+    desktopPill: true,
+  });
+  const transport = createDesktopTransport(async (command, args) => {
+    calls.push([command, args]);
+    if (command === "read_pill_state") return brokerState;
+    return "";
+  });
+  const snapshots: unknown[] = [];
+  const stop = transport.subscribe((snapshot) => snapshots.push(snapshot));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal((snapshots.at(-1) as { agents?: Array<{ handle?: string }> })?.agents?.[0]?.handle, "claude");
+  assert.equal(transport.capabilities?.allowForADay, false, "the broker-owned UI does not advertise a legacy day grant");
+  await transport.decide("A1", "allow");
+  assert.deepEqual(calls.find(([command]) => command === "pill_decide")?.[1], { approvalId: "A1", decision: "allow" });
+  assert.equal(calls.some(([command]) => command === "decide"), false, "broker-owned approvals must not use the legacy feed command");
+  await assert.rejects(transport.decide("A1", "allow_day"), /unavailable/);
+  if (typeof stop === "function") stop();
+});
+
 test("an undeliverable message offers a session link only when the feed says it is linkable, and the desktop transport links through the overlay commands", async () => {
   const snap = fromFeed({
     needsYou: [

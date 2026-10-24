@@ -80,7 +80,7 @@ export function resolveOpenCodeHookInvocation(input: {
   sourceHookPath?: string;
   sourceNodeArgs?: readonly string[];
   /** OpenCode also polls an active session and acknowledges accepted live prompts. */
-  event?: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" | "OpenCodeExecutionFailed";
+  event?: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" | "OpenCodeExecutionFailed" | "ProviderTurnEnd";
 }): OpenCodeHookInvocation {
   const event = input.event ?? "SessionStart";
   if (input.engineExecutable?.trim()) {
@@ -173,12 +173,14 @@ export function buildOpenCodeIdentityPluginSource(
   deliveredInvocation?: OpenCodeHookInvocation,
   deliveryFailedInvocation?: OpenCodeHookInvocation,
   executionFailedInvocation?: OpenCodeHookInvocation,
+  turnEndInvocation?: OpenCodeHookInvocation,
 ): string {
   const prompt = promptInvocation ?? { command: invocation.command, args: ["m9r-hook", "UserPromptSubmit", "opencode"] };
   const poll = pollInvocation ?? { command: invocation.command, args: ["m9r-hook", "OpenCodePoll", "opencode"] };
   const delivered = deliveredInvocation ?? { command: invocation.command, args: ["m9r-hook", "OpenCodeDelivered", "opencode"] };
   const deliveryFailed = deliveryFailedInvocation ?? { command: invocation.command, args: ["m9r-hook", "OpenCodeDeliveryFailed", "opencode"] };
   const executionFailed = executionFailedInvocation ?? { command: invocation.command, args: ["m9r-hook", "OpenCodeExecutionFailed", "opencode"] };
+  const turnEnd = turnEndInvocation ?? { command: invocation.command, args: ["m9r-hook", "ProviderTurnEnd", "opencode"] };
   const parser = serializeGeneratedFunction(extractOpenCodeAdditionalContext);
   const modelSelector = serializeGeneratedFunction(chooseOpenCodeModelFromCatalog);
   return `import { spawn } from "node:child_process";
@@ -195,17 +197,29 @@ const M9R_HOOK_DELIVERY_FAILED_COMMAND = ${JSON.stringify(deliveryFailed.command
 const M9R_HOOK_DELIVERY_FAILED_ARGS = ${JSON.stringify(deliveryFailed.args)};
 const M9R_HOOK_EXECUTION_FAILED_COMMAND = ${JSON.stringify(executionFailed.command)};
 const M9R_HOOK_EXECUTION_FAILED_ARGS = ${JSON.stringify(executionFailed.args)};
+const M9R_HOOK_TURN_END_COMMAND = ${JSON.stringify(turnEnd.command)};
+const M9R_HOOK_TURN_END_ARGS = ${JSON.stringify(turnEnd.args)};
 const M9R_HOOK_TIMEOUT_MS = 5000;
 const M9R_MAX_CACHED_SESSIONS = 256;
 const M9R_POLL_INTERVAL_MS = 1500;
 const M9R_POLL_RETRY_MS = 5000;
 const M9R_SESSION_DISCOVERY_INTERVAL_MS = 5000;
-const M9R_IDLE_FAILURE_GRACE_MS = 2000;
 const M9R_SESSION_BOOTSTRAPS = new Map();
 const M9R_SESSION_POLLERS = new Map();
 const M9R_SESSION_DIRECTORIES = new Map();
 const M9R_SESSION_DISCOVERY_TIMERS = new Map();
 const M9R_ACTIVE_TASKS = new Map();
+const M9R_REPORTED_ISSUES = new Set();
+
+function reportM9rIssue(key, message) {
+  if (M9R_REPORTED_ISSUES.has(key)) return;
+  M9R_REPORTED_ISSUES.add(key);
+  if (typeof console !== "undefined" && typeof console.warn === "function") console.warn("[M9R] " + message);
+}
+
+function clearM9rIssue(key) {
+  M9R_REPORTED_ISSUES.delete(key);
+}
 
 ${parser}
 
@@ -216,10 +230,17 @@ function runM9rHook(command, args, sessionID, cwd, extra = {}) {
     let stdout = "";
     let settled = false;
     let oversized = false;
-    const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "ignore"],
-      windowsHide: true,
-    });
+    let child;
+    try {
+      child = spawn(command, args, {
+        stdio: ["pipe", "pipe", "ignore"],
+        windowsHide: true,
+      });
+    } catch {
+      reportM9rIssue("local-hook", "OpenCode could not start M9R's local hook; automatic delivery will retry.");
+      resolve(null);
+      return;
+    }
     const finish = (value) => {
       if (settled) return;
       settled = true;
@@ -228,6 +249,7 @@ function runM9rHook(command, args, sessionID, cwd, extra = {}) {
     };
     const timeout = setTimeout(() => {
       child.kill();
+      reportM9rIssue("local-hook", "M9R's local hook timed out; automatic delivery will retry.");
       finish(null);
     }, M9R_HOOK_TIMEOUT_MS);
     timeout.unref?.();
@@ -236,14 +258,29 @@ function runM9rHook(command, args, sessionID, cwd, extra = {}) {
       if (stdout.length + chunk.length > 262144) {
         oversized = true;
         child.kill();
+        reportM9rIssue("local-hook", "M9R's local hook returned an oversized response; automatic delivery will retry.");
         finish(null);
         return;
       }
       stdout += chunk;
     });
-    child.once("error", () => finish(null));
-    child.once("close", (code) => finish(!oversized && code === 0 ? stdout : null));
-    child.stdin.once("error", () => finish(null));
+    child.once("error", () => {
+      reportM9rIssue("local-hook", "OpenCode could not start M9R's local hook; automatic delivery will retry.");
+      finish(null);
+    });
+    child.once("close", (code) => {
+      if (!oversized && code === 0) {
+        clearM9rIssue("local-hook");
+        finish(stdout);
+      } else {
+        reportM9rIssue("local-hook", "M9R's local hook exited unsuccessfully; automatic delivery will retry.");
+        finish(null);
+      }
+    });
+    child.stdin.once("error", () => {
+      reportM9rIssue("local-hook", "OpenCode could not send the session to M9R's local hook; automatic delivery will retry.");
+      finish(null);
+    });
     child.stdin.end(JSON.stringify({ session_id: sessionID, cwd, ...extra }));
   });
 }
@@ -266,10 +303,11 @@ function runM9rDelivered(sessionID, cwd, taskID) {
   return runM9rHook(M9R_HOOK_DELIVERED_COMMAND, M9R_HOOK_DELIVERED_ARGS, sessionID, cwd, { task_id: taskID });
 }
 
-function runM9rDeliveryFailed(sessionID, cwd, taskID, deliveryError) {
+function runM9rDeliveryFailed(sessionID, cwd, taskID, deliveryError, detail) {
   return runM9rHook(M9R_HOOK_DELIVERY_FAILED_COMMAND, M9R_HOOK_DELIVERY_FAILED_ARGS, sessionID, cwd, {
     task_id: taskID,
     delivery_error: deliveryError,
+    ...(typeof detail === "string" ? { delivery_detail: detail.slice(0, 240) } : {}),
   });
 }
 
@@ -279,6 +317,10 @@ function runM9rExecutionFailed(sessionID, cwd, taskID, executionError, detail) {
     execution_error: executionError,
     ...(typeof detail === "string" && detail.length > 0 ? { execution_detail: detail.slice(0, 240) } : {}),
   });
+}
+
+function runM9rTurnEnd(sessionID, cwd) {
+  return runM9rHook(M9R_HOOK_TURN_END_COMMAND, M9R_HOOK_TURN_END_ARGS, sessionID, cwd);
 }
 
 function parseOpenCodeTask(raw) {
@@ -310,10 +352,10 @@ function parseOpenCodeDeliveryAck(raw, taskID) {
 
 async function settleOpenCodeTask(sessionID, cwd, entry) {
   if (!entry.pendingSettlement) return false;
-  const { taskID, outcome } = entry.pendingSettlement;
+  const { taskID, outcome, detail } = entry.pendingSettlement;
   const raw = outcome === "accepted"
     ? await runM9rDelivered(sessionID, cwd, taskID).catch(() => null)
-    : await runM9rDeliveryFailed(sessionID, cwd, taskID, outcome).catch(() => null);
+    : await runM9rDeliveryFailed(sessionID, cwd, taskID, outcome, detail).catch(() => null);
   if (!parseOpenCodeDeliveryAck(raw, taskID)) return false;
   entry.pendingSettlement = null;
   return true;
@@ -335,26 +377,6 @@ function eventError(event) {
   return "provider execution failed";
 }
 
-function messageText(message) {
-  const parts = Array.isArray(message?.parts) ? message.parts : [];
-  return parts.filter((part) => part?.type === "text" && typeof part?.text === "string").map((part) => part.text).join("\\n");
-}
-
-function sessionHasAssistantResponse(messages, marker) {
-  const items = Array.isArray(messages?.data) ? messages.data : Array.isArray(messages) ? messages : [];
-  let markerSeen = false;
-  for (const item of items) {
-    const info = item?.info ?? item;
-    const role = info?.role;
-    if (role === "user" && messageText(item).includes(marker)) markerSeen = true;
-    if (markerSeen && role === "assistant") {
-      if (info?.error) return false;
-      return true;
-    }
-  }
-  return false;
-}
-
 async function reportOpenCodeExecutionFailure(sessionID, cwd, active, error, detail) {
   if (!active || active.reported) return;
   active.reported = true;
@@ -365,26 +387,6 @@ async function reportOpenCodeExecutionFailure(sessionID, cwd, active, error, det
   } else {
     active.reported = false;
   }
-}
-
-function inspectOpenCodeIdle(sessionID, cwd, client, active) {
-  if (active.idleTimer || active.reported || typeof client?.session?.messages !== "function") return;
-  active.idleTimer = setTimeout(async () => {
-    active.idleTimer = null;
-    if (M9R_ACTIVE_TASKS.get(sessionID) !== active || active.reported) return;
-    try {
-      const messages = await client.session.messages({ path: { id: sessionID } });
-      if (sessionHasAssistantResponse(messages, active.marker)) {
-        M9R_ACTIVE_TASKS.delete(sessionID);
-        return;
-      }
-      await reportOpenCodeExecutionFailure(sessionID, cwd, active, "idle_without_response", "OpenCode became idle without an assistant response.");
-    } catch {
-      // A failed inspection is not evidence that the provider failed. Keep the
-      // task active so a later session event or a fresh idle boundary can retry.
-    }
-  }, M9R_IDLE_FAILURE_GRACE_MS);
-  active.idleTimer.unref?.();
 }
 
 function openCodeErrorText(value) {
@@ -404,6 +406,9 @@ function isOpenCodeRequestShapeError(value) {
 }
 
 function openCodeSessionTransport(client) {
+  // OpenCode's documented plugin context supplies its SDK client. Keep all
+  // outbound prompts on that supported, session-addressed API; do not depend
+  // on an undocumented ctx.session.prompt surface.
   const session = client?.session;
   if (typeof session?.promptAsync === "function") {
     return {
@@ -476,7 +481,7 @@ async function pollOpenCodeSession(sessionID, cwd, client, entry) {
     // The server atomically claims before exposing this prompt. Never replay it, including after
     // an ambiguous transport failure: replaying could create a duplicate user turn.
     try {
-      const active = { taskID: task.task_id, marker: "[M9R " + task.task_id + "]", idleTimer: null, reported: false };
+      const active = { taskID: task.task_id, idleTimer: null, reported: false };
       M9R_ACTIVE_TASKS.set(sessionID, active);
       let model;
       try {
@@ -493,12 +498,12 @@ async function pollOpenCodeSession(sessionID, cwd, client, entry) {
         if (active.idleTimer) clearTimeout(active.idleTimer);
         M9R_ACTIVE_TASKS.delete(sessionID);
       }
-      entry.pendingSettlement = { taskID: task.task_id, outcome: response?.error ? "session_rejected" : "accepted" };
-    } catch {
+      entry.pendingSettlement = { taskID: task.task_id, outcome: response?.error ? "session_rejected" : "accepted", detail: response?.error ? openCodeErrorText(response.error) : undefined };
+    } catch (error) {
       const active = M9R_ACTIVE_TASKS.get(sessionID);
       if (active?.idleTimer) clearTimeout(active.idleTimer);
       M9R_ACTIVE_TASKS.delete(sessionID);
-      entry.pendingSettlement = { taskID: task.task_id, outcome: "unknown" };
+      entry.pendingSettlement = { taskID: task.task_id, outcome: "unknown", detail: openCodeErrorText(error) };
     }
 
     if (!await settleOpenCodeTask(sessionID, cwd, entry)) entry.retryAfter = Date.now() + M9R_POLL_RETRY_MS;
@@ -508,7 +513,12 @@ async function pollOpenCodeSession(sessionID, cwd, client, entry) {
 }
 
 function startOpenCodePoller(sessionID, cwd, client) {
-  if (M9R_SESSION_POLLERS.has(sessionID) || !openCodeSessionTransport(client)) return;
+  if (M9R_SESSION_POLLERS.has(sessionID)) return;
+  if (!openCodeSessionTransport(client)) {
+    reportM9rIssue("session-transport", "This OpenCode session exposes no supported outbound prompt method; automatic delivery is unavailable until its session API is available.");
+    return;
+  }
+  clearM9rIssue("session-transport");
   if (M9R_SESSION_POLLERS.size >= M9R_MAX_CACHED_SESSIONS) {
     const oldest = M9R_SESSION_POLLERS.keys().next().value;
     if (oldest !== undefined) {
@@ -647,7 +657,11 @@ async function startKnownOpenCodeSessions(cwd, client, data) {
     // and its sessions alive. Do not make the first failed discovery a
     // permanent loss of automatic delivery.
     const listedResult = await listOpenCodeSessions(cwd, client);
-    if (listedResult === null || listedResult.value?.error) return;
+    if (listedResult === null || listedResult.value?.error) {
+      reportM9rIssue("session-discovery", "OpenCode's live sessions are not discoverable yet; automatic delivery is retrying.");
+      return;
+    }
+    clearM9rIssue("session-discovery");
     const sessions = openCodeSessionList(listedResult.value);
     for (const session of sessions) {
       const sessionID = session?.id;
@@ -656,7 +670,14 @@ async function startKnownOpenCodeSessions(cwd, client, data) {
       if (!sessionCwd) continue;
       M9R_SESSION_DIRECTORIES.set(sessionID, sessionCwd);
       const status = await readOpenCodeSessionStatus(sessionID, sessionCwd, client, data);
-      if (!isOpenCodeLiveStatus(openCodeStatusFor(status, sessionID))) continue;
+      const sessionStatus = openCodeStatusFor(status, sessionID);
+      if (!isOpenCodeLiveStatus(sessionStatus)) {
+        if (status === null || sessionStatus?.error) {
+          reportM9rIssue("session-status", "OpenCode could not confirm a session is live; M9R will not guess which session should receive work.");
+        }
+        continue;
+      }
+      clearM9rIssue("session-status");
       // A provider service can hot-reload this plugin without recreating its
       // already-open sessions. Re-publish the session claim before polling so
       // the MCP connection cannot remain transport-connected but anonymous
@@ -667,13 +688,14 @@ async function startKnownOpenCodeSessions(cwd, client, data) {
   } catch {
     // A server can be ready before its session endpoint; the active transform
     // will still start a poller for the session that is actually in use.
+    reportM9rIssue("session-discovery", "OpenCode session discovery failed; automatic delivery is retrying.");
   } finally {
     // Keep discovery alive while the provider process is resident. This is a
     // bounded local reconciliation loop, not inbox polling: it only asks the
     // provider for its active sessions and starts an M9R poller for sessions
     // that the provider itself reports as live. The timer is unref'd so it
     // cannot keep a shutting-down provider alive.
-    scheduleKnownOpenCodeSessions(cwd, client, data);
+    scheduleKnownOpenCodeSessions(cwd, client, data, M9R_SESSION_DISCOVERY_INTERVAL_MS);
   }
 }
 
@@ -744,9 +766,17 @@ async function handleOpenCodeEvent(cwd, client, event) {
     stopOpenCodePoller(sessionID);
     M9R_SESSION_BOOTSTRAPS.delete(sessionID);
     M9R_SESSION_DIRECTORIES.delete(sessionID);
+    await runM9rTurnEnd(sessionID, sessionCwd).catch(() => null);
     const deleted = M9R_ACTIVE_TASKS.get(sessionID);
     if (deleted) await reportOpenCodeExecutionFailure(sessionID, sessionCwd, deleted, "session_deleted", "OpenCode session was deleted before the M9R task completed.");
     return;
+  }
+
+  // Close the process/session turn binding on every real idle boundary, even
+  // when no M9R task is active. Shared OpenCode MCP processes can host many
+  // sessions; leaving old turns open makes later tool calls falsely ambiguous.
+  if (normalized?.type === "session.idle") {
+    await runM9rTurnEnd(sessionID, sessionCwd).catch(() => null);
   }
 
   const active = M9R_ACTIVE_TASKS.get(sessionID);
@@ -759,7 +789,9 @@ async function handleOpenCodeEvent(cwd, client, event) {
     await reportOpenCodeExecutionFailure(sessionID, sessionCwd, active, "provider_execution_failed", eventError(normalized));
     return;
   }
-  if (normalized?.type === "session.idle") inspectOpenCodeIdle(sessionID, sessionCwd, client, active);
+  // An idle boundary contains no task identity. Plain prompt text cannot prove
+  // whether this task succeeded or failed; only its authenticated result can.
+  if (normalized?.type === "session.idle") M9R_ACTIVE_TASKS.delete(sessionID);
 }
 
 async function setupM9rOpenCodeV2(ctx = {}) {
@@ -770,6 +802,11 @@ async function setupM9rOpenCodeV2(ctx = {}) {
       : process.cwd();
   const client = ctx?.client ?? ctx;
   const legacy = await M9rIdentity({ directory: cwd, client, data: ctx?.data });
+  if (!openCodeSessionTransport(client)) {
+    reportM9rIssue("session-transport", "This OpenCode session exposes no supported outbound prompt method; automatic delivery is unavailable until its session API is available.");
+  } else {
+    clearM9rIssue("session-transport");
+  }
 
   if (typeof ctx?.session?.hook === "function") {
     await ctx.session.hook("context", async (event) => {
@@ -792,7 +829,7 @@ async function setupM9rOpenCodeV2(ctx = {}) {
       if (stream && typeof stream[Symbol.asyncIterator] === "function") {
         void (async () => {
           try {
-            for await (const event of stream) await handleOpenCodeEvent(cwd, client, event);
+         for await (const event of stream) await handleOpenCodeEvent(cwd, client, event);
           } catch {
             // Event delivery is advisory; the session hook remains the source of truth for task work.
           }

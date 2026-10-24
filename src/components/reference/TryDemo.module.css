@@ -1,0 +1,144 @@
+@font-face{font-family:StudyGaramond;src:url('/reference-innerwebs/a288b9bbf88db8be.woff2')}
+@font-face{font-family:StudyInstrument;src:url('/reference-innerwebs/instrument-serif-normal-400.woff2');font-style:normal}
+@font-face{font-family:StudyInstrument;src:url('/reference-innerwebs/instrument-serif-italic-400.woff2');font-style:italic}
+@font-face{font-family:StudyMicro;src:url('/reference-innerwebs/microgramma-extended-normal-700.woff2');font-weight:700}
+@font-face{font-family:StudyHaas;src:url('/reference-innerwebs/neue-haas-grotesk-display-normal-600.woff2');font-weight:600}
+
+@font-face{font-family:StudyArray;src:url('/reference-innerwebs/929333b026c6a5c7.otf')}
+
+/* Outer shell mirrors ReferenceHome: .backdrop gradient, .scanlines, .crtTop/.crtBottom, .header/.nav, .reserve */
+.page{position:relative;isolation:isolate;min-height:100vh;color:#c4b9b3;font-family:StudyGaramond,serif;font-weight:400;line-height:1.5;overflow:clip}
+.page *{box-sizing:border-box}
+.backdrop{position:fixed;inset:0;z-index:-2;background:radial-gradient(93.49% 118.46% at 100% 100%,#708cff 10%,#29222b 100%)}
+.scanlines{position:fixed;inset:0;pointer-events:none;z-index:999;opacity:.3;background:linear-gradient(hsla(0,6%,7%,0) 50%,rgba(0,0,0,.25) 0),linear-gradient(90deg,rgba(255,0,0,.06),rgba(0,255,0,.02),rgba(0,0,255,.06));background-size:100% 2px,3px 100%}
+.crtTop,.crtBottom{position:fixed;left:0;width:100%;height:50dvh;pointer-events:none;z-index:1000}.crtTop{top:0}.crtBottom{bottom:0}.crtTop img,.crtBottom img{display:block;width:100%;height:100%;object-fit:fill}
+.header{position:relative;z-index:30;padding:24px 22.88px 0}
+.nav{max-width:1089px;margin:auto;display:flex;align-items:center;justify-content:space-between;padding:12px 0}
+.back{display:flex;align-items:center;gap:10px;color:#c4b9b3;text-decoration:none;font:italic 22px/1 StudyInstrument,serif;transition:color .2s}
+.back:hover{color:#f3dd9d}
+.back img{display:block;width:auto;height:55px}
+.logoTint{filter:grayscale(1) brightness(1.65) contrast(.9)}
+.back svg{width:18px;height:18px;flex:none}
+.reserve{display:inline-flex;align-items:center;justify-content:center;font:700 20px/28px StudyGaramond,serif;letter-spacing:.015em;padding:8px 18px 10px;border:0;border-radius:6px;color:#15151a;background:#f3dd9d;text-shadow:0 1px rgb(255 255 255 / .28);box-shadow:1.79px 2.68px 1.79px rgba(0,0,0,.95);cursor:pointer;transition:filter .2s,transform .2s}
+.reserve:hover{filter:brightness(1.1);transform:translateY(-1px);color:#000}
+.reserve:active{transform:translateY(2px)}
+.back:focus-visible,.reserve:focus-visible{outline:2px solid #f3dd9d;outline-offset:6px}
+
+.intro{max-width:900px;margin:0 auto;padding:72px 22.88px 40px;text-align:center}
+.kicker{font:500 18px/28px StudyMicro,sans-serif;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#828282}
+.title{margin:14px 0 0;font:64px/58px StudyArray;letter-spacing:-.02em;color:#c4b9b3}
+.sub{margin:18px auto 0;max-width:640px;font:italic 30px/38px StudyInstrument,serif;color:#c4b9b3}
+
+@media(max-width:639px){.header{padding:24px 24px 0}.nav{padding:8px 0}.back img{height:40px}.back{font-size:18px}.reserve{font-size:15.7px;line-height:24px;padding:8px 10px 10px}.intro{padding:48px 22.4px 28px}.title{font-size:38px;line-height:36px}.sub{font-size:22px;line-height:30px}.kicker{font-size:13px}}
+@media(prefers-reduced-motion:reduce){.reserve{transition:none}}
+
+.stageWrap{position:relative;z-index:1;max-width:1089px;margin:0 auto 120px;padding:0 22.88px}
+
+.desktop{position:relative;width:100%;aspect-ratio:16/10;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.08);box-shadow:0 30px 80px rgba(0,0,0,.5);
+  font-family:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  background:radial-gradient(70% 90% at 15% 10%, rgba(120,170,255,.55), transparent 60%),radial-gradient(80% 90% at 85% 100%, rgba(60,70,160,.6), transparent 65%),linear-gradient(160deg,#2451a8 0%,#15306b 45%,#0a1736 100%)}
+.ribbon{position:absolute;inset:-10% -10%;opacity:.55;filter:blur(1px);mix-blend-mode:screen}
+
+.deskIcon{position:absolute;display:flex;flex-direction:column;align-items:center;gap:6px;width:70px}
+.deskIcon .tile{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 10px rgba(0,0,0,.3)}
+.deskIcon .lbl{font-size:10.5px;color:#f2f3f5;text-shadow:0 1px 3px rgba(0,0,0,.65)}
+.iconNotes{left:2.2%;top:6%}
+.iconPaint{left:2.2%;top:21%}
+.iconMusic{left:2.2%;top:36%}
+
+.win{position:absolute;border-radius:9px;overflow:hidden;background:#fbfbfc;box-shadow:0 24px 54px rgba(0,0,0,.5);border:1px solid rgba(0,0,0,.08)}
+.winBar{display:flex;align-items:center;gap:7px;padding:7px 10px;background:#f3f3f5;border-bottom:1px solid #e4e4e7}
+.winBar .tile{width:16px;height:16px;border-radius:4px;flex:none;display:flex;align-items:center;justify-content:center}
+.winBar .name{font-size:11px;color:#2b2b30;font-weight:600}
+.winBar .dots{margin-left:auto;display:flex;gap:6px}
+.winBar .dots span{width:11px;height:11px;border-radius:3px;background:#e4e4e7}
+.winBody{padding:13px 15px;background:#fff;position:relative}
+
+.notesWin{left:7%;top:9%;width:33%;height:40%;z-index:2}
+.paintWin{right:3%;top:16%;width:37%;height:46%;z-index:1}
+.musicWin{left:22%;bottom:5%;width:36%;height:21%;z-index:3}
+
+/* ---------- Notes: text reveals in sync with the cursor's x position (same steps, same timing) ---------- */
+.noteLine{font-size:11.5px;line-height:1.8;color:#2b2b30;overflow:hidden;white-space:nowrap;width:0;animation:line1 9s steps(26,end) infinite}
+.noteLine.l2{animation-name:line2}
+.noteLine.l3{position:relative}
+.noteLine.l3 span{display:inline-block;overflow:hidden;white-space:nowrap;width:0;vertical-align:top;animation:line3 9s steps(26,end) infinite}
+.noteLine.l3 .before{animation-name:line3Before}
+.noteLine.l3 .after{position:absolute;left:0;top:0;color:#2457b8;animation-name:line3After}
+@keyframes line1{0%,4%{width:0}26%{width:23ch}42%{width:23ch}100%{width:23ch}}
+@keyframes line2{0%,26%{width:0}36%{width:27ch}42%{width:27ch}100%{width:27ch}}
+@keyframes line3Before{0%,36%{width:0}44%,56%{width:21ch}59%{width:0}100%{width:0}}
+@keyframes line3After{0%,59%{width:0}62%,100%{width:24ch}}
+.editMark{position:absolute;left:14px;bottom:14px;right:14px;padding:6px 8px;border-radius:6px;background:#eaf2ff;border:1px solid #bcd6ff;font-size:10px;color:#2457b8;opacity:0;animation:editShow 9s ease-in-out infinite}
+@keyframes editShow{0%,56%{opacity:0;transform:translateY(4px)}59%,70%{opacity:1;transform:translateY(0)}73%,100%{opacity:0;transform:translateY(4px)}}
+
+/* ---------- Paint: the stroke draws, pauses while Codex is away, resumes after ---------- */
+.canvas{position:relative;height:84%;background:#fff}
+.canvasPath{position:absolute;inset:8px}
+.strokePath{stroke:#2f6fed;stroke-width:2.6;fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:300;stroke-dashoffset:300;animation:drawStroke 9s linear infinite}
+@keyframes drawStroke{0%,4%{stroke-dashoffset:300}40%,80%{stroke-dashoffset:150}92%,100%{stroke-dashoffset:0}}
+
+/* ---------- Music: an actual click, an actual state change ---------- */
+.track{display:flex;align-items:center;gap:10px}
+.trackArt{width:30px;height:30px;border-radius:6px;background:linear-gradient(140deg,#34D399,#1b8f66);flex:none;display:flex;align-items:center;justify-content:center}
+.trackInfo{font-size:11px;color:#6b6b74;overflow:hidden}
+.trackInfo b{display:block;color:#1c1c20;font-size:12px;margin-bottom:1px;font-weight:600}
+.transport{display:flex;align-items:center;gap:8px;margin-left:auto}
+.transport button{width:24px;height:24px;border-radius:50%;border:none;background:#f0f0f2;display:flex;align-items:center;justify-content:center;padding:0;position:relative}
+.transport button.play{animation:playPress 9s ease-in-out infinite;position:relative}
+@keyframes playPress{0%,40%{transform:scale(1);background:#f0f0f2}42%{transform:scale(.82);background:#dfe3ea}45%,100%{transform:scale(1);background:#34D399}}
+.playIcon,.pauseIcon{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;transition:opacity .15s}
+.playIcon{opacity:1;animation:playFade 9s ease-in-out infinite}
+.pauseIcon{opacity:0;animation:pauseFade 9s ease-in-out infinite}
+@keyframes playFade{0%,43%{opacity:1}45%,100%{opacity:0}}
+@keyframes pauseFade{0%,43%{opacity:0}45%,100%{opacity:1}}
+.clickRing{position:absolute;inset:-6px;border-radius:50%;border:2px solid #34D399;opacity:0;animation:clickRing 9s ease-out infinite}
+@keyframes clickRing{0%,40%{opacity:0;transform:scale(.6)}42%{opacity:.8;transform:scale(1)}50%,100%{opacity:0;transform:scale(1.4)}}
+
+/* ---------- taskbar ---------- */
+.taskbar{position:absolute;left:0;right:0;bottom:0;height:9%;display:flex;align-items:center;padding:0 16px;background:rgba(24,26,32,.68);backdrop-filter:blur(16px);border-top:1px solid rgba(255,255,255,.07)}
+.taskCenter{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:6px}
+.startOrb{width:28px;height:28px;border-radius:7px;background:linear-gradient(135deg,#ede1c9,#d9783f);display:flex;align-items:center;justify-content:center}
+.taskApp{width:28px;height:28px;border-radius:7px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center}
+
+/* ---------- cursors ---------- */
+.cursor{position:absolute;display:flex;align-items:flex-start;pointer-events:none;will-change:left,top;z-index:6}
+.cursorArrow{width:16px;height:16px;flex:none;filter:drop-shadow(0 2px 4px rgba(0,0,0,.5))}
+.cursorLabel{position:absolute;left:6px;top:19px;font:700 9.5px/1 StudyHaas,sans-serif;letter-spacing:.02em;padding:3px 7px;border-radius:6px;background:rgba(10,10,12,.85);color:#fff;white-space:nowrap;height:fit-content}
+
+/* Claude's cursor tracks the three-line typing timeline, then gives a small sign of life after the edit lands instead of going still */
+.claude{animation:claudeType 9s linear infinite}
+.claude .cursorLabel{color:#D97757}
+@keyframes claudeType{
+  0%,4%{left:17.5%;top:20%}
+  26%{left:26.5%;top:20%}
+  28%,36%{left:17.5%;top:24.5%}
+  34%{left:28%;top:24.5%}
+  38%,44%{left:17.5%;top:29%}
+  42%{left:26%;top:29%}
+  44%,60%{left:26%;top:29%}
+  65%{left:23%;top:29%}
+  70%,100%{left:17.5%;top:20%}
+}
+
+/* Codex draws (passing through the curve's mapped stage points), then travels only after the call bubble is visible, arrives right on the edit banner, helps, returns, finishes drawing */
+.codex{animation:codexMove 9s ease-in-out infinite}
+.codex .cursorLabel{color:#7AA2F7}
+@keyframes codexMove{
+  0%,4%{left:62.8%;top:50.3%}
+  22%{left:70.8%;top:36.3%}
+  40%,48%{left:81.6%;top:41%}
+  58%,70%{left:18%;top:44%}
+  80%{left:81.6%;top:41%}
+  86%{left:90.1%;top:43.3%}
+  92%{left:94.2%;top:34%}
+  100%{left:62.8%;top:50.3%}
+}
+
+/* OpenCode rests, then moves onto Play specifically (not skip) and presses it */
+.opencode{animation:openMove 9s ease-in-out infinite}
+.opencode .cursorLabel{color:#34D399}
+@keyframes openMove{0%,34%{left:46%;top:84%}37%{left:49%;top:85.5%}40%,43%{left:49.8%;top:86%}49%,100%{left:46%;top:84%}}
+
+.callBubble{position:absolute;left:17.5%;top:9%;font:600 10px/1 StudyHaas,sans-serif;color:#d9783f;background:rgba(28,22,19,.94);border:1px solid rgba(217,120,63,.4);padding:5px 9px;border-radius:7px;opacity:0;animation:callPing 9s ease-in-out infinite;z-index:5}
+@keyframes callPing{0%,44%{opacity:0;transform:translateY(4px)}47%,70%{opacity:1;transform:translateY(0)}73%,100%{opacity:0;transform:translateY(4px)}}

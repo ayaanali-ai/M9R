@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { supabase } from "@/lib/supabase";
 import { requireStripe, cohortForPriceId } from "@/lib/stripe";
+import { persistWebhook } from "@/lib/webhook-persistence";
 
 export const dynamic = "force-dynamic";
 
@@ -41,7 +42,7 @@ export async function POST(req: NextRequest) {
 
         const stripe = requireStripe();
         const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-        await upsertSubscription(userId, customerId, subscription);
+        await upsertSubscription(userId, customerId, subscription, event);
         break;
       }
       case "customer.subscription.updated":
@@ -50,7 +51,9 @@ export async function POST(req: NextRequest) {
         const userId = (subscription.metadata?.user_id as string | undefined) ?? await userIdForSubscription(subscription.id);
         const customerId = typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id;
         if (!userId) break;
-        await upsertSubscription(userId, customerId, subscription);
+        // Read the current Stripe state instead of applying a delayed event's stale snapshot.
+        const current = await requireStripe().subscriptions.retrieve(subscription.id);
+        await upsertSubscription(userId, customerId, current, event);
         break;
       }
       default:
@@ -67,20 +70,23 @@ export async function POST(req: NextRequest) {
 
 async function userIdForSubscription(subscriptionId: string): Promise<string | null> {
   if (!supabase) return null;
-  const { data } = await supabase.from("subscriptions").select("user_id").eq("stripe_subscription_id", subscriptionId).maybeSingle();
+  const { data, error } = await supabase.from("subscriptions").select("user_id").eq("stripe_subscription_id", subscriptionId).maybeSingle();
+  if (error) throw new Error(`Could not resolve subscription owner: ${error.message}`);
   return (data as { user_id?: string } | null)?.user_id ?? null;
 }
 
-async function upsertSubscription(userId: string, customerId: string, subscription: Stripe.Subscription): Promise<void> {
-  if (!supabase) return;
+async function upsertSubscription(userId: string, customerId: string, subscription: Stripe.Subscription, event: Stripe.Event): Promise<void> {
+  if (!supabase) throw new Error("Billing is not configured.");
   const priceId = subscription.items.data[0]?.price?.id ?? "";
   // "tier" is a generic text column; it now carries the locked cohort ("founding"/"standard")
   // rather than a billing interval -- there is only one interval (monthly) in this model.
   const tier = cohortForPriceId(priceId);
   const currentPeriodEnd = subscription.items.data[0]?.current_period_end;
 
-  const { error } = await supabase.from("subscriptions").upsert(
-    {
+  await persistWebhook(supabase, "apply_stripe_subscription_event", {
+    p_event_id: event.id,
+    p_event_created: event.created,
+    p_subscription: {
       user_id: userId,
       stripe_customer_id: customerId,
       stripe_subscription_id: subscription.id,
@@ -92,7 +98,5 @@ async function upsertSubscription(userId: string, customerId: string, subscripti
       cancel_at_period_end: subscription.cancel_at_period_end,
       updated_at: new Date().toISOString(),
     },
-    { onConflict: "user_id" },
-  );
-  if (error) console.error("upsertSubscription failed:", error.message, error.code);
+  });
 }

@@ -1320,8 +1320,22 @@ test("shows the clean provider cursor before the first movement", async () => wi
 
   const shown = await driver.showAgentCursor("preview-stage", { handle: "opencode", sessionId: "private-session-id" });
   assert.deepEqual(shown, { label: "OpenCode", visible: true });
-  assert.deepEqual(calls.map((call) => call.method), ["create", "startSession", "setAgentCursorMotion", "setAgentCursorEnabled", "getSession"]);
+  assert.deepEqual(calls.map((call) => call.method), ["create", "startSession", "setAgentCursorMotion", "setAgentCursorEnabled", "getScreenSize", "callTool", "getAgentCursorState", "getSession"]);
   assert.equal(JSON.stringify(calls).includes("private-session-id"), false, "cursor setup calls must not expose the provider session ID");
+  await driver.shutdown();
+}));
+
+test("concurrent provider cursor starts occupy distinct overlay positions without physical-pointer input", async () => withRoot(async (root) => {
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never });
+  // Start all providers together: allocation must reserve slots atomically even
+  // while the Cua calls are still in flight.
+  await Promise.all(["codex", "claude", "opencode"].map((handle) =>
+    driver.showAgentCursor("preview-stage", { handle, sessionId: handle })));
+  const moves = calls.filter((call) => call.method === "callTool").map((call) => (call.value as { name: string; args: { scope: string; x: number; y: number } }));
+  assert.equal(new Set(moves.map((move) => `${move.args.x}:${move.args.y}`)).size, 3);
+  assert.ok(moves.every((move) => move.name === "move_cursor" && move.args.scope === "window"));
+  assert.equal(calls.some((call) => call.method === "moveCursor"), false);
   await driver.shutdown();
 }));
 
@@ -1331,7 +1345,7 @@ test("optional cursor motion failure does not block the logical cursor or stage 
 
   const shown = await driver.showAgentCursor("preview-stage", { handle: "codex", sessionId: "motion-failure-session" });
   assert.deepEqual(shown, { label: "Codex", visible: true });
-  assert.deepEqual(calls.map((call) => call.method), ["create", "startSession", "setAgentCursorMotion", "setAgentCursorEnabled", "getSession"]);
+  assert.deepEqual(calls.map((call) => call.method), ["create", "startSession", "setAgentCursorMotion", "setAgentCursorEnabled", "getScreenSize", "callTool", "getAgentCursorState", "getSession"]);
   await driver.shutdown();
 }));
 
@@ -1633,6 +1647,23 @@ test("foreground delivery captures and restores the owner's real pointer positio
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls: [] }) as never, ownerPointer });
   await driver.typeText("stage", "sample", undefined, { confirmFocusForeground: true });
   assert.deepEqual(restoreCall, { x: 500, y: 400 }, "the owner's pointer must be restored to its exact pre-action position");
+}));
+
+test("foreground delivery refuses to report a clean result when pointer restoration fails", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls: [] }) as never,
+    ownerPointer: {
+      get: async () => ({ x: 500, y: 400 }),
+      restore: async () => { throw new Error("restore blocked"); },
+    },
+  });
+
+  await assert.rejects(
+    () => driver.typeText("stage", "sample", undefined, { confirmFocusForeground: true }),
+    /pointer restoration.*could not be confirmed|outcome is uncertain/i,
+  );
 }));
 
 test("foreground delivery waits once for a natural gap when the owner is actively moving the real pointer, instead of grabbing control", async () => withRoot(async (root) => {

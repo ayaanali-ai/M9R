@@ -4,13 +4,23 @@
 // "M9R browser tools are unavailable" as a result. This runs the real built exe through a real MCP handshake and
 // confirms the web tools are actually present, not just that the process didn't crash.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { stopChildProcess } from "./runtime-child-shutdown.mjs";
 
 const exe = join(process.cwd(), "engine", "dist", process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
+
+function stageEngineForSmoke(smokeHome: string): string {
+  const smokeBin = join(smokeHome, "bin");
+  mkdirSync(smokeBin, { recursive: true });
+  const smokeExe = join(smokeBin, process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
+  copyFileSync(exe, smokeExe);
+  copyFileSync(join(process.cwd(), "engine", "dist", "m9r-build-info.json"), join(smokeBin, "m9r-build-info.json"));
+  return smokeExe;
+}
 
 test("the built engine exe's `mcp` subcommand completes a real MCP handshake and exposes the web tools", { skip: !existsSync(exe) ? "engine/dist/m9r-engine.exe was not built (run: node scripts/build-engine.mjs)" : false }, async () => {
   // The packaged supervisor intentionally resolves an installed stable runtime
@@ -18,7 +28,8 @@ test("the built engine exe's `mcp` subcommand completes a real MCP handshake and
   // hermetic: otherwise it can launch the old installed image and compare that
   // image's identity with the candidate manifest beside engine/dist.
   const smokeHome = mkdtempSync(join(tmpdir(), "m9r-engine-smoke-"));
-  const child = spawn(exe, ["mcp"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, M9R_HOME: smokeHome } });
+  const smokeExe = stageEngineForSmoke(smokeHome);
+  const child = spawn(smokeExe, ["mcp"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, M9R_HOME: smokeHome } });
   let out = "";
   let err = "";
   child.stdout.on("data", (d) => (out += d.toString()));
@@ -67,14 +78,15 @@ test("the built engine exe's `mcp` subcommand completes a real MCP handshake and
       assert.equal(stageTool.inputSchema?.properties?.mode?.default, "owner-preview");
     }
   } finally {
-    child.kill();
+    await stopChildProcess(child);
     rmSync(smokeHome, { recursive: true, force: true });
   }
 });
 
 test("the built engine exe's `dev-mcp-server` subcommand starts the packaged governed MCP server", { skip: !existsSync(exe) ? "engine/dist/m9r-engine.exe was not built (run: node scripts/build-engine.mjs)" : false }, async () => {
   const smokeHome = mkdtempSync(join(tmpdir(), "m9r-engine-smoke-"));
-  const child = spawn(exe, ["dev-mcp-server", process.cwd()], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, M9R_HOME: smokeHome } });
+  const smokeExe = stageEngineForSmoke(smokeHome);
+  const child = spawn(smokeExe, ["dev-mcp-server", process.cwd()], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, M9R_HOME: smokeHome } });
   let out = "";
   let err = "";
   child.stdout.on("data", (d) => (out += d.toString()));
@@ -98,7 +110,7 @@ test("the built engine exe's `dev-mcp-server` subcommand starts the packaged gov
       assert.ok(names.includes(required), `${required} missing from the packaged dev MCP tool list: [${names.join(", ")}]`);
     }
   } finally {
-    child.kill();
+    await stopChildProcess(child);
     rmSync(smokeHome, { recursive: true, force: true });
   }
 });

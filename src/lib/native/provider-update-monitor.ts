@@ -17,6 +17,18 @@ export const DEFAULT_PROVIDER_UPDATE_INTERVAL_MS = 5 * 60_000;
 const MIN_PROVIDER_UPDATE_INTERVAL_MS = 5_000;
 const MAX_PROVIDER_UPDATE_INTERVAL_MS = 24 * 60 * 60_000;
 
+/**
+ * The provider update/reconciliation loop belongs to the long-lived native
+ * feed process that owns local delivery, not to the optional terminal runtime.
+ */
+export function shouldRunProviderUpdateMonitorForCommand(
+  command: string,
+  args: readonly string[],
+  ownsFeedLock: boolean,
+): boolean {
+  return ownsFeedLock && command === "feed" && args.includes("--watch");
+}
+
 export interface ProviderUpdateCycleEntry {
   providerId: string;
   status: ProviderUpdateStatus;
@@ -40,6 +52,12 @@ export interface ProviderUpdateMonitorOptions {
   /** Optional adapter actions. Without them, changed providers remain waiting
    * and durable state is retained rather than pretending a reconnect happened. */
   actions?: ProviderUpdateActions;
+  /** Reconcile M9R-owned provider config on resident startup, even when vendor versions are unchanged. */
+  reconcileOnStart?: boolean;
+  /** Internal first-cycle signal used by the startup reconciliation pass. */
+  reconcileUnchanged?: boolean;
+  /** Retry startup reconciliation only for providers whose prior pass did not become healthy. */
+  reconcileUnchangedProviderIds?: ReadonlySet<string>;
   intervalMs?: number;
   nowMs?: () => number;
   onCycle?: (result: ProviderUpdateCycleResult) => void | Promise<void>;
@@ -80,6 +98,7 @@ export async function runProviderUpdateCycle(options: ProviderUpdateMonitorOptio
       providerId: current.providerId,
       current,
       nowMs: startedAtMs,
+      reconcileUnchanged: options.reconcileUnchanged || options.reconcileUnchangedProviderIds?.has(current.providerId),
       actions: options.actions,
       persist: (next) => store.saveProviderUpdateState(next),
     });
@@ -135,11 +154,31 @@ export interface ProviderUpdateMonitor {
 export function startProviderUpdateMonitor(options: ProviderUpdateMonitorOptions): ProviderUpdateMonitor {
   const intervalMs = boundedInterval(options.intervalMs);
   let stopped = false;
+  let startupReconciliationPending = options.reconcileOnStart === true && Boolean(options.actions?.reconnect);
+  let startupReconciliationProviderIds: Set<string> | null = null;
   let inFlight: Promise<ProviderUpdateCycleResult> | null = null;
 
   const runOnce = (): Promise<ProviderUpdateCycleResult> => {
     if (inFlight) return inFlight;
-    inFlight = runProviderUpdateCycle(options)
+    const reconcileUnchanged = startupReconciliationPending && startupReconciliationProviderIds === null;
+    inFlight = runProviderUpdateCycle({
+      ...options,
+      reconcileUnchanged,
+      reconcileUnchangedProviderIds: startupReconciliationProviderIds ?? undefined,
+    })
+      .then((result) => {
+        // Healthy providers are refreshed once. Preserve only providers whose
+        // first startup reconciliation was unavailable or failed, so their
+        // return can converge without repeatedly rewriting healthy providers.
+        if (startupReconciliationPending) {
+          startupReconciliationProviderIds = new Set(
+            result.entries.filter((entry) => entry.status !== "healthy").map((entry) => entry.providerId),
+          );
+          startupReconciliationPending = startupReconciliationProviderIds.size > 0;
+          if (!startupReconciliationPending) startupReconciliationProviderIds = null;
+        }
+        return result;
+      })
       .catch((error) => {
         options.onError?.(error);
         throw error;

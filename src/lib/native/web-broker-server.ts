@@ -198,6 +198,8 @@ export interface WebBrokerServerOptions {
   ownerPipePath?: string;
   /** Best-effort delivery-time cursor prime for a task created through the authenticated agent-store pipe. */
   onAgentTaskCreated?: (token: string, taskId: string) => void | Promise<void>;
+  /** Deliver an eligible owner-created native task through the resident provider-session owner. Owner-pipe only. */
+  deliverOwnerTask?: (taskId: string) => unknown | Promise<unknown>;
 }
 
 type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string; taskId?: string; created?: boolean; taskIds?: string[]; alreadyRecorded?: boolean } };
@@ -451,6 +453,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     "/web/mode", "/web/shutdown", "/web/approve", "/web/deny", "/web/revoke", "/web/revoke-all",
     "/web/actions/approve", "/web/actions/deny", "/web/aware/members/invite", "/web/aware/members/remove",
     "/web/aware/disclosures/decision", "/web/protocol",
+    "/web/ui/command", "/web/ui/approve", "/web/ui/deny", "/web/ui/save-note",
   ]);
   const ownerPipeReadPaths = new Set(["/web/aware/members", "/web/aware/disclosures"]);
   const ownerReply = (ok: boolean, extra: Record<string, unknown> = {}): Record<string, unknown> => ({ ok, ...extra });
@@ -504,6 +507,28 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       if (typeof request.body !== "object" || request.body === null || Array.isArray(request.body)) return ownerReply(false, { error: "protocol message must be an object" });
       const accepted = acceptProtocolFrame(request.body as unknown as ProtocolMessage, ownerPrincipalId);
       return accepted.ok ? ownerReply(true, { message: accepted.message }) : ownerReply(false, { error: accepted.error });
+    }
+    if (request.path.startsWith("/web/ui/")) {
+      if (request.method !== "POST" || !options.ui || typeof request.body !== "object" || request.body === null || Array.isArray(request.body)) {
+        return ownerReply(false, { error: "the desktop pill UI bridge is unavailable or the request is invalid" });
+      }
+      const body = request.body as Record<string, unknown>;
+      const keys = Object.keys(body);
+      let message: unknown;
+      if (request.path === "/web/ui/command") {
+        if (keys.some((key) => !["text", "context"].includes(key)) || typeof body.text !== "string" || !body.text.trim() || body.text.length > 4_000
+          || (body.context !== undefined && (typeof body.context !== "object" || body.context === null || Array.isArray(body.context)))) {
+          return ownerReply(false, { error: "desktop pill command is invalid" });
+        }
+        message = { type: "ui-command", text: body.text, context: body.context ?? {} };
+      } else if (request.path === "/web/ui/approve" || request.path === "/web/ui/deny") {
+        if (keys.length !== 1 || typeof body.id !== "string" || !body.id || body.id.length > 128) return ownerReply(false, { error: "desktop pill approval ID is invalid" });
+        message = { type: request.path.endsWith("/approve") ? "ui-approve" : "ui-deny", id: body.id };
+      } else {
+        if (keys.length !== 1 || typeof body.text !== "string" || !body.text.trim() || body.text.length > 2_000) return ownerReply(false, { error: "desktop pill note is invalid" });
+        message = { type: "ui-save-note", text: body.text };
+      }
+      return options.ui.handleExtensionMessage(message) ? ownerReply(true) : ownerReply(false, { error: "the desktop pill command was rejected" });
     }
     if (request.path === "/web/aware/members/invite" || request.path === "/web/aware/members/remove") {
       if (request.method !== "POST" || typeof request.body !== "object" || request.body === null || Array.isArray(request.body)) return ownerReply(false, { error: "request body must be an object" });
@@ -631,9 +656,27 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     requestTimeoutMs: (request) => request.method === "POST" && agentStagePaths.has(request.path) ? (quickStagePath(request.path) ? 5_000 : 70_000)
       : request.method === "POST" && request.path === "/web/mcp/store" ? 15_000
       : request.method === "POST" && request.path === ownerCursorPath ? 5_000
+      : request.method === "POST" && request.path === "/web/provider-delivery" ? 70_000
+      : request.method === "POST" && request.path.startsWith("/web/ui/") ? 15_000
       : 2_000,
     handle: (request) => {
       if (request.method === "GET") return handleOwnerRequest(request);
+      if (request.method === "POST" && request.path === "/web/provider-delivery") {
+        if (!request.body || typeof request.body !== "object" || Array.isArray(request.body)) return ownerReply(false, { error: "provider delivery body must be an object" });
+        const body = request.body as Record<string, unknown>;
+        if (Object.keys(body).length !== 1 || typeof body.taskId !== "string" || !/^T[0-9]{1,12}$/.test(body.taskId)) {
+          return ownerReply(false, { error: "provider delivery requires one valid task id" });
+        }
+        if (!options.deliverOwnerTask) return ownerReply(false, { error: "resident provider-session delivery is unavailable" });
+        return Promise.resolve(options.deliverOwnerTask(body.taskId)).then((result) => {
+          if (!result || typeof result !== "object" || Array.isArray(result)) return ownerReply(false, { error: "resident provider-session owner returned an invalid result" });
+          const value = result as Record<string, unknown>;
+          return value.ok === true
+            ? ownerReply(true, Object.fromEntries(Object.entries(value).filter(([key]) => key !== "ok")))
+            : ownerReply(false, { error: typeof value.error === "string" ? value.error.slice(0, 500) : "resident provider-session owner refused delivery" });
+        });
+      }
+      if (request.method === "POST" && ownerOnlyPaths.has(request.path)) return handleOwnerRequest(request);
       if (request.method === "POST" && request.path === "/web/mcp/store") {
         if (!options.agentMcpStore) return { ok: false, error: "Owner-brokered M9R task state writes are unavailable." };
         const result = applyAgentMcpStoreMutation(options.agentMcpStore, request.body);

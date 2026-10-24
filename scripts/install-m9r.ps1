@@ -116,6 +116,66 @@ function Get-VerifiedPackage([string]$LocalPackagePath, [string]$DownloadRoot) {
     return @{ ZipPath = $zipPath }
 }
 
+function Assert-ReleasePackageManifest([string]$Destination) {
+    $runtimePath = Join-Path $Destination 'm9r-build-info.json'
+    $packagePath = Join-Path $Destination 'm9r-package-info.json'
+    try {
+        $runtime = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json
+        $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json
+    } catch {
+        throw "The release package identity manifests are unreadable."
+    }
+    if ($runtime.schemaVersion -ne 1 -or $runtime.buildId -notmatch '^[a-fA-F0-9]{64}$' -or
+        $runtime.source.sourceCommit -notmatch '^[a-fA-F0-9]{40}$' -or $null -eq $runtime.source.sourceDirty) {
+        throw 'The runtime identity manifest has an invalid schema.'
+    }
+    if ($package.schemaVersion -ne 1 -or $package.packageName -ne 'm9r-engine-windows-x64' -or
+        $package.runtimeBuildId -ne $runtime.buildId -or $package.source.sourceCommit -ne $runtime.source.sourceCommit -or
+        $package.source.sourceDirty -ne $runtime.source.sourceDirty -or $null -eq $package.files) {
+        throw 'The package manifest does not match the runtime identity manifest.'
+    }
+    $properties = @($package.files.PSObject.Properties)
+    if ($properties.Count -eq 0) { throw 'The package manifest contains no file hashes.' }
+    $root = [IO.Path]::GetFullPath($Destination).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $expectedPaths = @{}
+    foreach ($property in $properties) {
+        $relative = [string]$property.Name
+        if ([string]::IsNullOrWhiteSpace($relative) -or [IO.Path]::IsPathRooted($relative) -or
+            $relative -match '(^|[\\/])\.\.([\\/]|$)' -or $relative -match '^[A-Za-z]:') {
+            throw "The package manifest contains an unsafe file path: $relative"
+        }
+        $expectedPaths[$relative.Replace('\', '/')] = $true
+        $target = [IO.Path]::GetFullPath((Join-Path $Destination $relative))
+        if (-not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $target -PathType Leaf)) {
+            throw "The package manifest references a missing file: $relative"
+        }
+        if ([string]$property.Value -notmatch '^[a-fA-F0-9]{64}$') {
+            throw "The package manifest contains an invalid hash: $relative"
+        }
+        $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne ([string]$property.Value).ToLowerInvariant()) {
+            throw "The package manifest hash does not match: $relative"
+        }
+    }
+    $entries = @(Get-ChildItem -LiteralPath $Destination -Recurse -Force)
+    foreach ($entry in $entries) {
+        if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The extracted release package contains a symbolic link or reparse point: $($entry.FullName)"
+        }
+    }
+    $actualPaths = @($entries | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
+        $fullPath = [IO.Path]::GetFullPath($_.FullName)
+        if (-not $fullPath.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The extracted release package contains a file outside its root: $fullPath"
+        }
+        $fullPath.Substring($root.Length).Replace('\', '/')
+    } | Where-Object { $_ -ine 'm9r-package-info.json' } | Sort-Object)
+    $expectedSorted = @($expectedPaths.Keys | Sort-Object)
+    if (Compare-Object -ReferenceObject $expectedSorted -DifferenceObject $actualPaths) {
+        throw 'The extracted release package file set does not match its identity manifest.'
+    }
+}
+
 function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $root = [IO.Path]::GetFullPath($Destination).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
@@ -132,11 +192,12 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
         }
     } finally { $archive.Dispose() }
     [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
-    foreach ($name in @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt')) {
+    foreach ($name in @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'm9r-package-info.json', 'INSTALLATION.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Destination $name) -PathType Leaf)) {
             throw "The release package is incomplete; '$name' is missing."
         }
     }
+    Assert-ReleasePackageManifest $Destination
 }
 
 function Get-ManagedWebBrokerPaths {

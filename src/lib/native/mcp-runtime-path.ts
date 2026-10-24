@@ -23,7 +23,14 @@ export function resolveMcpRuntimeExecutable(
   if (!isEngineName(basename(execPath))) return execPath;
   const root = defaultStoreRoot(homedir(), env);
   const installed = join(root, "bin", platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
-  return existsSync(installed) ? installed : execPath;
+  if (existsSync(installed)) return installed;
+
+  // A packaged engine is not its own fallback. In particular, a process whose
+  // image was renamed to *.m9r-retired-* must never respawn that retired image
+  // when an update temporarily leaves the stable slot unavailable. Failing
+  // closed lets the supervisor retry after activation instead of perpetuating
+  // an old runtime generation behind the provider's back.
+  throw new Error(`The stable M9R engine is missing at ${installed}; refusing to start another provider worker from ${basename(execPath)}.`);
 }
 
 export function isPackagedMcpExecutable(path: string): boolean {

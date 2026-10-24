@@ -16,6 +16,20 @@ function tempStore(now?: () => Date) {
 }
 const task = (over: Record<string, unknown> = {}) => ({ from: "codex", to: "claude", goal: "look at the reconnect bug", origin: "human_typed" as const, idempotencyKey: "k1", ...over });
 
+test("completed results preserve failed transport evidence while finalizing delivery", () => {
+  const { store, done } = tempStore();
+  try {
+    const created = store.addTask(task()).task;
+    store.setDelivery(created.id, { state: "failed", error: "first push failed", attempts: 1 });
+    store.setResult(created.id, "finished through the prompt route");
+    const finished = store.getTask(created.id)!;
+    assert.equal(finished.delivery?.state, "done");
+    assert.equal(finished.delivery?.error, "first push failed");
+    assert.equal(finished.deliveryHistory?.at(-1)?.state, "failed");
+    assert.equal(finished.lifecycle?.state, "completed");
+  } finally { done(); }
+});
+
 test("provider names map to friendly handles", () => {
   assert.equal(handleForProvider("claude-code"), "claude");
   assert.equal(handleForProvider("Codex"), "codex");
@@ -134,6 +148,38 @@ test("an untargeted task is claimed by one Claude session and cannot be answered
   const b = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "session-b", cwd: "/repo", prompt: "hi" }, ctx(store));
   assert.equal(b, null, "a different provider session must not receive work already claimed by session A");
   assert.equal(store.getTask(created.task.id)?.deliveredSession, "session-a");
+  done();
+});
+
+test("a resident provider delivery atomically claims only fresh, approved, owner-originated work for its configured folder", () => {
+  const clock = () => new Date("2026-10-23T12:00:00.000Z");
+  const { store, done } = tempStore(clock);
+  const identity = store.issueIdentity("claude", "claude-code", "web-claude-worker-1");
+  const eligible = store.addTask({
+    from: "you", to: "claude", goal: "Read the visible status.", origin: "human_typed", cwd: "C:\\Work\\App",
+    idempotencyKey: "resident-provider-delivery",
+  }).task;
+  store.setDelivery(eligible.id, { state: "deferred" });
+
+  const expected = { handle: "claude", provider: "claude-code", cwd: "c:/work/app" };
+  const claimed = store.claimProviderDelivery(eligible.id, identity.token, expected);
+  assert.equal(claimed?.id, eligible.id);
+  assert.equal(claimed?.deliveredSession, identity.sessionId);
+  assert.equal(claimed?.delivery?.state, "sending");
+  assert.equal(claimed?.deliveredAt, undefined, "a claim is not mislabeled as provider acceptance");
+  assert.equal(claimed?.lifecycle, undefined, "the durable lifecycle advances only after the transport accepts the task");
+  assert.equal(store.claimProviderDelivery(eligible.id, identity.token, expected), undefined, "a second pump cannot claim an in-flight task");
+
+  const otherIdentity = store.issueIdentity("claude", "claude-code", "web-claude-worker-2");
+  assert.equal(store.claimProviderDelivery(eligible.id, otherIdentity.token, expected), undefined, "another provider identity cannot take work after it is claimed");
+
+  const wrongFolder = store.addTask({
+    from: "you", to: "claude", goal: "Stay in the other folder.", origin: "human_typed", cwd: "C:\\Work\\Other",
+    idempotencyKey: "resident-provider-wrong-folder",
+  }).task;
+  store.setDelivery(wrongFolder.id, { state: "deferred" });
+  assert.equal(store.claimProviderDelivery(wrongFolder.id, identity.token, expected), undefined);
+  assert.equal(store.getTask(wrongFolder.id)?.delivery?.state, "deferred");
   done();
 });
 
@@ -343,15 +389,15 @@ test("repeated SessionStart for the same session keeps its token valid, while ex
   done();
 });
 
-test("a compacted SessionStart carries the private binding forward on the same provider process", () => {
+test("a compacted SessionStart preserves both identities and the prompt turn binds the new session", () => {
   const { store, root, done } = tempStore();
-  const context = { ...ctx(store), providerProcessId: 4242 };
+  const context = { ...ctx(store), providerProcessId: process.pid };
   try {
     handleHookEvent({ hook_event_name: "SessionStart", session_id: "before-compaction", cwd: "C:/repo" }, context);
     const before = JSON.parse(readFileSync(join(root, "state.json"), "utf8")) as {
       connectionClaims: Array<{ claimId: string }>;
     };
-    const binding = store.bindConnectionClaim(before.connectionClaims[0]!.claimId, { provider: "claude-code", processId: 4242 });
+    const binding = store.bindConnectionClaim(before.connectionClaims[0]!.claimId, { provider: "claude-code", processId: process.pid });
     assert.ok(binding);
 
     handleHookEvent({ hook_event_name: "SessionStart", session_id: "after-compaction", cwd: "C:/repo" }, context);
@@ -359,10 +405,73 @@ test("a compacted SessionStart carries the private binding forward on the same p
       connectionClaims: Array<{ sessionId: string; bindingId?: string }>;
       connectionBindings: Array<{ sessionId: string; bindingId: string }>;
     };
-    assert.deepEqual(after.connectionClaims.map((claim) => claim.sessionId), ["after-compaction"]);
-    assert.equal(after.connectionClaims[0]!.bindingId, binding!.bindingId);
-    assert.deepEqual(after.connectionBindings.map((candidate) => candidate.sessionId), ["after-compaction"]);
-    assert.equal(store.identityTokenFor("claude", "before-compaction"), null);
+    assert.deepEqual(after.connectionClaims.map((claim) => claim.sessionId), ["before-compaction", "after-compaction"]);
+    assert.equal(after.connectionClaims[0]!.bindingId, binding!.bindingId, "a PID match must not transfer an older binding to a different session");
+    assert.equal(after.connectionClaims[1]!.bindingId, undefined);
+    assert.deepEqual(after.connectionBindings.map((candidate) => candidate.sessionId), ["before-compaction"]);
+
+    handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "after-compaction", cwd: "C:/repo", prompt: "continue" }, context);
+    const active = store.bindActiveProviderTurn({ provider: "claude-code", processId: process.pid });
+    assert.equal(active.status, "resolved");
+    assert.equal(active.status === "resolved" ? active.binding.sessionId : null, "after-compaction");
+    assert.ok(store.identityTokenFor("claude", "before-compaction"), "the previous provider conversation identity remains intact");
+  } finally { done(); }
+});
+
+test("OpenCode idle closes only the exact active process/session turn", () => {
+  const { store, done } = tempStore();
+  const context = { ...ctx(store, "opencode"), providerProcessId: process.pid };
+  try {
+    handleHookEvent({ hook_event_name: "SessionStart", session_id: "opencode-turn", cwd: "C:/repo" }, context);
+    handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "opencode-turn", cwd: "C:/repo", prompt: "hello" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "opencode", processId: process.pid }).status, "resolved");
+
+    handleHookEvent({ hook_event_name: "ProviderTurnEnd", session_id: "different-session" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "opencode", processId: process.pid }).status, "resolved", "an idle event for a sibling session must not release this turn");
+
+    handleHookEvent({ hook_event_name: "ProviderTurnEnd", session_id: "opencode-turn" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "opencode", processId: process.pid }).status, "none", "the matching idle event releases the stale turn");
+  } finally { done(); }
+});
+
+test("an OpenCode poll refreshes the exact session claim to the replacement provider process", () => {
+  const { store, done } = tempStore();
+  const sessionId = "opencode-restarted-session";
+  store.registerEndpoint({ provider: "opencode", sessionId, cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", sessionId);
+  store.issueConnectionClaim({
+    handle: "opencode",
+    provider: "opencode",
+    sessionId,
+    cwd: "C:/repo",
+    ownerProcessId: 2_000_000_000,
+  });
+
+  try {
+    handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: sessionId, cwd: "C:/repo" }, {
+      ...ctx(store, "opencode"),
+      providerProcessId: process.pid,
+    });
+
+    const binding = store.bindConnectionForProcess({ provider: "opencode", processId: process.pid, sessionId });
+    assert.equal(binding?.sessionId, sessionId);
+    assert.equal(binding?.ownerProcessId, process.pid, "a resumed session must bind to the current OpenCode host, not its previous PID");
+  } finally { done(); }
+});
+
+test("Codex Interrupt retires only the matching turn id", () => {
+  const { store, done } = tempStore();
+  const context = { ...ctx(store, "codex"), providerProcessId: process.pid };
+  try {
+    handleHookEvent({ hook_event_name: "SessionStart", session_id: "codex-turns", cwd: "C:/repo" }, context);
+    handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "codex-turns", turn_id: "turn-old", cwd: "C:/repo", prompt: "first" }, context);
+    handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "codex-turns", turn_id: "turn-current", cwd: "C:/repo", prompt: "second" }, context);
+
+    handleHookEvent({ hook_event_name: "Interrupt", session_id: "codex-turns", turn_id: "turn-old" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "codex", processId: process.pid }).status, "resolved");
+
+    handleHookEvent({ hook_event_name: "Interrupt", session_id: "codex-turns", turn_id: "turn-current" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "codex", processId: process.pid }).status, "none");
   } finally { done(); }
 });
 
@@ -430,6 +539,25 @@ test("OpenCode polling pushes only an approved, fresh task into its exact authen
   assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "oc-1", cwd: "C:/repo", prompt: "ordinary prompt" }, context), null);
   assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pending.seq);
   done();
+});
+
+test("an uncertain plain-goal OpenCode send stays fenced after restart and preserves its owner notice", () => {
+  const { root, store, done } = tempStore();
+  try {
+    const sessionId = "oc-uncertain";
+    store.registerEndpoint({ provider: "opencode", sessionId, cwd: "C:/repo" });
+    const identity = store.issueIdentity("opencode", "opencode", sessionId);
+    const created = store.addTask({ from: "codex", to: "opencode", goal: "review the shared change", origin: "human_typed", cwd: "C:/repo", targetSession: sessionId, idempotencyKey: "uncertain-plain" }).task;
+    assert.ok(store.claimOpenCodeTask(created.id, { sessionId, identityToken: identity.token, cwd: "C:/repo", activeWindowMs: 60_000, maxAgeMs: 60_000 }));
+    assert.equal(store.settleOpenCodeTask(created.id, sessionId, identity.token, { state: "uncertain", error: "connection reset" }), true);
+    const restarted = createLocalStore(root);
+    const poll = handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: sessionId, cwd: "C:/repo" }, ctx(restarted, "opencode"));
+    assert.equal(poll, null);
+    assert.equal(restarted.getTask(created.id)?.delivery?.state, "uncertain");
+    assert.equal(restarted.getTask(created.id)?.delivery?.error, "connection reset");
+    assert.equal(restarted.dismiss([created.id]), 1);
+    assert.equal(restarted.getTask(created.id)?.delivery?.state, "uncertain", "clearing the owner notice never replays work");
+  } finally { done(); }
 });
 
 test("OpenCode polling rebinds an already-known session after a provider update and claims its held owner task", () => {

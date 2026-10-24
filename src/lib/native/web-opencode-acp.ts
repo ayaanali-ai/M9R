@@ -6,7 +6,7 @@ export interface OpenCodeLiveRuntime {
   ready(): Promise<{ sessionId: string; restored?: boolean }>;
   /** False once the provider process has exited or the runtime was closed; the caller replaces a dead runtime instead of prompting it. */
   alive?(): boolean;
-  prompt(text: string): AsyncIterable<InteractiveProviderEvent>;
+  prompt(text: string, options?: { onRequestSubmitted?: () => void }): AsyncIterable<InteractiveProviderEvent>;
   cancelTurn(): Promise<void>;
   close(): void;
 }
@@ -20,6 +20,8 @@ export interface OpenCodeLiveRuntimeOptions {
   model?: string;
   effort?: string;
   resumeId?: string;
+  /** Refuse a new session if the exact saved provider conversation cannot be resumed. */
+  strictResume?: boolean;
   /** Test seam for exercising the ACP lifecycle without spawning a provider binary. */
   adapterFactory?: (options: Parameters<typeof createOpenCodeAcpAdapter>[0]) => Pick<AcpStdioProviderAdapter,
     "launchServer" | "initialize" | "createSession" | "resumeSession" | "prompt" | "cancelTurn" | "shutdown"> & Partial<Pick<AcpStdioProviderAdapter, "getServerHealth">>;
@@ -73,7 +75,11 @@ export function createOpenCodeAcpRuntime(options: OpenCodeLiveRuntimeOptions): O
         // A saved session that can no longer be resumed (deleted, or its store was reset) must not leave the agent permanently
         // unable to start: continue on a fresh session and say so, instead of failing every message.
         try { session = await adapter.resumeSession({ server: activeServer, providerSessionRef: options.resumeId, assignment }); }
-        catch { session = await adapter.createSession({ server: activeServer, assignment }); restored = false; }
+        catch (error) {
+          if (options.strictResume) throw error;
+          session = await adapter.createSession({ server: activeServer, assignment });
+          restored = false;
+        }
       } else {
         session = await adapter.createSession({ server: activeServer, assignment });
       }
@@ -103,9 +109,9 @@ export function createOpenCodeAcpRuntime(options: OpenCodeLiveRuntimeOptions): O
       });
       return startup;
     },
-    async *prompt(text: string): AsyncIterable<InteractiveProviderEvent> {
+    async *prompt(text: string, promptOptions?: { onRequestSubmitted?: () => void }): AsyncIterable<InteractiveProviderEvent> {
       if (closed || !session) throw new Error("OpenCode ACP session is not ready.");
-      yield* adapter.prompt({ session, text });
+      yield* adapter.prompt({ session, text, onRequestSubmitted: promptOptions?.onRequestSubmitted });
     },
     async cancelTurn(): Promise<void> {
       if (closed || !session) return;

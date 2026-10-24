@@ -35,6 +35,21 @@ function observation(overrides: Partial<ProviderRuntimeObservation> = {}): Provi
   });
 }
 
+function verifiedLiveSessionActions() {
+  return {
+    refreshAdapter: async () => undefined,
+    reconnect: async () => ({ healthy: true, detail: "test observer rebound a live provider session" }),
+  };
+}
+
+test("unchanged provider versions cannot retain healthy status after their session disappears", async () => {
+  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100, actions: verifiedLiveSessionActions() });
+  const next = await reconcileProviderUpdate({ providerId: "claude-code", state: first.state, current: observation(), nowMs: 200,
+    actions: { reconnect: async () => ({ healthy: false, detail: "session disconnected" }) } });
+  assert.equal(next.status, "waiting");
+  assert.match(next.error!, /session disconnected/);
+});
+
 test("a new provider observation is committed as healthy and survives a fresh store instance", async () => {
   const root = tempStore("m9r-provider-update-store-");
   try {
@@ -44,6 +59,7 @@ test("a new provider observation is committed as healthy and survives a fresh st
       state: store.providerUpdateState(),
       current: observation(),
       nowMs: 100,
+      actions: verifiedLiveSessionActions(),
     });
     assert.equal(next.status, "healthy");
     store.saveProviderUpdateState(next.state);
@@ -58,8 +74,8 @@ test("a new provider observation is committed as healthy and survives a fresh st
   }
 });
 
-test("an unchanged provider is reused without a refresh or reconnect", async () => {
-  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100 });
+test("an unchanged provider rechecks its session without rewriting configuration", async () => {
+  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100, actions: verifiedLiveSessionActions() });
   let refreshes = 0;
   let reconnects = 0;
   const second = await reconcileProviderUpdate({
@@ -75,7 +91,33 @@ test("an unchanged provider is reused without a refresh or reconnect", async () 
   assert.equal(second.status, "healthy");
   assert.equal(second.plan.action, "reuse_connection");
   assert.equal(refreshes, 0);
-  assert.equal(reconnects, 0);
+  assert.equal(reconnects, 1);
+});
+
+test("startup reconciliation reconnects an unchanged provider session and stays waiting until it is actually bound", async () => {
+  const first = await reconcileProviderUpdate({
+    providerId: "claude-code",
+    state: createInitialProviderUpdateState(),
+    current: observation(),
+    nowMs: 100,
+    actions: verifiedLiveSessionActions(),
+  });
+  const events: string[] = [];
+  const next = await reconcileProviderUpdate({
+    providerId: "claude-code",
+    state: first.state,
+    current: observation({ observedAtMs: 200 }),
+    nowMs: 200,
+    reconcileUnchanged: true,
+    actions: {
+      refreshAdapter: async () => { events.push("refresh"); },
+      reconnect: async () => { events.push("reconnect"); return { healthy: false, detail: "no live Claude session was rebound" }; },
+    },
+  });
+  assert.equal(next.status, "waiting");
+  assert.equal(next.state.providers["claude-code"]?.lastGoodObservation?.version, "1.2.3");
+  assert.match(next.error ?? "", /no live Claude session was rebound/);
+  assert.deepEqual(events, ["refresh", "reconnect"]);
 });
 
 test("the first provider observation runs the configured initialization callback before becoming healthy", async () => {
@@ -96,7 +138,7 @@ test("the first provider observation runs the configured initialization callback
 });
 
 test("a provider update persists a pending candidate before refresh and retires old state only after health", async () => {
-  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100 });
+  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100, actions: verifiedLiveSessionActions() });
   const events: string[] = [];
   const next = await reconcileProviderUpdate({
     providerId: "claude-code",
@@ -119,7 +161,7 @@ test("the real local store contains the pending candidate before side effects ru
   const root = tempStore("pending-before-side-effect-");
   try {
     const store = createLocalStore(root);
-    const first = await reconcileProviderUpdate({ providerId: "claude-code", state: store.providerUpdateState(), current: observation(), nowMs: 100 });
+    const first = await reconcileProviderUpdate({ providerId: "claude-code", state: store.providerUpdateState(), current: observation(), nowMs: 100, actions: verifiedLiveSessionActions() });
     store.saveProviderUpdateState(first.state);
     let pendingSeenByRefresh = false;
     const next = await reconcileProviderUpdate({
@@ -144,7 +186,7 @@ test("the real local store contains the pending candidate before side effects ru
 });
 
 test("a failed refresh retains the last-known-good provider and does not retire the old connection", async () => {
-  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100 });
+  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100, actions: verifiedLiveSessionActions() });
   let retired = false;
   const next = await reconcileProviderUpdate({
     providerId: "claude-code",
@@ -165,7 +207,7 @@ test("a failed refresh retains the last-known-good provider and does not retire 
 });
 
 test("provider failure diagnostics are redacted before durable persistence", async () => {
-  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100 });
+  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100, actions: verifiedLiveSessionActions() });
   const next = await reconcileProviderUpdate({
     providerId: "claude-code",
     state: first.state,
@@ -182,7 +224,7 @@ test("provider failure diagnostics are redacted before durable persistence", asy
 });
 
 test("an unhealthy replacement is retained as pending and cannot retire the healthy previous state", async () => {
-  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100 });
+  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100, actions: verifiedLiveSessionActions() });
   let retired = false;
   const next = await reconcileProviderUpdate({
     providerId: "claude-code",
@@ -201,7 +243,7 @@ test("an unhealthy replacement is retained as pending and cannot retire the heal
 });
 
 test("temporary provider absence retains durable state without creating a reconnect loop or clearing tasks", async () => {
-  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100 });
+  const first = await reconcileProviderUpdate({ providerId: "claude-code", state: createInitialProviderUpdateState(), current: observation(), nowMs: 100, actions: verifiedLiveSessionActions() });
   const next = await reconcileProviderUpdate({ providerId: "claude-code", state: first.state, current: null, nowMs: 200 });
   assert.equal(next.status, "waiting");
   assert.equal(next.plan.action, "wait_without_mutation");
@@ -239,7 +281,7 @@ test("the local store state remains bounded and contains no provider credentials
   const root = tempStore("m9r-provider-update-bounded-");
   try {
     const store = createLocalStore(root);
-    const state = (await reconcileProviderUpdate({ providerId: "claude-code", state: store.providerUpdateState(), current: observation(), nowMs: 100 })).state;
+    const state = (await reconcileProviderUpdate({ providerId: "claude-code", state: store.providerUpdateState(), current: observation(), nowMs: 100, actions: verifiedLiveSessionActions() })).state;
     store.saveProviderUpdateState(state);
     const raw = readFileSync(join(root, "state.json"), "utf8");
     assert.doesNotMatch(raw, /token|secret|password|bearer/i);

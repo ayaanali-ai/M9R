@@ -10,7 +10,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { inboxMaxAgeMs, renderAutoDeliveryPendingAck, renderHeldAck, renderInboxAck, renderInboxInjection, renderResultsInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
+import { inboxMaxAgeMs, redactSecrets, renderAutoDeliveryPendingAck, renderHeldAck, renderInboxAck, renderInboxInjection, renderResultsInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
 import { buildQueueMessage, canQueue, isM9rPushedPrompt, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
 import { findEndpointMentions } from "./mention-core";
 import { findMemoryHints, renderMemoryHint } from "./memory-hint-core";
@@ -20,6 +20,8 @@ import { deliveredTaskContext } from "./task-execution-context";
 export interface HookInput {
   hook_event_name?: string;
   session_id?: string;
+  /** Provider turn selector where the hook contract supplies one (Codex). */
+  turn_id?: string;
   transcript_path?: string;
   cwd?: string;
   prompt?: string;
@@ -27,6 +29,7 @@ export interface HookInput {
   task_id?: string;
   /** Fixed, non-sensitive delivery diagnostic; raw SDK errors and request bodies never cross this boundary. */
   delivery_error?: "session_rejected" | "unknown";
+  delivery_detail?: string;
   /** Provider execution failed after OpenCode accepted the M9R prompt. */
   execution_error?: "provider_execution_failed" | "idle_without_response";
   /** Bounded local diagnostic; never trust or render it as provider instructions. */
@@ -106,7 +109,12 @@ function identityForProviderSession(
   cwd: string | undefined,
 ): string | null {
   const current = ctx.store.identityTokenFor(handle, sessionId);
-  if (current) return current;
+  // A live provider hook is also the reconnect signal. Refresh the exact
+  // session's process claim even when its durable identity already exists;
+  // otherwise an updated/restarted provider keeps a stale owner PID forever.
+  // Without a verified provider PID, do not overwrite a good claim with an
+  // ownerless one merely because an older adapter invoked this helper.
+  if (current && ctx.providerProcessId === undefined) return current;
   try {
     ctx.store.reconcileLiveProviderConnection({
       provider: ctx.provider,
@@ -115,9 +123,9 @@ function identityForProviderSession(
       ...(ctx.providerProcessId !== undefined ? { processId: ctx.providerProcessId } : {}),
     });
   } catch {
-    return null;
+    return current;
   }
-  return ctx.store.identityTokenFor(handle, sessionId);
+  return ctx.store.identityTokenFor(handle, sessionId) ?? current;
 }
 
 /** The task's goal is what the human wrote, minus the routing token, so the target reads a clean request. */
@@ -262,7 +270,6 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
           sessionId: input.session_id,
           cwd: projectCwd,
           ownerProcessId: ctx.providerProcessId,
-          continuation: true,
         });
       }
       // A reconnecting provider must not need a manual `m9r_inbox` call just
@@ -373,7 +380,8 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const task = ctx.store.getTask(input.task_id!);
       if (!task || task.to !== self || task.delivery?.threadId !== sessionId) return null;
       const rejected = input.delivery_error === "session_rejected";
-      const diagnostic = rejected ? "OpenCode rejected the task prompt." : "OpenCode could not confirm task delivery.";
+      const diagnostic = (rejected ? "OpenCode rejected the task prompt." : "OpenCode could not confirm task delivery.")
+        + (typeof input.delivery_detail === "string" ? ` ${redactSecrets(input.delivery_detail).slice(0, 240)}` : "");
       const settled = ctx.store.settleOpenCodeTask(task.id, sessionId, identityToken, {
         state: rejected ? "failed" : "uncertain",
         error: diagnostic,
@@ -405,8 +413,54 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       return settled ? out(event, JSON.stringify({ accepted: true, task_id: task.id })) : null;
     }
 
+    // OpenCode's session.idle event uses this narrow event to close only the
+    // exact provider turn. It must not run Stop's result/answer bookkeeping.
+    if (event === "ProviderTurnEnd") {
+      if (input.session_id && ctx.providerProcessId !== undefined) {
+        ctx.store.endProviderTurn({
+          provider: ctx.provider,
+          sessionId: input.session_id,
+          processId: ctx.providerProcessId,
+          ...(input.turn_id ? { turnId: input.turn_id } : {}),
+        });
+      }
+      return null;
+    }
+
+    // Codex fires Interrupt for a canceled active turn; Stop is not guaranteed
+    // on abort/error. Use its exact turn id so a delayed old hook cannot close
+    // a newer turn in the same session.
+    if (event === "Interrupt") {
+      if (input.session_id && ctx.providerProcessId !== undefined) {
+        ctx.store.endProviderTurn({
+          provider: ctx.provider,
+          sessionId: input.session_id,
+          processId: ctx.providerProcessId,
+          ...(input.turn_id ? { turnId: input.turn_id } : {}),
+        });
+      }
+      return null;
+    }
+
+    if (event === "SessionEnd") {
+      // SessionEnd has no turn id. Closing only this provider session and its
+      // verified host process is safe even if sibling sessions share the PID.
+      if (input.session_id && ctx.providerProcessId !== undefined) {
+        ctx.store.endProviderTurn({ provider: ctx.provider, sessionId: input.session_id, processId: ctx.providerProcessId });
+      }
+      return null;
+    }
+
     // A turn finished. If this session was shown tasks other agents sent, its final message is the answer: record it and send it back.
     if (event === "Stop") {
+      if (input.session_id && ctx.providerProcessId !== undefined) {
+        ctx.store.endProviderTurn({
+          provider: ctx.provider,
+          sessionId: input.session_id,
+          processId: ctx.providerProcessId,
+          ...(input.turn_id ? { turnId: input.turn_id } : {}),
+        });
+      }
       // A Stop hook is a provider-turn boundary, not task evidence. Older code
       // attached the same final answer to every recently delivered task when
       // the adapter omitted a task reference. That polluted the ledger and
@@ -476,7 +530,13 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
             sessionId: input.session_id,
             cwd: projectCwd,
             ownerProcessId: ctx.providerProcessId,
-            continuation: true,
+          });
+          ctx.store.beginProviderTurn({
+            provider: ctx.provider,
+            sessionId: input.session_id,
+            cwd: projectCwd,
+            processId: ctx.providerProcessId,
+            ...(input.turn_id ? { turnId: input.turn_id } : {}),
           });
         }
         if (identity && self === "codex" && knownSession) {

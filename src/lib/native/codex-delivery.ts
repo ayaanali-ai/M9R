@@ -8,7 +8,7 @@ import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, M9R_PUSHED_RESULT_PREFIX, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
-import { windowsFileHolders, type Liveness } from "./codex-liveness";
+import { windowsFileHolderObservations, type FileHolderObservation, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
 import { defaultStoreRoot } from "./local-store";
 import { createWebBrokerClient } from "./web-broker-client";
@@ -32,6 +32,8 @@ export interface DeliveryDeps {
   readRolloutTail(threadId: string): string | null;
   /** Which of these threads are open right now. Optional: without it (or with `unknown`) recency decides. */
   sessionLiveness?(threadIds: string[]): Promise<Record<string, Liveness>>;
+  /** Exact process holding each live rollout file; absent when ownership is ambiguous or unavailable. */
+  sessionOwnerProcessIds?(threadIds: string[]): Promise<Record<string, number | undefined>>;
   /** Production hook delivery must target a session with a live M9R identity. Unit callers may opt into legacy fixtures. */
   requireTargetIdentity?: boolean;
 }
@@ -208,7 +210,7 @@ export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, 
 const TAIL_BYTES = 512 * 1024;
 const LIVENESS_FRESH_MS = 20_000;
 /** Who holds which session file open, remembered briefly within this process (the resident engine). */
-const livenessMemo = new Map<string, { v: Liveness; at: number }>();
+const livenessMemo = new Map<string, { v: Liveness; processId?: number; at: number }>();
 
 export function codexHome(env: Record<string, string | undefined>): string {
   return env.CODEX_HOME?.trim() || join(homedir(), ".codex");
@@ -222,13 +224,62 @@ export function codexHome(env: Record<string, string | undefined>): string {
  * live/free checks against it are checking a file nobody has held open in days. Match the optional `_<uuid>` tail too.
  */
 export function findRolloutFile(home: string, threadId: string): string | null {
+  return scanCodexRolloutFiles(home, [threadId]).paths.get(threadId) ?? null;
+}
+
+export interface CodexRolloutFileScan {
+  /** The newest matching local rollout file for each requested Codex thread. */
+  paths: ReadonlyMap<string, string>;
+  /** False means some part of the session tree could not be inspected; absence is then not proof of closure. */
+  complete: boolean;
+}
+
+/**
+ * Index the Codex session tree once for a batch of session IDs. A complete scan
+ * that finds no rollout is positive evidence that a retained M9R session record
+ * is stale; a missing or unreadable directory remains unknown and fail-closed.
+ * Directory entries are traversed in the same reverse-lexical order as the
+ * previous lookup so a resumed thread still resolves to its newest rotation.
+ */
+export function scanCodexRolloutFiles(home: string, threadIds: readonly string[]): CodexRolloutFileScan {
+  const paths = new Map<string, string>();
+  const patterns = new Map(threadIds.map((threadId) => [
+    threadId,
+    new RegExp(`-${threadId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:_[0-9a-f-]+)?\\.jsonl$`, "i"),
+  ]));
+  let complete = true;
+  const entries = (directory: string) => {
+    try {
+      return readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+        a.name < b.name ? 1 : a.name > b.name ? -1 : 0);
+    } catch {
+      complete = false;
+      return [];
+    }
+  };
+
   const root = join(home, "sessions");
-  const pattern = new RegExp(`-${threadId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:_[0-9a-f-]+)?\\.jsonl$`, "i");
-  const list = (dir: string): string[] => { try { return readdirSync(dir).sort().reverse(); } catch { return []; } };
-  for (const y of list(root)) for (const m of list(join(root, y))) for (const d of list(join(root, y, m))) {
-    for (const f of list(join(root, y, m, d))) if (pattern.test(f)) return join(root, y, m, d, f);
+  for (const year of entries(root)) {
+    if (!year.isDirectory()) continue;
+    const yearPath = join(root, year.name);
+    for (const month of entries(yearPath)) {
+      if (!month.isDirectory()) continue;
+      const monthPath = join(yearPath, month.name);
+      for (const day of entries(monthPath)) {
+        if (!day.isDirectory()) continue;
+        const dayPath = join(monthPath, day.name);
+        for (const file of entries(dayPath)) {
+          if (!file.isFile()) continue;
+          for (const [threadId, pattern] of patterns) {
+            if (!paths.has(threadId) && pattern.test(file.name)) {
+              paths.set(threadId, join(dayPath, file.name));
+            }
+          }
+        }
+      }
+    }
   }
-  return null;
+  return { paths, complete };
 }
 
 export function readTail(path: string, bytes: number): string | null {
@@ -259,6 +310,39 @@ export function readRolloutTailFor(threadId: string, env: Record<string, string 
 export function realDeps(env: Record<string, string | undefined> = process.env): DeliveryDeps {
   const root = defaultStoreRoot(homedir(), env);
   const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
+  const observeCodexSessions = async (threadIds: string[]): Promise<Record<string, FileHolderObservation>> => {
+    const now = Date.now();
+    const out: Record<string, FileHolderObservation> = {};
+    const missing: string[] = [];
+    for (const id of threadIds) {
+      const hit = livenessMemo.get(id);
+      if (hit && now - hit.at < LIVENESS_FRESH_MS) {
+        out[id] = { state: hit.v, ...(hit.processId !== undefined ? { processId: hit.processId } : {}) };
+      } else missing.push(id);
+    }
+    if (missing.length > 0) {
+      const byFile = new Map<string, string>();
+      const scan = scanCodexRolloutFiles(codexHome(env), missing);
+      for (const id of missing) {
+        const file = scan.paths.get(id);
+        if (file) byFile.set(file, id);
+        else out[id] = { state: scan.complete ? "free" : "unknown" };
+      }
+      const observations = await windowsFileHolderObservations([...byFile.keys()]);
+      for (const [file, id] of byFile) out[id] = observations[file] ?? { state: "unknown" };
+      for (const id of missing) {
+        const observation = out[id] ?? { state: "unknown" as Liveness };
+        if (observation.state !== "unknown") {
+          livenessMemo.set(id, {
+            v: observation.state,
+            ...(observation.processId !== undefined ? { processId: observation.processId } : {}),
+            at: Date.now(),
+          });
+        }
+      }
+    }
+    return out;
+  };
   return {
     prepareTaskStage: (token, taskId) => prepareTaskStageNotice(root, web, token, "codex", taskId),
     requireTargetIdentity: true,
@@ -286,25 +370,8 @@ export function realDeps(env: Record<string, string | undefined> = process.env):
       const file = findRolloutFile(codexHome(env), threadId);
       return file ? readTail(file, TAIL_BYTES) : null;
     },
-    sessionLiveness: async (threadIds) => {
-      // The feed already asks the machine every few seconds; a push right after should not pay for the same 2 s question again.
-      const now = Date.now();
-      const out: Record<string, Liveness> = {};
-      const missing: string[] = [];
-      for (const id of threadIds) {
-        const hit = livenessMemo.get(id);
-        if (hit && now - hit.at < LIVENESS_FRESH_MS) out[id] = hit.v; else missing.push(id);
-      }
-      if (missing.length > 0) {
-        const byFile = new Map<string, string>();
-        for (const id of missing) { const f = findRolloutFile(codexHome(env), id); if (f) byFile.set(f, id); }
-        const verdicts = await windowsFileHolders([...byFile.keys()]);
-        for (const id of missing) out[id] = "unknown";
-        for (const [file, id] of byFile) out[id] = verdicts[file] ?? "unknown";
-        for (const id of missing) if (out[id] !== "unknown") livenessMemo.set(id, { v: out[id], at: Date.now() });
-      }
-      return out;
-    },
+    sessionLiveness: async (threadIds) => Object.fromEntries(Object.entries(await observeCodexSessions(threadIds)).map(([id, observation]) => [id, observation.state])),
+    sessionOwnerProcessIds: async (threadIds) => Object.fromEntries(Object.entries(await observeCodexSessions(threadIds)).map(([id, observation]) => [id, observation.processId])),
   };
 }
 

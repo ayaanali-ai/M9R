@@ -1,10 +1,111 @@
 import { createHash, randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 type RuntimeFile = { from: string; to: string };
 const digest = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
-const DEFAULT_COMMITTED_BACKUP_RETENTION = 3;
+const DEFAULT_COMPLETED_TRANSACTION_RETENTION = 0;
+
+function isCompletedFileManifest(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const file = entry as Record<string, unknown>;
+    if (typeof file.path !== "string" || !file.path || file.path.includes("\0")
+      || isAbsolute(file.path) || file.path.includes(":")
+      || file.path.split(/[\\/]+/).some((segment) => !segment || segment === "." || segment === "..")
+      || !/^[a-f0-9]{64}$/i.test(String(file.sha256 ?? ""))
+      || typeof file.existed !== "boolean") return false;
+    const previousHashValid = file.existed
+      ? typeof file.previousSha256 === "string" && /^[a-f0-9]{64}$/i.test(file.previousSha256)
+      : file.previousSha256 === null;
+    if (!previousHashValid) return false;
+    const key = process.platform === "win32" ? file.path.toLowerCase() : file.path;
+    if (seen.has(key)) return false;
+    seen.add(key);
+  }
+  return true;
+}
+
+type SnapshotManifest = ReadonlyMap<string, string>;
+
+function normalizeSnapshotPath(path: string): string {
+  // Journals are written with the host platform's separator, while snapshot
+  // traversal below deliberately builds portable `/`-separated relative
+  // paths. Normalize both forms before comparing them; otherwise every
+  // Windows transaction containing a nested runtime file is treated as
+  // unverifiable and is retained forever.
+  const normalized = path.replace(/\\/g, "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function inspectSnapshot(snapshotRoot: string, expectedFiles: SnapshotManifest): Array<{ path: string; sha256: string }> | null {
+  if (!existsSync(snapshotRoot)) return [];
+  try {
+    const rootInfo = lstatSync(snapshotRoot);
+    if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) return null;
+
+    const expectedDirectories = new Set<string>();
+    for (const filePath of expectedFiles.keys()) {
+      const segments = filePath.split(/[\\/]+/);
+      for (let index = 1; index < segments.length; index += 1) {
+        expectedDirectories.add(normalizeSnapshotPath(segments.slice(0, index).join("/")));
+      }
+    }
+
+    const found: Array<{ path: string; sha256: string }> = [];
+    const visit = (directory: string, relativeDirectory: string): boolean => {
+      for (const name of readdirSync(directory)) {
+        const path = join(directory, name);
+        const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name;
+        const key = normalizeSnapshotPath(relativePath);
+        const info = lstatSync(path);
+        if (info.isSymbolicLink()) return false;
+        if (info.isDirectory()) {
+          if (!expectedDirectories.has(key) || !visit(path, relativePath)) return false;
+          continue;
+        }
+        if (!info.isFile()) return false;
+        const sha256 = expectedFiles.get(key);
+        if (!sha256 || digest(path) !== sha256) return false;
+        found.push({ path, sha256 });
+      }
+      return true;
+    };
+
+    return visit(snapshotRoot, "") ? found : null;
+  } catch {
+    return null;
+  }
+}
+
+function removeVerifiedSnapshot(snapshotRoot: string, expectedFiles: SnapshotManifest): void {
+  const files = inspectSnapshot(snapshotRoot, expectedFiles);
+  if (!files) throw new Error("Completed runtime snapshot contains unexpected or changed data.");
+  if (!existsSync(snapshotRoot)) return;
+
+  const directories: string[] = [];
+  const collectDirectories = (directory: string): void => {
+    for (const name of readdirSync(directory)) {
+      const path = join(directory, name);
+      const info = lstatSync(path);
+      if (info.isSymbolicLink()) throw new Error("Completed runtime snapshot changed during cleanup.");
+      if (info.isDirectory()) collectDirectories(path);
+    }
+    directories.push(directory);
+  };
+  collectDirectories(snapshotRoot);
+
+  for (const file of files) {
+    const info = lstatSync(file.path);
+    if (info.isSymbolicLink() || !info.isFile() || digest(file.path) !== file.sha256) {
+      throw new Error("Completed runtime snapshot changed during cleanup.");
+    }
+    unlinkSync(file.path);
+  }
+  for (const directory of directories) rmdirSync(directory);
+}
 
 function rejectRedirectedAncestors(path: string): void {
   for (let ancestor = resolve(path); ; ancestor = dirname(ancestor)) {
@@ -31,51 +132,111 @@ export function hasPendingRuntimeTransaction(targetDir: string): boolean {
 }
 
 /**
- * Bound successful runtime snapshots without touching evidence needed to recover
- * an interrupted or failed update.  A setup can run many times in one day, and
- * each successful transaction contains a full copy of the runtime.  Keeping
- * every committed snapshot makes the local installation grow without bound;
- * keeping the newest small rollback window preserves recovery while draining
- * redundant history.
+ * Remove completed runtime transaction snapshots without touching evidence
+ * needed to recover an interrupted or failed update. The previous files exist
+ * only until the new runtime verifies or the prior runtime is fully restored;
+ * retaining completed copies creates stale generations on disk.
  *
  * Unknown, malformed, foreign-target, applying, and rollback_failed journals
  * are deliberately retained.  They may be needed for recovery or inspection,
  * and an updater must never turn uncertainty into deletion.
  */
-export function pruneCommittedRuntimeBackups(targetDir: string, keepCount = DEFAULT_COMMITTED_BACKUP_RETENTION): string[] {
-  if (!Number.isInteger(keepCount) || keepCount < 1 || keepCount > 32) throw new Error("Runtime backup retention count is invalid.");
+export function pruneCompletedRuntimeTransactions(targetDir: string, keepCount = DEFAULT_COMPLETED_TRANSACTION_RETENTION): string[] {
+  if (!Number.isInteger(keepCount) || keepCount < 0 || keepCount > 32) throw new Error("Runtime backup retention count is invalid.");
   const root = resolve(targetDir);
   const backupRoot = join(dirname(root), "runtime-backups");
-  if (!existsSync(backupRoot)) return [];
-  rejectRedirectedAncestors(backupRoot);
-  const backupRootInfo = lstatSync(backupRoot);
-  if (backupRootInfo.isSymbolicLink() || !backupRootInfo.isDirectory()) throw new Error("Runtime backup directory is unsafe; preserved for inspection.");
-
-  const normalizedRoot = process.platform === "win32" ? root.toLowerCase() : root;
-  const committed: Array<{ path: string; mtimeMs: number }> = [];
-  for (const name of readdirSync(backupRoot)) {
-    if (!/^[a-f0-9-]{36}$/.test(name)) continue;
-    const transaction = join(backupRoot, name);
-    const transactionInfo = lstatSync(transaction);
-    if (transactionInfo.isSymbolicLink() || !transactionInfo.isDirectory()) continue;
-    const journal = join(transaction, "transaction.json");
-    if (!existsSync(journal)) continue;
-    const journalInfo = lstatSync(journal);
-    if (journalInfo.isSymbolicLink() || !journalInfo.isFile() || journalInfo.size > 2 * 1024 * 1024) continue;
-    let record: { status?: unknown; targetDir?: unknown; files?: unknown };
-    try { record = JSON.parse(readFileSync(journal, "utf8")) as typeof record; } catch { continue; }
-    const recordedTarget = typeof record.targetDir === "string" ? resolve(record.targetDir) : "";
-    if (record.status !== "committed" || (process.platform === "win32" ? recordedTarget.toLowerCase() : recordedTarget) !== normalizedRoot || !Array.isArray(record.files)) continue;
-    committed.push({ path: transaction, mtimeMs: Math.max(transactionInfo.mtimeMs, journalInfo.mtimeMs) });
-  }
-
-  committed.sort((a, b) => b.mtimeMs - a.mtimeMs || b.path.localeCompare(a.path));
   const pruned: string[] = [];
-  for (const entry of committed.slice(keepCount)) {
-    try {
-      rmSync(entry.path, { recursive: true, force: true });
-      if (!existsSync(entry.path)) pruned.push(entry.path);
-    } catch { /* A locked snapshot remains recoverable and is retried on a later update. */ }
+  try {
+    if (!existsSync(backupRoot)) return pruned;
+    rejectRedirectedAncestors(backupRoot);
+    const backupRootInfo = lstatSync(backupRoot);
+    if (backupRootInfo.isSymbolicLink() || !backupRootInfo.isDirectory()) return pruned;
+
+    const normalizedRoot = process.platform === "win32" ? root.toLowerCase() : root;
+    const completed: Array<{
+      path: string;
+      mtimeMs: number;
+      journalHash: string;
+      nextFiles: SnapshotManifest;
+      previousFiles: SnapshotManifest;
+    }> = [];
+    for (const name of readdirSync(backupRoot)) {
+      if (!/^[a-f0-9-]{36}$/.test(name)) continue;
+      const transaction = join(backupRoot, name);
+      let transactionInfo: ReturnType<typeof lstatSync>;
+      try { transactionInfo = lstatSync(transaction); } catch { continue; }
+      if (transactionInfo.isSymbolicLink() || !transactionInfo.isDirectory()) continue;
+      const journal = join(transaction, "transaction.json");
+      if (!existsSync(journal)) {
+        // A crash can occur after creating the UUID directory but before writing
+        // its journal. Remove only a provably empty directory; never guess about
+        // unjournaled contents.
+        try {
+          if (readdirSync(transaction).length === 0) rmdirSync(transaction);
+        } catch { /* inaccessible or non-empty directories are preserved */ }
+        continue;
+      }
+      let journalInfo: ReturnType<typeof lstatSync>;
+      try { journalInfo = lstatSync(journal); } catch { continue; }
+      if (journalInfo.isSymbolicLink() || !journalInfo.isFile() || journalInfo.size > 2 * 1024 * 1024) continue;
+      let record: { status?: unknown; targetDir?: unknown; files?: unknown };
+      try { record = JSON.parse(readFileSync(journal, "utf8")) as typeof record; } catch { continue; }
+      const recordedTarget = typeof record.targetDir === "string" ? resolve(record.targetDir) : "";
+      if ((record.status !== "committed" && record.status !== "rolled_back")
+        || (process.platform === "win32" ? recordedTarget.toLowerCase() : recordedTarget) !== normalizedRoot
+        || !isCompletedFileManifest(record.files)) continue;
+      const manifest = record.files as Array<{ path: string; sha256: string; existed: boolean; previousSha256: string | null }>;
+      const nextFiles = new Map(manifest.map((file) => [normalizeSnapshotPath(file.path), file.sha256.toLowerCase()]));
+      const previousFiles = new Map(manifest
+        .filter((file) => file.existed)
+        .map((file) => [normalizeSnapshotPath(file.path), file.previousSha256!.toLowerCase()]));
+      let children: string[];
+      try { children = readdirSync(transaction); } catch { continue; }
+      if (children.some((child) => child !== "transaction.json" && child !== "next" && child !== "previous")) continue;
+      let safeChildren = true;
+      for (const child of ["next", "previous"]) {
+        if (!children.includes(child)) continue;
+        const path = join(transaction, child);
+        let info: ReturnType<typeof lstatSync>;
+        try { info = lstatSync(path); } catch { safeChildren = false; break; }
+        if (info.isSymbolicLink() || !info.isDirectory()) safeChildren = false;
+      }
+      if (!safeChildren) continue;
+      if (!inspectSnapshot(join(transaction, "next"), nextFiles)
+        || !inspectSnapshot(join(transaction, "previous"), previousFiles)) continue;
+      completed.push({
+        path: transaction,
+        mtimeMs: Math.max(transactionInfo.mtimeMs, journalInfo.mtimeMs),
+        journalHash: digest(journal),
+        nextFiles,
+        previousFiles,
+      });
+    }
+
+    completed.sort((a, b) => b.mtimeMs - a.mtimeMs || b.path.localeCompare(a.path));
+    for (const entry of completed.slice(keepCount)) {
+      try {
+        // Remove bulk data before its journal. If a locked file interrupts
+        // cleanup, the terminal journal remains so a later pass can safely retry.
+        const children = readdirSync(entry.path);
+        if (children.some((child) => child !== "transaction.json" && child !== "next" && child !== "previous")) {
+          throw new Error("Completed runtime transaction changed during cleanup.");
+        }
+        removeVerifiedSnapshot(join(entry.path, "next"), entry.nextFiles);
+        removeVerifiedSnapshot(join(entry.path, "previous"), entry.previousFiles);
+        const journal = join(entry.path, "transaction.json");
+        const journalInfo = lstatSync(journal);
+        if (journalInfo.isSymbolicLink() || !journalInfo.isFile() || digest(journal) !== entry.journalHash) {
+          throw new Error("Completed runtime journal changed during cleanup.");
+        }
+        unlinkSync(journal);
+        rmdirSync(entry.path);
+        if (!existsSync(entry.path)) pruned.push(entry.path);
+      } catch { /* A locked snapshot remains recoverable and is retried on a later update. */ }
+    }
+  } catch {
+    // Retention is best-effort cleanup; an unreadable or redirected backup
+    // directory must not turn a verified runtime install into a failed setup.
   }
   return pruned;
 }
@@ -135,8 +296,9 @@ export function installRuntimeTransaction(targetDir: string, files: readonly Run
     }
     record.status = "committed";
     journal();
-    // Retain the prior set and journal for explicit rollback; staging is disposable.
-    rmSync(join(transaction, "next"), { recursive: true, force: true });
+    // Rollback evidence is no longer needed after the complete new set verifies.
+    // Cleanup failure must not roll back the already verified runtime.
+    try { pruneCompletedRuntimeTransactions(root); } catch { /* cleanup is retried without rolling back the verified runtime */ }
     return [...retired, ...plan.map((file) => file.to)];
   } catch (error) {
     const failures: string[] = [];
@@ -151,6 +313,9 @@ export function installRuntimeTransaction(targetDir: string, files: readonly Run
     }
     record.status = failures.length ? "rollback_failed" : "rolled_back";
     journal();
+    if (failures.length === 0) {
+      try { pruneCompletedRuntimeTransactions(root); } catch { /* a later setup retries cleanup; preserve the original update error */ }
+    }
     const recoveryMessage = failures.length
       ? `Runtime update failed and rollback requires recovery for ${failures.join(", ")}. Preserved transaction: ${transaction}`
       : `Runtime update failed; the previous runtime was restored. Preserved transaction: ${transaction}`;
@@ -210,4 +375,5 @@ export function recoverRuntimeTransactions(targetDir: string, replace: (from: st
     record.status = "rolled_back";
     writeFileSync(journal, JSON.stringify(record, null, 2) + "\n");
   }
+  pruneCompletedRuntimeTransactions(root);
 }

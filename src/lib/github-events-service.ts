@@ -17,6 +17,7 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { supabase } from "@/lib/supabase";
+import { persistWebhook } from "@/lib/webhook-persistence";
 
 export type GithubWebhookEventName = "push" | "pull_request" | "pull_request_review";
 
@@ -99,26 +100,12 @@ function requireService() {
 }
 
 /** Routes a rendered event to its bound channel (if any) and posts it as a system message. Silent no-op for an unbound repo — the same refusal discipline as mission-channel-binding.ts, not an error a webhook sender needs to retry on. */
-export async function postGithubEventToBoundChannel(input: { repoFullName: string; body: string }): Promise<{ posted: boolean }> {
+export async function postGithubEventToBoundChannel(input: { repoFullName: string; body: string; deliveryId: string }): Promise<{ posted: boolean }> {
   const db = requireService();
-  const { data: binding } = await db
-    .from("github_repo_bindings")
-    .select("workspace_id, conversation_id")
-    .eq("repo_full_name", input.repoFullName)
-    .maybeSingle();
-  if (!binding) return { posted: false };
-
-  const { error } = await db.from("conversation_messages").insert({
-    workspace_id: binding.workspace_id,
-    conversation_id: binding.conversation_id,
-    sender_connection_id: null,
-    sender_user_id: null,
-    sender_kind: "system",
-    sender_display_name: "GitHub",
-    recipient_connection_id: null,
-    kind: "message",
-    body: input.body,
+  const posted = await persistWebhook(db, "post_github_delivery", {
+    p_repo_full_name: input.repoFullName,
+    p_body: input.body,
+    p_delivery_id: input.deliveryId,
   });
-  if (error) throw new Error(`Could not post GitHub event: ${error.message}`);
-  return { posted: true };
+  return { posted };
 }

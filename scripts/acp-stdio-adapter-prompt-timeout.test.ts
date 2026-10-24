@@ -35,7 +35,8 @@ test("prompt() times out instead of hanging forever when the provider never resp
 
     const startedAt = Date.now();
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
-    for await (const event of adapter.prompt({ session, text: "do the thing" })) {
+    let submitted = 0;
+    for await (const event of adapter.prompt({ session, text: "do the thing", onRequestSubmitted: () => { submitted += 1; } })) {
       events.push({ type: event.type, payload: event.payload });
     }
     const elapsedMs = Date.now() - startedAt;
@@ -50,6 +51,7 @@ test("prompt() times out instead of hanging forever when the provider never resp
     assert.equal(events.length, 1);
     assert.equal(events[0].type, "provider.failed");
     assert.match(String(events[0].payload.reason), /did not respond within 500ms/);
+    assert.equal(submitted, 1, "the submission receipt fires once the ACP prompt RPC is issued, without waiting for the provider's answer");
 
     // The actual production bug: acp-client.ts's `session.queue` guard
     // throws "ACP session already has an active prompt" for any prompt()

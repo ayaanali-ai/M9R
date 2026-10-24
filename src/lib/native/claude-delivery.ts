@@ -11,7 +11,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { Task } from "./inbox-core";
+import { redactSecrets, type Task } from "./inbox-core";
 import { buildQueueMessage, canQueue, normCwd } from "./codex-delivery-core";
 import { claudeSessionsDir, readClaudeSessions, type ClaudeSession } from "./claude-registry";
 import type { LocalStore } from "./local-store";
@@ -25,9 +25,17 @@ export interface ClaudeDeliveryOptions {
   mcpConfigPaths: readonly string[];
   cwd?: string;
   now?: () => Date;
+  /** Maximum time to wait for Claude to identify the requested resumed conversation. */
+  sessionInitTimeoutMs?: number;
   /** Injected in tests; production uses the signed-in `claude` executable. */
   spawnClaude?: (command: string, args: string[], cwd: string) => LiveProcess;
 }
+
+export type ClaudeDeliveryOutcome =
+  | { state: "accepted"; threadId: string }
+  | { state: "unavailable"; reason: string }
+  | { state: "ineligible" | "owned"; reason: string }
+  | { state: "failed" | "uncertain"; reason: string };
 
 interface ActiveDelivery {
   live?: LiveSession;
@@ -120,15 +128,15 @@ function transportError(error: unknown): string {
  * by the normal SessionStart/UserPromptSubmit hook path; a silent no-op is
  * safer than guessing a session or spawning an unrelated one.
  */
-export function createClaudeDeliveryAdapter(options: ClaudeDeliveryOptions, store: LocalStore): (taskId: string) => Promise<void> {
+export function createClaudeDeliveryAdapter(options: ClaudeDeliveryOptions, store: LocalStore): (taskId: string) => Promise<ClaudeDeliveryOutcome> {
   const active = new Map<string, ActiveDelivery>();
   const configPath = () => options.mcpConfigPaths.find((path) => typeof path === "string" && path.length > 0 && existsSync(path));
 
   return async (taskId) => {
     const task = store.getTask(taskId);
-    if (!task || task.to !== "claude" || task.resultSummary || !canQueue(task)) return;
+    if (!task || task.to !== "claude" || task.resultSummary || !canQueue(task)) return { state: "ineligible", reason: "not an eligible Claude task" };
     const mcpConfigPath = configPath();
-    if (!mcpConfigPath) return;
+    if (!mcpConfigPath) return { state: "unavailable", reason: "no installed Claude M9R MCP configuration was found" };
 
     const sessionsEnv = {
       ...options.env,
@@ -136,14 +144,14 @@ export function createClaudeDeliveryAdapter(options: ClaudeDeliveryOptions, stor
     };
     const sessions = readClaudeSessions(claudeSessionsDir(sessionsEnv));
     const session = chooseSession(store, task, sessions, active);
-    if (!session) return;
+    if (!session) return { state: "unavailable", reason: "no one unambiguous idle M9R Claude session is available" };
     const token = store.identityTokenFor("claude", session.sessionId);
-    if (!token || active.has(session.sessionId)) return;
+    if (!token || active.has(session.sessionId)) return { state: "unavailable", reason: "the selected Claude session has no usable M9R identity" };
 
     // This is the durable ownership fence. It is checked before a process is
     // started, so a second feed or a manual inbox read cannot claim the same
     // task after this adapter has selected its exact session.
-    if (!store.bindTaskToSession(taskId, token)) return;
+    if (!store.bindTaskToSession(taskId, token)) return { state: "owned", reason: "another delivery path already owns this task" };
     const claimedAt = (options.now ?? (() => new Date()))().toISOString();
     store.setDelivery(taskId, {
       state: "sending",
@@ -151,22 +159,34 @@ export function createClaudeDeliveryAdapter(options: ClaudeDeliveryOptions, stor
       threadId: session.sessionId,
       claimedAt,
       correlation: "internal-context",
+      transport: "claude-resume",
     });
 
     const record: ActiveDelivery = { sent: false, sawResult: false, wrongSession: false, exited: false };
-    const handleExit = (): void => {
+    let settleInit!: (result: { ok: true } | { ok: false; reason: string }) => void;
+    let initSettled = false;
+    const init = new Promise<{ ok: true } | { ok: false; reason: string }>((resolve) => {
+      settleInit = (result) => {
+        if (initSettled) return;
+        initSettled = true;
+        resolve(result);
+      };
+    });
+    let stderrTail = "";
+    const handleExit = (code: number | null): void => {
       record.exited = true;
       active.delete(session.sessionId);
+      settleInit({ ok: false, reason: "Claude exited before confirming the requested session." });
       const current = store.getTask(taskId);
       if (current?.resultSummary || record.sawResult) return;
       store.setDelivery(taskId, {
-        state: record.wrongSession ? "uncertain" : record.sent ? "uncertain" : "failed",
+        state: record.sent ? "uncertain" : "failed",
         threadId: session.sessionId,
         error: record.wrongSession
           ? "Claude resume returned a different session; M9R did not replay the task."
           : record.sent
-            ? "Claude resume exited before M9R confirmed the provider turn."
-            : "Claude could not accept the resumed provider turn.",
+            ? `Claude resume exited before M9R confirmed the provider turn. Exit=${code ?? "unknown"}. ${stderrTail}`
+            : `Claude could not accept the resumed provider turn. Exit=${code ?? "unknown"}. ${stderrTail}`,
       });
     };
     const onEvent = (event: LiveEvent): void => {
@@ -174,9 +194,11 @@ export function createClaudeDeliveryAdapter(options: ClaudeDeliveryOptions, stor
         // --resume must not silently create a different conversation. Stop the
         // transport and fence the task against automatic replay.
         record.wrongSession = true;
+        settleInit({ ok: false, reason: "Claude resumed a different session; no task text was sent." });
         record.live?.stop();
         return;
       }
+      if (event.kind === "init") settleInit({ ok: true });
       if (event.kind === "result") {
         record.sawResult = true;
         if (event.isError && !store.getTask(taskId)?.resultSummary) {
@@ -198,24 +220,48 @@ export function createClaudeDeliveryAdapter(options: ClaudeDeliveryOptions, stor
           resumeSessionId: session.sessionId,
         },
         env: { ...options.env, M9R_HOME: options.root, M9R_PROVIDER: "claude-code" },
-        spawn: options.spawnClaude ?? ((command, args, cwd) => defaultSpawnClaude(options, command, args, cwd)),
+        spawn: (command, args, cwd) => {
+          const child = options.spawnClaude ? options.spawnClaude(command, args, cwd) : defaultSpawnClaude(options, command, args, cwd);
+          child.stderr?.on("data", (chunk) => { stderrTail = redactSecrets((stderrTail + String(chunk)).slice(-2000)).replace(/\s+/g, " ").slice(-240); });
+          return child;
+        },
         onEvent,
         onExit: handleExit,
       });
       record.live = live;
       active.set(session.sessionId, record);
-      if (record.wrongSession || record.exited) {
+      const initTimer = setTimeout(
+        () => settleInit({ ok: false, reason: "Claude did not confirm the requested session before the startup deadline." }),
+        Math.max(1, options.sessionInitTimeoutMs ?? 15_000),
+      );
+      initTimer.unref?.();
+      const initialized = await init;
+      clearTimeout(initTimer);
+      if (!initialized.ok || record.wrongSession || record.exited || live.state().status === "exited") {
         live.stop();
-        return;
+        active.delete(session.sessionId);
+        const reason = initialized.ok ? "Claude exited before accepting the task." : initialized.reason;
+        store.setDelivery(taskId, {
+          state: "failed",
+          threadId: session.sessionId,
+          error: reason,
+        });
+        return { state: "failed", reason };
       }
       live.send(messageFor(task));
       record.sent = true;
-      store.setDelivery(taskId, {
+      const queued = store.setDelivery(taskId, {
         state: "queued",
         threadId: session.sessionId,
         queuedAt: (options.now ?? (() => new Date()))().toISOString(),
         correlation: "internal-context",
       });
+      if (!queued || (queued.delivery?.state !== "queued" && queued.delivery?.state !== "done" && !queued.resultSummary)) {
+        const reason = "Claude accepted the prompt, but M9R could not confirm the durable delivery receipt; it will not replay the task.";
+        store.setDelivery(taskId, { state: "uncertain", threadId: session.sessionId, error: reason });
+        return { state: "uncertain", reason };
+      }
+      return { state: "accepted", threadId: session.sessionId };
     } catch (error) {
       active.delete(session.sessionId);
       record.live?.stop();
@@ -224,6 +270,7 @@ export function createClaudeDeliveryAdapter(options: ClaudeDeliveryOptions, stor
         threadId: session.sessionId,
         error: transportError(error),
       });
+      return { state: record.sent ? "uncertain" : "failed", reason: transportError(error) };
     }
   };
 }

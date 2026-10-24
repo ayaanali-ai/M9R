@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isM9rPushedPrompt, isThreadId, isWindowsSystemCwd, M9R_PUSHED_RESULT_PREFIX, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
-import { collectCodexResults, deliverToCodex, findRolloutFile, type DeliveryDeps } from "../src/lib/native/codex-delivery";
+import { collectCodexResults, deliverToCodex, findRolloutFile, realDeps, scanCodexRolloutFiles, type DeliveryDeps } from "../src/lib/native/codex-delivery";
 import { renderInboxInjection, renderResultsInjection } from "../src/lib/native/inbox-core";
 import { handleHookEvent } from "../src/lib/native/hook-handler";
 import { createLocalStore, RESULT_RECONCILIATION_MAX_AGE_MS } from "../src/lib/native/local-store";
@@ -664,15 +664,51 @@ test("a link whose stored session id is not a real Codex thread id is never used
 
 test("findRolloutFile follows a thread across Codex's rotated/resumed rollout files, not just its original one", () => {
   const home = mkdtempSync(join(tmpdir(), "m9r-codex-home-"));
-  const day1 = join(home, "sessions", "2026", "09", "19");
-  const day2 = join(home, "sessions", "2026", "09", "21");
-  mkdirSync(day1, { recursive: true });
-  mkdirSync(day2, { recursive: true });
-  const id = "01a0bc65-5d09-71a1-89f1-1f15cf4bc79a";
-  // The original file (no second id) plus two later rotations Codex creates for the same thread as it compacts/resumes.
-  writeFileSync(join(day1, `rollout-2026-09-19T20-19-14-${id}.jsonl`), "");
-  writeFileSync(join(day2, `rollout-2026-09-21T21-56-07-${id}_01a0c70a-c5c7-7c22-8bd4-0f5ab237cdbd.jsonl`), "");
-  writeFileSync(join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "");
-  const found = findRolloutFile(home, id);
-  assert.equal(found, join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "must resolve to the latest rotation, not the closed original file");
+  try {
+    const day1 = join(home, "sessions", "2026", "09", "19");
+    const day2 = join(home, "sessions", "2026", "09", "21");
+    mkdirSync(day1, { recursive: true });
+    mkdirSync(day2, { recursive: true });
+    const id = "01a0bc65-5d09-71a1-89f1-1f15cf4bc79a";
+    // The original file (no second id) plus two later rotations Codex creates for the same thread as it compacts/resumes.
+    writeFileSync(join(day1, `rollout-2026-09-19T20-19-14-${id}.jsonl`), "");
+    writeFileSync(join(day2, `rollout-2026-09-21T21-56-07-${id}_01a0c70a-c5c7-7c22-8bd4-0f5ab237cdbd.jsonl`), "");
+    writeFileSync(join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "");
+    const found = findRolloutFile(home, id);
+    assert.equal(found, join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "must resolve to the latest rotation, not the closed original file");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("Codex rollout scan distinguishes a complete missing-session record from an unreadable session tree", () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-codex-index-"));
+  try {
+    mkdirSync(join(home, "sessions", "2026", "10", "23"), { recursive: true });
+    const complete = scanCodexRolloutFiles(home, ["missing-session"]);
+    assert.equal(complete.complete, true, "a fully traversed tree proves that this stale record has no local rollout");
+    assert.equal(complete.paths.has("missing-session"), false);
+
+    const unavailable = scanCodexRolloutFiles(join(home, "missing-home"), ["unverifiable-session"]);
+    assert.equal(unavailable.complete, false, "a missing sessions root is not proof that a session is closed");
+    assert.equal(unavailable.paths.has("unverifiable-session"), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("real Codex liveness treats an absent old rollout as free only after a complete scan", async () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-codex-liveness-"));
+  const staleSession = `stale-${Date.now()}-${Math.random()}`;
+  const unverifiableSession = `unverifiable-${Date.now()}-${Math.random()}`;
+  try {
+    mkdirSync(join(home, "sessions", "2026", "10", "23"), { recursive: true });
+    const completeTree = await realDeps({ CODEX_HOME: home }).sessionLiveness!([staleSession]);
+    assert.equal(completeTree[staleSession], "free", "a fully readable tree with no matching rollout proves this retained record is not live here");
+
+    const missingRoot = await realDeps({ CODEX_HOME: join(home, "not-created") }).sessionLiveness!([unverifiableSession]);
+    assert.equal(missingRoot[unverifiableSession], "unknown", "a missing session root must never be treated as closure");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

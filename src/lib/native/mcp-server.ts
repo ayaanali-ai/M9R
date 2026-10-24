@@ -12,13 +12,17 @@
  * time with a clear reason, same discipline as dev-mcp-server.ts.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type RegisteredTool, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { ServerNotification, ServerRequest, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { readRuntimeBuildIdentity } from "./runtime-build-identity";
-import type { LocalStore } from "./local-store";
+import { handleForProvider, type LocalStore } from "./local-store";
 import { inboxMaxAgeMs, normalizeHandle, renderInboxInjection, type Task } from "./inbox-core";
-import { canQueue } from "./codex-delivery-core";
+import { canQueue, isThreadId, normCwd } from "./codex-delivery-core";
 import type { VerifiedIdentity } from "./identity-core";
 import type { WebBatchRequest, WebRequest } from "./web-broker-core";
 import type { WebBrokerClient } from "./web-broker-client";
@@ -52,6 +56,13 @@ export interface McpServerDeps {
   /** Private project/session hints supplied by a provider adapter. */
   connectionCwd?: string;
   connectionSessionId?: string;
+  /** Reconcile a provider session only through an exact process/session observation. */
+  reconcileProviderConnection?: (input: {
+    provider: string;
+    processId?: number;
+    sessionId?: string;
+    cwd?: string;
+  }) => Promise<{ healthy: boolean; detail: string; binding?: ConnectionBinding }>;
   /**
    * A private worker refreshed underneath an already-running provider-owned
    * supervisor may no longer have the launch environment that identified the
@@ -80,6 +91,64 @@ export interface McpServerDeps {
 const OPTIONAL_TOKEN_FIELD = { token: z.string().min(1).optional().describe("Your M9R session token, if this connection was not already bound by its provider adapter. Most connections do not need this.") };
 const STAGE_APP_REF = z.string().min(1).max(1024).refine(isStageAppReference, "Use an installed app name, app id, or absolute .exe path.");
 const runtimeIdentityAtProcessStart = readRuntimeBuildIdentity();
+type ProviderReconciliationResult = { healthy: boolean; detail: string; binding?: ConnectionBinding };
+
+interface ProviderCallMetadata {
+  /** Codex supplies the current conversation thread on each tools/call request. */
+  codexThreadId?: string;
+  codexThreadIdSupplied: boolean;
+  codexThreadIdInvalid: boolean;
+  bindingProblem?: string;
+}
+
+type M9rRequestExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
+
+/**
+ * Preserve the transport's per-request metadata across every tool surface,
+ * including tools registered by computer-use and network adapters. This keeps
+ * session selection request-scoped instead of pinning one shared MCP process
+ * to whichever conversation happened to call first.
+ */
+class ProviderContextMcpServer extends McpServer {
+  private readonly providerCallContext: AsyncLocalStorage<ProviderCallMetadata>;
+
+  constructor(
+    providerCallContext: AsyncLocalStorage<ProviderCallMetadata>,
+    options: { name: string; version: string },
+  ) {
+    super(options);
+    this.providerCallContext = providerCallContext;
+  }
+
+  override registerTool<OutputArgs extends ZodRawShapeCompat | AnySchema, InputArgs extends undefined | ZodRawShapeCompat | AnySchema = undefined>(
+    name: string,
+    config: {
+      title?: string;
+      description?: string;
+      inputSchema?: InputArgs;
+      outputSchema?: OutputArgs;
+      annotations?: ToolAnnotations;
+      _meta?: Record<string, unknown>;
+    },
+    callback: ToolCallback<InputArgs>,
+  ): RegisteredTool {
+    const contextualCallback = ((...args: unknown[]) => {
+      const extra = args.at(-1) as M9rRequestExtra | undefined;
+      const requestMeta = extra?._meta as Record<string, unknown> | undefined;
+      const codexThreadIdSupplied = requestMeta !== undefined
+        && Object.prototype.hasOwnProperty.call(requestMeta, "threadId");
+      const rawCodexThreadId = codexThreadIdSupplied ? requestMeta.threadId : undefined;
+      const validCodexThreadId = typeof rawCodexThreadId === "string" && isThreadId(rawCodexThreadId);
+      const context: ProviderCallMetadata = {
+        codexThreadIdSupplied,
+        codexThreadIdInvalid: codexThreadIdSupplied && !validCodexThreadId,
+        ...(validCodexThreadId ? { codexThreadId: rawCodexThreadId } : {}),
+      };
+      return this.providerCallContext.run(context, () => Reflect.apply(callback, undefined, args));
+    }) as ToolCallback<InputArgs>;
+    return super.registerTool(name, config, contextualCallback);
+  }
+}
 
 function runtimeServerVersion(): string {
   return runtimeIdentityAtProcessStart.status === "verified" && runtimeIdentityAtProcessStart.buildId
@@ -88,7 +157,8 @@ function runtimeServerVersion(): string {
 }
 
 export function createM9rMcpServer(deps: McpServerDeps): McpServer {
-  const server = new McpServer({ name: "m9r-mcp", version: runtimeServerVersion() });
+  const providerCallContext = new AsyncLocalStorage<ProviderCallMetadata>();
+  const server = new ProviderContextMcpServer(providerCallContext, { name: "m9r-mcp", version: runtimeServerVersion() });
   const operationNamespace = randomUUID();
   const pageNotes = deps.pageNotes ?? createPageNotesStore(deps.store.root);
   // Whether this process was ever told anything connection-mode-shaped at startup. This stays a
@@ -98,52 +168,269 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const connectionConfigured = Boolean(deps.connectionBindingId || deps.connectionProcessId || deps.connectionProvider || deps.connectionWorkerFallback);
   const AUTH_FIELD = OPTIONAL_TOKEN_FIELD;
   let connectionBindingId = deps.connectionBindingId;
+  const defaultConnectionBindingProblem = "no trusted SessionStart or UserPromptSubmit event has published a usable provider claim yet";
   const connectionWaitMs = Math.max(0, Math.min(10_000, Math.floor(deps.connectionWaitMs ?? 3_000)));
   const connectionPollMs = Math.max(10, Math.min(250, Math.floor(deps.connectionPollMs ?? 50)));
+  const providerReconciliations = new Map<string, {
+    inFlight?: Promise<ProviderReconciliationResult>;
+    startedAt: number;
+    result?: ProviderReconciliationResult;
+  }>();
+  const setConnectionBindingProblem = (problem: string): void => {
+    const request = providerCallContext.getStore();
+    if (request) request.bindingProblem = problem;
+  };
+  const getConnectionBindingProblem = (): string =>
+    providerCallContext.getStore()?.bindingProblem ?? defaultConnectionBindingProblem;
+  const codexCallSelector = (): { supplied: boolean; invalid: boolean; sessionId?: string } => {
+    if (handleForProvider(deps.connectionProvider ?? "") !== "codex") {
+      return { supplied: false, invalid: false };
+    }
+    const request = providerCallContext.getStore();
+    if (!request?.codexThreadIdSupplied) return { supplied: false, invalid: false };
+    return {
+      supplied: true,
+      invalid: request.codexThreadIdInvalid,
+      ...(request.codexThreadId ? { sessionId: request.codexThreadId } : {}),
+    };
+  };
+  const pruneProviderReconciliations = (now: number): void => {
+    for (const [key, state] of providerReconciliations) {
+      if (!state.inFlight && now - state.startedAt > 30_000) providerReconciliations.delete(key);
+    }
+    while (providerReconciliations.size > 64) {
+      const oldest = [...providerReconciliations.entries()].find(([, state]) => !state.inFlight);
+      if (!oldest) break;
+      providerReconciliations.delete(oldest[0]);
+    }
+  };
   const sleepAsync = (ms: number) => new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, ms);
     timer.unref?.();
   });
 
-  function resolveConnectionBinding(): ConnectionBinding | null {
-    if (connectionBindingId) {
+  type DeliveredTaskSessionResolution =
+    | { status: "none" }
+    | { status: "ambiguous" }
+    | { status: "selected"; sessionId: string };
+
+  /**
+   * A provider PID is not a conversation id. When a native delivery has already
+   * recorded the exact thread that accepted the task, use that receipt as the
+   * selector instead of asking process-wide discovery to guess between sibling
+   * sessions. Old, answered, unapproved, or merely deferred tasks are never
+   * binding evidence.
+   */
+  function currentDeliveredTaskSession(): DeliveredTaskSessionResolution {
+    const provider = deps.connectionProvider?.trim();
+    const processId = deps.connectionProcessId;
+    if (!provider || processId === undefined || deps.connectionSessionId) return { status: "none" };
+
+    const handle = handleForProvider(provider);
+    const nowMs = (deps.now ?? (() => new Date()))().getTime();
+    const maxAge = inboxMaxAgeMs();
+    const sessionIds = new Set(deps.store.tasksFor(handle).flatMap((task) => {
+      const sessionId = task.delivery?.threadId;
+      const createdAt = Date.parse(task.createdAt);
+      const age = nowMs - createdAt;
+      if (!sessionId || !["sending", "queued"].includes(task.delivery?.state ?? "") || task.resultSummary || !canQueue(task)
+        || !Number.isFinite(createdAt) || age < 0 || age > maxAge
+        || (task.targetSession && task.targetSession !== sessionId)
+        || (task.deliveredSession && task.deliveredSession !== sessionId)) return [];
+      return [sessionId];
+    }));
+
+    if (sessionIds.size === 0) return { status: "none" };
+    if (sessionIds.size > 1) {
+      setConnectionBindingProblem("multiple recent delivered tasks name different sessions in this shared provider process; M9R refused to guess");
+      return { status: "ambiguous" };
+    }
+
+    return { status: "selected", sessionId: sessionIds.values().next().value as string };
+  }
+
+  function bindCurrentDeliveredTask(sessionId: string): ConnectionBinding | null {
+    const provider = deps.connectionProvider?.trim();
+    const processId = deps.connectionProcessId;
+    if (!provider || processId === undefined) return null;
+    const handle = handleForProvider(provider);
+    const binding = deps.store.bindConnectionForProcess({ provider, processId, sessionId, ...(deps.connectionCwd ? { cwd: deps.connectionCwd } : {}) });
+    const identity = binding ? deps.store.verifyConnectionBinding(binding.bindingId) : null;
+    if (!binding || !identity
+      || binding.sessionId !== sessionId || identity.sessionId !== sessionId
+      || normalizeHandle(identity.handle) !== normalizeHandle(handle)
+      || normalizeHandle(identity.provider) !== normalizeHandle(provider)) {
+      setConnectionBindingProblem("the delivered task identifies its exact session, but that session has no matching active M9R process binding");
+      return null;
+    }
+    return binding;
+  }
+
+  function resolveConnectionBinding(callSelector = codexCallSelector()): ConnectionBinding | null {
+    if (callSelector.invalid) {
+      setConnectionBindingProblem("the Codex host supplied an invalid per-call thread selector; refusing to choose a sibling session");
+      return null;
+    }
+    const exactSessionId = callSelector.supplied ? callSelector.sessionId : deps.connectionSessionId;
+    const hasProviderProcess = Boolean(deps.connectionProvider && deps.connectionProcessId !== undefined);
+    let activeTurnStatus: "none" | "ambiguous" | "unavailable" | undefined;
+    if (deps.connectionProvider !== undefined && deps.connectionProcessId !== undefined && !exactSessionId
+      && deps.store.bindActiveProviderTurn) {
+      const activeTurn = deps.store.bindActiveProviderTurn({ provider: deps.connectionProvider, processId: deps.connectionProcessId });
+      if (activeTurn.status === "resolved") return activeTurn.binding;
+      activeTurnStatus = activeTurn.status;
+    }
+    if (hasProviderProcess && !exactSessionId) {
+      const taskSession = currentDeliveredTaskSession();
+      if (taskSession.status === "ambiguous") return null;
+      if (taskSession.status === "selected") {
+        const taskBinding = bindCurrentDeliveredTask(taskSession.sessionId);
+        if (taskBinding) return taskBinding;
+        return null;
+      }
+    }
+    if (activeTurnStatus === "ambiguous") {
+      setConnectionBindingProblem("multiple provider turns are active in this shared process; M9R refused to choose one");
+      return null;
+    }
+    if (activeTurnStatus === "unavailable") {
+      setConnectionBindingProblem("the active provider turn has no matching live identity and private claim");
+      return null;
+    }
+    // A configured binding id is only a stable selector when this MCP process
+    // has no provider-host context. Per-call host metadata takes precedence and
+    // must never be replaced by a connection-wide, possibly stale binding.
+    if (connectionBindingId && !hasProviderProcess && !callSelector.supplied) {
       return deps.store.verifyConnectionBinding(connectionBindingId)
         ? { bindingId: connectionBindingId, claimId: "bound", handle: "", provider: "", sessionId: "", boundAt: "" }
         : null;
     }
     if (deps.connectionProcessId === undefined && !deps.connectionProvider && !deps.connectionWorkerFallback) return null;
-    let binding = deps.store.bindConnectionForProcess({ provider: deps.connectionProvider, processId: deps.connectionProcessId });
-    if (!binding && deps.connectionProvider && deps.store.reconcileLiveProviderConnection && deps.connectionSessionId) {
+    const expected = {
+      ...(deps.connectionProvider ? { provider: deps.connectionProvider } : {}),
+      ...(deps.connectionProcessId !== undefined ? { processId: deps.connectionProcessId } : {}),
+      ...(exactSessionId ? { sessionId: exactSessionId } : {}),
+      ...(deps.connectionCwd ? { cwd: deps.connectionCwd } : {}),
+    };
+    let binding = deps.store.bindConnectionForProcess(expected);
+    if (!binding && !callSelector.supplied && deps.connectionProvider && deps.store.reconcileLiveProviderConnection && exactSessionId) {
       binding = deps.store.reconcileLiveProviderConnection({
         provider: deps.connectionProvider,
         ...(deps.connectionCwd ? { cwd: deps.connectionCwd } : {}),
-        sessionId: deps.connectionSessionId,
+        sessionId: exactSessionId,
         ...(deps.connectionProcessId !== undefined ? { processId: deps.connectionProcessId } : {}),
       });
     }
-    if (!binding && deps.connectionProvider && deps.store.recoverProviderConnection) {
+    if (!binding && !callSelector.supplied && deps.connectionProvider && deps.store.recoverProviderConnection) {
       binding = deps.store.recoverProviderConnection({
         provider: deps.connectionProvider,
         ...(deps.connectionCwd ? { cwd: deps.connectionCwd } : {}),
-        ...(deps.connectionSessionId ? { sessionId: deps.connectionSessionId } : {}),
+        ...(exactSessionId ? { sessionId: exactSessionId } : {}),
         ...(deps.connectionProcessId !== undefined ? { processId: deps.connectionProcessId } : {}),
       });
     }
-    if (binding) connectionBindingId = binding.bindingId;
+    if (binding) {
+      const identity = deps.store.verifyConnectionBinding(binding.bindingId);
+      const matchesExactCall = Boolean(identity)
+        && (!exactSessionId || (binding.sessionId === exactSessionId && identity!.sessionId === exactSessionId))
+        && (!deps.connectionProvider
+          || (normalizeHandle(binding.provider) === normalizeHandle(deps.connectionProvider)
+            && normalizeHandle(identity!.provider) === normalizeHandle(deps.connectionProvider)))
+        && (!deps.connectionCwd || normCwd(binding.cwd) === normCwd(deps.connectionCwd))
+        && (deps.connectionProcessId === undefined || binding.ownerProcessId === deps.connectionProcessId);
+      if (!matchesExactCall) {
+        setConnectionBindingProblem("the provider claim did not match this exact tool-call session and owning process; refusing to bind another session");
+        return null;
+      }
+    }
+    if (binding && (exactSessionId || (!deps.connectionProvider && deps.connectionProcessId === undefined))) {
+      connectionBindingId = binding.bindingId;
+    }
+    if (!binding) setConnectionBindingProblem("there is no active provider claim matching this exact process and conversation");
     return binding;
   }
 
-  async function waitForConnectionBinding(): Promise<ConnectionBinding | null> {
-    const immediate = resolveConnectionBinding();
-    if (immediate || connectionWaitMs === 0) return immediate;
+  async function waitForConnectionBinding(callSelector = codexCallSelector()): Promise<ConnectionBinding | null> {
+    if (callSelector.invalid) {
+      setConnectionBindingProblem("the Codex host supplied an invalid per-call thread selector; refusing to choose a sibling session");
+      return null;
+    }
+    const selectedSessionId = callSelector.supplied ? callSelector.sessionId : deps.connectionSessionId;
+    const immediate = resolveConnectionBinding(callSelector);
+    if (immediate) return immediate;
+
+    // Hooks remain the preferred, lowest-latency path. If no exact claim is
+    // available, let the provider's local live-session observer repair only
+    // this provider process/session. Never run provider-wide discovery from an
+    // MCP tool call: process/session ambiguity must remain fail-closed.
+    const deliveredTaskSession = deps.connectionProvider && deps.connectionProcessId !== undefined && !selectedSessionId
+      ? currentDeliveredTaskSession()
+      : { status: "none" as const };
+    if (deliveredTaskSession.status === "ambiguous") return null;
+    const exactSessionId = selectedSessionId
+      ?? (deliveredTaskSession.status === "selected" ? deliveredTaskSession.sessionId : undefined);
+    const hasExactSelector = Boolean(exactSessionId)
+      || (deliveredTaskSession.status === "none" && deps.connectionProcessId !== undefined);
+    if (deps.reconcileProviderConnection && deps.connectionProvider && hasExactSelector) {
+      const now = Date.now();
+      pruneProviderReconciliations(now);
+      const reconciliationKey = JSON.stringify({
+        provider: deps.connectionProvider,
+        processId: deps.connectionProcessId,
+        sessionId: exactSessionId,
+        cwd: deps.connectionCwd,
+      });
+      const reconciliation = providerReconciliations.get(reconciliationKey) ?? { startedAt: 0 };
+      providerReconciliations.set(reconciliationKey, reconciliation);
+      if (!reconciliation.inFlight && (!reconciliation.result || now - reconciliation.startedAt >= 1_000)) {
+        reconciliation.startedAt = now;
+        const inFlight = Promise.resolve().then(() => deps.reconcileProviderConnection!({
+          provider: deps.connectionProvider!,
+          ...(deps.connectionProcessId !== undefined ? { processId: deps.connectionProcessId } : {}),
+          ...(exactSessionId ? { sessionId: exactSessionId } : {}),
+          ...(deps.connectionCwd ? { cwd: deps.connectionCwd } : {}),
+        })).catch(() => ({ healthy: false, detail: "provider live-session reconciliation failed" }))
+          .then((result) => {
+            reconciliation.result = result;
+            return result;
+          })
+          .finally(() => {
+            if (reconciliation.inFlight === inFlight) reconciliation.inFlight = undefined;
+          });
+        reconciliation.inFlight = inFlight;
+      }
+      const result = reconciliation.inFlight ? await reconciliation.inFlight : reconciliation.result;
+      const observedBinding = result?.healthy ? result.binding : undefined;
+      if (observedBinding
+        && observedBinding.provider.toLowerCase() === deps.connectionProvider.toLowerCase()
+        && (!exactSessionId || observedBinding.sessionId === exactSessionId)
+        && (deps.connectionProcessId === undefined || observedBinding.ownerProcessId === deps.connectionProcessId)) {
+        const identity = deps.store.verifyConnectionBinding(observedBinding.bindingId);
+        if (identity
+          && identity.sessionId === observedBinding.sessionId
+          && normalizeHandle(identity.handle) === normalizeHandle(observedBinding.handle)
+          && identity.provider.toLowerCase() === observedBinding.provider.toLowerCase()) {
+          return observedBinding;
+        }
+      }
+      const reconciled = resolveConnectionBinding(callSelector);
+      if (reconciled) return reconciled;
+      if (result) {
+        setConnectionBindingProblem(result.healthy
+          ? "the provider observer found a session but the exact MCP process binding did not resolve"
+          : result.detail);
+      }
+    }
+
+    if (connectionWaitMs === 0) return resolveConnectionBinding(callSelector);
 
     const deadline = Date.now() + connectionWaitMs;
     while (Date.now() < deadline) {
       await sleepAsync(Math.min(connectionPollMs, Math.max(1, deadline - Date.now())));
-      const binding = resolveConnectionBinding();
+      const binding = resolveConnectionBinding(callSelector);
       if (binding) return binding;
     }
-    return resolveConnectionBinding();
+    return resolveConnectionBinding(callSelector);
   }
 
   async function requireIdentity(token?: string): Promise<VerifiedIdentity> {
@@ -154,11 +441,25 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     // process with no connection-mode configuration, or while a connection genuinely has none
     // bound yet and the caller supplied one anyway (legacy/manual use).
     if (connectionConfigured) {
-      const binding = await waitForConnectionBinding();
+      const selector = codexCallSelector();
+      if (selector.invalid) {
+        throw new Error("Automatic M9R provider binding did not become ready; invalid Codex thread selector, refusing to choose a sibling session.");
+      }
+      const binding = await waitForConnectionBinding(selector);
       const identity = binding ? deps.store.verifyConnectionBinding(binding.bindingId) : null;
-      if (identity) return identity;
+      if (identity
+        && (!selector.supplied || identity.sessionId === selector.sessionId)
+        && (!deps.connectionProvider || normalizeHandle(identity.provider) === normalizeHandle(deps.connectionProvider))) return identity;
       if (typeof token !== "string") {
-        throw new Error(`Automatic M9R provider binding did not become ready within ${connectionWaitMs}ms; the provider's SessionStart hook has not published a usable claim yet. No manual token or new session is required; retry after the provider connection settles.`);
+        throw new Error(`Automatic M9R provider binding did not become ready within ${connectionWaitMs}ms; ${getConnectionBindingProblem()}. No manual token or new session is required; retry after the provider turn is unambiguous.`);
+      }
+      if (selector.supplied) {
+        const manualIdentity = deps.store.verifyIdentity(token);
+        if (!manualIdentity || manualIdentity.sessionId !== selector.sessionId
+          || (deps.connectionProvider && normalizeHandle(manualIdentity.provider) !== normalizeHandle(deps.connectionProvider))) {
+          throw new Error("The supplied manual credential does not match the Codex conversation identified by this tool call.");
+        }
+        return manualIdentity;
       }
       // Fall through to legacy token verification below -- a caller that supplied a token
       // explicitly is honored even on a connection-configured process.
@@ -555,6 +856,14 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           return { content: [{ type: "text" as const, text: delivered.text + (stageNotice ? `\n\n${stageNotice}` : "") }] };
         }
         if (!inRoom(identity)) {
+          const uncertain = queuedTasks.filter((task) => !task.resultSummary
+            && (task.receipt?.state === "uncertain" || task.delivery?.state === "uncertain")
+            && (!task.targetSession || task.targetSession === identity.sessionId)
+            && (!task.delivery?.threadId || task.delivery.threadId === identity.sessionId));
+          if (uncertain.length > 0) {
+            const lines = uncertain.slice(0, 10).map((task) => `- ${task.id}: ${task.receipt?.error ?? task.delivery?.error ?? "Provider acceptance was not confirmed."}`);
+            return { content: [{ type: "text" as const, text: `Delivery is unconfirmed for this session. These are status records, not new work; do not execute or resend them. The owner must inspect the provider conversation, then clear the notice or explicitly send a new message. M9R will not infer acceptance from matching message text.\n${lines.join("\n")}` }] };
+          }
           // A cursor is only a presentation fence. Do not tell a provider that
           // it has no work when this exact session was already shown an open
           // task and has not reported its result yet (the live Claude failure

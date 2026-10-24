@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { createReleasePackageManifest } from "./release-package-manifest.mjs";
 
 const root = resolve(".");
 const installer = resolve("scripts/install-m9r.ps1");
@@ -31,7 +32,10 @@ const testM9rHomes = new Set();
 
 function runPowerShell(script, args = [], { input, env = process.env } = {}) {
   const result = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File", script, ...args], {
-    cwd: root,
+    // Run the packaged engine from a temporary working directory so its
+    // user-scoped credential boundary does not mistake the checkout fixture
+    // for the repository being configured.
+    cwd: tmpdir(),
     encoding: "utf8",
     input,
     env,
@@ -57,6 +61,7 @@ function createPackage(directory) {
   cpSync(installer, join(stage, "install-m9r.ps1"));
   cpSync(resolve("scripts/install-m9r.cmd"), join(stage, "install-m9r.cmd"));
   writeFileSync(join(stage, "INSTALLATION.txt"), "M9R Windows standalone installer test package\n");
+  createReleasePackageManifest(stage);
   const zipPath = join(directory, "m9r-engine-windows-x64.zip");
   const zipScript = [
     "Add-Type -AssemblyName System.IO.Compression.FileSystem",
@@ -80,7 +85,13 @@ function makeProfile(parent) {
   // M9R deliberately rejects a project-local M9R_HOME because that would put
   // provider credentials inside the checkout. Keep the fixture outside the
   // clean repository while retaining the profile/config fixtures beside it.
-  const m9rHome = join(root, "..", `.m9r-installer-home-${randomUUID()}`);
+  // Keep the test-owned M9R_HOME on the short, writable checkout path. The
+  // native Windows test host permits executable replacement there but can
+  // deny both sibling-folder creation and executable rename operations under
+  // its AppContainer-scoped TEMP directory. This remains isolated from real
+  // user state and the build provenance rules classify the fixture as local
+  // test evidence.
+  const m9rHome = join(root, `.m9r-installer-home-${randomUUID()}`);
   testM9rHomes.add(m9rHome);
   const claude = join(parent, "claude-config");
   const codex = join(parent, "codex-home");
@@ -144,6 +155,9 @@ test("installer contains no Node/npm dependency and changes no saved PowerShell 
   assert.match(source, /--m9r-update-shutdown/, "pill updates must use the app's single-instance shutdown handoff");
   assert.match(source, /WaitForExit\(15000\)/, "the installer must wait for the installed pill to exit before replacing its image");
   assert.match(source, /function Invoke-M9rEngine/);
+  assert.match(source, /m9r-package-info\.json/);
+  assert.match(source, /function Assert-ReleasePackageManifest/);
+  assert.match(source, /Compare-Object[\s\S]*file set does not match its identity manifest/, "the installer must reject files outside the exact package manifest");
   assert.match(source, /\$ErrorActionPreference\s*=\s*'Continue'/, "native engine stderr warnings must not abort an otherwise successful update");
   assert.match(source, /Invoke-M9rEngine \$engine \$dryRunArgs/);
   assert.match(source, /function Invoke-ManagedBrokerUpdate/);
@@ -196,6 +210,8 @@ test("standalone release packages runtime companions from the canonical engine d
   assert.match(packagerSource, /m9r-web-broker\.exe/, "the release ZIP must contain the standalone broker");
   assert.match(packagerSource, /m9r-overlay\.exe/, "the release ZIP must contain the M9R desktop pill");
   assert.match(packagerSource, /m9r-build-info\.json/, "the release ZIP must contain the runtime artifact identity manifest");
+  assert.match(packagerSource, /release-package-manifest\.mjs/, "the release ZIP must be bound to the exact staged package manifest");
+  assert.match(packagerSource, /--verify/, "the release ZIP must be verified after its package manifest is created");
   assert.match(packagerSource, /\$overlay\s*=\s*Join-Path\s+\$dist\s+'m9r-overlay\.exe'/, "the release ZIP must take the pill from the same engine distribution used by local setup");
   assert.doesNotMatch(packagerSource, /overlay\\src-tauri\\target\\release\\m9r-overlay\.exe/i, "release packaging must not bypass the canonical engine distribution");
   const pillBuildIndex = workflowSource.indexOf("npm --prefix overlay run build");
@@ -204,6 +220,7 @@ test("standalone release packages runtime companions from the canonical engine d
   assert.match(installerSource, /m9r-web-broker\.exe/, "the installer must require the broker from the verified package");
   assert.match(installerSource, /m9r-overlay\.exe/, "the installer must require the M9R desktop pill from the verified package");
   assert.match(installerSource, /m9r-build-info\.json/, "the installer must require the runtime artifact identity manifest");
+  assert.match(installerSource, /m9r-package-info\.json/, "the installer must require the exact package identity manifest");
   assert.match(installerSource, /Install-ManagedWebBroker/, "the installer must place the broker beside the installed engine");
   assert.match(installerSource, /claim an identical companion/, "the installer must claim the broker after the engine copies its companion files");
   assert.match(installerSource, /Remove-ManagedWebBroker/, "uninstall must remove only the unchanged installer-owned broker");
@@ -248,6 +265,7 @@ test("release ZIP contains the built standalone broker", { skip: skipNative }, (
   assert.match(listed.stdout, /^m9r-web-broker\.exe\s*$/m);
   assert.match(listed.stdout, /^m9r-overlay\.exe\s*$/m);
   assert.match(listed.stdout, /^m9r-build-info\.json\s*$/m);
+  assert.match(listed.stdout, /^m9r-package-info\.json\s*$/m);
   assert.match(listed.stdout, /^cua-driver-runtime\/bin\/cua-cursor-theme\.exe\s*$/m);
 });
 

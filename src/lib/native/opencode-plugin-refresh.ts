@@ -33,24 +33,30 @@ interface ManagedPluginOwnership {
 }
 
 function readManagedPluginOwnership(manifest: Record<string, unknown>): ManagedPluginOwnership | null {
-  if (typeof manifest.openCodeIdentityPluginPath === "string" && typeof manifest.openCodeIdentityPluginHash === "string") {
-    return {
-      path: manifest.openCodeIdentityPluginPath,
-      hash: manifest.openCodeIdentityPluginHash,
-    };
+  if (Array.isArray(manifest.entries)) {
+    const candidates = manifest.entries.flatMap((entry, index) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const record = entry as Record<string, unknown>;
+      return record.kind === "opencode-plugin" ? [{ record, index }] : [];
+    });
+
+    // Once the native manifest has a canonical plugin entry, its ownership
+    // record is authoritative. Never let a stale top-level field override it.
+    if (candidates.length > 0) {
+      if (candidates.length !== 1) return null;
+      const { record, index } = candidates[0]!;
+      if (typeof record.path !== "string" || typeof record.sha256After !== "string") return null;
+      return { path: record.path, hash: record.sha256After, entryIndex: index };
+    }
   }
 
-  if (!Array.isArray(manifest.entries)) return null;
-  const candidates = manifest.entries.flatMap((entry, index) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
-    const record = entry as Record<string, unknown>;
-    return record.kind === "opencode-plugin"
-      && typeof record.path === "string"
-      && typeof record.sha256After === "string"
-      ? [{ path: record.path, hash: record.sha256After, entryIndex: index }]
-      : [];
-  });
-  return candidates.length === 1 ? candidates[0]! : null;
+  // Older web-setup manifests predate the native `entries` representation.
+  // Keep them supported only when there is no canonical native plugin entry.
+  if (typeof manifest.openCodeIdentityPluginPath !== "string" || typeof manifest.openCodeIdentityPluginHash !== "string") return null;
+  return {
+    path: manifest.openCodeIdentityPluginPath,
+    hash: manifest.openCodeIdentityPluginHash,
+  };
 }
 
 function updateManagedPluginOwnership(

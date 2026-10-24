@@ -50,6 +50,67 @@ test("a deferred task without a pinned session is offered to the adapter that ow
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("approving native Claude work releases it to the resident delivery pump", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-delivery-pump-approved-"));
+  try {
+    const store = createLocalStore(root);
+    const task = store.addTask({
+      from: "codex", to: "claude", goal: "deliver only after approval", origin: "agent_initiated",
+      idempotencyKey: "approved-claude-delivery",
+    }).task;
+    assert.equal(task.approval, "pending");
+    assert.equal(task.delivery, undefined, "pending work must not be eligible for provider delivery");
+
+    store.setApproval(task.id, "approved");
+
+    assert.equal(store.getTask(task.id)?.delivery?.state, "deferred", "approval must enqueue the authorized task for the resident provider adapter");
+    const sent: string[] = [];
+    const pump = createTaskDeliveryPump(store, new Map([[
+      "claude",
+      async (taskId: string) => { sent.push(taskId); },
+    ]]));
+    await pump.tick();
+    assert.deepEqual(sent, [task.id], "the provider task should not wait for a future prompt hook or manual inbox read");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("approval does not enqueue room, stale, denied, or previously delivered work", () => {
+  let clock = new Date();
+  const root = mkdtempSync(join(tmpdir(), "m9r-delivery-pump-approval-boundary-"));
+  try {
+    const store = createLocalStore(root, { now: () => new Date(clock) });
+    const roomTask = store.addTask({
+      from: "web-codex", to: "web-claude", goal: "room handoff stays on the room relay", origin: "agent_initiated",
+      idempotencyKey: "approved-room-handoff",
+    }).task;
+    store.setApproval(roomTask.id, "approved");
+    assert.equal(store.getTask(roomTask.id)?.delivery, undefined);
+
+    const stale = store.addTask({
+      from: "codex", to: "claude", goal: "do not replay old approved work", origin: "agent_initiated",
+      idempotencyKey: "stale-approved-handoff",
+    }).task;
+    clock = new Date(Date.now() + 31 * 60_000);
+    store.setApproval(stale.id, "approved");
+    assert.equal(store.getTask(stale.id)?.delivery, undefined);
+
+    const denied = store.addTask({
+      from: "codex", to: "claude", goal: "denied work must not enter the pump", origin: "agent_initiated",
+      idempotencyKey: "denied-handoff",
+    }).task;
+    store.setApproval(denied.id, "denied");
+    assert.equal(store.getTask(denied.id)?.delivery, undefined);
+
+    const alreadyDelivered = store.addTask({
+      from: "codex", to: "claude", goal: "preserve delivery history", origin: "agent_initiated",
+      idempotencyKey: "previously-delivered-handoff",
+    }).task;
+    store.setDelivery(alreadyDelivered.id, { state: "queued", threadId: "existing-session" });
+    store.setApproval(alreadyDelivered.id, "approved");
+    assert.equal(store.getTask(alreadyDelivered.id)?.delivery?.state, "queued");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("deferred recovery does not replay uncertain input or bypass approval", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-delivery-pump-"));
   try {
@@ -78,6 +139,27 @@ test("the provider-neutral pump does not retry stale deferred work", async () =>
 
     await pump.tick();
     assert.deepEqual(sent, [], "stale deferred work must not reach any provider adapter");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("adapter delivery failures are reported once per task/reason instead of disappearing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-delivery-pump-diagnostics-"));
+  try {
+    const store = createLocalStore(root);
+    const task = store.addTask({ from: "owner", to: "local-model", goal: "deliver with diagnostics", origin: "human_typed", idempotencyKey: "diagnostic" }).task;
+    store.setDelivery(task.id, { state: "deferred" });
+    const issues: Array<{ taskId: string; provider: string; reason: string }> = [];
+    const pump = createTaskDeliveryPump(
+      store,
+      new Map([["local-model", async () => ({ state: "unavailable", reason: "no exact live session" })]]),
+      (issue) => issues.push(issue),
+    );
+
+    await pump.tick();
+    await pump.tick();
+
+    assert.deepEqual(issues, [{ taskId: task.id, provider: "local-model", reason: "no exact live session" }]);
+    assert.equal(store.getTask(task.id)?.delivery?.state, "deferred");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

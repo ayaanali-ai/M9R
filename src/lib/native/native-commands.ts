@@ -9,7 +9,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   HOOK_MARKER,
@@ -33,7 +33,7 @@ import {
 import { createLocalStore, defaultStoreRoot, handleForProvider } from "./local-store";
 import { inboxMaxAgeMs } from "./inbox-core";
 import { CONNECTION_CLAIM_TTL_MS } from "./mcp-connection-core";
-import { hasPendingRuntimeTransaction, installRuntimeTransaction, pruneCommittedRuntimeBackups, recoverRuntimeTransactions } from "./runtime-install-transaction";
+import { hasPendingRuntimeTransaction, installRuntimeTransaction, pruneCompletedRuntimeTransactions, recoverRuntimeTransactions } from "./runtime-install-transaction";
 import { createPageNotesStore } from "./page-notes-store";
 import { projectRoomId } from "./project-room";
 import { planOpenCodeModelStateRepair, resolveOpenCodeModelFiles, type OpenCodeModelRepairResult } from "./opencode-model-core";
@@ -56,6 +56,7 @@ import { createClaudeDeliveryAdapter } from "./claude-delivery";
 import { USER_STEPS } from "./onboarding-steps";
 import { readRuntimeBuildId, readRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
 import { checkEngineUpdate, parseUpdateConfig } from "./update-lifecycle";
+import { shouldRunProviderUpdateMonitorForCommand } from "./provider-update-monitor";
 import {
   buildOpenCodeIdentityPluginSource,
   OPENCODE_IDENTITY_PLUGIN_FILENAME,
@@ -83,6 +84,8 @@ export interface NativeIo {
   cwd?: string;
   /** Runtime image path; production defaults to the current executable, tests may use an isolated image. */
   executablePath?: string;
+  /** Start provider lifecycle reconciliation only after this process owns the watched feed. */
+  startProviderLifecycle?(root: string): { stop(): Promise<void> } | undefined;
   /** Start-with-Windows switch; tests inject a fake so nothing ever touches the real registry. */
   autostart?: Autostart;
 }
@@ -90,13 +93,15 @@ export interface NativeIo {
 /**
  * Build the feed's provider-neutral delivery scheduler.
  *
- * The scheduler is deliberately transport-agnostic. The native runtime wires
- * the currently supported Codex queue adapter by default and accepts future
- * provider adapters through NativeIo without changing the scheduler or the
- * feed lifecycle. Deferred work remains durable until its adapter settles it;
- * this function never invents a provider session or retries uncertain sends.
+ * The scheduler is deliberately transport-agnostic. Codex uses its queue
+ * adapter; Claude uses its exact existing-session adapter; OpenCode remains
+ * deferred for the plugin poller that has the exact live session id. Native
+ * delivery must never be redirected to the separate web-workspace workers.
  */
-export function createNativeDeliveryPump(root: string, io: Pick<NativeIo, "env" | "homeDir" | "cwd" | "codexDeps" | "deliveryAdapters">) {
+export function createNativeDeliveryPump(
+  root: string,
+  io: Pick<NativeIo, "env" | "homeDir" | "cwd" | "codexDeps" | "deliveryAdapters"> & { err?: NativeIo["err"] },
+) {
   const store = createLocalStore(root);
   const adapters = new Map(io.deliveryAdapters ?? []);
   if (!adapters.has("codex")) {
@@ -105,15 +110,18 @@ export function createNativeDeliveryPump(root: string, io: Pick<NativeIo, "env" 
   }
   if (!adapters.has("claude")) {
     const paths = nativePaths(io);
-    adapters.set("claude", createClaudeDeliveryAdapter({
+    const direct = createClaudeDeliveryAdapter({
       root,
       homeDir: io.homeDir,
       env: io.env,
       cwd: io.cwd,
       mcpConfigPaths: [paths.claudeMcp, paths.claudeGlobalMcp],
-    }, store));
+    }, store);
+    adapters.set("claude", direct);
   }
-  return createTaskDeliveryPump(store, adapters);
+  return createTaskDeliveryPump(store, adapters, (issue) => {
+    io.err?.(`M9R delivery remains deferred: @${issue.provider} task ${issue.taskId}: ${issue.reason}`);
+  });
 }
 
 export interface Autostart {
@@ -300,7 +308,7 @@ function replaceRuntimeFile(from: string, to: string): string[] {
   try {
     copyFileSync(from, staged);
     try {
-      // Same-directory rename is atomic. On Windows this works even when an agent still has the old image mapped.
+      // Prefer same-directory replacement; Windows may reject it while the image is mapped.
       renameSync(staged, to);
       return [];
     } catch (replaceError) {
@@ -341,6 +349,55 @@ function isRetiredRuntimePath(path: string): boolean {
   return /\.m9r-retired-[^\\/]+$/i.test(path);
 }
 
+function ownedRetiredRuntimeEntries(
+  manifest: Manifest | null,
+  runtime: { targetDir: string; engine?: { to: string }; shim?: { to: string }; nativeInputHost?: { to: string }; companions?: Array<{ to: string }> },
+): string[] {
+  const root = resolve(runtime.targetDir);
+  const rootPrefix = `${root}${sep}`;
+  const normalize = (path: string) => process.platform === "win32" ? path.toLowerCase() : path;
+  const stableTargets = new Set([
+    runtime.engine?.to,
+    runtime.shim?.to,
+    runtime.nativeInputHost?.to,
+    ...(runtime.companions ?? []).map((file) => file.to),
+  ].filter((path): path is string => !!path).map((path) => normalize(resolve(path))));
+  return (manifest?.runtimeFiles ?? []).filter((file) => {
+    if (!isRetiredRuntimePath(file)) return false;
+    const retiredPath = resolve(file);
+    if (!normalize(retiredPath).startsWith(normalize(rootPrefix))) return false;
+    const stablePath = retiredPath.replace(/\.m9r-retired-[^\\/]+$/i, "");
+    return stableTargets.has(normalize(stablePath));
+  });
+}
+
+function inspectRetiredRuntimeFile(path: string): "file" | "missing" | "unknown" {
+  try {
+    const info = lstatSync(path);
+    return info.isFile() && !info.isSymbolicLink() ? "file" : "unknown";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+  }
+}
+
+function pruneOwnedRetiredRuntimeFiles(manifest: Manifest, candidates: readonly string[]): { removed: number; remaining: number } {
+  const known = new Set(candidates.map((file) => process.platform === "win32" ? resolve(file).toLowerCase() : resolve(file)));
+  let removed = 0;
+  for (const path of candidates) {
+    const before = inspectRetiredRuntimeFile(path);
+    if (before === "file") {
+      try { rmSync(path, { force: true }); } catch { /* a still-mapped image is retained and retried next setup */ }
+      if (inspectRetiredRuntimeFile(path) === "missing") removed += 1;
+    }
+  }
+  manifest.runtimeFiles = (manifest.runtimeFiles ?? []).filter((file) => {
+    const key = process.platform === "win32" ? resolve(file).toLowerCase() : resolve(file);
+    return !known.has(key) || inspectRetiredRuntimeFile(file) !== "missing";
+  });
+  return { removed, remaining: candidates.filter((file) => inspectRetiredRuntimeFile(file) !== "missing").length };
+}
+
 function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> }): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
   if (plan.engine) {
@@ -348,7 +405,7 @@ function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { fr
     const files = [plan.engine, ...(plan.shim ? [plan.shim] : []), ...(plan.nativeInputHost ? [plan.nativeInputHost] : []), ...(plan.companions ?? [])];
     const written = installRuntimeTransaction(plan.targetDir, files, replaceRuntimeFile);
     for (const file of files) pruneRetiredRuntimeFile(file.to);
-    pruneCommittedRuntimeBackups(plan.targetDir);
+    pruneCompletedRuntimeTransactions(plan.targetDir);
     return written;
   }
   const written: string[] = [];
@@ -370,13 +427,23 @@ const readText = (path: string): string | null => (existsSync(path) ? readFileSy
 function hookSpecs(entry: string, provider = "claude-code", shim?: string): HookSpec[] {
   // The engine's subcommand is spelled "m9r-hook" so the installed command carries the marker that uninstall looks for.
   const command = (event: string) => (shim ? `"${slash(shim)}" ${event} ${provider}` : /m9r-engine(\.exe)?$/i.test(entry) ? `"${slash(entry)}" m9r-hook ${event} ${provider}` : `node "${slash(entry)}" ${event} ${provider}`);
-  return [
+  const specs: HookSpec[] = [
     { event: "SessionStart", command: command("SessionStart"), timeoutSec: 5 },
     { event: "UserPromptSubmit", command: command("UserPromptSubmit"), timeoutSec: 5 },
     // Every provider: when a turn ends, tell the browser overlay (markDone) and, for Claude, answer any task another
     // agent handed it with its final message.
     { event: "Stop", command: command("Stop"), timeoutSec: 5 },
   ];
+  // Codex exposes distinct normal-stop and interrupt events. Interrupt closes
+  // a turn when Stop is skipped; SessionEnd is the final cleanup boundary if
+  // the provider process exits while an error-path turn is still recorded.
+  if (provider === "codex") {
+    specs.push(
+      { event: "Interrupt", command: command("Interrupt"), timeoutSec: 5 },
+      { event: "SessionEnd", command: command("SessionEnd"), timeoutSec: 3 },
+    );
+  }
+  return specs;
 }
 
 /** The native hook the settings should point at: only when one ships with the engine and no override is set. */
@@ -433,7 +500,7 @@ function openCodeLayoutFor(io: NativeIo, existing: string | null): WebOpenCodeLa
 
 function nativeOpenCodeHookInvocation(
   io: NativeIo,
-  event: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" | "OpenCodeExecutionFailed",
+  event: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" | "OpenCodeExecutionFailed" | "ProviderTurnEnd",
 ): { command: string; args: readonly string[] } {
   const stableShim = shimFor(io) ? shimTarget(io) : null;
   if (stableShim) return { command: stableShim, args: [event, "opencode"] };
@@ -607,7 +674,7 @@ function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = tru
     const agentsBefore = readText(p.codexAgents);
     const agents = applyStandingInstruction(agentsBefore, "codex");
     files.push(
-      { path: p.codexHooks, kind: "hooks-json", before: hooksBefore, after: codexHooks.content, changed: codexHooks.changed, summary: `add 2 hooks (session start, prompt submit) to ${p.codexHooks} (Codex; you trust them once with /hooks)` },
+      { path: p.codexHooks, kind: "hooks-json", before: hooksBefore, after: codexHooks.content, changed: codexHooks.changed, summary: `reconcile Codex lifecycle hooks (session start, prompt submit, stop, interrupt, session end) in ${p.codexHooks} (trust them once with /hooks)` },
       { path: p.codexAgents, kind: "markdown-block", before: agentsBefore, after: agents.content, changed: agents.changed, summary: `${agentsBefore == null ? "create" : "add a short block to"} ${p.codexAgents} (it tells Codex to leave @mentions of other agents to M9R, so nothing is done twice)` },
     );
     const codexMcpSpec = includeMcp ? mcpServerSpec(io, "codex") : null;
@@ -629,6 +696,7 @@ function plan(io: NativeIo, selectedAgents?: readonly string[], includeMcp = tru
       nativeOpenCodeHookInvocation(io, "OpenCodeDelivered"),
       nativeOpenCodeHookInvocation(io, "OpenCodeDeliveryFailed"),
       nativeOpenCodeHookInvocation(io, "OpenCodeExecutionFailed"),
+      nativeOpenCodeHookInvocation(io, "ProviderTurnEnd"),
     );
     const priorManifest = readManifest(p.manifest);
     const priorPlugin = priorManifest?.entries.find((entry) => entry.path === p.opencodePlugin);
@@ -729,6 +797,7 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   const runtime = runtimePlan(io);
   const manifestBefore = readManifest(p.manifest);
   const installedEngine = installedEnginePath(io, runtime);
+  const retiredRuntimeEntries = ownedRetiredRuntimeEntries(manifestBefore, runtime);
   const installedIdentity = existsSync(installedEngine) ? readRuntimeBuildIdentity(installedEngine) : null;
   const activeRuntime = installedIdentity ? activeRuntimeFromIdentity(io, runtime.targetDir, installedIdentity) : null;
   // A legacy hook-only install has no build manifest and remains supported. Once
@@ -750,12 +819,13 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   // A previously installed user can opt into startup without reinstalling hooks.
   const startupRequested = flags.autostart === true && !!runtime.engine && !!runtime.shim
     && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
-  if (todo.length === 0 && !runtime.needed && !startupRequested && !identityNeedsReconcile && modelRepair?.plan.status !== "updated") { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
+  if (todo.length === 0 && !runtime.needed && !startupRequested && !identityNeedsReconcile && modelRepair?.plan.status !== "updated" && retiredRuntimeEntries.length === 0) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
   io.out("This will:");
   if (startupRequested) io.out("  - start the M9R desktop pill when this Windows user signs in (uninstall removes this entry)");
   if (runtime.needed) io.out(`  - copy the small hook program to ${runtime.targetDir} (so the hooks keep working even if this CLI moves or is updated)`);
   if (runtime.engine && runtime.shim) io.out("  - start the M9R background engine, which answers your agents' hooks in milliseconds (uninstall stops it)");
   if (identityNeedsReconcile) io.out(`  - reconcile the verified installed runtime identity in ${p.manifest}`);
+  if (retiredRuntimeEntries.length > 0) io.out(`  - retry cleanup of ${retiredRuntimeEntries.length} M9R-owned retired runtime image(s); locked or unreadable images will remain tracked`);
   for (const f of todo) io.out(`  - ${f.summary}`);
   if (modelRepair?.plan.status === "updated") io.out(`  - repair stale OpenCode model references in ${modelRepair.statePath} using the cached provider catalog (a rollback copy will be retained)`);
   if (modelRepair?.plan.status === "blocked") io.out(`  [WAIT] OpenCode model state was not changed: ${modelRepair.plan.reason}`);
@@ -776,6 +846,11 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
       // Retired images that were unlocked get pruned during copyRuntime. Drop their now-dead ownership
       // records; keep any image still on disk because a running provider MCP process may have it mapped.
       .filter((file) => !isRetiredRuntimePath(file) || existsSync(file));
+  }
+  if (retiredRuntimeEntries.length > 0) {
+    const cleanup = pruneOwnedRetiredRuntimeFiles(manifest, retiredRuntimeEntries);
+    if (cleanup.removed > 0) io.out(`[PASS] Removed ${cleanup.removed} unlocked retired runtime image(s).`);
+    if (cleanup.remaining > 0) io.out(`[WAIT] Kept ${cleanup.remaining} retired runtime image(s) that remain locked or unreadable; setup will retry later.`);
   }
   if (modelRepair?.plan.status === "updated") {
     const backupPath = applyNativeOpenCodeModelRepair(modelRepair);
@@ -972,6 +1047,45 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
   return 0;
 }
 
+type DesktopPillOwnerResponse = { ok: boolean; error?: string };
+
+async function runDesktopPillOwnerRequest(io: NativeIo, path: string, body: Record<string, unknown>, label: string): Promise<number> {
+  const result = await requestOwnerPipe<DesktopPillOwnerResponse>(ownerPipePath(nativePaths(io).m9r), {
+    method: "POST", path, body,
+  }, 15_000);
+  if (!result) {
+    io.err(`The M9R owner broker did not answer the desktop pill ${label}; no browser or inbox fallback was used.`);
+    return 1;
+  }
+  if (result.ok !== true) {
+    io.err(typeof result.error === "string" && result.error.trim() ? result.error : `The M9R owner broker rejected the desktop pill ${label}.`);
+    return 1;
+  }
+  io.out(`Desktop pill ${label} accepted by the M9R owner broker.`);
+  return 0;
+}
+
+/** Route a desktop-pill message directly to the owner broker's UI bridge. */
+export function runPillSend(io: NativeIo, text: string): Promise<number> {
+  const message = text.trim();
+  if (!message) { io.err("The desktop pill message is empty."); return Promise.resolve(1); }
+  return runDesktopPillOwnerRequest(io, "/web/ui/command", { text: message, context: {} }, "message");
+}
+
+export function runPillDecision(io: NativeIo, approvalId: string, decision: string): Promise<number> {
+  if (!approvalId || !["allow", "deny"].includes(decision)) {
+    io.err("The desktop pill decision must be allow or deny.");
+    return Promise.resolve(1);
+  }
+  return runDesktopPillOwnerRequest(io, decision === "allow" ? "/web/ui/approve" : "/web/ui/deny", { id: approvalId }, "approval decision");
+}
+
+export function runPillNote(io: NativeIo, text: string): Promise<number> {
+  const note = text.trim();
+  if (!note) { io.err("The desktop pill note is empty."); return Promise.resolve(1); }
+  return runDesktopPillOwnerRequest(io, "/web/ui/save-note", { text: note }, "memory note");
+}
+
 export interface StatusRow { id: string; state: "ok" | "todo" | "info"; label: string; fix?: string }
 
 /** Live checklist rows for `doctor`: what is in place, what is still open, with the exact fix beside each. */
@@ -1002,11 +1116,12 @@ export function nativeStatus(io: NativeIo): StatusRow[] {
   const missingIdentity = activeSessions.filter((session) => !store.sessionsWithIdentity(session.handle, session.cwd).some((live) => live.sessionId === session.sessionId));
   rows.push(missingIdentity.length > 0
     ? { id: "target-identities", state: "todo", label: `${missingIdentity.length} recently active provider session(s) lack a live M9R identity; targeted delivery will fail visibly`, fix: "continue that existing provider session so M9R can issue its session token" }
-    : { id: "target-identities", state: activeSessions.length > 0 ? "ok" : "info", label: activeSessions.length > 0 ? "All recently active provider sessions have live M9R identities" : "No recently active provider sessions to check; retained session history is preserved" });
+    : { id: "target-identities", state: "info", label: activeSessions.length > 0 ? "Stored M9R identities exist for recently active provider sessions; current-turn binding is not verified" : "No recently active provider sessions to check; retained session history is preserved" });
   const inboxCutoff = statusNow - inboxMaxAgeMs();
   const pending = endpoints.reduce((n, e) => n + store.tasksFor(e.handle).filter((t) => {
     const createdAt = Date.parse(t.createdAt);
     return t.approval !== "denied" && t.approval !== "expired"
+      && t.receipt?.state !== "canceled"
       && !t.resultSummary
       && t.delivery?.state !== "queued" && t.delivery?.state !== "done"
       && Number.isFinite(createdAt) && createdAt <= statusNow && createdAt >= inboxCutoff
@@ -1115,15 +1230,22 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   if (command === "note") return runNote(io, positionals.join(" "));
   if (command === "cloud") return runCloud(io, positionals, value("--url"));
   if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key"), session: value("--session") });
+  if (command === "pill-send") return runPillSend(io, rest.join(" "));
+  if (command === "pill-decide") return runPillDecision(io, rest[0] ?? "", rest[1] ?? "");
+  if (command === "pill-note") return runPillNote(io, rest.join(" "));
   const root = nativePaths(io).m9r;
   if (command === "feed") {
     const controller = new AbortController();
     const release = has("--watch") ? acquireFeedLock(root) : () => {};
     if (!release) { io.out("The feed is already being written by another M9R process."); return 0; }
     const watching = has("--watch");
+    let providerLifecycle: ReturnType<NonNullable<NativeIo["startProviderLifecycle"]>>;
     let server: ReturnType<typeof startHookServer> | undefined;
     let freshnessTimer: ReturnType<typeof setInterval> | undefined;
     try {
+      if (shouldRunProviderUpdateMonitorForCommand(command, rest, watching && typeof release === "function")) {
+        providerLifecycle = io.startProviderLifecycle?.(root);
+      }
       if (watching) {
         process.once("SIGINT", () => controller.abort());
         process.once("SIGTERM", () => controller.abort());
@@ -1170,11 +1292,15 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
       if (!watching) io.out(`Wrote ${feedPath(root)}`);
       return 0;
     } finally {
-      if (freshnessTimer) clearInterval(freshnessTimer);
-      server?.close();
-      // A runtime-generation change must never strand the single-writer lock,
-      // even if feed observation or hook-server startup throws.
-      release();
+      try {
+        await providerLifecycle?.stop();
+      } finally {
+        if (freshnessTimer) clearInterval(freshnessTimer);
+        server?.close();
+        // A runtime-generation change must never strand the single-writer lock,
+        // even if feed observation or hook-server startup throws.
+        release();
+      }
     }
   }
   if (command === "dismiss") { const n = createLocalStore(root).dismiss(positionals.map((p) => p.toUpperCase())); io.out(n ? `Cleared ${n} from the overlay list.` : "Nothing to clear."); return 0; }

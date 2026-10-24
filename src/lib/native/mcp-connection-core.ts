@@ -36,21 +36,20 @@ export interface ConnectionClaimInput {
   sessionId: string;
   cwd?: string;
   ownerProcessId?: number;
-  /**
-   * A trusted provider SessionStart/UserPromptSubmit continuation. When the
-   * provider reuses its parent process across compaction, this permits the
-   * hook to carry the existing private binding forward to the new session
-   * instead of creating a competing claim. Direct callers remain fail-closed.
-   */
-  continuation?: boolean;
 }
 
 export interface BindConnectionInput {
   provider?: string;
   processId?: number;
+  /** Exact provider conversation when the adapter can supply it. */
+  sessionId?: string;
+  /** Primary compatibility selector; process IDs only validate this scope. */
+  cwd?: string;
 }
 
 export const CONNECTION_CLAIM_TTL_MS = 15 * 60_000;
+/** A turn binding is short-lived and refreshed by each M9R tool call; session identities themselves remain durable. */
+export const PROVIDER_TURN_TTL_MS = 2 * 60 * 60_000;
 /**
  * A provider-owned process can survive an M9R/provider update without emitting
  * another SessionStart event. Recovery is still fail-closed (one provider,
@@ -72,6 +71,16 @@ export function normalizeConnectionProvider(provider: string): string {
 
 export function sameConnectionProvider(left: string, right: string): boolean {
   return normalizeConnectionProvider(left) === normalizeConnectionProvider(right);
+}
+
+function normalizeConnectionCwd(value: string | undefined): string {
+  return (value ?? "").trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+export function sameConnectionCwd(left: string | undefined, right: string | undefined): boolean {
+  const leftNormalized = normalizeConnectionCwd(left);
+  const rightNormalized = normalizeConnectionCwd(right);
+  return Boolean(leftNormalized && rightNormalized && leftNormalized === rightNormalized);
 }
 
 export function validConnectionProcessId(value: unknown): value is number {
@@ -96,7 +105,9 @@ export function usableConnectionClaim(
   // a recurring user credential.
   if (claim.bindingId || Date.parse(claim.expiresAt) <= nowMs) return false;
   if (expected?.provider && !sameConnectionProvider(claim.provider, expected.provider)) return false;
+  if (expected?.cwd !== undefined && !sameConnectionCwd(claim.cwd, expected.cwd)) return false;
   if (expected?.processId !== undefined && claim.ownerProcessId !== undefined && claim.ownerProcessId !== expected.processId) return false;
+  if (expected?.sessionId && claim.sessionId !== expected.sessionId) return false;
   return true;
 }
 

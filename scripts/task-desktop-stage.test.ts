@@ -200,6 +200,22 @@ test("delivery-time cursor prime shows the logical cursor before stage preparati
   } finally { f.cleanup(); }
 });
 
+test("the first desktop action re-primes a cursor after preparation could not show it", async () => {
+  const f = fixture(true);
+  const originalShow = f.driver.showAgentCursor;
+  let attempts = 0;
+  f.driver.showAgentCursor = async (stageName: string, identity: { handle: string; sessionId: string }) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("cursor surface unavailable");
+    return originalShow(stageName, identity);
+  };
+  try {
+    await assert.rejects(f.service.prepare(f.identity.token, f.task.id, "owner-preview"), /cursor surface unavailable/);
+    await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "desktop" }, "owner-preview");
+    assert.equal(attempts, 2, "the first action must restore cursor readiness before any desktop operation");
+  } finally { f.cleanup(); }
+});
+
 test("each staged request durably records its queue and execution timing on the task", async () => {
   const f = fixture(true);
   try {
@@ -368,6 +384,27 @@ test("owner-preview launch presents an existing app without stealing the owner's
     const launched = await f.service.launch(f.identity.token, f.task.id, "paint", "owner-preview");
     assert.equal(launched.reused, true);
     assert.equal(focusCalls, 0, "launch must not activate a window; focus is an explicit leased action");
+  } finally { f.cleanup(); }
+});
+
+test("stage launch primes the provider cursor before inspecting or opening the app", async () => {
+  const f = fixture(true, (root, appId) => {
+    assert.equal(appId, "paint");
+    return { executable: join(root, "mspaint.exe"), args: [] };
+  });
+  const events: string[] = [];
+  try {
+    f.driver.showAgentCursor = async () => {
+      events.push("cursor");
+      return { label: "Codex", visible: true as const };
+    };
+    f.driver.listVisibleWindows = async () => {
+      events.push("windows");
+      return [{ pid: 321, windowId: "654", appName: "mspaint.exe", title: "Paint", width: 1000, height: 700 }];
+    };
+    await f.service.launch(f.identity.token, f.task.id, "paint", "owner-preview");
+    assert.equal(events[0], "cursor", "the provider cursor must be visible before the first launch inspection");
+    assert.ok(events.includes("windows"));
   } finally { f.cleanup(); }
 });
 
@@ -581,6 +618,16 @@ test("pending and finished tasks cannot provision stages", async () => {
     f.store.setResult(f.task.id, "Done");
     await assert.rejects(f.service.prepare(f.identity.token, f.task.id), /owner-authorized or approved task/);
     assert.equal(f.creations(), 0);
+  } finally { f.cleanup(); }
+});
+
+test("a durably canceled task cannot prepare or dispatch desktop work", async () => {
+  const f = fixture(true);
+  try {
+    assert.ok(f.store.cancelTask(f.task.id));
+    await assert.rejects(f.service.prepare(f.identity.token, f.task.id), /canceled/);
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "desktop" }), /canceled/);
+    assert.equal(f.creations(), 0, "canceled work must not create a desktop stage");
   } finally { f.cleanup(); }
 });
 

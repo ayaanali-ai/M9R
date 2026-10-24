@@ -31,8 +31,9 @@ test("OpenCode ACP launches once, resumes the same provider session, streams tur
           calls.push("resume"); assert.equal(input.server, server); assert.equal(input.providerSessionRef, "ses_previous_123"); assert.equal(input.assignment, assignment);
           return session = { sessionId: "session-resumed", providerSessionRef: input.providerSessionRef };
         },
-        async *prompt(input: { session: unknown; text: string }) {
+        async *prompt(input: { session: unknown; text: string; onRequestSubmitted?: () => void }) {
           calls.push("prompt"); assert.equal(input.session, session); prompts.push(input.text);
+          input.onRequestSubmitted?.();
           yield { type: "provider.reply_text", sessionId: "session-resumed", occurredAt: "now", payload: { text: "Persistent reply" } };
         },
         cancelTurn: async (input: { session: unknown }) => { calls.push("cancel"); assert.equal(input.session, session); },
@@ -59,8 +60,10 @@ test("OpenCode ACP launches once, resumes the same provider session, streams tur
   assert.deepEqual((capturedOptions as { serverEnv: () => unknown }).serverEnv(), {}, "web MCP config remains the isolated config file's responsibility");
 
   const received: string[] = [];
-  for await (const event of runtime.prompt("first persistent turn")) received.push(String(event.payload.text));
+  let requestSubmitted = 0;
+  for await (const event of runtime.prompt("first persistent turn", { onRequestSubmitted: () => { requestSubmitted += 1; } })) received.push(String(event.payload.text));
   assert.deepEqual(received, ["Persistent reply"]);
+  assert.equal(requestSubmitted, 1, "the live runtime forwards the transport-submission receipt once");
   assert.deepEqual(prompts, ["first persistent turn"]);
   await runtime.cancelTurn();
   runtime.close();
@@ -133,4 +136,25 @@ test("OpenCode ACP falls back to a fresh session when the saved one cannot be re
   health = "alive";
   runtime.close();
   assert.equal(runtime.alive?.(), false, "a closed runtime is dead");
+});
+
+test("strict OpenCode resume fails without creating a replacement conversation", async () => {
+  const calls: string[] = [];
+  const runtime = createOpenCodeAcpRuntime({
+    exe: "opencode.exe", cwd: "C:/Work", env: {}, handle: "opencode", missionId: "room",
+    resumeId: "ses_saved_123", strictResume: true,
+    adapterFactory: () => ({
+      launchServer: async () => { calls.push("launch"); return { serverId: "s", adapterId: "opencode-acp" }; },
+      initialize: async () => { calls.push("initialize"); return {}; },
+      resumeSession: async () => { calls.push("resume"); throw new Error("saved session not found"); },
+      createSession: async () => { calls.push("create"); return { sessionId: "fresh", providerSessionRef: "ses_fresh_123" }; },
+      prompt: async function* () { return; },
+      cancelTurn: async () => undefined,
+      shutdown: async () => { calls.push("shutdown"); },
+    }) as never,
+  });
+  await assert.rejects(runtime.ready(), /saved session not found/);
+  assert.deepEqual(calls, ["launch", "initialize", "resume", "shutdown"]);
+  runtime.close();
+  assert.equal(calls.includes("create"), false, "strict resume never invents a new provider conversation");
 });

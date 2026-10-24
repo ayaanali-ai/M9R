@@ -3,10 +3,11 @@ import test from "node:test";
 
 import { createProviderNeutralUpdateActions } from "../src/lib/native/provider-update-route-actions.ts";
 
-test("provider updates reuse the current source MCP route without touching vendor configuration", async () => {
+test("provider updates verify the M9R route then reconnect a provider session without touching credentials", async () => {
   let refreshed = false;
   let callbackProvider = "";
   let callbackRoute = "";
+  let reconnected = false;
   const actions = createProviderNeutralUpdateActions({
     execPath: process.execPath,
     platform: process.platform,
@@ -14,6 +15,11 @@ test("provider updates reuse the current source MCP route without touching vendo
       refreshed = true;
       callbackProvider = input.providerId;
       callbackRoute = input.route;
+    },
+    reconcileProviderSession: async (input) => {
+      reconnected = true;
+      assert.equal(input.providerId, "claude-code");
+      return { healthy: true, detail: "one live Claude session rebound" };
     },
   });
   await actions.refreshAdapter?.({
@@ -55,11 +61,26 @@ test("provider updates reuse the current source MCP route without touching vendo
   assert.equal(callbackRoute, process.execPath);
   const health = await actions.reconnect?.({ providerId: "claude-code", previous: null, current: {} as never });
   assert.equal(health?.healthy, true);
+  assert.equal(reconnected, true);
+  assert.match(health?.detail ?? "", /live Claude session rebound/);
 });
 
-test("a missing route fails closed instead of claiming a provider update is healthy", async () => {
-  const actions = createProviderNeutralUpdateActions({ execPath: "C:/missing/m9r-mcp.exe", platform: "win32" });
+test("a valid M9R route alone is not reported as a reconnected provider session", async () => {
+  const actions = createProviderNeutralUpdateActions({ execPath: process.execPath, platform: process.platform });
+  const health = await actions.reconnect?.({ providerId: "codex", previous: null, current: {} as never });
+  assert.equal(health?.healthy, false);
+  assert.match(health?.detail ?? "", /session.*reconcil|live provider session/i);
+});
+
+test("a missing route fails closed before attempting provider-session reconciliation", async () => {
+  let reconciled = false;
+  const actions = createProviderNeutralUpdateActions({
+    execPath: "C:/missing/m9r-mcp.exe",
+    platform: "win32",
+    reconcileProviderSession: async () => { reconciled = true; return { healthy: true }; },
+  });
   const health = await actions.reconnect?.({ providerId: "codex", previous: null, current: {} as never });
   assert.equal(health?.healthy, false);
   assert.match(health?.detail ?? "", /missing/i);
+  assert.equal(reconciled, false);
 });

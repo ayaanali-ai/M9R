@@ -151,6 +151,16 @@ test("provider delivery holds at a pending task instead of skipping it and advan
   assert.equal(renderInboxInjection([pending, approved], 0).includedIds[0], "T1", "owner-facing cards still show pending work");
 });
 
+test("a task claimed or uncertain on a push channel is not injected again by provider hooks", () => {
+  const sending: Task = { ...mk({}, 1), delivery: { state: "sending", attempts: 1, threadId: "worker-session" } };
+  const uncertain: Task = { ...mk({}, 2), delivery: { state: "uncertain", attempts: 1, threadId: "worker-session" } };
+  for (const task of [sending, uncertain]) {
+    const result = renderInboxInjection([task], 0, { includePending: false });
+    assert.equal(result.text, "", `${task.delivery?.state} delivery must not race a second provider route`);
+    assert.equal(result.newCursor, 0, "the cursor does not advance just because another delivery channel claimed work");
+  }
+});
+
 test("provider delivery carries work text without exposing internal task or credential metadata", () => {
   const task = mk({ goal: "Open the safe app and report the visible result." }, 1);
   const rendered = renderInboxInjection([task], 0, { includePending: false, includeTaskIds: false, items: 1 });

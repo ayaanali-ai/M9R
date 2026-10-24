@@ -27,6 +27,9 @@ const publicBuildDefaults = {
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  // Keep Next's proxy clone above the largest permitted request (26 MiB).
+  // Otherwise Next silently truncates uploads at its default 10 MB before our byte guard sees them.
+  experimental: { proxyClientMaxBodySize: 32 * 1024 * 1024 },
   // OpenNext runs a nested Next build. Keep that disposable tree beside the
   // configured OpenNext output so a stale root .next ACL cannot block a
   // Cloudflare build before the worker bundle is generated.

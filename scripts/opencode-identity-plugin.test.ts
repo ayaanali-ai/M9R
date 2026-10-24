@@ -12,6 +12,53 @@ import {
 
 type HookOutcome = { code: number; output: string };
 
+test("OpenCode preserves transport diagnostics instead of discarding the rejection cause", async () => {
+  const hook = (event: string, context: unknown) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: typeof context === "string" ? context : JSON.stringify(context) } });
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  const factory = evaluateGeneratedPluginV2(buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }), createMockSpawn([
+    { code: 0, output: hook("SessionStart", "connected") },
+    { code: 0, output: hook("OpenCodePoll", { task_id: "T85", prompt: "review the shared change" }) },
+    { code: 0, output: hook("OpenCodeDeliveryFailed", { accepted: true, task_id: "T85" }) },
+  ], calls));
+  const stop = await factory.setup({ location: { directory: "C:/repo" }, data: { session: { status: async () => ({ type: "idle" }) } }, client: { session: {
+    list: async () => [{ id: "exact-session", directory: "C:/repo", time: {} }],
+    promptAsync: async (payload) => {
+      assert.deepEqual((payload as { parts: unknown }).parts, [{ type: "text", text: "review the shared change" }]);
+      throw new Error("connection reset while submitting prompt");
+    },
+  } } });
+  try {
+    for (let attempt = 0; attempt < 30 && !calls.some((call) => call.args.includes("OpenCodeDeliveryFailed")); attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
+    const failed = calls.find((call) => call.args.includes("OpenCodeDeliveryFailed"));
+    assert.ok(failed);
+    assert.match(JSON.parse(failed.input).delivery_detail, /connection reset/);
+  } finally { stop?.(); }
+});
+
+test("OpenCode keeps ambiguous plain-text delivery uncertain even when identical text exists in history", async () => {
+  const hook = (event: string, context: unknown) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: typeof context === "string" ? context : JSON.stringify(context) } });
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  let submissions = 0;
+  let historyReads = 0;
+  const factory = evaluateGeneratedPluginV2(buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }), createMockSpawn([
+    { code: 0, output: hook("SessionStart", "connected") },
+    { code: 0, output: hook("OpenCodePoll", { task_id: "T86", prompt: "review the shared change" }) },
+    { code: 0, output: hook("OpenCodeDeliveryFailed", { accepted: true, task_id: "T86" }) },
+  ], calls));
+  const stop = await factory.setup({ location: { directory: "C:/repo" }, data: { session: { status: async () => ({ type: "idle" }) } }, client: { session: {
+    list: async () => [{ id: "exact-session", directory: "C:/repo", time: {} }],
+    promptAsync: async () => { submissions++; throw new Error("acceptance unknown"); },
+    messages: async () => { historyReads++; return { data: [{ info: { role: "user" }, parts: [{ type: "text", text: "review the shared change" }] }] }; },
+  } } } as Parameters<typeof factory.setup>[0]);
+  try {
+    for (let attempt = 0; attempt < 30 && !calls.some((call) => call.args.includes("OpenCodeDeliveryFailed")); attempt++) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(submissions, 1);
+    assert.equal(historyReads, 0);
+    assert.equal(calls.some((call) => call.args.includes("OpenCodeDelivered")), false);
+    assert.equal(JSON.parse(calls.find((call) => call.args.includes("OpenCodeDeliveryFailed"))!.input).delivery_error, "unknown");
+  } finally { stop?.(); }
+});
+
 function createMockSpawn(outcomes: HookOutcome[], calls: Array<{ command: string; args: string[]; input: string }>) {
   return (command: string, args: string[]) => {
     const child = new EventEmitter() as EventEmitter & {
@@ -66,7 +113,9 @@ function evaluateGeneratedPluginV2(
       location?: { directory?: string };
       data?: { session?: { status?: (sessionID: string) => unknown | Promise<unknown> } };
       client?: { session?: { list?: (input?: unknown) => Promise<unknown>; promptAsync?: (input: unknown) => Promise<unknown> } };
-      session?: { hook?: (name: string, callback: (event: { sessionID?: string; system?: Array<{ type: string; text: string }> }) => Promise<void>) => Promise<unknown> };
+      session?: {
+        hook?: (name: string, callback: (event: { sessionID?: string; system?: Array<{ type: string; text: string }> }) => Promise<void>) => Promise<unknown>;
+      };
       event?: { subscribe?: (input?: { signal?: AbortSignal }) => AsyncIterable<unknown> };
     }) => Promise<(() => void) | undefined>;
   };
@@ -382,6 +431,71 @@ test("OpenCode startup discovers live sessions across project directories and pr
   plugin?.();
 });
 
+test("OpenCode V2 uses its documented SDK prompt API to deliver into the exact existing session", async () => {
+  const hook = (event: string, additionalContext: string) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  const prompts: unknown[] = [];
+  const factory = evaluateGeneratedPluginV2(buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }), createMockSpawn([
+    { code: 0, output: hook("SessionStart", "connected") },
+    { code: 0, output: hook("OpenCodePoll", JSON.stringify({ task_id: "T84", prompt: "[M9R T84] do the approved work" })) },
+    { code: 0, output: hook("OpenCodeDelivered", JSON.stringify({ accepted: true, task_id: "T84" })) },
+  ], calls));
+  const plugin = await factory.setup({
+    location: { directory: "C:/repo" },
+    data: { session: { status: async () => ({ type: "idle" }) } },
+    client: {
+      session: {
+        list: async () => [{ id: "exact-live-session", directory: "C:/repo", time: {} }],
+        promptAsync: async (input: unknown) => {
+          prompts.push(input);
+          return { data: undefined };
+        },
+      },
+    },
+  });
+
+  for (let attempt = 0; attempt < 30 && calls.every((call) => !call.args.includes("OpenCodeDelivered")); attempt++) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  assert.deepEqual(prompts, [{
+    sessionID: "exact-live-session",
+    directory: "C:/repo",
+    parts: [{ type: "text", text: "[M9R T84] do the approved work" }],
+  }]);
+  assert.deepEqual(JSON.parse(calls.find((call) => call.args.includes("OpenCodePoll"))!.input), {
+    session_id: "exact-live-session",
+    cwd: "C:/repo",
+  });
+  assert.ok(calls.some((call) => call.args.includes("OpenCodeDelivered")));
+  plugin?.();
+});
+
+test("OpenCode reports when its session API cannot accept automatic M9R delivery", async () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...values: unknown[]) => warnings.push(values.map(String).join(" "));
+  try {
+    const factory = evaluateGeneratedPluginV2(
+      buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }),
+      createMockSpawn([], []),
+      ((callback: () => void) => ({ callback, unref() {} })) as unknown as typeof setInterval,
+      (() => undefined) as typeof clearInterval,
+    );
+    const plugin = await factory.setup({
+      location: { directory: "C:/repo" },
+      client: { session: { list: async () => [] } },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.match(warnings.join("\n"), /no supported outbound prompt method.*automatic delivery is unavailable/i);
+    assert.doesNotMatch(warnings.join("\n"), /session[_ -]?id|task[_ -]?id|token/i);
+    plugin?.();
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 test("OpenCode retries the legacy promptAsync shape only after request validation rejects the modern shape", async () => {
   const hook = (event: string, additionalContext: string) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
   const calls: Array<{ command: string; args: string[]; input: string }> = [];
@@ -506,6 +620,24 @@ test("OpenCode session lifecycle events rebind identity and start delivery polli
   ]);
 });
 
+test("OpenCode session.idle reports the exact provider-turn end to the native hook", async () => {
+  const calls: Array<{ command: string; args: string[]; input: string }> = [];
+  const factory = evaluateGeneratedPlugin(
+    buildOpenCodeIdentityPluginSource({ command: "m9r-engine", args: ["m9r-hook", "SessionStart", "opencode"] }),
+    createMockSpawn([{ code: 0, output: "" }], calls),
+  );
+  const plugin = await factory({
+    directory: "C:/repo",
+    client: { session: { promptAsync: async () => ({}) } },
+  });
+
+  await plugin.event!({ event: { type: "session.idle", properties: { sessionID: "idle-session" } } });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]?.args, ["m9r-hook", "ProviderTurnEnd", "opencode"]);
+  assert.deepEqual(JSON.parse(calls[0]!.input), { session_id: "idle-session", cwd: "C:/repo" });
+});
+
 test("deleting an OpenCode session retires its poller and closes active delivery", async () => {
   const hook = (event: string, additionalContext: string) => JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext } });
   const calls: Array<{ command: string; args: string[]; input: string }> = [];
@@ -522,6 +654,7 @@ test("deleting an OpenCode session retires its poller and closes active delivery
     { code: 0, output: hook("UserPromptSubmit", "") },
     { code: 0, output: hook("OpenCodePoll", JSON.stringify({ task_id: "T77", prompt: "[M9R T77]\nwork" })) },
     { code: 0, output: hook("OpenCodeDelivered", JSON.stringify({ accepted: true, task_id: "T77" })) },
+    { code: 0, output: "" },
     { code: 0, output: hook("OpenCodeExecutionFailed", JSON.stringify({ accepted: true, task_id: "T77" })) },
   ], calls), setIntervalMock, clearIntervalMock);
   const plugin = await factory({
@@ -539,6 +672,9 @@ test("deleting an OpenCode session retires its poller and closes active delivery
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   assert.equal(cleared.length, 1);
+  const turnEnd = calls.find((call) => call.args.includes("ProviderTurnEnd"));
+  assert.ok(turnEnd, "deleting a session must close its exact active provider turn");
+  assert.deepEqual(JSON.parse(turnEnd!.input), { session_id: "deleted-session", cwd: "C:/repo" });
   const failure = calls.find((call) => call.args.includes("OpenCodeExecutionFailed"));
   assert.ok(failure);
   assert.deepEqual(JSON.parse(failure!.input), {

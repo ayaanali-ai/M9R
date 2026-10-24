@@ -46,6 +46,116 @@ An item is not CLOSED because code exists, a unit test passes, a synthetic curso
 
 ## 2. Current evidence snapshot
 
+### 2026-10-22 — full local security/build audit and boundary hardening
+
+- **Cross-workspace activity isolation fixed:** the current-file-activity read
+  now requires both the authenticated agent's `workspace_id` and the requested
+  conversation. A conversation identifier alone can no longer read another
+  workspace's activity rows.
+- **Sensitive watcher contents fixed:** resident file watching and the direct
+  file-watch API now suppress contents for environment files, credential and
+  secret files, private configuration, signing material, and sensitive
+  certificates. Session redaction also covers credential-bearing webhook URLs.
+- **Git installation-token exposure fixed:** the push helper no longer embeds a
+  GitHub token in a remote URL or command argument. It uses a short-lived local
+  askpass channel, sanitizes failures, and removes its temporary helper even if
+  setup fails.
+- **Current local gates:** `npm run typecheck` passed; the full suite passed
+  **2,668/2,668** tests across 216 files; lint passed with **0 errors** and 246
+  existing warnings; `npm run build:cli`, the production web build, the
+  Cloudflare/OpenNext worker build, `npm run open-core:check`, and the public
+  surface gate all exited successfully. `npm audit --omit=dev` reported **0
+  vulnerabilities**. The full audit still reports five high development-only
+  advisories in the Next ESLint -> fast-glob -> micromatch -> braces chain; its
+  suggested fix is an unsafe downgrade to `eslint-config-next@14.2.35`, so no
+  downgrade was applied to the Next 16 production application.
+- **ACL diagnosis:** the tracked `third_party/dashboard-reference/LICENSE`
+  descriptor has the expected owner/inheritance and passes `icacls /verify`.
+  The earlier WinError 5 is the restricted scanner worker failing to read a
+  protected/low-integrity checkout path, not a source-level deny ACE or an
+  evidence-backed cross-user backdoor. No broad ACL rewrite was performed.
+- **Cloudflare build boundary:** OpenNext 1.20.6 emits three nonfatal copy
+  errors for packages with plain-string `exports` fields, then emits the worker
+  and exits 0. The failure is in OpenNext's Windows package-copy transformer,
+  not the repository ACL. The Cloudflare isolated security audit remains
+  unrun because WSL/Docker Linux execution is unavailable here.
+- **Codex Security boundary:** the current Standard scan is still an unsealed
+  historical draft, and the current Deep scan is still running against its
+  launch snapshot; neither is a completed current-tree security report. They
+  are not being represented as a clean security pass.
+- **Still open:** live provider/lifecycle and desktop acceptance, the
+  Cloudflare Linux audit, final review of the five development-only advisories,
+  and provenance-backed retention/deletion of ignored runtime/quarantine
+  directories. Generated directories remain ignored and retained until each
+  one is proven unreferenced; no user document or unknown dirty work was
+  deleted, committed, or overwritten in this pass.
+- **Exact stale-process cleanup:** one orphaned Node process running the old
+  temporary `m9r-clean-build-.../cli/dist/m9r.js terminal runtime` was verified
+  to have no live parent or provider owner and stopped. Its empty temporary
+  directory remains because Windows still reports an open handle; no provider
+  session was stopped and no active managed runtime was touched.
+
+### 2026-10-22 — user-scoped provider credential boundary
+
+- **Source implementation complete for this slice:** provider bearer files now
+  live under the per-user, per-workspace M9R store (`M9R_HOME` or the user's
+  home), never under the repository's `.m9r/agents/` directory. Provider
+  identity selects the scoped file; a runtime cannot borrow another provider's
+  profile or a project-local override.
+- **Local migration complete:** the active Claude/Codex legacy files were
+  migrated to the user store and protected with a Windows owner-only ACL
+  (`MSI\\kaina:(F)`). Repository copies and the old revoked OpenCode file now
+  contain non-secret migration markers only; no bearer values were printed.
+- **Revocation retention fixed:** a revoked active credential is replaced by a
+  non-secret retirement marker instead of being moved to a reversible
+  `local.revoked.json` bearer file. Migration markers are idempotent on later
+  startup.
+- **Focused evidence:** credential-store regression **6/6 passed**. The bridge
+  regression is currently blocked before test loading by the pre-existing
+  protected ACL on `src/lib/provider-adapter-config.ts` (`EPERM`). The formal
+  Codex Security scan is likewise blocked during repository snapshotting by
+  the protected `cli/licenses/Cua-Driver-Node-Runtime-NOTICE.md` file; neither
+  blocker is being reported as a security pass.
+- **Additional sweep:** `npm audit --omit=dev --audit-level=high` returned **0
+  vulnerabilities**. A redacted repository-local memory sweep found only
+  historical tool IDs, paths, code excerpts, or existing placeholders; no raw
+  bearer value was found in M9R memory files.
+- **Still open:** full checkout ACL repair, clean package/build verification,
+  and integrated live provider/lifecycle, desktop-action, cursor, and
+  single-/multi-agent dry-run acceptance. This credential slice does not close
+  those runtime gates.
+
+### 2026-10-22 — post-app-update step 1/2 execution
+
+- **Post-update credential check:** after the owner updated the Codex desktop
+  app, the user-scoped credential files remained owner-only (`MSI\\kaina:(F)`);
+  the credential-store regression remained **6/6 passed** and `npm audit
+  --omit=dev --audit-level=high` remained **0 vulnerabilities**. This verifies
+  the credential boundary did not regress across that app update; it does not
+  prove provider delivery or desktop acceptance.
+- **Stale Git ACL boundary:** the current user SID was verified as distinct
+  from four orphaned SIDs carrying explicit deny ACEs on `.git`. Only those
+  eight exact deny rules were removed from `.git`, and the index inheritance
+  was refreshed; no source contents, unrelated permissions, or user files were
+  changed. Nested checkout ACL blockers remain elsewhere and are not claimed
+  repaired.
+- **Selective release commits:** credential boundary and focused tests were
+  committed without the private tracker or unrelated dirty paths:
+  `7ce8989d`, `7bcd29b2`, `dac3d870`, `f7a8e3b5`, and `23354f80`.
+- **Clean CLI package:** a detached worktree at `23354f80` built `cli/dist`
+  successfully and passed the complete CLI package suite **19/19**. The clean
+  package contained 173 artifacts (4,468,833 bytes) with manifest fingerprint
+  `b2c694dcf63c9e6f91d52c1894b8ce7d5089cc257a536b179705599da5d446a0`.
+- **Full engine package:** still **BLOCKED/UNVERIFIED**. The engine builder
+  first required the generated desktop pill; the clean worktree then passed
+  the pill frontend and pill-next build, but its native Tauri build did not
+  produce `m9r-overlay.exe` before the disposable build session was stopped.
+  No engine was activated and no live runtime was changed.
+- **Formal security scan:** the Codex Security launcher failed before issuing a
+  scan ID, so there is no formal scan pass. Full checkout scanning remains
+  blocked by protected nested paths; the scoped source/tests and local audit
+  evidence above are the only accepted evidence for this slice.
+
 ### Follow-up implementation checkpoint — steps 1–4
 
 - **Step 1 / source verified:** Corrupt or unsupported-version state now fails closed and preserves the file rather than silently resetting identities and task IDs. Local-state publication never falls back to an in-place copy. Writer locks publish their owner atomically; age never authorizes lock theft; a demonstrably dead owner can be recovered using its unique ownership file.
@@ -3182,3 +3292,2130 @@ sent or consumed during activation. Live provider acceptance remains separate:
 OpenCode must prove automatic post-update identity/delivery, Claude's idle
 native-session delivery limitation remains open, and the three-provider
 open-world matrix is not yet signed off.
+
+### 2026-10-21 (Codex) — verification pass and remaining closure sequence reconciled
+
+The current source/package boundary was rechecked without changing the pill,
+provider sessions, processes, credentials, desktop state, or retained artifacts.
+The full repository suite passed **2,645/2,645 tests** across **215 files** with
+zero failed batches. `npm run typecheck` passed. The production dependency audit
+reported **0 high-severity production vulnerabilities**, and `git diff --check`
+passed. A new production-build invocation emitted the Next.js build-start
+banner but its child process disappeared before the wrapper returned a result;
+the run was stopped and is recorded as **inconclusive**, not as a build pass.
+The targeted ESLint invocation likewise lost its child process without a
+completion result and is recorded as **inconclusive**, not as a lint pass. The
+previous clean package/build/activation evidence remains valid but is not
+replaced by either inconclusive rerun.
+
+The remaining work was consolidated into the numbered closure sequence 9–16 in
+`docs/M9R_MASTER_LIST_2.1.md`: cursor identity/presentation; universal live
+desktop actions; provider-neutral latency and dead-tool removal; provider
+continuity and multiplayer operations; pill/messaging orchestration; updater,
+release, and evidence-backed cleanup; production/public readiness; and the
+open-world matrix, dry runs, rehearsal, and final demo. Harness² remains a
+later isolated harness-optimization experiment, not a production runtime
+dependency. No item in this entry closes live acceptance, provider acceptance,
+safe cleanup, or the demo gates.
+
+### 2026-10-21 (Codex) — items 9–11 provider-neutral source slice
+
+The first implementation slice of closure items 9–11 is complete and remains
+uncommitted by design. The private tracker and acceptance notes are not release
+inputs. No provider session, pill process, credential, desktop task, runtime
+activation, held artifact, or live task was touched.
+
+Item 9 source work:
+
+- Native Cua cursor badges now use clean provider labels (`Claude`, `Codex`,
+  and `OpenCode`, with deterministic title-casing for unknown handles). They
+  no longer expose an `@`-prefixed handle, provider session ID, or derived
+  session hash. The private `(handle, sessionId)` ownership key remains in the
+  broker so the user-facing label change does not remove backend fencing.
+- Approved stage preparation enables and verifies the provider cursor before
+  launch, capture, focus, or the first input action. This is visual-only and
+  does not move the owner's physical pointer or focus a window.
+- Cursor colors and custom Cua theme assets remain explicitly open: the
+  installed Cua surface currently exposes only its default theme, so no
+  unverified color/theme claim was made. Same-provider concurrent cursor
+  identity/display separation also remains a live design/acceptance boundary.
+
+Item 10 source work:
+
+- The existing generic action layer remains unchanged and covered: semantic
+  and coordinate input, keyboard/hotkeys, scroll/drag, clipboard, menus,
+  window state, cancellation, stale-target refusal, and postcondition
+  verification. The new pre-action cursor publication is integrated at the
+  common stage boundary rather than in an app-specific branch.
+- The source/fixture gate is not a live open-world pass. Arbitrary apps,
+  focus contention, multi-provider ownership, multi-monitor behavior, and
+  owner-visible action proof remain open for the matrix.
+
+Item 11 source work:
+
+- Provider launch prompts no longer advertise the retired, unregistered
+  `m9r_web_*` browser-extension/shared-tab route. Providers are directed to
+  the native desktop/browser route and to report an unavailable capability
+  instead of probing dead tools or silently switching surfaces. The dormant
+  shared-browser implementation was not deleted.
+- Read-only window enumeration now reuses the already-connected Cua transport
+  instead of creating and ending a throwaway session on every launch poll.
+  This removes repeated cold starts and avoids session churn in the common
+  discovery path while preserving the explicit persistent agent cursor
+  sessions.
+
+Verification for this slice:
+
+- Full repository suite: **2,645/2,645 passed**, **215 files**, zero failed
+  batches.
+- `npm run build:cli`: passed.
+- `npm run typecheck`: passed.
+- `npm audit --omit=dev --audit-level=high`: **0 vulnerabilities**.
+- `git diff --check`: passed; only the existing Master List line-ending
+  normalization warning was emitted.
+- Focused Cua/vendor tests: **71/71 passed**. The prior task-stage focused
+  rerun hit a Windows `%TEMP%` `EPERM` state-lock rename before service logic;
+  the full suite subsequently passed, so no local-store workaround was added.
+- Focused ESLint and a fresh production-build invocation were attempted but
+  their child processes did not return completion results in this host
+  boundary; both remain **inconclusive**, not passes. Existing clean
+  package/build/activation evidence remains separate and is not rewritten.
+
+This closes the verified source slice for items 9–11, not their live gates.
+The next work still requires explicit owner-visible matrix proof, remaining
+cursor/theme decisions, provider continuity, release/cleanup review, and the
+two dry runs before the final demo. Held paths remain untouched and no commit
+was created.
+
+### 2026-10-21 (Codex) — production build gate rerun
+
+The full current-checkout production Webpack build completed successfully with
+exit code 0. Next.js 16.3.8 compiled the application, completed TypeScript,
+collected page data, generated all 138 static pages, finalized optimization,
+and emitted the complete route manifest set. The artifact contains `BUILD_ID`,
+`routes-manifest.json`, `required-server-files.json`, `prerender-manifest.json`,
+and server/client output. The build ID is `LfZgv35CFNax41XBYP5cp`; the SHA-256
+of `.next/BUILD_ID` is
+`234FAF2A72273A0B71A054E0038CABD9D336ED0110537043CE6B3DBD489B719D`.
+
+An obsolete, separately launched Next debug probe was found still resident and
+was stopped by its verified PID; the active release build and all provider/
+runtime processes were left untouched. No source, provider session, pill,
+credential, or runtime activation was changed by this cleanup. The supported
+cursor color palettes remain preview-only until the owner selects one; no color
+was hardcoded in this step.
+
+### 2026-10-21 (Codex) — approved provider colors and Pine/WebMCP scope reconciliation
+
+The owner selected the Balanced palette for the current demo/release boundary:
+
+- Codex: `#4F7CFF` (Balanced blue)
+- Claude: `#D97757` (Balanced orange/terracotta)
+- OpenCode: `#9CA3AF` (the lighter gray from palette C)
+
+The fixed provider colors are now wired into both shared color surfaces:
+`src/lib/agent-brand-color.ts` for dashboard/pill fallback rendering and
+`src/lib/native/local-store.ts` for the durable local feed/native identity
+allocator. Known provider assignments are migrated from the prior local palette
+when they are read, while unknown providers receive a stable overflow color and
+cannot reserve one of the three provider colors. The existing multi-human
+allocator remains unchanged; this pass does not remove its explicit per-person
+workspace behavior. No native Cua theme hex value was invented: the installed
+Cua contract accepts an installed opaque theme ID, and this machine still has
+only `cua.default`. Per-provider native cursor artwork therefore remains a
+separate asset/build/live-acceptance gate.
+
+Tracker reconciliation for the two older concepts the owner asked about:
+
+- **Pine-style observation:** the local implementation is already structure-first
+  (UI Automation/accessibility tree or browser structure where available), with
+  bounded same-capture visual fallback and target/revision/status/count/fallback
+  metadata. It is not a Pine cloud dependency and needs no external vision API.
+  Fresh arbitrary native/browser live parity, event-driven freshness, and full
+  installed-provider acceptance remain open under the universal action and live
+  matrix gates.
+- **“Make every site an MCP”:** the repository contains the historical WebMCP/
+  browser-extension route and its route-separation tests, but it does not and
+  should not generate a separate MCP wrapper for every site. That route is
+  dormant/optional and is not the universal acceptance boundary. The current
+  product path is the generic native desktop/browser observation and action
+  surface, which accepts arbitrary site and app targets without per-site code.
+  A site-specific WebMCP integration remains optional future capability, not a
+  prerequisite or a claim that every site is already an MCP server.
+
+Verification for this source slice:
+
+- Focused color/inbox/native-feed regressions: **49/49 passed**, including legacy
+  provider-color migration and collision prevention.
+- Full repository suite: **2,646/2,646 passed**, **215 files**, zero failed
+  batches.
+- `npm run typecheck`: passed.
+- `npm run build:cli`: passed.
+- `npm audit --omit=dev --audit-level=high`: **0 vulnerabilities**.
+- `npm run build`: passed with Next.js 16.3.8/Turbopack, TypeScript complete,
+  and **138/138** static pages generated. Build ID:
+  `6zxLtA4-d_Sp475QBaayT`; `.next/BUILD_ID` SHA-256:
+  `524CB990215F9004D0B93E08530E212D6E74E8A2341783E88273E273248E3C16`.
+- `git diff --check`: passed with only expected LF/CRLF normalization warnings.
+
+This closes the approved color source/regression/build slice only. It does not
+close native custom cursor themes, live provider continuity, live open-world
+acceptance, background/foreground parity, release cleanup, dry runs, or the
+multiplayer demo. No provider session, runtime activation, credential, held
+artifact, or commit was changed.
+
+### 2026-10-21 (Codex) — batched pre-demo proof reconciliation
+
+This was a read-only proof sweep against the current dirty checkout. No
+provider session, desktop surface, runtime activation, credential, held
+artifact, or commit was changed.
+
+Local source/package evidence:
+
+- `npm test`: **2,646/2,646 passed**, **215 files**, zero failed batches.
+- `npm run typecheck`: passed.
+- `npm run lint`: exited 0 with **0 errors** and **245 warnings**. The warnings
+  remain a cleanup item; lint success is not a claim that the warning set is
+  resolved.
+- `npm run build:cli`: passed.
+- `npm run build`: passed with Next.js 16.3.8, TypeScript complete, and
+  **138/138** static pages generated. Build ID: `LfZgv35CFNax41XBYP5cp`.
+- `npm audit --omit=dev --audit-level=high`: **0 vulnerabilities**.
+- `npm run test:desktop-stage`: **118/118 passed**.
+- `npm run test:presence`: **26/26 passed**.
+- `npm run open-core:check`: passed.
+- `git diff --check`: passed with only expected LF/CRLF normalization warnings.
+
+Release and public-surface findings:
+
+- `npm run test:installer`: **9/13 passed, 4 failed**. The explicit approval,
+  refresh, and modified-broker uninstall cases rolled back with
+  `Runtime update failed; the previous runtime was restored`. The installer
+  gate is blocked until the rollback/update path is diagnosed and fixed; no
+  blind rerun or runtime activation was performed.
+- `npm run open-core:public-surface`: failed because the retained recovery
+  quarantine contains many `web-broker.key` files and deeply nested paths.
+  The quarantine was not deleted or altered; this is a held-artifact cleanup
+  blocker, not evidence that a public release is safe.
+
+The read-only GPT-6 Luna reconciliation confirms that the clean installed
+runtime fingerprint previously recorded is not the current working tree: the
+latest source/test edits are not in that installed package. Therefore all
+fresh live provider and owner-visible desktop proof must use one newly built,
+fingerprinted package containing the reviewed source. The proof can be one
+batched campaign, but its evidence remains separate for provider continuity,
+whole-screen observation, focus/recovery, cursors, actions, latency, updater,
+and multiplayer acceptance. Historical Codex/Chrome/Calculator evidence does
+not close fresh open-world or three-provider acceptance.
+
+Current live blockers remain: fresh Codex/Claude/OpenCode automatic-delivery
+and reconnect proof; serialized owner-visible arbitrary-target desktop proof;
+whole-screen shell/taskbar plus native/UIA/browser structured observation with
+one revision model; cursor pre-action visibility and pointer isolation; fresh
+latency correlation; installer/update/rollback/reboot evidence; quarantine
+review; and the two difficult dry runs, multiplayer rehearsal, and final demo.
+
+### 2026-10-21 (Codex) — provider-neutral execution boundary and update fingerprint
+
+This source slice strengthens the provider-neutral boundary without replacing
+or altering the existing CLI/MCP transport. The public adapter manifest now
+publishes one versioned execution contract for every provider and future
+provider: connect, identify, deliver, progress, result, cancel, pause, resume,
+reconnect, recover, and update rebind. The manifest validates that every
+declared provider exposes the same operation set; live verification status is
+still kept separate and is not fabricated by this declaration.
+
+The ACP registry now performs a provider-neutral runtime conformance check at
+registration. It accepts an arbitrary future provider adapter when it exposes
+the shared lifecycle surface and rejects an incomplete adapter before any
+session or task can use it. No provider allowlist or provider-specific
+workflow was added.
+
+The side-effect-free provider update observation path now records the current
+M9R adapter and capability-manifest versions with every detected provider.
+This means a future M9R contract update is part of the same compatibility
+fingerprint as a vendor update, so the existing monitor can reconcile it
+through the stable CLI/MCP route while preserving durable work and waiting for
+a healthy replacement before retirement.
+
+Verification for this slice:
+
+- Focused adapter, bridge, and provider-update regressions: **48/48 passed**.
+- Full repository suite: **2,646/2,646 passed**, **215 files**, zero failed
+  batches.
+- `npm run typecheck`: passed.
+- `npm run build:cli`: passed; generated provider-update code resolves the
+  packaged adapter contract locally.
+- `npm run lint`: exited 0 with **0 errors** and **245 existing warnings**.
+- `npm run build`: passed with Next.js 16.3.8/Turbopack, TypeScript complete,
+  and **138/138** static pages generated.
+- `git diff --check`: passed with only expected LF/CRLF normalization
+  warnings.
+
+This closes the provider-neutral source contract slice only. It does not close
+fresh installed provider proof, automatic delivery after provider updates,
+reconnect/reboot proof, provider-native pause/resume parity, arbitrary desktop
+acceptance, cursor proof, updater rollback, cleanup, dry runs, or the final
+multiplayer demo. No provider session, desktop surface, runtime activation,
+credential, held artifact, or commit was changed.
+
+### 2026-10-21 (Codex) — ordered pre-live items 1–6: cross-worker focus safety and verification
+
+This pass continued the ordered pre-live lanes without activating a runtime,
+starting a provider task, changing a pill, touching credentials, deleting held
+artifacts, or creating a commit. The source boundary was audited first; only a
+concrete cross-process focus gap was changed.
+
+**Item 1 — provider continuity and source wiring:** the provider-neutral
+execution contract and update-compatibility boundary already present in the
+working tree were reverified rather than duplicated. Focused provider/update
+coverage remained green, and the full repository suite remained green. Fresh
+provider reconnect, reboot, automatic delivery, and installed-runtime
+continuity are still live gates and are not marked complete by source tests.
+
+**Item 2 — universal desktop/action/focus:** separate provider workers now share
+the M9R-owned `foreground-input-lease` directory when they need the one real
+Windows foreground input stream. The lease is provider-neutral and generic: it
+uses atomic directory acquisition, FIFO waiting, abortable waiters, dead-owner
+recovery, bounded stale-owner checks, and fail-closed handling for unexpected
+lock contents. Background-capable work is not serialized by this lease. The
+existing generic action and observation paths were not replaced with app-specific
+branches. Focus contention, arbitrary-target recovery, and owner-visible live
+proof remain open until the fresh matrix.
+
+**Item 3 — cursor presentation:** the existing pre-action cursor publication,
+stable identity/color source, and pointer-isolation fixtures were reverified by
+the focused desktop/native suites. The lease change does not alter cursor
+identity or artwork. Persistent visible cursors, multi-provider/multi-monitor
+live behavior, and final native cursor presentation remain live gates.
+
+**Item 4 — latency, idempotency, and stale-tool behavior:** the current source
+continues to suppress the retired `m9r_web_*` route in provider launch guidance,
+reuse the connected Cua transport for window enumeration, and preserve durable
+terminal/idempotent delivery behavior. No dead browser route was reintroduced.
+Fresh latency correlation, taskbar/focus fast-path timing, provider delivery
+after reconnect, and live no-duplicate proof remain open.
+
+**Item 5 — release/update reliability:** the current source/package checks and
+provider-neutral update fingerprint remain coherent. The production build and
+CLI build both passed. The native installer fixture was not falsely closed: a
+targeted native-consent/install run remained inside its PowerShell child for
+the bounded test window and was stopped as inconclusive. The historical full
+fixture result remains **9/13 passed, 4 rollback cases not closed**; no runtime
+activation or installer workaround was applied.
+
+**Item 6 — held-artifact/release-boundary review:** the recovery quarantine,
+runtime snapshots, engine output, scratchpad, relay-secret material, and user
+documents were classified as held/owner-review material and left untouched.
+The deterministic open-core check passed. The dirty-worktree public-surface
+scan remains blocked by broker-key files, nested recovery paths, and current
+secret matches inside `.m9r-recovery-quarantine-20261014`; this is a real
+release-boundary blocker, not a reason to delete evidence blindly.
+
+Verification for this pass:
+
+- Cross-process foreground lease: **5/5 passed**, including FIFO sharing across
+  independent worker instances and dead-owner recovery without touching an
+  unrelated file.
+- Full repository suite: **2,646/2,646 passed**, **215 files**, zero failed
+  batches.
+- `npm run test:desktop-stage`: **118/118 passed**.
+- `npm run typecheck`: passed.
+- `npm run lint`: exit 0, **0 errors**, **245 existing warnings**; warnings were
+  not mass-edited as unrelated cleanup.
+- `npm run build:cli`: passed.
+- `npm run build`: passed with Next.js 16.3.8/Turbopack and **138/138** static
+  pages generated. Build ID: `LfZgv35CFNax41XBYP5cp`.
+- `npm audit --omit=dev --audit-level=high`: **0 vulnerabilities**.
+- `npm run open-core:check`: passed.
+- `git diff --check`: passed with only expected LF/CRLF normalization warnings.
+- `npm run open-core:public-surface`: **blocked** by the retained quarantine
+  material described above.
+
+This closes the verified source/test portion of ordered items 1–6 and records
+the concrete focus-contending-worker fix. It does **not** close fresh
+three-provider continuity, live open-world desktop/action acceptance, live
+cursor/focus parity, native installer rollback, held-artifact retirement, or
+the dry runs/final demo. No provider session, runtime activation, credential,
+held artifact, or commit was changed.
+
+### 2026-10-21 (Codex) — item 5 native installer fixture and item 6 public-surface boundary
+
+This follow-up completed the two concrete failures left open by the preceding
+items 1–6 pass. No provider session, desktop surface, runtime activation,
+credential, or held artifact was changed. No commit was created.
+
+**Item 5 — native installer rollback/update fixture:**
+
+- The first native failure was reproduced with its underlying cause exposed:
+  Windows returned `EPERM` while renaming the staged `m9r-engine.exe` inside
+  the Codex AppContainer-scoped `%TEMP%` boundary. The transaction had already
+  preserved its rollback evidence; the top-level error simply hid the native
+  cause.
+- The runtime transaction error now includes a bounded cause message while
+  retaining the structured `cause` and preserved transaction path. The
+  rollback regression asserts both restoration and cause visibility.
+- The disposable native installer fixture now uses a short checkout-local
+  temporary root on Windows. This is test-host isolation only; the production
+  installer still uses the user's normal Windows temporary directory.
+- Full native fixture result: `npm run test:installer` **13/13 passed**,
+  including package creation, both consent previews, real install, uninstall
+  from a maintenance copy, refresh with a broker replacement, modified-broker
+  preservation, decline, and checksum failure. The temporary diagnostic trace
+  was removed after diagnosis, and the fixture temp root was cleaned up.
+
+**Item 6 — public-surface/release boundary:**
+
+- `npm run open-core:public-surface` now **passes**. The untracked
+  `.m9r-recovery-quarantine-*` tree is explicitly reported as held local
+  recovery evidence and excluded from the release candidate; it was not
+  deleted, scanned into user-facing output, or altered.
+- The checker fails closed if a held quarantine path is tracked or staged, so
+  the fix does not turn retained evidence into an invisible release hole.
+- It still reports the required public-release documents, no candidate secret
+  files, no generated public artifacts, reviewed synthetic fixtures, launch
+  scope, announcement language, README capability boundaries, and diff
+  cleanliness.
+
+Scoped verification after the changes:
+
+- Runtime transaction regression: **4/4 passed**.
+- Native installer fixture: **13/13 passed**.
+- Public-surface gate: **passed**.
+- `npm run typecheck`: **passed**.
+- Changed-file ESLint (runtime transaction, installer fixture, and public
+  surface checker): **passed**.
+- A full repository `npm run lint` traversal was stopped after it spent several
+  minutes traversing retained quarantine copies without returning; it is not
+  represented as a pass or failure for this slice. The relevant changed files
+  were linted directly.
+- No live provider acceptance, desktop task, runtime activation, cleanup
+  deletion, or commit was performed.
+
+This closes the native fixture and default public-surface scan gates only. The
+clean staged release boundary, held-artifact review/removal, provider continuity
+and live delivery, arbitrary desktop acceptance, cursor/focus proof, dry runs,
+and final multiplayer demo remain open.
+
+### 2026-10-21 (Codex) — clean release boundary, package, and runtime activation
+
+This is the current authoritative release checkpoint. The implementation work
+for the ordered pre-demo items was completed and packaged; the remaining proof
+is intentionally grouped into the integrated single-agent and multiplayer dry
+runs, per the execution order. Items are not being left open merely because
+their evidence will be collected during those dry runs.
+
+**Release boundary and commits:**
+
+- `3e278b68` — committed the reviewed provider-neutral runtime/release source
+  boundary and its focused regressions. Private trackers, generated icons,
+  user manifest work, runtime output, quarantine, scratchpad, and unknown
+  artifacts were excluded.
+- `90078424` — classified only the explicitly retained local-evidence roots in
+  runtime source provenance; unknown untracked source still makes a build dirty.
+- `7cc5cae3` — corrected and verified the installer provenance assertion before
+  the final rebuild.
+- The private tracker, non-release icon/manifest/marketing changes, and other
+  held work were restored from the recoverable stash
+  `m9r-held-nonrelease-before-clean-runtime-20261021`; they remain uncommitted.
+  The stash itself remains available as a second recovery copy.
+
+**Clean runtime and package:**
+
+- `npm run build:engine` passed from `7cc5cae3`.
+- Runtime fingerprint: `fcf4c3fd25295cea6e7e363824d868b72fbcd1276bf7d6ff120d6ef901abc7a9`.
+- Manifest source: `7cc5cae35aaa199fcf469e6cd62cfaae42e34cd2`,
+  `sourceDirty: false`, with 185 artifact identities.
+- The final standalone ZIP is
+  `m9r-clean-cutover-20261021/m9r-engine-windows-x64.zip`; its SHA-256 is
+  `83f447506e525735589aa5ed856c56e968ef5ea9559f86ca19c1f74e7279390b`.
+  The declared checksum matches, and the package contains the engine, hook,
+  native input host, broker, pill, build manifest, extension, and Cua runtime.
+
+**Activation evidence:**
+
+- The exact ZIP was installed through the existing consent-driven installer.
+- The managed broker stopped and restarted from the current build.
+- Installed runtime build ID matches the source build ID; all six top-level
+  runtime artifact hashes match `engine/dist`.
+- Installed manifest records the same source commit, `sourceDirty: false`, and
+  autostart enabled. The M9R desktop pill started successfully.
+- No provider session, credential, user document, quarantine tree, or older
+  package directory was deleted or altered by this activation.
+
+**Verification after the final source correction:**
+
+- Focused installer provenance assertion: **1/1 passed**.
+- Prior focused native/source regression sweep: **205/205 passed**.
+- Native installer fixture: **13/13 passed** before the final one-line test
+  assertion correction; the correction was then independently run **1/1**.
+- Typecheck, audit, public-surface, CLI, native pill, and engine builds were
+  green at the release boundary; the final JavaScript-only assertion correction
+  was covered by its focused test and the final engine rebuild/package.
+
+**Next execution state:**
+
+1. Owner starts or resumes the provider sessions after this activation.
+2. Run the integrated single-agent dry run; collect all required delivery,
+   cursor, focus, observation, action, recovery, and visible-postcondition
+   evidence in one task rather than splitting it into isolated proof cards.
+3. Run the integrated multiplayer dry run with the same shared evidence
+   standard, then close only the implementation/proof points actually supported
+   by those runs.
+4. Review held artifacts and perform only provenance-backed cleanup after the
+   dry runs; do not drain unknown or user-owned material.
+
+### 2026-10-21 (Codex) — provider-update continuity repair: OpenCode config drift
+
+The repeated OpenCode binding failure was traced to a real provider-update
+compatibility gap, not to a requirement for a new chat or a new provider
+session. OpenCode had two supported global config spellings in the same config
+directory: `opencode.jsonc` and an older `opencode.json`. M9R previously
+reconciled only the selected file, so a provider update could leave the sibling
+file on the old direct-engine route without the current provider environment or
+identity plugin. An OpenCode process launched from that sibling could stay
+visible and running while never publishing the claim needed for automatic M9R
+binding, producing the recurring 3000ms error.
+
+Implemented and committed in `023f2707` (`Repair provider config continuity
+across updates`):
+
+- The resolver now returns every existing supported OpenCode config spelling in
+  the active config directory, deterministically.
+- Native setup and provider-update reconciliation apply the same conservative,
+  M9R-owned merge to every returned config, preserving unrelated user entries
+  and credentials and refusing arbitrary unowned files.
+- The update path re-reads immediately before each atomic write, so a provider
+  or user change racing reconciliation is preserved rather than overwritten.
+- The existing provider-neutral update monitor and CLI/MCP route remain in
+  place; this is a continuity repair, not an OpenCode-only transport fork.
+- Existing M9R-owned provider workers retain the private supervisor's idle
+  worker-refresh path, so a current runtime can replace its worker without
+  replacing the provider chat/session. The durable identity and task state stay
+  in M9R's local store.
+
+Verification:
+
+- Provider-update compatibility/lifecycle/monitor/route tests: **26/26**.
+- Dual-config native reconciliation regression: **1/1**.
+- Typecheck: **passed**.
+- Changed-file ESLint: **0 errors**; only two pre-existing unused-variable
+  warnings remain.
+- `git diff --check`: **passed**.
+- Clean engine build: **passed**, runtime build ID
+  `8d9b9cd242cfacf98ec83f2c409f31f3572d9bad8ca576513d8de5357e4d69c0`, source
+  commit `023f270778212836338b65a5224ec0d95647e24e`, `sourceDirty: false`.
+- Runtime activation: **passed**; installed manifest matches the same build
+  and source identity, with 207 installed runtime files.
+- Post-activation inspection confirmed both `opencode.json` and
+  `opencode.jsonc` contain the current M9R hook route, `M9R_PROVIDER=opencode`,
+  the shared M9R home/port, and the M9R identity plugin entry.
+
+This closes the reproducible config-drift cause. It does not falsely claim
+fresh live provider acceptance: a provider session must still produce a live
+claim and receive one normal task in the integrated dry run. No credentials,
+provider-owned session, user document, private tracker history, or held
+artifact was deleted. The previously held private work was restored unchanged
+after activation.
+
+### 2026-10-21 (Codex) — continuity status and clean runtime finalization
+
+The continuity repair is now installed from the final verified source boundary:
+
+- `be585d28` ignores retained historical sessions when calculating identity
+  health; `0ae4eed6` and `0bf353a2` remove the misleading first-time
+  "Start a new Claude Code session" guidance whenever an existing provider
+  endpoint is already known.
+- The native status regression suite is **41/41** under the real Windows
+  filesystem path; typecheck passes; changed-file lint has **0 errors** with
+  the same pre-existing unused-variable warning.
+- Final clean runtime build ID is
+  `8be9ae912cf36f82e0080b3d68f422a4b509f41420dc40d2e6f8e353711cd9e4`, source
+  commit `0bf353a256259eef3ff2257bd950f326b242411e`, `sourceDirty: false`.
+  The installed manifest matches that identity and contains 209 runtime files.
+- Read-only installed status now preserves historical session records but only
+  evaluates the recent activity window; it reported two recently active
+  sessions needing identity repair and did not instruct the owner to create a
+  fresh chat. Both OpenCode config spellings remain on the modern M9R route.
+
+This is the permanent source/runtime fix for the repeated stale-config and
+stale-status loop. It does not claim that a live provider task has already
+completed in this turn; the existing sessions still own the final integrated
+dry-run proof. No provider session, credential, pill asset, private tracker,
+or held artifact was deleted or committed.
+
+### 2026-10-21 (Codex) — non-blocking provider binding and action-wire recovery
+
+The next source slice addresses the latency and provider-update boundary without
+changing the CLI/MCP transport or requiring a fresh provider session:
+
+- MCP provider binding recovery now waits with yielding timers instead of
+  `Atomics.wait`. The same bounded timeout and fail-closed ambiguity rules are
+  preserved, but a delayed SessionStart claim no longer blocks the Node event
+  loop or starves unrelated delivery work.
+- Provider continuation recovery now accepts one unambiguous, non-revoked
+  provider/session/project record for up to seven days after its last endpoint
+  heartbeat. The 15-minute claim-publication TTL remains separate, so this is
+  not a token-expiry relaxation or an ambiguous-session guess.
+- The computer-use MCP entry point now normalizes a JSON-stringified structured
+  action from a bridge before canonical validation. The provider still gets the
+  same universal action contract; malformed strings remain rejected.
+- The generated OpenCode identity plugin now retries startup session discovery
+  after a provider API-readiness race, then publishes the idempotent identity
+  hook before starting delivery polling. The focused OpenCode suite is
+  **21/21** and the delayed-binding regression passes.
+
+Verification for this slice:
+
+- `npm run typecheck`: passed.
+- Focused OpenCode identity suite: **21/21 passed**.
+- MCP connection suite: **28/28 passed**, including the new non-blocking wait
+  regression; the full combined computer-use/connection run remains **76/77**
+  because the existing Windows `state.lock` rename `EPERM` race still occurs in
+  the server-recreation fixture. The changed tests pass in isolation.
+- No provider session, runtime activation, held artifact, credential, or user
+  document was changed. These source changes remain uncommitted pending the
+  broader fix-order review.
+
+### 2026-10-21 (Codex) — unified whole-screen Windows UIA observation
+
+This source slice implements the approved shared Windows UI Automation layer
+without adding a provider, app, browser, or extension-specific route. The
+native stage now exposes one bounded `inspectDesktopStructure` capability rooted
+at the virtual desktop. It returns only labeled roles, bounded rectangles,
+depth, enabled/focused state, virtual-screen origin/size, and truncation status;
+HWNDs, PIDs, COM handles, and provider internals remain native-only.
+
+The Cua desktop observer consumes that structure in the same observation cycle,
+maps screen-space rectangles into the exact desktop capture, includes shell and
+taskbar controls in the common element model, and retains the same-capture
+visual fallback when native UIA is unavailable. Existing visible-window
+accessibility trees, pointer isolation, and action authorization are preserved.
+
+Verification:
+
+- `cargo check`: passed.
+- Native `cargo test`: **20/21 passed**; the one failure is the existing
+  environment-sensitive owner-pointer round-trip test (`SetCursorPos` returned
+  false), unrelated to this UIA change. No new native test failure was caused
+  by the snapshot code.
+- `npm run typecheck`: passed.
+- Focused desktop-stage run: **125/125 passed**, including bounded native
+  snapshot validation and same-capture whole-screen integration.
+- `npm run lint`: exit 0 with the repository's existing **245 warnings** and
+  no errors.
+- `git diff --check`: no whitespace errors; only existing LF/CRLF conversion
+  notices.
+
+This closes the source implementation of the generic desktop structure and
+structure-first fallback. Installed native behavior, focus/occlusion recovery,
+provider parity, dry-run evidence, held-artifact review, and the final demo
+remain open. No provider session, runtime activation, credential, user
+document, held artifact, or commit was changed.
+
+### 2026-10-21 (Codex) — exact moved-window owner-preview recovery
+
+The generic focus/recovery slice now distinguishes a live window that moved to
+another Windows virtual desktop from a window that actually disappeared:
+
+- Owner-preview verifies the exact saved PID/window identity before recovery.
+- A moved live window is re-presented on the owner's current desktop and
+  re-attached to the same stage; it is not relaunched, guessed, or replaced.
+- Re-adoption preserves the selected app and durable coordination key, so a
+  joint task does not lose its ownership group during recovery.
+- Relaunch remains limited to the existing closed/gone-window path; helper
+  timeouts, malformed native responses, and other inspection failures still
+  fail closed rather than spawning a duplicate app.
+
+Verification:
+
+- `npm run typecheck`: passed.
+- Focused moved-window regression: **1/1 passed** on a workspace-local Windows
+  temp root; the trace confirmed exact-window re-presentation and preserved
+  state notice.
+- Combined desktop-stage suite: **125/125 passed** for the native/Cua/room
+  stage set.
+- The standalone task-stage suite remains environment-blocked when Windows
+  redirects Node's temp root into the sandbox package filesystem: its existing
+  `state.lock` rename returns `EPERM`. That is recorded as an environment
+  limitation, not treated as a source pass.
+
+Focus/occlusion, taskbar/minimized/hidden recovery, installed-runtime proof,
+provider parity, dry-run evidence, held-artifact review, and final demo remain
+open. No provider session, runtime activation, credential, user document,
+held artifact, or commit was changed.
+
+### 2026-10-21 (Codex) — canonical window-state action boundary
+
+The shared action contract had a source-level mismatch: the native stage
+already implemented minimize, maximize, and restore, but the provider-neutral
+computer-use schema did not expose those operations. The contract now carries
+one strict `window_state` action with `minimized`, `maximized`, or `restored`,
+advertises `window.state` on exact app-window targets, and maps the action to
+the existing native stage dispatch. No provider-specific route or new window
+implementation was added.
+
+Verification:
+
+- Canonical contract and MCP regression suite: **62/62 passed** using a
+  workspace-local Windows temp root.
+- Repository TypeScript typecheck: passed.
+- Existing native stage behavior remains the implementation boundary; no
+  installed runtime was activated and no live window-control effect was
+  claimed.
+
+This closes the source/regression portion of the universal action bullet for
+the currently implemented action families. Installed/live window-state,
+resize/move, menu, clipboard, cancellation, pointer-isolation, and arbitrary
+control evidence remain integrated dry-run gates.
+
+### 2026-10-21 (Codex) — provider-color and public-label presentation boundary
+
+The overlay now consumes the same durable provider color assignment for every
+identity surface it renders. The approved demo palette is Codex blue
+(`#4F7CFF`), Claude terracotta (`#D97757`), and OpenCode light gray
+(`#9CA3AF`); unknown providers retain a stable overflow color. Provider labels
+are rendered as the public provider name plus a plain-language state, never a
+session ID, token, process ID, or internal handle. The activity ring remains a
+separate state indicator, so a status transition cannot silently replace the
+agent's identity color.
+
+The overlay typecheck passes. Owner-facing color selection/persistence UI and
+native Cua theme support remain intentionally open; this slice does not claim
+that a user can change colors yet, and it does not change cursor motion or
+physical-pointer behavior.
+
+### 2026-10-21 (Codex) — provider-session rebind and deferred owner delivery
+
+The provider lifecycle boundary now treats a missing provider identity after an
+update or process replacement as recoverable state when the provider hook gives
+M9R the exact existing session id. The hook re-registers that session, invokes
+the narrow one-session recovery path, and only then attempts delivery. It never
+guesses between sessions and still refuses revoked or ambiguous state.
+
+Owner-typed work addressed to a known provider with no currently active M9R
+identity is now stored as `deferred`, not `failed`. The task remains authorized
+and eligible for the provider's next trusted hook/poll, so the owner does not
+have to resend it or open a fresh provider session. OpenCode polling and its
+atomic claim path accept only this intentional deferred state; failed, queued,
+uncertain, and completed work remain fenced against replay.
+
+Verification:
+
+- Native store/hook and delivery-pump regression suites: **58/58 passed** with
+  a workspace-local Windows temp root.
+- The new regression covers an already-known OpenCode session losing its
+  identity, receiving a held owner task, and reclaiming it after the next poll
+  without a new session.
+- Installed runtime behavior, Claude/other-provider resident delivery,
+  provider update execution, and live dry-run evidence remain open; no runtime
+  was activated and no commit or held artifact was changed.
+
+### 2026-10-21 (Codex) — resident provider-neutral delivery retry pump
+
+The feed watcher now owns the existing provider-neutral deferred-delivery
+scheduler instead of leaving it as an unconnected library seam. The scheduler
+is wired through an adapter map: Codex uses the existing queue transport by
+default, while future provider transports can be supplied without changing
+task fencing, one-at-a-time scheduling, or stale/uncertain replay rules.
+
+This closes the source gap where an owner task intentionally held during a
+temporary provider-identity gap could remain deferred until an unrelated hook
+or manual resend. It does not claim that a local MCP server can inject work
+into arbitrary provider-owned sessions; those transports still require their
+own resident hook/API or an M9R-managed session.
+
+Verification:
+
+- Native command suite: **42/42 passed** with a workspace-local Windows temp
+  root, including the new deferred-delivery adapter-pump regression.
+- `npm run typecheck`: passed.
+- No runtime activation, provider restart, artifact deletion, or commit was
+  performed.
+
+### 2026-10-21 (Codex) — deferred-task cursor priming
+
+The owner-task path now calls the visual task-created callback before a
+provider transport is ready. This keeps the addressed agent's cursor/identity
+eligible to appear immediately after send, including when the task is held as
+`deferred` during a provider update, process replacement, or reconnect race.
+The callback is best-effort and isolated from authorization and delivery: an
+ambiguous or unknown session still fails closed, while the durable task stays
+deferred for the provider's next trusted hook/poll.
+
+Verification:
+
+- Native store/hook suite: **56/56 passed** with a workspace-local Windows temp
+  root, including the new pre-action cursor-prime regression.
+- No runtime activation, provider restart, artifact deletion, or commit was
+  performed.
+
+### 2026-10-21 (Codex) — active provider prompt stale-route removal
+
+The active managed-session and shared-task prompts no longer advertise the
+retired browser-extension/shared-tab tools. They now direct browser and app
+actions through the native `m9r_stage_app` plus structured
+`m9r_computer_observe`/`m9r_computer_action` surface, with same-capture
+fallback and fresh verification. The disabled legacy implementation and
+skipped historical fixtures were not deleted.
+
+Verification: targeted web-live prompt tests **3/3 passed**; `npm run
+typecheck` passed; `git diff --check` passed with existing line-ending notices
+only. This is source verification only; installed tools/list, provider
+sessions, live open-world action, and runtime activation remain open.
+
+### 2026-10-21 (Codex) — provider-update hook reconciliation
+
+The provider-neutral update monitor now refreshes the M9R-owned OpenCode
+identity hook as part of the existing compatibility boundary. The adapter
+regenerates the current session-start, prompt-delivery, poll, and delivery
+result hook source after an OpenCode update, but only when the setup manifest
+proves that M9R owns the plugin. User edits, path changes, malformed manifests,
+and unowned plugins fail closed and remain untouched. The provider's
+credentials, model state, unrelated configuration, and existing CLI/MCP route
+are not modified. Provider-update config replacement for this path now uses a
+bounded Windows-safe managed-file replacement with rollback recovery.
+
+Verification:
+
+- `npm run typecheck`: passed.
+- OpenCode plugin refresh plus provider compatibility/lifecycle/monitor/route
+  suites: **30/30 passed**.
+- This remains source verification only. Installed updater behavior, provider
+  restart/rebind, and integrated dry-run evidence remain open; no runtime was
+  activated, no provider was restarted, and no artifact was deleted or
+  committed.
+
+### 2026-10-21 (Codex) — trusted session-start delivery fallback
+
+The common provider hook now uses the trusted `SessionStart` boundary to claim
+and inject at most one owner-authorized task for the exact reconnecting session
+when that provider has a hook-based delivery path. The injected text contains
+the task body but no task ID, session ID, token, or inbox command. OpenCode
+continues to use its resident session poller so two delivery mechanisms cannot
+race. Pending, denied, expired, ambiguous, revoked, queued, uncertain, and
+already-delivered work remains fenced closed.
+
+The broker-prompt detector now recognizes the current provider-neutral native
+desktop wording as well as the retained historical wording, so M9R-generated
+teammate mentions cannot be mistaken for an owner command after the active
+route prompt change.
+
+Verification:
+
+- native store/hook suite: **57/57 passed** with a workspace-local Windows temp
+  root, including reconnect auto-delivery and no-replay regressions;
+- `npm run typecheck`: passed;
+- `git diff --check`: passed with existing line-ending notices only.
+
+This is source verification only. It does not claim unsolicited push into an
+arbitrary already-running provider-owned session, installed-runtime behavior,
+provider restart/rebind, or integrated live/dry-run acceptance.
+
+### 2026-10-21 (Codex) — terminal delivery-failure replay fence
+
+The ordinary provider-prompt inbox path now treats a terminal `failed`
+delivery as closed work. It is neither rendered nor reclaimed on a later
+prompt, so a failed item cannot block or replay ahead of a fresh
+owner-authorized item. In-flight `sending`/`uncertain` work remains fenced for
+reconciliation, while intentional `deferred` work remains eligible for its
+next trusted provider boundary.
+
+Verification:
+
+- native store/hook suite: **58/58 passed** with a workspace-local Windows temp
+  root, including the failed-delivery replay regression;
+- `npm run typecheck`: passed after this narrowly scoped inbox change;
+- `git diff --check`: passed with existing line-ending notices only.
+
+This is source verification only; installed/runtime and integrated provider
+proof remain open.
+
+### 2026-10-21 (Codex) — terminal lifecycle work excluded from identity repair
+
+The provider identity-repair query now excludes tasks whose delivery or
+lifecycle state is terminally `failed` or `completed`. Those records remain
+durable history, but they can no longer block a known provider session from
+repairing its current identity or make stale failed work look pending. The
+existing `sending`/`uncertain` reconciliation barrier and intentional
+`deferred` eligibility are unchanged.
+
+Verification:
+
+- native store/hook suite: **58/58 passed** with a workspace-local Windows
+  temp root, including the terminal-failure identity-repair regression;
+- `npm run typecheck`: passed after this change;
+- `git diff --check`: passed with existing line-ending notices only.
+
+This is source verification only; installed/runtime and integrated provider
+proof remain open.
+
+### 2026-10-21 (Codex) — structured computer-use result boundary
+
+The native `m9r_computer_observe` and `m9r_computer_action` tools now expose
+the same privacy-filtered result through MCP `structuredContent` and the
+legacy JSON text block. Modern provider bridges can consume targets,
+observations, receipts, postconditions, and telemetry directly instead of
+asking the model to parse a text envelope or make a redundant follow-up.
+Compatibility text remains for older bridges, and screenshot data URLs stay
+redacted from both result forms while bounded image blocks remain available.
+
+Verification:
+
+- computer-use contract and MCP suite: **62/62 passed**;
+- `npm run typecheck`: passed after the structured-result change;
+- `git diff --check`: passed with existing line-ending notices only.
+
+This is source verification only. It does not claim that every provider bridge
+consumes `structuredContent`, nor does it close installed runtime, provider
+restart/rebind, focus, action, or integrated live/dry-run acceptance.
+
+The telemetry attachment was then made symmetric across both MCP result forms;
+structured results now carry the same validated phase timings and replay-
+receipt flag as the compatibility text result. The computer-use suite remained
+**62/62**, `npm run typecheck` passed, and `git diff --check` passed afterward.
+This remains source verification only.
+
+### 2026-10-21 (Codex) — SessionStart stage-contract parity
+
+The trusted hook delivery path now carries the same native desktop-stage
+contract when it injects the first owner-authorized task at `SessionStart` as
+it does for an ordinary provider prompt. A task cannot arrive through the
+automatic reconnect path without the M9R-only observation/action guidance
+that keeps desktop work on the shared native UIA/desktop route. The helper
+uses the existing exact-session identity and approval-frontier checks, so
+pending approvals remain blocked and no task/session credential is exposed.
+OpenCode is intentionally excluded from this pre-delivery notice because its
+resident poller owns its live prompt transport; it receives the notice only
+with the task it actually claims.
+
+Verification:
+
+- focused task-stage-notice suite: **6/6 passed**;
+- native store/hook regression suite: **58/58 passed**;
+- `npm run typecheck`: passed;
+- `git diff --check`: passed with existing LF/CRLF normalization notices only.
+
+This closes the source gap for SessionStart stage-contract parity. Installed
+runtime behavior, provider-owned unsolicited push, focus/action behavior, and
+integrated live/dry-run acceptance remain open. No runtime was activated, no
+provider was restarted, no artifact was deleted, and no commit was made.
+
+### 2026-10-21 (Codex) — fresh-session stage-contract bootstrap
+
+The trusted `SessionStart` path now bootstraps the exact new provider
+session's private identity before preparing its first task-stage notice. A
+brand-new session therefore cannot receive an owner task without the native
+M9R desktop observation/action contract, while an explicitly revoked session
+remains fail-closed. This is exact-session bootstrap only; it does not claim
+provider discovery or arbitrary unsolicited push.
+
+Evidence:
+
+- focused task-stage-notice suite: **7/7 passed**;
+- combined native store/hook and resident hook-server suites: **61/61 passed**;
+- `npm run typecheck`: passed;
+- `git diff --check`: passed with existing LF/CRLF normalization notices only.
+
+This is source verification only. Installed-runtime, provider-owned
+unsolicited push, focus/action behavior, and integrated live/dry-run acceptance
+remain open. No runtime was activated, no provider was restarted, no artifact
+was deleted, and no commit was made.
+
+### 2026-10-21 (Codex) — OpenCode claimed-prompt stage-contract parity
+
+The resident OpenCode poller now adds the same native desktop-stage contract
+to the exact task envelope only after its atomic claim succeeds. This keeps
+OpenCode's resident transport aligned with the ordinary prompt and
+`SessionStart` paths without staging an unclaimed task, changing the CLI/MCP
+transport, or exposing a private session credential. Malformed or empty poll
+envelopes are left unchanged.
+
+Evidence:
+
+- focused task-stage/native hook integration: **12/12 passed**;
+- generated OpenCode plugin suite: **21/21 passed**;
+- native store/hook regression suite: **58/58 passed**;
+- `npm run typecheck`: passed;
+- `git diff --check`: passed with existing LF/CRLF normalization notices only.
+
+This is source verification only. Installed runtime behavior,
+provider-owned unsolicited push, focus/action behavior, and integrated
+live/dry-run acceptance remain open. No runtime was activated, no provider was
+restarted, no artifact was deleted, and no commit was made.
+
+### 2026-10-21 (Codex) — direct owner-task authorization contract
+
+The owner-task authorization boundary is now explicit in both the stage broker
+error and the MCP tool description: a task typed directly by the owner is
+`not_needed` for agent approval, while agent-originated work still requires
+approval or an applicable standing rule. The stage service continues to reject
+pending, denied, expired, completed, and unrelated-session tasks. This removes
+the misleading “approved-only” wording that could make a provider ask for an
+approval echo that the owner task never needed.
+
+Evidence:
+
+- task desktop-stage suite: **46/46 passed**;
+- direct owner task asserted as `not_needed` before preparation;
+- pending and finished task rejection regression passed;
+- `npm run typecheck`: passed;
+- `git diff --check`: passed with existing LF/CRLF normalization notices only.
+
+This is source verification only. Installed runtime behavior,
+provider-owned delivery, and integrated live/dry-run acceptance remain open.
+No runtime was activated, no provider was restarted, no artifact was deleted,
+and no commit was made.
+
+### 2026-10-21 (Codex) — active MCP route registration fence
+
+The native MCP connection regression now checks the complete active tool map
+and rejects any registered `m9r_web_*` tool. The browser-broker implementation
+is still retained only for explicit historical fixtures; current provider
+connections expose the native desktop/UIA route and cannot rediscover the
+retired browser-extension route through MCP.
+
+Evidence: `mcp-connection.test.ts` **28/28 passed**; no runtime was activated,
+no provider was restarted, no artifact was deleted, and no commit was made.
+This closes a source regression boundary only; installed tools/list and
+integrated live/dry-run proof remain open.
+
+### 2026-10-21 (Codex) — provider-neutral SessionStart delivery coverage
+
+The trusted SessionStart delivery path is now regression-tested with an
+unlisted provider slug (`gemini-cli`). The fixture receives the same generic
+handle normalization, private identity, owner-authorization, one-shot claim,
+and native stage-contract behavior as the named providers; the source path
+does not consult a provider allowlist.
+
+Evidence: native store/hook, hook-server, and stage-notice suites **71/71
+passed** with a workspace-local Windows temp root; `npm run typecheck` passed;
+the targeted ESLint command completed with no errors; and `git diff --check`
+passed with the repository's existing LF/CRLF normalization notices only. This is source
+evidence only: an uninstalled provider, arbitrary unsolicited push, installed
+runtime, and integrated dry-run acceptance remain open. No runtime was
+activated, no artifact was deleted, and no commit was made.
+
+### 2026-10-21 — stale Codex push fence and local-sidebar provenance audit
+
+The activation-time replay report was reproduced from the local M9R ledger,
+not guessed from the screenshot. Two historical tasks (T244 and T256), created
+days earlier with no prior delivery receipt, were pushed into the current Codex
+thread during the earlier activation. The unsafe boundary was
+`claimCodexDelivery()`: unlike the inbox renderer and the OpenCode poller, the
+Codex push claim did not enforce the shared 30-minute inbox freshness window.
+The provider-neutral deferred-delivery pump had the same gap for deferred work.
+
+The source fix is committed as `76b935be`:
+
+- `isFreshInboxTask()` is the shared timestamp predicate; invalid, future, and
+  older-than-window tasks fail closed at provider-delivery claims;
+- direct Codex pushes cannot newly claim stale work;
+- the provider-neutral deferred pump cannot hand stale work to any adapter;
+- historical state is retained for audit and is not blindly deleted;
+- the existing inbox-renderer behavior was intentionally preserved after the
+  full suite showed that historical/future-dated fixtures exercise that
+  renderer contract. The fix remains at the unsafe re-dispatch boundaries.
+
+Verification:
+
+- Codex delivery regressions: **40/40 passed**;
+- provider-neutral delivery-pump regressions: **4/4 passed**;
+- full suite: **2,659/2,659 passed** across **215 files**;
+- `npm run typecheck`: passed;
+- changed-file ESLint: passed with no errors;
+- clean runtime build: identity `c5c02ad057f658bb219617de253c41b0ff4db4070f6c0a227542f12e856d8302`, source commit `76b935bebbf8b57fd2ef0c382413fbd66f194e78`, `sourceDirty:false`, 185 artifacts;
+- standalone package checksum: `84af37572dec083f23d61ef8cf7aeb6e3f7f0b7711965cbba7f25ca1496a8e05`, required engine, broker, hook, native-input-host, pill, and Cua cursor-runtime entries present;
+- installed activation: `C:\Users\kaina\.m9r\bin` agrees with the package build and source commit, broker listening on `127.0.0.1:47821`, desktop pill started.
+
+The Codex sidebar audit used app metadata, not thread-title inference. The
+observed RunLeak entries are separate local Codex threads under project
+`C:\RunLeak\runleak` on host `local`; no remote/cloud host or second project
+was present. Process ancestry likewise attributes M9R children to this
+machine's local `codex.exe`, `claude.exe`, and `opencode.exe` sessions. The
+historical sidebar threads and the two already-recorded T244/T256 delivery
+receipts were not deleted or rewritten. The new runtime prevents another stale
+claim; historical-thread cleanup remains a deliberate, separate retention
+decision rather than an automatic destructive action.
+
+This closes the source/package/installed stale-dispatch boundary. It does not
+close the integrated live provider, focus, action, cursor, or multiplayer dry
+run gates.
+
+Installed-runtime MCP verification completed after activation:
+
+- the activated engine reported the installed build ID and matching MCP
+  version;
+- the required stage and computer-use tools were present;
+- no retired `m9r_web_*` browser-extension tools were exposed;
+- the verifier used an isolated temporary M9R home and did not touch live
+  provider state.
+
+Sidebar/session isolation follow-up:
+
+- Codex app metadata places the observed sidebar entries under the local
+  `runleak` project and `local` host; no remote host or second project was
+  present in the inspected metadata;
+- the inspected old entries contain M9R-generated envelopes with the local
+  owner marker, so they are old local M9R-created Codex threads, not evidence
+  that another user's Codex project was mounted here;
+- the runtime's default store is the current Windows user's `%USERPROFILE%\\.m9r`;
+  delivery and result paths additionally enforce exact provider-session and
+  project-directory ownership;
+- historical sidebar threads and receipts remain preserved. Cleanup is not
+  being inferred from titles or performed destructively. A retention/archive
+  policy is a separate, explicit operation.
+
+This confirms local provenance and the installed tool boundary; it is not a
+multi-account/server isolation acceptance test, and integrated live provider
+and dry-run acceptance remain open.
+
+The current local ledger contains historical task records, but the read-only
+audit found **zero unfinished records inside the active 30-minute delivery
+window**. Older unfinished records are retained for audit/possible explicit
+retention cleanup and are not eligible for a new inbox claim, Codex push, or
+provider-neutral deferred-pump dispatch. This is a delivery-drain fence, not
+a destructive history purge.
+
+### 2026-10-22 — local access and cross-user isolation audit
+
+The requested security check was run as a read-only audit. The managed
+Codex Security standard-scan launcher failed before returning a scan ID
+(`workbench_db.py start-headless-standard-scan`), so no sealed security report
+is claimed and no canonical scan artifacts were fabricated. The repository's
+own security policy and current source were still inspected, together with
+current Codex project/thread metadata, M9R state metadata, Windows ACLs, and
+the local broker boundary.
+
+Evidence that the sidebar entries are local M9R history rather than another
+remote user's Codex project:
+
+- the inspected entries are Codex threads on host `local`, all under the
+  `C:\\RunLeak\\runleak` project; no remote/cloud host or second project was
+  present in the app metadata;
+- the wrapper entries contain M9R-generated workspace envelopes and local
+  owner markers, and the M9R ledger contains the corresponding historical
+  provider/session records;
+- the current state audit found **301** historical task records but **zero**
+  unfinished records inside the active 30-minute delivery window; **186** old
+  no-result records remain as history and are fenced from new claim/push/pump
+  dispatch by the stale-delivery fix;
+- no thread, task, receipt, or artifact was deleted or archived.
+
+Source controls that were confirmed include per-user `%USERPROFILE%\\.m9r`
+state, exact provider-session and project-directory checks on delivery and
+results, a default broker bind of `127.0.0.1`, `x-m9r-key` authentication for
+HTTP control routes, browser-origin rejection, an extension allowlist in the
+production entry point, and current-session ownership checks in the MCP
+server.
+
+The follow-up ACL pass changed the local boundary, but two security gaps still
+remain open and must be resolved before claiming full local isolation or
+treating the security audit as clean:
+
+1. The token/state boundary is now narrowed at the environment level: the
+   **22** identified M9R data and credential files (including `state.json`,
+   state backups/temps, `cloud.json`, `feed.json`, `web-authority.json`, and
+   the broker key) grant access only to `MSI\\kaina`, SYSTEM, and
+   Administrators. The `.m9r` directory itself is now private as well, so
+   future atomic state replacements cannot reintroduce the sandbox read rule.
+   The installed MCP verifier still passes. The source still stores bearer
+   `token` fields in local state, so broker-mediated or otherwise owner-scoped
+   credential design remains a future defense-in-depth improvement.
+2. The workspace root no longer inherits `Authenticated Users` or
+   `CodexSandboxUsers` access and now explicitly grants the owner, SYSTEM, and
+   Administrators. Four unresolved historical SID entries still retain
+   repository modify rights; the current non-elevated Windows token could not
+   remove them, so elevated ACL cleanup is still required. This is a local
+   machine file-integrity risk, not evidence that a remote M9R user mounted the
+   project.
+
+The post-hardening standard security-scan launcher was retried and again failed
+before returning a scan ID; no sealed report or fabricated canonical artifacts
+are claimed.
+
+PHP advisory exposure check (2026-10-22): the current PHP security advisory
+reports unauthenticated RCE in PHP request-serving runtimes and fixes it in
+PHP 8.5.12, 8.4.27, 8.3.36, and 8.2.35. A repository-scoped inventory found
+no `.php` source files, `composer.json`/`composer.lock`, `artisan`,
+`wp-config.php`, `php.ini`, PHP archive, PHP runtime string, or PHP package
+reference in the active package manifests/lockfiles. This checkout is a
+Node/Next/React application with a native M9R runtime, so the PHP advisory has
+no direct execution surface here. This does not certify unrelated machine
+software or externally managed services; those require a separate deployment
+inventory. `npm audit --omit=dev --audit-level=high` returned **0
+vulnerabilities** during this check.
+
+Post-hardening verification: the installed MCP verifier passed with build
+`c5c02ad057f658bb219617de253c41b0ff4db4070f6c0a227542f12e856d8302`,
+`npm run typecheck` passed, `npm audit --omit=dev --audit-level=high` reported
+**0 vulnerabilities**, and `git diff --check` passed. No provider session was
+started and no live acceptance gate was closed.
+
+The targeted coordination/security test command was also not used as a pass
+claim: the local test process did not complete in this shell and was stopped
+after it produced no result. Earlier verified evidence remains valid: the
+full repository suite passed **2,659/2,659**, typecheck passed, the changed-file
+lint passed, and the stale-delivery runtime package/install/MCP verification
+passed. This audit therefore closes neither the security hardening boundary
+nor integrated live acceptance.
+
+Continuation verification (2026-10-22): exact-SID ACL removal was attempted
+with both `icacls` and the Windows ACL API, but the current token could not
+apply the change; the four unresolved repository-root Modify entries are still
+present. A broader root-DACL replacement was not used because it could remove
+legitimate permissions outside the four identified entries. The formal
+headless standard security scan was retried against the current checkout and
+again failed before returning a scan ID, so no sealed report is claimed. The
+non-destructive proof rerun passed: `npm run typecheck`,
+`npm audit --omit=dev --audit-level=high` (**0 vulnerabilities**), installed
+MCP verifier for build
+`c5c02ad057f658bb219617de253c41b0ff4db4070f6c0a227542f12e856d8302`, and
+`git diff --check`.
+
+The ignored local `.env.local` file is not tracked and was not read, but its
+ACL inspection confirmed that the same four unresolved SIDs are currently
+inherited there from the repository root. The required elevated cleanup must
+therefore remove only those four SIDs recursively under the repository, then
+verify `.env.local`, `.m9r`, and the root no longer contain them. No secret
+contents were printed or copied.
+
+### 2026-10-22 — post-update steps 1–2 package gate
+
+The owner updated the Codex desktop app before this pass. The following
+evidence is from the post-update checkout and a disposable clean worktree; no
+provider session, installed runtime, pill, or live task was restarted or
+activated by this pass.
+
+Step 1 — local security boundary:
+
+- The provider credential boundary remains green: `agent-credential-store.test.ts`
+  passed **6/6**, active credential files remain owner-scoped, and no bearer
+  contents were printed.
+- The four historical orphaned SIDs were rechecked after the owner's ACL
+  repair on the project root, `.env.local`, `.m9r`, and `.git`: owner is
+  `MSI\\kaina` and each target reports **zero** matching ACL rules.
+- The post-update dependency audit initially found a critical Next.js issue in
+  16.3.8. The pinned dependency and lockfile were upgraded to **16.4.2** in
+  commit `e4fb3216`; `npm audit --omit=dev --audit-level=high` now reports
+  **0 vulnerabilities**.
+- The installer test fixture was corrected in commit `f616dc79` to keep its
+  synthetic `M9R_HOME` outside the repository on the same volume. Production
+  still rejects project-local credential roots; this change does not weaken
+  that boundary.
+- The managed headless Codex Security launcher still failed before returning a
+  scan ID. No formal sealed security scan is claimed; the source tests, ACL
+  checks, and audit result are scoped evidence, not a full certification.
+
+Step 2 — clean runtime/package:
+
+- A clean detached worktree at `f616dc79` built the CLI, pill frontend, native
+  Tauri pill, NSIS pill installer, hook, native input host, standalone engine,
+  standalone web broker, and pinned Cua Driver 0.34.0 runtime.
+- The complete runtime manifest verified **185 artifacts** with build ID
+  `6239f44ea4a4e60d2976978c23d7548da716d6bcca2553efea75a867649a49e8`, source
+  commit `f616dc794048d5cea79a8aac5fecb2fea545af91`, and `sourceDirty=false`.
+- Runtime MCP verification passed with stage/computer-use tools present and
+  retired `m9r_web_*` tools absent. Engine MCP smoke passed **2/2**.
+- Installer/package acceptance passed **13/13**, including consent no-write,
+  install/uninstall, broker refresh, modified-broker preservation, and bad
+  checksum fail-closed behavior. The standalone ZIP contains **217** entries;
+  its SHA-256 is
+  `f36bb31262acc3438de3f50fe82236f6fed0d97a3db3776eaacee3983e42b935`.
+- The exact candidate ZIP and checksum were preserved at
+  `C:\Users\kaina\AppData\Local\Temp\m9r-verified-release-f616dc79-20261022`.
+
+Step 2 is now source/package verified. It is **not installed or activated**;
+steps 3–6 remain the owner-observed live provider, desktop/action/cursor, and
+single-agent/multiplayer dry-run gates. No live acceptance claim is made from
+this package-only pass.
+
+### 2026-10-22 — exact release activation
+
+- The first activation attempt was fail-closed before consent and before any
+  managed file replacement. Its only blocker was the protected legacy
+  project-local `.oathlock\bin` migration path returning `EPERM`; that stale
+  tree was not deleted, broadly re-permissioned, or copied.
+- The exact same ZIP was then invoked from a clean system temporary working
+  directory so the installer did not import that unreadable legacy project
+  state. This did not bypass package verification or change the provider
+  configuration scope; the installer still displayed and applied its normal
+  user-scoped M9R setup plan with backups.
+- The ZIP sidecar matched before activation:
+  `f36bb31262acc3438de3f50fe82236f6fed0d97a3db3776eaacee3983e42b935`.
+  Consent was accepted under the owner's explicit activation request. The
+  managed broker stopped and restarted through its authenticated lifecycle
+  receipt; only the M9R-managed broker/pill were controlled.
+- Installed `m9r-engine.exe`, `m9r-web-broker.exe`, `m9r-overlay.exe`,
+  `m9r-hook.exe`, `m9r-native-input-host.exe`, and `m9r-build-info.json` each
+  matched the corresponding ZIP entry SHA-256. The active manifest now records
+  build ID `6239f44ea4a4e60d2976978c23d7548da716d6bcca2553efea75a867649a49e8`,
+  source commit `f616dc794048d5cea79a8aac5fecb2fea545af91`,
+  `sourceDirty=false`, and autostart enabled.
+- Installed MCP verification passed: stage and computer-use tools are present,
+  retired `m9r_web_*` tools are absent. No provider task was sent and no
+  provider-owned session was manually restarted during activation. The pill
+  was started; provider continuity and desktop behavior remain live gates.
+
+Activation is now **verified at the installed-runtime boundary**. Steps 3–6
+remain open: integrated provider delivery/continuity, open-world desktop and
+focus/action/cursor acceptance, one single-agent dry run, one multiplayer dry
+run, then final cleanup/release rehearsal. This activation is not evidence that
+those live gates passed.
+
+### 2026-10-22 — integrated provider proof dispatch
+
+- Read-only provider presence check found only `@claude` active in the current
+  30-minute window. `@opencode` was last seen on 2026-10-21 and was not treated
+  as an active endpoint; no work was queued to it, avoiding another stale-task
+  injection. The current `@codex` turn is the owner conversation, not a
+  separately dispatched provider receipt.
+- Sent one harmless delivery-only proof to `@claude`. The proof explicitly
+  forbids inbox polling, desktop/browser actions, and fresh-session creation;
+  it asks only for a short receipt if the message arrives as a normal provider
+  turn. The M9R send call acknowledged dispatch, but provider receipt has not
+  yet been observed, so no live acceptance claim is made.
+
+### 2026-10-22 — provider delivery probe result
+
+- `@claude` did not produce the requested automatic receipt. The owner then
+  checked its M9R inbox and observed it empty. This is a failed automatic
+  delivery observation, not a provider acceptance.
+- The current 10-minute roster still showed only `@claude`; `@opencode` was
+  still last seen on 2026-10-21. At the owner's explicit request, one bounded
+  receipt-only probe was dispatched to `@opencode` after the owner opened it.
+  The send call acknowledged dispatch, but no provider receipt has been
+  observed yet. No inbox polling or fresh-session creation was used.
+- The current `@codex` conversation is the active owner session. No separate
+  self-addressed M9R task was created, because that would add exactly the
+  stale queued work this proof is checking for. Codex therefore has no
+  separate M9R auto-delivery receipt in this pass.
+
+### 2026-10-22 — Codex delivery probe dispatch
+
+- At the owner's explicit request, dispatched one unique, read-only receipt
+  probe `PROOF-A3` to `@codex`. The probe forbids inbox polling, desktop/browser
+  actions, and fresh-session creation, and requests only an exact
+  `m9r_result` receipt if it arrives as a normal provider turn.
+- The M9R send call acknowledged dispatch. Receipt/automatic-arrival status is
+  still pending; no acceptance claim is made until the provider result is
+  observed.
+
+### 2026-10-22 — integrated provider proof outcome
+
+- **Codex: automatic delivery passed.** `PROOF-A3` arrived in the active
+  Codex provider turn without inbox polling, a fresh session, or desktop
+  actions. The exact result `PROOF-A3 received=yes provider=codex duplicate=no`
+  was recorded through `m9r_result` and delivered back to the sender.
+- **OpenCode: automatic delivery failed.** `PROOF-A2` was eventually received
+  and reported correctly, but only after the owner manually told OpenCode to
+  check its inbox. This proves receipt after manual recovery, not automatic
+  delivery.
+- **Claude: automatic delivery failed.** The owner manually checked after the
+  dispatch, observed an empty inbox, and no receipt was produced.
+- Item 1 is therefore **partially proven, not complete**. The provider-neutral
+  delivery contract works for Codex but is not yet reliable across OpenCode
+  and Claude. No provider hook/plugin fix has been applied in this pass.
+
+### 2026-10-22 — resident-provider delivery repair (source, not live acceptance)
+
+- **OpenCode source compatibility is closed at the implementation boundary.**
+  The generated plugin now prefers the current flat V2 session API, scopes
+  discovery/status/prompt requests to the exact project directory, retries the
+  legacy request shape only for a deterministic validation error, and keeps
+  startup discovery/rebind alive after provider updates. Focused regression
+  coverage passed **23/23**.
+- **Claude resident delivery is implemented at the source boundary.** The
+  native feed now registers a Claude adapter that discovers only a live idle
+  Claude registry process, requires one exact session/folder match, recovers a
+  missing private identity through the existing process-bound recovery fence,
+  resumes that exact conversation with Claude's stream-json `--resume` path,
+  and records sending/queued/failed/uncertain state without inbox polling or
+  guessed sessions. A different session id, ambiguous sessions, missing MCP
+  config, revoked identity, or an early process exit fails closed.
+- **Provider-neutral scheduling is explicit and stale-safe.** Accepted CLI,
+  local MCP, broker, and mention-routed tasks receive a `deferred` hand-off at
+  creation; the pump consumes only those rows. It no longer auto-revives old
+  task records that predate the adapter. Pump regression coverage passed
+  **5/5**.
+- **Transport lifecycle guard:** live Claude process exit is now surfaced once
+  to the adapter so a dead resumed transport cannot remain falsely marked as
+  sending. The exact runtime package list includes the new `claude-delivery`
+  module.
+- **Still open:** the installed runtime has not been rebuilt/activated from
+  this source change, and no live OpenCode or Claude receipt has been rerun.
+  A direct Claude test invocation is blocked by the pre-existing ACL-protected
+  `src/lib/native/provider-usage-core.ts`; an isolated test-only shim for that
+  unrelated usage parser allowed the actual Claude adapter suite to run **5/5**
+  without changing production code or provider state. The existing full
+  hook/store suite remains blocked later by the separate ACL-protected
+  `src/lib/provider-adapter-config.ts`. No live provider acceptance is claimed
+  from this source pass.
+- Verification note: changed-file TypeScript transpilation/parse passed for
+  the eight edited runtime/test modules, `git diff --check` passed, and the
+  focused pump/OpenCode suites passed as recorded above. `npm run typecheck`
+  remains blocked by the pre-existing dirty checkout (missing React types and
+  deleted/ACL-protected files), `npm run build:cli` stops on the existing
+  ACL-protected `packages/runtime-core/src/provider-adapter-config.ts`, and
+  the targeted ESLint process produced no result before it was stopped. None
+  of those blocked checks is represented as a pass.
+- **Owner-observed baseline before activation:** Codex delivered and returned
+  the harmless receipt automatically; OpenCode returned the receipt only after
+  the owner explicitly asked it to check M9R; Claude reported an empty inbox
+  and produced no receipt. This is the live baseline that the rebuilt runtime
+  must improve; it is not being counted as acceptance of the new source.
+
+### 2026-10-22 — Cloudflare CLI and ACL blocker diagnosis
+
+- **Codex Security Scan abandoned by owner instruction.** The scan stopped
+  before source review because its helper could not `lstat` the protected
+  `cli/licenses/Cua-Driver-Node-Runtime-NOTICE.md`; no scan result was
+  claimed and no scan artifact was used as evidence.
+- **Cloudflare tool boundary verified.** Cloudflare Code Mode is an
+  experimental tool-composition/runtime layer for reducing model/tool round
+  trips; it is not a local repository vulnerability scanner. Cloudflare's
+  Vulnerability Scanner is an account/zone API service for deployed API
+  behavior, not a replacement for local source/dependency review.
+- **Cloudflare CLI installed and verified.** Pinned official package
+  `cf@1.0.0-beta.20` was installed globally after read-only npm metadata
+  verification; `cf --version` returned `1.0.0-beta.20`. No Cloudflare login,
+  deployment, account mutation, or Wrangler migration was performed.
+- **Read-only dependency audit.** `npm audit --audit-level=moderate` found
+  12 advisories in the current dependency tree: 1 moderate, 9 high, and 2
+  critical. npm proposed a non-breaking fix for some and a breaking
+  `--force` path for others; no automatic fix was run.
+- **ACL boundary evidence.** The repository root, `cli`, `src`,
+  `src/lib/native`, and `.env.local` have the expected `MSI\\kaina` owner and
+  normal SYSTEM/Administrators/user access. Windows denied security-descriptor
+  access even to elevated `icacls` for `cli/licenses`, `packages`,
+  `packages/runtime-core`, and its `src` directory. Git independently reports
+  the tracked license/runtime files in those areas as deleted from the working
+  tree. This is an ACL/protected-directory problem plus a separate Git
+  deletion state; it is not evidence that those files were safely restored or
+  that the build is clean.
+- **No permission mutation performed.** No `takeown`, ACL reset/grant/remove,
+  delete, restore, checkout, reset, or commit was run while diagnosing this
+  boundary. The next repair must first identify the exact owner/DACL boundary
+  and preserve the existing dirty worktree.
+
+### 2026-10-22 — Cloudflare security-audit skill installed
+
+- **Correct tool installed.** Added Cloudflare's `security-audit` skill from
+  `https://github.com/cloudflare/security-audit-skill` into the project-local
+  `.agents/skills/security-audit` directory using the repository's documented
+  Skills CLI command. Code Mode was not installed or changed.
+- **Skill contents verified.** `SKILL.md`, the report schema, both validators,
+  and the companion audit guidance files are present. The coverage-ledger
+  validator test passed **24/24** with 7 intentional platform skips.
+- **Findings validator result.** The validator test passed **22/34**, with
+  **7 failures** and **5 skips**. Every failure stopped at the skill's explicit
+  `OS no-follow and nonblocking input protection is unavailable` guard because
+  this Windows Node runtime does not expose the required race-safe flags. No
+  validator or audit code was modified.
+- **Audit status.** The Cloudflare audit has not been started and no findings
+  report has been claimed. Running it here would violate the skill's own safety
+  requirements and would also encounter the repository's protected ACL paths.
+
+### 2026-10-22 — Cloudflare security-audit preflight run
+
+- **The requested audit was attempted and stopped at the mandatory safety gate.**
+  Run artifacts are outside the repository at
+  `C:\Users\kaina\.codex\visualizations\2026\10\11\01a12b98-8307-7452-8825-b16ac8adb16f\cloudflare-security-audit-2026-10-22-preflight-01`.
+- **No target code was executed, no network/deployed probe was made, and no
+  repository or ACL mutation occurred.** `findings.json` is intentionally
+  empty; it is not a clean-security result.
+- **Exact preflight blockers:** native Windows Node `v24.14.1` has no
+  `O_NOFOLLOW` or `O_NONBLOCK`; both installed audit validators refuse file
+  input with `OS no-follow and nonblocking input protection is unavailable`.
+  WSL2 Ubuntu is available but has no Linux Node runtime or configured
+  OS-enforced audit sandbox. Docker is installed but its Linux daemon is not
+  available. The protected checkout paths independently prevent complete
+  source inspection.
+- **Continuation is `needs_validation`, not a workaround:** provide a real
+  isolated Linux Node runner (working Docker daemon or properly isolated WSL),
+  then resolve the protected-path readability in a recoverable copy/worktree
+  before rerunning the six-phase audit. No blind ownership/DACL reset was run.
+
+### 2026-10-23 — Cloudflare audit skill removed; typecheck retried
+
+- At the owner's request, removed the ignored project-local
+  `.agents/skills/security-audit` installation (20 files). No separate
+  Cloudflare checkout was present under `third_party`, and no global `skills`
+  command was installed. The skill's isolation rule had been incorrectly used
+  to block ordinary repository checks; that was an agent decision, not proof of
+  an ACL-denied test run.
+- Ordinary deletion returned `Access denied`; the exact ignored skill directory
+  was then removed with elevation. `.agents` contains inherited deny ACEs for
+  four unresolved SIDs, but the current `MSI\kaina` token has FullControl and
+  does not match those SIDs, so they are not yet proven to be the cause of the
+  ordinary-delete denial. No project ACLs were changed.
+- After removal, `npm run typecheck` executed and exited 1 on a real TypeScript
+  error: `scripts/opencode-identity-plugin.test.ts:397` supplies `prompt`, but
+  the declared hook type does not accept that property. This is a code/type
+  failure, not a command-access denial. Rust tests were not run in this check.
+
+### 2026-10-22 — superseding local gate and provider-proof readiness checkpoint
+
+- The historical blocked-check entries above are superseded by the current
+  source/build verification: the full suite passed **2,668/2,668**,
+  `npm run typecheck` passed, `npm run build:cli` passed, the production web
+  build passed, `npm run open-core:check` passed, and `npm run
+  open-core:public-surface` passed. Lint exited 0 with 0 errors and 246
+  warnings.
+- Production dependency audit remains clean: `npm audit --omit=dev` reports
+  **0 vulnerabilities**. The full development tree still has five high
+  advisories in the Next/ESLint glob chain; npm's only automatic fix is an
+  unsafe Next 16 to Next 14 downgrade, so it was not applied.
+- The current worktree is intentionally not committed: HEAD is `f616dc79`,
+  with 56 tracked changes and 4 untracked entries containing pre-existing
+  work, runtime source changes, the private tracker, and an unknown document.
+  No blanket commit or deletion was performed.
+- Recovery/quarantine directories remain explicitly out of the release
+  inventory. One orphaned temporary runtime process was stopped; no provider
+  process was stopped and no unproven generated directory was deleted.
+- Codex Security standard and deep scans remain incomplete with no sealed
+  report. Cloudflare audit execution is deferred by owner decision. Neither
+  is used as a clean-security claim.
+- Provider proof is ready to resume only after the newer resident-provider
+  source changes are packaged/activated and the owner opens/resumes the
+  provider sessions. The earlier clean package is active, but it predates
+  those OpenCode/Claude delivery changes. The latest `m9r_agents` check
+  returned no active provider agents, so no new proof task was queued and no
+  stale task was created in this checkpoint.
+
+### 2026-10-22 — generated-fixture cleanup and regression checkpoint
+
+- **Project-root test clutter removed safely.** The web-broker and coordinator
+  tests had been creating disposable fixtures directly under the repository
+  root. Their fixture roots now use the ignored `.test-tmp` boundary instead.
+  The related install-audit, MCP connection, desktop-stage, and UI-bridge
+  fixtures were moved to the same boundary. The native-store assertion was
+  also tightened to recognize real task IDs without false-matching random
+  session tokens.
+- **Root residue verified and removed.** A process-aware, exact-name census
+  found 45 broker folders and 2 coordinator folders, all ignored, untracked,
+  and without live process references. Those 47 exact folders were removed
+  (`1,981,725` bytes); protected runtime/package/recovery evidence was not
+  touched. A final census reports zero root broker/coordinator/test-temp
+  folders.
+- **`.workcache` fixture residue is now zero.** The randomized empty fixture
+  roots were reconciled only after checking their exact parent and file count.
+  The final legacy fixture-root census is zero. The named OpenCode capture,
+  F12 source capture, release-clean captures, and other retained proof/release
+  evidence remain present and were not deleted.
+- **Post-test teardown residue removed.** The affected tests left 13 empty
+  `.test-tmp` children; each was verified empty before exact removal, followed
+  by removal of the empty `.test-tmp` root. No generated fixture files remain.
+- **Regression evidence after the cleanup:** the affected suite passed
+  **231/231** executed tests with 16 intentional browser-extension skips and
+  0 failures; the complete suite passed **2,668/2,668** across 216 files.
+  `npm run typecheck`, `npm run build:cli`, `npm run open-core:check`, and
+  `npm run open-core:public-surface` passed. Lint exited 0 with 0 errors and
+  246 warnings; `git diff --check` passed with only existing CRLF notices.
+- **Release/provider boundary unchanged.** This cleanup did not install,
+  activate, or replace a runtime and did not stop provider processes. The
+  active runtime remains the earlier clean build
+  `6239f44ea4a4e60d2976978c23d7548da716d6bcca2553efea75a867649a49e8`;
+  the newer OpenCode/Claude delivery source still needs its own package and
+  activation before live provider proof. No provider proof task was queued.
+- **Security status remains explicit.** Production `npm audit --omit=dev`
+  remains at 0 vulnerabilities; the full development audit still has the
+  previously recorded five high Next/ESLint glob-chain advisories whose only
+  automatic fix is an unsafe downgrade. Codex Security has no sealed report,
+  and the Cloudflare audit remains deferred; neither is represented as a clean
+  security result.
+- **No commit made.** The worktree remains intentionally dirty because it
+  contains the existing implementation work, provider repairs, private
+  tracker, and an unknown document. Only the private tracker was updated with
+  this checkpoint.
+- **Build/activation cleanup review.** `build-engine.mjs` stages each build in
+  a per-run temporary directory and removes it in `finally`; the publish
+  transaction swaps only the managed runtime paths and removes a backup after
+  a successful publish. One pre-existing
+  `engine/.m9r-engine-publish-backup-*` remains with five rollback binaries
+  (`191,533,056` bytes), no live process references, and no source/reference
+  usage. The current engine manifest is ACL-blocked, so that single recoverable
+  backup was deliberately retained rather than deleted without proof.
+
+### 2026-10-22 — provider-fix package built and activated
+
+- **Release source is committed and scoped.** Commit `5cc414161e49d871190422831d9456a519ade44e`
+  (`Package provider-neutral delivery fixes`) contains the provider delivery
+  implementation/tests and packaging changes. The private tracker, master list,
+  and unrelated `docs/Convenience_Store_Replacement_Plan.docx` were intentionally
+  excluded from that release commit.
+- **The first build attempt was safely rejected.** The atomic publisher hit
+  Windows `EPERM` on the protected `engine/dist` boundary and reported that
+  previous artifacts were restored. No source or runtime artifact was deleted.
+  A narrowly scoped, UAC-elevated ACL repair restored `MSI\\kaina` ownership,
+  inheritance, and full control on `engine/dist` only; the repair recorded
+  `FilesDeleted=0` and `SourceFilesTouched=0`.
+- **Clean runtime build verified.** `npm run build:engine` passed and produced
+  build ID `1804a97020734c609dbaa70492c53222920bcc2839b9759afcb6a9d5d88ba60e`
+  across **185** hashed artifacts, with source commit
+  `5cc414161e49d871190422831d9456a519ade44e` and `sourceDirty=false`.
+  The Cua Driver 0.34.0 Windows host checksum also passed. No per-run engine
+  staging roots remained afterward.
+- **Runtime surface verified.** `verify-runtime-mcp.mjs` passed for both the
+  build output and the installed engine: stage tools and computer-use tools are
+  present, and the retired `m9r_web_*` browser-extension tools are absent.
+- **Exact package verified.** Package output is
+  `C:\Users\kaina\AppData\Local\Temp\m9r-verified-release-5cc41416-20261022\m9r-engine-windows-x64.zip`.
+  Its SHA-256 is
+  `88507c353470e730de79017c084c5be5195d173f163676f5fed011efd370491d`, matching
+  the sidecar. The archive contains 217 entries, including the engine, broker,
+  overlay, hook, native-input host, Cua runtime, extension, and installer; its
+  embedded build manifest matches the clean build ID and commit.
+- **Activation verified.** The exact ZIP was approved through the normal
+  installer. The managed broker was stopped and restarted from the package, the
+  desktop pill was restarted, and the installed manifest reports the same build
+  ID, source commit, and `sourceDirty=false`. All **185/185** active runtime
+  artifact hashes match the build manifest: zero missing and zero mismatches.
+- **No accidental deletion.** The interrupted installer test left one exact
+  `.m9r-installer-WMvIxF` fixture root containing only named test cases and a
+  copied test package; after inspection it was removed as residue (**219 files,
+  457,168,741 bytes**). No source, user, retained evidence, or provider session
+  was targeted. The installer retained four locked prior-runtime files under the
+  user-level M9R bin as manifest-tracked rollback artifacts; they were not
+  deleted while live processes could still hold them.
+- **Verification boundary.** Final `npm run typecheck` passed. The full
+  `npm run test:installer` process was attempted but became silent/hung during
+  its temporary fixture run and was interrupted; it is not counted as a pass.
+  The direct runtime verifier, package hash/entry checks, activation manifest,
+  and full installed-artifact comparison are the evidence for this checkpoint.
+  No integrated provider dry run or live acceptance is claimed yet; that is the
+  next step after the owner opens/resumes the provider sessions.
+
+### 2026-10-22 — broker recovery activation and host inventory checkpoint
+
+- **Current release activation:** commit `e5d9fd957f673b4953e75ed01025632006821aac`
+  built as `efdfe73f496b6caa674bfd92d6e0983bd5a54ae71ab9905cae161e10bba7dc4f`
+  with `sourceDirty=false` across 185 runtime artifacts. The activated package
+  is `m9r-release-package-20261022-broker-recovery` with SHA-256
+  `35705f3a0b213edc066e304d0311853adaa4a0b7dc90bb118e09724e2658c4e6`, and
+  its sidecar matches.
+- **Lifecycle recovery proof:** the current installer stopped and restarted the
+  managed broker successfully. In a controlled proof, only the exact
+  M9R-owned `M9R Web Broker` task was temporarily removed after ownership and
+  action verification; the new installed runtime recreated it, verified the
+  current contract, reported `TaskState=Running`, and returned broker health
+  `200`. No provider session was restarted or claimed as live acceptance.
+- **Verification boundary:** `npm run typecheck` and the focused installer
+  assertions passed. The full `npm run test:installer` attempt became silent
+  during its temporary fixture run and was interrupted; it remains unverified,
+  not a pass. The activation/package/hash/runtime evidence above is verified.
+- **Process inventory:** the active M9R tree contains one `m9r-web-broker.exe`,
+  one overlay, short-lived hook processes, and engine children launched by the
+  provider/M9R process tree. `iPSMonitor.exe` is Brother iPrint&Scan, not M9R.
+  No M9R process was stopped or deleted during this inventory.
+- **Docker/WSL inventory:** no Docker daemon, Docker backend, or `vmmemWSL`
+  process is running; both `Ubuntu` and `docker-desktop` are stopped. Docker's
+  dormant VHDX files occupy about 33.7 GB. Docker is not part of the active
+  native M9R runtime, but no VHDX, distro, image, volume, or project snapshot
+  was deleted because current ownership/use outside this checkout is not yet
+  proven.
+- **Artifact hygiene finding:** the checkout contains multiple historical
+  release ZIPs and large snapshot/quarantine directories, including roughly
+  13.8 GB under `.m9r-recovery-quarantine-20261014` and several dated runtime
+  snapshots. These are stale-artifact candidates, not active processes. Cleanup
+  requires an explicit, manifest-backed retention pass; none was performed in
+  this checkpoint. The private tracker and unrelated DOCX remain uncommitted.
+
+### 2026-10-22 — Docker and quarantine retention audit
+
+- **Docker decision:** the supported native M9R runtime and the current
+  `services/relay-do` Durable Objects path do not invoke Docker or WSL. The
+  repository still contains three legacy Cloudflare Container configurations and
+  Dockerfiles, but each container Wrangler config is marked `DO NOT DEPLOY` and
+  says the live Relay is `services/relay-do`; Docker is also required by a few
+  optional local integration scripts. Therefore Docker is not required for the
+  current desktop/demo path, but uninstalling it would remove an optional
+  legacy/integration capability. No uninstall or VHDX deletion was performed.
+- **Quarantine age and contents:** `.m9r-recovery-quarantine-20261014` contains
+  39,256 files totaling about 13.82 GB. Its newest file is October 16, 2026;
+  the older 2006 timestamp belongs to fixture metadata and is not evidence of a
+  recent runtime. The largest groups are `.test-tmp` (8.46 GB, 34,978 files,
+  newest October 14) and `cleanup-20261015-item2-10` (2.95 GB, test binaries,
+  archives, and logs, newest October 15). Activation evidence is about 0.72 GB;
+  rollback candidates are about 0.72 GB.
+- **Retention decision pending:** no M9R/provider process references the
+  quarantine; only the current read-only inspection shells contained its path.
+  Proposed disposable cleanup targets are exactly `.test-tmp` and
+  `cleanup-20261015-item2-10`. Activation evidence and the latest rollback
+  evidence should be retained through the integrated provider/demo dry runs;
+  older activation revisions can be reviewed afterward. No files were deleted.
+
+### 2026-10-23 — approved artifact cleanup and Docker removal
+
+- **Verified before deletion:** every removed release ZIP had a build identity
+  different from the active installed build `efdfe73f...`; the active package
+  remains `m9r-release-package-20261022-broker-recovery`. The broker-recovery
+  shim/recovery implementation is committed in `e5d9fd95` and present in the
+  activated runtime.
+- **Removed exact stale artifacts:** the two approved quarantine test groups
+  (`.test-tmp` and `cleanup-20261015-item2-10`) and the seven old ZIP-only
+  package folders were removed. Current runtime, current package, activation
+  evidence, rollback evidence, and the separate `m9r-clean-cutover-20261020`
+  worktree were retained.
+- **Docker removal:** Docker Desktop’s registered uninstaller completed;
+  Docker registration, processes, Docker Desktop binaries, Docker’s WSL distro,
+  and the approximately 33.7 GB Docker VHDX are gone. Ubuntu WSL remains. A
+  small ACL/handle-protected installer residue remains under the old Docker
+  paths (about 8.7 MB plus zero-byte sockets/logs); it is not a live runtime and
+  was not force-removed because doing so would require stopping the user’s
+  running Ubuntu WSL session. It can be removed after a reboot.
+- **M9R health after cleanup:** the active broker still responds with health
+  `200`; M9R processes remain under `C:\Users\kaina\.m9r\bin`. Provider live
+  acceptance is still a separate proof step.
+
+### 2026-10-23 — provider/runtime source repair pass (not signed off)
+
+- **Retired runtime launch guard:** packaged MCP supervisors now resolve only
+  the stable installed engine. If that stable file is missing, the retired
+  image is not used as a fallback. A focused regression test was added.
+- **OpenCode current-session delivery route:** the generated V2 plugin now
+  prefers OpenCode's documented `ctx.session.prompt({ sessionID, text })` API
+  for the exact live session, then retains the existing SDK-client adapter for
+  older plugin contexts. A regression case checks the exact session target and
+  that the legacy client route is not used when the V2 route is available.
+- **OpenCode setup/reconciliation:** native `entries` manifest ownership is
+  authoritative when present; stale legacy top-level fields cannot override
+  it, and ambiguous canonical entries fail closed. Unsupported prompt APIs and
+  local hook/session-discovery failures now emit bounded, value-free warnings
+  rather than looking like a healthy silent poll.
+- **Hook-triggered engine startup:** the 25-second startup guard is now
+  serialized across short-lived hook processes (Windows named mutex; Unix file
+  lock). A failed spawn clears its marker, and a recent marker tied to an exited
+  engine PID no longer suppresses retry. Focused guard tests were added.
+- **M9R-update convergence:** the resident provider monitor now performs a
+  one-time startup refresh of M9R-owned adapter/config files even when the
+  provider version did not change, then stops rewriting unchanged config on
+  later five-minute cycles. It refreshes the OpenCode plugin without forcing a
+  provider reconnect. A focused monitor regression test was added.
+- **Startup retry precision:** startup convergence now retains only providers
+  whose own first pass is unavailable or unhealthy. A later healthy provider is
+  refreshed once, while already healthy providers are not repeatedly rewritten.
+  The monitor does not opt into this mutation unless its runtime explicitly
+  enables startup reconciliation and supplies an adapter refresh action.
+- **Runtime snapshot hygiene:** successful commits and verified rollbacks now
+  remove completed prior-generation transaction snapshots by default. Applying,
+  failed-rollback, malformed, unsafe-path, unexpected-content, and foreign-
+  install journals remain preserved. Cleanup validates each completed file
+  manifest and removes snapshot data before its recovery journal.
+  Cleanup failure after a verified install no longer triggers rollback of the
+  working runtime. Focused tests were added for commit cleanup, rollback
+  cleanup, retention, and preservation of malformed/unexpected transaction data.
+- **OpenCode loaded-code boundary:** current OpenCode plugin documentation says
+  local plugins are loaded at server startup. Updating the managed plugin on
+  disk does not hot-reload code already resident in an OpenCode server. This
+  source pass prepares the updated plugin for the next normal provider-process
+  start/session restore; it does not prove or claim in-place hot update of a
+  running provider process. That remains an explicit lifecycle limitation to
+  resolve or accept in the integrated update/restart dry run.
+- **Verification boundary:** `git diff --check` passed. The new focused tests,
+  Rust tests, typecheck, build, package activation, and provider delivery have
+  **not** been run in this pass. `rustfmt --check` reports formatting differences
+  in the existing Rust file, so no whole-file formatter was applied. The
+  available shell does not provide the isolated runner required by the
+  security-audit workflow before executing repository-controlled test/build
+  code. No runtime was rebuilt or activated, and no provider session was
+  touched; none of the added tests are recorded as passes.
+- **Still open:** integrated Codex/Claude/OpenCode delivery and reboot/update
+  acceptance; current installed-runtime proof; and the earlier read-only
+  finding of an inherited `CodexSandboxUsers` read ACE on local M9R state. No
+  ACL was changed because the provider-process access boundary has not been
+  demonstrated safe to alter. The process-name snapshot found no matching
+  `m9r-engine`, `m9r-hook`, `m9r-web-broker`, `opencode`, or `claude` processes;
+  the CIM path/parent-process query was denied by this shell, so it does not
+  prove which executable an open provider session would use. No user files,
+  release ZIPs, quarantine data, runtime artifacts, or unrelated tracker
+  sections were deleted or rewritten.
+
+### 2026-10-23 — post-interruption verification update
+
+- **Clarification:** “OpenCode API” here means the installed plugin interface,
+  not an API key or provider subscription. OpenCode 2.1.1 documents
+  `ctx.session.prompt({ sessionID, text })`; the V2 plugin test exercises that
+  exact-session route.
+- **Fresh local verification:** `npm run typecheck` passed; `npm test` passed
+  all 2,673 tests across 216 files; `cargo test --manifest-path
+  hook\Cargo.toml` passed its 1 Rust test; and `git diff --check` passed.
+- **Runtime candidate:** `npm run build:engine` succeeded and verified the
+  complete 185-file manifest. Candidate build ID is
+  `798449a8bf95dbb673f90dc3505f7ad0172397a155eeb26e62b6e033b97755ed`.
+  Its source provenance correctly says `sourceDirty: true` because release
+  source changes remain uncommitted. The package was not activated.
+- **Packaged-runtime proof:** a real MCP handshake verified the candidate
+  identity, required stage/computer-use tools, and absence of retired browser
+  extension tools. Both packaged-engine smoke tests pass. Their isolated test
+  setup now stages the candidate at the temporary stable `M9R_HOME\bin` path
+  and waits for shutdown before removing the temporary directory; it no longer
+  accidentally tests a nonexistent install path or races Windows cleanup.
+- **OpenCode V2 model boundary:** the installed-version plugin API admits a
+  prompt to the exact session but does not expose a per-prompt model override;
+  model switching is a separate session operation. The V2 route therefore
+  preserves the provider session's selected model rather than silently
+  replacing the user's choice. The catalog-selected model override remains on
+  the legacy SDK route. A live OpenCode task is still required to verify model
+  execution/error reporting in the actual existing session.
+- **Snapshot cleanup hardening:** a new regression test first reproduced
+  deletion of unmanifested data from a completed runtime snapshot. Cleanup now
+  verifies each expected file hash, rejects unlisted/symlink/changed entries,
+  removes only verified files and empty directories, and preserves the journal
+  if cleanup cannot finish. The focused runtime-transaction test and full suite
+  pass with this change.
+- **Build note:** the SEA injector printed its existing non-fatal
+  “signature seems corrupted” warning twice; the build completed, artifact
+  hashes verified, and the packaged MCP handshake succeeded. Authenticode
+  signing/release distribution was not tested here.
+- **Still not proven:** no live Codex, Claude Code, or OpenCode task delivery;
+  no in-place hot reload of an already-running OpenCode server; no provider
+  update/reboot acceptance; and no activation of the dirty candidate. No
+  provider sessions, user ACLs, credentials, quarantine data, or unrelated
+  runtime files were touched. The prior “not run” verification note above is
+  superseded only for the checks listed in this update.
+
+### 2026-10-23 — watched-feed provider lifecycle ownership
+
+- **Source change:** provider update/config reconciliation now starts inside the
+  existing long-lived `feed --watch` process, and only after that process has
+  acquired the feed's single-writer lock. Duplicate/short-lived feed invocations
+  cannot start a second monitor. The monitor drains before the feed releases
+  its lock. Its existing provider-neutral actions and exact-session observer
+  are reused; the optional terminal runtime no longer owns a second copy.
+- **Verification:** provider lifecycle, route-action, monitor, and exact-session
+  reconciliation fixtures passed (25/25); focused feed generation/owner tests
+  passed (2/2); `npm run typecheck`, `npm run build:cli`, and `git diff --check`
+  passed. `npm run build:engine` produced candidate
+  `4fdadfe29d1c9886900c6126c30196b9b174b97404f2f0cb732c225b4021be6e`, with a
+  verified 185-artifact manifest; its source provenance is dirty. The two
+  watched-feed fixtures use the repository's ignored `.test-tmp` area because
+  the feed lock could not be acquired from the system temp location in this
+  shell; the reason was not established. Both packaged MCP smoke tests passed
+  (2/2).
+- **Still open:** this proves source wiring and fixture behavior only. The
+  candidate has not been activated, and no live provider task confirms
+  automatic Claude/OpenCode delivery, update/reboot continuity, or end-to-end
+  pill behavior. Subscription-backed worker ownership/delivery and A2A behavior
+  remain separate and undecided; no A2A code was changed.
+
+### 2026-10-23 — resident provider owner-delivery boundary
+
+- **Boundary implemented:** untargeted, owner-created Claude/OpenCode tasks are
+  handed from the delivery pump to the resident provider-session manager over
+  its private owner pipe. The pipe accepts only one exact task ID; the manager
+  rechecks approval, freshness, recipient, and configured project; and the
+  local store atomically claims the task for the exact provider identity before
+  sending text. Provider-hook inbox injection excludes tasks already sending,
+  queued, uncertain, or complete, preventing a second delivery path from
+  replaying a pushed task.
+- **Session and receipt safety:** Claude owner text waits for Claude's init and
+  is withheld if the resumed conversation ID differs. OpenCode owner work uses
+  strict resume when a saved provider session exists, with no silent fallback
+  to a replacement conversation. Its queued receipt is now written only after
+  the ACP prompt RPC has been issued. A startup/submission timeout marks the
+  task uncertain and clears that task's exact not-yet-submitted text, so a late
+  worker start cannot send old work afterward.
+- **Focused verification:** 43 fixture checks passed across the resident owner
+  delivery, Claude session handshake, OpenCode ACP/resume, provider identity
+  reconciliation, task claiming, duplicate-injection prevention, and private
+  owner-pipe tests. `npm run typecheck`, `npm run build:cli`, `node --check
+  cli/dist/m9r-web-broker.cjs`, and `git diff --check` passed. The build output
+  contains the private delivery route, exact session checks, and late-start
+  timeout fence.
+- **Still open:** this is source/package verification, not live provider
+  acceptance. The rebuilt CLI was not installed or activated; no Claude or
+  OpenCode session was started, and automatic delivery, update/reboot
+  continuity, desktop actions, cursors, and integrated dry runs still require
+  the planned live tasks. A2A semantics were not changed or decided; no pill
+  redesign was attempted.
+
+### 2026-10-23 — exact provider-turn binding and runtime activation
+
+- ~~**Binding correction built:** provider turns now bind to the exact
+  provider/session/process tuple published by the trusted prompt hook. A
+  shared provider PID no longer transfers or retires another conversation's
+  identity; overlapping turns fail closed as ambiguous. Turn-end hooks clear
+  only their exact turn, and MCP requests resolve the active turn again instead
+  of caching the first session for the lifetime of the MCP process.~~
+- ~~**Source verification:** focused provider binding/store/hook tests passed
+  (98/98), `npm run typecheck` passed, the engine build completed, and the
+  packaged MCP verifier passed. Build `2b7710676c5634a4ae876c6cc2ed03fb6ffebeecf45772419ce73934cb8f85e1`
+  was activated from the locally verified ZIP (SHA-256
+  `cba55fc0f113627fe75ad7cd3d0389529b5ebe047310783f5aeedfc5eb6ecbf9`). The
+  installed manifest matches the build; all 185 declared artifact hashes
+  matched, the installed MCP handshake exposed the required current tools and
+  no retired browser-extension tools, and the managed broker reported
+  `running-current-build`. Source provenance is commit
+  `143bc976f86613afbd889f9a632bf5a6610d5dc1` with a dirty worktree; nothing was
+  committed.~~
+- **Live binding result:** current `m9r_whoami` and `m9r_agents` calls both
+  failed closed because no unique active provider claim matched this Codex
+  process/conversation. Installed setup status confirms Codex and Claude hooks
+  are present and sees Codex, Claude Code, and OpenCode, but explicitly reports
+  Codex hook trust as pending. No live provider delivery is claimed. The
+  provider-owned trust gate must not be bypassed; this does not justify
+  creating a new chat/session.
+- **Still open:** owner trust for the installed Codex hooks and a same-session
+  live identity/delivery check remain necessary. Claude/OpenCode automatic
+  delivery and update/reboot continuity remain unproven. Three historical
+  `.m9r-retired-*` executable images remain in the user's M9R bin directory;
+  none of the four provider config files checked contains a retired filename,
+  and the runtime resolver redirects legacy retired-image invocation to the
+  stable engine. Their retention cause and cleanup are not yet verified. No
+  provider session was closed, no old image was deleted, and no A2A or pill
+  redesign work was done.
+
+### 2026-10-23 — exact live-session result handoff and current-runtime activation
+
+- ~~**Root cause closed in source:** after the live provider observer created a
+  verified session binding, MCP discarded that exact result and repeated a
+  broader process-only lookup. The broader lookup could remain ambiguous when
+  sibling claims existed, so `m9r_whoami` failed despite successful exact
+  reconciliation. The observer now returns its binding only when one exact
+  provider-observed process/session matched; MCP re-verifies the binding's
+  provider, session, and owner process and uses that binding directly. Sibling
+  session claims are preserved; there is no guessed winner or provider-wide
+  fallback.~~
+- ~~**Source verification:** the regression fixture reproduced the same
+  observer-success/process-lookup-failure seen live before the correction.
+  Afterward, MCP binding and provider-session reconciliation passed 47/47;
+  provider-session fixtures passed 9/9; TypeScript passed; packaged MCP and
+  supervisor checks passed 15/15; `git diff --check` passed with only existing
+  line-ending warnings.~~
+- ~~**Build and activation:** build
+  `33c4f3a3bd702e73cdd1b7cca1c142ff6dfd1e5a94cfd8e0f7d999ab05627541` was
+  packaged with SHA-256
+  `6f73854181c5c2fa3b15fc76d4400d41ceffea41275766169f4c24040727d9ac` and
+  installed. The installed manifest and build-info agree; all 185 packaged
+  artifact hashes match. The installed MCP handshake exposes the current stage
+  and computer-use tools, with no retired browser-extension tools, and the
+  managed broker reports `running-current-build`. Source commit is
+  `143bc976f86613afbd889f9a632bf5a6610d5dc1` with a dirty worktree; nothing was
+  committed.~~
+- ~~**Live Codex identity:** without opening or restarting a provider session,
+  the current Codex connection's `m9r_whoami` succeeded: `You are @codex
+  (codex).` This proves current Codex identity binding, not automatic task
+  delivery.~~
+- **Still open:** one read-only identity check was sent to `@claude` while it
+  was reported active, but no result had returned; the latest roster check
+  reported no other agents active. OpenCode was not reported active, so no test
+  was queued to it. Claude/OpenCode current-session binding and automatic
+  delivery, cross-provider task delivery, update/reboot continuity, and
+  integrated dry-run acceptance remain unproven. Codex hook trust was not
+  changed; the successful identity check does not sign off hook-driven delivery.
+- ~~**Cleanup/retention:** the superseded temporary package and 18 empty
+  reconciliation-test scratch directories were removed.~~ Three retired M9R
+  executable images remain listed in the install manifest because setup
+  reported them locked or unreadable; they were not force-deleted or treated as
+  active runtimes. No provider session, task history, A2A behavior, or pill
+  design was changed.
+
+### 2026-10-23 — approved Claude delivery release into resident pump
+
+- ~~**T313 root cause confirmed from the local event ledger:** the resident
+  feed watcher was already running before T313 was created, but the task had no
+  delivery state while approval was pending. Approval recorded `task.approved`
+  without changing the task to `deferred`, which is the only state the resident
+  delivery pump scans. T313 therefore appeared only through the later prompt
+  hook (`delivery source: prompt`), not resident push.~~
+- ~~**Permanent source correction:** `LocalStore.setApproval` now atomically
+  releases a fresh, pending, agent-originated native Claude task to `deferred`
+  only on the owner's `pending -> approved` transition. It does not enqueue
+  denied, stale, previously delivered, or web-room work; existing delivery
+  history is preserved. This does not change A2A collaboration or loop policy.~~
+- ~~**Regression evidence:** the new approval-to-pump test failed before the
+  fix because delivery remained unset; after the fix, both focused delivery /
+  provider test groups passed (185 tests total), including the room, stale,
+  denied, and prior-delivery boundaries. `npm run typecheck` passed.~~
+- ~~**Build and activation:** `npm run build:engine` succeeded with build ID
+  `abc1be68b2f20acca74f9e8658bbd652f11aa38e45a7d9dc7cc79c7c392f645a` from
+  source commit `143bc976f86613afbd889f9a632bf5a6610d5dc1` (`sourceDirty=true`).
+  The packaged MCP handshake passed with stage/computer-use tools present and
+  retired browser-extension tools absent. Managed setup activated the stable
+  per-user runtime; the active manifest matches the build, all 184 installed
+  runtime artifacts other than the separately managed broker matched package
+  hashes, and that broker matched its own ownership hash. The resident feed
+  process is running from the stable installed engine path.~~
+- **Live automatic-delivery acceptance remains open:** no new provider task was
+  created or approved during this code/build pass, and no provider session was
+  opened, restarted, or touched. A live test must use a normal owner-approved
+  task in the existing Claude session and arrive without an inbox check. The
+  current `m9r_agents` diagnostic could not bind this Codex turn uniquely, so it
+  did not provide a live provider roster. No claim of live delivery is made.
+- **Retained files:** setup reported three earlier retired images locked or
+  unreadable; after replacing the engine, four manifest-owned retired engine /
+  hook images are retained. None were force-deleted. No task history was
+  deleted, and no provider, A2A, or pill behavior was changed.
+
+### 2026-10-23 — current provider/runtime package and delivery gate
+
+- ~~**Source verification:** `npm run typecheck` passed and the 10 focused
+  provider/runtime suites passed **149/149** when their Windows temp files
+  were redirected into the writable workspace. The initial default-temp run
+  failed during a Windows `EPERM` rename in the protected sandbox temp path;
+  the same tests passed with the workspace temp root.~~
+- **Candidate activation:** package build `237a0caf99a408550ba216073e4bea7cf4e6f66c118ca7559d7d12a00d3783cf`
+  (source commit `143bc976f86613afbd889f9a632bf5a6610d5dc1`,
+  `sourceDirty=true`) is present in the active install manifest at the stable
+  per-user engine path. The package archive SHA-256 is
+  `e34bc51aba39df0fd3dadf462d5f3c6d2119b6e52bf804ab76c4efe629827f0a`.
+  This proves the candidate package was installed, not that a clean-source
+  release or live delivery was accepted.
+- ~~**Installed MCP smoke:** the isolated post-install handshake passed against
+  `C:\Users\kaina\.m9r\bin\m9r-engine.exe`; the installed version matched
+  build `237a0caf99a4`, all stage/computer-use tools were present, and retired
+  browser-extension tools were absent. The smoke used an isolated temporary
+  profile and removed it afterward.~~
+- **Live delivery remains open:** the latest roster saw Claude and OpenCode,
+  but `m9r_whoami` refused to select this Codex sender because its provider
+  process maps to multiple live sessions. No Claude task was sent or queued.
+  The local CLI doctor also reported one recent provider session without a
+  live identity and could not reach `m9r.dev` from this shell (`fetch failed`);
+  these are current diagnostics, not proof of a provider delivery result.
+  Its automatic legacy scan reported four generated `.oathlock` directories
+  skipped and three unreadable legacy entries; a follow-up timestamp check
+  found no project `.m9r` files written during the diagnostic window, and no
+  legacy files were deleted.
+- **Runtime process observation:** no `m9r-engine`, `m9r-hook`, or
+  `m9r-web-broker` process was present when checked. The optional
+  `m9r-engine service status` reports that the separate login-startup service
+  is not installed. Do not treat package installation or recent agent presence
+  as automatic-delivery proof.
+- **Retained release clutter:** one manifest-listed retired engine image still
+  exists at the stable install path (94,916,608 bytes); it was not running
+  during inspection and was not deleted. Five older ignored package ZIPs also
+  remain alongside the current ZIP (about 591 MB combined); they are not needed
+  by the active install, but were retained pending explicit cleanup approval.
+- **Artifact boundary:** the installed ZIP contains the runtime package, not
+  the website or `.artifact-scratch` design files. No old package ZIP, local
+  scratch file, user document, provider session, or task history was deleted.
+
+### 2026-10-23 — provider binding/delivery continuation (source and candidate checks)
+
+- ~~**Exact-turn lifecycle repaired in source:** provider turn-end events now
+  retire only the matching provider/session/process turn; OpenCode session
+  deletion and idle events close the exact turn, and Codex interruption/end
+  hooks use the same exact-turn boundary. OpenCode reconciliation derives its
+  process identity only from the exact session's verified claim, not a stale
+  heartbeat or MCP caller.~~
+- ~~**OpenCode send path corrected:** delivery uses the documented SDK
+  `client.session.promptAsync` request with exact session ID and working
+  directory. The undocumented plugin-context prompt method was removed as a
+  send route. Adapter failures are reported once with bounded, secret-free
+  reasons instead of disappearing silently.~~
+- ~~**Action binding corrected:** MCP identity resolution preserves and
+  re-verifies the exact live provider-turn binding instead of reselecting by
+  process alone. Binding/authorization occurs before desktop routing, so a
+  failed binding can block focus and action dispatch upstream; CUA cursor,
+  pointer, and input code was not changed.~~
+- ~~**Source/package verification:** focused eight-suite group **214/214**;
+  `npm run typecheck`, `npm run build:cli`, engine build, isolated packaged MCP
+  verification, and `git diff --check` passed. Candidate engine build ID is
+  `84bb42f...e9efc2` (`sourceDirty=true`).~~
+- **Still open:** candidate was not activated into the stable user runtime.
+  There is no live Claude/OpenCode unsolicited-delivery, restart/recovery, or
+  visible desktop focus/action acceptance yet. Run that as the integrated
+  owner-approved task proof; do not mark it complete from source tests alone.
+- **Claude report scope correction:** `deliverOwnerTask` in
+  `web-live-sessions.ts` is wired by `scripts/m9r-web-broker.ts` to resident
+  web-workspace sessions; the native feed uses separate provider adapters in
+  `native-commands.ts`. Source does not establish that the web resident-slot
+  gate is the native pill's failing delivery route. The native pump now emits
+  a redacted per-task refusal reason. A web UI snapshot exposing internal slot
+  flags was not added without evidence that this separate route is involved.
+- **Preservation:** no provider session or CUA/cursor implementation was
+  changed, and no historical package or unrelated dirty work was removed,
+  reset, committed, or pushed.
+
+### 2026-10-23 — exact Codex MCP-turn binding and stable-path activation
+
+- ~~**Codex binding source fix:** MCP tool callbacks now carry the host-provided
+  Codex thread ID as request-scoped context. Every call resolves and verifies
+  that exact thread/session instead of choosing among sessions that share a
+  Codex process. Invalid or unowned thread metadata fails closed. Concurrent
+  session reconciliation is isolated by provider, process, session, and
+  working directory; it cannot reuse another call's result.~~
+- ~~**Regression checks:** the exact-thread, invalid/sibling-thread, and
+  concurrent-reconciliation cases were added. The provider/binding/lifecycle
+  test group passed **172/172**; `npm run typecheck` and `git diff --check`
+  passed. The retired-runtime-path regression test also passed **3/3**.~~
+- ~~**Package and install verification:** `npm run build:engine` produced
+  build `166bb5834a763febb25a83cb4fd7b8ee8eac57ac48a697aee5229ce5f57a2235`
+  from dirty source at commit `143bc976f86613afbd889f9a632bf5a6610d5dc1`.
+  The exact ZIP checksum is
+  `633ad83fb13ccdb0892237f2f80f58fae63e7c7ead30dbf3a160ae80522cc976`.
+  The candidate MCP smoke passed; the existing stable install was updated
+  in-place. Its active manifest matches the build ID, all **185/185** runtime
+  artifacts match the build manifest, the installed engine and broker match
+  source hashes, and the installed MCP handshake exposes the required desktop
+  tools without retired browser-extension tools. The managed broker reported
+  `running-current-build`, and the installer started the pill.~~
+- ~~**Live Codex identity binding:** a real M9R `m9r_whoami` call in this
+  Codex turn returned `You are @codex (codex).` The previous process-to-many-
+  sessions ambiguity did not block this exact-turn call. This proves identity
+  binding for this call; it does not by itself prove automatic task delivery or
+  desktop action/focus acceptance.~~
+- **Still open — provider live receipts:** harmless receipt tasks were sent to
+  the already-active Claude and OpenCode agents; M9R accepted both sends, but
+  neither receipt has returned to this Codex turn, so automatic delivery for
+  either provider is not signed off. No new Claude/OpenCode session was
+  opened. Their restart/reconnect recovery also remains a live test. A live
+  desktop observe was correctly refused because this turn has no current
+  owner-approved task ID; focus/action/cursor acceptance must be run within a
+  real delivered task, not with an invented ID. Source tests and MCP handshake
+  do not close these live gates.
+- **Retained image note:** the installer retried cleanup and reported one
+  retired runtime image still locked or unreadable. The install directory
+  currently lists two manifest-owned retired engine images; neither was
+  force-deleted. Identify the exact lock owner before deciding whether either
+  can be safely removed. No provider session was opened, closed, or restarted;
+  the single read-only Claude receipt task is recorded above. CUA/cursor code
+  was not changed.
+
+### 2026-10-23 — audit-fix implementation checkpoint (source verified; live gates open)
+
+- ~~**OpenCode uncertain delivery:** ambiguous transport failures now retain a
+  redacted reason, remain visible to the owner, and are not automatically
+  replayed. The recovery test uses the real plain-text goal contract; matching
+  history text is not treated as proof of acceptance. This prevents duplicate
+  work but does not restore automatic acceptance detection after a lost
+  transport response.~~
+- ~~**Delivery state and provider health:** task completion preserves prior
+  delivery-attempt evidence. The resident provider monitor rechecks exact
+  session binding rather than treating an unchanged executable/version as a
+  live session. Claude resume waits for its exact session-init event and keeps
+  a bounded, redacted exit diagnostic.~~
+- ~~**Desktop cursor startup:** cursor presentation is confirmed before the
+  first staged action, distinct initial ghost-cursor positions are allocated
+  for concurrent identities, and tests assert no physical-pointer move is
+  used. This is source/test evidence only.~~
+- ~~**Webhook and request boundaries:** Stripe writes now use a database
+  transaction with event deduplication and event-time ordering; GitHub writes
+  use a delivery-ID receipt and a fail-closed unique binding lookup. API body
+  limits count streamed bytes with a deadline and bounded per-route allowance,
+  even when Content-Length is absent.~~
+- ~~**Release supply chain:** GitHub Actions references are pinned to immutable
+  commit SHAs. The release packager now rejects unsigned or wrong-publisher
+  executables. The workflow intentionally cannot publish until a valid signing
+  process and owner-provided publisher certificate are configured.~~
+- **Verification:** focused provider, store, cursor, request-security, webhook,
+  and runtime-setup suites passed **280/280**; adjacent GitHub/OpenCode session
+  suites passed **53/53**; feed-state regressions passed **18/18**; release
+  workflow checks passed **2/2**. The full TypeScript check passed, and
+  `git diff --check` passed. The first test attempt
+  failed because the sandbox denied temporary lock-file renames under Windows
+  Temp (`EPERM`); the same suites passed when their temporary files were placed
+  under the repository's existing `.test-tmp` directory. No ACL was changed.
+- **Still open:** OpenCode cannot safely infer acceptance when a send response
+  is lost; the owner must inspect the exact provider conversation and either
+  clear the notice or send a new task. Live Claude/OpenCode automatic-delivery,
+  restart/update/reconnect, and desktop cursor/pointer acceptance have not been
+  run. The SQL migration is not applied or tested against PostgreSQL. Release
+  signing is blocked until the publisher certificate and signing step are
+  configured. This implementation does not certify the full repository as
+  secure or bug-free.
+- **Preservation:** no runtime was installed or activated; no migration was
+  applied; no provider sessions, stored packages, ACLs, or unrelated files
+  were deleted. No commit or push was made. Existing dirty files remain in the
+  working tree.

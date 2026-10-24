@@ -23,6 +23,8 @@ export interface ProviderUpdateRouteOptions {
   platform?: NodeJS.Platform;
   /** Optional provider-specific config/schema reconciliation behind a provider-neutral boundary. */
   refreshProviderConfig?: (input: ProviderConfigRefreshInput) => Promise<void> | void;
+  /** Must observe and bind exact live provider sessions; route health is not session health. */
+  reconcileProviderSession?: ProviderUpdateActions["reconnect"];
 }
 
 function currentMcpRoute(options: ProviderUpdateRouteOptions): string {
@@ -34,12 +36,9 @@ function currentMcpRoute(options: ProviderUpdateRouteOptions): string {
 }
 
 /**
- * Actions for the provider-neutral path. Provider binaries and credentials
- * remain outside M9R's ownership. A provider update therefore refreshes no
- * vendor config; it only verifies that the stable M9R MCP route still points
- * at a usable current runtime. The private MCP supervisor owns worker
- * replacement separately and will refresh an idle worker when its build
- * generation changes.
+ * Provider-neutral update actions. Route verification is a prerequisite, not
+ * proof of provider connectivity. A successful reconnect requires the live
+ * provider-session reconciler to observe and bind the exact session(s).
  */
 export function createProviderNeutralUpdateActions(options: ProviderUpdateRouteOptions = {}): ProviderUpdateActions {
   const verifyRoute = (): string => {
@@ -59,12 +58,24 @@ export function createProviderNeutralUpdateActions(options: ProviderUpdateRouteO
       const route = verifyRoute();
       await options.refreshProviderConfig?.({ ...input, route });
     },
-    reconnect: () => {
+    reconnect: async (input) => {
+      let route: string;
       try {
-        const route = verifyRoute();
-        return { healthy: true, detail: `stable M9R MCP route verified at ${route}` };
+        route = verifyRoute();
       } catch (error) {
         return { healthy: false, detail: error instanceof Error ? error.message : String(error) };
+      }
+      if (!options.reconcileProviderSession) {
+        return { healthy: false, detail: `M9R route verified at ${route}, but no live provider-session reconciler is configured.` };
+      }
+      try {
+        const result = await options.reconcileProviderSession(input);
+        return {
+          healthy: result.healthy,
+          detail: `M9R route verified; ${result.detail ?? (result.healthy ? "provider session rebound" : "no live provider session was rebound")}`,
+        };
+      } catch (error) {
+        return { healthy: false, detail: `M9R route verified, but provider-session reconciliation failed: ${error instanceof Error ? error.message : String(error)}` };
       }
     },
   };

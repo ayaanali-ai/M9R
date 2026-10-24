@@ -308,3 +308,11 @@ test("an unconfirmed OpenCode delivery ages into an explicit uncertain state and
   assert.equal(uncertain?.kind, "delivery_uncertain");
   if (uncertain?.kind === "delivery_uncertain") assert.match(uncertain.reason, /will not resend/i);
 });
+
+test("unresolved uncertainty remains owner-visible after a day and completed work clears it", () => {
+  const pending = task({ id: "T8", createdAt: "2026-09-18T12:00:00Z", delivery: { state: "uncertain", attempts: 1, error: "connection reset" } });
+  const feed = buildFeed(input({ now: NOW, tasks: [pending] }), null);
+  assert.equal(feed.needsYou.find((item) => item.taskId === "T8")?.kind, "delivery_uncertain");
+  const done = buildFeed(input({ now: NOW, tasks: [{ ...pending, resultSummary: "finished" }] }), null);
+  assert.equal(done.needsYou.some((item) => item.kind === "delivery_uncertain"), false);
+});

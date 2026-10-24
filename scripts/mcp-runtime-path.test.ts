@@ -20,6 +20,19 @@ test("a packaged supervisor spawned from a retired image resolves the active ins
   }
 });
 
+test("a retired packaged supervisor never falls back to its own image when the stable engine is missing", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-mcp-runtime-missing-"));
+  try {
+    const retired = join(root, "bin", "m9r-engine.exe.m9r-retired-1234-abcd");
+    assert.throws(
+      () => resolveMcpRuntimeExecutable({ M9R_HOME: root }, retired, "win32"),
+      /stable M9R engine is missing.*refusing to start another provider worker/i,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("non-engine MCP entrypoints are not redirected to the installed runtime", () => {
   assert.equal(resolveMcpRuntimeExecutable({ M9R_HOME: "C:/m9r" }, "node.exe", "win32"), "node.exe");
   assert.equal(isPackagedMcpExecutable("node.exe"), false);

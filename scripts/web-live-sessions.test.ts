@@ -71,8 +71,15 @@ function fakeClaude() {
   return { spawn, spawned };
 }
 
-function setup(extra: Partial<Parameters<typeof createWebLiveSessions>[0]> = {}) {
+function setup(extra: Partial<Parameters<typeof createWebLiveSessions>[0]> = {}, options: { resumeId?: string; resumeHandle?: string; resumeProvider?: string; resumeCwd?: string } = {}) {
   const root = makeFixture("m9r-live-");
+  if (options.resumeId) {
+    const sessionDir = join(root, "web-sessions", options.resumeHandle ?? "claude");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, "provider-session.json"), JSON.stringify({
+      version: 1, provider: options.resumeProvider ?? "claude-code", project: projectRoomId(options.resumeCwd ?? root), resumeId: options.resumeId,
+    }));
+  }
   const identities: Array<{ handle: string; provider: string; sessionId: string }> = [];
   const revoked: string[] = [];
   const events: SessionEvent[] = [];
@@ -110,6 +117,363 @@ test("claude starts lazily on the first message with only M9R tools, its own ide
   } finally { t.done(); }
 });
 
+test("an owner task is claimed by one managed provider identity before dispatch and completed from its result", async () => {
+  const task = {
+    id: "T901",
+    from: "you",
+    to: "claude",
+    goal: "Read the visible status and report one sentence.",
+    origin: "human_typed",
+    approval: "not_needed",
+    createdAt: new Date().toISOString(),
+    delivery: { state: "deferred", attempts: 0 },
+  } as const;
+  const order: string[] = [];
+  let deliveredSession: string | undefined;
+  let deliveredAt: string | undefined;
+  let resultSummary: string | undefined;
+  let delivery: Record<string, unknown> = { ...task.delivery };
+  const store = {
+    issueIdentity: (_handle: string, _provider: string, sessionId: string) => ({ token: `worker-token-${sessionId}` }),
+    revokeIdentity: () => undefined,
+    getTask: (id: string) => id === task.id ? { ...task, deliveredSession, deliveredAt, resultSummary, delivery } : undefined,
+    claimProviderDelivery: (id: string, token: string, expected: { handle: string; provider: string; cwd: string }) => {
+      order.push("claim");
+      assert.equal(id, task.id);
+      assert.deepEqual(expected, { handle: "claude", provider: "claude-code", cwd: t.root });
+      const sessionId = token.slice("worker-token-".length);
+      deliveredSession = sessionId;
+      delivery = { ...delivery, state: "sending", threadId: sessionId, attempts: 1 };
+      return { ...task, deliveredSession, delivery };
+    },
+    setDelivery: (id: string, patch: Record<string, unknown>) => {
+      assert.equal(id, task.id);
+      order.push(`delivery:${String(patch.state)}`);
+      delivery = { ...delivery, ...patch };
+      if (patch.state === "queued") deliveredAt = new Date().toISOString();
+      return { ...task, deliveredSession, deliveredAt, delivery };
+    },
+    recordTaskResult: (token: string, id: string, summary: string) => {
+      assert.equal(token, `worker-token-${deliveredSession}`);
+      assert.equal(id, task.id);
+      resultSummary = summary;
+      delivery = { ...delivery, state: "done" };
+      return { ok: true };
+    },
+    setResult: () => undefined,
+  };
+  const claude = fakeClaude();
+  const t = setup({ store: store as never, spawnClaude: (...args) => { order.push("spawn"); return claude.spawn(...args); } });
+  try {
+    const pending = t.sessions.deliverOwnerTask(task.id);
+    assert.equal(claude.spawned.length, 1);
+    assert.equal(claude.spawned[0]?.written.length, 0, "owner text waits for Claude's session identity event");
+    claude.spawned[0]!.out(line({ type: "system", subtype: "init", session_id: "claude-thread-901" }));
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.ok(result.sessionId?.startsWith("web-claude-"));
+    assert.deepEqual(order, ["claim", "spawn", "delivery:queued"]);
+    assert.equal(deliveredSession, result.sessionId);
+    assert.equal(delivery.threadId, result.sessionId);
+    assert.equal(claude.spawned.length, 1);
+    assert.equal(claude.spawned[0]?.written.length, 1, "the task is sent once through the provider's user-message channel");
+    assert.match(JSON.parse(claude.spawned[0]!.written[0]!).message.content[0].text, /M9R task T901/);
+
+    claude.spawned[0]!.out(line({ type: "assistant", message: { content: [{ type: "text", text: "The status is ready." }] } }));
+    claude.spawned[0]!.out(line({ type: "result", is_error: false, result: "The status is ready.", session_id: "claude-thread-901" }));
+    assert.equal(resultSummary, "The status is ready.", "the worker result closes the same owner task unless m9r_result already did so");
+    assert.equal(delivery.state, "done");
+  } finally { t.done(); }
+});
+
+test("a resumed Claude owner task is not sent when the process reports a different conversation", async () => {
+  const task = {
+    id: "T906", from: "you", to: "claude", goal: "Keep this text out of any other conversation.", origin: "human_typed",
+    approval: "not_needed", createdAt: new Date().toISOString(), delivery: { state: "deferred", attempts: 0 },
+  } as const;
+  let delivery: Record<string, unknown> = { ...task.delivery };
+  let resultSummary: string | undefined;
+  const store = {
+    issueIdentity: (_handle: string, _provider: string, sessionId: string) => ({ token: `worker-token-${sessionId}` }),
+    revokeIdentity: () => undefined,
+    getTask: (id: string) => id === task.id ? { ...task, delivery, resultSummary } : undefined,
+    claimProviderDelivery: (_id: string, _token: string) => {
+      delivery = { ...delivery, state: "sending", attempts: 1 };
+      return { ...task, delivery };
+    },
+    setDelivery: (_id: string, patch: Record<string, unknown>) => {
+      delivery = { ...delivery, ...patch };
+      return { ...task, delivery, resultSummary };
+    },
+    recordTaskResult: () => ({ ok: false, error: "unexpected result recording" }),
+    setResult: (_id: string, summary: string) => { resultSummary = summary; },
+  };
+  const t = setup({ store: store as never }, { resumeId: "saved-claude-thread-906" });
+  try {
+    const pending = t.sessions.deliverOwnerTask(task.id);
+    assert.equal(t.claude.spawned.length, 1);
+    const args = t.claude.spawned[0]!.args;
+    assert.equal(args[args.indexOf("--resume") + 1], "saved-claude-thread-906");
+    assert.equal(t.claude.spawned[0]!.written.length, 0);
+    t.claude.spawned[0]!.out(line({ type: "system", subtype: "init", session_id: "different-claude-thread-906" }));
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(t.claude.spawned[0]!.written.length, 0, "a mismatched resumed session receives none of the task text");
+    assert.equal(delivery.state, "failed");
+    assert.match(resultSummary ?? "", /different conversation/i);
+  } finally { t.done(); }
+});
+
+test("a failed Claude start cannot leak its owner task into the next provider turn", async () => {
+  const task = {
+    id: "T907", from: "you", to: "claude", goal: "This failed task must never be replayed.", origin: "human_typed",
+    approval: "not_needed", createdAt: new Date().toISOString(), delivery: { state: "deferred", attempts: 0 },
+  } as const;
+  let delivery: Record<string, unknown> = { ...task.delivery };
+  let resultSummary: string | undefined;
+  const store = {
+    issueIdentity: (_handle: string, _provider: string, sessionId: string) => ({ token: `worker-token-${sessionId}` }),
+    revokeIdentity: () => undefined,
+    getTask: (id: string) => id === task.id ? { ...task, delivery, resultSummary } : undefined,
+    claimProviderDelivery: () => {
+      delivery = { ...delivery, state: "sending", attempts: 1 };
+      return { ...task, delivery };
+    },
+    setDelivery: (_id: string, patch: Record<string, unknown>) => {
+      delivery = { ...delivery, ...patch };
+      return { ...task, delivery, resultSummary };
+    },
+    recordTaskResult: () => ({ ok: false, error: "unexpected result recording" }),
+    setResult: (_id: string, summary: string) => { resultSummary = summary; },
+  };
+  const claude = fakeClaude();
+  let failSpawn = true;
+  const t = setup({
+    store: store as never,
+    spawnClaude: (...args) => {
+      if (failSpawn) throw new Error("simulated Claude launch failure");
+      return claude.spawn(...args);
+    },
+  });
+  try {
+    const failed = await t.sessions.deliverOwnerTask(task.id);
+    assert.equal(failed.ok, false);
+    assert.equal(delivery.state, "failed");
+    assert.match(resultSummary ?? "", /simulated Claude launch failure/i);
+
+    failSpawn = false;
+    assert.deepEqual(t.sessions.deliver("claude", "Fresh independent request."), { ok: true, mode: "started" });
+    assert.equal(claude.spawned[0]?.written.length, 1);
+    claude.spawned[0]!.out(line({ type: "system", subtype: "init", session_id: "fresh-claude-thread-907" }));
+    assert.equal(claude.spawned[0]?.written.length, 1, "the failed task is not injected after the next session starts");
+    const sent = JSON.parse(claude.spawned[0]!.written[0]!).message.content[0].text as string;
+    assert.match(sent, /Fresh independent request/);
+    assert.doesNotMatch(sent, /failed task must never be replayed/i);
+  } finally { t.done(); }
+});
+
+test("a Claude owner task that times out before session init is never sent when init arrives later", async () => {
+  const task = {
+    id: "T910", from: "you", to: "claude", goal: "Do not deliver after the owner-pipe timeout.", origin: "human_typed",
+    approval: "not_needed", createdAt: new Date().toISOString(), delivery: { state: "deferred", attempts: 0 },
+  } as const;
+  let delivery: Record<string, unknown> = { ...task.delivery };
+  const store = {
+    issueIdentity: (_handle: string, _provider: string, sessionId: string) => ({ token: `worker-token-${sessionId}` }),
+    revokeIdentity: () => undefined,
+    getTask: (id: string) => id === task.id ? { ...task, delivery } : undefined,
+    claimProviderDelivery: () => {
+      delivery = { ...delivery, state: "sending", attempts: 1 };
+      return { ...task, delivery };
+    },
+    setDelivery: (_id: string, patch: Record<string, unknown>) => {
+      delivery = { ...delivery, ...patch };
+      return { ...task, delivery };
+    },
+    recordTaskResult: () => ({ ok: false, error: "unexpected result recording" }),
+    setResult: () => undefined,
+  };
+  const claude = fakeClaude();
+  const keepAlive = setInterval(() => undefined, 1_000);
+  const t = setup({ store: store as never, spawnClaude: claude.spawn, ownerDeliveryTimeoutMs: 10 });
+  try {
+    const result = await t.sessions.deliverOwnerTask(task.id);
+    assert.equal(result.ok, false);
+    assert.equal(delivery.state, "uncertain");
+    assert.equal(claude.spawned.length, 1);
+    assert.equal(claude.spawned[0]?.written.length, 0);
+    claude.spawned[0]!.out(line({ type: "system", subtype: "init", session_id: "claude-late-init-910" }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(claude.spawned[0]?.written.length, 0, "late Claude init must not receive owner text after the receipt timed out");
+    assert.equal(delivery.state, "uncertain", "late init must not reopen the task for another send");
+  } finally {
+    clearInterval(keepAlive);
+    t.sessions.close();
+    t.done();
+  }
+});
+
+test("managed owner-task delivery refuses unapproved, stale, already-targeted, or duplicate work", async () => {
+  const task = {
+    id: "T902", from: "you", to: "claude", goal: "Do not start before approval.", origin: "human_typed",
+    approval: "pending", createdAt: new Date().toISOString(), delivery: { state: "deferred", attempts: 0 },
+  };
+  const spawned = fakeClaude();
+  const store = {
+    issueIdentity: () => ({ token: "worker-token-abcdef" }),
+    revokeIdentity: () => undefined,
+    getTask: (id: string) => id === task.id ? task : undefined,
+    bindTaskToSession: () => { assert.fail("pending tasks must not be claimed"); },
+  };
+  const t = setup({ store: store as never, spawnClaude: spawned.spawn });
+  try {
+    const result = await t.sessions.deliverOwnerTask(task.id);
+    assert.equal(result.ok, false);
+    assert.equal(spawned.spawned.length, 0);
+    assert.equal(task.delivery.state, "deferred", "rejection leaves the durable task available to the approval flow");
+  } finally { t.done(); }
+});
+
+test("an owner task reaches OpenCode through the resident ACP session and records its result", async () => {
+  const task = {
+    id: "T905", from: "you", to: "opencode", goal: "Read the second visible label.", origin: "human_typed",
+    approval: "not_needed", createdAt: new Date().toISOString(), delivery: { state: "deferred", attempts: 0 },
+  } as const;
+  let deliveredSession: string | undefined;
+  let deliveredAt: string | undefined;
+  let resultSummary: string | undefined;
+  let delivery: Record<string, unknown> = { ...task.delivery };
+  let prompt = "";
+  let runtimeClosed = false;
+  let markPromptStarted!: () => void;
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  let allowPromptSubmission!: () => void;
+  const promptSubmissionGate = new Promise<void>((resolve) => { allowPromptSubmission = resolve; });
+  const store = {
+    issueIdentity: (_handle: string, _provider: string, sessionId: string) => ({ token: `worker-token-${sessionId}` }),
+    revokeIdentity: () => undefined,
+    getTask: (id: string) => id === task.id ? { ...task, deliveredSession, deliveredAt, resultSummary, delivery } : undefined,
+    claimProviderDelivery: (id: string, token: string, expected: { handle: string; provider: string; cwd: string }) => {
+      assert.equal(id, task.id);
+      assert.deepEqual(expected, { handle: "opencode", provider: "opencode", cwd: process.cwd() });
+      deliveredSession = token.slice("worker-token-".length);
+      delivery = { ...delivery, state: "sending", threadId: deliveredSession, attempts: 1 };
+      return { ...task, deliveredSession, delivery };
+    },
+    setDelivery: (_id: string, patch: Record<string, unknown>) => {
+      delivery = { ...delivery, ...patch };
+      if (patch.state === "queued") deliveredAt = new Date().toISOString();
+      return { ...task, deliveredSession, deliveredAt, delivery };
+    },
+    recordTaskResult: (_token: string, id: string, summary: string) => {
+      assert.equal(id, task.id);
+      resultSummary = summary;
+      delivery = { ...delivery, state: "done" };
+      return { ok: true };
+    },
+    setResult: () => undefined,
+  };
+  const runtime = {
+    ready: async () => ({ sessionId: "opencode-session-905" }),
+    alive: () => true,
+    prompt: (text: string, options?: { onRequestSubmitted?: () => void }) => (async function* () {
+      prompt = text;
+      markPromptStarted();
+      await promptSubmissionGate;
+      options?.onRequestSubmitted?.();
+      yield { type: "provider.reply_text", sessionId: "opencode-session-905", occurredAt: "now", payload: { text: "The second label is Settings." } };
+      yield { type: "provider.completed", sessionId: "opencode-session-905", occurredAt: "now", payload: {} };
+    })(),
+    cancelTurn: async () => undefined,
+    close: () => { runtimeClosed = true; },
+  };
+  const t = setup({
+    agents: [{ handle: "opencode", provider: "opencode", folder: process.cwd() }],
+    store: store as never,
+    opencodeExe: () => "opencode",
+    openCodeRuntime: () => runtime as never,
+  });
+  try {
+    let deliverySettled = false;
+    const pendingDelivery = t.sessions.deliverOwnerTask(task.id).then((result) => { deliverySettled = true; return result; });
+    await promptStarted;
+    assert.equal(delivery.state, "sending", "the task stays in sending until OpenCode's ACP request is issued");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(deliverySettled, false, "the owner-pipe receipt does not precede actual provider transport submission");
+    allowPromptSubmission();
+    const result = await pendingDelivery;
+    assert.equal(result.ok, true);
+    assert.ok(result.sessionId?.startsWith("web-opencode-"));
+    assert.match(prompt, /M9R task T905/);
+    assert.match(prompt, /Read the second visible label/);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(resultSummary, "The second label is Settings.");
+    assert.equal(delivery.state, "done");
+  } finally { t.sessions.close(); t.done(); }
+  assert.equal(runtimeClosed, true);
+});
+
+test("an owner task that times out during OpenCode startup is fenced and never sent later", async () => {
+  const task = {
+    id: "T909", from: "you", to: "opencode", goal: "Do not deliver after the owner-pipe timeout.", origin: "human_typed",
+    approval: "not_needed", createdAt: new Date().toISOString(), delivery: { state: "deferred", attempts: 0 },
+  } as const;
+  let delivery: Record<string, unknown> = { ...task.delivery };
+  let resultSummary: string | undefined;
+  let releaseReady!: (value: { sessionId: string }) => void;
+  const ready = new Promise<{ sessionId: string }>((resolve) => { releaseReady = resolve; });
+  let promptCalls = 0;
+  const store = {
+    issueIdentity: (_handle: string, _provider: string, sessionId: string) => ({ token: `worker-token-${sessionId}` }),
+    revokeIdentity: () => undefined,
+    getTask: (id: string) => id === task.id ? { ...task, delivery, resultSummary } : undefined,
+    claimProviderDelivery: () => {
+      delivery = { ...delivery, state: "sending", attempts: 1 };
+      return { ...task, delivery };
+    },
+    setDelivery: (_id: string, patch: Record<string, unknown>) => {
+      delivery = { ...delivery, ...patch };
+      return { ...task, delivery, resultSummary };
+    },
+    recordTaskResult: () => ({ ok: false, error: "unexpected result recording" }),
+    setResult: (_id: string, summary: string) => { resultSummary = summary; },
+  };
+  const runtime = {
+    ready: () => ready,
+    alive: () => true,
+    prompt: (_text: string, options?: { onRequestSubmitted?: () => void }) => (async function* () {
+      promptCalls += 1;
+      options?.onRequestSubmitted?.();
+      yield { type: "provider.reply_text", sessionId: "ses_late_909", occurredAt: "now", payload: { text: "Late delivery." } };
+      yield { type: "provider.completed", sessionId: "ses_late_909", occurredAt: "now", payload: {} };
+    })(),
+    cancelTurn: async () => undefined,
+    close: () => undefined,
+  };
+  const keepAlive = setInterval(() => undefined, 1_000);
+  const t = setup({
+    agents: [{ handle: "opencode", provider: "opencode", folder: process.cwd() }],
+    store: store as never,
+    opencodeExe: () => "opencode",
+    openCodeRuntime: () => runtime as never,
+    ownerDeliveryTimeoutMs: 10,
+  });
+  try {
+    const result = await t.sessions.deliverOwnerTask(task.id);
+    assert.equal(result.ok, false);
+    assert.equal(delivery.state, "uncertain");
+    releaseReady({ sessionId: "ses_late_909" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(promptCalls, 0, "a worker that comes up after timeout must not receive stale owner text");
+    assert.equal(delivery.state, "uncertain", "late startup must not reopen the task for delivery");
+    assert.equal(resultSummary, undefined);
+  } finally {
+    clearInterval(keepAlive);
+    t.sessions.close();
+    t.done();
+  }
+});
+
 test("a message while working interrupts and redirects; the completed answer streams and is labeled Done", () => {
   const t = setup();
   try {
@@ -131,6 +495,57 @@ test("a message while working interrupts and redirects; the completed answer str
     assert.ok(t.events.some((e) => e.kind === "say" && e.text === "Opening the page."));
     assert.ok(t.events.some((e) => e.kind === "tool" && e.name === "mcp__m9r__m9r_web_open"));
     assert.ok(t.events.some((e) => e.kind === "result" && e.text === "Shipping is free over $50."));
+  } finally { t.done(); }
+});
+
+test("an OpenCode owner task never falls back to a new session when its saved conversation cannot be restored", async () => {
+  const task = {
+    id: "T908", from: "you", to: "opencode", goal: "Keep this out of a replacement conversation.", origin: "human_typed",
+    approval: "not_needed", createdAt: new Date().toISOString(), delivery: { state: "deferred", attempts: 0 },
+  } as const;
+  let delivery: Record<string, unknown> = { ...task.delivery };
+  let resultSummary: string | undefined;
+  let strictResume = false;
+  let promptCalls = 0;
+  let runtimeClosed = false;
+  const store = {
+    issueIdentity: (_handle: string, _provider: string, sessionId: string) => ({ token: `worker-token-${sessionId}` }),
+    revokeIdentity: () => undefined,
+    getTask: (id: string) => id === task.id ? { ...task, delivery, resultSummary } : undefined,
+    claimProviderDelivery: () => {
+      delivery = { ...delivery, state: "sending", attempts: 1 };
+      return { ...task, delivery };
+    },
+    setDelivery: (_id: string, patch: Record<string, unknown>) => {
+      delivery = { ...delivery, ...patch };
+      return { ...task, delivery, resultSummary };
+    },
+    recordTaskResult: () => ({ ok: false, error: "unexpected result recording" }),
+    setResult: (_id: string, summary: string) => { resultSummary = summary; },
+  };
+  const t = setup({
+    agents: [{ handle: "opencode", provider: "opencode", folder: process.cwd() }],
+    store: store as never,
+    opencodeExe: () => "opencode",
+    openCodeRuntime: (input) => {
+      strictResume = input.strictResume === true;
+      return {
+        ready: async () => ({ sessionId: "ses_replacement_908", restored: false }),
+        alive: () => true,
+        async *prompt() { promptCalls += 1; },
+        cancelTurn: async () => undefined,
+        close: () => { runtimeClosed = true; },
+      };
+    },
+  }, { resumeId: "ses_saved_908", resumeHandle: "opencode", resumeProvider: "opencode", resumeCwd: process.cwd() });
+  try {
+    const result = await t.sessions.deliverOwnerTask(task.id);
+    assert.equal(result.ok, false);
+    assert.equal(strictResume, true);
+    assert.equal(promptCalls, 0, "no owner text reaches the replacement session");
+    assert.equal(runtimeClosed, true);
+    assert.equal(delivery.state, "failed");
+    assert.match(resultSummary ?? "", /saved provider conversation/i);
   } finally { t.done(); }
 });
 
@@ -371,13 +786,13 @@ test("agents.json: valid entries load, bad ones are skipped with a reason; defau
     assert.equal(loadAgentsConfig(root, { env: { M9R_AGENT_FOLDER: "C:/proj" }, cwd: root, detect: { codex: () => false, opencode: () => false } }).agents[0].folder, "C:/proj");
     mkdirSync(join(root, "proj"));
     writeFileSync(join(root, "agents.json"), JSON.stringify({ agents: [
-      { handle: "@Claude", provider: "claude-code", folder: "proj", profile: "hands" },
+      { handle: "@Claude", provider: "claude-code", folder: "proj", profile: "hands", connectionId: "claude-proj" },
       { handle: "all", provider: "codex" },
       { handle: "gem", provider: "gemini" },
       { handle: "codex", provider: "codex", folder: join(root, "missing") },
     ] }));
     const c = loadAgentsConfig(root, { env: {}, cwd: root });
-    assert.deepEqual(c.agents.map((a) => [a.handle, a.folder, a.profile]), [["claude", join(root, "proj"), "hands"]]);
+    assert.deepEqual(c.agents.map((a) => [a.handle, a.folder, a.profile, a.connectionId]), [["claude", join(root, "proj"), "hands", "claude-proj"]]);
     assert.equal(c.problems.length, 3);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

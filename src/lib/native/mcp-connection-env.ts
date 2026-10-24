@@ -15,12 +15,11 @@ function positiveProcessId(value: unknown): number | undefined {
  * Reads the provider binding inputs once, before a stdio supervisor starts.
  *
  * The top-level supervisor may use its immediate provider-parent PID as a
- * recovery selector even when the provider name is present. The worker must
- * never infer ownership from its own supervisor parent; it receives the
- * already-resolved PID explicitly through `mcpWorkerEnvironment` instead.
- * `bindConnectionForProcess` still requires exactly one durable claim for
- * that PID, so this never falls back to choosing an arbitrary provider
- * session.
+ * recovery selector even when the provider name or a legacy binding id is
+ * present. Trusted prompt hooks supply the exact active conversation for that
+ * process; process-only claim lookup remains fail-closed when no turn is active.
+ * The worker must never infer ownership from its own supervisor parent; it
+ * receives the already-resolved PID explicitly through `mcpWorkerEnvironment`.
  */
 export function readM9rMcpConnectionConfig(
   env: Record<string, string | undefined>,
@@ -33,8 +32,11 @@ export function readM9rMcpConnectionConfig(
   const sessionId = rawSessionId && rawSessionId.length <= 256 && !/[\u0000-\u001f\u007f]/.test(rawSessionId)
     ? rawSessionId : undefined;
   const isWorker = env.M9R_MCP_WORKER === "1";
+  // A legacy binding id must not suppress the provider-host identity. When
+  // both are present the MCP server can prefer the exact active turn and avoid
+  // pinning a shared provider process to the first conversation it saw.
   const processId = explicitProcessId
-    ?? (!isWorker && !bindingId ? positiveProcessId(parentProcessId) : undefined);
+    ?? (!isWorker && (!bindingId || provider) ? positiveProcessId(parentProcessId) : undefined);
   return {
     ...(provider ? { provider } : {}),
     ...(bindingId ? { bindingId } : {}),

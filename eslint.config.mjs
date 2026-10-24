@@ -71,6 +71,9 @@ const eslintConfig = defineConfig([
     "m9r-runtime-clean-*/**",
     "m9r-clean-cutover-*/**",
     // Local scratch and tool caches are user/test data, not source.
+    ".artifact-scratch/**",
+    ".n3-proof/**",
+    ".grok/**",
     "scratchpad*/**",
     ".test-tmp/**",
     ".tmp/**",
@@ -82,6 +85,10 @@ const eslintConfig = defineConfig([
     ".wrangler/**",
     // Wrangler writes nested temporary bundles under service roots as well.
     "**/.wrangler/**",
+    // Browser-extension build output and store-submission material are
+    // generated/distribution artifacts; lint the extension source instead.
+    "extensions/browser/pill-next/**",
+    "extensions/browser/store-assets/**",
   ]),
 ]);
 

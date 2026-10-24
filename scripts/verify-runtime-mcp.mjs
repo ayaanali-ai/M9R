@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { stopChildProcess } from "./runtime-child-shutdown.mjs";
@@ -11,7 +11,12 @@ const manifest = JSON.parse(readFileSync(join(dirname(executable), "m9r-build-in
 // engine. A package verifier must use an isolated store; otherwise it tests
 // the user's installed runtime instead of the candidate passed on argv.
 const smokeHome = mkdtempSync(join(tmpdir(), "m9r-runtime-mcp-"));
-const child = spawn(executable, ["mcp"], {
+const smokeBin = join(smokeHome, "bin");
+mkdirSync(smokeBin, { recursive: true });
+const smokeExecutable = join(smokeBin, executable.split(/[\\/]/).pop());
+copyFileSync(executable, smokeExecutable);
+copyFileSync(join(dirname(executable), "m9r-build-info.json"), join(smokeBin, "m9r-build-info.json"));
+const child = spawn(smokeExecutable, ["mcp"], {
   stdio: ["pipe", "pipe", "pipe"],
   windowsHide: true,
   env: { ...process.env, M9R_HOME: smokeHome },

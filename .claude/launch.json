@@ -53,6 +53,12 @@
       "port": 5195
     },
     {
+      "name": "pill",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "pill", "run", "dev"],
+      "port": 1431
+    },
+    {
       "name": "presence-test",
       "runtimeExecutable": "python",
       "runtimeArgs": [

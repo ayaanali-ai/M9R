@@ -124,3 +124,63 @@ test("canonical native install manifest ownership is refreshed without consultin
   assert.equal(updated.entries[0].sha256After, sha256("new native plugin"));
   assert.equal(updated.entries[1].sha256After, "keep");
 });
+
+test("canonical native plugin ownership wins over conflicting legacy top-level ownership", async () => {
+  const nativeManifestPath = "C:/Users/Ada/.m9r/install-manifest.json";
+  const oldPlugin = Buffer.from("canonical plugin bytes");
+  const manifest = {
+    openCodeIdentityPluginPath: "C:/stale/m9r-identity.js",
+    openCodeIdentityPluginHash: sha256("stale bytes"),
+    entries: [{ path: pluginPath, kind: "opencode-plugin", sha256After: sha256(oldPlugin), backupPath: null }],
+  };
+  const files = new Map<string, Buffer>([
+    [pluginPath, oldPlugin],
+    [nativeManifestPath, Buffer.from(JSON.stringify(manifest))],
+  ]);
+  const result = await refreshManagedOpenCodeIdentityPlugin({
+    manifestPath: nativeManifestPath,
+    pluginPath,
+    desiredContent: "refreshed canonical plugin",
+  }, {
+    async readFile(path) { return files.get(path) ?? null; },
+    async writeAtomic(path, bytes) { files.set(path, Buffer.from(bytes)); },
+    async removeFile(path) { files.delete(path); },
+  });
+
+  assert.deepEqual(result, { action: "upgrade", updated: true });
+  const updated = JSON.parse(files.get(nativeManifestPath)!.toString("utf8"));
+  assert.equal(updated.entries[0].sha256After, sha256("refreshed canonical plugin"));
+  assert.equal(updated.openCodeIdentityPluginPath, manifest.openCodeIdentityPluginPath);
+  assert.equal(updated.openCodeIdentityPluginHash, manifest.openCodeIdentityPluginHash);
+});
+
+test("ambiguous canonical plugin entries fail closed instead of adopting a legacy hash", async () => {
+  const nativeManifestPath = "C:/Users/Ada/.m9r/install-manifest.json";
+  const oldPlugin = Buffer.from("plugin bytes");
+  const manifest = {
+    openCodeIdentityPluginPath: pluginPath,
+    openCodeIdentityPluginHash: sha256(oldPlugin),
+    entries: [
+      { path: pluginPath, kind: "opencode-plugin", sha256After: sha256(oldPlugin) },
+      { path: "C:/old/m9r-identity.js", kind: "opencode-plugin", sha256After: sha256("other") },
+    ],
+  };
+  const files = new Map<string, Buffer>([
+    [pluginPath, oldPlugin],
+    [nativeManifestPath, Buffer.from(JSON.stringify(manifest))],
+  ]);
+  const writes: string[] = [];
+  const result = await refreshManagedOpenCodeIdentityPlugin({
+    manifestPath: nativeManifestPath,
+    pluginPath,
+    desiredContent: "new bytes",
+  }, {
+    async readFile(path) { return files.get(path) ?? null; },
+    async writeAtomic(path, bytes) { writes.push(path); files.set(path, Buffer.from(bytes)); },
+    async removeFile(path) { files.delete(path); },
+  });
+
+  assert.deepEqual(result, { action: "not-managed", updated: false });
+  assert.deepEqual(writes, []);
+  assert.equal(files.get(pluginPath)?.toString(), "plugin bytes");
+});

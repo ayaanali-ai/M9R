@@ -25,6 +25,128 @@ export const TRUNCATION_MARKER = " [truncated: full text via get_task]";
 export type Approval = "not_needed" | "pending" | "approved" | "denied" | "expired";
 export type Origin = "human_typed" | "agent_initiated";
 
+/**
+ * Provider-neutral evidence for one task. Transport state remains on
+ * `TaskDelivery` for adapter-specific details; this is the single receipt
+ * contract every delivery path updates.
+ */
+export type TaskReceiptState = "accepted" | "dispatched" | "provider_received" | "started"
+  | "completed" | "canceled" | "failed" | "retryable" | "uncertain";
+export type TaskReceiptSource = "owner-broker" | "provider-transport" | "provider-session" | "prompt" | "system";
+export type TaskReceiptBasis = "observed" | "inferred";
+
+export interface TaskReceiptEvent {
+  state: TaskReceiptState;
+  at: string;
+  attempt: number;
+  source: TaskReceiptSource;
+  basis: TaskReceiptBasis;
+  sessionId?: string;
+  error?: string;
+}
+
+export interface TaskReceipt {
+  state: TaskReceiptState;
+  attempt: number;
+  updatedAt: string;
+  source: TaskReceiptSource;
+  sessionId?: string;
+  error?: string;
+  history: TaskReceiptEvent[];
+}
+
+export interface TaskReceiptTransition {
+  state: TaskReceiptState;
+  at: string;
+  attempt?: number;
+  source?: TaskReceiptSource;
+  basis?: TaskReceiptBasis;
+  sessionId?: string;
+  error?: string;
+}
+
+const MAX_TASK_RECEIPT_EVENTS = 32;
+const RECEIPT_TRANSITIONS: Readonly<Record<TaskReceiptState, readonly TaskReceiptState[]>> = {
+  accepted: ["dispatched", "provider_received", "started", "completed", "canceled", "failed", "retryable", "uncertain"],
+  dispatched: ["provider_received", "started", "completed", "canceled", "failed", "retryable", "uncertain"],
+  provider_received: ["started", "completed", "canceled", "failed", "uncertain"],
+  started: ["completed", "canceled", "failed", "uncertain"],
+  retryable: ["dispatched", "canceled", "failed"],
+  uncertain: ["completed", "canceled"],
+  failed: ["completed", "canceled", "retryable"],
+  completed: [],
+  canceled: [],
+};
+
+function receiptEventEqual(left: TaskReceiptEvent, right: TaskReceiptEvent): boolean {
+  return left.state === right.state
+    && left.attempt === right.attempt
+    && left.source === right.source
+    && left.basis === right.basis
+    && left.sessionId === right.sessionId
+    && left.error === right.error;
+}
+
+function pushReceiptEvent(receipt: TaskReceipt, event: TaskReceiptEvent): TaskReceipt {
+  const previous = receipt.history.at(-1);
+  if (previous && receiptEventEqual(previous, event)) return receipt;
+  return {
+    ...receipt,
+    state: event.state,
+    attempt: Math.max(receipt.attempt, event.attempt),
+    updatedAt: event.at,
+    source: event.source,
+    ...(event.sessionId ? { sessionId: event.sessionId } : receipt.sessionId ? { sessionId: receipt.sessionId } : {}),
+    ...(event.error ? { error: event.error } : event.state === "completed" || event.state === "canceled" ? { error: undefined } : {}),
+    history: [...receipt.history, event].slice(-MAX_TASK_RECEIPT_EVENTS),
+  };
+}
+
+export function initialTaskReceipt(at: string): TaskReceipt {
+  const event: TaskReceiptEvent = { state: "accepted", at, attempt: 0, source: "owner-broker", basis: "observed" };
+  return { state: event.state, attempt: 0, updatedAt: at, source: event.source, history: [event] };
+}
+
+/**
+ * Advances the canonical receipt without allowing an adapter to move a task
+ * backwards or silently turn an uncertain send into a retry. A later result
+ * is allowed to close a failed/uncertain transport because that result is
+ * positive evidence that the provider did receive and start the work; the
+ * missing intermediate states are marked inferred, never presented as raw
+ * provider observations.
+ */
+export function transitionTaskReceipt(current: TaskReceipt | undefined, transition: TaskReceiptTransition): TaskReceipt {
+  let receipt = current ?? initialTaskReceipt(transition.at);
+  if (receipt.state === transition.state
+    && (transition.error === undefined || transition.error === receipt.error)
+    && (transition.sessionId === undefined || transition.sessionId === receipt.sessionId)
+    && (transition.attempt === undefined || transition.attempt <= receipt.attempt)) return receipt;
+
+  const attempt = Math.max(receipt.attempt, transition.attempt ?? receipt.attempt);
+  const source = transition.source ?? receipt.source;
+  const basis = transition.basis ?? "observed";
+  const event = (state: TaskReceiptState, eventBasis: TaskReceiptBasis = basis): TaskReceiptEvent => ({
+    state,
+    at: transition.at,
+    attempt,
+    source,
+    basis: eventBasis,
+    ...(transition.sessionId ? { sessionId: transition.sessionId } : receipt.sessionId ? { sessionId: receipt.sessionId } : {}),
+    ...(transition.error && (state === transition.state || state === "failed" || state === "uncertain" || state === "retryable") ? { error: transition.error } : {}),
+  });
+
+  if (transition.state === "completed" && receipt.state !== "completed" && receipt.state !== "canceled") {
+    if (receipt.state !== "provider_received") receipt = pushReceiptEvent(receipt, event("provider_received", "inferred"));
+    if (receipt.state !== "started") receipt = pushReceiptEvent(receipt, event("started", "inferred"));
+    return pushReceiptEvent(receipt, event("completed"));
+  }
+
+  if (transition.state === receipt.state) return pushReceiptEvent(receipt, event(transition.state));
+  if (receipt.state === "completed" || receipt.state === "canceled") return receipt;
+  if (!RECEIPT_TRANSITIONS[receipt.state].includes(transition.state)) return receipt;
+  return pushReceiptEvent(receipt, event(transition.state));
+}
+
 /** A durable phase boundary for one request handled by the native desktop stage. */
 export type StageTimingPhase = "queue_wait" | "prepare" | "launch" | "action" | "close" | "stop"
   | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion";
@@ -74,8 +196,12 @@ export interface Task {
   dismissedAt?: string;
   /** Native push (N2): how far pushing this task into the target session got. Absent for plain inbox tasks. */
   delivery?: TaskDelivery;
+  /** Bounded transport transition evidence, independent of the final task result. */
+  deliveryHistory?: TaskDelivery[];
   /** Durable target-session receipt; unlike a cursor this records what was actually presented. */
   lifecycle?: TaskLifecycle;
+  /** Provider-neutral delivery receipt; old state files may not have this field and are backfilled on mutation. */
+  receipt?: TaskReceipt;
   /** Working directory of the sender; used to pick the target's session when several are open. */
   cwd?: string;
   /** Session id (or unique prefix) the sender pinned, so a push never has to guess. */
@@ -93,6 +219,8 @@ export interface Task {
 }
 
 export interface TaskDelivery {
+  /** A resumed CLI process does not prove the owner's visible chat window updated. */
+  transport?: "claude-resume" | "opencode-session-api" | "codex-queue";
   /** `sending` is a one-time claim; `queued` is provider acceptance, never proof the agent started work. */
   state: "sending" | "queued" | "uncertain" | "failed" | "done" | "deferred";
   attempts: number;
@@ -191,6 +319,7 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
     replyDepth: input.replyDepth ?? 0,
     idempotencyKey: input.idempotencyKey,
     createdAt: nowIso,
+    receipt: initialTaskReceipt(nowIso),
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(input.targetSession ? { targetSession: input.targetSession } : {}),
     ...(input.fromSession ? { fromSession: input.fromSession } : {}),
@@ -281,9 +410,11 @@ export function renderInboxInjection(tasks: readonly Task[], cursor: number, opt
   const maxAge = options.maxAgeMs ?? inboxMaxAgeMs();
   const includeTaskIds = options.includeTaskIds !== false;
   const eligible = tasks
-    // A task already pushed into the session as a real prompt must not be injected a second time from the inbox.
+    // A task claimed or pushed by a direct transport must not race a second provider route through the inbox.
     // A task that already has a result is finished, and one older than the age limit is history, not work to hand a new session.
-    .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired" && t.delivery?.state !== "queued" && t.delivery?.state !== "done"
+    .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired"
+      && t.receipt?.state !== "canceled"
+      && !["sending", "queued", "uncertain", "done"].includes(t.delivery?.state ?? "")
       && !t.resultSummary && !(now - Date.parse(t.createdAt) > maxAge))
     .sort((a, b) => a.seq - b.seq);
   // Provider delivery must preserve inbox order. If an unapproved task is at

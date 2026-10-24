@@ -814,6 +814,11 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   // Calculator, or any other target cannot be focused by two workers at once.
   const foregroundLease = deps.foregroundLease ?? createForegroundInputLease({ lockPath: join(root, "foreground-input-lease") });
   const agentSessions = new Map<string, AgentCursorSession>();
+  const cursorStartSlots = new Map<string, number>();
+  // Cursor presentation can be requested concurrently by several provider
+  // deliveries. Keep slot reservation and the initial overlay move atomic so
+  // two providers cannot observe the same free slot and overlap at startup.
+  let cursorSlotQueue: Promise<void> = Promise.resolve();
   const desktopCaptures = new Map<string, CachedDesktopCapture>();
   const desktopInputTargets = new Map<string, DesktopInputTarget>();
   let agentRuntimePromise: Promise<CuaRuntime> | undefined;
@@ -952,6 +957,15 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return { runtime, session: agentSessions.get(details.key)! };
   }
 
+  async function withCursorSlotLock<T>(run: () => Promise<T>): Promise<T> {
+    const previous = cursorSlotQueue;
+    let release!: () => void;
+    cursorSlotQueue = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await run(); }
+    finally { release(); }
+  }
+
   /**
    * Make the provider cursor visible as soon as an approved stage is prepared,
    * before launch, capture, or the first input action.  This is intentionally
@@ -961,6 +975,27 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   async function showAgentCursor(name: string, identity: CuaAgentCursorIdentity): Promise<{ label: string; visible: true }> {
     const { runtime, session } = await ensureAgentSession(identity, name);
     resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not show the agent cursor before the first desktop action.");
+    await withCursorSlotLock(async () => {
+      if (cursorStartSlots.has(session.key)) return;
+      const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
+      const occupied = new Set(cursorStartSlots.values());
+      let slot = 0;
+      while (occupied.has(slot)) slot++;
+      if (slot >= 16) throw new Error("No free agent cursor starting position is available.");
+      cursorStartSlots.set(session.key, slot);
+      const x = Math.floor(screen.width * ((slot % 4) + 1) / 5);
+      const y = Math.floor(screen.height * (Math.floor(slot / 4) + 1) / 6);
+      try {
+        // The existing window scope is overlay-only in desktop-screen coordinates.
+        // Desktop scope would move the real pointer and must never be used here.
+        resultError(await runtime.driver.callTool("move_cursor", JSON.stringify({ scope: "window", x, y, session: session.session })), "Cua Driver could not place the agent cursor.");
+        const state = cursorStateFromResult(await runtime.driver.getAgentCursorState({ session: session.session }));
+        if (!state.enabled || state.x !== x || state.y !== y) throw new Error("Cua Driver did not confirm the agent cursor starting position.");
+      } catch (error) {
+        cursorStartSlots.delete(session.key);
+        throw error;
+      }
+    });
     if ((await runtime.driver.getSession({ session: session.session })).cursorVisible !== true) {
       throw new Error("Cua Driver enabled the agent cursor but did not confirm that its desktop overlay is visible.");
     }
@@ -1081,8 +1116,8 @@ const OWNER_ACTIVITY_THRESHOLD_PX = 3;
  * control out from under them. After the action, restore the owner's pointer to exactly where it
  * was -- so regardless of whether the action started foreground or background, and regardless of
  * whether the owner touched their mouse during it, their pointer is never left wherever the
- * agent's action happened to leave it. Best-effort: a guard failure (e.g. not running on Windows)
- * never blocks the underlying action, it only means isolation wasn't available for this call.
+ * agent's action happened to leave it. If restoration cannot be confirmed after foreground input,
+ * the call fails explicitly as uncertain instead of claiming clean pointer isolation.
  * Uses `deps.ownerPointer` when supplied (the test seam); production always uses the real native
  * Windows stage manager's get/restore, which is in closure scope here via `manager`.
  */
@@ -1117,13 +1152,26 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     options.signal?.throwIfAborted();
     actionOutcome(await driver.callTool("bring_to_front", JSON.stringify({ pid, window_id: windowId, session }), asyncOptions),
       "Cua Driver could not bring the exact target window to the foreground.");
+    let outcome: CuaStageActionOutcome | undefined;
+    let actionError: unknown;
     try {
       options.signal?.throwIfAborted();
-      const outcome = actionOutcome(await driver.callTool(name, JSON.stringify({ ...args, delivery_mode: "foreground" }), asyncOptions), fallback);
-      return { ...outcome, foregroundConfirmed: true };
-    } finally {
-      if (saved) await ownerPointer.restore(saved.x, saved.y).catch(() => undefined);
+      outcome = actionOutcome(await driver.callTool(name, JSON.stringify({ ...args, delivery_mode: "foreground" }), asyncOptions), fallback);
+    } catch (error) {
+      actionError = error;
     }
+    let restoreError: unknown;
+    if (saved) {
+      try { await ownerPointer.restore(saved.x, saved.y); }
+      catch (error) { restoreError = error; }
+    }
+    if (restoreError) {
+      const detail = "Desktop input was dispatched, but the owner's pointer restoration could not be confirmed; the outcome is uncertain.";
+      if (actionError instanceof Error) throw new Error(`${detail} Original action error: ${actionError.message}`, { cause: actionError });
+      throw new Error(detail, { cause: restoreError });
+    }
+    if (actionError !== undefined) throw actionError;
+    return { ...outcome!, foregroundConfirmed: true };
   };
   const runForeground = () => foregroundLease.run(name, options.signal, deliverForeground);
   if (options.deliveryMode === "background" && options.preferForeground) {
@@ -2477,6 +2525,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       try { await runtime.driver.endSession({ session: details.session }); }
       finally {
         agentSessions.delete(details.key);
+        cursorStartSlots.delete(details.key);
         forgetAgentDesktopInputTargets(cursorIdentity);
       }
     }
@@ -2487,6 +2536,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     agentRuntimePromise = undefined;
     const sessions = [...agentSessions.values()];
     agentSessions.clear();
+    cursorStartSlots.clear();
     desktopInputTargets.clear();
     if (!runtimePromise) return;
     try {

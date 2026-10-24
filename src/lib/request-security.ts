@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
-import { evaluateContentLength, isCrossSiteWrite } from "@/lib/request-security-core";
+import { apiBodyLimit, evaluateContentLength, evaluateBodySize, isCrossSiteWrite } from "@/lib/request-security-core";
 
 const DEFAULT_MAX_API_BODY_BYTES = 4 * 1024 * 1024;
 
@@ -40,11 +40,12 @@ function configuredBodyLimit(): number {
 }
 
 /** Reject malformed, oversized, or cross-site state-changing API requests. */
-export function guardApiRequest(request: NextRequest): NextResponse | null {
+export async function guardApiRequest(request: NextRequest): Promise<NextResponse | null> {
   if (!request.nextUrl.pathname.startsWith("/api/")) return null;
 
   const rawLength = request.headers.get("content-length");
-  const lengthDecision = evaluateContentLength(rawLength, configuredBodyLimit());
+  const maximum = apiBodyLimit(request.nextUrl.pathname, configuredBodyLimit());
+  const lengthDecision = evaluateContentLength(rawLength, maximum);
   if (lengthDecision === "invalid") {
     return NextResponse.json({ error: "Invalid Content-Length." }, { status: 400 });
   }
@@ -63,6 +64,15 @@ export function guardApiRequest(request: NextRequest): NextResponse | null {
     return NextResponse.json({ error: "Cross-site request rejected." }, { status: 403 });
   }
 
+  try {
+    const actual = await evaluateBodySize(request, maximum);
+    if (actual === "timed_out") return NextResponse.json({ error: "Request body read timed out." }, { status: 408 });
+    if (actual === "too_large") {
+      return NextResponse.json({ error: "Request body is too large." }, { status: 413 });
+    }
+  } catch {
+    return NextResponse.json({ error: "Could not read request body." }, { status: 400 });
+  }
   return null;
 }
 

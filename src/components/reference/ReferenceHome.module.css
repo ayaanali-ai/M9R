@@ -1,6 +1,9 @@
 @font-face{font-family:StudyArray;src:url('/reference-innerwebs/929333b026c6a5c7.otf')}@font-face{font-family:StudyGaramond;src:url('/reference-innerwebs/a288b9bbf88db8be.woff2')}@font-face{font-family:StudyPixel;src:url('/reference-innerwebs/9f9a5ae37038c539.otf')}@font-face{font-family:StudyMarker;src:url('/reference-innerwebs/permanent-marker-normal-400.woff2')}@font-face{font-family:StudyInstrument;src:url('/reference-innerwebs/instrument-serif-normal-400.woff2');font-style:normal}@font-face{font-family:StudyInstrument;src:url('/reference-innerwebs/instrument-serif-italic-400.woff2');font-style:italic}@font-face{font-family:StudyMicro;src:url('/reference-innerwebs/microgramma-extended-normal-700.woff2');font-weight:700}@font-face{font-family:StudyMicro;src:url('/reference-innerwebs/microgramma-extended-normal-500.woff2');font-weight:500}@font-face{font-family:StudyHaas;src:url('/reference-innerwebs/neue-haas-grotesk-display-normal-600.woff2');font-weight:600}@font-face{font-family:StudyHaas;src:url('/reference-innerwebs/neue-haas-grotesk-display-italic-700.woff2');font-weight:700;font-style:italic}
 
 .study{--nav-progress:0;--teal:0;--black:0;--reveal:1;--exit:0;position:relative;isolation:isolate;overflow:clip;color:#c4b9b3;font-family:StudyGaramond,serif;font-weight:400;line-height:1.5;background:transparent}
+.eyelid{position:absolute;left:34.3%;top:21.5%;width:24%;height:16%;border-radius:50%;background:#2a1710;mix-blend-mode:multiply;filter:blur(2px);transform:scaleY(0);transform-origin:50% 50%;pointer-events:none;will-change:transform;z-index:2}
+.eyelid.blink{animation:blinkMotion 340ms cubic-bezier(.3,.1,.3,1) 1}
+@keyframes blinkMotion{0%{transform:scaleY(0)}30%{transform:scaleY(1)}50%{transform:scaleY(1)}100%{transform:scaleY(0)}}
 .study *{box-sizing:border-box}.study button,.study a{-webkit-tap-highlight-color:transparent}.study button{cursor:pointer}.study a{color:inherit;text-decoration:none}.study img{display:block}.study h1,.study h2,.study p,.study ul{margin:0}.study a:focus-visible,.study button:focus-visible,.photoViewport:focus-visible{outline:2px solid #f3dd9d;outline-offset:6px}.skip{position:fixed;top:-100px;left:40px;z-index:1100;background:#fff;color:#000!important;padding:12px}.skip:focus{top:20px}
 .backdrop{position:fixed;inset:0;z-index:-2;background:radial-gradient(93.49% 118.46% at 100% 100%,#708cff 10%,#29222b 100%)}.teal,.black{position:absolute;inset:0}.teal{background:linear-gradient(159.36deg,teal 44.93%,#001a1a 96.91%);opacity:var(--teal)}.black{background:#000;opacity:var(--black)}
 .crtTop,.crtBottom{position:fixed;left:0;width:100%;height:50dvh;pointer-events:none;z-index:1000}.crtTop{top:0}.crtBottom{bottom:0}.crtTop img,.crtBottom img{width:100%;height:100%;object-fit:fill}
@@ -31,6 +34,9 @@
 .wmItalic{font-family:StudyInstrument,serif;font-style:italic}
 .wmPixel{font-family:StudyPixel,monospace}
 .wmBold{font-family:StudyHaas,sans-serif;font-weight:700;font-style:italic}
+.logoMark{display:block;width:34px;height:42px;flex:none}
+.logoMark img{display:block;width:100%;height:100%;object-fit:contain;filter:grayscale(1) brightness(1.65) contrast(.9) drop-shadow(0 2px 8px rgb(0 0 0/.28))}
+.logoTint{filter:grayscale(1) brightness(1.65) contrast(.9)}
 @media(max-width:700px){.logoText{font-size:34px}.storyLead{font-size:9vw}.wordmarks{width:300vw}}
 
 /* Motion pass: the reference is driven by physical-feeling scroll states, not one entrance animation. */

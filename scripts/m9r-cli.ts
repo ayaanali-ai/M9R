@@ -63,6 +63,7 @@ import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { agentCredentialPath, agentCredentialRoot, migrateLegacyAgentCredentials, protectAgentCredentialFile, readOrCreateTerminalBridgeToken } from "@/lib/native/agent-credential-store";
 import { startProviderUpdateMonitor } from "@/lib/native/provider-update-monitor";
 import { createProviderNeutralUpdateActions, type ProviderConfigRefreshInput } from "@/lib/native/provider-update-route-actions";
+import { reconcileProviderSessions } from "@/lib/native/provider-session-reconciliation";
 import { isAgentContext, isHumanContext } from "@/lib/native/approval-core";
 import { DEFAULT_BROKER_PORT, brokerKeyPath } from "@/lib/native/web-broker-paths";
 import { standaloneWebBrokerRuntime } from "@/lib/native/web-broker-runtime";
@@ -206,6 +207,7 @@ const deps: CliDeps = {
   }),
   listDirectory: (path) => readdir(path),
   installLocalBrokerAutostart: ensureLocalBrokerAutostart,
+  startProviderLifecycle: startNativeProviderLifecycle,
 };
 
 async function withAgentVersionProbeEnv<T>(binary: string, runProbe: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
@@ -249,6 +251,34 @@ async function probeVersion(binary: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Start provider update reconciliation from the watched feed's owner process.
+ * The native command calls this only after acquiring the feed's single-writer
+ * lock, so short-lived or duplicate feed invocations cannot race lifecycle work.
+ */
+function startNativeProviderLifecycle(root: string) {
+  if (process.env.M9R_LOCAL_ONLY === "1" || process.env.M9R_TEST_DISABLE_PROVIDER_UPDATE_MONITOR === "1") return undefined;
+  return startProviderUpdateMonitor({
+    root,
+    probe: probeVersion,
+    actions: createProviderNeutralUpdateActions({
+      env: process.env,
+      execPath: process.execPath,
+      platform: process.platform,
+      refreshProviderConfig: refreshProviderConfigAfterUpdate,
+      reconcileProviderSession: ({ providerId }) => reconcileProviderSessions({
+        root,
+        providerId,
+        env: process.env,
+      }),
+    }),
+    reconcileOnStart: true,
+    onError: (error) => {
+      process.stderr.write(`[provider-update] compatibility cycle deferred: ${error instanceof Error ? error.message : String(error)}\n`);
+    },
+  });
 }
 
 async function probeWebAgentVersion(binary: string): Promise<string | null> {
@@ -852,25 +882,11 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
     },
   });
   let stopPromise: Promise<void> | null = null;
-  const providerUpdateMonitor = localOnly || process.env.M9R_TEST_DISABLE_PROVIDER_UPDATE_MONITOR === "1" ? null : startProviderUpdateMonitor({
-    root: defaultStoreRoot(homedir(), process.env),
-    probe: probeVersion,
-    actions: createProviderNeutralUpdateActions({
-      env: process.env,
-      execPath: process.execPath,
-      platform: process.platform,
-      refreshProviderConfig: refreshProviderConfigAfterUpdate,
-    }),
-    onError: (error) => {
-      process.stderr.write(`[provider-update] compatibility cycle deferred: ${error instanceof Error ? error.message : String(error)}\n`);
-    },
-  });
   const stop = () => {
     stopPromise ??= Promise.all([
       supervisor.stopGracefully().catch((error) => {
         process.stderr.write(`[resident-supervisor] graceful drain failed: ${error instanceof Error ? error.message : String(error)}\n`);
       }),
-      providerUpdateMonitor?.stop(),
     ]).then(() => undefined);
     return stopPromise;
   };
@@ -1500,7 +1516,7 @@ function webMcpRuntime(): { command: string; args: readonly string[] } {
 
 function webOpenCodeHookInvocation(
   runtime: { command: string },
-  event: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" | "OpenCodeExecutionFailed" = "SessionStart",
+  event: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" | "OpenCodeExecutionFailed" | "ProviderTurnEnd" = "SessionStart",
 ): { command: string; args: readonly string[] } {
   const entry = fileURLToPath(import.meta.url);
   const engineName = runtime.command.split(/[\\/]/).pop() ?? "";
@@ -1563,6 +1579,7 @@ async function refreshProviderConfigAfterUpdate(input: ProviderConfigRefreshInpu
         webOpenCodeHookInvocation(runtime, "OpenCodeDelivered"),
         webOpenCodeHookInvocation(runtime, "OpenCodeDeliveryFailed"),
         webOpenCodeHookInvocation(runtime, "OpenCodeExecutionFailed"),
+        webOpenCodeHookInvocation(runtime, "ProviderTurnEnd"),
       );
       const storeRoot = defaultStoreRoot(home, process.env);
       // The native install manifest is authoritative once it exists. The web
@@ -2564,8 +2581,9 @@ async function runWebSetup(args: string[]): Promise<number> {
       const deliveredHook = webOpenCodeHookInvocation(runtime, "OpenCodeDelivered");
       const deliveryFailedHook = webOpenCodeHookInvocation(runtime, "OpenCodeDeliveryFailed");
       const executionFailedHook = webOpenCodeHookInvocation(runtime, "OpenCodeExecutionFailed");
+      const turnEndHook = webOpenCodeHookInvocation(runtime, "ProviderTurnEnd");
       const path = join(openCodePaths.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME);
-      const bytes = Buffer.from(buildOpenCodeIdentityPluginSource(hook, promptHook, pollHook, deliveredHook, deliveryFailedHook, executionFailedHook));
+      const bytes = Buffer.from(buildOpenCodeIdentityPluginSource(hook, promptHook, pollHook, deliveredHook, deliveryFailedHook, executionFailedHook, turnEndHook));
       const current = await readOptional(path);
       openCodePlugin = {
         path,

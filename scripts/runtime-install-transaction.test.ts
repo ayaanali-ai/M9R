@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { hasPendingRuntimeTransaction, installRuntimeTransaction, pruneCommittedRuntimeBackups, recoverRuntimeTransactions } from "@/lib/native/runtime-install-transaction";
+import { hasPendingRuntimeTransaction, installRuntimeTransaction, pruneCompletedRuntimeTransactions, recoverRuntimeTransactions } from "@/lib/native/runtime-install-transaction";
 import { createHash, randomUUID } from "node:crypto";
 
 test("interrupted updates restore verified backups and reject tampering before replacement", () => {
@@ -51,6 +51,48 @@ test("a failed component replacement restores all previous runtime files", () =>
     assert.equal(readFileSync(files[0]!.to, "utf8"), "old-engine");
     assert.equal(readFileSync(files[1]!.to, "utf8"), "old-broker");
     assert.equal(existsSync(files[2]!.to), false);
+    assert.deepEqual(readdirSync(join(home, "runtime-backups")), [], "a verified rollback leaves no stale prior-runtime snapshot");
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("a successful runtime update removes its temporary prior-generation snapshot", () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-runtime-commit-cleanup-"));
+  const bin = join(home, "bin");
+  mkdirSync(bin, { recursive: true });
+  const from = join(home, "source-engine");
+  const to = join(bin, "m9r-engine");
+  writeFileSync(from, "new runtime");
+  writeFileSync(to, "old runtime");
+  const backupRoot = join(home, "runtime-backups");
+  try {
+    installRuntimeTransaction(bin, [{ from, to }], (source, target) => {
+      copyFileSync(source, target);
+      return [];
+    });
+
+    assert.equal(readFileSync(to, "utf8"), "new runtime");
+    assert.deepEqual(readdirSync(backupRoot), [], "no committed old runtime generation remains on disk");
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("completed cleanup verifies nested Windows manifest paths", () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-runtime-nested-cleanup-"));
+  const bin = join(home, "bin");
+  mkdirSync(bin, { recursive: true });
+  const from = join(home, "source-engine");
+  const to = join(bin, "components", "m9r-engine");
+  writeFileSync(from, "new nested runtime");
+  mkdirSync(join(bin, "components"), { recursive: true });
+  writeFileSync(to, "old nested runtime");
+  const backupRoot = join(home, "runtime-backups");
+  try {
+    installRuntimeTransaction(bin, [{ from, to }], (source, target) => {
+      copyFileSync(source, target);
+      return [];
+    });
+
+    assert.equal(readFileSync(to, "utf8"), "new nested runtime");
+    assert.deepEqual(readdirSync(backupRoot), [], "nested committed generations must be pruned after verification");
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -93,12 +135,77 @@ test("retention prunes only old committed snapshots and preserves recovery evide
     const malformed = join(backupRoot, randomUUID());
     mkdirSync(malformed, { recursive: true });
     writeFileSync(join(malformed, "transaction.json"), "not json");
+    const unsafeManifest = makeJournal("committed", bin, 900);
+    writeFileSync(join(unsafeManifest, "transaction.json"), JSON.stringify({
+      status: "committed",
+      targetDir: bin,
+      files: [{ path: "../outside", sha256: "a".repeat(64), existed: false, previousSha256: null }],
+    }));
+    const unexpectedContent = makeJournal("committed", bin, 1_000);
+    writeFileSync(join(unexpectedContent, "owner-data.txt"), "preserve");
 
-    const pruned = pruneCommittedRuntimeBackups(bin, 3);
+    const pruned = pruneCompletedRuntimeTransactions(bin, 3);
 
     assert.deepEqual(pruned.sort(), [old1, old2].sort());
     assert.equal(existsSync(old1), false);
     assert.equal(existsSync(old2), false);
-    for (const retained of [keep1, keep2, keep3, applying, failed, foreign, malformed]) assert.equal(existsSync(retained), true, retained);
+    for (const retained of [keep1, keep2, keep3, applying, failed, foreign, malformed, unsafeManifest, unexpectedContent]) {
+      assert.equal(existsSync(retained), true, retained);
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("default cleanup removes verified rolled-back transactions but preserves failed recovery evidence", () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-runtime-rolled-back-cleanup-"));
+  const bin = join(home, "bin");
+  const backupRoot = join(home, "runtime-backups");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(backupRoot, { recursive: true });
+  const makeJournal = (status: string) => {
+    const transaction = join(backupRoot, randomUUID());
+    mkdirSync(transaction, { recursive: true });
+    writeFileSync(join(transaction, "transaction.json"), JSON.stringify({ status, targetDir: bin, files: [] }));
+    return transaction;
+  };
+  try {
+    const rolledBack = makeJournal("rolled_back");
+    const rollbackFailed = makeJournal("rollback_failed");
+
+    const removed = pruneCompletedRuntimeTransactions(bin);
+
+    assert.deepEqual(removed, [rolledBack]);
+    assert.equal(existsSync(rolledBack), false);
+    assert.equal(existsSync(rollbackFailed), true);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("completed cleanup preserves snapshot data that is not in the transaction manifest", () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-runtime-unexpected-snapshot-data-"));
+  const bin = join(home, "bin");
+  const backupRoot = join(home, "runtime-backups");
+  const transaction = join(backupRoot, randomUUID());
+  const previous = join(transaction, "previous");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(previous, { recursive: true });
+  const expectedPrevious = join(previous, "engine");
+  const ownerData = join(previous, "owner-notes.txt");
+  writeFileSync(expectedPrevious, "previous engine bytes");
+  writeFileSync(ownerData, "preserve unrelated data");
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+  writeFileSync(join(transaction, "transaction.json"), JSON.stringify({
+    status: "committed",
+    targetDir: bin,
+    files: [{
+      path: "engine",
+      sha256: hash("current engine bytes"),
+      existed: true,
+      previousSha256: hash("previous engine bytes"),
+    }],
+  }));
+
+  try {
+    assert.deepEqual(pruneCompletedRuntimeTransactions(bin), []);
+    assert.equal(readFileSync(expectedPrevious, "utf8"), "previous engine bytes");
+    assert.equal(readFileSync(ownerData, "utf8"), "preserve unrelated data");
   } finally { rmSync(home, { recursive: true, force: true }); }
 });

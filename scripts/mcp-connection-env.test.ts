@@ -38,5 +38,10 @@ test("the top-level supervisor recovers provider claims by exact parent PID, whi
     "a worker must not infer ownership from its own supervisor parent",
   );
   assert.deepEqual(readM9rMcpConnectionConfig({ M9R_CONNECTION_BINDING_ID: "binding-1" }, 5151), { bindingId: "binding-1" });
+  assert.deepEqual(
+    readM9rMcpConnectionConfig({ M9R_PROVIDER: "codex", M9R_CONNECTION_BINDING_ID: "legacy-binding" }, 5151),
+    { provider: "codex", bindingId: "legacy-binding", processId: 5151 },
+    "a legacy binding id must not hide the provider process needed for active-turn resolution",
+  );
   assert.deepEqual(readM9rMcpConnectionConfig({ M9R_SESSION_ID: "session-2" }, 5151), { processId: 5151, sessionId: "session-2" });
 });

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import test from "node:test";
 import { createLocalStore } from "@/lib/native/local-store";
-import { CONNECTION_CLAIM_TTL_MS, newConnectionId, usableConnectionClaim } from "@/lib/native/mcp-connection-core";
+import { CONNECTION_CLAIM_TTL_MS, PROVIDER_TURN_TTL_MS, newConnectionId, sameConnectionCwd, usableConnectionClaim } from "@/lib/native/mcp-connection-core";
 import { createM9rMcpServer } from "@/lib/native/mcp-server";
 import { handleHookEvent } from "@/lib/native/hook-handler";
 
@@ -118,7 +118,7 @@ test("process discovery fails closed when two sessions share one provider proces
   } finally { done(); }
 });
 
-test("a provider continuation reuses the existing claim and binding for the same process", () => {
+test("a new logical session sharing a provider process keeps its own identity and binding", () => {
   const { store, done } = tempStore(undefined, () => true);
   try {
     store.issueIdentity("claude", "claude-code", "session-old");
@@ -133,25 +133,172 @@ test("a provider continuation reuses the existing claim and binding for the same
     assert.ok(oldBinding);
 
     store.issueIdentity("claude", "claude-code", "session-new");
-    const continuationInput = {
+    const nextSessionInput = {
       handle: "claude",
       provider: "claude-code",
       sessionId: "session-new",
       cwd: "C:/work",
       ownerProcessId: 4242,
-      continuation: true,
     };
-    const newClaim = store.issueConnectionClaim(continuationInput as Parameters<typeof store.issueConnectionClaim>[0]);
+    const newClaim = store.issueConnectionClaim(nextSessionInput);
 
     const claims = persistedClaims(store.root);
-    assert.deepEqual(claims.map((claim) => claim.sessionId), ["session-new"]);
-    assert.equal(newClaim.bindingId, oldBinding!.bindingId);
+    assert.deepEqual(claims.map((claim) => claim.sessionId), ["session-old", "session-new"]);
+    assert.notEqual(newClaim.claimId, oldClaim.claimId, "a shared host PID must not merge distinct provider conversation identities");
+    assert.equal(newClaim.bindingId, undefined);
     assert.deepEqual(store.verifyConnectionBinding(oldBinding!.bindingId), {
       handle: "claude",
       provider: "claude-code",
-      sessionId: "session-new",
+      sessionId: "session-old",
     });
-    assert.equal(store.identityTokenFor("claude", "session-old"), null, "the superseded session identity is retired");
+    assert.ok(store.identityTokenFor("claude", "session-old"), "publishing a second session must not revoke the first session");
+    assert.ok(store.identityTokenFor("claude", "session-new"));
+  } finally { done(); }
+});
+
+test("active-turn binding selects the exact prompted session when several sessions share one provider process", () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    for (const sessionId of ["session-a", "session-b"]) {
+      store.issueIdentity("codex", "codex", sessionId);
+      store.issueConnectionClaim({ handle: "codex", provider: "codex", sessionId, cwd: "C:/work", ownerProcessId: 5151 });
+    }
+
+    assert.equal(store.bindConnectionForProcess({ provider: "codex", processId: 5151 }), null,
+      "process-only discovery remains fail-closed when the host owns multiple sessions");
+    assert.equal(store.beginProviderTurn({ provider: "codex", sessionId: "session-b", cwd: "C:/work", processId: 5151 }), true);
+
+    const resolution = store.bindActiveProviderTurn({ provider: "codex", processId: 5151 });
+    assert.equal(resolution.status, "resolved");
+    assert.equal(resolution.binding?.sessionId, "session-b");
+    assert.equal(store.verifyConnectionBinding(resolution.binding!.bindingId)?.sessionId, "session-b");
+    assert.deepEqual(persistedClaims(store.root).map((claim) => claim.sessionId), ["session-a", "session-b"],
+      "selecting the active turn must not delete or rewrite the other session's claim");
+  } finally { done(); }
+});
+
+test("project-folder binding selects the exact provider connection before shared-PID evidence", () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    for (const [sessionId, cwd] of [["session-a", "C:/project-a"], ["session-b", "C:/project-b"]] as const) {
+      store.issueIdentity("claude", "claude-code", sessionId);
+      store.issueConnectionClaim({ handle: "claude", provider: "claude-code", sessionId, cwd, ownerProcessId: 8181 });
+    }
+
+    const binding = store.bindConnectionForProcess({ provider: "claude-code", processId: 8181, cwd: "c:\\project-b\\" });
+    assert.equal(binding?.sessionId, "session-b");
+    assert.equal(sameConnectionCwd(binding?.cwd, "c:\\project-b\\"), true);
+  } finally { done(); }
+});
+
+test("overlapping provider turns on one host fail closed, and Stop releases only its exact turn", () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    for (const sessionId of ["session-a", "session-b"]) {
+      store.issueIdentity("codex", "codex", sessionId);
+      store.issueConnectionClaim({ handle: "codex", provider: "codex", sessionId, cwd: "C:/work", ownerProcessId: 6161 });
+    }
+
+    store.beginProviderTurn({ provider: "codex", sessionId: "session-a", cwd: "C:/work", processId: 6161 });
+    store.beginProviderTurn({ provider: "codex", sessionId: "session-b", cwd: "C:/work", processId: 6161 });
+    assert.equal(store.bindActiveProviderTurn({ provider: "codex", processId: 6161 }).status, "ambiguous");
+
+    store.endProviderTurn({ provider: "codex", sessionId: "session-a", processId: 6161 });
+    const resolution = store.bindActiveProviderTurn({ provider: "codex", processId: 6161 });
+    assert.equal(resolution.status, "resolved");
+    assert.equal(resolution.binding?.sessionId, "session-b");
+  } finally { done(); }
+});
+
+test("a delayed Codex Stop or Interrupt cannot close a newer turn in the same session", () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    store.issueIdentity("codex", "codex", "session-one");
+    store.issueConnectionClaim({ handle: "codex", provider: "codex", sessionId: "session-one", ownerProcessId: 6171 });
+    assert.equal(store.beginProviderTurn({ provider: "codex", sessionId: "session-one", turnId: "turn-old", processId: 6171 }), true);
+    assert.equal(store.beginProviderTurn({ provider: "codex", sessionId: "session-one", turnId: "turn-current", processId: 6171 }), true);
+
+    store.endProviderTurn({ provider: "codex", sessionId: "session-one", turnId: "turn-old", processId: 6171 });
+    const stillCurrent = store.bindActiveProviderTurn({ provider: "codex", processId: 6171 });
+    assert.equal(stillCurrent.status, "resolved");
+    assert.equal(stillCurrent.status === "resolved" ? stillCurrent.binding.sessionId : null, "session-one");
+
+    store.endProviderTurn({ provider: "codex", sessionId: "session-one", turnId: "turn-current", processId: 6171 });
+    assert.equal(store.bindActiveProviderTurn({ provider: "codex", processId: 6171 }).status, "none");
+  } finally { done(); }
+});
+
+test("an abandoned provider turn expires without revoking its durable session identity", () => {
+  let current = new Date("2026-10-15T18:00:00.000Z");
+  const { store, done } = tempStore(() => current, () => true);
+  try {
+    store.issueIdentity("codex", "codex", "session-a");
+    store.issueConnectionClaim({ handle: "codex", provider: "codex", sessionId: "session-a", ownerProcessId: 6262 });
+    assert.equal(store.beginProviderTurn({ provider: "codex", sessionId: "session-a", processId: 6262 }), true);
+    current = new Date(current.getTime() + PROVIDER_TURN_TTL_MS + 1);
+    assert.equal(store.bindActiveProviderTurn({ provider: "codex", processId: 6262 }).status, "none");
+    assert.ok(store.identityTokenFor("codex", "session-a"), "turn expiry is not session revocation");
+  } finally { done(); }
+});
+
+test("an explicit provider session selector binds only that session when the host owns several", async () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    for (const sessionId of ["session-a", "session-b"]) {
+      store.issueIdentity("codex", "codex", sessionId);
+      store.issueConnectionClaim({ handle: "codex", provider: "codex", sessionId, ownerProcessId: 7272 });
+    }
+    const server = createM9rMcpServer({
+      store,
+      connectionProvider: "codex",
+      connectionProcessId: 7272,
+      connectionSessionId: "session-b",
+      connectionWaitMs: 0,
+    });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+    const result = await tools.m9r_whoami.handler({});
+    assert.equal(result.content[0]!.text, "You are @codex (codex).");
+    const claims = persistedClaims(store.root);
+    assert.equal(claims.find((claim) => claim.sessionId === "session-b")?.bindingId !== undefined, true);
+    assert.equal(claims.find((claim) => claim.sessionId === "session-a")?.bindingId, undefined);
+  } finally { done(); }
+});
+
+test("one already-running MCP process follows successive exact provider turns instead of caching the first session", async () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    let firstClaim: ReturnType<typeof store.issueConnectionClaim> | undefined;
+    for (const sessionId of ["session-a", "session-b"]) {
+      store.issueIdentity("codex", "codex", sessionId);
+      const claim = store.issueConnectionClaim({ handle: "codex", provider: "codex", sessionId, cwd: "C:/work", ownerProcessId: 7171 });
+      if (sessionId === "session-a") firstClaim = claim;
+    }
+    assert.ok(firstClaim);
+    const staleLaunchBinding = store.bindConnectionClaim(firstClaim!.claimId, { provider: "codex", processId: 7171 });
+    assert.ok(staleLaunchBinding);
+    const server = createM9rMcpServer({
+      store,
+      connectionProvider: "codex",
+      connectionProcessId: 7171,
+      connectionBindingId: staleLaunchBinding!.bindingId,
+      connectionWaitMs: 0,
+    });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+
+    store.beginProviderTurn({ provider: "codex", sessionId: "session-a", cwd: "C:/work", processId: 7171 });
+    const first = await tools.m9r_whoami.handler({});
+    assert.equal(first.content[0]!.text, "You are @codex (codex).");
+    const firstBinding = store.bindActiveProviderTurn({ provider: "codex", processId: 7171 });
+    assert.equal(firstBinding.status, "resolved");
+    assert.equal(firstBinding.status === "resolved" ? firstBinding.binding.sessionId : null, "session-a");
+
+    store.endProviderTurn({ provider: "codex", sessionId: "session-a", processId: 7171 });
+    store.beginProviderTurn({ provider: "codex", sessionId: "session-b", cwd: "C:/work", processId: 7171 });
+    await tools.m9r_whoami.handler({});
+    const secondBinding = store.bindActiveProviderTurn({ provider: "codex", processId: 7171 });
+    assert.equal(secondBinding.status, "resolved");
+    assert.equal(secondBinding.status === "resolved" ? secondBinding.binding.sessionId : null, "session-b",
+      "the shared MCP process must resolve the active conversation afresh on every tool call");
   } finally { done(); }
 });
 
@@ -286,6 +433,102 @@ test("a provider that starts MCP before its hook binds later without guessing", 
   } finally { done(); }
 });
 
+test("an existing provider MCP connection reconciles its exact live host session when hooks did not publish a claim", async () => {
+  const { store, done } = tempStore();
+  try {
+    let reconciliationCalls = 0;
+    const deps = {
+      store,
+      connectionProvider: "codex",
+      connectionProcessId: 4547,
+      connectionCwd: "C:/repo",
+      reconcileProviderConnection: async (input: { provider: string; processId?: number; sessionId?: string; cwd?: string }) => {
+        reconciliationCalls += 1;
+        assert.deepEqual(input, { provider: "codex", processId: 4547, cwd: "C:/repo" });
+        // Test adapter: the production observer must supply this exact live
+        // session/PID pair before the store is allowed to create a binding.
+        store.reconcileLiveProviderConnection({
+          provider: input.provider,
+          sessionId: "current-provider-session",
+          processId: input.processId,
+          cwd: input.cwd,
+        });
+        return { healthy: true, detail: "live session matched the exact host process" };
+      },
+    };
+    const server = createM9rMcpServer(deps as Parameters<typeof createM9rMcpServer>[0]);
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+
+    const result = await tools.m9r_whoami.handler({});
+
+    assert.equal(result.content[0]!.text, "You are @codex (codex).");
+    assert.equal(reconciliationCalls, 1, "one failed direct lookup triggers one live-session reconciliation");
+    assert.deepEqual(persistedClaims(store.root).map((claim) => claim.sessionId), ["current-provider-session"]);
+    assert.equal(persistedClaims(store.root)[0]?.ownerProcessId, 4547);
+  } finally { done(); }
+});
+
+test("an exact live-session result resolves the current turn when process-wide claims are ambiguous", async () => {
+  const { store, done } = tempStore();
+  try {
+    const processId = 4548;
+    for (const sessionId of ["inactive-sibling", "current-provider-session"]) {
+      store.registerEndpoint({ provider: "codex", sessionId, cwd: "C:/repo" });
+      store.issueIdentity("codex", "codex", sessionId);
+      const claim = store.issueConnectionClaim({
+        handle: "codex",
+        provider: "codex",
+        sessionId,
+        cwd: "C:/repo",
+        ownerProcessId: processId,
+      });
+      assert.ok(store.bindConnectionClaim(claim.claimId, { provider: "codex", processId }));
+    }
+
+    const exactBinding = store.reconcileLiveProviderConnection({
+      provider: "codex",
+      sessionId: "current-provider-session",
+      cwd: "C:/repo",
+      processId,
+    });
+    assert.ok(exactBinding);
+    const bindByProcess = store.bindConnectionForProcess.bind(store);
+    store.bindConnectionForProcess = (expected) => expected.provider === "codex" && expected.processId === processId
+      ? null
+      : bindByProcess(expected);
+    store.recoverProviderConnection = () => null;
+    const verifiedSessions: string[] = [];
+    const verify = store.verifyConnectionBinding.bind(store);
+    store.verifyConnectionBinding = (bindingId) => {
+      const identity = verify(bindingId);
+      if (identity) verifiedSessions.push(identity.sessionId);
+      return identity;
+    };
+
+    let reconciliationCalls = 0;
+    const server = createM9rMcpServer({
+      store,
+      connectionProvider: "codex",
+      connectionProcessId: processId,
+      connectionCwd: "C:/repo",
+      connectionWaitMs: 0,
+      reconcileProviderConnection: async () => {
+        reconciliationCalls += 1;
+        return { healthy: true, detail: "exact live Codex session and owning process verified", binding: exactBinding! };
+      },
+    } as unknown as Parameters<typeof createM9rMcpServer>[0]);
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+
+    const result = await tools.m9r_whoami.handler({});
+
+    assert.equal(result.content[0]!.text, "You are @codex (codex).");
+    assert.equal(reconciliationCalls, 1);
+    assert.ok(verifiedSessions.includes("current-provider-session"),
+      "MCP must use the exact binding returned by the provider observer, not rerun an ambiguous process-only lookup");
+    assert.equal(persistedClaims(store.root).length, 2, "resolving the exact session must preserve the sibling session claim");
+  } finally { done(); }
+});
+
 test("a delayed provider binding wait does not block unrelated local work", async () => {
   const { store, done } = tempStore();
   try {
@@ -401,6 +644,36 @@ test("a live provider adapter rebinds the same durable session after a long outa
       handle: "opencode",
       provider: "opencode",
       sessionId: "same-session",
+    });
+  } finally { done(); }
+});
+
+test("live provider reconciliation binds each exact session instead of returning another session's provider-wide binding", () => {
+  const { store, done } = tempStore();
+  try {
+    const first = store.reconcileLiveProviderConnection({
+      provider: "opencode",
+      sessionId: "session-a",
+      cwd: "C:/work",
+    });
+    assert.equal(first?.sessionId, "session-a");
+
+    const second = store.reconcileLiveProviderConnection({
+      provider: "opencode",
+      sessionId: "session-b",
+      cwd: "C:/work",
+    });
+
+    assert.equal(second?.sessionId, "session-b", "an exact live session observation must never resolve through another session's provider-wide binding");
+    assert.deepEqual(store.verifyConnectionBinding(first!.bindingId), {
+      handle: "opencode",
+      provider: "opencode",
+      sessionId: "session-a",
+    });
+    assert.deepEqual(store.verifyConnectionBinding(second!.bindingId), {
+      handle: "opencode",
+      provider: "opencode",
+      sessionId: "session-b",
     });
   } finally { done(); }
 });
@@ -632,6 +905,30 @@ test("the first provider tool call waits for a SessionStart claim published afte
   } finally { done(); }
 });
 
+test("trusted provider prompt hooks select their exact session and Stop clears only that turn", () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    const context = { provider: "codex", store, providerProcessId: 8181 };
+    for (const sessionId of ["session-a", "session-b"]) {
+      handleHookEvent({ hook_event_name: "SessionStart", session_id: sessionId, cwd: "C:/work" }, context);
+    }
+
+    handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "session-b", cwd: "C:/work", prompt: "continue" }, context);
+    let resolution = store.bindActiveProviderTurn({ provider: "codex", processId: 8181 });
+    assert.equal(resolution.status, "resolved");
+    assert.equal(resolution.binding?.sessionId, "session-b");
+
+    handleHookEvent({ hook_event_name: "Stop", session_id: "session-b" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "codex", processId: 8181 }).status, "none");
+
+    handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "session-a", cwd: "C:/work", prompt: "next turn" }, context);
+    resolution = store.bindActiveProviderTurn({ provider: "codex", processId: 8181 });
+    assert.equal(resolution.status, "resolved");
+    assert.equal(resolution.binding?.sessionId, "session-a");
+    assert.ok(store.identityTokenFor("codex", "session-b"), "finishing a turn must not revoke the provider session identity");
+  } finally { done(); }
+});
+
 test("managed SessionStart creates a private claim and keeps credentials out of the provider card", async () => {
   const { store, done } = tempStore();
   try {
@@ -653,5 +950,237 @@ test("managed SessionStart creates a private claim and keeps credentials out of 
     const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
     const result = await tools.m9r_whoami.handler({});
     assert.equal(result.content[0]!.text, "You are @codex (codex).");
+  } finally { done(); }
+});
+
+test("an exact in-flight task receipt resolves Codex binding when its shared process owns several sessions", async () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    const processId = 9811;
+    const sessions = ["sibling-session", "task-session"];
+    for (const sessionId of sessions) {
+      store.registerEndpoint({ provider: "codex", sessionId, cwd: "C:/repo" });
+      store.issueIdentity("codex", "codex", sessionId);
+      const claim = store.issueConnectionClaim({ handle: "codex", provider: "codex", sessionId, cwd: "C:/repo", ownerProcessId: processId });
+      assert.ok(store.bindConnectionClaim(claim.claimId, { provider: "codex", processId }));
+    }
+    const task = store.addTask({
+      from: "you", to: "codex", goal: "the task addressed to this exact Codex turn", origin: "human_typed",
+      idempotencyKey: "exact-task-binding",
+    }).task;
+    store.setDelivery(task.id, { state: "sending", threadId: "task-session" });
+
+    const bindingSelectors: Array<{ provider?: string; processId?: number; sessionId?: string }> = [];
+    const bind = store.bindConnectionForProcess.bind(store);
+    store.bindConnectionForProcess = (expected) => {
+      bindingSelectors.push(expected);
+      return bind(expected);
+    };
+    const verifiedSessions: string[] = [];
+    const verify = store.verifyConnectionBinding.bind(store);
+    store.verifyConnectionBinding = (bindingId) => {
+      const identity = verify(bindingId);
+      if (identity) verifiedSessions.push(identity.sessionId);
+      return identity;
+    };
+    const server = createM9rMcpServer({ store, connectionProcessId: processId, connectionProvider: "codex", connectionWaitMs: 0, now: () => new Date("2026-10-15T18:00:00.000Z") });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+
+    const result = await tools.m9r_whoami.handler({});
+
+    assert.equal(result.content[0]!.text, "You are @codex (codex).");
+    assert.ok(bindingSelectors.some((selector) => selector.sessionId === "task-session"), "MCP must pass the delivered task's exact session selector to the store");
+    assert.ok(verifiedSessions.includes("task-session"), "the binding must verify the exact session recorded on the delivered task");
+    assert.equal(verifiedSessions.includes("sibling-session"), false, "the sibling session must never be selected by recency or process order");
+  } finally { done(); }
+});
+
+test("different in-flight task sessions remain fail-closed when they share a provider process", async () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    const processId = 9812;
+    for (const sessionId of ["task-session-a", "task-session-b"]) {
+      store.registerEndpoint({ provider: "codex", sessionId, cwd: "C:/repo" });
+      store.issueIdentity("codex", "codex", sessionId);
+      const claim = store.issueConnectionClaim({ handle: "codex", provider: "codex", sessionId, cwd: "C:/repo", ownerProcessId: processId });
+      assert.ok(store.bindConnectionClaim(claim.claimId, { provider: "codex", processId }));
+      const task = store.addTask({
+        from: "you", to: "codex", goal: `task for ${sessionId}`, origin: "human_typed",
+        idempotencyKey: `ambiguous-${sessionId}`,
+      }).task;
+      store.setDelivery(task.id, { state: "queued", threadId: sessionId, queuedAt: new Date().toISOString() });
+    }
+
+    const bindingSelectors: Array<{ provider?: string; processId?: number; sessionId?: string }> = [];
+    const bind = store.bindConnectionForProcess.bind(store);
+    store.bindConnectionForProcess = (expected) => {
+      bindingSelectors.push(expected);
+      return bind(expected);
+    };
+    let reconciliationCalls = 0;
+    const server = createM9rMcpServer({
+      store,
+      connectionProcessId: processId,
+      connectionProvider: "codex",
+      connectionWaitMs: 0,
+      now: () => new Date("2026-10-15T18:00:00.000Z"),
+      reconcileProviderConnection: async () => {
+        reconciliationCalls += 1;
+        return { healthy: true, detail: "must not run for ambiguous task receipts" };
+      },
+    });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+
+    await assert.rejects(() => tools.m9r_whoami.handler({}), /multiple.*sessions|ambiguous/i);
+    assert.equal(bindingSelectors.some((selector) => selector.sessionId), false, "M9R must not guess between different task-bound sessions");
+    assert.equal(reconciliationCalls, 0, "a process-only live observer must not bypass task-session ambiguity");
+  } finally { done(); }
+});
+
+test("Codex tool-call thread metadata binds each call to its exact session in a shared process", async () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    const processId = 9814;
+    const sessions = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
+    for (const sessionId of sessions) {
+      store.registerEndpoint({ provider: "codex", sessionId, cwd: "C:/repo" });
+      store.issueIdentity("codex", "codex", sessionId);
+      const claim = store.issueConnectionClaim({ handle: "codex", provider: "codex", sessionId, cwd: "C:/repo", ownerProcessId: processId });
+      assert.ok(store.bindConnectionClaim(claim.claimId, { provider: "codex", processId }));
+    }
+
+    const selected: string[] = [];
+    const bind = store.bindConnectionForProcess.bind(store);
+    store.bindConnectionForProcess = (expected) => {
+      if (expected.sessionId) selected.push(expected.sessionId);
+      return bind(expected);
+    };
+    const server = createM9rMcpServer({ store, connectionProcessId: processId, connectionProvider: "codex", connectionWaitMs: 0 });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown, extra?: { _meta?: Record<string, unknown> }) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+
+    for (const sessionId of sessions) {
+      const result = await tools.m9r_whoami.handler({}, { _meta: { threadId: sessionId } });
+      assert.equal(result.content[0]!.text, "You are @codex (codex).");
+    }
+
+    assert.deepEqual(selected, sessions, "each call must use its host-provided thread id, not a process-wide cached session");
+  } finally { done(); }
+});
+
+test("invalid or unknown Codex thread metadata never falls back to another process session", async () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    const processId = 9815;
+    const knownSession = "33333333-3333-4333-8333-333333333333";
+    store.registerEndpoint({ provider: "codex", sessionId: knownSession, cwd: "C:/repo" });
+    store.issueIdentity("codex", "codex", knownSession);
+    const claim = store.issueConnectionClaim({ handle: "codex", provider: "codex", sessionId: knownSession, cwd: "C:/repo", ownerProcessId: processId });
+    assert.ok(store.bindConnectionClaim(claim.claimId, { provider: "codex", processId }));
+
+    const selected: string[] = [];
+    const bind = store.bindConnectionForProcess.bind(store);
+    store.bindConnectionForProcess = (expected) => {
+      if (expected.sessionId) selected.push(expected.sessionId);
+      return bind(expected);
+    };
+    const server = createM9rMcpServer({ store, connectionProcessId: processId, connectionProvider: "codex", connectionWaitMs: 0 });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown, extra?: { _meta?: Record<string, unknown> }) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+
+    await assert.rejects(
+      () => tools.m9r_whoami.handler({}, { _meta: { threadId: "not-a-codex-thread" } }),
+      /invalid Codex thread selector/i,
+    );
+    await assert.rejects(
+      () => tools.m9r_whoami.handler({}, { _meta: { threadId: "44444444-4444-4444-8444-444444444444" } }),
+      /exact tool-call session|exact process/i,
+    );
+    assert.equal(selected.includes(knownSession), false, "invalid or unowned metadata must not bind a known sibling session");
+  } finally { done(); }
+});
+
+test("simultaneous Codex calls reconcile independently by their exact thread metadata", async () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    const processId = 9816;
+    const sessions = ["55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"];
+    for (const sessionId of sessions) {
+      store.registerEndpoint({ provider: "codex", sessionId, cwd: "C:/repo" });
+      store.issueIdentity("codex", "codex", sessionId);
+    }
+
+    const reconciled: string[] = [];
+    const server = createM9rMcpServer({
+      store,
+      connectionProcessId: processId,
+      connectionProvider: "codex",
+      connectionCwd: "C:/repo",
+      connectionWaitMs: 0,
+      reconcileProviderConnection: async (input) => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        if (input.sessionId) reconciled.push(input.sessionId);
+        const binding = input.sessionId
+          ? store.reconcileLiveProviderConnection({ provider: input.provider, sessionId: input.sessionId, cwd: input.cwd, processId: input.processId })
+          : null;
+        return { healthy: Boolean(binding), detail: "exact-session test observation", ...(binding ? { binding } : {}) };
+      },
+    });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown, extra?: { _meta?: Record<string, unknown> }) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+
+    const results = await Promise.all(sessions.map((sessionId) =>
+      tools.m9r_whoami.handler({}, { _meta: { threadId: sessionId } }),
+    ));
+
+    assert.deepEqual(results.map((result) => result.content[0]!.text), ["You are @codex (codex).", "You are @codex (codex)."]);
+    assert.deepEqual(reconciled.sort(), [...sessions].sort(), "each concurrent call must reconcile its own exact thread");
+    for (const sessionId of sessions) assert.ok(store.bindConnectionForProcess({ provider: "codex", processId, sessionId }));
+  } finally { done(); }
+});
+
+test("live reconciliation follows the exact delivered task session and refreshes when that session changes", async () => {
+  const { store, done } = tempStore(undefined, () => true);
+  try {
+    const processId = 9813;
+    for (const sessionId of ["task-session-a", "task-session-b"]) {
+      store.registerEndpoint({ provider: "codex", sessionId, cwd: "C:/repo" });
+      store.issueIdentity("codex", "codex", sessionId);
+    }
+
+    const firstTask = store.addTask({
+      from: "you", to: "codex", goal: "deliver to session A", origin: "human_typed", idempotencyKey: "observer-session-a",
+    }).task;
+    store.setDelivery(firstTask.id, { state: "queued", threadId: "task-session-a" });
+    const observed: string[] = [];
+    const server = createM9rMcpServer({
+      store,
+      connectionProcessId: processId,
+      connectionProvider: "codex",
+      connectionCwd: "C:/repo",
+      connectionWaitMs: 0,
+      now: () => new Date("2026-10-15T18:00:00.000Z"),
+      reconcileProviderConnection: async (input) => {
+        observed.push(input.sessionId!);
+        const binding = store.reconcileLiveProviderConnection({
+          provider: input.provider,
+          sessionId: input.sessionId!,
+          cwd: input.cwd,
+          processId: input.processId,
+        });
+        return { healthy: Boolean(binding), detail: "observed the exact task session", ...(binding ? { binding } : {}) };
+      },
+    });
+    const tools = (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ text: string }> }> }> })._registeredTools;
+
+    const first = await tools.m9r_whoami.handler({});
+    assert.equal(first.content[0]!.text, "You are @codex (codex).");
+    store.setDelivery(firstTask.id, { state: "done", threadId: "task-session-a" });
+    const secondTask = store.addTask({
+      from: "you", to: "codex", goal: "deliver to session B", origin: "human_typed", idempotencyKey: "observer-session-b",
+    }).task;
+    store.setDelivery(secondTask.id, { state: "queued", threadId: "task-session-b" });
+
+    const second = await tools.m9r_whoami.handler({});
+
+    assert.equal(second.content[0]!.text, "You are @codex (codex).");
+    assert.deepEqual(observed, ["task-session-a", "task-session-b"], "a cached observer result for an older session must not be reused for a new task");
   } finally { done(); }
 });

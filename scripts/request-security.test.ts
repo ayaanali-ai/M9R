@@ -1,6 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateContentLength, isCrossSiteWrite } from "@/lib/request-security-core";
+import { apiBodyLimit, evaluateContentLength, isCrossSiteWrite, evaluateBodySize } from "@/lib/request-security-core";
+
+test("body limits count actual bytes without trusting Content-Length and preserve the original body", async () => {
+  const request = new Request("https://example.test/api/test", { method: "POST", body: "éé" });
+  assert.equal(await evaluateBodySize(request, 3), "too_large");
+  const accepted = new Request("https://example.test", { method: "POST", body: "abcd" });
+  assert.equal(await evaluateBodySize(accepted, 4), "ok");
+  assert.equal(await accepted.text(), "abcd");
+});
+
+test("streamed bodies stop at the byte budget and cancel the producer", async () => {
+  let chunks = 0;
+  let cancelled = false;
+  const stream = new ReadableStream({ pull(controller) { chunks++; controller.enqueue(new Uint8Array(1024)); }, cancel() { cancelled = true; } });
+  const request = new Request("https://example.test/api/test", { method: "POST", body: stream, duplex: "half" } as RequestInit);
+  assert.equal(await evaluateBodySize(request, 2048), "too_large");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(chunks <= 6, `read ${chunks} chunks beyond limit`);
+  assert.equal(cancelled, true);
+});
+
+test("a stalled upload has a total deadline", async () => {
+  const request = new Request("https://example.test/api/test", { method: "POST", body: new ReadableStream({}) , duplex: "half" } as RequestInit);
+  assert.equal(await evaluateBodySize(request, 2048, 10), "timed_out");
+});
+
+test("attachment upload allowance stays bounded and other routes retain their default", () => {
+  assert.equal(apiBodyLimit("/api/dashboard/conversations/room/attachments", 4 * 1024 * 1024), 26 * 1024 * 1024);
+  assert.equal(apiBodyLimit("/api/traces/upload", 4 * 1024 * 1024), 4 * 1024 * 1024);
+  assert.equal(apiBodyLimit("/api/messages", Number.MAX_SAFE_INTEGER), 32 * 1024 * 1024);
+});
 
 test("API guard classifies malformed and oversized body lengths", () => {
   assert.equal(evaluateContentLength(null, 100), "ok");

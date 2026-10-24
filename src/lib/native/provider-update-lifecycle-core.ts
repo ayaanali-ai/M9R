@@ -16,8 +16,7 @@ export type ProviderUpdateStatus = "healthy" | "reconciling" | "waiting";
 
 export interface ProviderUpdateRecord {
   providerId: string;
-  /** "healthy" means the compatibility observation and M9R-owned route were accepted;
-   * live provider-task acceptance remains a separate end-to-end gate. */
+  /** "healthy" means a provider-specific observer rebound at least one exact live session. */
   status: ProviderUpdateStatus;
   lastGoodObservation: ProviderRuntimeObservation | null;
   pendingObservation: ProviderRuntimeObservation | null;
@@ -62,6 +61,8 @@ export interface ReconcileProviderUpdateInput {
   providerId: string;
   current: ProviderRuntimeObservation | null;
   nowMs: number;
+  /** Refresh M9R-owned config once after the resident runtime starts, even if the provider version is unchanged. */
+  reconcileUnchanged?: boolean;
   actions?: ProviderUpdateActions;
   persist?: (state: ProviderUpdateState) => Promise<void> | void;
 }
@@ -233,7 +234,31 @@ export async function reconcileProviderUpdate(input: ReconcileProviderUpdateInpu
   // actions, so it must initialize the provider route before declaring it
   // healthy; otherwise a newly observed provider could remain on stale
   // configuration while durable state claimed success.
-  if (comparison.kind === "unchanged" || (comparison.kind === "first_seen" && (!input.actions?.refreshAdapter || !input.actions.reconnect))) {
+  if (comparison.kind === "unchanged") {
+    const shouldReconcileSession = Boolean(input.actions?.reconnect) || input.reconcileUnchanged || record.status !== "healthy";
+    if (shouldReconcileSession && current) {
+      record.status = "reconciling";
+      record.pendingObservation = cloneObservation(current);
+      record.lastError = null;
+      state.providers[providerId] = record;
+      await persist(input, state);
+      try {
+        if (input.reconcileUnchanged && input.actions?.refreshAdapter) {
+          await input.actions.refreshAdapter({ providerId, previous: cloneObservation(record.lastGoodObservation), current, comparison, plan });
+        }
+        if (!input.actions?.reconnect) throw new Error("provider-session reconciler is not configured");
+        const health = await input.actions.reconnect({ providerId, previous: cloneObservation(record.lastGoodObservation), current });
+        if (!health.healthy) throw new Error(health.detail || "no live provider session was rebound");
+      } catch (error) {
+        record.status = "waiting";
+        record.failureCount += 1;
+        record.lastError = boundedError(error);
+        record.retirementPending = false;
+        state.providers[providerId] = record;
+        await persist(input, state);
+        return { state, status: "waiting", plan, comparison, error: record.lastError };
+      }
+    }
     record.status = "healthy";
     record.lastGoodObservation = cloneObservation(current);
     record.pendingObservation = null;
@@ -245,6 +270,17 @@ export async function reconcileProviderUpdate(input: ReconcileProviderUpdateInpu
     return { state, status: "healthy", plan, comparison };
   }
 
+  if (comparison.kind === "first_seen" && !input.actions?.reconnect) {
+    record.status = "waiting";
+    record.pendingObservation = cloneObservation(current);
+    record.failureCount += 1;
+    record.lastError = "provider-session reconciler is not configured; runtime presence is not session connectivity";
+    record.retirementPending = false;
+    state.providers[providerId] = record;
+    await persist(input, state);
+    return { state, status: "waiting", plan, comparison, error: record.lastError };
+  }
+
   const previous = record.lastGoodObservation;
   if (!current) throw new Error("provider update candidate is missing");
   record.status = "reconciling";
@@ -254,12 +290,12 @@ export async function reconcileProviderUpdate(input: ReconcileProviderUpdateInpu
   await persist(input, state);
 
   try {
-    if (!input.actions?.refreshAdapter || !input.actions.reconnect) {
-      throw new Error("provider update actions are not configured; replacement was not activated");
+    if (!input.actions?.reconnect) {
+      throw new Error("provider-session reconciler is not configured; replacement was not activated");
     }
-    await input.actions.refreshAdapter({ providerId, previous: cloneObservation(previous), current, comparison, plan });
+    await input.actions.refreshAdapter?.({ providerId, previous: cloneObservation(previous), current, comparison, plan });
     const health = await input.actions.reconnect({ providerId, previous: cloneObservation(previous), current });
-    if (!health.healthy) throw new Error(health.detail || "replacement provider route did not become healthy");
+    if (!health.healthy) throw new Error(health.detail || "no live provider session was rebound");
 
     let retirementPending = false;
     let retirementError: string | null = null;

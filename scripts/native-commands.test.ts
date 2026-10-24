@@ -16,8 +16,10 @@ let autostartOn = false;
 // Every test gets a fake: nothing here may ever touch the real Windows registry.
 const fakeAutostart = { enable: (c: string) => { autostartCalls.push(`enable ${c}`); autostartOn = true; return true; }, disable: () => { autostartCalls.push("disable"); autostartOn = false; }, isOn: () => autostartOn };
 
-function sandbox(opts: { confirm?: boolean | "none" } = {}) {
-  const home = mkdtempSync(join(tmpdir(), "m9r-home-"));
+function sandbox(opts: { confirm?: boolean | "none"; tempRoot?: string } = {}) {
+  const tempRoot = opts.tempRoot ?? tmpdir();
+  mkdirSync(tempRoot, { recursive: true });
+  const home = mkdtempSync(join(tempRoot, "m9r-home-"));
   const hookEntry = join(home, "m9r-hook.js");
   writeFileSync(hookEntry, "// stand-in hook program", "utf8");
   const out: string[] = [];
@@ -230,7 +232,8 @@ test("status flags provider sessions that cannot receive targeted delivery witho
   assert.match(missing?.label ?? "", /lack a live M9R identity/);
   store.issueIdentity("codex", "codex", "codex-no-token");
   const healthy = nativeStatus(s.io).find((row) => row.id === "target-identities");
-  assert.equal(healthy?.state, "ok");
+  assert.equal(healthy?.state, "info", "a retained identity does not prove current-turn binding");
+  assert.match(healthy?.label ?? "", /stored M9R identities.*current-turn binding is not verified/i);
   s.done();
 });
 
@@ -361,6 +364,8 @@ test("when Codex is installed, setup also adds its hooks and standing block, kee
   const hooks = JSON.parse(readFileSync(s.p.codexHooks, "utf8"));
   assert.equal(hooks.hooks.Stop[0].hooks[0].command, "node my-own-hook.js", "the user's own hook is untouched");
   assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /m9r-hook.* UserPromptSubmit codex$/);
+  assert.match(hooks.hooks.Interrupt[0].hooks[0].command, /m9r-hook.* Interrupt codex$/);
+  assert.match(hooks.hooks.SessionEnd[0].hooks[0].command, /m9r-hook.* SessionEnd codex$/);
   assert.match(readFileSync(s.p.codexAgents, "utf8"), /^# Codex rules\nBe brief\.\n\n<!-- M9R:STANDING-INSTRUCTION:START/);
   assert.equal(nativeStatus(s.io).find((r) => r.id === "codex-hooks")?.state, "ok");
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
@@ -452,6 +457,36 @@ test("an engine update removes dead retired-image entries from the install owner
   assert.equal(existsSync(removableRetired), false, "the runtime update prunes an unlocked retired image");
   assert.equal(after.runtimeFiles.includes(missingRetired), false, "missing retired images are removed from ownership metadata");
   assert.equal(after.runtimeFiles.includes(removableRetired), false, "pruned retired images are removed from ownership metadata");
+  s.done();
+});
+
+test("a no-op setup retries cleanup of owned retired runtime images and reconciles their manifest entries", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+
+  const bin = join(s.p.m9r, "bin");
+  const retired = join(bin, "m9r-engine.exe.m9r-retired-previous-unlocked");
+  writeFileSync(retired, "stale engine image", "utf8");
+  const before = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { runtimeFiles: string[] };
+  before.runtimeFiles.push(retired);
+  writeFileSync(s.p.manifest, JSON.stringify(before, null, 2) + "\n", "utf8");
+
+  s.out.length = 0;
+  assert.equal(await s.run("setup", ["--dry-run"]), 0);
+  assert.match(s.out.join("\n"), /retry cleanup of 1 M9R-owned retired runtime image/i);
+  assert.equal(existsSync(retired), true, "dry-run never deletes a retired image");
+
+  s.out.length = 0;
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const after = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { runtimeFiles: string[] };
+  assert.equal(existsSync(retired), false, "an unlocked retired image is removed on no-op setup");
+  assert.equal(after.runtimeFiles.includes(retired), false, "the stale ownership record is removed after deletion");
+  assert.match(s.out.join("\n"), /removed 1 unlocked retired runtime image/i);
   s.done();
 });
 
@@ -766,7 +801,7 @@ test("Windows setup installs the pill, broker, and Driver runtime together and s
 });
 
 test("a watched feed drains on runtime generation change and releases its writer lock", async () => {
-  const s = sandbox();
+  const s = sandbox({ tempRoot: join(process.cwd(), ".test-tmp") });
   try {
     const executable = join(s.home, "m9r-engine.exe");
     const manifest = join(s.home, "m9r-build-info.json");
@@ -782,6 +817,29 @@ test("a watched feed drains on runtime generation change and releases its writer
     assert.equal(await running, 0);
     assert.match(s.err.join("\n"), /runtime generation changed on disk; draining the feed/i);
     assert.equal(existsSync(join(s.p.m9r, "feed.lock")), false, "the stale watcher must not strand the single-writer lock");
+  } finally { s.done(); }
+});
+
+test("provider lifecycle starts only in the watched feed that owns the writer lock and stops before release", async () => {
+  const s = sandbox({ tempRoot: join(process.cwd(), ".test-tmp") });
+  try {
+    s.io.env.M9R_NO_CODEX_WATCH = "1";
+    let starts = 0;
+    let stops = 0;
+    s.io.startProviderLifecycle = () => {
+      starts += 1;
+      setImmediate(() => process.emit("SIGINT"));
+      return { stop: async () => { stops += 1; } };
+    };
+
+    const running = s.run("feed", ["--watch"]);
+    const duplicateCode = await s.run("feed", ["--watch"]);
+    assert.equal(duplicateCode, 0);
+    assert.match(s.out.join("\n"), /already being written/);
+    assert.equal(starts, 1, "the duplicate feed must not start a second provider monitor");
+    assert.equal(await running, 0);
+    assert.equal(stops, 1, "the provider monitor is stopped as its feed owner drains");
+    assert.equal(existsSync(join(s.p.m9r, "feed.lock")), false);
   } finally { s.done(); }
 });
 
@@ -812,6 +870,45 @@ test("the native feed exposes deferred delivery through the provider-neutral ada
     await pump.tick();
     assert.deepEqual(sent, [task.id]);
     assert.equal(store.getTask(task.id)?.delivery?.state, "queued");
+  } finally { s.done(); }
+});
+
+test("owner-created Claude tasks use the native exact-session adapter instead of the web resident worker", async () => {
+  const s = sandbox();
+  try {
+    const store = createLocalStore(s.p.m9r);
+    const claude = store.addTask({ from: "you", to: "claude", goal: "Read one visible label.", origin: "human_typed", idempotencyKey: "native-claude" }).task;
+    store.setDelivery(claude.id, { state: "deferred" });
+    const nativeDelivery: string[] = [];
+    const pump = createNativeDeliveryPump(s.p.m9r, {
+      env: s.io.env,
+      homeDir: s.io.homeDir,
+      cwd: s.home,
+      err: s.io.err,
+      deliveryAdapters: new Map([["claude", async (taskId: string) => { nativeDelivery.push(taskId); return { state: "unavailable", reason: "test adapter" }; }]]),
+    });
+    await pump.tick();
+    assert.deepEqual(nativeDelivery, [claude.id]);
+    assert.equal(store.getTask(claude.id)?.delivery?.state, "deferred", "an unavailable native session stays eligible for an honest retry/inbox path");
+    assert.match(s.err.join("\n"), /Claude.*test adapter/i, "the owner must get the adapter's actual failure reason");
+  } finally { s.done(); }
+});
+
+test("OpenCode owner tasks stay deferred for the exact-session plugin poller, not the web resident worker", async () => {
+  const s = sandbox();
+  try {
+    const store = createLocalStore(s.p.m9r);
+    const opencode = store.addTask({ from: "you", to: "opencode", goal: "Read the visible label.", origin: "human_typed", idempotencyKey: "plugin-opencode" }).task;
+    store.setDelivery(opencode.id, { state: "deferred" });
+    const pump = createNativeDeliveryPump(s.p.m9r, {
+      env: s.io.env,
+      homeDir: s.io.homeDir,
+      cwd: s.home,
+    });
+
+    await pump.tick();
+
+    assert.equal(store.getTask(opencode.id)?.delivery?.state, "deferred", "the OpenCode plugin owns delivery into its exact live session");
   } finally { s.done(); }
 });
 

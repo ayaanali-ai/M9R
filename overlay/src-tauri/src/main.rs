@@ -273,6 +273,16 @@ fn web_activity_path() -> PathBuf {
         .join("web-activity.json")
 }
 
+/// The owner broker's redacted desktop-pill snapshot. The pill reads this
+/// before falling back to the legacy merged feed, so it never discovers or
+/// selects provider sessions itself.
+fn desktop_pill_state_path() -> PathBuf {
+    feed_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("desktop-pill-state.json")
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     /// Horizontal centre and top of the pill in physical pixels, so growing the panel keeps it where you put it.
@@ -345,6 +355,24 @@ fn resize_pill(window: WebviewWindow, width: f64, height: f64) -> Result<(), Str
 #[tauri::command]
 fn read_feed() -> Option<String> {
     read_view_feed(&feed_path(), &web_activity_path())
+}
+
+/// Read only a broker-published, versioned pill state envelope. Returning the
+/// inner state JSON keeps the Tauri command transport simple while the broker
+/// remains the sole writer and owner of provider/UI state.
+#[tauri::command]
+fn read_pill_state() -> Option<String> {
+    let path = desktop_pill_state_path();
+    let modified = fs::metadata(&path).ok()?.modified().ok()?;
+    if modified.elapsed().ok()?.as_secs() > 10 {
+        return None;
+    }
+    let text = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if value.get("version")?.as_u64()? != 1 || value.get("surface")?.as_str()? != "desktop-pill" {
+        return None;
+    }
+    value.get("state").map(serde_json::Value::to_string)
 }
 
 fn read_view_feed(native_path: &Path, web_path: &Path) -> Option<String> {
@@ -680,8 +708,35 @@ async fn decide(task_id: String, action: String, from: Option<String>, to: Optio
     .map_err(|e| e.to_string())?
 }
 
-/// The agents a typed message addresses and the text to send them: every distinct `@handle` that starts a word is a
-/// recipient, and the handles are removed from what they receive (the same rule the terminal hook applies).
+/// Sends what the owner typed to the broker-owned UI bridge. The broker owns
+/// recipient selection and the managed provider lifecycle; the pill never
+/// parses mentions or launches a provider-specific route itself.
+#[tauri::command]
+async fn send_message(text: String) -> Result<String, String> {
+    if text.trim().is_empty() || text.chars().count() > 4000 {
+        return Err("That message is empty or too long.".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["pill-send", &text]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Approves or denies a broker-owned pill approval. The broker UI contract
+/// intentionally has no `allow for a day` route; that legacy grant remains
+/// available only through the compatibility feed path.
+#[tauri::command]
+async fn pill_decide(approval_id: String, decision: String) -> Result<String, String> {
+    if !plain_id(&approval_id) || !matches!(decision.as_str(), "allow" | "deny") {
+        return Err("Bad desktop pill approval decision".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["pill-decide", &approval_id, &decision]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
 fn parse_mentions(text: &str) -> (Vec<String>, String) {
     let mut handles: Vec<String> = Vec::new();
     let mut kept: Vec<&str> = Vec::new();
@@ -701,36 +756,6 @@ fn parse_mentions(text: &str) -> (Vec<String>, String) {
     (handles, kept.join(" "))
 }
 
-/// Sends what the owner typed to the agents it names, through the engine's own `send` (the same human-typed path the
-/// terminal hook uses), so routing, approval rules and delivery stay in one place.
-#[tauri::command]
-async fn send_message(text: String) -> Result<String, String> {
-    if text.len() > 4000 {
-        return Err("That message is too long.".into());
-    }
-    let (handles, goal) = parse_mentions(&text);
-    if handles.is_empty() {
-        return Err("Start with who it is for, like @claude or @codex.".into());
-    }
-    if goal.trim().is_empty() {
-        return Err("Add what you want them to do after the @name.".into());
-    }
-    if handles.iter().any(|h| !plain_id(h)) {
-        return Err("Bad agent name".into());
-    }
-    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut replies = Vec::new();
-        for h in handles {
-            replies.push(engine_call(&engine, &["send", &format!("@{h}"), &goal])?);
-        }
-        Ok(replies.join("
-"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 /// Saves a fact or decision to the shared project memory agents read at session start (`m9r note`).
 #[tauri::command]
 async fn save_memory(text: String) -> Result<String, String> {
@@ -739,7 +764,7 @@ async fn save_memory(text: String) -> Result<String, String> {
         return Err("That note is empty or too long.".into());
     }
     let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
-    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["note", &text]))
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["pill-note", &text]))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -941,7 +966,7 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus, open_microphone_settings])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus, open_microphone_settings])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.

@@ -306,6 +306,18 @@ test("native inbox does not re-present already-delivered work after it becomes s
   } finally { t.done(); }
 });
 
+test("an uncertain transport receipt remains visible even without a session id", async () => {
+  const t = setup();
+  try {
+    await t.call("m9r_send", { token: t.claude, to: "codex", goal: "show the unresolved transport status" });
+    t.store.setDelivery("T1", { state: "uncertain", attempts: 1, error: "the provider did not confirm receipt" });
+    const status = await t.call("m9r_inbox", { token: t.codex });
+    assert.match(status, /Delivery is unconfirmed/);
+    assert.match(status, /T1/);
+    assert.match(status, /do not execute or resend/);
+  } finally { t.done(); }
+});
+
 test("browser-room pending work ignores stale tasks instead of handing an old task to a replacement provider session", async () => {
   let clock = Date.parse("2026-10-07T12:00:00.000Z");
   const t = setup({

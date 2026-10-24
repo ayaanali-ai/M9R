@@ -14,6 +14,7 @@ import { createWebBrokerClient } from "@/lib/native/web-broker-client";
 import { brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { createWebAuthority, verifyAudit } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore, renameWithRetry } from "@/lib/native/web-authority-store";
+import { createWebUiBridge } from "@/lib/native/web-ui-bridge";
 import { applyAgentMcpStoreMutation, loadOrCreateBrokerKey, startWebBroker, tightenKeyFileAcl } from "@/lib/native/web-broker-server";
 import { webExtensionAllowlist, WEB_EXTENSION_ID } from "@/lib/native/web-setup-core";
 
@@ -385,7 +386,7 @@ test("legacy authority snapshots migrate to a bounded v2 audit chain and persist
   }
 });
 
-async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtension?: boolean; authority?: ReturnType<typeof createWebAuthority>; approvalTimeoutMs?: number; extensionConnectTimeoutMs?: number; ownerId?: string; requestTimeoutMs?: number; onShutdownRequested?: () => void | Promise<void> } = {}) {
+async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtension?: boolean; authority?: ReturnType<typeof createWebAuthority>; approvalTimeoutMs?: number; extensionConnectTimeoutMs?: number; ownerId?: string; requestTimeoutMs?: number; onShutdownRequested?: () => void | Promise<void>; deliverOwnerTask?: (taskId: string) => unknown | Promise<unknown> } = {}) {
   // Disposable broker fixtures belong in OS temp, never in the source checkout.
   // Production key ACL behavior is covered by the dedicated Windows tests below.
   const root = mkdtempSync(join(testTempRoot, "m9r-web-broker-"));
@@ -408,6 +409,7 @@ async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtensio
     authority: options.authority,
     authorityStore,
     onShutdownRequested: options.onShutdownRequested,
+    deliverOwnerTask: options.deliverOwnerTask,
   });
   let broker = await startBroker();
   let web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: broker.port });
@@ -483,6 +485,60 @@ async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtensio
     },
   };
 }
+
+test("the owner pipe forwards only a validated task id to the resident provider-session owner", async () => {
+  const delivered: string[] = [];
+  const t = await setup({ deliverOwnerTask: (taskId) => { delivered.push(taskId); return { ok: true, accepted: true }; } });
+  try {
+    const accepted = await requestOwnerPipe<{ ok: boolean; accepted?: boolean }>(ownerPipePath(t.root), {
+      method: "POST", path: "/web/provider-delivery", body: { taskId: "T903" },
+    });
+    assert.deepEqual(accepted, { ok: true, accepted: true });
+    assert.deepEqual(delivered, ["T903"]);
+
+    const rejected = await requestOwnerPipe<{ ok: boolean; error?: string }>(ownerPipePath(t.root), {
+      method: "POST", path: "/web/provider-delivery", body: { taskId: "../../secrets" },
+    });
+    assert.equal(rejected?.ok, false);
+    const extraFields = await requestOwnerPipe<{ ok: boolean; error?: string }>(ownerPipePath(t.root), {
+      method: "POST", path: "/web/provider-delivery", body: { taskId: "T904", token: "must-not-be-accepted" },
+    });
+    assert.equal(extraFields?.ok, false);
+    assert.deepEqual(delivered, ["T903"], "invalid task ids never reach the session owner");
+  } finally { await t.broker.close(); rmSync(t.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+});
+
+test("the owner pipe routes desktop-pill commands into the shared broker UI bridge", async () => {
+  const root = mkdtempSync(join(testTempRoot, "m9r-desktop-pill-owner-"));
+  const key = randomBytes(32).toString("hex");
+  const delivered: string[] = [];
+  const ui = createWebUiBridge({ debounceMs: 0 });
+  ui.attachSessions({
+    handles: () => ["claude"],
+    snapshot: () => [{ handle: "claude", provider: "claude", folder: "C:/demo", status: "idle", doing: "" }],
+    deliver: (_handle, text) => { delivered.push(text); return { ok: true, mode: "started" }; },
+    stop: () => true,
+    stopAll: () => undefined,
+    secrets: () => [],
+  });
+  const broker = await startWebBroker({ key, port: 0, ownerPipePath: ownerPipePath(root), ui });
+  try {
+    const accepted = await requestOwnerPipe<{ ok: boolean; error?: string }>(ownerPipePath(root), {
+      method: "POST", path: "/web/ui/command", body: { text: "@claude inspect the current task", context: {} },
+    });
+    assert.deepEqual(accepted, { ok: true });
+    assert.deepEqual(delivered, ["@claude inspect the current task"]);
+
+    const rejected = await requestOwnerPipe<{ ok: boolean; error?: string }>(ownerPipePath(root), {
+      method: "POST", path: "/web/ui/command", body: { text: "@claude", unexpected: true },
+    });
+    assert.equal(rejected?.ok, false);
+    assert.match(rejected?.error ?? "", /invalid/);
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
 
 async function ownerRequest(port: number, key: string | undefined, path: string, method = "GET", body?: unknown, origin?: string): Promise<{ status: number; body: unknown }> {
   return new Promise((resolve, reject) => {
