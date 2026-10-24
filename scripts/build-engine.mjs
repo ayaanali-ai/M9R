@@ -54,6 +54,7 @@ const heldLocalProvenancePatterns = [
   /^m9r-release-package-[^/]+(?:\/|$)/i,
   /^m9r-runtime-clean-[^/]+(?:\/|$)/i,
   /^scratchpad(?:\/|$)/i,
+  /^\.artifact-scratch\/pill-mockup(?:\/|$)/i,
   /^docs\/Convenience_Store_Replacement_Plan\.docx$/i,
   /^public\/reference-innerwebs\/m9r-logo-transparent\.png$/i,
 ];
