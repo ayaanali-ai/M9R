@@ -14,6 +14,55 @@
 
 export const ADAPTER_CONTRACT_VERSION = "m9r.adapter-contract.v1" as const;
 export const CAPABILITY_MANIFEST_VERSION = "m9r.provider-capabilities.v1" as const;
+/**
+ * The lifecycle contract is deliberately separate from the CLI action
+ * manifest.  The CLI actions describe what a connected agent may call; this
+ * contract describes the provider-neutral semantics that M9R must preserve
+ * around every provider, including providers that are not known today.
+ *
+ * A provider's model quality, speed, native tools, and native session
+ * features may differ.  The orchestration boundary must not differ.
+ */
+export const PROVIDER_NEUTRAL_EXECUTION_CONTRACT_VERSION = "m9r.provider-execution.v1" as const;
+
+export const PROVIDER_NEUTRAL_EXECUTION_OPERATIONS = [
+  "connect",
+  "identify",
+  "deliver",
+  "progress",
+  "result",
+  "cancel",
+  "pause",
+  "resume",
+  "reconnect",
+  "recover",
+  "update_rebind",
+] as const;
+export type ProviderNeutralExecutionOperation = (typeof PROVIDER_NEUTRAL_EXECUTION_OPERATIONS)[number];
+
+export interface ProviderNeutralExecutionContract {
+  version: typeof PROVIDER_NEUTRAL_EXECUTION_CONTRACT_VERSION;
+  /** Every operation is provider-neutral; native provider support is an implementation detail. */
+  operations: readonly ProviderNeutralExecutionOperation[];
+  /** Provider updates are observed and rebound without a manual reconnect ritual. */
+  updatePolicy: {
+    automaticDetection: true;
+    preserveDurableWork: true;
+    preserveCliMcpRoute: true;
+    healthyReplacementBeforeRetirement: true;
+  };
+}
+
+export const PROVIDER_NEUTRAL_EXECUTION_CONTRACT: ProviderNeutralExecutionContract = {
+  version: PROVIDER_NEUTRAL_EXECUTION_CONTRACT_VERSION,
+  operations: PROVIDER_NEUTRAL_EXECUTION_OPERATIONS,
+  updatePolicy: {
+    automaticDetection: true,
+    preserveDurableWork: true,
+    preserveCliMcpRoute: true,
+    healthyReplacementBeforeRetirement: true,
+  },
+};
 
 export interface AdapterAction {
   id: string;
@@ -41,6 +90,7 @@ export interface AdapterContractManifest {
   protocolVersion: typeof ADAPTER_CONTRACT_VERSION;
   actions: readonly AdapterAction[];
   capabilityManifestVersion: typeof CAPABILITY_MANIFEST_VERSION;
+  providerNeutralExecution: ProviderNeutralExecutionContract;
   providers: readonly ProviderCapabilityManifest[];
   /** Provider-neutral baseline available to every valid agent_kind slug. */
   genericProvider: ProviderCapabilityManifest;
@@ -54,6 +104,9 @@ export interface ProviderCapabilityManifest {
   executionMode: "linked";
   transport: "generic_cli";
   supportedActions: readonly string[];
+  /** Same lifecycle surface for every provider; this is not a live-proof claim. */
+  executionContractVersion: typeof PROVIDER_NEUTRAL_EXECUTION_CONTRACT_VERSION;
+  executionOperations: readonly ProviderNeutralExecutionOperation[];
   verificationStatus: ProviderVerificationStatus;
   liveLifecycleVerified: boolean;
   crossRuntimeExchangeVerified: boolean;
@@ -85,6 +138,8 @@ export const PROVIDER_CAPABILITIES: readonly ProviderCapabilityManifest[] = [
     executionMode: "linked" as const,
     transport: "generic_cli" as const,
     supportedActions: GENERIC_CLI_ACTIONS,
+    executionContractVersion: PROVIDER_NEUTRAL_EXECUTION_CONTRACT_VERSION,
+    executionOperations: PROVIDER_NEUTRAL_EXECUTION_OPERATIONS,
     verificationStatus: protocolExchangeVerified ? "protocol_exchange_verified" as const : "implemented_not_live_verified" as const,
     liveLifecycleVerified: false,
     crossRuntimeExchangeVerified: protocolExchangeVerified,
@@ -107,6 +162,8 @@ export const GENERIC_PROVIDER_CAPABILITY: ProviderCapabilityManifest = {
   executionMode: "linked",
   transport: "generic_cli",
   supportedActions: GENERIC_CLI_ACTIONS,
+  executionContractVersion: PROVIDER_NEUTRAL_EXECUTION_CONTRACT_VERSION,
+  executionOperations: PROVIDER_NEUTRAL_EXECUTION_OPERATIONS,
   verificationStatus: "implemented_not_live_verified",
   liveLifecycleVerified: false,
   crossRuntimeExchangeVerified: false,
@@ -120,13 +177,24 @@ export const GENERIC_PROVIDER_CAPABILITY: ProviderCapabilityManifest = {
 
 /** The manifest an adapter can fetch to discover what OathLock supports, before or after connecting. */
 export function adapterContractManifest(): AdapterContractManifest {
-  return {
+  const manifest = {
     protocolVersion: ADAPTER_CONTRACT_VERSION,
     actions: KNOWN_ADAPTER_ACTIONS,
     capabilityManifestVersion: CAPABILITY_MANIFEST_VERSION,
+    providerNeutralExecution: PROVIDER_NEUTRAL_EXECUTION_CONTRACT,
     providers: PROVIDER_CAPABILITIES,
     genericProvider: GENERIC_PROVIDER_CAPABILITY,
   };
+  for (const provider of [...manifest.providers, manifest.genericProvider]) {
+    if (provider.executionContractVersion !== PROVIDER_NEUTRAL_EXECUTION_CONTRACT_VERSION) {
+      throw new Error(`Provider ${provider.id} does not use the provider-neutral execution contract.`);
+    }
+    if (provider.executionOperations.length !== PROVIDER_NEUTRAL_EXECUTION_OPERATIONS.length
+      || provider.executionOperations.some((operation, index) => operation !== PROVIDER_NEUTRAL_EXECUTION_OPERATIONS[index])) {
+      throw new Error(`Provider ${provider.id} does not expose the complete provider-neutral execution surface.`);
+    }
+  }
+  return manifest;
 }
 
 export interface NegotiationResult {

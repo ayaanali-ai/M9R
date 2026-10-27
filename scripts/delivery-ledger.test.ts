@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { DeliveryLedger, LEDGER_RETENTION_MS } from "@/lib/bridge/delivery-ledger";
 import { stateForTimingStage } from "@/lib/delivery-state";
 
-const fixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures", "delivery-ledger");
-mkdirSync(fixtureRoot, { recursive: true });
+const scratchRoot = join(process.cwd(), ".test-tmp");
+mkdirSync(scratchRoot, { recursive: true });
+const fixtureRoot = mkdtempSync(join(scratchRoot, "oathlock-delivery-ledger-"));
 const fixtureDirectories = new Set<string>();
 
 function tempPath() {

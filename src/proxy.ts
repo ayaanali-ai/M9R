@@ -14,7 +14,7 @@ function redirectHttpToHttps(request: NextRequest): Response | null {
 export async function proxy(request: NextRequest) {
   const httpsRedirect = redirectHttpToHttps(request);
   if (httpsRedirect) return httpsRedirect;
-  const rejected = guardApiRequest(request);
+  const rejected = await guardApiRequest(request);
   if (rejected) return secureApiResponse(request, rejected);
   return secureApiResponse(request, await updateSession(request));
 }

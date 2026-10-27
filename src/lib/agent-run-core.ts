@@ -8,7 +8,7 @@
  *
  * Two invariants live here and are tested directly:
  *   1. Run events carry status/provenance ONLY. `redactRunEvent` strips tokens,
- *      setup codes, claim URLs, `.m9r/local.json`, and anything that looks
+ *      setup codes, claim URLs, legacy `.m9r` credential paths, and anything that looks
  *      like source code. There is no path for raw content into a run event.
  *   2. Two-run proof copy is conservative. It never says a rule "worked",
  *      "proved" anything, "saved" money, "fixed" the agent, or "passed

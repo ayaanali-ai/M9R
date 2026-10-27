@@ -33,9 +33,11 @@ export async function POST(req: NextRequest) {
 
   const rendered = renderGithubEventAsMessage(eventName, payload);
   if (!rendered) return NextResponse.json({ ok: true, handled: false });
+  const deliveryId = req.headers.get("x-github-delivery");
+  if (!deliveryId || !/^[a-zA-Z0-9-]{1,100}$/.test(deliveryId)) return NextResponse.json({ error: "Missing or invalid delivery identity." }, { status: 400 });
 
   try {
-    const result = await postGithubEventToBoundChannel(rendered);
+    const result = await postGithubEventToBoundChannel({ ...rendered, deliveryId });
     return NextResponse.json({ ok: true, handled: true, posted: result.posted });
   } catch (error) {
     console.error("github/webhook failed to post event:", error instanceof Error ? error.message : error);

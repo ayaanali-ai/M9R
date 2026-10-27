@@ -4,12 +4,31 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parseHolders, windowsFileHolders } from "../src/lib/native/codex-liveness";
+import { parseHolderObservations, parseHolders, windowsFileHolders } from "../src/lib/native/codex-liveness";
 
 test("holder output becomes live, free or unknown, and anything unclear is never called free", () => {
   const files = ["C:/a.jsonl", "C:/b.jsonl", "C:/c.jsonl", "C:/d.jsonl"];
   const out = ["C:/a.jsonl\t1234:codex.exe;", "C:/b.jsonl\t", "C:/c.jsonl\tERR", "garbage line", ""].join("\n");
   assert.deepEqual(parseHolders(out, files), { "C:/a.jsonl": "live", "C:/b.jsonl": "free", "C:/c.jsonl": "unknown", "C:/d.jsonl": "unknown" });
+});
+
+test("session owner observations include one exact holder PID and refuse ambiguous PIDs", () => {
+  const files = ["C:/single.jsonl", "C:/multiple.jsonl", "C:/bad-pid.jsonl", "C:/free.jsonl", "C:/unknown.jsonl"];
+  const out = [
+    "C:/single.jsonl\t1234:codex.exe;",
+    "C:/multiple.jsonl\t1234:codex.exe;5678:codex.exe;",
+    "C:/bad-pid.jsonl\tnot-a-pid:codex.exe;",
+    "C:/free.jsonl\t",
+    "C:/unknown.jsonl\tERR",
+  ].join("\n");
+
+  assert.deepEqual(parseHolderObservations(out, files), {
+    "C:/single.jsonl": { state: "live", processId: 1234 },
+    "C:/multiple.jsonl": { state: "live" },
+    "C:/bad-pid.jsonl": { state: "live" },
+    "C:/free.jsonl": { state: "free" },
+    "C:/unknown.jsonl": { state: "unknown" },
+  });
 });
 
 test("on Windows a file another process holds open is live and an unopened one is free (Restart Manager, no exclusive open)", { skip: process.platform !== "win32" }, async (t) => {

@@ -985,12 +985,13 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
     return handle;
   }
 
-  async *prompt(input: { session: AgentSessionHandle; text: string }): AsyncIterable<InteractiveProviderEvent> {
+  async *prompt(input: { session: AgentSessionHandle; text: string; onRequestSubmitted?: () => void }): AsyncIterable<InteractiveProviderEvent> {
     const { state, session } = this.session(input.session);
     if (session.queue) throw new Error("ACP session already has an active prompt.");
     const queue = new AsyncEventQueue<InteractiveProviderEvent>();
     session.queue = queue;
     const prompt = this.connection(state).prompt({ sessionId: session.rawSessionId, prompt: [{ type: "text", text: input.text.slice(0, 32_000) }] });
+    input.onRequestSubmitted?.();
     // settled guards against the timeout and a late real response racing
     // each other -- only the first to happen may push/close the queue.
     let settled = false;

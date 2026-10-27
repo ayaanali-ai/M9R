@@ -319,8 +319,9 @@ test("managed files contain no tokens, claim URLs, config values, or secrets", a
   assert.ok(!content.includes("oathlock.example/claim"));
   assert.ok(!/oak_[A-Za-z0-9]/.test(content));
   assert.ok(!/Bearer/i.test(content));
-  // The block warns against reading local config rather than referencing values from it.
-  assert.match(content, /`\.m9r\/local\.json`/);
+  // The block warns against reading the provider-scoped run pointer rather than
+  // referencing credential values from the local store.
+  assert.match(content, /provider-scoped run pointer|`\.m9r\/agents\//i);
 });
 
 test("bootstrap error output never reveals local config contents", async () => {

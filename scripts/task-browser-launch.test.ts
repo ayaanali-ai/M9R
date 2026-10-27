@@ -15,6 +15,13 @@ test("personal browser launch uses the user's profile and asks Chrome for a new 
   assert.throws(() => ownedBrowserLaunch("root", "../escape", app), /Invalid browser stage/);
 });
 
+test("personal browser fallback can request a deterministic blank page without creating an isolated profile", () => {
+  const app = { executable: join("browser", "chrome.exe"), args: [] };
+  const fallback = ownedBrowserLaunch("root", "preview-agent-0123456789abcdef01234567", app, { startUrl: "about:blank" });
+  assert.deepEqual(fallback.args, ["--new-window", "about:blank"]);
+  assert.equal(fallback.args.some((arg) => arg.includes("user-data-dir")), false);
+});
+
 test("isolated browser mode remains an explicit opt-in", () => {
   const app = { executable: join("browser", "chrome.exe"), args: [] };
   const isolated = ownedBrowserLaunch("root", "agent-0123456789abcdef01234567", app, { mode: "isolated" });

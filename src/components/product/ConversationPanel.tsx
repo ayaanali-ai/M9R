@@ -16,11 +16,10 @@ import { TerminalWorkspace, type PtyRoomSession } from "./TerminalWorkspace";
 import { TERMINAL_ENABLED } from "@/lib/terminal-config";
 import { AttachIcon, MentionIcon } from "@/components/product/wf-icons";
 import { MemoryProposals } from "@/components/product/memory/MemoryProposals";
-import { AgentMark, AGENT_BRAND_COLOR } from "@/components/product/WorkspaceUI";
+import { AgentMark, AgentColorLabel } from "@/components/product/WorkspaceUI";
 import ProductConfirmDialog from "@/components/product/ProductConfirmDialog";
 import { type AgentView } from "@/lib/agent-workspace-data";
 import { explicitlyMentionedAgentKinds } from "@/lib/conversation-routing";
-import { getAgentDisplayName } from "@/lib/agent-identity";
 import { WorkspaceRelayBrowserClient, type BrowserMissionRelayStatus } from "@/lib/mission/mission-relay-browser-client";
 import type { RelayFrame } from "@/lib/mission/mission-relay-protocol";
 import { initialsFor, identityHue } from "@/lib/identity-color";
@@ -2391,7 +2390,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 sidePanelMode) -- both used to be buried in a "more actions"
                 dropdown or a full-screen modal; this is the one consistent
                 mechanism for both. */}
-            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"} color={channelColors[selected.id]} addressed={addressedAgents.length > 0 ? <span className="m9r-addressed" aria-label={`Talking to ${addressedAgents.map((agent) => agent.label).join(", ")}`}>{addressedAgents.map((agent) => <span key={agent.id} title={agent.label}><AgentMark agentKey={agent.key} size={22} /></span>)}</span> : undefined}
+            <DashboardChatHeader name={channelDisplayName(selected)} agent={agents.length === 1 ? agents[0].key : "other"} color={channelColors[selected.id]} addressed={addressedAgents.length > 0 ? <span className="m9r-addressed" aria-label={`Talking to ${addressedAgents.map((agent) => agent.label).join(", ")}`}>{addressedAgents.map((agent) => <span key={agent.id} title={agent.label}><AgentMark agentKey={agent.key} connectionId={agent.connectionId} size={22} /></span>)}</span> : undefined}
               threads={<DashboardPicker label="Choose conversation" value="Thread" icon={<Plus size={12} />} options={conversations.map(conversation => ({ id: conversation.id, label: channelDisplayName(conversation) }))} onSelect={selectConversation} />}
               model={<DashboardModels agents={agents.filter(agent => selected.participant_connection_ids.includes(agent.connectionId ?? ""))} conversationId={selected.id} />}
               actions={<>{onOpenReview && <button type="button" aria-label="Ready for review" title="Ready for review" onClick={onOpenReview} data-active={reviewActive}><ClipboardCheck size={18} />{Boolean(pendingReviewCount) && <i className="m9r-dash-notification-dot" />}</button>}</>}
@@ -2469,14 +2468,14 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                   >
                     {isGroupStart
                       ? senderAgent
-                        ? <span className="wf-chat-avatar is-agent" title={senderAgent.label}><AgentMark agentKey={senderAgent.key} size={28} /></span>
+                        ? <span className="wf-chat-avatar is-agent" title={senderAgent.label}><AgentMark agentKey={senderAgent.key} connectionId={senderAgent.connectionId} size={28} /></span>
                         : <div className="wf-chat-avatar" data-agent="false">{initialsFor(senderName)}</div>
                       : <time className="wf-chat-grouped-time ol-mono" dateTime={message.created_at}>{absoluteTime(message.created_at, now)}</time>}
                     <div className="wf-chat-message-body">
                       {isGroupStart && (
                         <div className="wf-chat-message-meta">
                           <strong>{senderName}</strong>
-                          {isViewer && (() => { const to = agentsMentionedIn(message.body); return to.length > 0 ? <span className="m9r-sent-to" aria-label={`To ${to.map((agent) => agent.label).join(", ")}`}>to {to.map((agent) => <span key={agent.id} title={agent.label}><AgentMark agentKey={agent.key} size={14} /></span>)}</span> : null; })()}
+                          {isViewer && (() => { const to = agentsMentionedIn(message.body); return to.length > 0 ? <span className="m9r-sent-to" aria-label={`To ${to.map((agent) => agent.label).join(", ")}`}>to {to.map((agent) => <span key={agent.id} title={agent.label}><AgentMark agentKey={agent.key} connectionId={agent.connectionId} size={14} /></span>)}</span> : null; })()}
                           {/* The rebranded display label ("Claude"), never the raw
                               provider key ("claude-code") -- the key still backs
                               real @mention matching elsewhere, this is display-only. */}
@@ -2532,15 +2531,15 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                       {recipientAgent ? (
                         <div className="wf-chat-route-card">
                           <div className="wf-chat-route-card-header">
-                            <span className="wf-chat-route-card-agent" style={{ color: AGENT_BRAND_COLOR[senderAgent!.key] ?? "var(--ol-text-primary)" }}>
-                              <AgentMark agentKey={senderAgent!.key} size={14} />
+                            <AgentColorLabel className="wf-chat-route-card-agent" connectionId={senderAgent!.connectionId} agentKey={senderAgent!.key}>
+                              <AgentMark agentKey={senderAgent!.key} connectionId={senderAgent!.connectionId} size={14} />
                               {senderAgent!.label}
-                            </span>
+                            </AgentColorLabel>
                             <span className="wf-chat-route-arrow" aria-hidden>→</span>
-                            <span className="wf-chat-route-card-agent" style={{ color: AGENT_BRAND_COLOR[recipientAgent.key] ?? "var(--ol-text-primary)" }}>
-                              <AgentMark agentKey={recipientAgent.key} size={14} />
+                            <AgentColorLabel className="wf-chat-route-card-agent" connectionId={recipientAgent.connectionId} agentKey={recipientAgent.key}>
+                              <AgentMark agentKey={recipientAgent.key} connectionId={recipientAgent.connectionId} size={14} />
                               {recipientAgent.label}
-                            </span>
+                            </AgentColorLabel>
                           </div>
                           <MessageBody body={message.body} className="wf-chat-route-card-body" />
                         </div>
@@ -2565,7 +2564,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                               APPROVAL REQUIRED
                             </div>
                             <div className="wf-chat-approval-card-subject">
-                              {senderAgent && <AgentMark agentKey={senderAgent.key} size={16} />}
+                              {senderAgent && <AgentMark agentKey={senderAgent.key} connectionId={senderAgent.connectionId} size={16} />}
                               <strong>{senderName}</strong>&nbsp;wants to submit evidence
                             </div>
                             <div className="wf-chat-approval-card-detail-box">{request.requestSummary}</div>
@@ -2592,7 +2591,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                               <ExpiryCountdownText expiresAt={approval.expiresAt} />
                             </div>
                             <div className="wf-chat-approval-card-subject">
-                              {senderAgent && <AgentMark agentKey={senderAgent.key} size={16} />}
+                              {senderAgent && <AgentMark agentKey={senderAgent.key} connectionId={senderAgent.connectionId} size={16} />}
                               <strong>{senderName}</strong>&nbsp;wants to run a command
                             </div>
                             {approval.sensitiveAreas.length > 0 && (
@@ -2622,7 +2621,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                               FINDING REQUIRES REVIEW
                             </div>
                             <div className="wf-chat-approval-card-subject">
-                              {senderAgent && <AgentMark agentKey={senderAgent.key} size={16} />}
+                              {senderAgent && <AgentMark agentKey={senderAgent.key} connectionId={senderAgent.connectionId} size={16} />}
                               <strong>{senderName}</strong>&nbsp;reported a finding
                             </div>
                             <div className="wf-chat-approval-card-detail-box">
@@ -2679,7 +2678,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                               APPROVAL REQUIRED
                             </div>
                             <div className="wf-chat-approval-card-subject">
-                              {senderAgent && <AgentMark agentKey={senderAgent.key} size={16} />}
+                              {senderAgent && <AgentMark agentKey={senderAgent.key} connectionId={senderAgent.connectionId} size={16} />}
                               <strong>{senderName}</strong>&nbsp;wants permission
                             </div>
                             <div className="wf-chat-approval-card-detail-box">
@@ -2852,7 +2851,7 @@ export default function ConversationPanel({ agents, workspaceId, viewerUserId, o
                 <div className="wf-chat-mention-chip-row">
                   {mentionedAgentsInDraft.map((agent) => (
                     <span key={agent.id} className="wf-chat-mention-chip">
-                      <AgentMark agentKey={agent.key} size={16} />
+                      <AgentMark agentKey={agent.key} connectionId={agent.connectionId} size={16} />
                       {agent.label}
                     </span>
                   ))}

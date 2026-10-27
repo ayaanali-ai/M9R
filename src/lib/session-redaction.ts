@@ -85,6 +85,12 @@ const RULES: Rule[] = [
     type: "env_secret",
     re: /\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API[_]?KEY)[A-Z0-9_]*)\s*=\s*(["']?)([^\s"']+)\2/g,
   },
+  // Webhook and other credential-bearing URLs are secrets even though the
+  // variable name ends in URL rather than KEY/TOKEN/SECRET.
+  {
+    type: "env_sensitive_url",
+    re: /\b([A-Z][A-Z0-9_]*(?:WEBHOOK|HOOK|TOKEN|SECRET|PRIVATE|CREDENTIAL|SIGNING|API[_]?KEY|AUTH)[A-Z0-9_]*URL)\s*=\s*(["']?)(https?:\/\/[^\s"']+)\2/gi,
+  },
   // Inline password / passwd / pwd assignments (key: value or key=value).
   {
     type: "password",
@@ -132,6 +138,11 @@ export function redactSession(input: string, options?: { includeHeuristics?: boo
     redactedText = redactedText.replace(rule.re, (match, ...groups) => {
       // env_secret / password rules: keep the key label, redact only the value.
       if (rule.type === "env_secret") {
+        const key = groups[0] as string;
+        countsByType[rule.type] = (countsByType[rule.type] ?? 0) + 1;
+        return `${key}=${placeholder(rule.type)}`;
+      }
+      if (rule.type === "env_sensitive_url") {
         const key = groups[0] as string;
         countsByType[rule.type] = (countsByType[rule.type] ?? 0) + 1;
         return `${key}=${placeholder(rule.type)}`;

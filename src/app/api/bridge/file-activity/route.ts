@@ -60,7 +60,7 @@ export async function GET(req: NextRequest) {
     if (!agent) return NextResponse.json({ error: "Invalid or missing agent token." }, { status: 401 });
     const conversationId = req.nextUrl.searchParams.get("conversationId");
     if (!conversationId) return NextResponse.json({ error: "conversationId is required." }, { status: 400 });
-    const activity = await listCurrentWorkspaceFileActivity(conversationId);
+    const activity = await listCurrentWorkspaceFileActivity(agent.workspaceId, conversationId);
     return NextResponse.json({ activity });
   } catch (err) {
     return handleAgentError(err);

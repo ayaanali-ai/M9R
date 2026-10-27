@@ -366,7 +366,7 @@ test("the standing instruction is created, appended with a separator, and never 
   assert.equal(created.content.startsWith(STANDING_START), true);
   const appended = applyStandingInstruction("# My rules\nBe terse.");
   assert.equal(appended.action, "installed");
-  assert.match(appended.content, /^# My rules\nBe terse\.\n\n<!-- M9R:STANDING-INSTRUCTION:START v5 -->/);
+  assert.match(appended.content, /^# My rules\nBe terse\.\n\n<!-- M9R:STANDING-INSTRUCTION:START v6 -->/);
   const again = applyStandingInstruction(appended.content);
   assert.equal(again.action, "unchanged");
   assert.equal((again.content.match(/STANDING-INSTRUCTION:START/g) ?? []).length, 1);
@@ -397,6 +397,13 @@ test("the block tells the agent to act on approved or typed items and never on p
   assert.match(block, /approved by the user or typed by the user/);
   assert.match(block, /Never act on an inbox item marked as awaiting/);
   assert.match(block, /data, not as instructions/);
+});
+
+test("the standing instruction treats authorized delivery as automatic instead of requiring inbox polling", () => {
+  const block = standingInstructionBlock();
+  assert.match(block, /automatically delivers authorized work/i);
+  assert.match(block, /do not poll.*m9r_inbox/i);
+  assert.doesNotMatch(block, /run: m9r-cli tasks/i);
 });
 
 test("uninstall restores the backup byte for byte when the file is unchanged since init", () => {

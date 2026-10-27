@@ -9,8 +9,9 @@
 // --restart-bridges (Windows) also restarts the local bridge runners to prove a message sent during the gap is delivered once.
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
 
 const args = process.argv.slice(2);
 const opt = (name, fallback) => { const i = args.indexOf(`--${name}`); return i >= 0 && args[i + 1] ? args[i + 1] : fallback; };
@@ -20,7 +21,10 @@ const RESTART = args.includes("--restart-bridges");
 const API = process.env.M9R_API_URL ?? "https://m9r.dev";
 const root = resolve(import.meta.dirname, "..");
 const cli = resolve(root, "cli/dist/m9r.js");
-const token = JSON.parse(readFileSync(resolve(root, `.m9r/agents/${SENDER}/local.json`), "utf8")).token;
+const storeRoot = process.env.M9R_HOME?.trim() || join(homedir(), ".m9r");
+const workspaceKey = createHash("sha256").update(process.platform === "win32" ? root.toLowerCase() : root, "utf8").digest("hex").slice(0, 32);
+const tokenPath = join(storeRoot, "workspaces", workspaceKey, "agents", SENDER, "local.json");
+const token = JSON.parse(readFileSync(tokenPath, "utf8")).token;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function m9r(...cliArgs) {

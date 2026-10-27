@@ -7,7 +7,9 @@ import { join, resolve } from "node:path";
 import { createServer } from "node:net";
 
 test("the packaged broker runs from persistent storage with no CLI or npm cache beside it", async () => {
-  const temporary = mkdtempSync(resolve(".m9r-install-audit-"));
+  const testRoot = resolve(".test-tmp");
+  mkdirSync(testRoot, { recursive: true });
+  const temporary = mkdtempSync(join(testRoot, "m9r-install-audit-"));
   const home = join(temporary, "home");
   const project = join(temporary, "project");
   mkdirSync(project);
@@ -27,28 +29,41 @@ test("the packaged broker runs from persistent storage with no CLI or npm cache 
   const port = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
   const child = spawn(process.execPath, [entry, "web", "serve", "--home", home, "--port", String(port), "--project-root", project], {
-    cwd: project, windowsHide: true, stdio: "ignore",
+    cwd: project, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
   });
+  let output = "";
+  child.stdout.on("data", chunk => { output = `${output}${chunk.toString()}`.slice(-16_384); });
+  child.stderr.on("data", chunk => { output = `${output}${chunk.toString()}`.slice(-16_384); });
   let spawnError;
   child.on("error", error => { spawnError = error; });
   const stopped = new Promise(resolve => child.once("close", resolve));
   try {
     let healthy = false;
+    let healthState = "not attempted";
     for (let attempt = 0; attempt < 40; attempt++) {
       if (spawnError) throw spawnError;
-      healthy = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) }).then(response => response.ok).catch(() => false);
+      healthy = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) })
+        .then(response => {
+          healthState = `HTTP ${response.status}`;
+          return response.ok;
+        })
+        .catch(error => {
+          const cause = error && typeof error === "object" && "cause" in error ? error.cause : undefined;
+          healthState = `${String(error)}${cause ? ` cause=${String(cause)}` : ""}`;
+          return false;
+        });
       if (healthy) break;
       if (child.exitCode !== null) break;
       await new Promise(resolve => setTimeout(resolve, 250));
     }
-    assert.equal(healthy, true, "the copied bundle must start without sibling CLI modules or dependencies");
+    assert.equal(healthy, true, `the copied bundle must start without sibling CLI modules or dependencies (${healthState})\n${output}`);
     const response = await fetch(`http://127.0.0.1:${port}/web/status`, { headers: { "x-m9r-key": key } });
     assert.equal(response.ok, true, "the running broker must authenticate its local owner");
   } finally {
     child.kill();
     await stopped;
     if (process.platform === "win32") spawnSync("icacls", [keyPath, "/reset"], { windowsHide: true, stdio: "ignore" });
-    rmSync(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
   }
 });
 
@@ -59,7 +74,9 @@ test("routine commands do not start an experimental runtime", () => {
 });
 
 test("the Windows CMD launcher runs its script under a Restricted parent without changing policy", { skip: process.platform !== "win32" }, () => {
-  const directory = mkdtempSync(resolve(".m9r-launcher-audit-"));
+  const testRoot = resolve(".test-tmp");
+  mkdirSync(testRoot, { recursive: true });
+  const directory = mkdtempSync(join(testRoot, "m9r-launcher-audit-"));
   try {
     copyFileSync("scripts/install-m9r.cmd", join(directory, "install-m9r.cmd"));
     writeFileSync(join(directory, "install-m9r.ps1"), 'Write-Output "launcher-ok"\n');
@@ -68,5 +85,5 @@ test("the Windows CMD launcher runs its script under a Restricted parent without
     if (result.error) throw result.error;
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /launcher-ok/);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally { rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
 });

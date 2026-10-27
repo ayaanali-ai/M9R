@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { MissionRelayClient } from "./mission-relay-client";
 import { FsTreeHost } from "../bridge/fs-tree-host";
 import { parseFsTreeRequestPayload, parseFsReadRequestPayload } from "./mission-fs-protocol";
 import type { RelayFrame } from "./mission-relay-protocol";
+import { agentCredentialPath, agentCredentialRoot, migrateLegacyAgentCredentials } from "../native/agent-credential-store";
 
 /**
  * Item #9 Phase 1a: the machine-level bootstrap for resident-served real
@@ -19,9 +19,9 @@ import type { RelayFrame } from "./mission-relay-protocol";
 
 const LOCAL_PROVIDER_NAMES = ["claude-code", "codex", "opencode"] as const;
 
-async function readLocalToken(repositoryRoot: string, provider: string): Promise<string | null> {
+async function readLocalToken(credentialRoot: string, provider: string): Promise<string | null> {
   try {
-    const raw = await readFile(resolve(repositoryRoot, ".m9r", "agents", provider, "local.json"), "utf8");
+    const raw = await readFile(agentCredentialPath(credentialRoot, provider), "utf8");
     const parsed = JSON.parse(raw) as { token?: string };
     return typeof parsed.token === "string" && parsed.token.trim() ? parsed.token.trim() : null;
   } catch {
@@ -29,9 +29,9 @@ async function readLocalToken(repositoryRoot: string, provider: string): Promise
   }
 }
 
-async function anyConnectedProviderToken(repositoryRoot: string): Promise<string | null> {
+async function anyConnectedProviderToken(credentialRoot: string): Promise<string | null> {
   for (const provider of LOCAL_PROVIDER_NAMES) {
-    const token = await readLocalToken(repositoryRoot, provider);
+    const token = await readLocalToken(credentialRoot, provider);
     if (token) return token;
   }
   return null;
@@ -54,6 +54,8 @@ interface ConversationListResponse {
 
 export interface OwnerFsRuntimeOptions {
   repositoryRoot: string;
+  /** Optional test/runtime override; production defaults to the user-scoped M9R store. */
+  credentialRoot?: string;
   appUrl?: string;
   relayPublicUrl?: string;
   onLog?: (message: string) => void;
@@ -66,6 +68,13 @@ export async function startOwnerFsRuntime(options: OwnerFsRuntimeOptions): Promi
   const relayPublicUrl = options.relayPublicUrl ?? process.env.MISSION_RELAY_PUBLIC_URL?.trim() ?? "https://m9r-relay.m9r.workers.dev";
   const discoveryIntervalMs = options.discoveryIntervalMs ?? 15_000;
   const log = options.onLog ?? ((message: string) => console.log(`[owner-fs] ${message}`));
+  const credentialRoot = options.credentialRoot ?? agentCredentialRoot(options.repositoryRoot);
+  try {
+    await migrateLegacyAgentCredentials(options.repositoryRoot, process.env);
+  } catch (error) {
+    log(`provider credential migration refused: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
 
   let token: string | null = null;
   let connectionId: string | null = null;
@@ -76,7 +85,7 @@ export async function startOwnerFsRuntime(options: OwnerFsRuntimeOptions): Promi
 
   async function ensureIdentity(): Promise<boolean> {
     if (connectionId && workspaceId && relayClient) return true;
-    const nextToken = await anyConnectedProviderToken(options.repositoryRoot);
+    const nextToken = await anyConnectedProviderToken(credentialRoot);
     if (!nextToken) return false;
     token = nextToken;
     try {

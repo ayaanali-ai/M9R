@@ -40,6 +40,10 @@ const HOLD_TO_TALK_HOTKEY_CODE: Code = Code::KeyM;
 const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Alt+M";
 /// Private single-instance handoff used by the installer to close the running pill cleanly.
 const UPDATE_SHUTDOWN_ARGUMENT: &str = "--m9r-update-shutdown";
+/// Passed to a second launch to open the app window on the already-running instance, the same
+/// as clicking the tray's "Open M9R" item -- lets the app window be opened from the command line
+/// instead of needing a click on the user's own desktop.
+const OPEN_APP_ARGUMENT: &str = "--m9r-open-app";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HoldToTalkEvent {
@@ -77,11 +81,14 @@ static ENGINE: Mutex<Option<Child>> = Mutex::new(None);
 static ENGINE_STOPPING: AtomicBool = AtomicBool::new(false);
 
 const PILL: &str = "pill";
+/// The full-window Clonk-style app, a real OS window (decorations, taskbar entry, resizable) --
+/// unlike the pill, closing it must never shut down the engine or the pill overlay.
+const APP_WINDOW: &str = "app";
 /// The real, live M9R workspace (agents, missions, memory, approvals, rooms) embedded as
 /// an ordinary native window -- the same data the web app already serves, not a reimplementation.
 const WORKSPACE: &str = "workspace";
 const COLLAPSED_W: f64 = 220.0;
-const TOP_MARGIN: f64 = 8.0;
+const TOP_MARGIN: f64 = 0.0;
 
 // ── One-pill window (default; M9R_PILL_NEXT=0 for the older overlay UI) ───────────────────────────────────────────────────────────────
 // The new pill UI draws its own island inside a fixed, transparent, top-centre window and tells this side three things:
@@ -91,9 +98,6 @@ const TOP_MARGIN: f64 = 8.0;
 /// The new UI's panel width (its `PANEL_W`); the island is centred in it, and tall enough for its largest view.
 const NEXT_W: f64 = 720.0;
 const NEXT_H: f64 = 320.0;
-/// The folded-away island leaves behind a small hit-testable handle so the pointer can wake it.
-const WAKE_W: f64 = 240.0;
-const WAKE_H: f64 = 10.0;
 /// Margin around the island that still counts as over it, matching the UI.
 const HIT_MARGIN: f64 = 14.0;
 
@@ -165,15 +169,9 @@ impl IslandRect {
 #[derive(Default)]
 struct NextPill {
     rect: IslandRect,
-    collapsed: bool,
 }
 
-static NEXT: Mutex<NextPill> = Mutex::new(NextPill { rect: IslandRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, collapsed: false });
-
-/// The size the window should have: the whole panel, or just the wake handle while the island is folded away.
-fn next_window_size(collapsed: bool) -> (f64, f64) {
-    if collapsed { (WAKE_W, WAKE_H) } else { (NEXT_W, NEXT_H) }
-}
+static NEXT: Mutex<NextPill> = Mutex::new(NextPill { rect: IslandRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 } });
 
 // ── One pill at a time ──────────────────────────────────────────────────────────────────────────────────────────
 // While this pill is running and visible it writes a heartbeat beside the feed; the web broker reads it and the in-page
@@ -194,10 +192,7 @@ fn spawn_heartbeat(app: AppHandle) {
     std::thread::spawn(move || loop {
         if let Some(_window) = app.get_webview_window(PILL) {
             let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-            // `window.is_visible()` reports the native wake-handle window, which remains visible even when the
-            // shared island has collapsed. The broker should yield to the browser shell only
-            // while the actual pill is expanded, otherwise the browser shell is suppressed forever after startup.
-            let visible = !NEXT.lock().map(|next| next.collapsed).unwrap_or(false);
+            let visible = true;
             let path = heartbeat_path();
             // Write beside, then rename, so the broker never reads half a file.
             let tmp = path.with_extension("json.tmp");
@@ -214,30 +209,6 @@ fn spawn_heartbeat(app: AppHandle) {
 fn pill_set_rect(x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
     let rect = IslandRect::checked(x, y, width, height).ok_or("island rectangle is outside the window")?;
     NEXT.lock().unwrap().rect = rect;
-    Ok(())
-}
-
-/// The island folded away (the window becomes the visible wake handle) or came back. Keeps its centre and top edge.
-#[tauri::command]
-fn pill_set_collapsed(window: WebviewWindow, collapsed: bool) -> Result<(), String> {
-    {
-        let mut state = NEXT.lock().unwrap();
-        if state.collapsed == collapsed {
-            return Ok(());
-        }
-        state.collapsed = collapsed;
-    }
-    let (w, h) = next_window_size(collapsed);
-    let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    let pos = window.outer_position().map_err(|e| e.to_string())?;
-    let size = window.outer_size().map_err(|e| e.to_string())?;
-    let cx = pos.x + size.width as i32 / 2;
-    window.set_size(LogicalSize::new(w, h)).map_err(|e| e.to_string())?;
-    window.set_position(PhysicalPosition::new(cx - (w * scale).round() as i32 / 2, pos.y)).map_err(|e| e.to_string())?;
-    // The wake handle must receive the pointer; everything else about click-through is decided by the watcher below.
-    if collapsed {
-        let _ = window.set_ignore_cursor_events(false);
-    }
     Ok(())
 }
 
@@ -276,14 +247,7 @@ fn spawn_click_through_watcher(app: AppHandle) {
         loop {
             std::thread::sleep(Duration::from_millis(16));
             let Some(window) = app.get_webview_window(PILL) else { continue };
-            let (rect, collapsed) = {
-                let state = NEXT.lock().unwrap();
-                (state.rect, state.collapsed)
-            };
-            if collapsed {
-                ignoring = None; // pill_set_collapsed made the strip solid; re-evaluate when it expands
-                continue;
-            }
+            let rect = NEXT.lock().unwrap().rect;
             let (Ok(cursor), Ok(pos), Ok(scale)) = (window.cursor_position(), window.outer_position(), window.scale_factor()) else { continue };
             let inside = rect.hit(HIT_MARGIN, (cursor.x - pos.x as f64) / scale, (cursor.y - pos.y as f64) / scale);
             if ignoring != Some(!inside) {
@@ -312,6 +276,16 @@ fn web_activity_path() -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("web-activity.json")
+}
+
+/// The owner broker's redacted desktop-pill snapshot. The pill reads this
+/// before falling back to the legacy merged feed, so it never discovers or
+/// selects provider sessions itself.
+fn desktop_pill_state_path() -> PathBuf {
+    feed_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("desktop-pill-state.json")
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -386,6 +360,24 @@ fn resize_pill(window: WebviewWindow, width: f64, height: f64) -> Result<(), Str
 #[tauri::command]
 fn read_feed() -> Option<String> {
     read_view_feed(&feed_path(), &web_activity_path())
+}
+
+/// Read only a broker-published, versioned pill state envelope. Returning the
+/// inner state JSON keeps the Tauri command transport simple while the broker
+/// remains the sole writer and owner of provider/UI state.
+#[tauri::command]
+fn read_pill_state() -> Option<String> {
+    let path = desktop_pill_state_path();
+    let modified = fs::metadata(&path).ok()?.modified().ok()?;
+    if modified.elapsed().ok()?.as_secs() > 10 {
+        return None;
+    }
+    let text = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if value.get("version")?.as_u64()? != 1 || value.get("surface")?.as_str()? != "desktop-pill" {
+        return None;
+    }
+    value.get("state").map(serde_json::Value::to_string)
 }
 
 fn read_view_feed(native_path: &Path, web_path: &Path) -> Option<String> {
@@ -721,8 +713,35 @@ async fn decide(task_id: String, action: String, from: Option<String>, to: Optio
     .map_err(|e| e.to_string())?
 }
 
-/// The agents a typed message addresses and the text to send them: every distinct `@handle` that starts a word is a
-/// recipient, and the handles are removed from what they receive (the same rule the terminal hook applies).
+/// Sends what the owner typed to the broker-owned UI bridge. The broker owns
+/// recipient selection and the managed provider lifecycle; the pill never
+/// parses mentions or launches a provider-specific route itself.
+#[tauri::command]
+async fn send_message(text: String) -> Result<String, String> {
+    if text.trim().is_empty() || text.chars().count() > 4000 {
+        return Err("That message is empty or too long.".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["pill-send", &text]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Approves or denies a broker-owned pill approval. The broker UI contract
+/// intentionally has no `allow for a day` route; that legacy grant remains
+/// available only through the compatibility feed path.
+#[tauri::command]
+async fn pill_decide(approval_id: String, decision: String) -> Result<String, String> {
+    if !plain_id(&approval_id) || !matches!(decision.as_str(), "allow" | "deny") {
+        return Err("Bad desktop pill approval decision".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["pill-decide", &approval_id, &decision]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
 fn parse_mentions(text: &str) -> (Vec<String>, String) {
     let mut handles: Vec<String> = Vec::new();
     let mut kept: Vec<&str> = Vec::new();
@@ -742,36 +761,6 @@ fn parse_mentions(text: &str) -> (Vec<String>, String) {
     (handles, kept.join(" "))
 }
 
-/// Sends what the owner typed to the agents it names, through the engine's own `send` (the same human-typed path the
-/// terminal hook uses), so routing, approval rules and delivery stay in one place.
-#[tauri::command]
-async fn send_message(text: String) -> Result<String, String> {
-    if text.len() > 4000 {
-        return Err("That message is too long.".into());
-    }
-    let (handles, goal) = parse_mentions(&text);
-    if handles.is_empty() {
-        return Err("Start with who it is for, like @claude or @codex.".into());
-    }
-    if goal.trim().is_empty() {
-        return Err("Add what you want them to do after the @name.".into());
-    }
-    if handles.iter().any(|h| !plain_id(h)) {
-        return Err("Bad agent name".into());
-    }
-    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut replies = Vec::new();
-        for h in handles {
-            replies.push(engine_call(&engine, &["send", &format!("@{h}"), &goal])?);
-        }
-        Ok(replies.join("
-"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 /// Saves a fact or decision to the shared project memory agents read at session start (`m9r note`).
 #[tauri::command]
 async fn save_memory(text: String) -> Result<String, String> {
@@ -780,7 +769,7 @@ async fn save_memory(text: String) -> Result<String, String> {
         return Err("That note is empty or too long.".into());
     }
     let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
-    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["note", &text]))
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["pill-note", &text]))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -885,6 +874,106 @@ fn toggle_pill(app: &AppHandle) {
     }
 }
 
+/// Shows (and focuses) the full app window, which starts hidden far off-screen (see its
+/// tauri.conf.json x/y) so a hidden native window can never leave any compositor artifact near
+/// the pill. Centering only happens here, the first time it's actually opened -- after that its
+/// position is whatever the owner last moved it to, same as any real window.
+#[tauri::command]
+fn open_app_window(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window(APP_WINDOW).ok_or("the app window is not registered")?;
+    if !window.is_visible().unwrap_or(false) {
+        let _ = window.center();
+    }
+    window.unminimize().map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Window presentation only; never routes into pill or provider lifecycle.
+#[tauri::command]
+fn app_window_action(app: tauri::AppHandle, action: String) -> Result<(), String> {
+    let window = app.get_webview_window(APP_WINDOW).ok_or("the app window is not registered")?;
+    match action.as_str() {
+        "windowless" => window.set_decorations(false),
+        "framed" => window.set_decorations(true),
+        "drag" => window.start_dragging(),
+        "minimize" => window.minimize(),
+        "maximize" => {
+            if window.is_maximized().map_err(|e| e.to_string())? { window.unmaximize() } else { window.maximize() }
+        }
+        "hide" => window.hide(),
+        _ => return Err("unsupported app window action".into()),
+    }.map_err(|error| error.to_string())
+}
+
+/// Explicit owner clicks may reveal an existing local file or open an HTTP(S)
+/// result. Never execute a referenced file or pass agent text to a shell.
+#[tauri::command]
+fn open_output_reference(kind: String, location: String) -> Result<(), String> {
+    let argument = output_reference_argument(&kind, &location)?;
+    let mut command = Command::new(
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into())).join("explorer.exe")
+    );
+    command.arg(argument).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn output_reference_argument(kind: &str, location: &str) -> Result<String, String> {
+    match kind {
+        "file" => {
+            let bytes = location.as_bytes();
+            if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || ![b'/', b'\\'].contains(&bytes[2]) {
+                return Err("Only an absolute local file reference can be revealed.".into());
+            }
+            let path = fs::canonicalize(&location).map_err(|_| "This referenced file is not available on this computer.")?;
+            if !path.is_file() { return Err("This reference is not a file.".into()); }
+            // Explorer expects the familiar drive path, not canonicalize's
+            // Windows extended-length (\\?\) spelling. Reveal the owner's
+            // referenced path after verifying the target exists.
+            Ok(format!("/select,{}", location.replace('/', "\\")))
+        }
+        "link" => {
+            let url = tauri::Url::parse(&location).map_err(|_| "Invalid output link.")?;
+            if !["http", "https"].contains(&url.scheme()) || !url.username().is_empty() || url.password().is_some() {
+                return Err("Only HTTP(S) result links without embedded credentials can be opened.".into());
+            }
+            Ok(url.to_string())
+        }
+        _ => Err("Unsupported output reference.".into()),
+    }
+}
+
+#[cfg(test)]
+mod output_reference_tests {
+    use super::output_reference_argument;
+
+    #[test]
+    fn output_urls_are_http_only_and_never_carry_credentials() {
+        for location in ["javascript:alert(1)", "file:///C:/secret.txt", "data:text/html,test", "https://user:pass@example.com/"] {
+            assert!(output_reference_argument("link", location).is_err());
+        }
+        assert_eq!(output_reference_argument("link", "https://example.com/result").unwrap(), "https://example.com/result");
+    }
+
+    #[test]
+    fn output_files_require_an_existing_local_drive_path() {
+        for location in ["relative.txt", "\\\\server\\share\\file", "C:\\m9r-missing-output-fixture\\result.txt"] {
+            assert!(output_reference_argument("file", location).is_err());
+        }
+        assert!(output_reference_argument("execute", "https://example.com").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn output_file_reveal_uses_an_explorer_compatible_path() {
+        let location = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+        let argument = output_reference_argument("file", &location).unwrap();
+        assert_eq!(argument, format!("/select,{}", location.replace('/', "\\")));
+        assert!(!argument.contains("\\\\?\\"));
+    }
+}
+
 /// Shows and focuses the real workspace window, reusing the one created at startup (defined in
 /// tauri.conf.json, same pattern as the pill) rather than ever building a second instance of it.
 fn show_workspace(app: &AppHandle) {
@@ -905,6 +994,10 @@ fn stop_engine() {
 
 fn has_update_shutdown_argument(args: &[String]) -> bool {
     args.iter().any(|arg| arg == UPDATE_SHUTDOWN_ARGUMENT)
+}
+
+fn has_open_app_argument(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == OPEN_APP_ARGUMENT)
 }
 
 fn shutdown_pill(app: &AppHandle) {
@@ -968,6 +1061,8 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if has_update_shutdown_argument(&args) {
                 shutdown_pill(app);
+            } else if has_open_app_argument(&args) {
+                let _ = open_app_window(app.clone());
             } else {
                 // The app already runs persistently in the background (tray + hidden pill), so a
                 // second launch is always a deliberate click on the app's icon -- the same gesture
@@ -1000,7 +1095,7 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, decide, send_message, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_collapsed, pill_set_focus, open_microphone_settings])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.
@@ -1029,6 +1124,13 @@ fn main() {
                 place(&window, &load_saved(app.handle()));
             }
             let _ = window.show();
+            // A normal M9R launcher passes --m9r-open-app. The resident tray/pill
+            // startup remains unchanged, but a deliberate app launch must present
+            // the full native window on the first process, not only on a duplicate
+            // launch handled by the single-instance callback.
+            if has_open_app_argument(&std::env::args().collect::<Vec<_>>()) {
+                let _ = open_app_window(app.handle().clone());
+            }
             // Debug aid for a live "the pill shows the wrong thing" report: M9R_DEBUG=1 opens DevTools on the
             // pill's own webview so the actual console/network error is visible instead of guessing from a
             // screenshot. Never on by default -- devtools is a real attack-surface increase to leave open.
@@ -1037,10 +1139,11 @@ fn main() {
             }
 
             let open = MenuItem::with_id(app, "open_workspace", "Open M9R", true, None::<&str>)?;
+            let open_app = MenuItem::with_id(app, "open-app", "Open M9R App", true, None::<&str>)?;
             let show = MenuItem::with_id(app, "toggle", &format!("Show / hide pill ({TOGGLE_HOTKEY_LABEL})"), true, None::<&str>)?;
             let dnd = CheckMenuItem::with_id(app, "dnd", "Do not disturb", true, false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &show, &dnd, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &open_app, &show, &dnd, &quit])?;
             let mut tray = TrayIconBuilder::new().tooltip("M9R").menu(&menu);
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
@@ -1048,6 +1151,7 @@ fn main() {
             tray.on_menu_event(move |app, event| match event.id.as_ref() {
                 "open_workspace" => show_workspace(app),
                 "toggle" => toggle_pill(app),
+                "open-app" => { let _ = open_app_window(app.clone()); }
                 "dnd" => {
                     let _ = app.emit("dnd", dnd.is_checked().unwrap_or(false));
                 }
@@ -1075,8 +1179,8 @@ fn main() {
         .on_window_event(|window, event| {
             match event {
                 WindowEvent::Moved(pos) => {
-                    // Position persistence is pill-specific framing; the workspace window is an
-                    // ordinary resizable app window with no saved-position concept.
+                    // Position persistence is pill-specific framing; the app and workspace windows
+                    // are ordinary resizable app windows with no saved-position concept.
                     if window.label() == PILL {
                         if let Ok(size) = window.outer_size() {
                             save_position(window.app_handle(), pos.x + size.width as i32 / 2, pos.y);
@@ -1087,8 +1191,8 @@ fn main() {
                     if window.label() == PILL {
                         shutdown_pill(window.app_handle());
                     } else {
-                        // Closing the workspace window should hide it, not quit the whole app or
-                        // destroy the window -- "Open M9R" from the tray must keep working after.
+                        // Closing the app or workspace window should hide it, not quit the whole
+                        // app or destroy the window -- "Open M9R" from the tray must keep working.
                         api.prevent_close();
                         let _ = window.hide();
                     }
@@ -1102,7 +1206,7 @@ fn main() {
 
 #[cfg(test)]
 mod one_pill_window_tests {
-    use super::{has_update_shutdown_argument, heartbeat_json, next_window_size, IslandRect, HIT_MARGIN, NEXT_H, NEXT_W, UPDATE_SHUTDOWN_ARGUMENT, WAKE_H, WAKE_W};
+    use super::{has_open_app_argument, has_update_shutdown_argument, heartbeat_json, IslandRect, HIT_MARGIN, NEXT_H, NEXT_W, OPEN_APP_ARGUMENT, UPDATE_SHUTDOWN_ARGUMENT};
 
     #[test]
     fn only_the_private_installer_argument_requests_shutdown() {
@@ -1112,6 +1216,19 @@ mod one_pill_window_tests {
         ]));
         assert!(!has_update_shutdown_argument(&["m9r-overlay.exe".into()]));
         assert!(!has_update_shutdown_argument(&["m9r-overlay.exe".into(), "--quit".into()]));
+    }
+
+    #[test]
+    fn the_app_launcher_argument_is_distinct_from_pill_startup() {
+        assert!(has_open_app_argument(&[
+            "m9r-overlay.exe".into(),
+            OPEN_APP_ARGUMENT.into(),
+        ]));
+        assert!(!has_open_app_argument(&["m9r-overlay.exe".into()]));
+        assert!(!has_open_app_argument(&[
+            "m9r-overlay.exe".into(),
+            UPDATE_SHUTDOWN_ARGUMENT.into(),
+        ]));
     }
 
     #[test]
@@ -1149,11 +1266,6 @@ mod one_pill_window_tests {
         assert!(!IslandRect::default().hit(HIT_MARGIN, 0.0, 0.0));
     }
 
-    #[test]
-    fn the_window_is_the_panel_or_just_the_wake_strip() {
-        assert_eq!(next_window_size(false), (NEXT_W, NEXT_H));
-        assert_eq!(next_window_size(true), (WAKE_W, WAKE_H));
-    }
 }
 
 #[cfg(test)]

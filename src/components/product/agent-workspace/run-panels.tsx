@@ -153,7 +153,7 @@ export function HeroRun({
     <div className="wf-hero" data-state={state.tone}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
-          <AgentMark agentKey={agent?.key ?? run.agent_kind ?? "other"} size={38} />
+          <AgentMark agentKey={agent?.key ?? run.agent_kind ?? "other"} connectionId={agent?.connectionId} size={38} />
           <div className="min-w-0">
             <div className="truncate text-[length:var(--ol-text-md)] font-semibold text-[color:var(--ol-text-primary)]">
               {run.task_title || "Run"}

@@ -9,7 +9,7 @@ import process from "node:process";
 import * as pty from "node-pty";
 import chokidar from "chokidar";
 import { WebSocket, WebSocketServer } from "ws";
-import { BRIDGE_PROTOCOL_VERSION, DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, MAX_BRIDGE_MESSAGE_BYTES, authorizeUpgrade, parseClientMessage, isIgnoredTerminalWatchPath } from "../src/lib/local-terminal-bridge-core";
+import { BRIDGE_PROTOCOL_VERSION, BRIDGE_TOKEN_COOKIE, DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT, MAX_BRIDGE_MESSAGE_BYTES, authorizeUpgrade, bridgeTokenFromProtocols, bridgeTokensEqual, parseClientMessage, isIgnoredTerminalWatchPath } from "../src/lib/local-terminal-bridge-core";
 import { createTerminalSessionManager, type PtyFactory } from "../src/lib/local-terminal-session-manager";
 import { parseResidentActivityLine, residentActivityJournalPath } from "../src/lib/resident-activity-journal";
 import { isTerminalProvider, type TerminalProvider } from "../src/lib/local-terminal-protocol";
@@ -18,11 +18,14 @@ import { parseProviderAdapterConfig } from "../src/lib/provider-adapter-config";
 import { createResidentSupervisor } from "../src/lib/resident-supervisor";
 import { spawn } from "node:child_process";
 import { migrateLegacyM9rDirectory, normalizeLegacyM9rEnvironment } from "../src/lib/native/m9r-compatibility";
+import { agentCredentialPath, agentCredentialRoot, migrateLegacyAgentCredentials, readOrCreateTerminalBridgeToken } from "../src/lib/native/agent-credential-store";
 
 const repositoryRoot = process.cwd();
 normalizeLegacyM9rEnvironment(process.env);
 try { migrateLegacyM9rDirectory(repositoryRoot); }
 catch (error) { process.stderr.write(`M9R could not copy legacy .oathlock state: ${error instanceof Error ? error.message : "unknown error"}\n`); }
+const credentialRoot = agentCredentialRoot(repositoryRoot, process.env);
+const bridgeToken = readOrCreateTerminalBridgeToken(repositoryRoot, process.env);
 const localOnlyRuntime = process.env.M9R_LOCAL_ONLY === "1";
 const host = DEFAULT_BRIDGE_HOST;
 const requestedPort = Number.parseInt(process.env.M9R_BRIDGE_PORT ?? "", 10);
@@ -41,6 +44,15 @@ const fitAddonScriptPath = require.resolve("@xterm/addon-fit");
 function providerFromProtocols(protocols: string[]): TerminalProvider | null {
   const value = protocols.find((protocol) => protocol.startsWith("oathlock-provider."))?.slice("oathlock-provider.".length);
   return isTerminalProvider(value) ? value : null;
+}
+
+function cookieValue(header: string | undefined, name: string): string | null {
+  const prefix = `${name}=`;
+  for (const part of (header ?? "").split(";")) {
+    const value = part.trim();
+    if (value.startsWith(prefix)) return value.slice(prefix.length) || null;
+  }
+  return null;
 }
 
 function powershellArg(value: string): string {
@@ -117,6 +129,23 @@ const server = createServer(async (request, response) => {
       response.end("Unsupported provider.");
       return;
     }
+    const bootstrapToken = requestUrl.searchParams.get("token");
+    if (bootstrapToken && bridgeTokensEqual(bridgeToken, bootstrapToken)) {
+      response.writeHead(302, {
+        location: `/workspace?provider=${encodeURIComponent(provider)}`,
+        "cache-control": "no-store",
+        "set-cookie": `${BRIDGE_TOKEN_COOKIE}=${bootstrapToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=300`,
+        "referrer-policy": "no-referrer",
+      });
+      response.end();
+      return;
+    }
+    const requestToken = cookieValue(request.headers.cookie, BRIDGE_TOKEN_COOKIE);
+    if (!bridgeTokensEqual(bridgeToken, requestToken)) {
+      response.writeHead(401, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+      response.end("Terminal workspace authorization is required.");
+      return;
+    }
     const nonce = randomBytes(18).toString("base64url");
     response.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
@@ -172,7 +201,8 @@ server.on("upgrade", (request, socket, head) => {
   const url = new URL(request.url ?? "/", `http://${host}:${port}`);
   if (url.pathname !== "/terminal") return socket.destroy();
   const protocols = (request.headers["sec-websocket-protocol"] ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-  const authorization = authorizeUpgrade({ origin: request.headers.origin, protocols, allowedOrigins });
+  const providedToken = bridgeTokenFromProtocols(protocols) ?? cookieValue(request.headers.cookie, BRIDGE_TOKEN_COOKIE);
+  const authorization = authorizeUpgrade({ origin: request.headers.origin, protocols, allowedOrigins, bridgeToken, providedToken });
   const provider = providerFromProtocols(protocols);
   if (!authorization.ok || !provider) {
     socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
@@ -311,9 +341,14 @@ server.listen(port, host, () => {
 const LOCAL_PROVIDER_NAMES = ["claude-code", "codex", "opencode"] as const;
 async function connectedLocalProviders(): Promise<string[]> {
   const found: string[] = [];
+  try { await migrateLegacyAgentCredentials(repositoryRoot, process.env); }
+  catch (error) {
+    process.stderr.write(`M9R provider credential migration refused: ${error instanceof Error ? error.message : String(error)}\n`);
+    return found;
+  }
   for (const provider of LOCAL_PROVIDER_NAMES) {
     try {
-      const raw = await readFile(resolve(repositoryRoot, ".m9r", "agents", provider, "local.json"), "utf8");
+      const raw = await readFile(agentCredentialPath(credentialRoot, provider), "utf8");
       const parsed = JSON.parse(raw) as { token?: string };
       if (typeof parsed.token === "string" && parsed.token.trim()) found.push(provider);
     } catch {
@@ -327,7 +362,7 @@ async function connectedLocalProviders(): Promise<string[]> {
 async function anyConnectedProviderToken(): Promise<string | null> {
   for (const provider of LOCAL_PROVIDER_NAMES) {
     try {
-      const raw = await readFile(resolve(repositoryRoot, ".m9r", "agents", provider, "local.json"), "utf8");
+      const raw = await readFile(agentCredentialPath(credentialRoot, provider), "utf8");
       const parsed = JSON.parse(raw) as { token?: string };
       if (typeof parsed.token === "string" && parsed.token.trim()) return parsed.token.trim();
     } catch {

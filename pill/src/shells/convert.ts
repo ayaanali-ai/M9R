@@ -14,7 +14,7 @@ const clip = (text: unknown, n: number) => (typeof text === "string" ? text.repl
 
 // ── Browser shell: the broker's `ui-state` as the extension delivers it ──────────────────────────────
 
-interface UiAgent { id: string; provider?: string; state?: string; doing?: string }
+interface UiAgent { id: string; provider?: string; state?: string; doing?: string; color?: string }
 interface UiThread { id: string; kind: string; agent?: string; text: string; phase?: string }
 interface UiApproval { id: string; agent?: string; provider?: string; text: string; site?: string; url?: string; action?: string }
 export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; desktopPill?: boolean }
@@ -35,6 +35,7 @@ export function fromUiState(message: UiState): PillSnapshot {
     if (doing && activity.at(-1) !== doing) activity.push(doing);
     return {
       handle,
+      ...(a.color ? { color: a.color } : {}),
       provider: providerOf(a.provider || handle),
       state: (RUN_STATES.has(a.state as AgentRunState) ? a.state : "unknown") as AgentRunState,
       activity,
@@ -56,7 +57,7 @@ export function fromUiState(message: UiState): PillSnapshot {
 
 // ── Desktop shell: the engine's feed.json merged with web-activity.json ────────────────────────────
 
-interface FeedAgent { handle: string; state?: string; doing?: string | null }
+interface FeedAgent { handle: string; state?: string; doing?: string | null; color?: string }
 type FeedNeeds =
   | { kind: "approval"; taskId: string; from: string; to: string; goal: string; protected?: boolean }
   | { kind: "push_failed"; taskId: string; from: string; fromSession?: string; to: string; reason: string; fix?: string; linkable?: boolean }
@@ -99,7 +100,7 @@ export function fromFeed(feed: Feed): PillSnapshot {
     const steps = [...acted, ...mine];
     if (doing && steps.at(-1) !== doing) steps.push(doing);
     else if (state === "working" && steps.length === 0) steps.push("Working on a turn");
-    return { handle, provider: providerOf(handle), state, activity: steps.slice(-12), ...(task ? { task } : {}) };
+    return { handle, provider: providerOf(handle), state, activity: steps.slice(-12), ...(task ? { task } : {}), ...(a.color ? { color: a.color } : {}) };
   });
   const needs = Array.isArray(feed.needsYou) ? feed.needsYou : [];
   const approvals = needs.flatMap((n) => n.kind === "approval"

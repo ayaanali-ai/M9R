@@ -1,5 +1,7 @@
 /** Deterministic validation for authenticated adapter heartbeats. */
 
+import { providerMention } from "@/lib/provider-adapter-config";
+
 export const HEARTBEAT_PROTOCOL_VERSION = "m9r.presence.v1";
 export const HEARTBEAT_LEASE_MS = 90_000;
 
@@ -24,7 +26,8 @@ export type HeartbeatResult =
         | "invalid_payload"
         | "unsupported_protocol"
         | "invalid_server_time"
-        | "sequence_not_newer";
+        | "sequence_not_newer"
+        | "provider_mismatch";
     };
 
 interface AcceptanceContext {
@@ -32,6 +35,8 @@ interface AcceptanceContext {
   receivedAt: string;
   /** Last accepted sequence for this exact adapter instance. */
   previousSequence: number | null;
+  /** The provider identity authenticated by the connection token. */
+  expectedProvider?: string;
 }
 
 function boundedString(value: unknown, min: number, max: number): value is string {
@@ -61,6 +66,10 @@ export function acceptHeartbeat(payload: unknown, context: AcceptanceContext): H
     || !boundedString(row.idempotencyKey, 16, 128)
   ) {
     return { ok: false, reason: "invalid_payload" };
+  }
+
+  if (context.expectedProvider && providerMention(row.provider) !== providerMention(context.expectedProvider)) {
+    return { ok: false, reason: "provider_mismatch" };
   }
 
   if (context.previousSequence !== null && sequence as number <= context.previousSequence) {

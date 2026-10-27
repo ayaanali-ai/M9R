@@ -88,10 +88,11 @@ test("agent.md is CLI-first and keeps curl as a fallback", () => {
   assert.match(md, /curl /);
 });
 
-test("agent.md documents the local token file and human approval claim", () => {
+test("agent.md documents the user-scoped credential store and human approval claim", () => {
   const md = buildAgentMarkdown(BASE);
-  assert.match(md, /\.m9r\/local\.json/);
-  assert.match(md, /do not commit/i);
+  assert.match(md, /user-scoped M9R credential store/i);
+  assert.match(md, /never written to the\s+repository/i);
+  assert.doesNotMatch(md, /\.m9r\/local\.json/);
   assert.match(md, /human approval claim/i);
 });
 
@@ -110,8 +111,9 @@ test("agent.md exposes no real-looking token examples", () => {
 test("agent.md treats init as one-time and says not to reconnect if already connected", () => {
   const md = buildAgentMarkdown(BASE);
   assert.match(md, /one-time/i);
-  // Check the local token file first; reuse the existing connection.
-  assert.match(md, /\.m9r\/local\.json/);
+  // Doctor checks the user-scoped connection; reuse it when it is healthy.
+  assert.match(md, /user-scoped.*credential store/i);
+  assert.doesNotMatch(md, /\.m9r\/local\.json/);
   assert.match(md, /do not run init/i);
   assert.match(md, /do not reconnect/i);
 });

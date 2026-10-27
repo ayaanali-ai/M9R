@@ -7,13 +7,22 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
-import { windowsFileHolders, type Liveness } from "./codex-liveness";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, M9R_PUSHED_RESULT_PREFIX, pickSession, nodeForCodex, normCwd, queueArgs, resolveCodexCommand, resultSummary, type CodexCommand } from "./codex-delivery-core";
+import { windowsFileHolderObservations, type FileHolderObservation, type Liveness } from "./codex-liveness";
 import type { LocalStore } from "./local-store";
 import { defaultStoreRoot } from "./local-store";
 import { createWebBrokerClient } from "./web-broker-client";
 import { brokerKeyPath, ownerPipePath } from "./web-broker-paths";
 import { prepareTaskStageNotice } from "./task-stage-notice";
+import { sessionHasUnfinishedDelivery } from "./task-delivery-pump";
+
+class DeferredDelivery extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super("Waiting for the preceding task in the selected session to finish.");
+    this.sessionId = sessionId;
+  }
+}
 
 export interface DeliveryDeps {
   prepareTaskStage?(token: string, taskId: string): Promise<string>;
@@ -23,6 +32,8 @@ export interface DeliveryDeps {
   readRolloutTail(threadId: string): string | null;
   /** Which of these threads are open right now. Optional: without it (or with `unknown`) recency decides. */
   sessionLiveness?(threadIds: string[]): Promise<Record<string, Liveness>>;
+  /** Exact process holding each live rollout file; absent when ownership is ambiguous or unavailable. */
+  sessionOwnerProcessIds?(threadIds: string[]): Promise<Record<string, number | undefined>>;
   /** Production hook delivery must target a session with a live M9R identity. Unit callers may opt into legacy fixtures. */
   requireTargetIdentity?: boolean;
 }
@@ -30,6 +41,7 @@ export interface DeliveryDeps {
 export type DeliveryOutcome =
   | { state: "queued"; threadId: string }
   | { state: "failed"; reason: string }
+  | { state: "deferred"; reason: string }
   | { state: "skipped"; reason: string };
 
 /** A task launched by M9R itself can inherit ~/.m9r/bin as process.cwd(); that is install state, never a project. */
@@ -55,6 +67,10 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
   try {
     return await deliverClaimedToCodex(store, taskId, guardedDeps, () => dispatched);
   } catch (error) {
+    if (!dispatched && error instanceof DeferredDelivery) {
+      store.setDelivery(taskId, { state: "deferred", threadId: error.sessionId, error: undefined });
+      return { state: "deferred", reason: error.message };
+    }
     const reason = error instanceof Error ? error.message : String(error);
     store.setDelivery(taskId, { state: dispatched ? "uncertain" : "failed", error: reason });
     return { state: "failed", reason };
@@ -80,8 +96,15 @@ async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: De
     if (!deps.requireTargetIdentity) return buildQueueMessage(task);
     const token = store.identityTokenFor("codex", sessionId);
     if (!token) return null;
-    const stageNotice = deps.prepareTaskStage ? await deps.prepareTaskStage(token, taskId).catch(() => "M9R task stage preparation failed; no desktop control was granted.") : "";
-    return buildQueueMessage(task, token) + (stageNotice ? `\n\n${stageNotice}` : "");
+    if (!store.bindTaskToSession(taskId, token)) {
+      const owner = task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId;
+      if ((!owner || owner === sessionId) && sessionHasUnfinishedDelivery(store, "codex", sessionId, taskId)) throw new DeferredDelivery(sessionId);
+      throw new Error("This task's session ownership is ambiguous; no additional prompt was pushed.");
+    }
+    // Authentication and task binding are supplied through the trusted hook
+    // context; the real user turn contains only the owner's task.
+    store.setDelivery(taskId, { state: "sending", threadId: sessionId, correlation: "internal-context" });
+    return buildQueueMessage(task);
   };
   const everySession = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
 
@@ -113,7 +136,7 @@ async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: De
   }
   // Asking the machine costs about a second, so only when there is a choice to make and nobody pinned one.
   const liveness = !task.targetSession && known.length > 1 && deps.sessionLiveness ? await deps.sessionLiveness(known.map((s) => s.sessionId)).catch(() => undefined) : undefined;
-  const choice = pickSession(known, { pinned: task.targetSession, senderCwd: taskCwd, now: new Date(), liveness });
+  const choice = pickSession(known, { pinned: task.targetSession ?? task.delivery?.threadId, senderCwd: taskCwd, now: new Date(), liveness });
   if (choice.kind === "none") return fail(task.targetSession
     ? (deps.requireTargetIdentity ? `No Codex session with an active M9R identity matches "${task.targetSession}". Start or reconnect that session, then retry.` : `No Codex session matches "${task.targetSession}"; start that session, then retry.`)
     : (deps.requireTargetIdentity ? "No Codex session with an active M9R identity is known. Start Codex with M9R enabled so it receives a SessionStart card, then retry." : "No Codex session is known. Start Codex, then retry."));
@@ -150,8 +173,10 @@ export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps:
   if (askerSessions.length !== 1) return { state: "failed", reason: askerSessions.length === 0 ? "the originating Codex session is no longer registered in its folder" : "the originating Codex session is ambiguous; no answer was pushed" };
   const command = deps.resolveCodex();
   if (!command) return { state: "failed", reason: "The codex command was not found on this machine." };
-  const goal = task.goal.length > 90 ? `${task.goal.slice(0, 89)}…` : task.goal;
-  const message = `[M9R ${task.id}] Answer from @${task.to} to your task "${goal}":\n${task.resultSummary}\n\nThis is the answer you asked for. Acknowledge it in one short line.`;
+  // The task/session/sender identity remains in the local ledger and answerPushedAt
+  // receipt. Codex sees only a natural result envelope; the stable prefix lets the
+  // hook suppress mention routing without exposing backend correlation metadata.
+  const message = `${M9R_PUSHED_RESULT_PREFIX}\n\n${task.resultSummary}`;
   const outcome = interpretQueueExit(await deps.runCodex(command, queueArgs(task.fromSession, message)));
   if (!outcome.ok) return { state: "failed", reason: outcome.error ?? "codex queue failed" };
   store.setAnswerPushed(task.id);
@@ -161,7 +186,8 @@ export async function pushAnswerToCodex(store: LocalStore, taskId: string, deps:
 /** Reads back answers for every pushed task that has none yet. Cheap when nothing is waiting (no file is opened). */
 export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, "readRolloutTail">): number {
   let collected = 0;
-  for (const task of store.awaitingResults()) {
+  for (const task of store.awaitingResults("codex")) {
+    if (task.delivery?.correlation === "internal-context") continue;
     const threadId = task.delivery?.threadId;
     if (!threadId) continue;
     const tail = deps.readRolloutTail(threadId);
@@ -184,7 +210,7 @@ export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, 
 const TAIL_BYTES = 512 * 1024;
 const LIVENESS_FRESH_MS = 20_000;
 /** Who holds which session file open, remembered briefly within this process (the resident engine). */
-const livenessMemo = new Map<string, { v: Liveness; at: number }>();
+const livenessMemo = new Map<string, { v: Liveness; processId?: number; at: number }>();
 
 export function codexHome(env: Record<string, string | undefined>): string {
   return env.CODEX_HOME?.trim() || join(homedir(), ".codex");
@@ -198,13 +224,62 @@ export function codexHome(env: Record<string, string | undefined>): string {
  * live/free checks against it are checking a file nobody has held open in days. Match the optional `_<uuid>` tail too.
  */
 export function findRolloutFile(home: string, threadId: string): string | null {
+  return scanCodexRolloutFiles(home, [threadId]).paths.get(threadId) ?? null;
+}
+
+export interface CodexRolloutFileScan {
+  /** The newest matching local rollout file for each requested Codex thread. */
+  paths: ReadonlyMap<string, string>;
+  /** False means some part of the session tree could not be inspected; absence is then not proof of closure. */
+  complete: boolean;
+}
+
+/**
+ * Index the Codex session tree once for a batch of session IDs. A complete scan
+ * that finds no rollout is positive evidence that a retained M9R session record
+ * is stale; a missing or unreadable directory remains unknown and fail-closed.
+ * Directory entries are traversed in the same reverse-lexical order as the
+ * previous lookup so a resumed thread still resolves to its newest rotation.
+ */
+export function scanCodexRolloutFiles(home: string, threadIds: readonly string[]): CodexRolloutFileScan {
+  const paths = new Map<string, string>();
+  const patterns = new Map(threadIds.map((threadId) => [
+    threadId,
+    new RegExp(`-${threadId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:_[0-9a-f-]+)?\\.jsonl$`, "i"),
+  ]));
+  let complete = true;
+  const entries = (directory: string) => {
+    try {
+      return readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+        a.name < b.name ? 1 : a.name > b.name ? -1 : 0);
+    } catch {
+      complete = false;
+      return [];
+    }
+  };
+
   const root = join(home, "sessions");
-  const pattern = new RegExp(`-${threadId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:_[0-9a-f-]+)?\\.jsonl$`, "i");
-  const list = (dir: string): string[] => { try { return readdirSync(dir).sort().reverse(); } catch { return []; } };
-  for (const y of list(root)) for (const m of list(join(root, y))) for (const d of list(join(root, y, m))) {
-    for (const f of list(join(root, y, m, d))) if (pattern.test(f)) return join(root, y, m, d, f);
+  for (const year of entries(root)) {
+    if (!year.isDirectory()) continue;
+    const yearPath = join(root, year.name);
+    for (const month of entries(yearPath)) {
+      if (!month.isDirectory()) continue;
+      const monthPath = join(yearPath, month.name);
+      for (const day of entries(monthPath)) {
+        if (!day.isDirectory()) continue;
+        const dayPath = join(monthPath, day.name);
+        for (const file of entries(dayPath)) {
+          if (!file.isFile()) continue;
+          for (const [threadId, pattern] of patterns) {
+            if (!paths.has(threadId) && pattern.test(file.name)) {
+              paths.set(threadId, join(dayPath, file.name));
+            }
+          }
+        }
+      }
+    }
   }
-  return null;
+  return { paths, complete };
 }
 
 export function readTail(path: string, bytes: number): string | null {
@@ -235,6 +310,39 @@ export function readRolloutTailFor(threadId: string, env: Record<string, string 
 export function realDeps(env: Record<string, string | undefined> = process.env): DeliveryDeps {
   const root = defaultStoreRoot(homedir(), env);
   const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: Number(env.M9R_WEB_BROKER_PORT) || undefined });
+  const observeCodexSessions = async (threadIds: string[]): Promise<Record<string, FileHolderObservation>> => {
+    const now = Date.now();
+    const out: Record<string, FileHolderObservation> = {};
+    const missing: string[] = [];
+    for (const id of threadIds) {
+      const hit = livenessMemo.get(id);
+      if (hit && now - hit.at < LIVENESS_FRESH_MS) {
+        out[id] = { state: hit.v, ...(hit.processId !== undefined ? { processId: hit.processId } : {}) };
+      } else missing.push(id);
+    }
+    if (missing.length > 0) {
+      const byFile = new Map<string, string>();
+      const scan = scanCodexRolloutFiles(codexHome(env), missing);
+      for (const id of missing) {
+        const file = scan.paths.get(id);
+        if (file) byFile.set(file, id);
+        else out[id] = { state: scan.complete ? "free" : "unknown" };
+      }
+      const observations = await windowsFileHolderObservations([...byFile.keys()]);
+      for (const [file, id] of byFile) out[id] = observations[file] ?? { state: "unknown" };
+      for (const id of missing) {
+        const observation = out[id] ?? { state: "unknown" as Liveness };
+        if (observation.state !== "unknown") {
+          livenessMemo.set(id, {
+            v: observation.state,
+            ...(observation.processId !== undefined ? { processId: observation.processId } : {}),
+            at: Date.now(),
+          });
+        }
+      }
+    }
+    return out;
+  };
   return {
     prepareTaskStage: (token, taskId) => prepareTaskStageNotice(root, web, token, "codex", taskId),
     requireTargetIdentity: true,
@@ -262,25 +370,8 @@ export function realDeps(env: Record<string, string | undefined> = process.env):
       const file = findRolloutFile(codexHome(env), threadId);
       return file ? readTail(file, TAIL_BYTES) : null;
     },
-    sessionLiveness: async (threadIds) => {
-      // The feed already asks the machine every few seconds; a push right after should not pay for the same 2 s question again.
-      const now = Date.now();
-      const out: Record<string, Liveness> = {};
-      const missing: string[] = [];
-      for (const id of threadIds) {
-        const hit = livenessMemo.get(id);
-        if (hit && now - hit.at < LIVENESS_FRESH_MS) out[id] = hit.v; else missing.push(id);
-      }
-      if (missing.length > 0) {
-        const byFile = new Map<string, string>();
-        for (const id of missing) { const f = findRolloutFile(codexHome(env), id); if (f) byFile.set(f, id); }
-        const verdicts = await windowsFileHolders([...byFile.keys()]);
-        for (const id of missing) out[id] = "unknown";
-        for (const [file, id] of byFile) out[id] = verdicts[file] ?? "unknown";
-        for (const id of missing) if (out[id] !== "unknown") livenessMemo.set(id, { v: out[id], at: Date.now() });
-      }
-      return out;
-    },
+    sessionLiveness: async (threadIds) => Object.fromEntries(Object.entries(await observeCodexSessions(threadIds)).map(([id, observation]) => [id, observation.state])),
+    sessionOwnerProcessIds: async (threadIds) => Object.fromEntries(Object.entries(await observeCodexSessions(threadIds)).map(([id, observation]) => [id, observation.processId])),
   };
 }
 

@@ -19,12 +19,13 @@ test("a failed push never leaks the installation token in its error message", as
     // A push to a nonexistent GitHub org/repo will genuinely fail (auth or
     // resolution error) without needing network mocking — the point here is
     // the token redaction, not a successful push.
-    assert.throws(
+    await assert.rejects(
       () => pushWithInstallationToken({ repoPath, branch: "main", owner: "oathlock-nonexistent-org-xyz", repo: "nonexistent-repo-xyz", token: secretToken }),
       (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         assert.ok(!message.includes(secretToken), `error message must not contain the raw token: ${message}`);
-        assert.ok(message.includes("x-access-token:***@"), "error message should show the redacted form");
+        assert.ok(!message.includes("x-access-token:"), "the token-bearing URL form must never be used");
+        assert.match(message, /git push to oathlock-nonexistent-org-xyz\/nonexistent-repo-xyz:main failed/);
         return true;
       },
     );

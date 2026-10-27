@@ -176,7 +176,8 @@ test("Codex launch uses stdin, JSONL, an ephemeral session, and a bounded sandbo
   assert.equal(spec.args.at(-1), "-");
   assert.doesNotMatch(spec.args.join(" "), /Inspect the resident adapter/);
   assert.match(spec.stdin, /grant-provider-123/);
-  assert.match(spec.stdin, /\.m9r\/local\.json/);
+  assert.match(spec.stdin, /Do not read or reveal credentials/i);
+  assert.doesNotMatch(spec.stdin, /\.m9r\/local\.json/);
   assert.equal(spec.shell, false);
 });
 

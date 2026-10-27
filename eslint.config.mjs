@@ -41,10 +41,54 @@ const eslintConfig = defineConfig([
     "oathlock-deck/**",
     // Generated CLI distributable (compiled from src by scripts/build-cli.mjs).
     "cli/dist/**",
+    // Project/user agent skills are instruction packages, not application code;
+    // they intentionally carry their own examples and tool scripts.
+    ".agents/**",
+    // Local M9R runtime state, browser profiles, screenshots, and recovery
+    // artifacts are generated data, not application source. Traversing them
+    // makes root lint unbounded and can parse bundled third-party extensions.
+    ".m9r/**",
     // Claude worktrees are separate generated checkouts, not this repository's
     // source tree. Linting them duplicates failures and makes the root result
     // depend on another agent's temporary workspace.
     ".claude/**",
+    // M9R/Codex workers, broker snapshots, and activation/recovery evidence are
+    // generated local data. The repository intentionally retains some of these
+    // directories for audit review; they are not root application source.
+    ".m9r-*/**",
+    ".codex-*/**",
+    // Private release-excluded marketing/archive material is deliberately kept
+    // outside the public source tree and may have protected ACLs. It must not
+    // be traversed by the root lint command.
+    ".release-excluded/**",
+    // Git worktrees are independent checkouts and must be linted from their
+    // own roots, never as part of this repository's result.
+    ".worktrees/**",
+    // Packaged runtime output and disposable cutover/runtime trees are not
+    // source inputs for the website/engine checkout.
+    "engine/**",
+    "dist/**",
+    "m9r-runtime-clean-*/**",
+    "m9r-clean-cutover-*/**",
+    // Local scratch and tool caches are user/test data, not source.
+    ".artifact-scratch/**",
+    ".n3-proof/**",
+    ".grok/**",
+    "scratchpad*/**",
+    ".test-tmp/**",
+    ".tmp/**",
+    ".workcache/**",
+    ".open-next/**",
+    ".oathlock/**",
+    ".playwright-mcp/**",
+    ".vercel/**",
+    ".wrangler/**",
+    // Wrangler writes nested temporary bundles under service roots as well.
+    "**/.wrangler/**",
+    // Browser-extension build output and store-submission material are
+    // generated/distribution artifacts; lint the extension source instead.
+    "extensions/browser/pill-next/**",
+    "extensions/browser/store-assets/**",
   ]),
 ]);
 

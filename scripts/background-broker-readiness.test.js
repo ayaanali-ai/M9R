@@ -64,6 +64,7 @@ function createHarness() {
     M9RQuietInput: {
       create() { return { adoptAndRelease() {}, stopAll() {}, resumeAll() {} }; },
     },
+    M9RRetiredPages: { isRetiredUrl: () => false, repair: async () => 0 },
     importScripts() {},
     setTimeout(callback, ms) { const timer = { callback, ms, cleared: false }; timers.push(timer); return timer; },
     clearTimeout(timer) { if (timer) timer.cleared = true; },

@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createLocalStore, defaultStoreRoot, handleForProvider } from "@/lib/native/local-store";
-import { handleHookEvent } from "@/lib/native/hook-handler";
+import { createLocalStore, defaultStoreRoot, handleForProvider, RESULT_RECONCILIATION_MAX_AGE_MS } from "@/lib/native/local-store";
+import { handleHookEvent, routeTypedMentions } from "@/lib/native/hook-handler";
 import { normalizeHandle, renderInboxInjection } from "@/lib/native/inbox-core";
 import { CODEX_WEB_PREFACE, webAgentPrompt } from "@/lib/native/web-live-sessions";
 import { isBrokerAgentPrompt } from "@/lib/native/codex-delivery-core";
@@ -16,6 +16,20 @@ function tempStore(now?: () => Date) {
 }
 const task = (over: Record<string, unknown> = {}) => ({ from: "codex", to: "claude", goal: "look at the reconnect bug", origin: "human_typed" as const, idempotencyKey: "k1", ...over });
 
+test("completed results preserve failed transport evidence while finalizing delivery", () => {
+  const { store, done } = tempStore();
+  try {
+    const created = store.addTask(task()).task;
+    store.setDelivery(created.id, { state: "failed", error: "first push failed", attempts: 1 });
+    store.setResult(created.id, "finished through the prompt route");
+    const finished = store.getTask(created.id)!;
+    assert.equal(finished.delivery?.state, "done");
+    assert.equal(finished.delivery?.error, "first push failed");
+    assert.equal(finished.deliveryHistory?.at(-1)?.state, "failed");
+    assert.equal(finished.lifecycle?.state, "completed");
+  } finally { done(); }
+});
+
 test("provider names map to friendly handles", () => {
   assert.equal(handleForProvider("claude-code"), "claude");
   assert.equal(handleForProvider("Codex"), "codex");
@@ -25,6 +39,21 @@ test("provider names map to friendly handles", () => {
   assert.equal(normalizeHandle("@@CLAUDE"), "@claude", "normalization removes exactly one leading mention marker");
   assert.equal(defaultStoreRoot("/home/u", {}), join("/home/u", ".m9r"));
   assert.equal(defaultStoreRoot("/home/u", { M9R_HOME: "/tmp/x" }), "/tmp/x");
+});
+
+test("an owner task waits for a missing provider identity without losing delivery eligibility", () => {
+  const { store, done } = tempStore();
+  const refusal = handleHookEvent({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "source-session",
+    cwd: "/repo",
+    prompt: "@codex review the current change",
+  }, { ...ctx(store), strictTargetIdentity: true });
+  const text = ctxOf(refusal) ?? "";
+  assert.match(text, /held your message to @codex/i);
+  assert.doesNotMatch(text, /T1|task\s+id/i);
+  assert.equal(store.tasksFor("codex")[0]?.delivery?.state, "deferred", "a missing identity is a transient lifecycle state");
+  done();
 });
 
 test("agent sessions are keyed by agent, normalized folder, and provider session id", () => {
@@ -75,6 +104,16 @@ test("tasks get sequential ids and per-inbox sequence numbers, and the same key 
   done();
 });
 
+test("a resolved idempotency match does not swallow a deliberate resend of identical pill text", () => {
+  const { store, done } = tempStore();
+  const first = store.addTask(task({ idempotencyKey: "paste-repeat" }));
+  store.setResult(first.task.id, "the first identical message was already handled");
+  const resent = store.addTask(task({ idempotencyKey: "paste-repeat" }));
+  assert.equal(resent.created, true, "a pasted resend must create a fresh task after the old one resolved");
+  assert.notEqual(resent.task.id, first.task.id);
+  done();
+});
+
 test("recipient handles are normalized before task storage, inbox lookup and idempotency checks", () => {
   const { store, done } = tempStore();
   const created = store.addTask(task({ to: "@CLAUDE" }));
@@ -112,6 +151,38 @@ test("an untargeted task is claimed by one Claude session and cannot be answered
   done();
 });
 
+test("a resident provider delivery atomically claims only fresh, approved, owner-originated work for its configured folder", () => {
+  const clock = () => new Date("2026-10-23T12:00:00.000Z");
+  const { store, done } = tempStore(clock);
+  const identity = store.issueIdentity("claude", "claude-code", "web-claude-worker-1");
+  const eligible = store.addTask({
+    from: "you", to: "claude", goal: "Read the visible status.", origin: "human_typed", cwd: "C:\\Work\\App",
+    idempotencyKey: "resident-provider-delivery",
+  }).task;
+  store.setDelivery(eligible.id, { state: "deferred" });
+
+  const expected = { handle: "claude", provider: "claude-code", cwd: "c:/work/app" };
+  const claimed = store.claimProviderDelivery(eligible.id, identity.token, expected);
+  assert.equal(claimed?.id, eligible.id);
+  assert.equal(claimed?.deliveredSession, identity.sessionId);
+  assert.equal(claimed?.delivery?.state, "sending");
+  assert.equal(claimed?.deliveredAt, undefined, "a claim is not mislabeled as provider acceptance");
+  assert.equal(claimed?.lifecycle, undefined, "the durable lifecycle advances only after the transport accepts the task");
+  assert.equal(store.claimProviderDelivery(eligible.id, identity.token, expected), undefined, "a second pump cannot claim an in-flight task");
+
+  const otherIdentity = store.issueIdentity("claude", "claude-code", "web-claude-worker-2");
+  assert.equal(store.claimProviderDelivery(eligible.id, otherIdentity.token, expected), undefined, "another provider identity cannot take work after it is claimed");
+
+  const wrongFolder = store.addTask({
+    from: "you", to: "claude", goal: "Stay in the other folder.", origin: "human_typed", cwd: "C:\\Work\\Other",
+    idempotencyKey: "resident-provider-wrong-folder",
+  }).task;
+  store.setDelivery(wrongFolder.id, { state: "deferred" });
+  assert.equal(store.claimProviderDelivery(wrongFolder.id, identity.token, expected), undefined);
+  assert.equal(store.getTask(wrongFolder.id)?.delivery?.state, "deferred");
+  done();
+});
+
 test("an explicit target session repairs a stale deliveredSession from an older build", () => {
   const { root, store, done } = tempStore();
   const target = store.issueIdentity("claude", "claude-code", "target-session");
@@ -141,6 +212,24 @@ test("approvals and results are stored, results are capped and redacted", () => 
   const r = store.getTask("T1")?.resultSummary ?? "";
   assert.equal(r.length <= 400, true);
   assert.doesNotMatch(r, /abcdef123456/);
+  done();
+});
+
+test("an unapproved provider task is not claimed before approval and becomes deliverable afterward", () => {
+  const clock = () => new Date("2026-09-20T12:00:00Z");
+  const { store, done } = tempStore(clock);
+  const pending = store.addTask({
+    from: "codex", to: "claude", goal: "open the settings app", origin: "agent_initiated", idempotencyKey: "approval-frontier",
+  }).task;
+  const first = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "claude-session", cwd: "/repo", prompt: "continue" }, ctx(store));
+  assert.doesNotMatch(ctxOf(first) ?? "", /open the settings app/, "pending work must not leak into the provider prompt");
+  assert.equal(store.getTask(pending.id)?.deliveredAt, undefined, "pending work must not acquire a delivery receipt");
+  assert.equal(store.cursorFor("claude", "claude-session", "/repo"), 0, "pending work must not advance the inbox cursor");
+
+  store.setApproval(pending.id, "approved");
+  const second = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "claude-session", cwd: "/repo", prompt: "continue" }, ctx(store));
+  assert.match(ctxOf(second) ?? "", /open the settings app/, "approval must make the same task deliverable");
+  assert.equal(store.getTask(pending.id)?.deliveredSession, "claude-session");
   done();
 });
 
@@ -185,7 +274,12 @@ test("a lock with a demonstrably dead owner recovers without resetting the state
 
 // ---- hook handler ----------------------------------------------------------------------------------------------
 
-const ctx = (store: ReturnType<typeof createLocalStore>, provider = "claude-code", pathExists: (p: string) => boolean = () => false) => ({ provider, store, pathExists, now: () => new Date("2026-09-20T12:00:00Z") });
+// Direct hook-handler tests represent a provider hook whose session metadata
+// has already been verified by hook-run.ts. Production callers supply the same
+// trust bit (or the provider parent PID); keeping it explicit here prevents a
+// unit fixture from exercising the intentionally untrusted/held path by
+// accident.
+const ctx = (store: ReturnType<typeof createLocalStore>, provider = "claude-code", pathExists: (p: string) => boolean = () => false) => ({ provider, store, pathExists, sessionMetadataVerified: true, now: () => new Date("2026-09-20T12:00:00Z") });
 const ctxOf = (value: unknown): string | undefined => {
   if (!value || typeof value !== "object") return undefined;
   const hookSpecificOutput = (value as { hookSpecificOutput?: unknown }).hookSpecificOutput;
@@ -202,6 +296,74 @@ test("SessionStart registers the endpoint and prints a short card that lists rec
   assert.match(ctxOf(out)!, /M9R connected as @claude\./);
   assert.match(ctxOf(out)!, /Active now: @codex/);
   assert.equal(store.listEndpoints().some((e) => e.handle === "claude"), true);
+  done();
+});
+
+test("SessionStart does not expose CLI polling instructions for pending work", () => {
+  const { store, done } = tempStore();
+  store.addTask({
+    from: "codex",
+    to: "claude",
+    goal: "Review the harmless verification.",
+    origin: "agent_initiated",
+    idempotencyKey: "session-card-pending",
+  });
+  const out = handleHookEvent({ hook_event_name: "SessionStart", session_id: "s1", cwd: "/repo" }, ctx(store));
+  const card = ctxOf(out) ?? "";
+  assert.match(card, /pending|authorized|delivered/i);
+  assert.doesNotMatch(card, /m9r-cli tasks|task ID/i);
+  done();
+});
+
+test("SessionStart claims one authorized task for the exact reconnecting session without an inbox command", () => {
+  const { store, done } = tempStore();
+  const created = store.addTask(task({ idempotencyKey: "session-start-auto-delivery" }));
+
+  const first = handleHookEvent({
+    hook_event_name: "SessionStart",
+    session_id: "claude-reconnected",
+    cwd: "/repo",
+  }, ctx(store));
+  const firstText = ctxOf(first) ?? "";
+
+  assert.match(firstText, /M9R work \(1 new\)/);
+  assert.match(firstText, /look at the reconnect bug/);
+  assert.doesNotMatch(firstText, /m9r_inbox|task ID|\bT\d{1,12}\b/);
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, "claude-reconnected");
+  assert.equal(store.getTask(created.task.id)?.deliverySource, "prompt");
+  assert.equal(store.getTask(created.task.id)?.lifecycle?.source, "prompt");
+
+  const second = handleHookEvent({
+    hook_event_name: "SessionStart",
+    session_id: "claude-reconnected",
+    cwd: "/repo",
+  }, ctx(store));
+  assert.doesNotMatch(ctxOf(second) ?? "", /look at the reconnect bug/);
+  done();
+});
+
+test("SessionStart delivery stays provider-neutral for an unlisted provider slug", () => {
+  const { store, done } = tempStore();
+  const created = store.addTask({
+    from: "you",
+    to: "gemini-cli",
+    goal: "review the shared change",
+    origin: "human_typed",
+    idempotencyKey: "generic-provider-session-start",
+  });
+
+  const out = handleHookEvent({
+    hook_event_name: "SessionStart",
+    session_id: "gemini-session",
+    cwd: "/repo",
+  }, ctx(store, "gemini-cli"));
+
+  const text = ctxOf(out) ?? "";
+  assert.match(text, /M9R work \(1 new\)/);
+  assert.match(text, /review the shared change/);
+  assert.doesNotMatch(text, /m9r_inbox|task ID|\bT\d{1,12}\b/);
+  assert.equal(store.getTask(created.task.id)?.deliveredSession, "gemini-session");
+  assert.equal(store.getTask(created.task.id)?.deliverySource, "prompt");
   done();
 });
 
@@ -225,6 +387,92 @@ test("repeated SessionStart for the same session keeps its token valid, while ex
   assert.equal(store.verifyIdentity(firstToken), null);
   assert.notEqual(store.verifyIdentity(afterRevoke), null);
   done();
+});
+
+test("a compacted SessionStart preserves both identities and the prompt turn binds the new session", () => {
+  const { store, root, done } = tempStore();
+  const context = { ...ctx(store), providerProcessId: process.pid };
+  try {
+    handleHookEvent({ hook_event_name: "SessionStart", session_id: "before-compaction", cwd: "C:/repo" }, context);
+    const before = JSON.parse(readFileSync(join(root, "state.json"), "utf8")) as {
+      connectionClaims: Array<{ claimId: string }>;
+    };
+    const binding = store.bindConnectionClaim(before.connectionClaims[0]!.claimId, { provider: "claude-code", processId: process.pid });
+    assert.ok(binding);
+
+    handleHookEvent({ hook_event_name: "SessionStart", session_id: "after-compaction", cwd: "C:/repo" }, context);
+    const after = JSON.parse(readFileSync(join(root, "state.json"), "utf8")) as {
+      connectionClaims: Array<{ sessionId: string; bindingId?: string }>;
+      connectionBindings: Array<{ sessionId: string; bindingId: string }>;
+    };
+    assert.deepEqual(after.connectionClaims.map((claim) => claim.sessionId), ["before-compaction", "after-compaction"]);
+    assert.equal(after.connectionClaims[0]!.bindingId, binding!.bindingId, "a PID match must not transfer an older binding to a different session");
+    assert.equal(after.connectionClaims[1]!.bindingId, undefined);
+    assert.deepEqual(after.connectionBindings.map((candidate) => candidate.sessionId), ["before-compaction"]);
+
+    handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "after-compaction", cwd: "C:/repo", prompt: "continue" }, context);
+    const active = store.bindActiveProviderTurn({ provider: "claude-code", processId: process.pid });
+    assert.equal(active.status, "resolved");
+    assert.equal(active.status === "resolved" ? active.binding.sessionId : null, "after-compaction");
+    assert.ok(store.identityTokenFor("claude", "before-compaction"), "the previous provider conversation identity remains intact");
+  } finally { done(); }
+});
+
+test("OpenCode idle closes only the exact active process/session turn", () => {
+  const { store, done } = tempStore();
+  const context = { ...ctx(store, "opencode"), providerProcessId: process.pid };
+  try {
+    handleHookEvent({ hook_event_name: "SessionStart", session_id: "opencode-turn", cwd: "C:/repo" }, context);
+    handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "opencode-turn", cwd: "C:/repo", prompt: "hello" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "opencode", processId: process.pid }).status, "resolved");
+
+    handleHookEvent({ hook_event_name: "ProviderTurnEnd", session_id: "different-session" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "opencode", processId: process.pid }).status, "resolved", "an idle event for a sibling session must not release this turn");
+
+    handleHookEvent({ hook_event_name: "ProviderTurnEnd", session_id: "opencode-turn" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "opencode", processId: process.pid }).status, "none", "the matching idle event releases the stale turn");
+  } finally { done(); }
+});
+
+test("an OpenCode poll refreshes the exact session claim to the replacement provider process", () => {
+  const { store, done } = tempStore();
+  const sessionId = "opencode-restarted-session";
+  store.registerEndpoint({ provider: "opencode", sessionId, cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", sessionId);
+  store.issueConnectionClaim({
+    handle: "opencode",
+    provider: "opencode",
+    sessionId,
+    cwd: "C:/repo",
+    ownerProcessId: 2_000_000_000,
+  });
+
+  try {
+    handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: sessionId, cwd: "C:/repo" }, {
+      ...ctx(store, "opencode"),
+      providerProcessId: process.pid,
+    });
+
+    const binding = store.bindConnectionForProcess({ provider: "opencode", processId: process.pid, sessionId });
+    assert.equal(binding?.sessionId, sessionId);
+    assert.equal(binding?.ownerProcessId, process.pid, "a resumed session must bind to the current OpenCode host, not its previous PID");
+  } finally { done(); }
+});
+
+test("Codex Interrupt retires only the matching turn id", () => {
+  const { store, done } = tempStore();
+  const context = { ...ctx(store, "codex"), providerProcessId: process.pid };
+  try {
+    handleHookEvent({ hook_event_name: "SessionStart", session_id: "codex-turns", cwd: "C:/repo" }, context);
+    handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "codex-turns", turn_id: "turn-old", cwd: "C:/repo", prompt: "first" }, context);
+    handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "codex-turns", turn_id: "turn-current", cwd: "C:/repo", prompt: "second" }, context);
+
+    handleHookEvent({ hook_event_name: "Interrupt", session_id: "codex-turns", turn_id: "turn-old" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "codex", processId: process.pid }).status, "resolved");
+
+    handleHookEvent({ hook_event_name: "Interrupt", session_id: "codex-turns", turn_id: "turn-current" }, context);
+    assert.equal(store.bindActiveProviderTurn({ provider: "codex", processId: process.pid }).status, "none");
+  } finally { done(); }
 });
 
 test("an already-open Codex session restores its missing identity on the next trusted prompt", () => {
@@ -265,9 +513,9 @@ test("OpenCode polling pushes only an approved, fresh task into its exact authen
   assert.equal(offered?.hookSpecificOutput.hookEventName, "OpenCodePoll");
   const envelope = JSON.parse(ctxOf(offered)!) as { task_id: string; prompt: string };
   assert.equal(envelope.task_id, pinned.id);
-  assert.equal(envelope.prompt.startsWith("[M9R T1]\n"), true);
-  assert.match(envelope.prompt, /review the shared change/);
-  assert.match(envelope.prompt, new RegExp(identity.token));
+  assert.equal(envelope.prompt, pinned.goal, "OpenCode receives only the owner's task text");
+  assert.doesNotMatch(envelope.prompt, new RegExp(pinned.id), "task correlation stays in the envelope");
+  assert.doesNotMatch(envelope.prompt, new RegExp(identity.token), "the session credential stays in trusted adapter context");
   assert.equal(store.getTask(pinned.id)?.delivery?.state, "sending", "the durable claim prevents a second prompt while acceptance is unconfirmed");
   assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pinned.seq);
   assert.equal(poll(), null, "an unacknowledged offer is still delivered at most once");
@@ -290,6 +538,173 @@ test("OpenCode polling pushes only an approved, fresh task into its exact authen
   // The dedicated task pump owns the cursor once it claims a task; an unrelated provider prompt does not.
   assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "oc-1", cwd: "C:/repo", prompt: "ordinary prompt" }, context), null);
   assert.equal(store.cursorFor("opencode", "oc-1", "C:/repo"), pending.seq);
+  done();
+});
+
+test("an uncertain plain-goal OpenCode send stays fenced after restart and preserves its owner notice", () => {
+  const { root, store, done } = tempStore();
+  try {
+    const sessionId = "oc-uncertain";
+    store.registerEndpoint({ provider: "opencode", sessionId, cwd: "C:/repo" });
+    const identity = store.issueIdentity("opencode", "opencode", sessionId);
+    const created = store.addTask({ from: "codex", to: "opencode", goal: "review the shared change", origin: "human_typed", cwd: "C:/repo", targetSession: sessionId, idempotencyKey: "uncertain-plain" }).task;
+    assert.ok(store.claimOpenCodeTask(created.id, { sessionId, identityToken: identity.token, cwd: "C:/repo", activeWindowMs: 60_000, maxAgeMs: 60_000 }));
+    assert.equal(store.settleOpenCodeTask(created.id, sessionId, identity.token, { state: "uncertain", error: "connection reset" }), true);
+    const restarted = createLocalStore(root);
+    const poll = handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: sessionId, cwd: "C:/repo" }, ctx(restarted, "opencode"));
+    assert.equal(poll, null);
+    assert.equal(restarted.getTask(created.id)?.delivery?.state, "uncertain");
+    assert.equal(restarted.getTask(created.id)?.delivery?.error, "connection reset");
+    assert.equal(restarted.dismiss([created.id]), 1);
+    assert.equal(restarted.getTask(created.id)?.delivery?.state, "uncertain", "clearing the owner notice never replays work");
+  } finally { done(); }
+});
+
+test("OpenCode polling rebinds an already-known session after a provider update and claims its held owner task", () => {
+  const now = new Date("2026-10-07T12:00:00Z");
+  const { store, done } = tempStore(() => now);
+  store.registerEndpoint({ provider: "opencode", sessionId: "oc-after-update", cwd: "C:/repo" });
+
+  const routed = handleHookEvent({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "codex-source",
+    cwd: "C:/repo",
+    prompt: "@opencode inspect the reconnect path",
+  }, { ...ctx(store, "codex"), strictTargetIdentity: true, now: () => now });
+  assert.match(ctxOf(routed) ?? "", /held your message to @opencode/i);
+  const held = store.tasksFor("opencode")[0];
+  assert.equal(held?.delivery?.state, "deferred");
+  assert.equal(store.identityTokenFor("opencode", "oc-after-update"), null, "the fixture starts without a republished identity");
+
+  const offered = handleHookEvent({
+    hook_event_name: "OpenCodePoll",
+    session_id: "oc-after-update",
+    cwd: "C:/repo",
+  }, { ...ctx(store, "opencode"), now: () => now });
+  assert.ok(offered, "the existing provider session should rebind without a fresh session");
+  const envelope = JSON.parse(ctxOf(offered)!) as { task_id: string; prompt: string };
+  assert.equal(envelope.task_id, held?.id);
+  assert.match(envelope.prompt, /inspect the reconnect path/);
+  assert.equal(typeof store.identityTokenFor("opencode", "oc-after-update"), "string");
+  assert.equal(store.getTask(held!.id)?.delivery?.state, "sending");
+  done();
+});
+
+test("a deferred owner task still primes its cursor before the provider reconnects", () => {
+  const { store, done } = tempStore();
+  try {
+    store.registerEndpoint({ provider: "claude-code", sessionId: "claude-session", cwd: process.cwd() });
+    const primed: Array<{ taskId: string; to: string }> = [];
+    const result = routeTypedMentions({
+      hook_event_name: "UserPromptSubmit",
+      session_id: "codex-session",
+      cwd: process.cwd(),
+      prompt: "@claude prepare the harmless preview",
+    }, {
+      provider: "codex",
+      store,
+      strictTargetIdentity: true,
+      onTaskCreated: (taskId, to) => primed.push({ taskId, to }),
+    });
+
+    assert.equal(result.tasks.length, 1);
+    const task = store.getTask(result.tasks[0]!.id);
+    assert.equal(task?.delivery?.state, "deferred");
+    assert.deepEqual(primed, [{ taskId: result.tasks[0]!.id, to: "claude" }]);
+  } finally { done(); }
+});
+
+test("OpenCode polling ignores a queued task beyond the inbox freshness window", () => {
+  let clock = new Date("2026-10-07T12:00:00Z");
+  const { store, done } = tempStore(() => clock);
+  store.registerEndpoint({ provider: "opencode", sessionId: "oc-current", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "oc-current");
+  const task = store.addTask({
+    from: "codex", to: "opencode", goal: "historical OpenCode work", origin: "human_typed",
+    cwd: "C:/repo", targetSession: "oc-current", idempotencyKey: "opencode-history-fence",
+  }).task;
+  clock = new Date(clock.getTime() + 31 * 60_000);
+  const context = { ...ctx(store, "opencode"), now: () => clock };
+  assert.equal(
+    handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: "oc-current", cwd: "C:/repo" }, context),
+    null,
+    "a current authenticated session must not receive a historical queued task",
+  );
+  assert.equal(store.getTask(task.id)?.delivery, undefined, "the stale task must remain history, not become claimed work");
+  done();
+});
+
+test("a late OpenCode provider failure closes an already queued task as terminally failed", () => {
+  const now = new Date("2026-10-07T12:00:00Z");
+  const { store, done } = tempStore(() => now);
+  store.registerEndpoint({ provider: "opencode", sessionId: "oc-failure", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "oc-failure");
+  const task = store.addTask({
+    from: "codex", to: "opencode", goal: "exercise late provider failure", origin: "human_typed",
+    cwd: "C:/repo", targetSession: "oc-failure", idempotencyKey: "opencode-late-failure",
+  }).task;
+  const context = { ...ctx(store, "opencode"), now: () => now };
+  const offered = handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: "oc-failure", cwd: "C:/repo" }, context);
+  assert.ok(offered);
+  assert.ok(handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "oc-failure", cwd: "C:/repo", task_id: task.id }, context));
+  assert.equal(store.getTask(task.id)?.delivery?.state, "queued");
+
+  const failed = handleHookEvent({
+    hook_event_name: "OpenCodeExecutionFailed",
+    session_id: "oc-failure",
+    cwd: "C:/repo",
+    task_id: task.id,
+    execution_error: "provider_execution_failed",
+  }, context);
+  assert.ok(failed, "the execution failure must be acknowledged by the local hook");
+  const recorded = store.getTask(task.id);
+  assert.ok(recorded?.lifecycle);
+  assert.equal(recorded.lifecycle.state, "failed");
+  assert.match(recorded.lifecycle.error ?? "", /OpenCode provider execution failed/);
+  done();
+});
+
+test("an OpenCode delivery acknowledgement cannot resurrect an expired offer", () => {
+  let clock = new Date("2026-10-07T12:00:00Z");
+  const { store, done } = tempStore(() => clock);
+  store.registerEndpoint({ provider: "opencode", sessionId: "oc-expired", cwd: "C:/repo" });
+  store.issueIdentity("opencode", "opencode", "oc-expired");
+  const task = store.addTask({
+    from: "codex", to: "opencode", goal: "expired OpenCode offer", origin: "human_typed",
+    cwd: "C:/repo", targetSession: "oc-expired", idempotencyKey: "opencode-expired-ack",
+  }).task;
+  const context = { ...ctx(store, "opencode"), now: () => clock };
+  const offered = handleHookEvent({ hook_event_name: "OpenCodePoll", session_id: "oc-expired", cwd: "C:/repo" }, context);
+  assert.ok(offered);
+  assert.equal(store.getTask(task.id)?.delivery?.state, "sending");
+
+  clock = new Date(clock.getTime() + 31 * 60_000);
+  assert.equal(
+    handleHookEvent({ hook_event_name: "OpenCodeDelivered", session_id: "oc-expired", cwd: "C:/repo", task_id: task.id }, context),
+    null,
+    "a delayed provider acknowledgement must not turn an expired offer into live queued work",
+  );
+  assert.equal(store.getTask(task.id)?.delivery?.state, "sending");
+  done();
+});
+
+test("a stale prompt delivery cannot reclaim a later Claude turn", () => {
+  let clock = new Date("2026-10-07T12:00:00Z");
+  const { store, done } = tempStore(() => clock);
+  const taskRecord = store.addTask({
+    from: "codex", to: "claude", goal: "continue the old provider task", origin: "human_typed",
+    cwd: "C:/repo", targetSession: "claude-session", idempotencyKey: "stale-prompt-context",
+  }).task;
+  store.issueIdentity("claude", "claude-code", "claude-session");
+  const context = { ...ctx(store), now: () => clock };
+  const delivered = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "claude-session", cwd: "C:/repo", prompt: "ordinary prompt" }, context);
+  assert.match(ctxOf(delivered) ?? "", /continue the old provider task/);
+
+  clock = new Date(clock.getTime() + RESULT_RECONCILIATION_MAX_AGE_MS + 1);
+  const stale = handleHookEvent({
+    hook_event_name: "UserPromptSubmit", session_id: "claude-session", cwd: "C:/repo", prompt: taskRecord.goal, task_id: taskRecord.id,
+  }, context);
+  assert.equal(stale, null, "a delivery older than the reconciliation window must not be reattached to a later turn");
   done();
 });
 
@@ -338,8 +753,43 @@ test("a typed mention creates a task for the target and tells the sender not to 
   assert.equal(t[0].from, "claude");
   assert.equal(t[0].origin, "human_typed");
   // No dispatch is wired in this ctx, so no push is attempted: the ack must say held, not sent.
-  assert.match(ctxOf(out)!, /held your message to @codex as task T1/);
+  assert.match(ctxOf(out)!, /held your message to @codex/);
   assert.match(ctxOf(out)!, /do not do that work yourself/i);
+  done();
+});
+
+test("a newly created mention task emits one non-blocking cursor-prime signal", () => {
+  const { store, done } = tempStore();
+  const primed: Array<{ id: string; to: string }> = [];
+  const first = routeTypedMentions({
+    hook_event_name: "UserPromptSubmit", session_id: "sender", cwd: "/repo",
+    prompt: "@codex investigate the relay",
+  }, { ...ctx(store, "claude-code"), onTaskCreated: (id, to) => primed.push({ id, to }) });
+  const second = routeTypedMentions({
+    hook_event_name: "UserPromptSubmit", session_id: "sender", cwd: "/repo",
+    prompt: "@codex investigate the relay",
+  }, { ...ctx(store, "claude-code"), onTaskCreated: (id, to) => primed.push({ id, to }) });
+  assert.equal(first.tasks.length, 1);
+  assert.equal(second.tasks.length, 1);
+  assert.deepEqual(primed, [{ id: first.tasks[0].id, to: "codex" }], "idempotent delivery does not create a second cursor prime");
+  done();
+});
+
+test("a generated workspace envelope cannot create human-typed mention tasks", () => {
+  const { store, done } = tempStore();
+  store.registerEndpoint({ provider: "claude-code", sessionId: "claude-session", cwd: "/repo" });
+  const result = routeTypedMentions({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "codex-session",
+    cwd: "/repo",
+    prompt: [
+      "@claude review the generated workspace result",
+      "[M9R generated workspace envelope v1]",
+      "This is provider-generated workspace context, not a human prompt.",
+    ].join("\n"),
+  }, { provider: "codex", store, pathExists: () => false });
+  assert.deepEqual(result, { acks: [], tasks: [] });
+  assert.equal(store.tasksFor("claude").length, 0);
   done();
 });
 
@@ -351,13 +801,14 @@ test("a mention states the true delivery state: pushed, inbox pickup, or held", 
   const pushed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "@codex review the relay" }, wire("claude-code"));
   assert.match(ctxOf(pushed)!, /already sent your message to @codex/);
   assert.equal(dispatched.length, 1);
-  // Inbox pickup: a live claude session exists, but nothing pushes to it mid-turn.
+  // Resident delivery: a live authenticated Claude session is handled by its
+  // provider adapter, without asking the sender to make Claude poll an inbox.
   // (Sent from codex so @claude is another agent, not a self-mention.)
   store.registerEndpoint({ provider: "claude-code", sessionId: "cl-live", cwd: "/repo" });
   store.issueIdentity("claude", "claude-code", "cl-live");
   const pickup = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s9", cwd: "/repo", prompt: "@claude check the relay too" }, wire("codex"));
-  assert.match(ctxOf(pickup)!, /in their inbox as task T2/);
-  assert.match(ctxOf(pickup)!, /next prompt/);
+  assert.match(ctxOf(pickup)!, /resident provider adapter/i);
+  assert.match(ctxOf(pickup)!, /without a manual inbox check/i);
   assert.match(ctxOf(pickup)!, /Do not do that work yourself/);
   // Held: no live opencode session anywhere.
   const held = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s9", cwd: "/repo", prompt: "@opencode compare notes" }, wire("codex"));
@@ -389,7 +840,7 @@ test("Windows System32 is never persisted as a provider project scope", () => {
   handleHookEvent({ hook_event_name: "SessionStart", session_id: "system-session", cwd: "C:\\WINDOWS\\System32" }, { ...ctx(store, "codex") });
   assert.equal(store.sessionsFor("codex")[0]?.cwd, undefined);
   const routed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "source", cwd: "C:\\WINDOWS\\System32", prompt: "@codex use the current project" }, { ...ctx(store, "opencode"), strictTargetIdentity: false });
-  assert.match(ctxOf(routed) ?? "", /task T1/);
+  assert.doesNotMatch(ctxOf(routed) ?? "", /task T1/);
   assert.equal(store.tasksFor("codex")[0]?.cwd, undefined);
   done();
 });
@@ -530,11 +981,53 @@ test("an inbox item is injected once and remains bound to the session that recei
   const { store, done } = tempStore();
   store.addTask({ from: "codex", to: "claude", goal: "review lease.ts", origin: "human_typed", idempotencyKey: "a" });
   const first = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "hi" }, ctx(store));
-  assert.match(ctxOf(first)!, /M9R inbox \(1 new\)/);
-  assert.match(ctxOf(first)!, /T1 from @codex, typed by the user\] review lease\.ts/);
+  assert.match(ctxOf(first)!, /M9R work \(1 new\)/);
+  assert.match(ctxOf(first)!, /M9R work from the owner: review lease\.ts/);
+  assert.doesNotMatch(ctxOf(first)!, /T1|get_task|session token/i);
   assert.equal(handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "and again" }, ctx(store)), null);
   const otherSession = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s2", cwd: "/repo", prompt: "new window" }, ctx(store));
   assert.equal(otherSession, null, "the same task must not be replayed into a second Claude session");
+  done();
+});
+
+test("a terminally failed delivery falls back once and cannot block the next authorized inbox item", () => {
+  const { store, done } = tempStore();
+  const failed = store.addTask({
+    from: "codex",
+    to: "claude",
+    goal: "do not replay the failed task",
+    origin: "human_typed",
+    idempotencyKey: "failed-inbox-item",
+  }).task;
+  store.setDelivery(failed.id, { state: "failed", error: "ambiguous provider session" });
+  assert.deepEqual(store.pendingWorkFor("claude", "claude-session"), [],
+    "terminally failed delivery must not block provider identity repair");
+  const fresh = store.addTask({
+    from: "codex",
+    to: "claude",
+    goal: "deliver the fresh task",
+    origin: "human_typed",
+    idempotencyKey: "fresh-inbox-item",
+  }).task;
+
+  const delivered = handleHookEvent({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "claude-session",
+    cwd: "/repo",
+    prompt: "continue",
+  }, ctx(store));
+  const text = ctxOf(delivered) ?? "";
+  assert.match(text, /do not replay the failed task/, "a failed push is presented once through the safe inbox fallback");
+  assert.doesNotMatch(text, /deliver the fresh task/, "the older fallback remains ordered ahead of newer work");
+  assert.equal(store.getTask(failed.id)?.deliveredSession, "claude-session");
+  const next = handleHookEvent({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "claude-session",
+    cwd: "/repo",
+    prompt: "continue again",
+  }, ctx(store));
+  assert.match(ctxOf(next) ?? "", /deliver the fresh task/);
+  assert.equal(store.getTask(fresh.id)?.deliveredSession, "claude-session");
   done();
 });
 
@@ -574,18 +1067,22 @@ test("Codex inbox work stays held until that session has an active M9R identity"
   assert.equal(store.cursorFor("codex", "c1", "/repo"), 0, "holding the task must not advance the session inbox cursor");
   assert.equal(store.tasksFor("codex")[0].deliveredAt, undefined, "holding the task must not mark it delivered");
 
-  handleHookEvent({ ...input, hook_event_name: "SessionStart" }, ctx(store, "codex"));
+  const resumed = handleHookEvent({ ...input, hook_event_name: "SessionStart" }, ctx(store, "codex"));
+  assert.match(ctxOf(resumed) ?? "", /review the governed bridge/, "a session with an issued identity should receive the pending task at its trusted reconnect boundary");
   const delivered = handleHookEvent(input, ctx(store, "codex"));
-  assert.match(ctxOf(delivered) ?? "", /review the governed bridge/, "a session with an issued identity should receive the pending task normally");
+  assert.doesNotMatch(ctxOf(delivered) ?? "", /review the governed bridge/, "the next prompt must not replay work already delivered at SessionStart");
   assert.equal(store.tasksFor("codex")[0].deliveredSession, "c1");
   done();
 });
 
-test("an agent-initiated task that is still pending is labelled so the receiver does not act on it", () => {
+test("an agent-initiated task that is still pending stays owner-visible without entering the provider prompt", () => {
   const { store, done } = tempStore();
-  store.addTask({ from: "codex", to: "claude", goal: "delete the old branch", origin: "agent_initiated", idempotencyKey: "b" });
+  const pending = store.addTask({ from: "codex", to: "claude", goal: "delete the old branch", origin: "agent_initiated", idempotencyKey: "b" }).task;
   const out = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/repo", prompt: "hi" }, ctx(store));
-  assert.match(ctxOf(out)!, /AWAITING THE USER'S APPROVAL, do not act on it yet/);
+  assert.doesNotMatch(ctxOf(out) ?? "", /delete the old branch/, "pending work must not be injected into the provider prompt");
+  assert.equal(store.pendingApprovals()[0]?.id, pending.id, "the owner-facing approval queue still contains the task");
+  assert.equal(store.getTask(pending.id)?.deliveredAt, undefined, "the provider did not receive a delivery receipt");
+  assert.equal(store.cursorFor("claude", "s1", "/repo"), 0, "the provider cursor remains before the approval frontier");
   done();
 });
 

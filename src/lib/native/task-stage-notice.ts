@@ -14,8 +14,24 @@ export async function prepareTaskStageNotice(root: string, web: WebBrokerClient 
     if (!web?.prepareTaskStage) return "M9R task stage unavailable: the owner-launched broker is not connected.";
     // Delivery does not imply desktop isolation. Let the actual task choose its
     // mode rather than silently preparing a background desktop for every prompt.
-    return `M9R desktop tools are available for ${taskId}; delivery has not started desktop work. The default and normal task mode is owner-preview: prepare with mode "owner-preview", then pass that same mode on every m9r_stage_action call. This is a desktop-wide view of the desktop the owner is currently using: Use m9r_stage_app to open a normal installed app or restore the existing personal browser without a separate profile or extra browser window. If the task specifically asks for icon clicking, use the labeled cursor on its visible desktop icon, taskbar icon, or Start menu; double-click a desktop shortcut. After m9r_stage_app selects an app, use view "app" on actions to capture and control that exact app window without relying on owner focus; view "desktop" remains available for desktop icons and other windows. Use coordinates from the latest capture for clicks, typing, scrolling, dragging, and keys; capture again after any screen change. Use mode "background" only when the task explicitly asks for an isolated Windows desktop. Approval remains required for money-like controls. Verify effects in the returned capture; a posted input is not proof of success.`;
+    return `M9R desktop tools are available for ${taskId}; delivery has not started desktop work. Use only M9R's own tools (m9r_stage_app / m9r_stage_action / m9r_computer_action / m9r_computer_observe) for every part of this task -- never your own provider's built-in computer-use, screenshot-automation, or any other non-M9R automation capability, even as a fallback after an M9R action fails or errors. If an M9R action fails, retry it or report the failure plainly; do not switch to a different automation system to work around it. The default and normal task mode is owner-preview: prepare with mode "owner-preview", then pass that same mode on every m9r_stage_action call. This is a desktop-wide view of the desktop the owner is currently using: Use m9r_stage_app to open a normal installed app or restore the existing personal browser without a separate profile or extra browser window. If the task specifically asks for icon clicking, use the labeled cursor on its visible desktop icon, taskbar icon, or Start menu; double-click a desktop shortcut. After m9r_stage_app selects an app, use view "app" on actions to capture and control that exact app window without relying on owner focus; view "desktop" remains available for desktop icons and other windows. Use coordinates from the latest capture for clicks, typing, scrolling, dragging, and keys; capture again after any screen change. Use mode "background" only when the task explicitly asks for an isolated Windows desktop. An explicit task from the owner authorizes every ordinary action it names -- open, click, type, navigate, edit, delete, drag, window, and browser actions -- on the exact target that task identifies, across any app, website, or browser; do not refuse or hold for approval just because the selected app or page also has unrelated unsaved, sensitive, or open content elsewhere (for example, other unsaved documents in the same editor, or other tabs in the same browser). The owner naming a target is itself the authorization; it is not evidence the action is unsafe. Bind every action to the exact window/tab/control and its fresh revision, and re-observe rather than guess when that target becomes stale or genuinely ambiguous (not merely "the app has other things open"). Purchases and other money-moving actions remain the one mandatory approval boundary; nothing else inherits that hold. Be a bit more careful specifically with delete actions: confirm the target is exactly the one named before deleting, and verify the result. Verify effects in the returned capture; a posted input is not proof of success.`;
   } catch { return "M9R task stage permission settings could not be read; computer access remains disabled."; }
+}
+
+/** Add the native stage contract to an already-claimed OpenCode poll envelope. */
+export function addOpenCodeTaskStageNotice(context: string, stageNotice: string): string {
+  if (!stageNotice) return context;
+  try {
+    const parsed: unknown = JSON.parse(context);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return context;
+    const envelope = parsed as Record<string, unknown>;
+    if (typeof envelope.prompt !== "string" || envelope.prompt.length === 0) return context;
+    return JSON.stringify({ ...envelope, prompt: `${stageNotice}\n\n${envelope.prompt}` });
+  } catch {
+    // A malformed provider envelope must remain untouched; the poller will
+    // reject it rather than receiving a partially rewritten task.
+    return context;
+  }
 }
 
 /** Prepare the current session's first approved inbox task before its hook injects that task into the prompt. */
@@ -24,19 +40,35 @@ export async function prepareHookInboxTaskStageNotice(input: {
   store: LocalStore;
   web: WebBrokerClient;
   handle: string;
+  provider: string;
   event: string;
+  /** SessionStart auto-delivery is enabled by the provider hook that owns that transport. */
+  autoDeliverOnSessionStart?: boolean;
   sessionId?: string;
   cwd?: string;
   prompt?: string;
   timeoutMs?: number;
 }): Promise<string> {
   try {
-    if (input.event !== "UserPromptSubmit" || !input.sessionId || isM9rPushedPrompt(input.prompt ?? "")) return "";
-    const token = input.store.identityTokenFor(input.handle, input.sessionId);
+    const isPromptDelivery = input.event === "UserPromptSubmit";
+    const isSessionStartDelivery = input.event === "SessionStart" && input.autoDeliverOnSessionStart === true;
+    if ((!isPromptDelivery && !isSessionStartDelivery) || !input.sessionId) return "";
+    if (isPromptDelivery && isM9rPushedPrompt(input.prompt ?? "")) return "";
+    // SessionStart is evaluated before handleHookEvent issues the identity for
+    // a genuinely new provider session. Bootstrap the same exact-session
+    // identity here so the first delivered task gets its native desktop
+    // contract too. An explicitly revoked session remains fail-closed; this
+    // is not a discovery or recovery path.
+    let token = input.store.identityTokenFor(input.handle, input.sessionId);
+    if (!token && isSessionStartDelivery && !input.store.identityWasRevoked(input.handle, input.sessionId)) {
+      token = input.store.issueIdentity(input.handle, input.provider, input.sessionId).token;
+    }
     if (!token) return "";
     const tasks = input.store.tasksForSession(input.handle, input.sessionId);
     const cursor = input.store.cursorFor(input.handle, input.sessionId, input.cwd);
-    const injection = renderInboxInjection(tasks, cursor);
+    // Match the trusted provider-delivery path: pending owner approvals must
+    // remain at the frontier and must not cause a stage notice for later work.
+    const injection = renderInboxInjection(tasks, cursor, { includePending: false, items: 1 });
     if (!injection.text) return "";
     const task = injection.includedIds
       .map((id) => input.store.getTask(id))

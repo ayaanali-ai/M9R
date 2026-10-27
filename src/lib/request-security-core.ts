@@ -2,6 +2,40 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export type ContentLengthDecision = "ok" | "invalid" | "too_large";
 
+/** Inspect bytes on a clone so signature verification and route parsing retain the original body. */
+export async function evaluateBodySize(request: Request, maximum: number, timeoutMs = 30_000): Promise<ContentLengthDecision | "timed_out"> {
+  if (!Number.isSafeInteger(maximum) || maximum < 0) throw new Error("Invalid request body limit");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error("Invalid request body deadline");
+  const reader = request.clone().body?.getReader();
+  if (!reader) return "ok";
+  let size = 0;
+  let accepted = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"timed_out">((resolve) => { timer = setTimeout(() => resolve("timed_out"), timeoutMs); });
+  try {
+    while (true) {
+      const chunk = await Promise.race([reader.read(), deadline]);
+      if (chunk === "timed_out") return chunk;
+      if (chunk.done) { accepted = true; return "ok"; }
+      size += chunk.value.byteLength;
+      if (size > maximum) return "too_large";
+    }
+  } finally {
+    clearTimeout(timer);
+    // Stop both tee branches on rejection; otherwise the unread original can retain the upload.
+    if (!accepted) void request.body?.cancel().catch(() => {});
+    // A tee's cancel promise can wait for the route's original branch; never await it here.
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+/** Request handlers parse whole bodies; attachments alone have an existing 25 MiB allowance. */
+export function apiBodyLimit(pathname: string, configuredDefault: number): number {
+  if (/^\/api\/dashboard\/conversations\/[^/]+\/attachments\/?$/.test(pathname)) return 26 * 1024 * 1024;
+  return Math.min(configuredDefault, 32 * 1024 * 1024);
+}
+
 export function evaluateContentLength(rawLength: string | null, maximum: number): ContentLengthDecision {
   if (rawLength === null) return "ok";
   const parsed = Number(rawLength);

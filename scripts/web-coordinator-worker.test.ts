@@ -8,6 +8,8 @@ import test from "node:test";
 import { assembleCoordinatorSession, createCoordinatorIdentity, createCoordinatorNodeClient, createCoordinatorSessionDescriptor, signCoordinatorSession } from "@/lib/native/web-coordinator-client";
 
 const projectRoot = process.cwd();
+const testTempRoot = join(projectRoot, ".test-tmp");
+mkdirSync(testTempRoot, { recursive: true });
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -24,7 +26,7 @@ test("local Durable Object establishes a signed session, routes sealed frames, a
     return fetch(input, { ...init, signal: AbortSignal.any(signals) });
   };
   const port = await freePort();
-  const persist = mkdtempSync(join(projectRoot, ".m9r-coordinator-worker-"));
+  const persist = mkdtempSync(join(testTempRoot, "m9r-coordinator-worker-"));
   const tempProject = join(persist, "project");
   const tempService = join(tempProject, "services", "web-coordinator");
   const tempServiceSrc = join(tempService, "src");
@@ -99,7 +101,7 @@ test("local Durable Object establishes a signed session, routes sealed frames, a
       void childExit.then(() => { clearTimeout(timer); resolveExit(); });
     });
     if (child.exitCode !== null || child.signalCode !== null) {
-      try { rmSync(persist, { recursive: true, force: true }); } catch { /* Windows may still release Miniflare files after the process exits. */ }
+      try { rmSync(persist, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 }); } catch { /* Windows may still release Miniflare files after the process exits. */ }
     }
   }
 });

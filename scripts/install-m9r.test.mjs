@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { createReleasePackageManifest } from "./release-package-manifest.mjs";
 
 const root = resolve(".");
 const installer = resolve("scripts/install-m9r.ps1");
@@ -27,10 +28,14 @@ const canRunNativeInstaller = process.platform === "win32"
   && existsSync(join(engineDist, "m9r-overlay.exe"))
   && existsSync(join(engineDist, "m9r-build-info.json"));
 const skipNative = canRunNativeInstaller ? false : "Windows engine binaries are required (CI builds them first).";
+const testM9rHomes = new Set();
 
 function runPowerShell(script, args = [], { input, env = process.env } = {}) {
   const result = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File", script, ...args], {
-    cwd: root,
+    // Run the packaged engine from a temporary working directory so its
+    // user-scoped credential boundary does not mistake the checkout fixture
+    // for the repository being configured.
+    cwd: tmpdir(),
     encoding: "utf8",
     input,
     env,
@@ -49,9 +54,14 @@ function createPackage(directory) {
   }
   cpSync(join(engineDist, "m9r-overlay.exe"), join(stage, "m9r-overlay.exe"));
   cpSync(join(engineDist, "m9r-build-info.json"), join(stage, "m9r-build-info.json"));
+  // The engine's native setup resolves the Cua runtime beside the engine.
+  // Keep this fixture representative of the canonical release packager so a
+  // stale/minimal test ZIP cannot report a false installer regression.
+  cpSync(join(engineDist, "cua-driver-runtime"), join(stage, "cua-driver-runtime"), { recursive: true });
   cpSync(installer, join(stage, "install-m9r.ps1"));
   cpSync(resolve("scripts/install-m9r.cmd"), join(stage, "install-m9r.cmd"));
   writeFileSync(join(stage, "INSTALLATION.txt"), "M9R Windows standalone installer test package\n");
+  createReleasePackageManifest(stage);
   const zipPath = join(directory, "m9r-engine-windows-x64.zip");
   const zipScript = [
     "Add-Type -AssemblyName System.IO.Compression.FileSystem",
@@ -72,7 +82,17 @@ function createPackage(directory) {
 
 function makeProfile(parent) {
   const profile = join(parent, "profile");
-  const m9rHome = join(parent, "m9r-data");
+  // M9R deliberately rejects a project-local M9R_HOME because that would put
+  // provider credentials inside the checkout. Keep the fixture outside the
+  // clean repository while retaining the profile/config fixtures beside it.
+  // Keep the test-owned M9R_HOME on the short, writable checkout path. The
+  // native Windows test host permits executable replacement there but can
+  // deny both sibling-folder creation and executable rename operations under
+  // its AppContainer-scoped TEMP directory. This remains isolated from real
+  // user state and the build provenance rules classify the fixture as local
+  // test evidence.
+  const m9rHome = join(root, `.m9r-installer-home-${randomUUID()}`);
+  testM9rHomes.add(m9rHome);
   const claude = join(parent, "claude-config");
   const codex = join(parent, "codex-home");
   mkdirSync(profile, { recursive: true });
@@ -109,6 +129,15 @@ function canonicalPath(path) {
   return realpathSync.native(path).replace(/^\\\\\?\\/, "").toLowerCase();
 }
 
+function nativeInstallerTemp() {
+  // The Codex/Windows test host exposes an AppContainer-scoped %TEMP% where
+  // renaming an executable is denied even when the destination is writable.
+  // Keep the native fixture on the short, writable checkout path instead; the
+  // production installer still uses the user's normal Windows temp directory.
+  const parent = process.platform === "win32" ? root : tmpdir();
+  return mkdtempSync(join(parent, ".m9r-installer-"));
+}
+
 test("installer contains no Node/npm dependency and changes no saved PowerShell policy", () => {
   const source = readFileSync(installer, "utf8");
   assert.doesNotMatch(source, /(?:&\s*|Get-Command\s+)(?:npm|node)(?:\.exe)?\b/i);
@@ -120,11 +149,19 @@ test("installer contains no Node/npm dependency and changes no saved PowerShell 
   assert.match(source, /Get-M9rHome/);
   assert.match(source, /\[switch\]\$NoAutostart/);
   assert.match(source, /\[switch\]\$NoLaunch/);
+  assert.match(source, /\[switch\]\$Yes/);
+  assert.match(source, /if \(-not \$Yes -and -not \(Read-Consent/);
   assert.match(source, /function Stop-InstalledM9rPill/);
   assert.match(source, /--m9r-update-shutdown/, "pill updates must use the app's single-instance shutdown handoff");
   assert.match(source, /WaitForExit\(15000\)/, "the installer must wait for the installed pill to exit before replacing its image");
+  assert.match(source, /function Invoke-M9rEngine/);
+  assert.match(source, /m9r-package-info\.json/);
+  assert.match(source, /function Assert-ReleasePackageManifest/);
+  assert.match(source, /Compare-Object[\s\S]*file set does not match its identity manifest/, "the installer must reject files outside the exact package manifest");
+  assert.match(source, /\$ErrorActionPreference\s*=\s*'Continue'/, "native engine stderr warnings must not abort an otherwise successful update");
+  assert.match(source, /Invoke-M9rEngine \$engine \$dryRunArgs/);
   assert.match(source, /function Invoke-ManagedBrokerUpdate/);
-  assert.match(source, /Invoke-ManagedBrokerUpdate\s+\$engine\s+'stop'[\s\S]*Stop-InstalledM9rPill[\s\S]*& \$engine \@applyArgs/,
+  assert.match(source, /Invoke-ManagedBrokerUpdate\s+\$engine\s+'stop'[\s\S]*Stop-InstalledM9rPill[\s\S]*Invoke-M9rEngine \$engine \$applyArgs/,
     "updates must authenticate and stop the owned broker before engine setup can replace its runtime image");
   assert.match(source, /Invoke-ManagedBrokerUpdate\s+\$installedEngine\s+'start'/,
     "updates must restart and verify the owned broker using the newly installed engine");
@@ -147,10 +184,25 @@ test("standalone release packages runtime companions from the canonical engine d
   const cliSource = readFileSync(resolve("scripts/m9r-cli.ts"), "utf8");
   const overlayPreflightIndex = builderSource.indexOf('if (process.platform === "win32" && !existsSync(overlayExe))');
   const stagingIndex = builderSource.indexOf("mkdirSync(out, { recursive: true });");
+  const provenanceIndex = builderSource.indexOf("const provenance = sourceProvenance();");
   assert.ok(overlayPreflightIndex >= 0 && stagingIndex > overlayPreflightIndex, "missing pill input must fail before a new build staging directory is created");
+  assert.ok(provenanceIndex >= 0 && provenanceIndex < stagingIndex, "source provenance must be captured before build staging can make a clean checkout look dirty");
+  assert.match(builderSource, /runGitCleanCheck\(\["diff", "--quiet", "--no-ext-diff", "--ignore-submodules", "--", "\."\, \.\.\.privateTrackerExclusions\]\)/,
+    "source cleanliness must compare tracked content instead of trusting file mtimes");
+  assert.match(builderSource, /runGitCleanCheck\(\["ls-files", "--others", "--exclude-standard", "--directory"\]\)/,
+    "source cleanliness must still account for non-ignored untracked paths");
+  assert.match(builderSource, /heldLocalProvenancePatterns/,
+    "source cleanliness may exclude only the explicitly classified local-evidence roots");
+  assert.match(builderSource, /\.codex-stage-build-|docs\/research|m9r-runtime-clean-/,
+    "known local build, research, and runtime evidence roots must remain outside source provenance");
+  assert.ok(builderSource.includes("CUMULATIVE_RELIABILITY_AND_DEMO_TRACKER_2026-10-10")
+    && builderSource.includes("MASTER_LIST_2\\.1"),
+    "private M9R tracker edits must not make an otherwise verified release source appear dirty");
+  assert.match(builderSource, /untrackedSource\.length > 0/,
+    "unknown untracked source must still block a clean runtime build");
   assert.match(builderSource, /m9r-web-broker\.cjs[\s\S]*m9r-web-broker\.exe/, "the build must turn the bundled broker into its own executable");
   assert.match(builderSource, /copyFileSync\(overlayExe, join\(out, "m9r-overlay\.exe"\)\)/, "the engine distribution must capture the just-built desktop pill");
-  assert.match(builderSource, /writeRuntimeBuildManifest\(out\)[\s\S]*verifyRuntimeBuildManifest\(out, \{ exact: true \}\)[\s\S]*publishRuntimeBuild\(out, output, managedRuntimePaths\)/,
+  assert.match(builderSource, /writeRuntimeBuildManifest\(out(?:, [^\n]*)?\)[\s\S]*verifyRuntimeBuildManifest\(out, \{ exact: true \}\)[\s\S]*publishRuntimeBuild\(out, output, managedRuntimePaths\)/,
     "the complete artifact set must be hashed and verified before it is published");
   assert.match(builderSource, /rmSync\(buildRoot, \{ recursive: true, force: true \}\)/, "only the unique build staging directory may be removed after publication");
   assert.doesNotMatch(builderSource, /rmSync\(out,\s*\{\s*recursive:\s*true/, "the build must preserve other files already in engine/dist");
@@ -158,6 +210,8 @@ test("standalone release packages runtime companions from the canonical engine d
   assert.match(packagerSource, /m9r-web-broker\.exe/, "the release ZIP must contain the standalone broker");
   assert.match(packagerSource, /m9r-overlay\.exe/, "the release ZIP must contain the M9R desktop pill");
   assert.match(packagerSource, /m9r-build-info\.json/, "the release ZIP must contain the runtime artifact identity manifest");
+  assert.match(packagerSource, /release-package-manifest\.mjs/, "the release ZIP must be bound to the exact staged package manifest");
+  assert.match(packagerSource, /--verify/, "the release ZIP must be verified after its package manifest is created");
   assert.match(packagerSource, /\$overlay\s*=\s*Join-Path\s+\$dist\s+'m9r-overlay\.exe'/, "the release ZIP must take the pill from the same engine distribution used by local setup");
   assert.doesNotMatch(packagerSource, /overlay\\src-tauri\\target\\release\\m9r-overlay\.exe/i, "release packaging must not bypass the canonical engine distribution");
   const pillBuildIndex = workflowSource.indexOf("npm --prefix overlay run build");
@@ -166,12 +220,15 @@ test("standalone release packages runtime companions from the canonical engine d
   assert.match(installerSource, /m9r-web-broker\.exe/, "the installer must require the broker from the verified package");
   assert.match(installerSource, /m9r-overlay\.exe/, "the installer must require the M9R desktop pill from the verified package");
   assert.match(installerSource, /m9r-build-info\.json/, "the installer must require the runtime artifact identity manifest");
+  assert.match(installerSource, /m9r-package-info\.json/, "the installer must require the exact package identity manifest");
   assert.match(installerSource, /Install-ManagedWebBroker/, "the installer must place the broker beside the installed engine");
   assert.match(installerSource, /claim an identical companion/, "the installer must claim the broker after the engine copies its companion files");
   assert.match(installerSource, /Remove-ManagedWebBroker/, "uninstall must remove only the unchanged installer-owned broker");
   assert.match(installerSource, /web-broker-install\.json/, "the broker ownership record must persist across installer runs");
-  assert.match(installerSource, /& \$installedEngine web setup/, "Web setup must resolve its broker beside the persistent engine");
+  assert.match(installerSource, /Invoke-M9rEngine \$installedEngine @\('web',\s*'setup'\)/, "Web setup must resolve its broker beside the persistent engine");
   assert.match(cliSource, /args\[0\] === "broker-update"/, "the packaged engine must expose the installer's broker lifecycle command");
+  assert.match(cliSource, /buildManagedBrokerTaskRecovery/, "the broker updater must be able to recover a missing M9R-owned login task");
+  assert.match(cliSource, /restoreMissingManagedBrokerTask/, "broker start must reconcile a missing owned task before launching it");
 });
 
 test("runtime updates replace a Windows-locked engine image without stopping active MCP sessions", () => {
@@ -181,6 +238,14 @@ test("runtime updates replace a Windows-locked engine image without stopping act
   assert.match(nativeSource, /manifest\.runtimeFiles = \[\.\.\.new Set\(\[\.\.\.\(manifest\.runtimeFiles \?\? \[\]\)/);
   assert.match(nativeSource, /pruneRetiredRuntimeFile\(file\.to\)/);
   assert.match(nativeSource, /filter\(\(file\) => !isRetiredRuntimePath\(file\) \|\| existsSync\(file\)\)/);
+});
+
+test("the standalone broker updater resolves its script-relative default outside parameter binding", () => {
+  const updaterSource = readFileSync(resolve("scripts/update-web-broker.ps1"), "utf8");
+  assert.match(updaterSource, /\[string\]\$SourcePath\s*=\s*''/i);
+  assert.match(updaterSource, /\$scriptRoot\s*=\s*if\s*\(/i);
+  assert.match(updaterSource, /Split-Path\s+-Parent\s+\$MyInvocation\.MyCommand\.Path/i);
+  assert.match(updaterSource, /Join-Path\s+\$scriptRoot\s+'\.\.\\engine\\dist\\m9r-web-broker\.exe'/i);
 });
 
 test("release ZIP contains the built standalone broker", { skip: skipNative }, (t) => {
@@ -200,11 +265,16 @@ test("release ZIP contains the built standalone broker", { skip: skipNative }, (
   assert.match(listed.stdout, /^m9r-web-broker\.exe\s*$/m);
   assert.match(listed.stdout, /^m9r-overlay\.exe\s*$/m);
   assert.match(listed.stdout, /^m9r-build-info\.json\s*$/m);
+  assert.match(listed.stdout, /^m9r-package-info\.json\s*$/m);
+  assert.match(listed.stdout, /^cua-driver-runtime\/bin\/cua-cursor-theme\.exe\s*$/m);
 });
 
 test("standalone package consent, setup, integrity, and uninstall paths", { skip: skipNative }, async (t) => {
-  const temp = mkdtempSync(join(tmpdir(), "m9r-real-installer-"));
-  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  const temp = nativeInstallerTemp();
+  t.after(() => {
+    rmSync(temp, { recursive: true, force: true });
+    for (const home of testM9rHomes) rmSync(home, { recursive: true, force: true });
+  });
   const zipPath = createPackage(temp);
 
   await t.test("default consent preview includes sign-in startup and decline writes nothing", () => {
@@ -237,7 +307,7 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
     ]);
     for (const [path, contents] of originalFiles) writeFileSync(path, contents);
     const installed = runPowerShell(installer, ["-PackagePath", zipPath, "-NoAutostart", "-NoLaunch"], { input: "y\n", env: profile.env });
-    assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+    assert.equal(installed.status, 0, `${installed.stderr ?? ""}\n${installed.stdout ?? ""}`);
     assert.match(installed.stdout, /M9R FIRST-RUN CONSENT/);
     assert.match(installed.stdout, /Exact setup plan from the engine/);
     assert.match(installed.stdout, /m9r-engine uninstall/);
@@ -278,7 +348,7 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
   await t.test("a broker replaced by engine setup can be refreshed from a verified package", () => {
     const profile = makeProfile(join(temp, "stale-broker-record-case"));
     const firstInstall = runPowerShell(installer, ["-PackagePath", zipPath, "-NoAutostart", "-NoLaunch"], { input: "y\n", env: profile.env });
-    assert.equal(firstInstall.status, 0, firstInstall.stderr || firstInstall.stdout);
+    assert.equal(firstInstall.status, 0, `${firstInstall.stderr ?? ""}\n${firstInstall.stdout ?? ""}`);
     const installedBroker = join(profile.m9rHome, "bin", "m9r-web-broker.exe");
     const runtimeManifest = JSON.parse(readFileSync(join(profile.m9rHome, "install-manifest.json"), "utf8"));
     assert.ok(runtimeManifest.runtimeFiles.some((path) => canonicalPath(path) === canonicalPath(installedBroker)));
@@ -295,7 +365,7 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
   await t.test("uninstall preserves a web broker changed after installation", () => {
     const profile = makeProfile(join(temp, "modified-broker-case"));
     const installed = runPowerShell(installer, ["-PackagePath", zipPath, "-NoAutostart", "-NoLaunch"], { input: "y\n", env: profile.env });
-    assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+    assert.equal(installed.status, 0, `${installed.stderr ?? ""}\n${installed.stdout ?? ""}`);
     const brokerPath = join(profile.m9rHome, "bin", "m9r-web-broker.exe");
     const ownershipPath = join(profile.m9rHome, "web-broker-install.json");
     writeFileSync(brokerPath, Buffer.concat([readFileSync(brokerPath), Buffer.from("user change")]));

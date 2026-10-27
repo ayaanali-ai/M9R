@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { renameStateFile } from "./atomic-file";
@@ -15,9 +15,14 @@ const DESKTOP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const EMPTY_DESKTOP_ID_RE = /^00000000-0000-0000-0000-000000000000$/i;
 const WINDOW_ID_RE = /^(?:0[xX][0-9a-f]+|[0-9]+)$/;
 const MACHINE_ID_FILE = "windows-stage-machine-id";
+const COORDINATION_KEY_RE = /^[a-f0-9]{64}$/;
 
 export interface WindowsStageRecord {
   name: string;
+  /** Stable logical app reference used to recover the selected window after a broker restart. */
+  appId?: string;
+  /** Stable, local-only intent group. Stages in one group may share a window. */
+  coordinationKey?: string;
   desktopId: string;
   /** Random local coordination identity; the Windows desktop GUID never leaves this machine. */
   roomDesktopId: string;
@@ -49,10 +54,14 @@ interface NativeStageResponse {
   error?: string;
   window?: NativeWindowStageInfo;
   desktop?: NativeDesktopStageInfo;
+  desktopStructure?: NativeDesktopStructure;
   input?: { childWindowId: string };
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
   control?: NativePointControl;
   windows?: { pid: number; windowId: string; title: string; width: number; height: number }[];
+  position?: { x: number; y: number };
+  windowState?: "closed" | "moved" | "minimized" | "occluded" | "hidden" | "visible";
+  state?: "minimized" | "maximized" | "restored";
 }
 
 export interface NativePointControl {
@@ -63,6 +72,26 @@ export interface NativePointControl {
   rect: { x: number; y: number; width: number; height: number };
   invoked: boolean;
   confirmed?: boolean;
+}
+
+/** Public, handle-free result from the native Windows UI Automation desktop snapshot. */
+export interface NativeDesktopStructureElement {
+  ref: string;
+  label: string;
+  role: string;
+  className: string;
+  rect: { x: number; y: number; width: number; height: number };
+  depth: number;
+  enabled: boolean;
+  focused: boolean;
+}
+
+export interface NativeDesktopStructure {
+  scope: "desktop";
+  status: "complete" | "partial";
+  screen: { x: number; y: number; width: number; height: number };
+  elements: NativeDesktopStructureElement[];
+  truncated: boolean;
 }
 
 interface NativeDesktopStageInfo {
@@ -93,6 +122,15 @@ function isNonzeroDesktopId(value: unknown): value is string {
   return typeof value === "string" && DESKTOP_ID_RE.test(value) && !EMPTY_DESKTOP_ID_RE.test(value);
 }
 
+function isPersistedAppId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 1024
+    && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function isCoordinationKey(value: unknown): value is string {
+  return typeof value === "string" && COORDINATION_KEY_RE.test(value);
+}
+
 function parseRegistry(raw: string): StageRegistry {
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { throw new Error("The local Windows stage registry is corrupt; it was left unchanged."); }
@@ -110,6 +148,8 @@ function parseRegistry(raw: string): StageRegistry {
     const name = normalizedName(typeof record.name === "string" ? record.name : "");
     if (names.has(name)) throw new Error("The local Windows stage registry contains duplicate names; it was left unchanged.");
     names.add(name);
+    if (record.appId !== undefined && (!isPersistedAppId(record.appId))) throw new Error("The local Windows stage registry contains an invalid app reference; it was left unchanged.");
+    if (record.coordinationKey !== undefined && !isCoordinationKey(record.coordinationKey)) throw new Error("The local Windows stage registry contains an invalid coordination key; it was left unchanged.");
     if (typeof record.desktopId !== "string" || !DESKTOP_ID_RE.test(record.desktopId)) throw new Error("The local Windows stage registry contains an invalid desktop id; it was left unchanged.");
     const returnToDesktopId = record.returnToDesktopId ?? null;
     if (returnToDesktopId !== null && (typeof returnToDesktopId !== "string" || !DESKTOP_ID_RE.test(returnToDesktopId))) {
@@ -145,6 +185,8 @@ function parseRegistry(raw: string): StageRegistry {
     }
     return {
       name,
+      ...(record.appId !== undefined ? { appId: record.appId } : {}),
+      ...(record.coordinationKey !== undefined ? { coordinationKey: record.coordinationKey } : {}),
       desktopId: record.desktopId.toLowerCase(),
       roomDesktopId: roomDesktopId.toLowerCase(),
       returnToDesktopId: returnToDesktopId?.toLowerCase() ?? null,
@@ -200,17 +242,55 @@ export function formatWindowsStageRoomKeys(machineId: string, stage: Pick<Window
   };
 }
 
-function acquireRegistryLock(root: string): () => void {
+// No legitimate registry update holds this lock for anywhere close to this
+// long -- it exists only to make the handful of synchronous filesystem calls
+// in writeRegistryWhileLocked atomic as a group. A lock older than this was
+// left behind by a process that no longer exists (the broker has been killed
+// and restarted many times across one session), not one still working.
+const STALE_LOCK_MS = 30_000;
+
+export function acquireRegistryLock(root: string): () => void {
   mkdirSync(root, { recursive: true });
   const target = registryPath(root);
   const lock = `${target}.lock`;
+  const token = randomUUID();
+  const ownerPath = join(lock, "owner.json");
+  const readOwner = (): { pid?: number; token?: string } => {
+    try { return JSON.parse(readFileSync(ownerPath, "utf8")); } catch { return {}; }
+  };
   try {
     mkdirSync(lock);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Another Windows stage registry update is already running; retry after it finishes.");
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // A lock with no PID, no age limit, and no staleness check meant that any
+    // process killed or crashed while holding it (a forced restart, in
+    // particular) permanently broke every future registry operation until
+    // someone deleted the lock directory by hand. Self-heal instead: a lock
+    // old enough to be certain nothing legitimate still holds it is removed
+    // and re-acquired, exactly once, before giving up for real.
+    let ageMs: number;
+    try { ageMs = Date.now() - statSync(lock).mtimeMs; } catch { ageMs = Infinity; }
+    if (ageMs < STALE_LOCK_MS) throw new Error("Another Windows stage registry update is already running; retry after it finishes.");
+    const owner = readOwner();
+    if (Number.isSafeInteger(owner.pid) && owner.pid! > 0) {
+      try { process.kill(owner.pid!, 0); throw new Error("Another Windows stage registry update is already running; its owner is alive."); }
+      catch (failure) {
+        if ((failure as NodeJS.ErrnoException).code !== "ESRCH") throw failure;
+      }
+    }
+    try { rmSync(lock, { recursive: true, force: true }); } catch { /* another process may have just cleared it too; proceed to retry regardless */ }
+    try {
+      mkdirSync(lock);
+    } catch (retryError) {
+      if ((retryError as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Another Windows stage registry update is already running; retry after it finishes.");
+      throw retryError;
+    }
   }
-  return () => rmSync(lock, { recursive: true, force: true });
+  try { writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token }), { flag: "wx", mode: 0o600 }); }
+  catch (error) { rmSync(lock, { recursive: true, force: true }); throw error; }
+  return () => {
+    if (readOwner().token === token) rmSync(lock, { recursive: true, force: true });
+  };
 }
 
 function writeRegistryWhileLocked(root: string, registry: StageRegistry): void {
@@ -300,20 +380,70 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return control;
   }
 
-  async function register(nameInput: string, pidInput: string, windowIdInput: string): Promise<WindowsStageRecord> {
+  /**
+   * Read the bounded Windows control-view tree rooted at the virtual desktop.
+   * This is one shared observation capability for shell, taskbar, and visible
+   * app controls; it is not a provider- or application-specific route.
+   */
+  async function desktopStructure(options: { maxElements?: number; maxDepth?: number } = {}): Promise<NativeDesktopStructure> {
+    assertWindows();
+    assertOwner();
+    const maxElements = options.maxElements ?? 64;
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isSafeInteger(maxElements) || maxElements < 1 || maxElements > 64
+      || !Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 10) {
+      throw new Error("Windows desktop structure bounds are invalid.");
+    }
+    const result = await invokeNative({ op: "inspectDesktopStructure", maxElements, maxDepth });
+    if (!result.ok) throw new Error(result.error ?? "Windows UI Automation could not inspect the desktop structure.");
+    const structure = result.desktopStructure;
+    const screen = structure?.screen;
+    if (!structure || structure.scope !== "desktop" || !["complete", "partial"].includes(structure.status)
+      || !screen || ![screen.x, screen.y, screen.width, screen.height].every(Number.isSafeInteger)
+      || screen.width < 1 || screen.height < 1 || screen.width > 65_536 || screen.height > 65_536
+      || !Array.isArray(structure.elements) || structure.elements.length > maxElements
+      || typeof structure.truncated !== "boolean") {
+      throw new Error("Windows returned an invalid desktop UI Automation structure.");
+    }
+    for (const element of structure.elements) {
+      if (!element || typeof element.ref !== "string" || !/^desktop-ui-element-\d+$/.test(element.ref)
+        || typeof element.label !== "string" || element.label.length > 160
+        || typeof element.role !== "string" || element.role.length > 80
+        || typeof element.className !== "string" || element.className.length > 120
+        || !Number.isSafeInteger(element.depth) || element.depth < 0 || element.depth > maxDepth
+        || typeof element.enabled !== "boolean" || typeof element.focused !== "boolean"
+        || !element.rect || ![element.rect.x, element.rect.y, element.rect.width, element.rect.height].every(Number.isFinite)
+        || element.rect.width <= 0 || element.rect.height <= 0) {
+        throw new Error("Windows returned an invalid desktop UI Automation element.");
+      }
+    }
+    return structure;
+  }
+
+  async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<WindowsStageRecord> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
+    if (appId !== undefined && !isPersistedAppId(appId)) throw new Error("The Windows stage app reference is invalid.");
+    if (coordinationKey !== undefined && !isCoordinationKey(coordinationKey)) throw new Error("The Windows stage coordination key is invalid.");
     const info = await inspectWindow(pidInput, windowIdInput);
     const release = acquireRegistryLock(root);
     try {
       const registry = readRegistry(root);
       const existing = registry.stages.find((stage) => stage.name === name);
+      const savedCoordinationKey = coordinationKey ?? existing?.coordinationKey;
+      const claimed = registry.stages.find((stage) => stage.name !== name
+        && stage.anchor?.pid === info.pid && stage.anchor.windowId === info.windowId
+        && !(savedCoordinationKey && stage.coordinationKey === savedCoordinationKey));
+      if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
       if (existing && existing.desktopId !== info.desktopId) {
         throw new Error(`Stage “${name}” already names a different desktop. Forget it first, then register the new desktop.`);
       }
+      const savedAppId = appId ?? existing?.appId;
       const record: WindowsStageRecord = {
         name,
+        ...(savedAppId !== undefined ? { appId: savedAppId } : {}),
+        ...(savedCoordinationKey !== undefined ? { coordinationKey: savedCoordinationKey } : {}),
         desktopId: info.desktopId,
         roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
         returnToDesktopId: existing?.returnToDesktopId ?? null,
@@ -347,7 +477,15 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       if (registry.stages.some((stage) => stage.name === name)) throw new Error(`A local stage named “${name}” already exists.`);
       if (registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
 
+      // Prepare durable recovery evidence before crossing the native side-effect
+      // boundary. A failed registry replacement must not erase the created ID.
+      const recoveryRoot = join(root, "desktop-creation-recovery");
+      mkdirSync(recoveryRoot, { recursive: true });
+      const recoveryFile = join(recoveryRoot, `${randomUUID()}.json`);
+      writeFileSync(recoveryFile, JSON.stringify({ name, state: "creation-requested", requestedAt: now().toISOString() }), { flag: "wx", mode: 0o600 });
       const result = await invokeNative({ op: "createDesktop" });
+      writeFileSync(recoveryFile, JSON.stringify({ name, state: result.ok ? "created-unregistered" : "failed", desktop: result.desktop,
+        error: result.error, recordedAt: now().toISOString() }), { mode: 0o600 });
       if (!result.ok) throw new Error(result.error ?? "Windows could not create a virtual desktop.");
       const desktop = normalizeDesktopInfo(result.desktop);
       if (desktop.isCurrent) throw new Error("Windows created the desktop but activated it unexpectedly; M9R did not register the stage.");
@@ -366,8 +504,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       try {
         writeRegistryWhileLocked(root, { version: STAGE_REGISTRY_VERSION, stages: [...registry.stages, record] });
       } catch (error) {
-        throw new Error(`Windows created desktop ${desktop.desktopId}, but M9R could not save its local stage mapping. The desktop was left intact. ${error instanceof Error ? error.message : ""}`.trim());
+        throw new Error(`Windows created desktop ${desktop.desktopId}, but M9R could not save its local stage mapping. The desktop was left intact; recovery evidence: ${recoveryFile}. ${error instanceof Error ? error.message : ""}`.trim());
       }
+      try { unlinkSync(recoveryFile); } catch { /* a retained journal is reconcilable against the saved registry; do not misreport a mapped desktop as failed */ }
       return record;
     } finally {
       release();
@@ -395,6 +534,8 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       if (!existing && registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
       const record: WindowsStageRecord = {
         name,
+        ...(existing?.appId !== undefined ? { appId: existing.appId } : {}),
+        ...(existing?.coordinationKey !== undefined ? { coordinationKey: existing.coordinationKey } : {}),
         desktopId: desktop.desktopId,
         roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
         returnToDesktopId: null,
@@ -504,15 +645,17 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return { fromDesktopId: current.desktopId, window: moved, stage };
   }
 
-  async function attachWindow(nameInput: string, pidInput: string, windowIdInput: string): Promise<{ stage: WindowsStageRecord; window: NativeWindowStageInfo }> {
+  async function attachWindow(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<{ stage: WindowsStageRecord; window: NativeWindowStageInfo }> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
     const stage = readRegistry(root).stages.find((item) => item.name === name);
     if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
+    const sharedKey = coordinationKey ?? stage.coordinationKey;
+    assertWindowUnclaimed(name, Number(pidInput), windowIdInput, sharedKey);
     const current = await inspectWindow(pidInput, windowIdInput);
     if (current.desktopId !== stage.desktopId) await moveWindow(name, pidInput, windowIdInput);
-    const registered = await register(name, pidInput, windowIdInput);
+    const registered = await register(name, pidInput, windowIdInput, appId, sharedKey);
     const inspected = await inspectStage(name);
     if (!inspected.anchor || inspected.anchor.pid !== registered.anchor?.pid || inspected.anchor.windowId !== registered.anchor?.windowId) {
       throw new Error(`Windows did not confirm that the selected app window is attached to stage “${name}”.`);
@@ -627,7 +770,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return result.windows;
   }
 
-  async function presentOwnerWindow(name: string, pid: number, windowId: string) {
+  async function presentOwnerWindow(name: string, pid: number, windowId: string, coordinationKey?: string) {
+    const existing = readRegistry(root).stages.find((stage) => stage.name === normalizedName(name));
+    assertWindowUnclaimed(name, pid, windowId, coordinationKey ?? existing?.coordinationKey);
     const inspected = await inspectStage(name);
     if (!inspected.desktop.isCurrent) throw new Error("The owner's desktop changed before application presentation.");
     const result = await invokeNative({ op: "presentOwnerWindow", pid, windowId, desktopId: inspected.stage.desktopId });
@@ -636,6 +781,40 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       throw new Error(result.error ?? "The requested application window was not presented on the owner's desktop.");
     }
     return result.window;
+  }
+
+  function assertWindowUnclaimed(name: string, pid: number, windowId: string, coordinationKey?: string) {
+    const claimed = readRegistry(root).stages.find((stage) => stage.name !== name
+      && stage.anchor?.pid === pid && stage.anchor.windowId === windowId
+      && !(coordinationKey && stage.coordinationKey === coordinationKey));
+    if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
+  }
+
+  async function windowStatus(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "windowStatus", pid, windowId });
+    if (!result.ok || !["closed", "moved", "minimized", "occluded", "hidden", "visible"].includes(result.windowState ?? "")) {
+      throw new Error(result.error ?? "Window lifecycle state could not be verified.");
+    }
+    return result.windowState!;
+  }
+
+  async function ownedPopups(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "listOwnedPopups", pid, windowId });
+    if (!result.ok || !Array.isArray(result.windows) || result.windows.length > 8) throw new Error(result.error ?? "Owned popup enumeration failed.");
+    if (result.windows.some((w) => w.pid !== pid || !WINDOW_ID_RE.test(w.windowId))) throw new Error("Invalid owned popup identity.");
+    return result.windows;
+  }
+
+  async function setWindowState(name: string, state: "minimized" | "maximized" | "restored") {
+    const inspected = await inspectStage(name);
+    if (!inspected.anchor) throw new Error("No exact selected window.");
+    const result = await invokeNative({ op: "setWindowState", ...inspected.anchor, state });
+    if (!result.ok || result.state !== state) throw new Error(result.error ?? "Window state was not verified.");
+    return state;
   }
 
   async function showOwnedWindow(name: string) {
@@ -659,18 +838,39 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return { stage: inspected.stage, window };
   }
 
+  /**
+   * The owner's real, physical pointer position -- distinct from any agent's synthetic cursor
+   * overlay. Added for the owner-cursor-isolation fix: any action that must fall back to real
+   * SendInput captures this immediately before acting and restores it with
+   * `restoreOwnerCursorPosition` immediately after, so the owner's pointer is never left wherever
+   * the agent's action happened to leave it.
+   */
+  async function getOwnerCursorPosition(): Promise<{ x: number; y: number }> {
+    const result = await invokeNative({ op: "getCursorPosition" });
+    if (!result.ok || !result.position || !Number.isFinite(result.position.x) || !Number.isFinite(result.position.y)) {
+      throw new Error(result.error ?? "Could not read the owner's real pointer position.");
+    }
+    return result.position;
+  }
+
+  async function restoreOwnerCursorPosition(x: number, y: number): Promise<void> {
+    if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y)) throw new Error("Invalid owner pointer restore coordinates.");
+    const result = await invokeNative({ op: "restoreCursorPosition", x, y });
+    if (!result.ok) throw new Error(result.error ?? "Could not restore the owner's real pointer position.");
+  }
+
   function clearOwnedAnchor(nameInput: string, pid: number, windowId: string) {
     assertWindows(); assertOwner();
     const name = normalizedName(nameInput), release = acquireRegistryLock(root);
     try {
       const registry = readRegistry(root), stage = registry.stages.find((item) => item.name === name);
       if (!stage || stage.anchor?.pid !== pid || stage.anchor.windowId !== windowId) throw new Error("The task app is no longer this stage's registered window.");
-      stage.anchor = null; stage.roomWindowId = null;
+      stage.anchor = null; stage.roomWindowId = null; delete stage.appId;
       writeRegistryWhileLocked(root, registry);
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor };
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, setWindowState, ownedPopups };
 }
 
 function parsePid(value: string): number {

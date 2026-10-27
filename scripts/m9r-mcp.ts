@@ -5,15 +5,107 @@
  * each tool call instead of being baked into how this process was launched.
  */
 import { homedir } from "node:os";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { runMcpStdioSupervisor } from "@/lib/native/mcp-stdio-supervisor";
+import { mcpWorkerEnvironment, readM9rMcpConnectionConfig } from "@/lib/native/mcp-connection-env";
+import { startLocalPresenceHeartbeat } from "@/lib/native/local-presence-heartbeat";
+import { hasPendingRuntimeTransaction } from "@/lib/native/runtime-install-transaction";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
+import { reconcileProviderSessions } from "@/lib/native/provider-session-reconciliation";
+import { migrateLegacyAgentCredentials, readAgentCredential } from "@/lib/native/agent-credential-store";
 import { createM9rMcpServer } from "@/lib/native/mcp-server";
+import { startParentLivenessWatchdog } from "@/lib/native/process-liveness";
 import { createNetworkCoreClient, parseNetworkCredentials } from "@/lib/native/network-core-client";
 import { createWebBrokerClient } from "@/lib/native/web-broker-client";
 import { brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
+import { isPackagedMcpExecutable, resolveMcpRuntimeExecutable } from "@/lib/native/mcp-runtime-path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
+async function localAgentToken(provider: string, env: NodeJS.ProcessEnv, repositoryRoot: string): Promise<string | undefined> {
+  const direct = env.M9R_AGENT_TOKEN?.trim();
+  if (direct) return direct;
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(provider)) return undefined;
+  try {
+    const migration = await migrateLegacyAgentCredentials(repositoryRoot, env, [provider]);
+    const blocked = migration.find((result) => result.action === "conflict" || result.action === "invalid");
+    if (blocked) {
+      throw new Error(`The ${blocked.provider} credential could not be migrated safely (${blocked.action}); refusing to use a project-local credential.`);
+    }
+    return (await readAgentCredential(repositoryRoot, provider, env))?.token;
+  } catch (error) {
+    process.stderr.write(`M9R refused a project-local credential migration for ${provider}: ${error instanceof Error ? error.message : String(error)}\n`);
+    return undefined;
+  }
+}
+
+async function startMcpPresence(connection: ReturnType<typeof readM9rMcpConnectionConfig>): Promise<ReturnType<typeof startLocalPresenceHeartbeat> | null> {
+  if (process.env.M9R_MCP_WORKER === "1" || connection.mode === "managed-owner" || !connection.provider) return null;
+  // A provider MCP process is commonly launched from the user's home folder
+  // (or from an arbitrary shell cwd), which is not proof of the project it is
+  // serving. Never treat that cwd as a credential-migration target: doing so
+  // trips the user-scoped M9R_HOME boundary and makes a healthy provider look
+  // disconnected. The native binding/claim path does not depend on this
+  // optional network heartbeat. Migration is only safe when setup supplied a
+  // trusted project root explicitly.
+  const repositoryRoot = process.env.M9R_PROJECT_ROOT?.trim();
+  if (!repositoryRoot) return null;
+  const token = await localAgentToken(connection.provider, process.env, repositoryRoot);
+  if (!token) return null;
+  const appUrl = (process.env.M9R_APP_URL?.trim() || process.env.M9R_API_URL?.trim() || "https://m9r.dev").replace(/\/+$/, "");
+  return startLocalPresenceHeartbeat({
+    appUrl,
+    agentToken: token,
+    provider: connection.provider,
+    adapterInstanceId: `m9r-mcp-${connection.provider}-${process.pid}-${randomUUID()}`.slice(0, 128),
+    onError: (error) => process.stderr.write(`M9R local presence heartbeat failed: ${error instanceof Error ? error.message : String(error)}\n`),
+  });
+}
+
 async function main(): Promise<void> {
+  const connection = readM9rMcpConnectionConfig(process.env, process.ppid);
+  if (process.env.M9R_MCP_WORKER !== "1") {
+    const presence = await startMcpPresence(connection);
+    const runtimeExecutable = resolveMcpRuntimeExecutable(process.env, process.execPath);
+    const packaged = isPackagedMcpExecutable(runtimeExecutable);
+    const executableDirectory = dirname(runtimeExecutable);
+    const workerRevision = packaged ? () => {
+      if (hasPendingRuntimeTransaction(executableDirectory)) return undefined;
+      try {
+        const manifest = JSON.parse(readFileSync(join(executableDirectory, "m9r-build-info.json"), "utf8"));
+        return typeof manifest.buildId === "string" && /^[a-f0-9]{64}$/.test(manifest.buildId) ? manifest.buildId : undefined;
+      } catch { return undefined; }
+    } : undefined;
+    const args = isPackagedMcpExecutable(runtimeExecutable)
+      ? ["mcp"] : [...process.execArgv, ...process.argv.slice(1)];
+    const runtime = runMcpStdioSupervisor({ input: process.stdin, output: process.stdout, workerRevision,
+      spawnWorker: () => spawn(runtimeExecutable, args, {
+        stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
+        env: mcpWorkerEnvironment(process.env, connection),
+      }),
+      onEvent: event => process.stderr.write(`M9R MCP lifecycle ${JSON.stringify(event)}\n`),
+    });
+    try {
+      await runtime.closed;
+    } finally {
+      presence?.stop();
+    }
+    return;
+  }
+  // This worker is a plain child of the outer supervisor, with no OS-level job/process-group tie
+  // on Windows: a crashed or forcibly-killed outer process leaves it running forever otherwise.
+  if (Number.isSafeInteger(process.ppid) && process.ppid > 0) {
+    startParentLivenessWatchdog({
+      parentPid: process.ppid,
+      onParentGone: () => {
+        process.stderr.write("M9R MCP worker exiting: outer supervisor process is no longer alive\n");
+        process.exit(0);
+      },
+    });
+  }
   const root = defaultStoreRoot(homedir(), process.env);
   const store = createLocalStore(root);
   const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: Number(process.env.M9R_WEB_BROKER_PORT) || undefined });
@@ -22,7 +114,37 @@ async function main(): Promise<void> {
     credentials: parseNetworkCredentials(process.env.M9R_NETWORK_CREDENTIALS_JSON),
   });
   const roomStartedAt = Number(process.env.M9R_ROOM_STARTED_AT);
-  const server: McpServer = createM9rMcpServer({ store, web, networkCore, ...(Number.isSafeInteger(roomStartedAt) && roomStartedAt > 0 ? { roomStartedAt } : {}) });
+  const server: McpServer = createM9rMcpServer({
+    store,
+    web,
+    networkCore,
+    ...(Number.isSafeInteger(roomStartedAt) && roomStartedAt > 0 ? { roomStartedAt } : {}),
+    ...(connection.mode === "managed-owner" ? {} : connection.bindingId ? { connectionBindingId: connection.bindingId } : {}),
+    ...(connection.mode ? { connectionMode: connection.mode } : {}),
+    ...(connection.mode === "managed-owner" ? {} : connection.processId ? { connectionProcessId: connection.processId } : {}),
+    ...(connection.provider ? { connectionProvider: connection.provider } : {}),
+    connectionCwd: process.env.M9R_PROJECT_ROOT?.trim() || process.cwd(),
+    ...(connection.sessionId ? { connectionSessionId: connection.sessionId } : {}),
+    ...(connection.mode !== "managed-owner" && connection.provider ? {
+      reconcileProviderConnection: ({ provider, processId, sessionId, cwd }) => reconcileProviderSessions({
+        root,
+        store,
+        providerId: provider,
+        env: process.env,
+        ...(cwd ? { expectedCwd: cwd } : {}),
+        ...(processId !== undefined ? { expectedProcessId: processId } : {}),
+        ...(sessionId ? { expectedSessionId: sessionId } : {}),
+      }),
+    } : {}),
+    // A worker can be refreshed by a newer engine while its provider-owned
+    // outer supervisor still carries an older environment. In that narrow
+    // private-worker mode the server may adopt exactly one active local claim;
+    // ambiguity remains fail-closed. Legacy standalone MCP launches do not
+    // receive this escape hatch.
+    ...(process.env.M9R_MCP_WORKER === "1" && !connection.provider && !connection.bindingId && !connection.processId
+      ? { connectionWorkerFallback: true }
+      : {}),
+  });
   const transport = new StdioServerTransport();
   // The SDK's stdio transport never listens for stdin closing, and on Windows a Node process commonly does not exit
   // on its own when its pipe EOFs -- confirmed live: every closed Claude Code/Codex session left this process behind

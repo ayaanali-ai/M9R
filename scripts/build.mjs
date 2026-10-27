@@ -5,9 +5,35 @@
 // does that by calling `npm run build` again. M9R_OPENNEXT_INNER marks that second call so it builds Next and does not recurse.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 const run = (command, args, env = process.env) => {
-  const result = spawnSync(command, args, { stdio: "inherit", shell: true, env });
+  // Keep the child process boundary shell-free. The build only invokes tools
+  // that are already declared in this checkout, so resolve their local entry
+  // points directly instead of routing arguments through npx/cmd.exe.
+  let executable = command;
+  let childArgs = args;
+  if (command === "npx") {
+    const [tool, ...toolArgs] = args;
+    const localEntryPoints = {
+      next: join(process.cwd(), "node_modules", "next", "dist", "bin", "next"),
+      "opennextjs-cloudflare": join(
+        process.cwd(),
+        "node_modules",
+        "@opennextjs",
+        "cloudflare",
+        "dist",
+        "cli",
+        "index.js",
+      ),
+    };
+    const entryPoint = localEntryPoints[tool];
+    if (!entryPoint) throw new Error(`Unsupported local build tool: ${tool ?? "<missing>"}`);
+    executable = process.execPath;
+    childArgs = [entryPoint, ...toolArgs];
+  }
+  const result = spawnSync(executable, childArgs, { stdio: "inherit", shell: false, env });
+  if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
 };
 
@@ -16,7 +42,7 @@ const onCloudflare = process.env.WORKERS_CI === "1" || process.env.M9R_BUILD_TAR
 const inner = process.env.M9R_OPENNEXT_INNER === "1";
 
 if (process.env.M9R_BUILD_DRY === "1") {
-  console.log(onCloudflare && !inner ? "cloudflare: opennextjs-cloudflare build (runs next build --turbopack through this script)" : "plain: next build --turbopack");
+  console.log(onCloudflare && !inner ? "cloudflare: opennextjs-cloudflare build (runs next build --webpack through this script)" : "plain: next build --webpack");
   process.exit(0);
 }
 
@@ -37,5 +63,9 @@ if (onCloudflare && !inner) {
     CLOUDFLARE_BUILD: "true",
   });
 } else {
-  run("npx", ["next", "build", "--turbopack"]);
+  // Keep the production compiler consistent across local and Cloudflare
+  // builds. Next 16's Turbopack path currently fails this app's
+  // next/font/google imports with a missing internal font module; Webpack is
+  // the supported opt-out and is already the Cloudflare production path.
+  run("npx", ["next", "build", "--webpack"]);
 }

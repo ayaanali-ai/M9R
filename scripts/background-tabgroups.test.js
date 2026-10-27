@@ -109,6 +109,7 @@ function createHarness(sessionSeed = {}) {
   const context = {
     chrome,
     M9RQuietInput: { create: () => ({ adoptAndRelease: async () => 0, stopAll: async () => {}, resumeAll() {} }) },
+    M9RRetiredPages: { isRetiredUrl: () => false, repair: async () => 0 },
     m9rPagePower() { return { ok: true, data: { rect: { x: 0, y: 0, width: 800, height: 600 } } }; },
     WebSocket: FakeWebSocket,
     importScripts() {},

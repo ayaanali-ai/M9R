@@ -16,6 +16,7 @@ export async function recordAgentHeartbeat(
   const accepted = acceptHeartbeat(payload, {
     receivedAt,
     previousSequence: null,
+    expectedProvider: agent.agentKind,
   });
   if (!accepted.ok) {
     const conflict = accepted.reason === "sequence_not_newer";

@@ -50,7 +50,7 @@ export function agentChromePaths(root: string) {
   return { root: absolute, profile, lock: join(absolute, "chrome-launch.lock") };
 }
 
-function findChrome(): string {
+export function findChrome(): string {
   const candidates = process.platform === "win32" ? [
     "C:/Program Files/Google/Chrome/Application/chrome.exe",
     "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",

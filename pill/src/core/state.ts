@@ -9,7 +9,7 @@ export type PillBadge = "approval" | "finished" | "error";
 
 /** Wire shape: what a shell gives the pill. */
 export interface PillSnapshot {
-  agents: Array<{ handle: string; provider: Provider; state: AgentRunState; activity: string[]; task?: string }>;
+  agents: Array<{ handle: string; provider: Provider; state: AgentRunState; activity: string[]; task?: string; color?: string }>;
   approvals: Array<{ id: string; agent: string; title: string; detail: string }>;
   /** Replies and notices from agents, newest last. */
   thread: Array<{ id: string; from: string; text: string; link?: LinkOffer }>;
@@ -193,7 +193,7 @@ class AppState {
         id: a.handle,
         name: a.handle,
         provider: a.provider,
-        color: PROVIDER_COLORS[a.provider] ?? PROVIDER_COLORS.agent,
+        color: /^#[0-9a-f]{6}$/i.test(a.color ?? "") ? a.color! : (PROVIDER_COLORS[a.provider] ?? PROVIDER_COLORS.agent),
         state: waiting.has(a.handle) ? "approval" : RUN_TO_BOT[a.state] ?? "idle",
         runState: a.state,
         stepIndex: Math.max(0, steps.length - 1),

@@ -142,11 +142,44 @@ test("a pending task is flagged so the agent does not act; denied and expired ar
   assert.match(r.text, /T4 from @claude, approved by the user/);
 });
 
+test("provider delivery holds at a pending task instead of skipping it and advancing the cursor", () => {
+  const pending = mk({ origin: "agent_initiated" }, 1);
+  const approved = mk({ origin: "agent_initiated", standingRuleApplies: true }, 2);
+  const r = renderInboxInjection([pending, approved], 0, { includePending: false });
+  assert.deepEqual(r.includedIds, [], "unapproved work must not be presented to a provider");
+  assert.equal(r.newCursor, 0, "approval must leave the task at the delivery frontier");
+  assert.equal(renderInboxInjection([pending, approved], 0).includedIds[0], "T1", "owner-facing cards still show pending work");
+});
+
+test("a task claimed or uncertain on a push channel is not injected again by provider hooks", () => {
+  const sending: Task = { ...mk({}, 1), delivery: { state: "sending", attempts: 1, threadId: "worker-session" } };
+  const uncertain: Task = { ...mk({}, 2), delivery: { state: "uncertain", attempts: 1, threadId: "worker-session" } };
+  for (const task of [sending, uncertain]) {
+    const result = renderInboxInjection([task], 0, { includePending: false });
+    assert.equal(result.text, "", `${task.delivery?.state} delivery must not race a second provider route`);
+    assert.equal(result.newCursor, 0, "the cursor does not advance just because another delivery channel claimed work");
+  }
+});
+
+test("provider delivery carries work text without exposing internal task or credential metadata", () => {
+  const task = mk({ goal: "Open the safe app and report the visible result." }, 1);
+  const rendered = renderInboxInjection([task], 0, { includePending: false, includeTaskIds: false, items: 1 });
+  assert.match(rendered.text, /Open the safe app and report the visible result/);
+  assert.doesNotMatch(rendered.text, /T1|get_task|session token|session id/i);
+});
+
+test("human-originated provider work is labeled as owner work, never as a synthetic @you agent", () => {
+  const task = mk({ from: "you", origin: "human_typed", goal: "Do the owner task." }, 1);
+  const rendered = renderInboxInjection([task], 0, { includePending: false, includeTaskIds: false, items: 1 });
+  assert.match(rendered.text, /M9R work from the owner: Do the owner task\./);
+  assert.doesNotMatch(rendered.text, /@you/);
+});
+
 test("the session card is a few lines of pointers within its cap, and never carries memory content", () => {
   const card = renderSessionCard({ handle: "claude", others: [{ handle: "codex", activity: "editing relay/hub.ts" }], pendingCount: 2, memoryDir: ".m9r/memory" });
   assert.match(card, /M9R connected as @claude\./);
   assert.match(card, /@codex \(editing relay\/hub\.ts\)/);
-  assert.match(card, /2 pending inbox item/);
+  assert.match(card, /authorized work is delivered automatically/i);
   assert.match(card, /indexed in \.m9r\/memory\/index\.md/);
   assert.doesNotMatch(renderSessionCard({ handle: "claude", others: [], pendingCount: 0 }), /memory/i, "no memory line when there is no folder");
   assert.equal(approxTokens(card) <= CAPS.cardTokens, true);
@@ -160,4 +193,8 @@ test("the sent acknowledgement tells the sender not to do the work itself", () =
   assert.match(ack, /task T12/);
   assert.match(ack, /do not do that work yourself/i);
   assert.match(ack, /tell the user it was sent to @codex/);
+
+  const providerAck = renderSentAck("T12", "codex", false);
+  assert.doesNotMatch(providerAck, /T12/);
+  assert.match(providerAck, /sent to @codex/);
 });

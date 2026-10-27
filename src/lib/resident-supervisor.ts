@@ -1,5 +1,7 @@
 export interface ResidentProcessHandle {
   kill(): void;
+  /** Ask the resident to drain its current bounded unit of work and exit. */
+  shutdown?(): Promise<void>;
 }
 
 /**
@@ -85,6 +87,7 @@ export function createResidentSupervisor(options: {
   }));
   let stopped = false;
   let started = false;
+  let gracefulStop: Promise<void> | null = null;
 
   function setState(resident: SupervisedResident, state: ResidentSupervisorState): void {
     resident.state = state;
@@ -188,6 +191,38 @@ export function createResidentSupervisor(options: {
         setState(resident, "stopped");
         process?.kill();
       }
+    },
+
+    /**
+     * Drain every resident before the runtime is replaced. The stopped state
+     * is set before awaiting children so exits cannot schedule replacements
+     * while a drain is in progress.
+     */
+    stopGracefully(): Promise<void> {
+      if (gracefulStop) return gracefulStop;
+      if (stopped) return Promise.resolve();
+      stopped = true;
+      const processes: ResidentProcessHandle[] = [];
+      for (const resident of residents) {
+        resident.scheduled?.cancel();
+        resident.scheduled = null;
+        const process = resident.process;
+        resident.process = null;
+        setState(resident, "stopped");
+        if (process) processes.push(process);
+      }
+      gracefulStop = Promise.all(processes.map(async (process) => {
+        if (process.shutdown) {
+          try {
+            await process.shutdown();
+            return;
+          } catch {
+            // Fall through to the bounded hard-stop compatibility path.
+          }
+        }
+        process.kill();
+      })).then(() => undefined);
+      return gracefulStop;
     },
 
     snapshot(): ResidentSupervisorSnapshot[] {

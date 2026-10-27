@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { AgentMark, AGENT_BRAND_COLOR } from "@/components/product/WorkspaceUI";
+import { AgentMark, AgentColorLabel } from "@/components/product/WorkspaceUI";
 import type { AgentView } from "@/lib/agent-workspace-data";
 
 export type TaskContractItemStatus = "pending" | "in_progress" | "blocked" | "done" | "failed";
@@ -179,7 +179,7 @@ export function TaskCard({
       </div>
       {decomposer && (
         <div className="wf-task-card-subject">
-          <AgentMark agentKey={decomposer.key} size={16} />
+          <AgentMark agentKey={decomposer.key} connectionId={decomposer.connectionId} size={16} />
           <strong>{decomposer.label}</strong>&nbsp;split this into {contract.items.length} {contract.items.length === 1 ? "piece" : "pieces"}
         </div>
       )}
@@ -188,10 +188,14 @@ export function TaskCard({
           const agent = item.assignedConnectionId ? byConnectionId.get(item.assignedConnectionId) ?? null : null;
           return (
             <li key={item.id} className="wf-task-card-item">
-              <span className="wf-task-card-item-agent" style={{ color: agent ? AGENT_BRAND_COLOR[agent.key] ?? "var(--ol-text-primary)" : undefined }}>
-                {agent && <AgentMark agentKey={agent.key} size={14} />}
-                {agent?.label ?? "Unassigned"}
-              </span>
+              {agent ? (
+                <AgentColorLabel className="wf-task-card-item-agent" connectionId={agent.connectionId} agentKey={agent.key}>
+                  <AgentMark agentKey={agent.key} connectionId={agent.connectionId} size={14} />
+                  {agent.label}
+                </AgentColorLabel>
+              ) : (
+                <span className="wf-task-card-item-agent">Unassigned</span>
+              )}
               <span className="wf-task-card-item-description">{item.description}</span>
               <span className="wf-activity-row-badge" data-status={item.status === "done" ? "ready" : item.status === "failed" || item.status === "blocked" ? "denied" : item.status === "in_progress" ? "pending" : "idle"}>
                 {ITEM_STATUS_LABEL[item.status]}

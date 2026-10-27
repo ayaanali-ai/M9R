@@ -18,7 +18,13 @@ const powerNames = [
   "m9r_web_upload", "m9r_web_download", "m9r_web_submit", "m9r_web_buy", "m9r_web_post", "m9r_web_follow", "m9r_web_like", "m9r_web_dm", "m9r_web_point", "m9r_web_follow_link",
 ];
 
-test("MCP exposes all browser powers and binds each call to the verified caller", async (t) => {
+// Owner-directed, 2026-10-17: the browser extension route (WEB_EXTENSION_ROUTE_ENABLED in
+// mcp-server.ts) is deliberately disabled -- an agent chose it over the OS-level native route
+// and stalled a real task. These tests exercise the now-unregistered m9r_web_* tools and are
+// skipped, not deleted, so they're ready the moment that flag is flipped back on.
+const WEB_EXTENSION_SKIP = "The browser extension route is deliberately disabled (mcp-server.ts WEB_EXTENSION_ROUTE_ENABLED); these tools are not registered.";
+
+test("MCP exposes all browser powers and binds each call to the verified caller", { skip: WEB_EXTENSION_SKIP }, async (t) => {
   const requests: WebRequest[] = [];
   const store = {
     root: "C:/tmp/m9r-web-powers-test",
@@ -51,7 +57,7 @@ test("MCP exposes all browser powers and binds each call to the verified caller"
   assert.equal(requests.length, 1, "unverified identity must never reach the broker");
 });
 
-test("snapshot refs map into the protected broker selector slot without changing its request contract", async (t) => {
+test("snapshot refs map into the protected broker selector slot without changing its request contract", { skip: WEB_EXTENSION_SKIP }, async (t) => {
   const requests: WebRequest[] = [];
   const store = {
     root: "C:/tmp/m9r-web-ref-test",
@@ -70,7 +76,7 @@ test("snapshot refs map into the protected broker selector slot without changing
   assert.equal(requests[1]?.action, "click");
 });
 
-test("m9r_web_press exposes the page-change result and the no-change hint to the agent", async (t) => {
+test("m9r_web_press exposes the page-change result and the no-change hint to the agent", { skip: WEB_EXTENSION_SKIP }, async (t) => {
   const store = {
     root: "C:/tmp/m9r-web-press-test",
     verifyIdentity: () => ({ handle: "codex", provider: "codex", sessionId: "session-press" }),
@@ -90,7 +96,7 @@ test("m9r_web_press exposes the page-change result and the no-change hint to the
   assert.match(content[0]?.text ?? "", /Nothing visibly changed after Enter/);
 });
 
-test("m9r_web_do sends one ordered batch request and returns the broker result", async (t) => {
+test("m9r_web_do sends one ordered batch request and returns the broker result", { skip: WEB_EXTENSION_SKIP }, async (t) => {
   const batches: unknown[] = [];
   const store = {
     root: "C:/tmp/m9r-web-batch-test",
@@ -149,14 +155,22 @@ test("a web-room agent's inbox cursor survives a fresh respawn (a new session ID
   t.after(async () => { await client.close(); await server.close(); });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-  // First worker (session A) already saw both messages, including the ancient one, and its cursor advanced.
+  // Recovery is deliberately one message per call. The room cursor, however, is
+  // shared across provider respawns, so the next call in the same room receives
+  // the next message rather than replaying the first one.
   const first = await client.callTool({ name: "m9r_inbox", arguments: { token: WEB_SESSION_A_TOKEN } });
   const firstText = (first.content as Array<{ text?: string }>)[0]?.text ?? "";
   assert.match(firstText, /old stop-all relic/);
-  assert.match(firstText, /real, current question/);
+  assert.doesNotMatch(firstText, /real, current question/);
 
-  // A brand-new process for the same agent (session B) must NOT see that ancient relic resurface.
-  const second = await client.callTool({ name: "m9r_inbox", arguments: { token: WEB_SESSION_B_TOKEN } });
+  const second = await client.callTool({ name: "m9r_inbox", arguments: { token: WEB_SESSION_A_TOKEN } });
   const secondText = (second.content as Array<{ text?: string }>)[0]?.text ?? "";
-  assert.equal(secondText, "Inbox is empty.", "a fresh respawn's cursor must not reset to zero and re-show old delivered tasks");
+  assert.match(secondText, /real, current question/);
+  assert.doesNotMatch(secondText, /old stop-all relic/);
+
+  // A brand-new process for the same agent (session B) must NOT see either
+  // already-delivered message resurface.
+  const fresh = await client.callTool({ name: "m9r_inbox", arguments: { token: WEB_SESSION_B_TOKEN } });
+  const freshText = (fresh.content as Array<{ text?: string }>)[0]?.text ?? "";
+  assert.equal(freshText, "Inbox is empty.", "a fresh respawn's room cursor must not reset to zero and re-show delivered tasks");
 });

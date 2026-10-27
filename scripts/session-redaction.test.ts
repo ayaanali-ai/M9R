@@ -60,6 +60,14 @@ test("redacts env secret assignments while keeping the key label", () => {
   assert.match(result.redactedText, /MY_SERVICE_TOKEN=\[REDACTED:ENV_SECRET\]/);
 });
 
+test("redacts webhook URLs even though the env key ends in URL", () => {
+  const secretUrl = "https://hooks.example.test/services/secret-value";
+  const result = redactSession(`LEAD_WEBHOOK_URL="${secretUrl}"`);
+  assert.ok(!result.redactedText.includes(secretUrl));
+  assert.match(result.redactedText, /LEAD_WEBHOOK_URL=\[REDACTED:ENV_SENSITIVE_URL\]/);
+  assert.equal(result.countsByType.env_sensitive_url, 1);
+});
+
 test("redacts inline password assignments", () => {
   const result = redactSession("db password: hunter2longpassword");
   assert.ok(!result.redactedText.includes("hunter2longpassword"));

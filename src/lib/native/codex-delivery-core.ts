@@ -7,6 +7,8 @@
  */
 import { posix, win32 } from "node:path";
 import type { Task } from "./inbox-core";
+import { isM9rWorkspaceEnvelope } from "./m9r-prompt-markers";
+import { taskCorrelationMarker, visibleTaskText } from "./task-execution-context";
 
 /** A task may be pushed only when a human typed it or approved it. Everything else stays in the inbox. */
 export function canQueue(task: Pick<Task, "origin" | "approval">): boolean {
@@ -14,25 +16,32 @@ export function canQueue(task: Pick<Task, "origin" | "approval">): boolean {
   return task.approval === "approved" || task.approval === "not_needed";
 }
 
-/** Marker Codex sees in the queued prompt; the result reader finds the turn by it. */
-export const queueMarker = (taskId: string) => `[M9R ${taskId}]`;
+/** Internal context marker used by legacy rollout reconciliation, never visible task text. */
+export const queueMarker = taskCorrelationMarker;
 
 /**
  * The prompt the broker builds for a web-room agent (webAgentPrompt) lists its teammates as @handles and carries its session token.
  * It is machine-written, never something the owner typed, so a hook or watcher that sees it must not turn those mentions into tasks.
  */
-export const isBrokerAgentPrompt = (prompt: string) => /You are @[a-z0-9-]+, an agent working for the owner in their own web browser through M9R/.test(prompt)
+export const isBrokerAgentPrompt = (prompt: string) => /You are @[a-z0-9-]+, an agent working for the owner on (?:their own web browser|their local, owner-visible desktop) through M9R\./.test(prompt)
   // The shorter prompt a resumed web worker gets: it only refreshes the session token and restates the room rules.
   || /^\s*Your current M9R session token is \S+\. Use it only on M9R tools/.test(prompt)
   || prompt.includes("M9R tools may only be reachable as deferred tools through your exec/code gateway");
 
+/** Stable, human-readable envelope prefix for an answer queued back into Codex. It carries no task/session identity. */
+export const M9R_PUSHED_RESULT_PREFIX = "A teammate completed the work you asked for:";
+
 /** True for a prompt M9R itself pushed into a session. Its @mentions are the sender's name, not a new request to route. */
-export const isM9rPushedPrompt = (prompt: string) => /^\s*\[M9R T\d+\]/.test(prompt) || isBrokerAgentPrompt(prompt);
+export const isM9rPushedPrompt = (prompt: string) => /^\s*\[M9R T\d+\]/.test(prompt)
+  || prompt.trimStart().startsWith(M9R_PUSHED_RESULT_PREFIX)
+  || isBrokerAgentPrompt(prompt)
+  || isM9rWorkspaceEnvelope(prompt);
 
 export function buildQueueMessage(task: Pick<Task, "id" | "from" | "goal">, sessionToken?: string): string {
-  // The marker is transport metadata used to correlate the answer. The body is only the task text; never forward the
+  // Correlation belongs in the trusted adapter context. The body is only the task text; never forward the
   // sender's surrounding prompt, chat transcript, routing explanation, or unrelated context into the target session.
-  return `${queueMarker(task.id)}\n${task.goal}${sessionToken ? `\n\nM9R session token for governed MCP tools: ${sessionToken}\nUse this token for M9R tool calls in this session. Do not include it in replies, files, or messages.` : ""}`;
+  void sessionToken;
+  return visibleTaskText(task);
 }
 
 /**
@@ -169,15 +178,22 @@ export function findQueuedResult(tailText: string, taskId: string): RolloutResul
   let seen = false;
   let answer: string | undefined;
   for (const line of tailText.split(/\r?\n/)) {
+    let row: { type?: string; payload?: { role?: string; phase?: string; type?: string; message?: string; content?: Array<{ text?: string }>; last_agent_message?: unknown } };
+    try { row = JSON.parse(line); } catch { continue; }
+    if (!row || typeof row !== "object") continue;
+    const payload = row.payload;
+    const userTexts = payload?.role === "user" && Array.isArray(payload.content) ? payload.content.flatMap(part => part && typeof part.text === "string" ? [part.text] : [])
+      : row.type === "event_msg" && payload?.type === "user_message" && typeof payload.message === "string" ? [payload.message] : [];
+    const markedUserPrompt = userTexts.some(text => text.trimStart().startsWith(marker));
     if (!seen) {
-      if (line.includes(marker)) seen = true;
+      if (markedUserPrompt) seen = true;
       continue;
     }
-    if (line.includes('"role":"user"') && !line.includes(marker)) {
+    if (userTexts.length && !markedUserPrompt) {
       if (answer !== undefined) return { seen: true, done: true, message: answer };
-      continue;
+      return { seen: true, done: false };
     }
-    if (line.includes('"role":"assistant"') && line.includes("output_text")) {
+    if (payload?.role === "assistant" && (!payload.phase || payload.phase === "final" || payload.phase === "final_answer")) {
       const text = assistantText(line);
       if (text) answer = text;
       continue;
@@ -206,5 +222,6 @@ function assistantText(line: string): string | undefined {
 /** Result text placed in the caller's inbox: short, and honest when Codex gave no final message. */
 export function resultSummary(taskId: string, message: string | undefined): string {
   const text = (message ?? "").trim();
-  return text ? text : `@codex finished ${taskId} without a final message.`;
+  void taskId;
+  return text || "The assigned work ended without a final message.";
 }

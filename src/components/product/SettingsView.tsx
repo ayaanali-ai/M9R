@@ -628,7 +628,7 @@ function ConnectedAgentsSection() {
         <ul className="divide-y divide-[color:var(--ol-border-subtle)]">
           {connections.map((row) => (
             <li key={row.connectionId} className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">
-              <AgentMark agentKey={row.agentKind} size={24} />
+              <AgentMark agentKey={row.agentKind} connectionId={row.connectionId} size={24} />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13px] font-medium text-[color:var(--ol-text-primary)]">{providerLabel(row.agentKind)}</div>
                 <div className="ol-mono text-[11px] text-[color:var(--ol-text-muted)]">

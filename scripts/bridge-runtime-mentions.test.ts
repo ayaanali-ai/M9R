@@ -65,6 +65,22 @@ test("active workspace rules are injected into the turn prompt when provided, an
   assert.doesNotMatch(withoutRules, /active rules/);
 });
 
+test("generated workspace envelopes lead with the real task and carry a machine provenance marker", () => {
+  const prompt = buildWorkspaceTurnPrompt({
+    provider: "codex",
+    participantId: "participant-codex",
+    conversationId: "conversation-1",
+    topic: "General",
+    messages: [{ id: "message-1", body: "Open the browser and search for the release notes.", parentMessageId: null }],
+  });
+  const taskIndex = prompt.indexOf("Open the browser and search for the release notes.");
+  const markerIndex = prompt.indexOf("[M9R generated workspace envelope v1]");
+  const governanceIndex = prompt.indexOf(MANDATORY_REPORT_INSTRUCTION);
+  assert.ok(taskIndex >= 0, "the real task must remain in the envelope");
+  assert.ok(markerIndex > taskIndex, "the marker must follow the title-bearing task text");
+  assert.ok(governanceIndex > markerIndex, "generated governance must follow the task marker");
+});
+
 /**
  * Live-caught: a human broadcast explicitly @-mentioned an agent ("ask
  * @opencode to..."), that agent replied, then a direct handoff for the same

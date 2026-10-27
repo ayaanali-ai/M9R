@@ -16,14 +16,19 @@ export const WIKIPEDIA_MAIN_PAGE_ELEMENTS: RawElement[] = [
 ];
 
 /**
- * Real elements captured live from github.com/search/advanced -- deliberately harder than the
- * Wikipedia case. A label here is a separate element from the field it names (no array-adjacency
- * clue), and the language picker is a "combobox", a role the Wikipedia sample never exercised.
+ * Real elements captured live from github.com/search/advanced -- including, on a second pass, the
+ * actual for/id links and the real <select> options a plain accessibility-tree read had missed the
+ * first time. The label/combobox "hard case" turned out to be a capture gap, not a reasoning gap --
+ * see generator.ts's label-resolution pass, verified against this exact data.
  */
 export const GITHUB_ADVANCED_SEARCH_ELEMENTS: RawElement[] = [
   { ref: "ref_7", role: "textbox", name: "" },
   { ref: "ref_8", role: "button", name: "Search" },
-  { ref: "ref_58", role: "label", name: "From these owners" },
-  { ref: "ref_64", role: "label", name: "Written in this language" },
-  { ref: "ref_65", role: "combobox", name: "Any language" },
+  { ref: "ref_58", role: "label", name: "From these owners", labelFor: "search_from" },
+  { ref: "ref_59", role: "textbox", name: "", id: "search_from" },
+  { ref: "ref_64", role: "label", name: "Written in this language", labelFor: "search_language" },
+  { ref: "ref_65", role: "select", name: "", id: "search_language", options: ["Any language", "C", "C#", "C++", "CoffeeScript", "CSS"] },
+  // Deliberately still broken: a label whose "for" never resolves, proving the remaining gap is
+  // reported honestly rather than silently dropped or force-matched to the wrong field.
+  { ref: "ref_90", role: "label", name: "Some future field", labelFor: "search_nonexistent" },
 ];

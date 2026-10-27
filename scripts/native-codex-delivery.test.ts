@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isThreadId, isWindowsSystemCwd, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
-import { collectCodexResults, deliverToCodex, findRolloutFile, type DeliveryDeps } from "../src/lib/native/codex-delivery";
+import { buildQueueMessage, canQueue, findQueuedResult, interpretQueueExit, isM9rPushedPrompt, isThreadId, isWindowsSystemCwd, M9R_PUSHED_RESULT_PREFIX, pickSession, queueArgs, queueMarker, resolveCodexCommand, resultSummary } from "../src/lib/native/codex-delivery-core";
+import { collectCodexResults, deliverToCodex, findRolloutFile, realDeps, scanCodexRolloutFiles, type DeliveryDeps } from "../src/lib/native/codex-delivery";
 import { renderInboxInjection, renderResultsInjection } from "../src/lib/native/inbox-core";
 import { handleHookEvent } from "../src/lib/native/hook-handler";
-import { createLocalStore } from "../src/lib/native/local-store";
+import { createLocalStore, RESULT_RECONCILIATION_MAX_AGE_MS } from "../src/lib/native/local-store";
+import { createTaskDeliveryPump } from "../src/lib/native/task-delivery-pump";
 
 const THREAD = "01a0bf78-e44a-7801-8e67-681a53f0ab68";
 const newStore = () => createLocalStore(mkdtempSync(join(tmpdir(), "m9r-n2-")));
@@ -28,6 +29,91 @@ function seedCodex(store: ReturnType<typeof newStore>) {
 }
 const typed = (store: ReturnType<typeof newStore>, goal = "Review lease.ts", key = "k1") =>
   store.addTask({ from: "claude", to: "codex", goal, origin: "human_typed", idempotencyKey: key }).task;
+
+test("a busy target defers the next plain task and the shared pump resumes it without a resend", async () => {
+  const store = newStore();
+  seedCodex(store);
+  store.issueIdentity("codex", "codex", THREAD);
+  const first = typed(store, "same task", "first"), second = typed(store, "same task", "second");
+  const deps = fakeDeps({ requireTargetIdentity: true });
+  assert.equal((await deliverToCodex(store, first.id, deps)).state, "queued");
+  assert.equal((await deliverToCodex(store, second.id, deps)).state, "deferred");
+  assert.equal(store.getTask(second.id)?.delivery?.threadId, THREAD);
+  const pump = createTaskDeliveryPump(store, new Map([["codex", (id: string) => deliverToCodex(store, id, deps)]]));
+  await pump.tick();
+  assert.equal(deps.calls.length, 1);
+  store.setResult(first.id, "completed");
+  await Promise.all([pump.tick(), pump.tick()]);
+  assert.equal(deps.calls.length, 2);
+  assert.equal(store.getTask(second.id)?.delivery?.state, "queued");
+  assert.equal(store.getTask(second.id)?.deliveredSession, THREAD);
+});
+
+test("a verbatim retry is not deferred forever behind a stale, never-finalized original attempt", async () => {
+  // Confirmed live in production state (T248/T249, 2026-10-17): the owner resent a failed task
+  // with the exact same wording; the retry was silently deferred with no bound at all, because
+  // the original attempt's delivery record was never finalized (it failed over elsewhere and the
+  // owner redirected it, so it never got a resultSummary). sessionHasUnfinishedDelivery now bounds
+  // how long an unfinished original attempt can block an identical-text retry.
+  let clock = Date.now() - 31 * 60_000; // older than the default 30-minute inbox staleness window
+  const dir = mkdtempSync(join(tmpdir(), "m9r-n2-stale-"));
+  const store = createLocalStore(dir, { now: () => new Date(clock) });
+  seedCodex(store);
+  store.issueIdentity("codex", "codex", THREAD);
+  const first = typed(store, "open file explorer and type hello in the search bar", "first-attempt");
+  clock = Date.now(); // the retry itself is sent now, in real time
+  const second = typed(store, "open file explorer and type hello in the search bar", "second-attempt");
+  const deps = fakeDeps({ requireTargetIdentity: true });
+  assert.equal((await deliverToCodex(store, first.id, deps)).state, "skipped", "an old original attempt is history, not new provider work");
+  // The first attempt never resolves (no setResult, no setDelivery to a terminal state) -- exactly
+  // what happens when a task fails over to a different tool or the owner redirects it by hand.
+  assert.equal((await deliverToCodex(store, second.id, deps)).state, "queued", "a retry must not be deferred behind an original attempt old enough to be stale");
+});
+
+test("a stale Codex task is never claimed by the direct push path", async () => {
+  let clock = new Date(Date.now() - 31 * 60_000);
+  const store = createLocalStore(mkdtempSync(join(tmpdir(), "m9r-n2-stale-codex-push-")), { now: () => new Date(clock) });
+  seedCodex(store);
+  const stale = typed(store, "an old task that must remain history", "stale-direct-push");
+  clock = new Date();
+  const deps = fakeDeps();
+
+  assert.deepEqual(await deliverToCodex(store, stale.id, deps), {
+    state: "skipped",
+    reason: "not eligible or already claimed for delivery",
+  });
+  assert.equal(deps.calls.length, 0, "stale work must not reach codex queue");
+  assert.equal(store.getTask(stale.id)?.delivery, undefined, "stale history is retained without becoming a live delivery");
+});
+
+test("Codex result collection ignores stale and non-Codex queued deliveries", async () => {
+  // Delivery selection uses the real wall clock because it represents the
+  // liveness of an actual Codex session. Keep the fixture's initial session
+  // fresh regardless of when the suite runs; the test advances this clock
+  // explicitly below to exercise reconciliation aging.
+  let clock = new Date();
+  const store = createLocalStore(mkdtempSync(join(tmpdir(), "m9r-n2-result-age-")), { now: () => new Date(clock) });
+  seedCodex(store);
+
+  const stale = typed(store, "stale Codex delivery", "stale-codex");
+  assert.equal((await deliverToCodex(store, stale.id, fakeDeps())).state, "queued");
+  store.setDelivery(stale.id, { state: "queued", threadId: "stale-codex-session" });
+
+  const otherProvider = store.addTask({ from: "claude", to: "opencode", goal: "queued for another provider", origin: "human_typed", idempotencyKey: "other-provider" }).task;
+  store.setDelivery(otherProvider.id, { state: "queued", threadId: "opencode-session" });
+
+  clock = new Date(clock.getTime() + RESULT_RECONCILIATION_MAX_AGE_MS + 1);
+  const current = typed(store, "current Codex delivery", "current-codex");
+  assert.equal((await deliverToCodex(store, current.id, fakeDeps())).state, "queued");
+
+  const readThreads: string[] = [];
+  assert.equal(collectCodexResults(store, {
+    readRolloutTail: (threadId) => { readThreads.push(threadId); return null; },
+  }), 0);
+  assert.deepEqual(readThreads, [THREAD], "only the fresh Codex delivery may be polled for a result");
+  assert.equal(store.getTask(stale.id)?.resultSummary, undefined, "stale history remains recorded but is not re-polled");
+  assert.equal(store.getTask(otherProvider.id)?.resultSummary, undefined, "another provider's delivery is not handed to the Codex collector");
+});
 
 test("concurrent Codex dispatchers inject a task once", async () => {
   const store = newStore();
@@ -72,9 +158,9 @@ test("only tasks a human typed or approved may be queued; everything else is nev
   assert.equal(canQueue({ origin: "agent_initiated", approval: "expired" }), false);
 });
 
-test("the queue message carries the marker and the goal, and the arguments are a plain array", () => {
+test("the visible queue message contains only the task, and the arguments are a plain array", () => {
   const msg = buildQueueMessage({ id: "T7", from: "claude", goal: "Review lease.ts" });
-  assert.ok(msg.startsWith(queueMarker("T7")));
+  assert.equal(msg, "Review lease.ts");
   assert.match(msg, /Review lease\.ts/);
   assert.deepEqual(queueArgs(THREAD, "a \"quoted\" message"), ["queue", "--thread", THREAD, "--message", "a \"quoted\" message"]);
   assert.equal(isThreadId(THREAD), true);
@@ -104,7 +190,21 @@ test("the rollout reader finds the answer to a marked task, not an earlier or la
   assert.deepEqual(findQueuedResult(tail, "T9"), { seen: false, done: false });
   const running = tail.split("\n").slice(0, 3).join("\n");
   assert.deepEqual(findQueuedResult(running, "T5"), { seen: true, done: false });
-  assert.match(resultSummary("T5", ""), /without a final message/);
+  assert.equal(resultSummary("T5", ""), "The assigned work ended without a final message.");
+});
+
+test("legacy result reconciliation never borrows a later prompt's answer", () => {
+  const tail = [
+    JSON.stringify({ type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: "[M9R T9] original task" }] } }),
+    JSON.stringify({ type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: "a different question" }] } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "answer to that different question" } }),
+  ].join("\n");
+  assert.deepEqual(findQueuedResult(tail, "T9"), { seen: true, done: false });
+  const quoted = [
+    JSON.stringify({ type: "response_item", payload: { role: "tool", content: [{ type: "output_text", text: "[M9R T9] quoted diagnostic" }] } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "an unrelated answer" } }),
+  ].join("\n");
+  assert.deepEqual(findQueuedResult(quoted, "T9"), { seen: false, done: false });
 });
 
 test("a typed task is pushed once with the real thread id, and marked delivered", async () => {
@@ -122,7 +222,7 @@ test("a typed task is pushed once with the real thread id, and marked delivered"
   assert.equal(deps.calls.length, 1, "a duplicate dispatch never queues a second prompt");
 });
 
-test("strict production delivery refuses missing identity and carries the existing token into the queued task", async () => {
+test("strict production delivery refuses missing identity and keeps credentials out of provider context", async () => {
   const store = newStore();
   seedCodex(store);
   const task = typed(store, "Review only the changed files", "strict-identity");
@@ -137,7 +237,12 @@ test("strict production delivery refuses missing identity and carries the existi
   assert.deepEqual(queued, { state: "queued", threadId: THREAD });
   const message = strictDeps.calls[0]?.[strictDeps.calls[0].indexOf("--message") + 1] ?? "";
   assert.match(message, /Review only the changed files/);
-  assert.ok(message.includes(token), "Codex can call its governed MCP tools from the queued turn");
+  assert.ok(!message.includes(token), "the visible task must not expose credentials");
+  const hidden = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: message },
+    { provider: "codex", store, strictTargetIdentity: true, readIndex: () => null });
+  const context = hidden?.hookSpecificOutput.additionalContext ?? "";
+  assert.match(context, /approved work item/i, "the receiving session gets the internal execution guidance");
+  assert.doesNotMatch(context, /T\d+|codex|session-one|session-token|token/i, "provider-visible context must not expose routing metadata or credentials");
   assert.equal(store.verifyIdentity(token)?.sessionId, THREAD, "delivery does not revoke the existing token");
   assert.doesNotMatch(message, /Task from @claude|surrounding chat/i);
 });
@@ -180,7 +285,7 @@ test("a pushed task is not injected again by Codex's own hook, and its answer re
   assert.equal(renderInboxInjection(store.tasksFor("codex"), 0).text, "", "the pushed prompt is the delivery; no second copy");
 
   assert.equal(collectCodexResults(store, { readRolloutTail: () => "no marker here" }), 0);
-  const tail = `${queueMarker(t.id)} Task\n${JSON.stringify({ payload: { type: "task_complete", last_agent_message: "Reviewed: one race in renew()." } })}`;
+  const tail = `${JSON.stringify({ type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: `${queueMarker(t.id)} Task` }] } })}\n${JSON.stringify({ payload: { type: "task_complete", last_agent_message: "Reviewed: one race in renew()." } })}`;
   assert.equal(collectCodexResults(store, { readRolloutTail: () => tail }), 1);
   assert.equal(store.getTask(t.id)?.delivery?.state, "done");
   const shown = renderResultsInjection(store.tasksFrom("claude"), "claude");
@@ -188,6 +293,21 @@ test("a pushed task is not injected again by Codex's own hook, and its answer re
   store.markResultShown(shown.ids);
   assert.equal(renderResultsInjection(store.tasksFrom("claude"), "claude").text, "");
   assert.equal(collectCodexResults(store, { readRolloutTail: () => tail }), 0, "nothing left to collect");
+});
+
+test("new internal-context deliveries require an authenticated task result, not inferred conversation completion", async () => {
+  const store = newStore(); seedCodex(store);
+  const identity = store.issueIdentity("codex", "codex", THREAD);
+  const task = typed(store);
+  await deliverToCodex(store, task.id, fakeDeps({ requireTargetIdentity: true }));
+  const tail = [
+    JSON.stringify({ type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: `${queueMarker(task.id)} quoted context` }] } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "unrelated final answer" } }),
+  ].join("\n");
+  assert.equal(collectCodexResults(store, { readRolloutTail: () => tail }), 0);
+  assert.equal(store.getTask(task.id)?.resultSummary, undefined);
+  assert.equal(store.recordTaskResult(identity.token, task.id, "actual task outcome").ok, true);
+  assert.equal(store.getTask(task.id)?.resultSummary, "actual task outcome");
 });
 
 test("typing @codex in Claude dispatches the push exactly once, and the result comes back at Claude's next prompt", () => {
@@ -394,18 +514,22 @@ test("with two sessions the push goes to the one that is open, and the machine i
   assert.equal(r.state, "failed", "a failing liveness check falls back to the safe ambiguous path");
 });
 
-test("an older inbox item is not mixed into a prompt M9R pushed; it waits for the user's next real prompt", () => {
+test("an older inbox item is not mixed into a prompt M9R pushed; SessionStart delivers it once", () => {
   const store = newStore(); seedCodex(store);
   const waiting = store.addTask({ from: "claude", to: "codex", goal: "Older item that fell back to the inbox", origin: "human_typed", idempotencyKey: "old" }).task;
   store.setDelivery(waiting.id, { state: "failed", error: "ambiguous" });
   const pushedTask = store.addTask({ from: "claude", to: "codex", goal: "Reply with only: pushed-one", origin: "human_typed", idempotencyKey: "new" }).task;
   store.setDelivery(pushedTask.id, { state: "queued", threadId: THREAD });
   const ctx = { provider: "codex", store, pathExists: () => false, readIndex: () => null };
-  handleHookEvent({ hook_event_name: "SessionStart", session_id: THREAD, cwd: "C:/p" }, ctx);
+  const started = handleHookEvent({ hook_event_name: "SessionStart", session_id: THREAD, cwd: "C:/p" }, ctx);
+  assert.match(started?.hookSpecificOutput.additionalContext ?? "", /Older item that fell back to the inbox/, "reconnecting sessions receive fallback work automatically");
   const pushed = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: buildQueueMessage(pushedTask) }, ctx);
-  assert.equal(pushed, null, "the pushed prompt gets nothing added");
+  const pushedContext = pushed?.hookSpecificOutput.additionalContext ?? "";
+  assert.match(pushedContext, /approved work item/i, "the pushed task receives internal execution guidance");
+  assert.doesNotMatch(pushedContext, new RegExp(queueMarker(pushedTask.id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the provider-visible context does not expose the task id");
+  assert.ok(!pushedContext.includes(waiting.goal), "older inbox work is not mixed into the pushed task");
   const real = handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: THREAD, cwd: "C:/p", prompt: "what next?" }, ctx);
-  assert.match(real?.hookSpecificOutput.additionalContext ?? "", /Older item that fell back to the inbox/, "it arrives at the user's own next prompt");
+  assert.equal(real, null, "the fallback was already delivered at SessionStart and is not replayed");
 });
 
 test("a task is only ever pushed into a Codex session in the sender's own folder: not a parent, not a child, not another project", async () => {
@@ -427,6 +551,7 @@ test("Claude's finished turn answers the task it was shown, and the answer is pu
   const { pushAnswerToCodex } = await import("../src/lib/native/codex-delivery");
   const store = newStore();
   store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/p" });
+  store.issueIdentity("claude", "claude-code", "cc-1");
   const asked = store.addTask({ from: "codex", to: "claude", goal: "Summarise a.txt", origin: "human_typed", idempotencyKey: "rev1", cwd: "C:/p", fromSession: A }).task;
   const answered: string[] = [];
   const ctx = { provider: "claude-code", store, pathExists: () => false, readIndex: () => null, lastAnswer: () => "It says: PURPLE-ELEPHANT-42.", answerBack: (id: string) => answered.push(id) };
@@ -436,22 +561,28 @@ test("Claude's finished turn answers the task it was shown, and the answer is pu
   // Claude sees it at its next prompt...
   handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", cwd: "C:/p", prompt: "go" }, ctx);
   assert.equal(store.getTask(asked.id)?.deliveredSession, "cc-1");
-  // ...and its finished turn is the answer.
-  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-1" }, ctx);
+  // ...and its adapter's explicit task reference binds the final answer.
+  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-1", task_id: asked.id }, ctx);
   assert.deepEqual(answered, [asked.id]);
   assert.equal(store.getTask(asked.id)?.resultSummary, "It says: PURPLE-ELEPHANT-42.");
   // A different Claude session's finished turn is not its answer.
   const other = newStore();
+  other.issueIdentity("claude", "claude-code", "cc-OTHER");
   const t2 = other.addTask({ from: "codex", to: "claude", goal: "x", origin: "human_typed", idempotencyKey: "rev2", fromSession: A }).task;
   handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "cc-1", prompt: "go" }, { ...ctx, store: other });
-  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-OTHER" }, { ...ctx, store: other, answerBack: (id: string) => answered.push("WRONG" + id) });
+  handleHookEvent({ hook_event_name: "Stop", session_id: "cc-OTHER", task_id: t2.id }, { ...ctx, store: other, answerBack: (id: string) => answered.push("WRONG" + id) });
   assert.equal(other.getTask(t2.id)?.resultSummary, undefined);
 
   const deps = fakeDeps();
   assert.deepEqual(await pushAnswerToCodex(store, asked.id, deps), { state: "queued", threadId: A });
   assert.equal(deps.calls.length, 1);
   assert.equal(deps.calls[0][2], A, "the answer goes back into the session that asked");
-  assert.match(deps.calls[0][4], /^\[M9R T1\] Answer from @claude[\s\S]*PURPLE-ELEPHANT-42/);
+  assert.equal(deps.calls[0][4].startsWith(M9R_PUSHED_RESULT_PREFIX), true);
+  assert.match(deps.calls[0][4], /PURPLE-ELEPHANT-42/);
+  assert.doesNotMatch(deps.calls[0][4], /T1|@claude|Summarise a\.txt/,
+    "task, sender, and goal metadata must stay in the ledger, not in Codex's visible conversation");
+  assert.equal(isM9rPushedPrompt(deps.calls[0][4]), true,
+    "the natural result envelope still suppresses mention routing");
   assert.equal((await pushAnswerToCodex(store, asked.id, deps)).state, "skipped", "never sent twice");
 });
 
@@ -533,15 +664,51 @@ test("a link whose stored session id is not a real Codex thread id is never used
 
 test("findRolloutFile follows a thread across Codex's rotated/resumed rollout files, not just its original one", () => {
   const home = mkdtempSync(join(tmpdir(), "m9r-codex-home-"));
-  const day1 = join(home, "sessions", "2026", "09", "19");
-  const day2 = join(home, "sessions", "2026", "09", "21");
-  mkdirSync(day1, { recursive: true });
-  mkdirSync(day2, { recursive: true });
-  const id = "01a0bc65-5d09-71a1-89f1-1f15cf4bc79a";
-  // The original file (no second id) plus two later rotations Codex creates for the same thread as it compacts/resumes.
-  writeFileSync(join(day1, `rollout-2026-09-19T20-19-14-${id}.jsonl`), "");
-  writeFileSync(join(day2, `rollout-2026-09-21T21-56-07-${id}_01a0c70a-c5c7-7c22-8bd4-0f5ab237cdbd.jsonl`), "");
-  writeFileSync(join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "");
-  const found = findRolloutFile(home, id);
-  assert.equal(found, join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "must resolve to the latest rotation, not the closed original file");
+  try {
+    const day1 = join(home, "sessions", "2026", "09", "19");
+    const day2 = join(home, "sessions", "2026", "09", "21");
+    mkdirSync(day1, { recursive: true });
+    mkdirSync(day2, { recursive: true });
+    const id = "01a0bc65-5d09-71a1-89f1-1f15cf4bc79a";
+    // The original file (no second id) plus two later rotations Codex creates for the same thread as it compacts/resumes.
+    writeFileSync(join(day1, `rollout-2026-09-19T20-19-14-${id}.jsonl`), "");
+    writeFileSync(join(day2, `rollout-2026-09-21T21-56-07-${id}_01a0c70a-c5c7-7c22-8bd4-0f5ab237cdbd.jsonl`), "");
+    writeFileSync(join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "");
+    const found = findRolloutFile(home, id);
+    assert.equal(found, join(day2, `rollout-2026-09-21T23-45-31-${id}_01a0c76e-f010-7f21-9e41-e4a61bd9fcab.jsonl`), "must resolve to the latest rotation, not the closed original file");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("Codex rollout scan distinguishes a complete missing-session record from an unreadable session tree", () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-codex-index-"));
+  try {
+    mkdirSync(join(home, "sessions", "2026", "10", "23"), { recursive: true });
+    const complete = scanCodexRolloutFiles(home, ["missing-session"]);
+    assert.equal(complete.complete, true, "a fully traversed tree proves that this stale record has no local rollout");
+    assert.equal(complete.paths.has("missing-session"), false);
+
+    const unavailable = scanCodexRolloutFiles(join(home, "missing-home"), ["unverifiable-session"]);
+    assert.equal(unavailable.complete, false, "a missing sessions root is not proof that a session is closed");
+    assert.equal(unavailable.paths.has("unverifiable-session"), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("real Codex liveness treats an absent old rollout as free only after a complete scan", async () => {
+  const home = mkdtempSync(join(tmpdir(), "m9r-codex-liveness-"));
+  const staleSession = `stale-${Date.now()}-${Math.random()}`;
+  const unverifiableSession = `unverifiable-${Date.now()}-${Math.random()}`;
+  try {
+    mkdirSync(join(home, "sessions", "2026", "10", "23"), { recursive: true });
+    const completeTree = await realDeps({ CODEX_HOME: home }).sessionLiveness!([staleSession]);
+    assert.equal(completeTree[staleSession], "free", "a fully readable tree with no matching rollout proves this retained record is not live here");
+
+    const missingRoot = await realDeps({ CODEX_HOME: join(home, "not-created") }).sessionLiveness!([unverifiableSession]);
+    assert.equal(missingRoot[unverifiableSession], "unknown", "a missing session root must never be treated as closure");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

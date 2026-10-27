@@ -36,6 +36,8 @@
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
     "**/*.mts",
+    ".workcache/cloudflare-output/.next/types/**/*.ts",
+    ".workcache/cloudflare-output/.next/dev/types/**/*.ts",
     "pill/src/**/*.d.ts"
   ],
   "exclude": [
@@ -50,7 +52,9 @@
     "node_modules",
     "extensions",
     "overlay",
+    "pill",
     "pill/vite.config.ts",
-    "runleak-analyzer-mvp"
+    "runleak-analyzer-mvp",
+    "m9r-clean-cutover-20261020"
   ]
 }

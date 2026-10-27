@@ -262,7 +262,12 @@ function extractClaudeCodeMessageText(message: Record<string, unknown> | undefin
  * skips anything it doesn't recognize.
  */
 export function parseCodexTranscript(jsonlText: string): CaptureTranscriptMessage[] {
-  const messages: CaptureTranscriptMessage[] = [];
+  // Codex may replay the same response_item/message ID during resume or
+  // rewind. Preserve anonymous records, but make a repeated provider ID
+  // last-write-wins like the Claude parser so one provider message cannot be
+  // rendered twice in captured session history.
+  const messages = new Map<string, CaptureTranscriptMessage>();
+  let anonymous = 0;
   for (const line of jsonlText.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -282,9 +287,12 @@ export function parseCodexTranscript(jsonlText: string): CaptureTranscriptMessag
     if (role !== "user" && role !== "assistant") continue;
     const text = extractCodexPayloadText(payload.content);
     if (!text) continue;
-    messages.push({ sender: role === "user" ? "User" : "Assistant", body: text });
+    const message: CaptureTranscriptMessage = { sender: role === "user" ? "User" : "Assistant", body: text };
+    const providerId = [payload.id, entry.id, payload.message_id, entry.message_id, payload.messageId, entry.messageId]
+      .find((value): value is string => typeof value === "string" && value.length > 0);
+    messages.set(providerId ?? `anonymous:${anonymous++}`, message);
   }
-  return messages;
+  return [...messages.values()];
 }
 
 function extractCodexPayloadText(content: unknown): string {

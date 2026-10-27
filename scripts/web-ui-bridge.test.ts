@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,9 @@ import { createWebBroker } from "@/lib/native/web-broker-core";
 import { brokerKeyPath } from "@/lib/native/web-broker-paths";
 import { startWebBroker } from "@/lib/native/web-broker-server";
 import { composeAgentMessage, createWebUiBridge, describeSelector, narrateStep, findAddressed, parseMentions, parseUiMessage, type SessionsPort, type UiState } from "@/lib/native/web-ui-bridge";
+
+const testTempRoot = join(process.cwd(), ".test-tmp");
+mkdirSync(testTempRoot, { recursive: true });
 
 function fakeSessions(handles = ["claude", "codex"]) {
   const delivered: Array<{ handle: string; text: string }> = [];
@@ -30,6 +33,12 @@ function fakeSessions(handles = ["claude", "codex"]) {
   };
   return { port, delivered, status, stopped, waitingOn };
 }
+
+test("UI snapshots carry the host's allocated color, including unknown providers", () => {
+  const ui = createWebUiBridge({ colorFor: (handle) => handle === "custom" ? "#123ABC" : "#456DEF" });
+  ui.attachSessions(fakeSessions(["custom"]).port);
+  assert.equal(ui.snapshot().agents[0]?.color, "#123ABC");
+});
 
 function bridgeWith(handles?: string[]) {
   let clock = 1_000;
@@ -280,7 +289,7 @@ test("narrated presence: a start frame and a done notice with the plain sentence
 // --- the transport: human-typed messages only through the authenticated, ready extension socket -------------------
 
 async function server() {
-  const root = mkdtempSync(join(process.cwd(), ".m9r-ui-bridge-"));
+  const root = mkdtempSync(join(testTempRoot, "m9r-ui-bridge-"));
   const key = randomBytes(32).toString("hex");
   writeFileSync(brokerKeyPath(root), `${key}\n`, "utf8");
   const ui = createWebUiBridge({ debounceMs: 0 });
@@ -301,7 +310,7 @@ async function server() {
     req.on("error", reject);
     req.end(JSON.stringify(body));
   });
-  return { broker, sessions, connect, post, async done() { for (const s of sockets) s.terminate(); await broker.close(); rmSync(root, { recursive: true, force: true }); } };
+  return { broker, sessions, connect, post, async done() { for (const s of sockets) s.terminate(); await broker.close(); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } };
 }
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));

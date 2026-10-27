@@ -1,12 +1,85 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, utimesSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { createWindowsDesktopStageManager, formatWindowsStageRoomKeys } from "../src/lib/native/windows-desktop-stage";
+import { acquireRegistryLock, createWindowsDesktopStageManager, formatWindowsStageRoomKeys } from "../src/lib/native/windows-desktop-stage";
 
 const stageDesktop = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
 const createdDesktop = "4fc4701b-6c3e-46d1-bba1-e99d993a28a2";
 const ownerDesktop = "c0999999-87d4-4f8b-9fd1-48bc9d8c14ae";
+
+test("window-state control verifies the exact selected HWND and requested state", async () => withRoot(async (root) => {
+  let result = "minimized";
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => {
+    if (request.op === "setWindowState") {
+      assert.equal(request.pid, 123); assert.equal(request.windowId, "456");
+      return { ok: true, state: result } as never;
+    }
+    return { ok: true, window: { pid: 123, windowId: "456", desktopId: stageDesktop, onCurrentDesktop: true } };
+  } });
+  await manager.register("stage", "123", "456");
+  assert.equal(await manager.setWindowState("stage", "minimized"), "minimized");
+  result = "restored";
+  await assert.rejects(manager.setWindowState("stage", "maximized"), /not verified/);
+}));
+
+test("native window lifecycle states remain distinct and unknown results fail closed", async () => withRoot(async (root) => {
+  let state = "closed";
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async () => ({ ok: true, windowState: state } as never) });
+  for (state of ["closed", "moved", "minimized", "occluded", "hidden", "visible"]) assert.equal(await manager.windowStatus(123, "456"), state);
+  state = "guess";
+  await assert.rejects(manager.windowStatus(123, "456"), /could not be verified/);
+}));
+
+test("a post-create registry failure retains a recoverable desktop journal", async () => withRoot(async (root) => {
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async () => {
+    mkdirSync(join(root, "windows-stages.json"));
+    return { ok: true, desktop: { desktopId: createdDesktop, isCurrent: false, returnDesktopId: ownerDesktop } };
+  } });
+  await assert.rejects(manager.create("new-stage"), /could not save/);
+  const files = readdirSync(join(root, "desktop-creation-recovery"));
+  assert.equal(files.length, 1);
+  const evidence = JSON.parse(readFileSync(join(root, "desktop-creation-recovery", files[0]!), "utf8"));
+  assert.equal(evidence.desktop.desktopId, createdDesktop);
+  assert.equal(evidence.name, "new-stage");
+}));
+
+test("an old registry lock held by a live process is not stolen and release checks its token", async () => withRoot(async (root) => {
+  const release = acquireRegistryLock(root);
+  const lock = join(root, "windows-stages.json.lock");
+  const owner = JSON.parse(readFileSync(join(lock, "owner.json"), "utf8"));
+  utimesSync(lock, new Date(0), new Date(0));
+  assert.throws(() => acquireRegistryLock(root), /already running/);
+  writeFileSync(join(lock, "owner.json"), JSON.stringify({ ...owner, token: "replacement" }));
+  release();
+  assert.equal(JSON.parse(readFileSync(join(lock, "owner.json"), "utf8")).token, "replacement");
+}));
+
+test("an exact HWND cannot be claimed by two stages", async () => withRoot(async (root) => {
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => ({
+    ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: stageDesktop, onCurrentDesktop: true },
+  }) });
+  await manager.register("first", "123", "456");
+  const contested = await Promise.allSettled([manager.register("racer-a", "123", "789"), manager.register("racer-b", "123", "789")]);
+  assert.equal(contested.filter((r) => r.status === "fulfilled").length, 1);
+  await assert.rejects(manager.register("second", "123", "456"), /already claimed/i);
+  assert.equal(manager.list().length, 2);
+  await manager.register("first", "123", "456");
+}));
+
+test("an exact HWND can be shared only by stages in the same durable coordination group", async () => withRoot(async (root) => {
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => ({
+    ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: stageDesktop, onCurrentDesktop: true },
+  }) });
+  const jointKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  await manager.register("provider-a", "123", "456", "calculator", jointKey);
+  const joined = await manager.register("provider-b", "123", "456", "calculator", jointKey);
+  assert.equal(joined.coordinationKey, jointKey);
+  await assert.rejects(manager.register("unrelated", "123", "456", "calculator",
+    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"), /already claimed/i);
+  assert.equal(manager.list().filter((stage) => stage.anchor?.windowId === "456").length, 2);
+}));
 
 test("shell point inspection and invocation preserve exact control identity without global input", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
@@ -22,6 +95,25 @@ test("shell point inspection and invocation preserve exact control identity with
   assert.deepEqual(requests.at(-1), { op: "invokePointControl", x: 10, y: 10, label: "Start", pid: 123, windowPid: 123, windowId: "456" });
   await assert.rejects(manager.windowAtPoint(NaN, 10), /Invalid/);
   await assert.rejects(manager.pointControl(0.5, 10), /Invalid/);
+}));
+
+test("whole-desktop UI Automation snapshots stay bounded and handle-free", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => {
+    requests.push(request);
+    return { ok: true, desktopStructure: {
+      scope: "desktop", status: "complete", truncated: false,
+      screen: { x: -1920, y: 0, width: 3840, height: 1080 },
+      elements: [{ ref: "desktop-ui-element-1", label: "Start", role: "button", className: "Start", depth: 2,
+        enabled: true, focused: false, rect: { x: -10, y: 1040, width: 48, height: 40 } }],
+    } } as never;
+  } });
+  const structure = await manager.desktopStructure({ maxElements: 64, maxDepth: 10 });
+  assert.equal(structure.status, "complete");
+  assert.equal(structure.screen.x, -1920);
+  assert.equal(structure.elements[0]?.label, "Start");
+  assert.deepEqual(requests, [{ op: "inspectDesktopStructure", maxElements: 64, maxDepth: 10 }]);
+  await assert.rejects(manager.desktopStructure({ maxElements: 65 }), /bounds are invalid/);
 }));
 const anchor = { pid: 4_321, windowId: "9223372036854775807", desktopId: stageDesktop, onCurrentDesktop: false };
 
@@ -61,7 +153,7 @@ test("moves only the exact broker-owned child to its background stage without ac
 }));
 
 function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
-  const fixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures");
+  const fixtureRoot = resolve(process.cwd(), ".test-tmp", "native-test-fixtures");
   mkdirSync(fixtureRoot, { recursive: true });
   const root = mkdtempSync(join(fixtureRoot, "m9r-windows-stage-"));
   return Promise.resolve(run(root)).finally(() => rmSync(root, { recursive: true, force: true }));
@@ -188,6 +280,20 @@ test("re-registering a known desktop refreshes its anchor without changing its i
   assert.deepEqual(refreshed.anchor, { pid: 9_876, windowId: "456" });
   assert.equal(refreshed.roomDesktopId, original.roomDesktopId);
   assert.notEqual(refreshed.roomWindowId, original.roomWindowId, "a different native window gets a fresh coordination identity");
+}));
+
+test("persists the selected app reference so a fresh manager can recover it", async () => withRoot(async (root) => {
+  const deps = {
+    platform: "win32" as const, root, terminal: true, env: {},
+    invokeNative: async (request: Record<string, unknown>) => ({ ok: true as const, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } }),
+  };
+  const manager = createWindowsDesktopStageManager(deps);
+  const registered = await manager.register("stage", "4321", anchor.windowId, "notepad");
+  assert.equal(registered.appId, "notepad");
+  const reloaded = createWindowsDesktopStageManager(deps);
+  assert.equal(reloaded.list()[0]?.appId, "notepad");
+  const rebound = await reloaded.register("stage", "4321", anchor.windowId);
+  assert.equal(rebound.appId, "notepad", "re-registering without an app id must preserve durable recovery metadata");
 }));
 
 test("room lease keys are stable and opaque and migrate existing v2 records once", async () => withRoot(async (root) => {

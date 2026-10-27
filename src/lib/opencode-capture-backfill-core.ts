@@ -3,10 +3,9 @@
  * plugin observed `session.idle`.
  *
  * OpenCode persists sessions locally and exposes two supported CLI operations
- * for reading them: `session list --format json` and `export <id>`. The
- * resident invokes those operations with `--pure`, so recovery is local-only,
- * does not authenticate with a provider, and does not load the M9R plugin
- * recursively. OpenCode's optional `--sanitize` export mode replaces ordinary
+ * for reading them: `session list --format json` and `export <id>`. Recovery is
+ * local-only, does not authenticate with a provider, and does not load the M9R
+ * plugin recursively. OpenCode's optional `--sanitize` export mode replaces ordinary
  * transcript text with opaque redaction tokens in the current release; M9R
  * therefore preserves useful text and applies its own secret redaction in the
  * existing drainer. Recovered exports enter that spool, and the normal
@@ -25,11 +24,21 @@ import {
   spoolPath,
   type CaptureJob,
 } from "@/lib/cross-agent-capture-core";
+import { requireOpenCodeExecutable } from "@/lib/native/opencode-executable";
 
 const execFileAsync = promisify(execFile);
 const CURSOR_FILE_NAME = "opencode-backfill.json";
 const DEFAULT_MAX_COUNT = 100;
 const DEFAULT_INTERVAL_MS = 60_000;
+
+/**
+ * Resolve the provider's real executable instead of invoking npm's `.cmd` or
+ * PowerShell shim. The session id is read from provider-owned local data, so
+ * passing it through a shell would turn a recovery feature into a command
+ * injection boundary. The current package is `@opencode/cli`; the older
+ * `opencode-ai` layout remains a compatibility fallback for existing installs.
+ */
+export const opencodeCaptureExecutable = requireOpenCodeExecutable;
 
 export interface OpenCodeSessionSummary {
   id: string;
@@ -136,9 +145,9 @@ export function opencodeBackfillCursorPath(repositoryRoot: string): string {
 
 function defaultRunOpenCodeCommand(): OpenCodeCommandRunner {
   return async (args, cwd) => {
-    const result = await execFileAsync("opencode", args, {
+    const result = await execFileAsync(opencodeCaptureExecutable(), args, {
       cwd,
-      shell: process.platform === "win32",
+      shell: false,
       // Without this, every `opencode session list`/`export` (one per session, every minute) opens
       // a visible console window on Windows.
       windowsHide: true,
@@ -211,6 +220,21 @@ function isMissingCommand(error: unknown): boolean {
 }
 
 /**
+ * OpenCode 2.x removed the old `--pure` flag from both `session list` and
+ * `export`. Its log-level enum is also lowercase (`error`, not `ERROR`). The
+ * flag was only an output/logging convenience; the parser already ignores the
+ * CLI's human-readable preamble. Keep these argument builders in one place so
+ * a provider CLI update cannot leave two recovery paths stale.
+ */
+export function openCodeSessionListArgs(maxCount: number): string[] {
+  return ["session", "list", "--format", "json", "--max-count", String(maxCount), "--log-level", "error"];
+}
+
+export function openCodeSessionExportArgs(sessionId: string): string[] {
+  return ["export", sessionId, "--log-level", "error"];
+}
+
+/**
  * Lists recent local OpenCode sessions, exports only sessions belonging to
  * this repository, and appends recoverable sessions to the existing spool.
  * The cursor is deliberately a per-session ledger rather than a destructive
@@ -235,7 +259,7 @@ export async function backfillOpenCodeCapture(options: {
 
   let listOutput: OpenCodeCommandResult;
   try {
-    listOutput = await runCommand(["session", "list", "--format", "json", "--max-count", String(maxCount), "--pure", "--log-level", "ERROR"], repositoryRoot);
+    listOutput = await runCommand(openCodeSessionListArgs(maxCount), repositoryRoot);
   } catch (error) {
     if (!isMissingCommand(error)) {
       result.failed = 1;
@@ -282,7 +306,7 @@ export async function backfillOpenCodeCapture(options: {
 
     let exportOutput: OpenCodeCommandResult;
     try {
-      exportOutput = await runCommand(["export", session.id, "--pure", "--log-level", "ERROR"], session.directory);
+      exportOutput = await runCommand(openCodeSessionExportArgs(session.id), session.directory);
       const exported = parseOpenCodeExportOutput(exportOutput.stdout);
       if (!exported) throw new Error("OpenCode export did not contain JSON");
       const exportedId = isRecord(exported.info) && typeof exported.info.id === "string" ? exported.info.id : null;

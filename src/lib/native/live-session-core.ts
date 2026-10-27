@@ -201,6 +201,8 @@ export function startLiveSession(options: {
   env?: Record<string, string | undefined>;
   allowApiKey?: boolean;
   onEvent?: (event: LiveEvent, state: LiveState) => void;
+  /** Called once when the provider process exits, including a spawn/runtime error. */
+  onExit?: (code: number | null) => void;
   /** Marker for signed user messages. Generated if not given; read it back from `session.marker`. */
   marker?: string;
 }): LiveSession {
@@ -210,6 +212,13 @@ export function startLiveSession(options: {
   const child = options.spawn("claude", buildClaudeLiveArgs({ ...options.config, appendSystemPrompt: [options.config.appendSystemPrompt, interruptSystemPrompt(marker)].filter(Boolean).join("\n\n") }), options.config.cwd);
   let state = createLiveState();
   let buffer = "";
+  let exitNotified = false;
+  const notifyExit = (code: number | null): void => {
+    if (exitNotified) return;
+    exitNotified = true;
+    state = reduceLive(state, { kind: "exit", code });
+    options.onExit?.(code);
+  };
   child.stdout.on("data", (chunk) => {
     buffer += chunk.toString();
     let at: number;
@@ -222,8 +231,8 @@ export function startLiveSession(options: {
       }
     }
   });
-  child.on("exit", ((code: number | null) => { state = reduceLive(state, { kind: "exit", code }); }) as never);
-  child.on("error", (() => { state = reduceLive(state, { kind: "exit", code: null }); }) as never);
+  child.on("exit", ((code: number | null) => { notifyExit(code); }) as never);
+  child.on("error", (() => { notifyExit(null); }) as never);
   return {
     marker,
     send(text) {

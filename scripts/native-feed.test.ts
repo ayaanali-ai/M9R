@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,35 @@ import { createLocalStore } from "../src/lib/native/local-store";
 import type { Task } from "../src/lib/native/inbox-core";
 
 const NOW = new Date("2026-09-20T12:00:00Z");
+
+test("reading an allocated color neither rewrites state nor reallocates on another store instance", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-color-read-"));
+  try {
+    const store = createLocalStore(root);
+    const color = store.colorFor("custom-provider");
+    const path = join(root, "state.json");
+    utimesSync(path, 1, 1);
+    const before = statSync(path).mtimeMs;
+    assert.equal(createLocalStore(root).colorFor("@CUSTOM-PROVIDER"), color);
+    assert.equal(statSync(path).mtimeMs, before, "rendering an existing identity is read-only");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("known provider colors migrate from a legacy assignment without colliding with an overflow handle", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-color-migrate-"));
+  try {
+    const store = createLocalStore(root);
+    store.colorFor("legacy-provider");
+    const statePath = join(root, "state.json");
+    const state = JSON.parse(readFileSync(statePath, "utf8")) as { cursorColors: Record<string, string> };
+    state.cursorColors = { "legacy-provider": "#4F7CFF", codex: "#7AA2F7" };
+    writeFileSync(statePath, JSON.stringify(state));
+
+    assert.equal(createLocalStore(root).colorFor("codex"), "#4F7CFF");
+    const migrated = JSON.parse(readFileSync(statePath, "utf8")) as { cursorColors: Record<string, string> };
+    assert.notEqual(migrated.cursorColors["legacy-provider"], "#4F7CFF");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 const S1 = "01a0c010-9e03-7152-a1d2-039c92c32e05";
 const S2 = "01a0c011-1111-7152-a1d2-039c92c32e06";
 
@@ -131,6 +160,7 @@ test("web activity is persisted as a web surface and never mixed into the native
   assert.equal(native.surface, "native");
   assert.equal("web" in native, false);
   assert.ok(native.agents.every((item) => item.surface === "native"));
+  assert.ok(native.agents.every((item) => item.color === store.colorFor(item.handle)), "the feed carries the durable allocator's colors");
   assert.ok(native.needsYou.every((item) => item.surface === "native"));
   assert.ok(native.pings.every((item) => item.surface === "native"));
   assert.ok(native.recent.every((item) => item.surface === "native"));
@@ -277,4 +307,12 @@ test("an unconfirmed OpenCode delivery ages into an explicit uncertain state and
   const uncertain = f.needsYou.find((item) => item.taskId === "T8");
   assert.equal(uncertain?.kind, "delivery_uncertain");
   if (uncertain?.kind === "delivery_uncertain") assert.match(uncertain.reason, /will not resend/i);
+});
+
+test("unresolved uncertainty remains owner-visible after a day and completed work clears it", () => {
+  const pending = task({ id: "T8", createdAt: "2026-09-18T12:00:00Z", delivery: { state: "uncertain", attempts: 1, error: "connection reset" } });
+  const feed = buildFeed(input({ now: NOW, tasks: [pending] }), null);
+  assert.equal(feed.needsYou.find((item) => item.taskId === "T8")?.kind, "delivery_uncertain");
+  const done = buildFeed(input({ now: NOW, tasks: [{ ...pending, resultSummary: "finished" }] }), null);
+  assert.equal(done.needsYou.some((item) => item.kind === "delivery_uncertain"), false);
 });

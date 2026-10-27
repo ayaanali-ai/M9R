@@ -198,7 +198,7 @@ function providerPrompt(grant: ProviderLaunchGrant, provider: string): string {
     "Do not run the repository's normal M9R automatic workflow, start another run, or produce an M9R Evidence Draft.",
     "Work packet (authoritative JSON):",
     JSON.stringify(packet),
-    "Do not read or reveal credentials, .env files, or .m9r/local.json.",
+    "Do not read or reveal credentials, .env files, or M9R's user-scoped credential store; .m9r contains non-secret runtime metadata only.",
     "Stay inside the repository and allowed path scope. You may request bounded work from authorized Mission participants through M9R's collaboration protocol; do not launch another provider directly.",
     packet.scope.executionMode === "read_only" ? "Do not modify files." : "Modify only allowed paths.",
     "Use the supplied context references first. Retrieve additional context only when necessary and within the context fetch budget.",

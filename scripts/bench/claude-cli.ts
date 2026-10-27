@@ -66,6 +66,80 @@ export interface ClaudeJson {
   };
 }
 
+export interface ClaudeSmokeOperation {
+  action: string;
+  path?: string;
+  selector?: string;
+  ok: boolean;
+}
+
+export interface ClaudeSmokeValidation {
+  ok: boolean;
+  failures: string[];
+}
+
+/** Replace a generated secret without treating an empty value as a pattern. */
+export function redactSecret(text: string, secret: string): string {
+  return secret.length === 0 ? text : text.split(secret).join("[REDACTED]");
+}
+
+/** Run every cleanup callback, preserving later cleanup when an earlier one fails. */
+export async function runCleanup(
+  finalizers: Array<() => void | Promise<void>>,
+  onError: (error: unknown) => void,
+): Promise<void> {
+  for (const finalizer of finalizers) {
+    try {
+      await finalizer();
+    } catch (error) {
+      onError(error);
+    }
+  }
+}
+
+/**
+ * Validate the small, provider-facing smoke contract without accepting a receipt as proof.
+ * The expected answer, page-open evidence, successful field read, and clean process exit are
+ * all required.  Callers can redact stdout/stderr before presenting failures to a user.
+ */
+export function validateClaudeSmoke(
+  run: ClaudeOutput,
+  parsed: ClaudeJson | null,
+  expectedAnswer: string,
+  expectedPages: string[],
+  operations: ClaudeSmokeOperation[],
+): ClaudeSmokeValidation {
+  const failures: string[] = [];
+  const result = parsed?.result ?? "";
+
+  if (run.code !== 0) {
+    failures.push(`provider exit code was ${String(run.code)}`);
+  }
+  if (parsed?.is_error === true) {
+    failures.push("provider reported an error result");
+  }
+  if (!result.includes(expectedAnswer)) {
+    failures.push("expected code was not present in the provider result");
+  }
+  if (!result.includes("NO BYPASS TOOL")) {
+    failures.push("provider did not confirm the restricted tool surface");
+  }
+
+  for (const page of expectedPages) {
+    const opened = operations.some((operation) => operation.action === "open" && operation.path === page && operation.ok);
+    if (!opened || !result.includes("m9r_web_open")) {
+      failures.push(`page was not opened successfully: ${page}`);
+    }
+  }
+
+  const read = operations.some((operation) => operation.action === "read" && operation.ok);
+  if (!read || !result.includes("m9r_web_read")) {
+    failures.push("no successful field read command was observed");
+  }
+
+  return { ok: failures.length === 0, failures };
+}
+
 export function parseClaudeJson(stdout: string): ClaudeJson | null {
   try {
     return JSON.parse(stdout) as ClaudeJson;

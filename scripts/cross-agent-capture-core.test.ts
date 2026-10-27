@@ -123,6 +123,18 @@ test("parseCodexTranscript extracts role/content from a payload-shaped record", 
   assert.deepEqual(messages[1], { sender: "Assistant", body: "It parses the config." });
 });
 
+test("parseCodexTranscript dedupes a repeated provider message ID without collapsing distinct messages", () => {
+  const lines = [
+    JSON.stringify({ type: "response_item", id: "msg-1", payload: { role: "assistant", content: [{ text: "once" }] } }),
+    JSON.stringify({ type: "response_item", id: "msg-1", payload: { role: "assistant", content: [{ text: "rewritten" }] } }),
+    JSON.stringify({ type: "response_item", id: "msg-2", payload: { role: "assistant", content: [{ text: "distinct" }] } }),
+  ].join("\n");
+  assert.deepEqual(parseCodexTranscript(lines), [
+    { sender: "Assistant", body: "rewritten" },
+    { sender: "Assistant", body: "distinct" },
+  ]);
+});
+
 test("parseCodexTranscript never throws on malformed or unrecognized lines", () => {
   const lines = ["garbage", JSON.stringify({ type: "turn_context" }), JSON.stringify({ payload: { role: "system", content: "x" } })].join("\n");
   assert.deepEqual(parseCodexTranscript(lines), []);

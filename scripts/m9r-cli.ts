@@ -36,6 +36,7 @@ import { applyResidentCredential, refreshResidentProfile, residentCredentialPath
 import { parseProviderAdapterConfig, type ProviderAdapterConfig } from "@/lib/provider-adapter-config";
 import { isTerminalProvider } from "@/lib/local-terminal-protocol";
 import { BRIDGE_PROTOCOL_VERSION, DEFAULT_BRIDGE_PORT } from "@/lib/local-terminal-protocol";
+import { bridgeTokenProtocol } from "@/lib/local-terminal-bridge-core";
 import { buildWindowsLaunchScript, buildRegAddArgs, buildRegDeleteArgs, buildRegQueryArgs, WINDOWS_RUN_KEY_VALUE_NAME } from "@/lib/oathlock-windows-service";
 import {
   autostartPlatform,
@@ -59,20 +60,27 @@ import { parseWatchdogLockPid, parseWatchdogLockStartedAt, shouldStartWatchdog, 
 import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
 import { createInterface } from "node:readline/promises";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
+import { agentCredentialPath, agentCredentialRoot, migrateLegacyAgentCredentials, protectAgentCredentialFile, readOrCreateTerminalBridgeToken } from "@/lib/native/agent-credential-store";
+import { startProviderUpdateMonitor } from "@/lib/native/provider-update-monitor";
+import { createProviderNeutralUpdateActions, type ProviderConfigRefreshInput } from "@/lib/native/provider-update-route-actions";
+import { reconcileProviderSessions } from "@/lib/native/provider-session-reconciliation";
 import { isAgentContext, isHumanContext } from "@/lib/native/approval-core";
-import { DEFAULT_BROKER_PORT, brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
+import { DEFAULT_BROKER_PORT, brokerKeyPath } from "@/lib/native/web-broker-paths";
 import { standaloneWebBrokerRuntime } from "@/lib/native/web-broker-runtime";
 import { runWebAuthorityCli } from "@/lib/native/web-authority-cli";
 import { apiKeyLaunchBlock, buildVendorLaunchPlan, type M9rLaunchProfile, type M9rLaunchVendor } from "@/lib/native/vendor-launch-core";
 import { buildAgentVersionProbeEnv, detectInstalledAgents, type DetectedAgent, type DetectableAgentKind } from "@/lib/agent-detection-core";
 import {
   buildClaudeMcpAddArgs, buildClaudeMcpRemoveArgs, buildPowerShellInvocation, extensionIdFromManifestKey, formatCommandPreview, mergeCodexWebMcp, mergeOpenCodeWebMcp, parseWebSetupList,
-  planWebSetup, planManagedWebExtensionRefresh, removeCodexWebMcp, removeOpenCodeWebMcp, resolveWebMcpRuntime, selectWebSetupAgents,
-  buildOpenCodeIdentityPluginSource, OPENCODE_IDENTITY_PLUGIN_FILENAME, planOpenCodeIdentityPluginInstall,
+  planWebSetup, planManagedWebExtensionRefresh, removeCodexWebMcp, removeOpenCodeWebMcp, resolveWebMcpRuntime, selectWebSetupAgents, webOpenCodeLayout,
+  buildOpenCodeIdentityPluginSource, OPENCODE_IDENTITY_PLUGIN_FILENAME, OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY, planOpenCodeIdentityPluginInstall,
   planOpenCodeIdentityPluginRemoval, resolveOpenCodeHookInvocation, resolveOpenCodeGlobalPaths, shouldOpenBrowserSetup,
   webConfigUninstallMode, webExtensionFileAction, WEB_EXTENSION_ID,
   type OpenCodeIdentityPluginInstallAction, type OpenCodeIdentityPluginRemovalAction, type WebSetupBrowser,
 } from "@/lib/native/web-setup-core";
+import { planOpenCodeModelStateRepair, resolveOpenCodeModelFiles } from "@/lib/native/opencode-model-core";
+import { refreshManagedOpenCodeIdentityPlugin } from "@/lib/native/opencode-plugin-refresh";
+import { renameStateFile } from "@/lib/native/atomic-file";
 import { loadOrCreateBrokerKey } from "@/lib/native/web-broker-server";
 import { parseBrokerUpdateRecord } from "@/lib/native/broker-update-record";
 import {
@@ -115,7 +123,12 @@ async function readNativeInputRegistration(key: string): Promise<string | null> 
 // deliberately retained so migration is recoverable and non-destructive.
 normalizeLegacyM9rEnvironment(process.env);
 for (const stateRoot of new Set([process.cwd(), homedir()])) {
-  try { migrateLegacyM9rDirectory(stateRoot); }
+  try {
+    const migration = migrateLegacyM9rDirectory(stateRoot);
+    if (migration.skippedGeneratedDirectories || migration.skippedUnreadableEntries) {
+      process.stderr.write(`M9R preserved ${migration.skippedGeneratedDirectories} generated legacy director${migration.skippedGeneratedDirectories === 1 ? "y" : "ies"} and skipped ${migration.skippedUnreadableEntries} unreadable legacy entr${migration.skippedUnreadableEntries === 1 ? "y" : "ies"} under ${stateRoot}.\n`);
+    }
+  }
   catch (error) {
     process.stderr.write(`M9R could not copy legacy .oathlock state from ${stateRoot}: ${error instanceof Error ? error.message : "unknown error"}\n`);
   }
@@ -141,12 +154,25 @@ function openUrl(url: string): void {
 const deps: CliDeps = {
   cwd: process.cwd(),
   env: process.env,
+  credentialRoot: agentCredentialRoot(process.cwd(), process.env),
+  ensureCredentialStore: async (provider) => {
+    const results = await migrateLegacyAgentCredentials(
+      process.cwd(),
+      process.env,
+      provider ? [provider] : undefined,
+    );
+    const blocked = results.find((result) => result.action === "conflict" || result.action === "invalid");
+    if (blocked) {
+      throw new Error(`M9R refused to use the ${blocked.provider} credential: its legacy project file could not be migrated safely. Resolve the conflict and reconnect that provider.`);
+    }
+  },
   fetch: globalThis.fetch,
   readFile: (p) => readFile(p, "utf8"),
   writeFile: (p, data) => writeFile(p, data, "utf8"),
   writeSecretFile: async (p, data) => {
     await writeFile(p, data, { encoding: "utf8", mode: 0o600 });
     if (platform() !== "win32") await chmod(p, 0o600);
+    else protectAgentCredentialFile(p);
   },
   removeFile: (p) => unlink(p),
   mkdir: async (p) => {
@@ -181,6 +207,7 @@ const deps: CliDeps = {
   }),
   listDirectory: (path) => readdir(path),
   installLocalBrokerAutostart: ensureLocalBrokerAutostart,
+  startProviderLifecycle: startNativeProviderLifecycle,
 };
 
 async function withAgentVersionProbeEnv<T>(binary: string, runProbe: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
@@ -224,6 +251,34 @@ async function probeVersion(binary: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Start provider update reconciliation from the watched feed's owner process.
+ * The native command calls this only after acquiring the feed's single-writer
+ * lock, so short-lived or duplicate feed invocations cannot race lifecycle work.
+ */
+function startNativeProviderLifecycle(root: string) {
+  if (process.env.M9R_LOCAL_ONLY === "1" || process.env.M9R_TEST_DISABLE_PROVIDER_UPDATE_MONITOR === "1") return undefined;
+  return startProviderUpdateMonitor({
+    root,
+    probe: probeVersion,
+    actions: createProviderNeutralUpdateActions({
+      env: process.env,
+      execPath: process.execPath,
+      platform: process.platform,
+      refreshProviderConfig: refreshProviderConfigAfterUpdate,
+      reconcileProviderSession: ({ providerId }) => reconcileProviderSessions({
+        root,
+        providerId,
+        env: process.env,
+      }),
+    }),
+    reconcileOnStart: true,
+    onError: (error) => {
+      process.stderr.write(`[provider-update] compatibility cycle deferred: ${error instanceof Error ? error.message : String(error)}\n`);
+    },
+  });
 }
 
 async function probeWebAgentVersion(binary: string): Promise<string | null> {
@@ -444,8 +499,14 @@ async function runResidentCli(argv: string[]): Promise<number> {
   let profile: ResidentProfile = checked.profile;
   const controller = new AbortController();
   const stop = () => controller.abort();
+  const drainMessage = (message: unknown) => {
+    if (message && typeof message === "object" && (message as { type?: unknown }).type === "m9r:drain") {
+      controller.abort();
+    }
+  };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  process.on("message", drainMessage);
   process.stdout.write(`Resident ${profile.instanceKey} ready for ${profile.provider} (${profile.executionMode}).\n`);
   await checkBuildFreshness(`resident run --profile ${profileName ?? selectedName}`, { exitOnStale: true });
   try {
@@ -464,6 +525,8 @@ async function runResidentCli(argv: string[]): Promise<number> {
   } finally {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
+    process.removeListener("message", drainMessage);
+    if (typeof process.disconnect === "function" && process.connected) process.disconnect();
   }
 }
 
@@ -576,7 +639,7 @@ async function connectedProviderBridgesAreHealthy(repositoryRoot: string): Promi
   const providers = ["claude-code", "codex", "opencode"] as const;
   const unhealthy: string[] = [];
   for (const provider of providers) {
-    const tokenPath = join(repositoryRoot, ".m9r", "agents", provider, "local.json");
+    const tokenPath = agentCredentialPath(agentCredentialRoot(repositoryRoot, process.env), provider);
     if (!existsSync(tokenPath)) continue; // never connected here -- not this watchdog's concern
     const logPath = join(repositoryRoot, ".m9r", "runtime", "mission-bridge-logs", `${provider}.log`);
     if (!existsSync(logPath)) continue; // bridge has never attempted a start yet
@@ -743,7 +806,10 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
     launch(profile, onExit) {
       const child = spawn(process.execPath, [process.argv[1], "resident", "run", "--config", configFile, "--profile", profile], {
         cwd: process.cwd(),
-        stdio: "ignore",
+        // Private IPC is the graceful drain path. A resident can finish its
+        // current bounded provider unit before the parent uses termination,
+        // instead of relying on a Windows tree kill that may interrupt work.
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
         windowsHide: true,
       });
       let reported = false;
@@ -754,7 +820,52 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
       };
       child.once("error", () => report(1));
       child.once("exit", report);
-      return { kill: () => { if (!child.killed) child.kill(); } };
+      return {
+        kill: () => { if (!child.killed) child.kill(); },
+        shutdown: () => new Promise<void>((resolveShutdown, rejectShutdown) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            resolveShutdown();
+            return;
+          }
+          let settled = false;
+          let killTimer: NodeJS.Timeout | undefined;
+          const finish = (error?: unknown) => {
+            if (settled) return;
+            settled = true;
+            child.off("exit", onExit);
+            clearTimeout(graceTimer);
+            if (killTimer) clearTimeout(killTimer);
+            if (error) rejectShutdown(error);
+            else resolveShutdown();
+          };
+          const onExit = () => finish();
+          const graceTimer = setTimeout(() => {
+            if (child.exitCode !== null || child.signalCode !== null) {
+              finish();
+              return;
+            }
+            try {
+              if (!child.killed) child.kill();
+            } catch (error) {
+              finish(error);
+              return;
+            }
+            killTimer = setTimeout(() => finish(new Error(`resident ${profile} did not exit after graceful drain`)), 2_000);
+          }, 5_000);
+          child.once("exit", onExit);
+          if (typeof child.send !== "function" || !child.connected) {
+            try { if (!child.killed) child.kill(); } catch (error) { finish(error); }
+            return;
+          }
+          try {
+            child.send({ type: "m9r:drain" }, (error) => {
+              if (error) finish(error);
+            });
+          } catch (error) {
+            finish(error);
+          }
+        }),
+      };
     },
     schedule(callback, delayMs) {
       const timer = setTimeout(callback, delayMs);
@@ -770,7 +881,15 @@ async function startTerminalRuntime(options: { localOnly?: boolean } = {}): Prom
       if (state === "failed") process.stderr.write(`[resident-supervisor] profile "${profile}" has FAILED and will not auto-restart -- it exhausted its restart budget. Restart the terminal runtime once the underlying issue is fixed.\n`);
     },
   });
-  const stop = () => supervisor.stop();
+  let stopPromise: Promise<void> | null = null;
+  const stop = () => {
+    stopPromise ??= Promise.all([
+      supervisor.stopGracefully().catch((error) => {
+        process.stderr.write(`[resident-supervisor] graceful drain failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      }),
+    ]).then(() => undefined);
+    return stopPromise;
+  };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   supervisor.start();
@@ -1139,10 +1258,11 @@ async function reportTerminalState(state: string | undefined): Promise<number> {
     return 1;
   }
   try {
+    const bridgeToken = readOrCreateTerminalBridgeToken(process.cwd(), process.env);
     await new Promise<void>((resolveState, rejectState) => {
       const socket = new WebSocket(
         `ws://127.0.0.1:${DEFAULT_BRIDGE_PORT}/terminal`,
-        [BRIDGE_PROTOCOL_VERSION, `oathlock-provider.${provider}`],
+        [BRIDGE_PROTOCOL_VERSION, `oathlock-provider.${provider}`, bridgeTokenProtocol(bridgeToken)],
         { origin: `http://127.0.0.1:${DEFAULT_BRIDGE_PORT}` },
       );
       const timeout = setTimeout(() => {
@@ -1296,6 +1416,70 @@ const writeAtomic = async (path: string, value: string | Uint8Array) => {
   await rename(temporary, path);
 };
 
+/**
+ * Replace a provider-owned compatibility file without relying on Node's
+ * rename(existing-file) behavior on Windows. The displaced copy is retained
+ * only for the duration of the replacement and is restored if the second
+ * rename fails; the caller's existing file is never deleted first.
+ */
+const writeManagedAtomic = async (path: string, value: string | Uint8Array) => {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.m9r-next-${process.pid}-${randomUUID()}.tmp`;
+  const displaced = `${path}.m9r-displaced-${process.pid}-${randomUUID()}.tmp`;
+  let keepDisplaced = false;
+  await writeFile(temporary, value);
+  try {
+    try {
+      renameStateFile(temporary, path);
+    } catch (error) {
+      if (process.platform !== "win32" || !existsSync(path)) throw error;
+      renameStateFile(path, displaced);
+      try {
+        renameStateFile(temporary, path);
+        await unlink(displaced).catch(() => undefined);
+      } catch (installError) {
+        try {
+          if (!existsSync(path) && existsSync(displaced)) renameStateFile(displaced, path);
+        } catch {
+          // The original remains at `displaced` as the recoverable boundary.
+          keepDisplaced = true;
+        }
+        throw installError;
+      }
+    }
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+    if (!keepDisplaced) await unlink(displaced).catch(() => undefined);
+  }
+};
+
+/** Repair only stale OpenCode model references, using the locally cached provider catalog. */
+async function repairOpenCodeModelState(home: string): Promise<ReturnType<typeof planOpenCodeModelStateRepair> & { backupPath?: string }> {
+  const paths = resolveOpenCodeModelFiles({
+    home,
+    xdgStateHome: process.env.XDG_STATE_HOME,
+    xdgCacheHome: process.env.XDG_CACHE_HOME,
+  });
+  const [stateBytes, catalogBytes] = await Promise.all([readOptional(paths.statePath), readOptional(paths.catalogPath)]);
+  if (!stateBytes || !catalogBytes) {
+    return { status: "blocked", reason: "OpenCode model state or its provider catalog is not present", removedModelIDs: [] };
+  }
+  let state: unknown;
+  let catalog: unknown;
+  try {
+    state = JSON.parse(stateBytes.toString("utf8"));
+    catalog = JSON.parse(catalogBytes.toString("utf8"));
+  } catch {
+    return { status: "blocked", reason: "OpenCode model state or its provider catalog is not valid JSON", removedModelIDs: [] };
+  }
+  const plan = planOpenCodeModelStateRepair(state, catalog);
+  if (plan.status !== "updated" || !plan.state) return plan;
+  const backupPath = `${paths.statePath}.m9r-backup-${randomUUID()}.json`;
+  await writeAtomic(backupPath, stateBytes);
+  await writeAtomic(paths.statePath, JSON.stringify(plan.state, null, 2) + "\n");
+  return { ...plan, backupPath };
+}
+
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index < 0 ? undefined : args[index + 1];
@@ -1332,7 +1516,7 @@ function webMcpRuntime(): { command: string; args: readonly string[] } {
 
 function webOpenCodeHookInvocation(
   runtime: { command: string },
-  event: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" = "SessionStart",
+  event: "SessionStart" | "UserPromptSubmit" | "OpenCodePoll" | "OpenCodeDelivered" | "OpenCodeDeliveryFailed" | "OpenCodeExecutionFailed" | "ProviderTurnEnd" = "SessionStart",
 ): { command: string; args: readonly string[] } {
   const entry = fileURLToPath(import.meta.url);
   const engineName = runtime.command.split(/[\\/]/).pop() ?? "";
@@ -1345,6 +1529,110 @@ function webOpenCodeHookInvocation(
     ...(awaitableExists(sourceHookPath) ? { sourceHookPath, sourceNodeArgs: process.execArgv } : {}),
     event,
   });
+}
+
+/**
+ * Reconcile only M9R-owned OpenCode schema drift after a provider update.
+ *
+ * The provider-update layer remains provider-neutral: this callback is an
+ * adapter behind that boundary. It never touches credentials, model state, or
+ * unrelated user config. It only runs when the current config visibly contains
+ * M9R's own route and identity plugin, then migrates those owned entries to
+ * the config spelling required by the observed OpenCode version.
+ */
+async function refreshProviderConfigAfterUpdate(input: ProviderConfigRefreshInput): Promise<void> {
+  if (input.providerId !== "opencode") return;
+  const home = homeDirectory();
+  const paths = resolveOpenCodeGlobalPaths({
+    home,
+    xdgConfigHome: process.env.XDG_CONFIG_HOME,
+    appData: process.env.APPDATA,
+    exists: awaitableExists,
+  });
+  const configPaths = paths.configPaths;
+  const pluginPath = join(paths.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME);
+  let hasIdentityPlugin = await canRead(pluginPath);
+  const runtime = webMcpRuntime();
+  let pluginReconciled = false;
+  for (const configPath of configPaths) {
+    const currentBytes = await readOptional(configPath);
+    if (!currentBytes) continue;
+    const before = currentBytes.toString("utf8");
+    // Do not adopt or rewrite an arbitrary OpenCode config. M9R must be
+    // visibly present in its own route plus either its home marker, a known
+    // M9R executable, or its identity plugin before this adapter may mutate
+    // the file. This also recognizes older M9R configs that predate the
+    // provider environment marker.
+    const hasM9rRoute = /["']m9r["']\s*:/iu.test(before);
+    const isM9rOwned = hasM9rRoute && (
+      /M9R_HOME/iu.test(before)
+      || /m9r-(?:engine|hook)(?:\.exe|\.js)?/iu.test(before)
+      || /m9r-identity\.js/iu.test(before)
+    );
+    if (!isM9rOwned) continue;
+
+    if (!pluginReconciled) {
+      const desiredPlugin = buildOpenCodeIdentityPluginSource(
+        webOpenCodeHookInvocation(runtime, "SessionStart"),
+        webOpenCodeHookInvocation(runtime, "UserPromptSubmit"),
+        webOpenCodeHookInvocation(runtime, "OpenCodePoll"),
+        webOpenCodeHookInvocation(runtime, "OpenCodeDelivered"),
+        webOpenCodeHookInvocation(runtime, "OpenCodeDeliveryFailed"),
+        webOpenCodeHookInvocation(runtime, "OpenCodeExecutionFailed"),
+        webOpenCodeHookInvocation(runtime, "ProviderTurnEnd"),
+      );
+      const storeRoot = defaultStoreRoot(home, process.env);
+      // The native install manifest is authoritative once it exists. The web
+      // manifest is a legacy fallback only for installations that predate the
+      // native manifest; consulting both when the native manifest is present
+      // would let stale ownership resurrect an old plugin hash.
+      const nativeManifestPath = join(storeRoot, "install-manifest.json");
+      const ownershipManifestPaths = await canRead(nativeManifestPath)
+        ? [nativeManifestPath]
+        : [join(storeRoot, WEB_SETUP_MANIFEST)];
+      let refreshedAction: string = "not-managed";
+      for (const manifestPath of ownershipManifestPaths) {
+        const refreshed = await refreshManagedOpenCodeIdentityPlugin({
+          manifestPath,
+          pluginPath,
+          desiredContent: desiredPlugin,
+        }, {
+          readFile: async (path) => await readOptional(path),
+          writeAtomic: writeManagedAtomic,
+          removeFile: async (path) => { await unlink(path).catch(() => undefined); },
+        });
+        refreshedAction = refreshed.action;
+        if (refreshed.action !== "not-managed") break;
+      }
+      if (refreshedAction === "preserve" || refreshedAction === "path-changed") {
+        throw new Error(`M9R OpenCode identity plugin changed outside its recorded ownership (${refreshedAction}); provider reconciliation stopped without overwriting it`);
+      }
+      pluginReconciled = true;
+      hasIdentityPlugin = await canRead(pluginPath);
+    }
+
+    const hasIdentityEntry = before.includes(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY);
+    if (hasIdentityEntry && !hasIdentityPlugin) {
+      throw new Error(`M9R OpenCode identity plugin is referenced but missing at ${pluginPath}`);
+    }
+
+    const merged = mergeOpenCodeWebMcp(before, webOpenCodeLayout(input.current.versionLine), {
+      command: runtime.command,
+      args: runtime.args,
+      m9rHome: defaultStoreRoot(home, process.env),
+      brokerPort: Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT,
+    }, hasIdentityPlugin);
+    if (merged === before) continue;
+
+    // Re-read immediately before the atomic replacement. A user/provider
+    // setup change racing this repair is preserved and retried on the next
+    // cycle rather than being overwritten by M9R.
+    const latest = await readOptional(configPath);
+    if (!latest || latest.toString("utf8") !== before) {
+      throw new Error(`OpenCode config changed during provider reconciliation (${configPath}); no config was overwritten`);
+    }
+    await writeManagedAtomic(configPath, merged);
+  }
 }
 
 function awaitableExists(path: string): boolean {
@@ -1527,6 +1815,25 @@ function runClaudeMcpCommand(binary: string, args: readonly string[]) {
 
 type InspectedLocalBrokerTask = LocalBrokerScheduledTaskSnapshot & { state: string; currentUserId: string };
 
+type ManagedBrokerTaskRecovery = {
+  action: LocalBrokerScheduledTaskAction;
+  port: number;
+  projectRoot: string;
+  workingDirectory: string;
+  taskActionHash: string;
+  taskDefinitionHash?: string;
+};
+
+type ManagedBrokerUpdateTarget = {
+  task: InspectedLocalBrokerTask | null;
+  port: number;
+  brokerPath: string;
+  installManifest: ManagedBrokerInstallManifest | null;
+  taskDefinitionHash?: string;
+  taskActionHash?: string;
+  recovery?: ManagedBrokerTaskRecovery;
+};
+
 async function inspectLocalBrokerTask(taskName: string): Promise<InspectedLocalBrokerTask | null> {
   const { stdout } = await powerShell(buildLocalBrokerScheduledTaskInspectScript(taskName));
   const output = stdout.trim();
@@ -1661,6 +1968,60 @@ function taskTargetsInstalledBroker(task: InspectedLocalBrokerTask, root: string
     && /\\conhost\.exe$/i.test(action.executable.replaceAll("/", "\\"));
 }
 
+function buildManagedBrokerTaskRecovery(
+  root: string,
+  brokerPath: string,
+  setup: Record<string, unknown> | null,
+  marker: Record<string, unknown> | null,
+  brokerConfig: Record<string, unknown> | null,
+): ManagedBrokerTaskRecovery | null {
+  const hasSetupRecord = setup?.version === 1 && Array.isArray(setup.configs);
+  const hasMarkerRecord = marker?.version === 1 && marker.taskName === WEB_TASK_NAME;
+  if (!hasSetupRecord && !hasMarkerRecord) return null;
+
+  const recordedPaths = [marker?.entry, marker?.executable].filter((value): value is string => typeof value === "string");
+  if (recordedPaths.some((path) => normalizeWindowsPath(path) !== normalizeWindowsPath(brokerPath))) {
+    throw new Error("The M9R broker recovery record points at a different executable; refusing to recreate the login task.");
+  }
+
+  const projectRoot = typeof marker?.projectRoot === "string"
+    ? marker.projectRoot
+    : typeof setup?.projectRoot === "string" ? setup.projectRoot : "";
+  const workingDirectory = typeof marker?.workingDirectory === "string" ? marker.workingDirectory : projectRoot;
+  if (!projectRoot || !workingDirectory) {
+    throw new Error("The M9R broker recovery record has no usable project root; refusing to recreate the login task.");
+  }
+
+  const port = validPort(marker?.port ?? brokerConfig?.port);
+  if (port === null) throw new Error("The M9R broker recovery record has no valid port; refusing to recreate the login task.");
+
+  const action = buildLocalBrokerScheduledTaskAction({
+    taskName: WEB_TASK_NAME,
+    executable: brokerPath,
+    args: ["--home", root, "--port", String(port), "--project-root", resolve(projectRoot)],
+    workingDirectory: resolve(workingDirectory),
+    hideConsole: true,
+  });
+  const taskActionHash = hashLocalBrokerScheduledTaskAction(action);
+  const recordedActionHash = typeof marker?.taskActionHash === "string"
+    ? marker.taskActionHash
+    : typeof setup?.brokerTaskActionHash === "string" ? setup.brokerTaskActionHash : "";
+  if (!/^[a-f0-9]{64}$/i.test(recordedActionHash) || recordedActionHash.toLowerCase() !== taskActionHash) {
+    throw new Error("The M9R broker recovery record does not match the current broker task contract; refusing to recreate the login task.");
+  }
+  if (typeof setup?.brokerTaskActionHash === "string" && setup.brokerTaskActionHash.toLowerCase() !== taskActionHash) {
+    throw new Error("The M9R web setup record disagrees with its broker recovery record; refusing to recreate the login task.");
+  }
+
+  const taskDefinitionHash = typeof marker?.taskDefinitionHash === "string"
+    ? marker.taskDefinitionHash
+    : typeof setup?.brokerTaskDefinitionHash === "string" ? setup.brokerTaskDefinitionHash : undefined;
+  if (taskDefinitionHash !== undefined && !/^[a-f0-9]{64}$/i.test(taskDefinitionHash)) {
+    throw new Error("The M9R broker recovery record has an invalid task definition hash; refusing to recreate the login task.");
+  }
+  return { action, port, projectRoot: resolve(projectRoot), workingDirectory: resolve(workingDirectory), taskActionHash, taskDefinitionHash };
+}
+
 async function readManagedBrokerProcessState(brokerPath: string): Promise<{
   fileHash: string;
   fileLastWriteUtc: string;
@@ -1711,24 +2072,19 @@ async function brokerAuthenticated(root: string, port: number): Promise<boolean>
   return Boolean(status?.ok);
 }
 
-async function loadManagedBrokerUpdateTarget(root: string): Promise<{
-  task: InspectedLocalBrokerTask;
-  port: number;
-  brokerPath: string;
-  installManifest: ManagedBrokerInstallManifest | null;
-  taskDefinitionHash?: string;
-  taskActionHash?: string;
-} | null> {
+async function loadManagedBrokerUpdateTarget(root: string): Promise<ManagedBrokerUpdateTarget | null> {
   if (platform() !== "win32") throw new Error("The managed broker update lifecycle is supported on Windows only.");
   const brokerPath = resolve(root, "bin", "m9r-web-broker.exe");
-  const [setupBytes, markerBytes, installBytes] = await Promise.all([
+  const [setupBytes, markerBytes, installBytes, brokerConfigBytes] = await Promise.all([
     readOptional(join(root, WEB_SETUP_MANIFEST)),
     readOptional(join(root, "broker-autostart.json")),
     readOptional(join(root, "web-broker-install.json")),
+    readOptional(join(root, "web-broker.json")),
   ]);
   const setup = parseBrokerUpdateRecord(setupBytes, "web setup");
   const marker = parseBrokerUpdateRecord(markerBytes, "broker startup");
   const installRecord = parseBrokerUpdateRecord(installBytes, "web broker install");
+  const brokerConfig = parseBrokerUpdateRecord(brokerConfigBytes, "broker config");
   let installManifest: ManagedBrokerInstallManifest | null = null;
   if (installRecord) {
     if (installRecord.version !== 1 || typeof installRecord.path !== "string" || typeof installRecord.sha256 !== "string"
@@ -1742,7 +2098,17 @@ async function loadManagedBrokerUpdateTarget(root: string): Promise<{
   if (!task) {
     const image = await readManagedBrokerProcessState(brokerPath).catch(() => null);
     if (image?.processes.length) throw new Error("The installed broker is running without its M9R-owned login task; refusing to replace a live image that cannot be safely restarted.");
-    return null;
+    const recovery = buildManagedBrokerTaskRecovery(root, brokerPath, setup, marker, brokerConfig);
+    if (!recovery) return null;
+    return {
+      task: null,
+      port: recovery.port,
+      brokerPath,
+      installManifest,
+      taskActionHash: recovery.taskActionHash,
+      taskDefinitionHash: recovery.taskDefinitionHash,
+      recovery,
+    };
   }
   const targetsInstalledBroker = taskTargetsInstalledBroker(task, root, brokerPath);
   if (!targetsInstalledBroker) return null;
@@ -1763,6 +2129,46 @@ async function loadManagedBrokerUpdateTarget(root: string): Promise<{
   }
   const port = brokerPortFromTask(task, marker?.version === 1 && marker.taskName === WEB_TASK_NAME ? marker : null);
   return { task, port, brokerPath, installManifest, taskDefinitionHash: ownershipProof.definition, taskActionHash: ownershipProof.action };
+}
+
+async function persistRecoveredManagedBrokerTask(root: string, taskDefinitionHash: string): Promise<void> {
+  const markerPath = join(root, "broker-autostart.json");
+  const markerBytes = await readOptional(markerPath);
+  const marker = parseBrokerUpdateRecord(markerBytes, "broker startup");
+  if (marker?.version === 1 && marker.taskName === WEB_TASK_NAME) {
+    await writeAtomic(markerPath, JSON.stringify({ ...marker, taskDefinitionHash, state: "configured" }) + "\n");
+  }
+
+  const setupPath = join(root, WEB_SETUP_MANIFEST);
+  const setupBytes = await readOptional(setupPath);
+  const setup = parseBrokerUpdateRecord(setupBytes, "web setup");
+  if (setup?.version === 1 && Array.isArray(setup.configs)) {
+    await writeAtomic(setupPath, JSON.stringify({ ...setup, brokerTaskDefinitionHash: taskDefinitionHash }) + "\n");
+  }
+}
+
+async function restoreMissingManagedBrokerTask(
+  root: string,
+  target: ManagedBrokerUpdateTarget,
+): Promise<void> {
+  if (target.task || !target.recovery) return;
+  await powerShell(buildLocalBrokerScheduledTaskRegisterScript({
+    taskName: WEB_TASK_NAME,
+    executable: target.brokerPath,
+    args: ["--home", root, "--port", String(target.recovery.port), "--project-root", target.recovery.projectRoot],
+    workingDirectory: target.recovery.workingDirectory,
+    hideConsole: true,
+  }));
+  const registered = await inspectLocalBrokerTask(WEB_TASK_NAME);
+  if (!registered || localBrokerTaskActionHash(registered) !== target.recovery.taskActionHash
+    || !localBrokerTaskMatchesContract(registered, target.recovery.action)) {
+    throw new Error("M9R recreated the broker task but could not verify its exact current-user definition.");
+  }
+  const definitionHash = hashLocalBrokerScheduledTaskDefinition(registered);
+  await persistRecoveredManagedBrokerTask(root, definitionHash);
+  target.task = registered;
+  target.taskDefinitionHash = definitionHash;
+  target.taskActionHash = target.recovery.taskActionHash;
 }
 
 async function waitForBrokerTaskState(taskName: string, shouldBeActive: boolean, attempts = 24): Promise<InspectedLocalBrokerTask> {
@@ -1828,6 +2234,8 @@ async function startManagedBrokerAfterUpdate(target: NonNullable<Awaited<ReturnT
   if (image.fileHash.toLowerCase() !== target.installManifest.sha256) {
     throw new Error("The installed broker file does not match its ownership hash; the login task was not started.");
   }
+  await restoreMissingManagedBrokerTask(defaultStoreRoot(homeDirectory(), process.env), target);
+  if (!target.task) throw new Error("The M9R broker task is missing and could not be safely recovered; it was not started.");
   const task = await inspectLocalBrokerTask(WEB_TASK_NAME);
   if (!task || !localBrokerTaskDefinitionOwned(task, target.taskDefinitionHash, target.taskActionHash)
     || !taskTargetsInstalledBroker(task, defaultStoreRoot(homeDirectory(), process.env), target.brokerPath)) {
@@ -1880,6 +2288,10 @@ async function runManagedBrokerUpdate(args: string[]): Promise<number> {
       return 0;
     }
     if (phase === "stop") {
+      if (!target.task) {
+        process.stdout.write(JSON.stringify({ ok: true, phase, managedTask: false, result: "no-installed-broker-task" }) + "\n");
+        return 0;
+      }
       await stopManagedBrokerForUpdate(target);
       process.stdout.write(JSON.stringify({ ok: true, phase, managedTask: true, result: "stopped" }) + "\n");
       return 0;
@@ -2094,6 +2506,11 @@ async function runWebExtensionUpdate(args: string[]): Promise<number> {
 async function runWebSetup(args: string[]): Promise<number> {
   if (platform() !== "win32") { process.stderr.write("M9R Web setup currently supports Windows 10/11 only.\n"); return 2; }
   if (args.includes("--broker-only")) {
+    // The standalone engine has no JavaScript CLI entry to persist. Reuse the
+    // provider-neutral broker lifecycle reconciler so a missing M9R-owned task
+    // is rebuilt from its authenticated ownership records instead of asking the
+    // user to reconnect a provider or run a second installer path.
+    if (isStandaloneEngine()) return runManagedBrokerUpdate(["start"]);
     const configuredProjectRoot = valueAfter(args, "--project-root");
     if (configuredProjectRoot) process.env.M9R_PROJECT_ROOT = resolve(configuredProjectRoot);
     const result = await ensureLocalBrokerAutostart();
@@ -2163,8 +2580,10 @@ async function runWebSetup(args: string[]): Promise<number> {
       const pollHook = webOpenCodeHookInvocation(runtime, "OpenCodePoll");
       const deliveredHook = webOpenCodeHookInvocation(runtime, "OpenCodeDelivered");
       const deliveryFailedHook = webOpenCodeHookInvocation(runtime, "OpenCodeDeliveryFailed");
+      const executionFailedHook = webOpenCodeHookInvocation(runtime, "OpenCodeExecutionFailed");
+      const turnEndHook = webOpenCodeHookInvocation(runtime, "ProviderTurnEnd");
       const path = join(openCodePaths.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME);
-      const bytes = Buffer.from(buildOpenCodeIdentityPluginSource(hook, promptHook, pollHook, deliveredHook, deliveryFailedHook));
+      const bytes = Buffer.from(buildOpenCodeIdentityPluginSource(hook, promptHook, pollHook, deliveredHook, deliveryFailedHook, executionFailedHook, turnEndHook));
       const current = await readOptional(path);
       openCodePlugin = {
         path,
@@ -2386,6 +2805,14 @@ async function runWebSetup(args: string[]): Promise<number> {
         process.stdout.write(`  [KEEP] Preserved unowned or user-edited OpenCode plugin: ${openCodePlugin.path}\n`);
       } else {
         throw new Error("The OpenCode config root changed since the M9R identity plugin was installed; run m9r web uninstall before selecting the new root.");
+      }
+      const modelRepair = await repairOpenCodeModelState(home);
+      if (modelRepair.status === "updated") {
+        process.stdout.write(`[PASS] OpenCode model selection repaired to ${modelRepair.selection?.providerID}/${modelRepair.selection?.modelID}; rollback kept at ${modelRepair.backupPath}\n`);
+      } else if (modelRepair.status === "unchanged") {
+        process.stdout.write("[PASS] OpenCode model selection already matches the cached provider catalog\n");
+      } else {
+        process.stdout.write(`[WAIT] OpenCode model selection was not changed: ${modelRepair.reason}\n`);
       }
     }
     const identityManifestPath = join(root, "install-manifest.json");
@@ -2743,7 +3170,7 @@ async function runWebUninstall(args: string[]): Promise<number> {
     }
     let currentRegistration: string | null;
     try { currentRegistration = await readNativeInputRegistration(registration.key); }
-    catch (error) {
+    catch {
       nativeManifestUnreferenced = false;
       process.stdout.write(`  [KEEP] Could not safely inspect ${registration.browser}'s native-input registration; preserved its manifest.\n`);
       continue;

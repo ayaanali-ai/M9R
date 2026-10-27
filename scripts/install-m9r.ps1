@@ -26,6 +26,10 @@ Do not add the M9R desktop pill to this Windows user's sign-in startup list.
 
 .PARAMETER NoLaunch
 Install without starting the desktop pill after setup. Intended for automated tests.
+
+.PARAMETER Yes
+Apply the reviewed setup plan without opening the interactive consent prompt.
+Use only with an exact, locally verified package path.
 #>
 [CmdletBinding()]
 param(
@@ -34,7 +38,8 @@ param(
     [switch]$Uninstall,
     [switch]$Web,
     [switch]$NoAutostart,
-    [switch]$NoLaunch
+[switch]$NoLaunch,
+[switch]$Yes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -111,6 +116,66 @@ function Get-VerifiedPackage([string]$LocalPackagePath, [string]$DownloadRoot) {
     return @{ ZipPath = $zipPath }
 }
 
+function Assert-ReleasePackageManifest([string]$Destination) {
+    $runtimePath = Join-Path $Destination 'm9r-build-info.json'
+    $packagePath = Join-Path $Destination 'm9r-package-info.json'
+    try {
+        $runtime = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json
+        $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json
+    } catch {
+        throw "The release package identity manifests are unreadable."
+    }
+    if ($runtime.schemaVersion -ne 1 -or $runtime.buildId -notmatch '^[a-fA-F0-9]{64}$' -or
+        $runtime.source.sourceCommit -notmatch '^[a-fA-F0-9]{40}$' -or $null -eq $runtime.source.sourceDirty) {
+        throw 'The runtime identity manifest has an invalid schema.'
+    }
+    if ($package.schemaVersion -ne 1 -or $package.packageName -ne 'm9r-engine-windows-x64' -or
+        $package.runtimeBuildId -ne $runtime.buildId -or $package.source.sourceCommit -ne $runtime.source.sourceCommit -or
+        $package.source.sourceDirty -ne $runtime.source.sourceDirty -or $null -eq $package.files) {
+        throw 'The package manifest does not match the runtime identity manifest.'
+    }
+    $properties = @($package.files.PSObject.Properties)
+    if ($properties.Count -eq 0) { throw 'The package manifest contains no file hashes.' }
+    $root = [IO.Path]::GetFullPath($Destination).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $expectedPaths = @{}
+    foreach ($property in $properties) {
+        $relative = [string]$property.Name
+        if ([string]::IsNullOrWhiteSpace($relative) -or [IO.Path]::IsPathRooted($relative) -or
+            $relative -match '(^|[\\/])\.\.([\\/]|$)' -or $relative -match '^[A-Za-z]:') {
+            throw "The package manifest contains an unsafe file path: $relative"
+        }
+        $expectedPaths[$relative.Replace('\', '/')] = $true
+        $target = [IO.Path]::GetFullPath((Join-Path $Destination $relative))
+        if (-not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $target -PathType Leaf)) {
+            throw "The package manifest references a missing file: $relative"
+        }
+        if ([string]$property.Value -notmatch '^[a-fA-F0-9]{64}$') {
+            throw "The package manifest contains an invalid hash: $relative"
+        }
+        $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne ([string]$property.Value).ToLowerInvariant()) {
+            throw "The package manifest hash does not match: $relative"
+        }
+    }
+    $entries = @(Get-ChildItem -LiteralPath $Destination -Recurse -Force)
+    foreach ($entry in $entries) {
+        if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The extracted release package contains a symbolic link or reparse point: $($entry.FullName)"
+        }
+    }
+    $actualPaths = @($entries | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
+        $fullPath = [IO.Path]::GetFullPath($_.FullName)
+        if (-not $fullPath.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The extracted release package contains a file outside its root: $fullPath"
+        }
+        $fullPath.Substring($root.Length).Replace('\', '/')
+    } | Where-Object { $_ -ine 'm9r-package-info.json' } | Sort-Object)
+    $expectedSorted = @($expectedPaths.Keys | Sort-Object)
+    if (Compare-Object -ReferenceObject $expectedSorted -DifferenceObject $actualPaths) {
+        throw 'The extracted release package file set does not match its identity manifest.'
+    }
+}
+
 function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $root = [IO.Path]::GetFullPath($Destination).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
@@ -127,11 +192,12 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
         }
     } finally { $archive.Dispose() }
     [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
-    foreach ($name in @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt')) {
+    foreach ($name in @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'm9r-package-info.json', 'INSTALLATION.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Destination $name) -PathType Leaf)) {
             throw "The release package is incomplete; '$name' is missing."
         }
     }
+    Assert-ReleasePackageManifest $Destination
 }
 
 function Get-ManagedWebBrokerPaths {
@@ -269,6 +335,25 @@ function Read-Consent([string]$Prompt) {
     return (Read-Host "$Prompt [y/N]") -match '^(?i:y|yes)$'
 }
 
+function Invoke-M9rEngine([string]$Path, [string[]]$Arguments) {
+    # Windows PowerShell promotes redirected native stderr to an ErrorRecord.
+    # The engine uses stderr for non-fatal migration and compatibility notices,
+    # so the installer must inspect the native exit code instead of allowing
+    # $ErrorActionPreference = Stop to mistake a warning for a failed setup.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $Path @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return [pscustomobject]@{
+        Output = @($output)
+        ExitCode = $exitCode
+    }
+}
+
 function Stop-InstalledM9rPill {
     $overlay = Join-Path (Get-M9rHome) 'bin\m9r-overlay.exe'
     if (-not (Test-Path -LiteralPath $overlay -PathType Leaf)) { return }
@@ -313,8 +398,9 @@ function Invoke-ManagedBrokerUpdate([string]$EnginePath, [ValidateSet('stop', 's
     if (-not (Test-Path -LiteralPath $EnginePath -PathType Leaf)) {
         throw "The M9R engine required to manage the broker update is missing: $EnginePath"
     }
-    $output = @(& $EnginePath web broker-update $Phase 2>&1)
-    $code = $LASTEXITCODE
+    $run = Invoke-M9rEngine $EnginePath @('web', 'broker-update', $Phase)
+    $output = @($run.Output)
+    $code = [int]$run.ExitCode
     foreach ($line in $output) { Write-Host ([string]$line) }
     if ($code -ne 0) { throw "M9R could not safely $Phase the managed Web broker (exit $code). No further installer files were replaced." }
     $resultLine = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^\{.*"phase"\s*:\s*"' + [regex]::Escape($Phase) + '".*\}$' } | Select-Object -Last 1)
@@ -435,8 +521,9 @@ try {
         $dryRunArgs += '--autostart'
         $applyArgs += '--autostart'
     }
-    $plan = @(& $engine @dryRunArgs 2>&1)
-    $planExit = $LASTEXITCODE
+    $planRun = Invoke-M9rEngine $engine $dryRunArgs
+    $plan = @($planRun.Output)
+    $planExit = [int]$planRun.ExitCode
     if ($planExit -ne 0) { $plan | ForEach-Object { Write-Host $_ }; throw "M9R could not prepare its setup plan (exit $planExit). Nothing was installed." }
     foreach ($line in $plan) {
         $text = [string]$line
@@ -444,7 +531,7 @@ try {
         Write-Host $text
     }
     Write-Host ''
-    if (-not (Read-Consent 'Do you approve this exact local setup?')) {
+    if (-not $Yes -and -not (Read-Consent 'Do you approve this exact local setup?')) {
         Write-Host 'Cancelled. No agent configuration was changed.'
         exit 0
     }
@@ -456,8 +543,9 @@ try {
     $brokerStop = Invoke-ManagedBrokerUpdate $engine 'stop'
     $brokerNeedsResume = $brokerStop.managedTask
     Stop-InstalledM9rPill
-    & $engine @applyArgs
-    $setupExit = $LASTEXITCODE
+    $setupRun = Invoke-M9rEngine $engine $applyArgs
+    foreach ($line in @($setupRun.Output)) { Write-Host ([string]$line) }
+    $setupExit = [int]$setupRun.ExitCode
     if ($setupExit -ne 0) { throw "M9R setup exited with code $setupExit. Review the engine output; do not rerun blindly." }
     $installedEngine = Join-Path $env:M9R_HOME 'bin\m9r-engine.exe'
     $brokerResumeEngine = $installedEngine
@@ -474,8 +562,9 @@ try {
         $env:M9R_EXTENSION_SOURCE = $extensionPackage
         Write-Host ''
         Write-Host 'Starting the separate M9R Web setup. It previews its agent/browser changes and asks before applying them.' -ForegroundColor Cyan
-        & $installedEngine web setup
-        $webExit = $LASTEXITCODE
+        $webRun = Invoke-M9rEngine $installedEngine @('web', 'setup')
+        foreach ($line in @($webRun.Output)) { Write-Host ([string]$line) }
+        $webExit = [int]$webRun.ExitCode
         if ($webExit -ne 0) { throw "M9R Web setup exited with code $webExit. Native setup remains installed and can be removed with -Uninstall." }
     }
     $brokerStart = Invoke-ManagedBrokerUpdate $installedEngine 'start'

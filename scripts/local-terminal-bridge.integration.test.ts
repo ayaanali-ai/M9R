@@ -3,12 +3,14 @@ import { spawn } from "node:child_process";
 import test from "node:test";
 import { WebSocket } from "ws";
 import { BRIDGE_PROTOCOL_VERSION } from "../src/lib/local-terminal-protocol.ts";
+import { bridgeTokenProtocol, createBridgeToken } from "../src/lib/local-terminal-bridge-core.ts";
 
 test("the real runtime rejects unauthenticated HTTP state mutation and accepts state changes on an authorized provider socket", { timeout: 60_000 }, async () => {
   const port = 43119;
+  const bridgeToken = createBridgeToken();
   const child = spawn(process.execPath, ["--import", "tsx", "scripts/oathlock-terminal-bridge.ts"], {
     cwd: process.cwd(),
-    env: { ...process.env, OATHLOCK_BRIDGE_PORT: String(port), OATHLOCK_BRIDGE_ORIGINS: "http://localhost:3000" },
+    env: { ...process.env, M9R_BRIDGE_PORT: String(port), M9R_BRIDGE_ORIGINS: "http://localhost:3000", M9R_BRIDGE_TOKEN: bridgeToken },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -36,8 +38,15 @@ test("the real runtime rejects unauthenticated HTTP state mutation and accepts s
     });
     assert.equal(unauthenticated.status, 404);
 
-    const message = await new Promise<Record<string, unknown>>((resolve, reject) => {
+    const unauthorizedSocket = await new Promise<boolean>((resolve) => {
       const ws = new WebSocket(`ws://127.0.0.1:${port}/terminal`, [BRIDGE_PROTOCOL_VERSION, "oathlock-provider.codex"], { origin: "http://localhost:3000" });
+      ws.once("open", () => { ws.close(); resolve(false); });
+      ws.once("error", () => resolve(true));
+    });
+    assert.equal(unauthorizedSocket, true, "a loopback client without the bridge token must be rejected");
+
+    const message = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/terminal`, [BRIDGE_PROTOCOL_VERSION, "oathlock-provider.codex", bridgeTokenProtocol(bridgeToken)], { origin: "http://localhost:3000" });
       let sessionId = "";
       ws.on("message", (data) => {
         const parsed = JSON.parse(String(data)) as Record<string, unknown>;

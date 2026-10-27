@@ -1160,7 +1160,7 @@ test("doctor fails cleanly when there is no token", async () => {
 
   assert.equal(code, 1);
   const text = out.join("\n");
-  assert.match(text, /\[FAIL\] .*local\.json exists/);
+  assert.match(text, /\[FAIL\] .*user-scoped M9R credential store exists/);
   assert.match(text, /\[FAIL\] token present/);
   assert.equal(requests.length, 0, "doctor must not call the API without a token");
 });

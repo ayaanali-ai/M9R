@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    [switch]$RequireSignedExecutables,
+    [switch]$RequireCleanSource,
+    [string]$ExpectedSignerThumbprint
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +14,7 @@ $assets = @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-
 $overlay = Join-Path $dist 'm9r-overlay.exe'
 $extension = Join-Path $root 'cli\dist\extension'
 $cuaRuntime = Join-Path $dist 'cua-driver-runtime'
+$packageManifestScript = Join-Path $PSScriptRoot 'release-package-manifest.mjs'
 $destination = [IO.Path]::GetFullPath($OutputDirectory)
 
 if (-not (Test-Path -LiteralPath $dist -PathType Container)) { throw 'engine/dist is missing. Run npm run build:engine on Windows first.' }
@@ -19,6 +23,15 @@ foreach ($asset in $assets) {
 }
 if (-not (Test-Path -LiteralPath $overlay -PathType Leaf)) {
     throw 'Required release binary is missing: engine/dist/m9r-overlay.exe. Build the M9R desktop pill, then run npm run build:engine before packaging the standalone release.'
+}
+if ($RequireSignedExecutables) {
+    if ($ExpectedSignerThumbprint -notmatch '^[a-fA-F0-9]{40}$') { throw 'Signed release mode requires the expected publisher certificate thumbprint.' }
+    foreach ($binary in @($assets | Where-Object { $_ -like '*.exe' }) + @('m9r-overlay.exe')) {
+        $signature = Get-AuthenticodeSignature -LiteralPath (Join-Path $dist $binary)
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $ExpectedSignerThumbprint) {
+            throw "Release executable lacks a valid signature from the expected publisher: $binary"
+        }
+    }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $extension 'manifest.json') -PathType Leaf)) { throw 'cli/dist/extension is missing. Run npm run build:cli first.' }
 foreach ($runtimeFile in @(
@@ -63,7 +76,7 @@ Requirements: 64-bit Windows and PowerShell 5.1 or newer. Node.js and npm are no
 Before extracting, verify the ZIP hash against m9r-engine-windows-x64.zip.sha256:
   Get-FileHash .\m9r-engine-windows-x64.zip -Algorithm SHA256
 
-The executables and the M9R desktop pill are currently unsigned; a matching SHA-256 checksum detects corruption but does not prove publisher identity. After verifying and extracting the archive, review install-m9r.ps1. If Windows marks it as downloaded, use the file's Properties > Unblock control, then double-click install-m9r.cmd (or run the PowerShell script normally; do not pipe downloaded code into PowerShell). To install the exact ZIP you verified, point -PackagePath at it; otherwise the script fetches the latest stable release and verifies that download itself:
+A matching SHA-256 checksum detects corruption but does not prove publisher identity. Production release packaging requires valid signatures from the configured publisher on every M9R executable; local development packages may be unsigned. Verify the publisher signatures separately. After verifying and extracting the archive, review install-m9r.ps1. If Windows marks it as downloaded, use the file's Properties > Unblock control, then double-click install-m9r.cmd (or run the PowerShell script normally; do not pipe downloaded code into PowerShell). To install the exact ZIP you verified, point -PackagePath at it; otherwise the script fetches the latest stable release and verifies that download itself:
   .\install-m9r.ps1 -PackagePath ..\m9r-engine-windows-x64.zip
 
 The installer shows the engine's exact local setup plan and asks before editing agent configuration. It adds the M9R desktop pill to this Windows user's sign-in startup by default; pass -NoAutostart to opt out. The pill supervises the local engine. The installer honors M9R_HOME consistently for the engine, broker, setup, and uninstall.
@@ -75,6 +88,22 @@ Uninstall the managed setup (review the plan before confirming):
 
 This package does not request administrator privileges. Setup changes are recorded by the engine for reversible removal. It does not purge local M9R data.
 '@ | Set-Content -LiteralPath (Join-Path $stage 'INSTALLATION.txt') -Encoding UTF8
+
+    if (-not (Test-Path -LiteralPath $packageManifestScript -PathType Leaf)) {
+        throw "Release package manifest verifier is missing: $packageManifestScript"
+    }
+    $manifestArgs = @($packageManifestScript, '--create', '--root', $stage)
+    if ($RequireCleanSource) { $manifestArgs += '--require-clean-source' }
+    $manifestOutput = & node @manifestArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release package manifest validation failed: $($manifestOutput -join [Environment]::NewLine)"
+    }
+    $verifyManifestArgs = @($packageManifestScript, '--verify', '--root', $stage)
+    if ($RequireCleanSource) { $verifyManifestArgs += '--require-clean-source' }
+    $verifyManifestOutput = & node @verifyManifestArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release package manifest verification failed: $($verifyManifestOutput -join [Environment]::NewLine)"
+    }
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = Join-Path $destination 'm9r-engine-windows-x64.zip'

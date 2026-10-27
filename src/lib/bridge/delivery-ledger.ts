@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { TERMINAL_STATES, type DeliveryState } from "../delivery-state";
 
@@ -153,14 +153,27 @@ export class DeliveryLedger {
   }
 
   private rewrite(entries: LedgerEntry[]): boolean {
+    const temp = `${this.path}.tmp`;
+    const content = entries.map((entry) => JSON.stringify(entry)).join("\n") + (entries.length ? "\n" : "");
     try {
-      const temp = `${this.path}.tmp`;
-      writeFileSync(temp, entries.map((entry) => JSON.stringify(entry)).join("\n") + (entries.length ? "\n" : ""), "utf8");
-      renameSync(temp, this.path);
+      writeFileSync(temp, content, "utf8");
+      try {
+        renameSync(temp, this.path);
+      } catch {
+        // Windows does not replace an existing destination for fs.renameSync.
+        // The fully-written temp file is still the durable source of truth, so
+        // overwrite the existing ledger from it rather than silently retaining
+        // expired history. The ledger is owned by one bridge process; this
+        // fallback preserves a complete target file and removes its staging
+        // file after the copy.
+        copyFileSync(temp, this.path);
+      }
       return true;
     } catch {
       // Keeping the old file is safe: it is only larger than intended.
       return false;
+    } finally {
+      try { rmSync(temp, { force: true }); } catch { /* best-effort staging cleanup */ }
     }
   }
 }

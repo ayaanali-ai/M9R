@@ -16,12 +16,14 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:net";
 import { dirname, resolve, join } from "node:path";
-import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 
 const repoRoot = process.cwd();
 const distDir = resolve(repoRoot, "cli", "dist");
+const testScratchRoot = resolve(repoRoot, ".test-tmp");
+mkdirSync(testScratchRoot, { recursive: true });
 
 // Build once before the suite (mirrors prepack).
 execFileSync("node", [resolve(repoRoot, "scripts", "build-cli.mjs")], { stdio: "pipe" });
@@ -32,6 +34,22 @@ const pkg = JSON.parse(readFileSync(resolve(repoRoot, "cli", "package.json"), "u
 const core = await import(pathToFileURL(resolve(distDir, "oathlock-cli-core.js")).href);
 
 const EXTERNAL_CWD = "/external/workspace";
+
+async function freeLoopbackPort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolvePort, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => resolvePort());
+  });
+  const address = probe.address();
+  if (!address || typeof address === "string") {
+    probe.close();
+    throw new Error("the test could not reserve a loopback port");
+  }
+  const port = address.port;
+  await new Promise<void>((resolveClose, rejectClose) => probe.close((error) => error ? rejectClose(error) : resolveClose()));
+  return port;
+}
 
 async function removeTempWorkspace(workspace: string): Promise<void> {
   // The runtime deliberately detaches its watchdog so it can survive a
@@ -199,10 +217,14 @@ test("managed extension refresh changes only owned extension files and preserves
   // Keep the simulated LOCALAPPDATA on the same writable volume as this
   // checkout. Some Windows sandboxes redirect the system temp directory into
   // an AppContainer that allows writes but denies atomic replacement renames.
-  const fixtureRoot = resolve(repoRoot, ".workcache", "cli-package-fixtures");
-  mkdirSync(fixtureRoot, { recursive: true });
+  const scratchRoot = resolve(repoRoot, ".test-tmp");
+  mkdirSync(scratchRoot, { recursive: true });
+  const fixtureRoot = mkdtempSync(join(scratchRoot, "oathlock-cli-package-fixtures-"));
   const temporaryRoot = mkdtempSync(join(fixtureRoot, "m9r-extension-refresh-"));
-  const home = join(temporaryRoot, "home");
+  // Keep the fixture on the checkout's known writable volume. This test uses
+  // an explicit M9R_HOME only for the packaged web-update command and never
+  // calls the production workspace credential resolver.
+  const home = mkdtempSync(join(fixtureRoot, "m9r-extension-home-"));
   const localAppData = join(temporaryRoot, "local-app-data");
   const source = join(temporaryRoot, "source-extension");
   const extensionPath = join(localAppData, "M9R", "extension");
@@ -255,11 +277,11 @@ test("managed extension refresh changes only owned extension files and preserves
       M9R_EXTENSION_SOURCE: source,
     };
     const cli = resolve(distDir, "m9r.js");
-    const dryRun = execFileSync(process.execPath, [cli, "web", "update-extension", "--dry-run"], { cwd: repoRoot, env, encoding: "utf8" });
+    const dryRun = execFileSync(process.execPath, [cli, "web", "update-extension", "--dry-run"], { cwd: temporaryRoot, env, encoding: "utf8" });
     assert.match(dryRun, /2 update, 1 unchanged, 2 preserved/);
     assert.equal(readFileSync(join(extensionPath, "src", "content.js"), "utf8"), "old managed content", "dry-run must not write");
 
-    const applied = execFileSync(process.execPath, [cli, "web", "update-extension", "--yes"], { cwd: repoRoot, env, encoding: "utf8" });
+    const applied = execFileSync(process.execPath, [cli, "web", "update-extension", "--yes"], { cwd: temporaryRoot, env, encoding: "utf8" });
     assert.match(applied, /\[UPDATED\] src\/content\.js/);
     assert.match(applied, /\[KEEP\] Preserved changed or untracked extension file: src\/edited\.js/);
     assert.match(applied, /\[KEEP\] Preserved changed or untracked extension file: src\/untracked\.js/);
@@ -274,6 +296,7 @@ test("managed extension refresh changes only owned extension files and preserves
     assert.equal(updatedManifest.extensionFiles.find((file) => file.path === join(extensionPath, "src", "new.js"))?.hash, hash(desiredNew));
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -285,10 +308,10 @@ test("built mission bridge runtime has no unresolved monorepo source imports", (
 });
 
 test("packed CLI entry boots the terminal runtime without printing a pairing secret", { timeout: 20_000 }, async () => {
-  const port = 43_120;
+  const port = await freeLoopbackPort();
   const child = spawn(process.execPath, [resolve(distDir, "m9r.js"), "terminal", "bridge"], {
     cwd: repoRoot,
-    env: { ...process.env, OATHLOCK_BRIDGE_PORT: String(port) },
+    env: { ...process.env, M9R_BRIDGE_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -319,9 +342,15 @@ test("packed CLI entry boots the terminal runtime without printing a pairing sec
 });
 
 test("packed CLI runtime uses the compiled mission runner for connected providers", { timeout: 20_000 }, async () => {
-  const port = 43_121;
-  const workspace = mkdtempSync(resolve(tmpdir(), "oathlock-cli-runtime-"));
-  const localTokenPath = resolve(workspace, ".m9r", "agents", "codex", "local.json");
+  const port = await freeLoopbackPort();
+  const workspace = mkdtempSync(join(testScratchRoot, "oathlock-cli-runtime-"));
+  const home = mkdtempSync(join(testScratchRoot, "oathlock-cli-runtime-home-"));
+  const normalizedWorkspace = workspace.replaceAll("\\", "/").replace(/\/+$/, "");
+  const workspaceKey = createHash("sha256")
+    .update(process.platform === "win32" ? normalizedWorkspace.toLowerCase() : normalizedWorkspace)
+    .digest("hex")
+    .slice(0, 32);
+  const localTokenPath = resolve(home, ".m9r", "workspaces", workspaceKey, "agents", "codex", "local.json");
   mkdirSync(dirname(localTokenPath), { recursive: true });
   // The token only exercises provider discovery. ACP is disabled for this
   // fixture, so the child exits before making any network or provider call.
@@ -334,7 +363,21 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
     // metadata sync from the OS home directory, independently of cwd.
     // Do not let startup recovery discover or launch the developer's globally
     // installed provider CLIs while this packaging test is running.
-    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, PATH: workspace, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", OATHLOCK_BRIDGE_PORT: String(port) },
+    env: {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      M9R_HOME: join(home, ".m9r"),
+      // Keep the packaged runtime from probing or launching the developer's
+      // real OpenCode installation while this concurrent test owns the temp
+      // profile. The backfill loop remains covered by its unit tests.
+      M9R_OPENCODE_EXE: join(workspace, "missing-opencode.exe"),
+      M9R_TEST_DISABLE_PROVIDER_UPDATE_MONITOR: "1",
+      PATH: workspace,
+      ACP_BRIDGE_ENABLED: "false",
+      M9R_TEST_DISABLE_WATCHDOG: "1",
+      M9R_BRIDGE_PORT: String(port),
+    },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -379,15 +422,19 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
       await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
     }
     await removeTempWorkspace(workspace);
+    // The runtime applies its normal M9R_HOME ACL policy to this test-owned
+    // directory too. Use the same bounded cleanup path so a short-lived child
+    // handle cannot turn a passing runtime test into an EPERM failure.
+    await removeTempWorkspace(home);
   }
 });
 
 test("packed CLI local-only runtime starts without a hosted token or mission bridge", { timeout: 20_000 }, async () => {
-  const port = 43_122;
-  const workspace = mkdtempSync(resolve(tmpdir(), "m9r-cli-local-only-"));
+  const port = await freeLoopbackPort();
+  const workspace = mkdtempSync(join(testScratchRoot, "m9r-cli-local-only-"));
   const child = spawn(process.execPath, [resolve(distDir, "m9r.js"), "terminal", "runtime", "--local-only"], {
     cwd: workspace,
-    env: { ...process.env, OATHLOCK_BRIDGE_PORT: String(port), M9R_TEST_DISABLE_WATCHDOG: "1" },
+    env: { ...process.env, M9R_BRIDGE_PORT: String(port), M9R_TEST_DISABLE_WATCHDOG: "1" },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });

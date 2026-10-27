@@ -12,12 +12,14 @@ jobs:
   windows-x64-release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, verified 2026-10-23
+        with:
+          toolchain: stable
       - run: npm ci
       - run: npm --prefix pill ci
       - run: npm --prefix overlay ci
@@ -27,7 +29,11 @@ jobs:
       - run: node --test ./scripts/install-m9r.test.mjs
       - name: Package standalone installer assets
         shell: pwsh
-        run: ./scripts/package-engine-release.ps1 -OutputDirectory "$env:RUNNER_TEMP/m9r-release"
+        env:
+          M9R_SIGNER_THUMBPRINT: ${{ vars.M9R_SIGNER_THUMBPRINT }}
+        # Publishing remains blocked until a signing step signs the built M9R binaries.
+        # Setting a thumbprint alone is insufficient: packaging verifies every signature.
+        run: ./scripts/package-engine-release.ps1 -OutputDirectory "$env:RUNNER_TEMP/m9r-release" -RequireSignedExecutables -RequireCleanSource -ExpectedSignerThumbprint "$env:M9R_SIGNER_THUMBPRINT"
       - name: Publish GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}

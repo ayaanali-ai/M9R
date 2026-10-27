@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateAgent, bearerFrom } from "@/lib/agent-join-service";
 import { recordWorkspaceFileActivity } from "@/lib/bridge/workspace-file-activity-service";
+import { isSensitiveTerminalWatchPath } from "@/lib/local-terminal-bridge-core";
 import { handleAgentError } from "../_shared";
 
 const MAX_EVENTS_PER_REQUEST = 200;
@@ -54,7 +55,12 @@ export async function POST(req: NextRequest) {
       filePath: event.filePath,
       activityKind: event.activityKind,
       status: "succeeded",
-      newText: event.activityKind === "delete" ? null : (event.newText?.slice(0, MAX_CONTENT_CHARS) ?? null),
+      // The resident watcher normally filters these paths before reading, but
+      // enforce the boundary again at the API so a direct caller cannot send
+      // secret file contents around the watcher-side filter.
+      newText: event.activityKind === "delete" || isSensitiveTerminalWatchPath(event.filePath)
+        ? null
+        : (event.newText?.slice(0, MAX_CONTENT_CHARS) ?? null),
       source: "fs_watch",
     })));
 

@@ -1,17 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   backfillOpenCodeCapture,
+  opencodeCaptureExecutable,
+  openCodeSessionExportArgs,
+  openCodeSessionListArgs,
   parseOpenCodeExportOutput,
   parseOpenCodeSessionListOutput,
   opencodeBackfillCursorPath,
   type OpenCodeCommandRunner,
 } from "../src/lib/opencode-capture-backfill-core.ts";
 import { drainCaptureSpool, spoolPath } from "../src/lib/cross-agent-capture-core.ts";
+import { opencodeExecutablePath } from "../src/lib/native/opencode-executable.ts";
 
 function commandRunner(responses: Record<string, string>): OpenCodeCommandRunner {
   return async (args) => {
@@ -28,6 +32,33 @@ test("OpenCode session list/export parsers tolerate the CLI's status preamble", 
 
   const exported = parseOpenCodeExportOutput('Exporting session: ses_1\n{"info":{"id":"ses_1"},"messages":[]}');
   assert.deepEqual(exported, { info: { id: "ses_1" }, messages: [] });
+});
+
+test("OpenCode recovery uses the current CLI contract and does not send removed or invalid flags", () => {
+  assert.deepEqual(openCodeSessionListArgs(20), [
+    "session", "list", "--format", "json", "--max-count", "20", "--log-level", "error",
+  ]);
+  assert.deepEqual(openCodeSessionExportArgs("ses_1"), [
+    "export", "ses_1", "--log-level", "error",
+  ]);
+});
+
+test("OpenCode capture resolves the current real executable from PATH without a shell shim", async () => {
+  const testRoot = join(process.cwd(), ".test-tmp");
+  await mkdir(testRoot, { recursive: true });
+  const root = await mkdtemp(join(testRoot, "m9r-opencode-executable-"));
+  const executable = join(root, "node_modules", "@opencode", "cli", "bin", "opencode.exe");
+  try {
+    await mkdir(dirname(executable), { recursive: true });
+    await writeFile(executable, "fixture", "utf8");
+    assert.equal(opencodeCaptureExecutable({ PATH: root }), executable);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit OpenCode executable path is authoritative and cannot fall through to another install", () => {
+  assert.equal(opencodeExecutablePath({ M9R_OPENCODE_EXE: "C:\\missing\\opencode.exe", APPDATA: "C:\\Users\\owner\\AppData\\Roaming", PATH: "C:\\Users\\owner\\AppData\\Roaming\\npm" }), null);
 });
 
 test("backfill queues a persisted OpenCode session after the process is gone, then the normal drainer writes memory", async () => {

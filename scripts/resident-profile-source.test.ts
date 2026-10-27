@@ -5,8 +5,9 @@ import { applyResidentCredential, refreshResidentProfile, residentCredentialPath
 
 test("resident credentials prefer the provider-specific OathLock connection", () => {
   const paths = residentCredentialPaths("C:\\repo", "claude-code");
-  assert.match(paths[0].replace(/\\/g, "/"), /\.m9r\/agents\/claude-code\/local\.json$/);
-  assert.match(paths[1].replace(/\\/g, "/"), /\.m9r\/local\.json$/);
+  assert.equal(paths.length, 1);
+  assert.match(paths[0].replace(/\\/g, "/"), /workspaces\/[^/]+\/agents\/claude-code\/local\.json$/);
+  assert.doesNotMatch(paths[0].replace(/\\/g, "/"), /C:\/repo/);
 });
 
 test("current connection credential overrides a stale copied resident token", () => {

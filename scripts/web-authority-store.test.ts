@@ -11,7 +11,7 @@ const bob = { owner: "bob", agent: "claude" };
 const site = "https://shop.example";
 
 function withStore(run: (root: string) => void): void {
-  const fixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures");
+  const fixtureRoot = resolve(process.cwd(), ".test-tmp", "native-test-fixtures");
   mkdirSync(fixtureRoot, { recursive: true });
   const root = mkdtempSync(join(fixtureRoot, "m9r-web-authority-"));
   try {

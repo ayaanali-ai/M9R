@@ -1,21 +1,26 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { HOOK_RUNTIME_FILES, nativeStatus, nativePaths, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
+import { HOOK_RUNTIME_FILES, createNativeDeliveryPump, nativeStatus, nativePaths, runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
 import { createLocalStore } from "@/lib/native/local-store";
 import { createPageNotesStore } from "@/lib/native/page-notes-store";
 import { projectRoomId } from "@/lib/native/project-room";
 import { ONBOARDING_STEPS, renderStepsMarkdown } from "@/lib/native/onboarding-steps";
+import { createRuntimeBuildInfo } from "@/lib/native/runtime-build-identity";
 
 const autostartCalls: string[] = [];
 let autostartOn = false;
+const brokerAutostartCalls: string[] = [];
 // Every test gets a fake: nothing here may ever touch the real Windows registry.
 const fakeAutostart = { enable: (c: string) => { autostartCalls.push(`enable ${c}`); autostartOn = true; return true; }, disable: () => { autostartCalls.push("disable"); autostartOn = false; }, isOn: () => autostartOn };
 
-function sandbox(opts: { confirm?: boolean | "none" } = {}) {
-  const home = mkdtempSync(join(tmpdir(), "m9r-home-"));
+function sandbox(opts: { confirm?: boolean | "none"; tempRoot?: string } = {}) {
+  const tempRoot = opts.tempRoot ?? tmpdir();
+  mkdirSync(tempRoot, { recursive: true });
+  const home = mkdtempSync(join(tempRoot, "m9r-home-"));
   const hookEntry = join(home, "m9r-hook.js");
   writeFileSync(hookEntry, "// stand-in hook program", "utf8");
   const out: string[] = [];
@@ -27,6 +32,14 @@ function sandbox(opts: { confirm?: boolean | "none" } = {}) {
     err: (l) => err.push(l),
     confirm: opts.confirm === "none" ? undefined : async () => opts.confirm !== false,
     autostart: fakeAutostart,
+    installLocalBrokerAutostart: async () => {
+      brokerAutostartCalls.push("install");
+      return { ok: true, message: "broker installed" };
+    },
+    removeLocalBrokerAutostart: async () => {
+      brokerAutostartCalls.push("remove");
+      return { ok: true, message: "broker removed" };
+    },
   };
   const p = nativePaths(io);
   return { home, io, out, err, p, run: (cmd: string, args: string[] = []) => runNativeCommand(cmd, args, io), done: () => rmSync(home, { recursive: true, force: true }) };
@@ -228,7 +241,48 @@ test("status flags provider sessions that cannot receive targeted delivery witho
   assert.match(missing?.label ?? "", /lack a live M9R identity/);
   store.issueIdentity("codex", "codex", "codex-no-token");
   const healthy = nativeStatus(s.io).find((row) => row.id === "target-identities");
-  assert.equal(healthy?.state, "ok");
+  assert.equal(healthy?.state, "info", "a retained identity does not prove current-turn binding");
+  assert.match(healthy?.label ?? "", /stored M9R identities.*current-turn binding is not verified/i);
+  s.done();
+});
+
+test("status does not tell the owner to restart retained historical sessions", () => {
+  const s = sandbox();
+  const store = createLocalStore(s.p.m9r);
+  store.registerEndpoint({ provider: "opencode", sessionId: "opencode-old", cwd: s.home, seenAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString() });
+
+  const identity = nativeStatus(s.io).find((row) => row.id === "target-identities");
+  assert.equal(identity?.state, "info");
+  assert.match(identity?.label ?? "", /No recently active provider sessions/);
+  assert.equal(identity?.fix, undefined);
+  s.done();
+});
+
+test("status does not repeat first-time new-session guidance after an endpoint is known", async () => {
+  const s = sandbox();
+  createLocalStore(s.p.m9r).registerEndpoint({ provider: "opencode", sessionId: "opencode-existing", cwd: s.home });
+  await s.run("setup", ["--status"]);
+
+  assert.doesNotMatch(s.out.join("\n"), /Start a new Claude Code session/);
+  s.out.length = 0;
+  await s.run("setup", ["--yes"]);
+  assert.doesNotMatch(s.out.join("\n"), /Start a new Claude Code session/);
+  s.done();
+});
+
+test("status does not count expired or already-pushed history as waiting inbox work", () => {
+  const s = sandbox();
+  const store = createLocalStore(s.p.m9r);
+  store.registerEndpoint({ provider: "codex", sessionId: "codex-status", cwd: s.home });
+  const stale = store.addTask({ from: "you", to: "codex", goal: "old work", origin: "human_typed", idempotencyKey: "old-status" }).task;
+  store.setDelivery(stale.id, { state: "queued", threadId: "codex-status" });
+  const statePath = join(s.p.m9r, "state.json");
+  const state = JSON.parse(readFileSync(statePath, "utf8")) as { tasks: Array<{ id: string; createdAt: string }> };
+  state.tasks.find((task) => task.id === stale.id)!.createdAt = new Date(Date.now() - 31 * 60_000).toISOString();
+  writeFileSync(statePath, JSON.stringify(state), "utf8");
+
+  const pending = nativeStatus(s.io).find((row) => row.id === "pending");
+  assert.equal(pending, undefined, "historical pushed work must not be shown as an inbox item");
   s.done();
 });
 
@@ -319,6 +373,8 @@ test("when Codex is installed, setup also adds its hooks and standing block, kee
   const hooks = JSON.parse(readFileSync(s.p.codexHooks, "utf8"));
   assert.equal(hooks.hooks.Stop[0].hooks[0].command, "node my-own-hook.js", "the user's own hook is untouched");
   assert.match(hooks.hooks.UserPromptSubmit[0].hooks[0].command, /m9r-hook.* UserPromptSubmit codex$/);
+  assert.match(hooks.hooks.Interrupt[0].hooks[0].command, /m9r-hook.* Interrupt codex$/);
+  assert.match(hooks.hooks.SessionEnd[0].hooks[0].command, /m9r-hook.* SessionEnd codex$/);
   assert.match(readFileSync(s.p.codexAgents, "utf8"), /^# Codex rules\nBe brief\.\n\n<!-- M9R:STANDING-INSTRUCTION:START/);
   assert.equal(nativeStatus(s.io).find((r) => r.id === "codex-hooks")?.state, "ok");
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
@@ -354,6 +410,38 @@ test("with the engine, setup copies it into M9R's folder and the hooks call it (
   s.done();
 });
 
+test("setup records verified runtime provenance and repairs stale active-runtime metadata without restarting the daemon", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  const engineBytes = Buffer.from("verified stand-in engine", "utf8");
+  writeFileSync(engine, engineBytes);
+  const engineHash = createHash("sha256").update(engineBytes).digest("hex");
+  writeFileSync(join(s.home, "m9r-build-info.json"), JSON.stringify(createRuntimeBuildInfo(
+    { "m9r-engine.exe": engineHash },
+    "2026-10-16T00:00:00.000Z",
+    { sourceCommit: "source-commit-1", sourceDirty: false },
+  )));
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const first = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { activeRuntime?: { buildId: string; sourceCommit: string; sourceDirty: boolean; installedRoot: string; stateRoot: string } };
+  assert.equal(first.activeRuntime?.sourceCommit, "source-commit-1");
+  assert.equal(first.activeRuntime?.sourceDirty, false);
+  assert.equal(first.activeRuntime?.installedRoot, join(s.p.m9r, "bin"));
+  assert.equal(first.activeRuntime?.stateRoot, s.p.m9r);
+
+  first.activeRuntime!.sourceCommit = "stale-commit";
+  writeFileSync(s.p.manifest, JSON.stringify(first, null, 2) + "\n", "utf8");
+  s.out.length = 0;
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const repaired = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { activeRuntime?: { sourceCommit: string } };
+  assert.equal(repaired.activeRuntime?.sourceCommit, "source-commit-1");
+  assert.match(s.out.join("\n"), /reconcile the verified installed runtime identity/i);
+  s.done();
+});
+
 test("an engine update removes dead retired-image entries from the install ownership manifest", async () => {
   const s = sandbox();
   const engine = join(s.home, "m9r-engine.exe");
@@ -378,6 +466,36 @@ test("an engine update removes dead retired-image entries from the install owner
   assert.equal(existsSync(removableRetired), false, "the runtime update prunes an unlocked retired image");
   assert.equal(after.runtimeFiles.includes(missingRetired), false, "missing retired images are removed from ownership metadata");
   assert.equal(after.runtimeFiles.includes(removableRetired), false, "pruned retired images are removed from ownership metadata");
+  s.done();
+});
+
+test("a no-op setup retries cleanup of owned retired runtime images and reconciles their manifest entries", async () => {
+  const s = sandbox();
+  const engine = join(s.home, "m9r-engine.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+
+  const bin = join(s.p.m9r, "bin");
+  const retired = join(bin, "m9r-engine.exe.m9r-retired-previous-unlocked");
+  writeFileSync(retired, "stale engine image", "utf8");
+  const before = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { runtimeFiles: string[] };
+  before.runtimeFiles.push(retired);
+  writeFileSync(s.p.manifest, JSON.stringify(before, null, 2) + "\n", "utf8");
+
+  s.out.length = 0;
+  assert.equal(await s.run("setup", ["--dry-run"]), 0);
+  assert.match(s.out.join("\n"), /retry cleanup of 1 M9R-owned retired runtime image/i);
+  assert.equal(existsSync(retired), true, "dry-run never deletes a retired image");
+
+  s.out.length = 0;
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  const after = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { runtimeFiles: string[] };
+  assert.equal(existsSync(retired), false, "an unlocked retired image is removed on no-op setup");
+  assert.equal(after.runtimeFiles.includes(retired), false, "the stale ownership record is removed after deletion");
+  assert.match(s.out.join("\n"), /removed 1 unlocked retired runtime image/i);
   s.done();
 });
 
@@ -418,25 +536,37 @@ test("with the engine and the native hook side by side, the settings point at th
   s.done();
 });
 
-test("with the engine, setup registers the M9R MCP server for Claude (and Codex, when installed), keeps every other registered server, and uninstall removes only ours", async () => {
+test("with the engine, setup registers the M9R MCP server for Claude at both effective scopes, keeps every other server, and uninstall removes only ours", async () => {
   const s = sandbox();
   const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, "m9r-hook.exe");
   writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in stable launcher", "utf8");
   delete s.io.env.M9R_HOOK_ENTRY;
   s.io.env.M9R_ENGINE = engine;
   mkdirSync(s.p.codex, { recursive: true });
   mkdirSync(s.p.claude, { recursive: true });
   writeFileSync(s.p.codexConfig, "[mcp_servers.github]\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-github\"]\n", "utf8");
   writeFileSync(s.p.claudeMcp, JSON.stringify({ mcpServers: { other: { command: "npx", args: ["-y", "other-server"] } } }), "utf8");
+  writeFileSync(s.p.claudeGlobalMcp, JSON.stringify({ mcpServers: {
+    otherGlobal: { command: "npx", args: ["-y", "other-global-server"] },
+    m9r: { command: engine, args: ["mcp"], env: { M9R_HOME: s.p.m9r }, },
+  } }), "utf8");
 
   assert.equal(await s.run("setup", ["--yes"]), 0);
 
   const claudeMcp = JSON.parse(readFileSync(s.p.claudeMcp, "utf8"));
   assert.deepEqual(claudeMcp.mcpServers.other, { command: "npx", args: ["-y", "other-server"] }, "an already-registered server is left alone");
-  assert.match(claudeMcp.mcpServers.m9r.command, /m9r-engine(\.exe)?$/);
+  assert.match(claudeMcp.mcpServers.m9r.command, /m9r-hook\.exe$/);
   assert.deepEqual(claudeMcp.mcpServers.m9r.args, ["mcp"]);
   assert.equal(claudeMcp.mcpServers.m9r.env.M9R_HOME, s.p.m9r);
   assert.equal(claudeMcp.mcpServers.m9r.env.M9R_WEB_BROKER_PORT, "47821");
+
+  const claudeGlobalMcp = JSON.parse(readFileSync(s.p.claudeGlobalMcp, "utf8"));
+  assert.deepEqual(claudeGlobalMcp.mcpServers.otherGlobal, { command: "npx", args: ["-y", "other-global-server"] }, "the user-level config preserves other servers");
+  assert.match(claudeGlobalMcp.mcpServers.m9r.command, /m9r-hook\.exe$/);
+  assert.deepEqual(claudeGlobalMcp.mcpServers.m9r.args, ["mcp"]);
+  assert.equal(claudeGlobalMcp.mcpServers.m9r.env.M9R_PROVIDER, "claude-code");
 
   const codexConfig = readFileSync(s.p.codexConfig, "utf8");
   assert.match(codexConfig, /\[mcp_servers\.github\]/);
@@ -454,9 +584,181 @@ test("with the engine, setup registers the M9R MCP server for Claude (and Codex,
   const claudeMcpAfter = JSON.parse(readFileSync(s.p.claudeMcp, "utf8"));
   assert.ok(!("m9r" in claudeMcpAfter.mcpServers), "our entry is gone");
   assert.deepEqual(claudeMcpAfter.mcpServers.other, { command: "npx", args: ["-y", "other-server"] }, "the other server survives uninstall");
+  const claudeGlobalAfter = JSON.parse(readFileSync(s.p.claudeGlobalMcp, "utf8"));
+  assert.deepEqual(claudeGlobalAfter.mcpServers.m9r, { command: engine, args: ["mcp"], env: { M9R_HOME: s.p.m9r } }, "the pre-existing user-level M9R entry is restored exactly");
+  assert.deepEqual(claudeGlobalAfter.mcpServers.otherGlobal, { command: "npx", args: ["-y", "other-global-server"] }, "the user-level other server survives uninstall");
   const codexConfigAfter = readFileSync(s.p.codexConfig, "utf8");
   assert.doesNotMatch(codexConfigAfter, /\[mcp_servers\.m9r\]/);
   assert.match(codexConfigAfter, /\[mcp_servers\.github\]/);
+  s.done();
+});
+
+test("with the engine, native setup maintains OpenCode's MCP entry and identity plugin without touching other config", async () => {
+  const s = sandbox();
+  const p = s.p as typeof s.p & { opencodeConfig: string; opencodePlugin: string };
+  const opencodeDirectory = join(s.home, ".config", "opencode");
+  mkdirSync(opencodeDirectory, { recursive: true });
+  writeFileSync(p.opencodeConfig, JSON.stringify({ mcp: { github: { type: "local", command: ["gh-mcp"] } }, theme: "dark" }, null, 2) + "\n", "utf8");
+
+  const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, "m9r-hook.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in stable launcher", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  s.io.env.M9R_OPENCODE_VERSION = "1.19.0";
+
+  assert.equal(await s.run("setup", ["--agents", "opencode", "--yes"]), 0);
+  const config = JSON.parse(readFileSync(p.opencodeConfig, "utf8")) as {
+    mcp: Record<string, { enabled?: boolean; command?: string[]; environment?: Record<string, string> }>;
+    theme: string;
+  };
+  assert.equal(config.theme, "dark");
+  assert.deepEqual(config.mcp.github, { type: "local", command: ["gh-mcp"] });
+  assert.equal(config.mcp.m9r.enabled, true);
+  assert.deepEqual(config.mcp.m9r.command, [join(s.p.m9r, "bin", "m9r-hook.exe").replaceAll("\\", "/"), "mcp"]);
+  assert.equal(config.mcp.m9r.environment?.M9R_PROVIDER, "opencode");
+  assert.equal(existsSync(p.opencodePlugin), true);
+  assert.match(readFileSync(p.opencodePlugin, "utf8"), /OpenCodePoll/);
+
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  const after = JSON.parse(readFileSync(p.opencodeConfig, "utf8")) as {
+    mcp: Record<string, { enabled?: boolean; command?: string[]; environment?: Record<string, string> }>;
+    theme: string;
+  };
+  assert.equal(after.theme, "dark");
+  assert.deepEqual(after.mcp.github, { type: "local", command: ["gh-mcp"] });
+  assert.equal("m9r" in after.mcp, false);
+  assert.equal(existsSync(p.opencodePlugin), false);
+  s.done();
+});
+
+test("native setup reconciles both OpenCode config spellings in the active directory", async () => {
+  const s = sandbox();
+  const opencodeDirectory = join(s.home, ".config", "opencode");
+  mkdirSync(opencodeDirectory, { recursive: true });
+  const modernPath = join(opencodeDirectory, "opencode.jsonc");
+  const legacyPath = join(opencodeDirectory, "opencode.json");
+  const modernBefore = JSON.stringify({ mcp: { github: { type: "local", command: ["gh-mcp"] } }, theme: "dark" }, null, 2) + "\n";
+  const legacyBefore = JSON.stringify({ mcp: { m9r: { type: "local", command: ["old-m9r-engine", "mcp"], environment: { M9R_HOME: s.p.m9r } } }, theme: "dark" }, null, 2) + "\n";
+  writeFileSync(modernPath, modernBefore, "utf8");
+  writeFileSync(legacyPath, legacyBefore, "utf8");
+
+  const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, "m9r-hook.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in stable launcher", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  s.io.env.M9R_OPENCODE_VERSION = "2.1.1";
+
+  assert.equal(await s.run("setup", ["--agents", "opencode", "--yes"]), 0);
+  for (const path of [modernPath, legacyPath]) {
+    const config = JSON.parse(readFileSync(path, "utf8")) as {
+      mcp: { servers?: Record<string, { enabled?: boolean; command?: string[]; environment?: Record<string, string> }>; m9r?: { enabled?: boolean; command?: string[]; environment?: Record<string, string> } };
+      theme: string;
+    };
+    const m9r = config.mcp.servers?.m9r;
+    assert.equal(config.theme, "dark");
+    assert.equal(m9r?.enabled, true);
+    assert.match(m9r?.command?.[0] ?? "", /m9r-hook(?:\.exe)?$/i);
+    assert.equal(m9r?.environment?.M9R_PROVIDER, "opencode");
+  }
+  assert.equal(existsSync(s.p.opencodePlugin), true);
+  const manifest = JSON.parse(readFileSync(s.p.manifest, "utf8")) as { entries: Array<{ path: string; kind: string }> };
+  assert.equal(manifest.entries.filter((entry) => entry.kind === "opencode-json").map((entry) => entry.path).sort().join("|"), [modernPath, legacyPath].sort().join("|"));
+
+  assert.equal(await s.run("uninstall", ["--yes"]), 0);
+  assert.equal(readFileSync(modernPath, "utf8"), modernBefore);
+  assert.equal(readFileSync(legacyPath, "utf8"), legacyBefore);
+  assert.equal(existsSync(s.p.opencodePlugin), false);
+  s.done();
+});
+
+test("native setup refreshes a stale OpenCode plugin that is owned by web setup", async () => {
+  const s = sandbox();
+  const p = s.p as typeof s.p & { opencodeConfig: string; opencodePlugin: string; webSetupManifest: string };
+  const opencodeDirectory = join(s.home, ".config", "opencode");
+  mkdirSync(join(opencodeDirectory, "plugins"), { recursive: true });
+  mkdirSync(s.p.m9r, { recursive: true });
+  writeFileSync(p.opencodeConfig, JSON.stringify({ mcp: {} }, null, 2) + "\n", "utf8");
+
+  const oldPlugin = "old web-setup plugin";
+  writeFileSync(p.opencodePlugin, oldPlugin, "utf8");
+  writeFileSync(p.webSetupManifest, JSON.stringify({
+    version: 1,
+    openCodeIdentityPluginPath: p.opencodePlugin,
+    openCodeIdentityPluginHash: createHash("sha256").update(oldPlugin).digest("hex"),
+    extensionPath: join(s.home, "extension"),
+    brokerConfigHash: "preserve-me",
+  }, null, 2) + "\n", "utf8");
+
+  const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, "m9r-hook.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in stable launcher", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  s.io.env.M9R_OPENCODE_VERSION = "1.19.0";
+
+  assert.equal(await s.run("setup", ["--agents", "opencode", "--yes"]), 0);
+  const refreshed = readFileSync(p.opencodePlugin, "utf8");
+  assert.notEqual(refreshed, oldPlugin);
+  assert.match(refreshed, /OpenCodeExecutionFailed/);
+  const webManifest = JSON.parse(readFileSync(p.webSetupManifest, "utf8")) as { openCodeIdentityPluginHash: string; brokerConfigHash: string };
+  assert.equal(webManifest.openCodeIdentityPluginHash, createHash("sha256").update(refreshed).digest("hex"));
+  assert.equal(webManifest.brokerConfigHash, "preserve-me");
+  s.done();
+});
+
+test("native OpenCode setup repairs a stale persisted model from the cached catalog and keeps a rollback", async () => {
+  const s = sandbox();
+  const p = s.p as typeof s.p & { opencodeConfig: string; opencodePlugin: string };
+  const opencodeDirectory = join(s.home, ".config", "opencode");
+  mkdirSync(opencodeDirectory, { recursive: true });
+  writeFileSync(p.opencodeConfig, JSON.stringify({ mcp: {} }, null, 2) + "\n", "utf8");
+
+  const modelStatePath = join(s.home, ".local", "state", "opencode", "model.json");
+  const modelCatalogPath = join(s.home, ".cache", "opencode", "models.json");
+  mkdirSync(join(s.home, ".local", "state", "opencode"), { recursive: true });
+  mkdirSync(join(s.home, ".cache", "opencode"), { recursive: true });
+  const originalState = JSON.stringify({
+    recent: [
+      { providerID: "opencode", modelID: "muse-spark-1.3-contributor-free" },
+      { providerID: "openai", modelID: "gpt-5.3-codex" },
+    ],
+    favorite: [],
+    variant: {
+      "opencode/muse-spark-1.3-contributor-free": "default",
+      "openai/gpt-5.3-codex": "default",
+    },
+    untouched: "keep-me",
+  }, null, 2) + "\n";
+  writeFileSync(modelStatePath, originalState, "utf8");
+  writeFileSync(modelCatalogPath, JSON.stringify({ providers: [{ id: "opencode", models: [{ id: "beam-free" }, { id: "muse-spark-1.3-contributor-free", status: "deprecated" }] }] }), "utf8");
+
+  const engine = join(s.home, "m9r-engine.exe");
+  const shim = join(s.home, "m9r-hook.exe");
+  writeFileSync(engine, "stand-in engine", "utf8");
+  writeFileSync(shim, "stand-in stable launcher", "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  s.io.env.M9R_OPENCODE_VERSION = "1.19.0";
+
+  assert.equal(await s.run("setup", ["--agents", "opencode", "--yes"]), 0);
+  const repaired = JSON.parse(readFileSync(modelStatePath, "utf8")) as { recent: Array<{ providerID: string; modelID: string }>; variant: Record<string, string>; untouched: string };
+  assert.equal(repaired.recent[0]?.modelID, "beam-free");
+  assert.equal(repaired.recent.some((entry) => entry.modelID === "muse-spark-1.3-contributor-free"), false);
+  assert.equal(repaired.variant["opencode/muse-spark-1.3-contributor-free"], undefined);
+  assert.equal(repaired.variant["openai/gpt-5.3-codex"], "default");
+  assert.equal(repaired.untouched, "keep-me");
+  const backups = readdirSync(join(s.home, ".local", "state", "opencode")).filter((name) => name.startsWith("model.json.m9r-backup-"));
+  assert.equal(backups.length, 1);
+  assert.equal(readFileSync(join(s.home, ".local", "state", "opencode", backups[0]!), "utf8"), originalState);
   s.done();
 });
 
@@ -476,15 +778,18 @@ test("starting with Windows is optional: only with --autostart (or a yes to its 
   delete s.io.env.M9R_HOOK_ENTRY;
   s.io.env.M9R_ENGINE = engine;
   s.io.env.M9R_NO_DAEMON = "1";
-  autostartCalls.length = 0; autostartOn = false;
+  autostartCalls.length = 0; brokerAutostartCalls.length = 0; autostartOn = false;
   assert.equal(await s.run("setup", ["--yes"]), 0);
   assert.deepEqual(autostartCalls, [], "--yes alone never turns it on");
+  assert.deepEqual(brokerAutostartCalls, [], "--yes alone never installs the owner broker login task");
   assert.equal(await s.run("setup", ["--yes", "--autostart"]), 0);
   assert.equal(autostartCalls.length, 1);
+  assert.deepEqual(brokerAutostartCalls, ["install"], "--autostart installs the owner broker login task");
   assert.match(autostartCalls[0], /^enable ".*m9r-engine\.exe" feed --watch --serve-hooks$/);
   assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).autostart, true);
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(autostartCalls.at(-1), "disable");
+  assert.equal(brokerAutostartCalls.at(-1), "remove");
   s.done();
 });
 
@@ -514,6 +819,118 @@ test("Windows setup installs the pill, broker, and Driver runtime together and s
     assert.equal(existsSync(brokerPath), true, "engine uninstall leaves the separately managed broker for its owner manifest");
     assert.equal(existsSync(join(s.p.m9r, "bin", "m9r-overlay.exe")), false);
     assert.equal(existsSync(join(s.p.m9r, "bin", "cua-driver-runtime", "node_modules", "driver", "driver.node")), false);
+  } finally { s.done(); }
+});
+
+test("a watched feed drains on runtime generation change and releases its writer lock", async () => {
+  const s = sandbox({ tempRoot: join(process.cwd(), ".test-tmp") });
+  try {
+    const executable = join(s.home, "m9r-engine.exe");
+    const manifest = join(s.home, "m9r-build-info.json");
+    writeFileSync(executable, "stand-in engine", "utf8");
+    const writeGeneration = (hash: string) => writeFileSync(manifest, JSON.stringify(createRuntimeBuildInfo({ "m9r-engine.exe": hash })));
+    writeGeneration("a".repeat(64));
+    s.io.executablePath = executable;
+    s.io.env.M9R_NO_CODEX_WATCH = "1";
+
+    const running = s.run("feed", ["--watch"]);
+    await new Promise((resolve) => setTimeout(resolve, 2_250));
+    writeGeneration("b".repeat(64));
+    assert.equal(await running, 0);
+    assert.match(s.err.join("\n"), /runtime generation changed on disk; draining the feed/i);
+    assert.equal(existsSync(join(s.p.m9r, "feed.lock")), false, "the stale watcher must not strand the single-writer lock");
+  } finally { s.done(); }
+});
+
+test("provider lifecycle starts only in the watched feed that owns the writer lock and stops before release", async () => {
+  const s = sandbox({ tempRoot: join(process.cwd(), ".test-tmp") });
+  try {
+    s.io.env.M9R_NO_CODEX_WATCH = "1";
+    let starts = 0;
+    let stops = 0;
+    s.io.startProviderLifecycle = () => {
+      starts += 1;
+      setImmediate(() => process.emit("SIGINT"));
+      return { stop: async () => { stops += 1; } };
+    };
+
+    const running = s.run("feed", ["--watch"]);
+    const duplicateCode = await s.run("feed", ["--watch"]);
+    assert.equal(duplicateCode, 0);
+    assert.match(s.out.join("\n"), /already being written/);
+    assert.equal(starts, 1, "the duplicate feed must not start a second provider monitor");
+    assert.equal(await running, 0);
+    assert.equal(stops, 1, "the provider monitor is stopped as its feed owner drains");
+    assert.equal(existsSync(join(s.p.m9r, "feed.lock")), false);
+  } finally { s.done(); }
+});
+
+test("the native feed exposes deferred delivery through the provider-neutral adapter pump", async () => {
+  const s = sandbox();
+  try {
+    const store = createLocalStore(s.p.m9r);
+    const { task } = store.addTask({
+      from: "you",
+      to: "codex",
+      goal: "resume the held owner task",
+      origin: "human_typed",
+      idempotencyKey: "deferred-pump",
+    });
+    store.setDelivery(task.id, { state: "deferred", threadId: "codex-session" });
+    const sent: string[] = [];
+    const pump = createNativeDeliveryPump(s.p.m9r, {
+      env: s.io.env,
+      homeDir: s.io.homeDir,
+      deliveryAdapters: new Map([[
+        "codex",
+        async (taskId: string) => {
+          sent.push(taskId);
+          store.setDelivery(taskId, { state: "queued", threadId: "codex-session", queuedAt: new Date().toISOString() });
+        },
+      ]]),
+    });
+    await pump.tick();
+    assert.deepEqual(sent, [task.id]);
+    assert.equal(store.getTask(task.id)?.delivery?.state, "queued");
+  } finally { s.done(); }
+});
+
+test("owner-created Claude tasks use the native exact-session adapter instead of the web resident worker", async () => {
+  const s = sandbox();
+  try {
+    const store = createLocalStore(s.p.m9r);
+    const claude = store.addTask({ from: "you", to: "claude", goal: "Read one visible label.", origin: "human_typed", idempotencyKey: "native-claude" }).task;
+    store.setDelivery(claude.id, { state: "deferred" });
+    const nativeDelivery: string[] = [];
+    const pump = createNativeDeliveryPump(s.p.m9r, {
+      env: s.io.env,
+      homeDir: s.io.homeDir,
+      cwd: s.home,
+      err: s.io.err,
+      deliveryAdapters: new Map([["claude", async (taskId: string) => { nativeDelivery.push(taskId); return { state: "unavailable", reason: "test adapter" }; }]]),
+    });
+    await pump.tick();
+    assert.deepEqual(nativeDelivery, [claude.id]);
+    assert.equal(store.getTask(claude.id)?.delivery?.state, "deferred", "an unavailable native session stays eligible for an honest retry/inbox path");
+    assert.match(s.err.join("\n"), /Claude.*test adapter/i, "the owner must get the adapter's actual failure reason");
+  } finally { s.done(); }
+});
+
+test("OpenCode owner tasks stay deferred for the exact-session plugin poller, not the web resident worker", async () => {
+  const s = sandbox();
+  try {
+    const store = createLocalStore(s.p.m9r);
+    const opencode = store.addTask({ from: "you", to: "opencode", goal: "Read the visible label.", origin: "human_typed", idempotencyKey: "plugin-opencode" }).task;
+    store.setDelivery(opencode.id, { state: "deferred" });
+    const pump = createNativeDeliveryPump(s.p.m9r, {
+      env: s.io.env,
+      homeDir: s.io.homeDir,
+      cwd: s.home,
+    });
+
+    await pump.tick();
+
+    assert.equal(store.getTask(opencode.id)?.delivery?.state, "deferred", "the OpenCode plugin owns delivery into its exact live session");
   } finally { s.done(); }
 });
 

@@ -9,7 +9,7 @@
 
 import type { Decision, DesktopStage, DesktopStageActionProof, DesktopStageCapture, DesktopStageCursorMove, DesktopStageWindowOption, PillTransport, SessionRow } from "../core/transport";
 import { desktopSpeechEnv } from "../core/speech";
-import { fromFeed, type Feed } from "./convert";
+import { fromFeed, fromUiState, type Feed, type UiState } from "./convert";
 
 type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -22,6 +22,8 @@ const POLL_MS = 1000;
 
 export function createDesktopTransport(invoke: Invoke): PillTransport {
   let feed: Feed | null = null;
+  let uiStateAvailable = false;
+  const capabilities = { allowForADay: true, linkSessions: true, dictation: true, saveMemory: true };
 
   type StageAction = "list" | "create" | "activate" | "return" | "capture" | "cursor" | "windows" | "attach" | "click" | "type" | "scroll" | "drag" | "allow-agent" | "allow-control" | "revoke-agent";
   async function stageRequest(action: StageAction, name?: string, args: Record<string, unknown> = {}): Promise<{
@@ -85,7 +87,7 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
   }
 
   return {
-    capabilities: { allowForADay: true, linkSessions: true, dictation: true, saveMemory: true },
+    capabilities,
     createDictationEnvironment() { return desktopSpeechEnv(() => { void invoke("open_microphone_settings").catch(() => {}); }); },
     desktopStages: /Windows/i.test(navigator.userAgent) ? {
       async setAgentPermission(handle, enabled, control = false) { await stageRequest(enabled ? (control ? "allow-control" : "allow-agent") : "revoke-agent", handle); },
@@ -112,12 +114,29 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
       await invoke("link_sessions", { fromHandle: offer.from, fromSession: offer.fromSession, toHandle: offer.to, toSession });
     },
     subscribe(listener) {
-      let last = "";
+      let lastSnapshotKey = "";
       const tick = async () => {
         try {
+          const brokerRaw = await invoke("read_pill_state");
+          if (typeof brokerRaw === "string" && brokerRaw.trim()) {
+            const state = JSON.parse(brokerRaw) as UiState;
+            const snapshotKey = `ui:${brokerRaw}`;
+            uiStateAvailable = true;
+            capabilities.allowForADay = false;
+            if (snapshotKey !== lastSnapshotKey) {
+              lastSnapshotKey = snapshotKey;
+              listener(fromUiState(state));
+            }
+            return;
+          }
+        } catch { /* broker state is absent or mid-write; the compatibility feed remains available */ }
+        uiStateAvailable = false;
+        capabilities.allowForADay = true;
+        try {
           const raw = (await invoke("read_feed")) as string | null;
-          if (raw && raw !== last) {
-            last = raw;
+          const snapshotKey = raw ? `feed:${raw}` : "";
+          if (raw && snapshotKey !== lastSnapshotKey) {
+            lastSnapshotKey = snapshotKey;
             feed = JSON.parse(raw) as Feed;
             listener(fromFeed(feed));
           }
@@ -144,6 +163,11 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
       void invoke("pill_set_focus", { focused }).catch(() => { /* typing falls back to clicking the field */ });
     },
     async decide(approvalId: string, decision: Decision) {
+      if (uiStateAvailable) {
+        if (decision === "allow_day") throw new Error("Allow for a day is unavailable on the broker-owned desktop pill.");
+        await invoke("pill_decide", { approvalId, decision: decision === "deny" ? "deny" : "allow" });
+        return;
+      }
       const need = feed?.needsYou?.find((n) => n.kind === "approval" && n.taskId === approvalId);
       const from = need && "from" in need ? need.from : undefined;
       const to = need && "to" in need ? need.to : undefined;

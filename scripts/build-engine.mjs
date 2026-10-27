@@ -12,6 +12,13 @@ import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { publishRuntimeBuild, verifyRuntimeBuildManifest, writeRuntimeBuildManifest } from "./engine-build-transaction.mjs";
 
+// Git for Windows ships its own GNU tar earlier on PATH than the real Windows System32 bsdtar.
+// GNU tar misparses a bare "C:\..." path as a remote "host:path" spec and cannot read .zip
+// archives at all -- it fails with "Cannot connect to C: resolve failed", which looks like a
+// network error but is purely a PATH-order collision between two different tar binaries. Calling
+// the real one by its full path sidesteps that collision entirely, regardless of PATH order.
+const systemTarExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Windows ships libarchive-based bsdtar at System32\\tar.exe. A bare tar.exe can
 // resolve to Git for Windows' GNU tar, which treats a C:\\ path as a remote host
@@ -22,13 +29,50 @@ const output = join(engineDir, "dist");
 const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
 const out = join(buildRoot, "artifacts");
 const work = join(buildRoot, "work");
-const overlayExe = join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
+// The desktop build may use an isolated Cargo target directory when a previous
+// generated target tree is locked or owned by another Windows boundary.  Never
+// silently fall back to an older pill in that case: callers may provide the
+// exact freshly-built executable explicitly.
+const overlayExe = process.env.M9R_OVERLAY_EXE
+  ? resolve(process.env.M9R_OVERLAY_EXE)
+  : join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(root, "cli", "dist", "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";
 const cuaDriverVersion = "0.34.0";
 const cuaDriverArchiveSha256 = "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b408608b0ea4423a8b888";
 const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua-driver-rs-v${cuaDriverVersion}/cua-driver-rs-${cuaDriverVersion}-windows-x86_64-binary.zip`;
+
+// These are recoverable, owner-reviewed local evidence roots. They are not
+// source and must not make an otherwise committed release appear dirty, but
+// the list is deliberately narrow so an unexpected untracked source file
+// still blocks a clean runtime build.
+const heldLocalProvenancePatterns = [
+  /^\.m9r-(?:live-activation|recovery-quarantine|runtime-package|coordinator-worker|web-broker|installer)-[^/]+(?:\/|$)/i,
+  /^\.codex-stage-build-[^/]+(?:\/|$)/i,
+  /^\.codex-verify-temp(?:\/|$)/i,
+  /^\.opencode(?:\/|$)/i,
+  /^\.test-tmp(?:-[^/]+)?(?:\/|$)/i,
+  /^\.tmp(?:\/|$)/i,
+  /^engine(?:\/|$)/i,
+  /^docs\/research(?:\/|$)/i,
+  // These are private planning/tracker documents. They are intentionally
+  // kept outside the public release commit and must not turn a verified
+  // source checkout into a dirty runtime solely because progress was logged.
+  /^docs\/M9R_(?:CUMULATIVE_RELIABILITY_AND_DEMO_TRACKER_2026-10-10|MASTER_LIST_2\.1)\.md$/i,
+  /^m9r-clean-cutover-[^/]+(?:\/|$)/i,
+  /^m9r-release-package-[^/]+(?:\/|$)/i,
+  /^m9r-runtime-clean-[^/]+(?:\/|$)/i,
+  /^scratchpad(?:\/|$)/i,
+  /^\.artifact-scratch(?:\/|$)/i,
+  /^docs\/Convenience_Store_Replacement_Plan\.docx$/i,
+  /^public\/reference-innerwebs\/m9r-logo-transparent\.png$/i,
+];
+
+function isHeldLocalProvenancePath(path) {
+  const normalized = path.replaceAll("\\", "/");
+  return heldLocalProvenancePatterns.some((pattern) => pattern.test(normalized));
+}
 
 if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle)) throw new Error("cli/dist is missing: run `npm run build:cli` first.");
 if (process.platform === "win32" && !existsSync(overlayExe)) {
@@ -40,6 +84,10 @@ for (const name of [exeName, brokerExeName, process.platform === "win32" ? "m9r-
 }
 const postjectCli = join(root, "node_modules", "postject", "dist", "cli.js");
 if (!existsSync(postjectCli)) throw new Error("postject is missing; install the locked development dependencies before building the engine.");
+// Capture source provenance before creating the builder's own temporary staging
+// directory. Otherwise the build would report every otherwise-clean checkout as
+// dirty because `engine/.m9r-engine-build-*/` exists during this check.
+const provenance = sourceProvenance();
 mkdirSync(out, { recursive: true });
 mkdirSync(work, { recursive: true });
 
@@ -53,6 +101,45 @@ function buildSeaExecutable(main, executable, label) {
   copyFileSync(process.execPath, executable);
   result = spawnSync(process.execPath, [postjectCli, executable, "NODE_SEA_BLOB", blob, "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2", ...(process.platform === "darwin" ? ["--macho-segment-name", "NODE_SEA"] : [])], { stdio: "inherit" });
   if (result.error || result.status !== 0) throw new Error(`Could not inject the ${label} SEA blob.`, { cause: result.error });
+}
+
+function sourceProvenance() {
+  const commit = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
+  if (commit.error || commit.status !== 0) throw new Error("Cannot determine the source commit; refusing to build an unidentified runtime.", { cause: commit.error });
+  const sourceCommit = String(commit.stdout).trim();
+  if (!/^[a-f0-9]{40}$/i.test(sourceCommit)) throw new Error("Git returned an invalid source commit; refusing to build an unidentified runtime.");
+  // Compare content, not the status command's cached file metadata. Native
+  // packaging tools can touch a tracked file's mtime without changing bytes;
+  // `git status --porcelain` can then report a false dirty build even though
+  // the committed source is unchanged. Keep untracked source/artifact paths in
+  // the decision, but collapse ignored directories so large runtime evidence
+  // trees cannot overflow spawnSync's buffer.
+  const runGitCleanCheck = (args) => {
+    const result = spawnSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 256 * 1024 });
+    if (result.error || (result.status !== 0 && result.status !== 1)) {
+      throw new Error("Cannot determine source cleanliness; refusing to build an unidentified runtime.", { cause: result.error });
+    }
+    return result;
+  };
+  // The private tracker is intentionally allowed to advance alongside a
+  // release without becoming part of that release's source fingerprint.
+  // Exclude only those two exact tracked paths; every other tracked change
+  // remains a hard dirty-build failure.
+  const privateTrackerExclusions = [
+    ":(exclude)docs/M9R_CUMULATIVE_RELIABILITY_AND_DEMO_TRACKER_2026-10-10.md",
+    ":(exclude)docs/M9R_MASTER_LIST_2.1.md",
+  ];
+  const worktreeDiff = runGitCleanCheck(["diff", "--quiet", "--no-ext-diff", "--ignore-submodules", "--", ".", ...privateTrackerExclusions]);
+  const indexDiff = runGitCleanCheck(["diff", "--cached", "--quiet", "--no-ext-diff", "--ignore-submodules", "--", ".", ...privateTrackerExclusions]);
+  const untracked = runGitCleanCheck(["ls-files", "--others", "--exclude-standard", "--directory"]);
+  const untrackedPaths = String(untracked.stdout).split(/\r?\n/g).map((path) => path.trim()).filter(Boolean);
+  const heldLocalEvidence = untrackedPaths.filter(isHeldLocalProvenancePath);
+  const untrackedSource = untrackedPaths.filter((path) => !isHeldLocalProvenancePath(path));
+  if (heldLocalEvidence.length > 0) {
+    console.log(`Excluded ${heldLocalEvidence.length} retained local-evidence root(s) from source provenance.`);
+  }
+  const sourceDirty = worktreeDiff.status === 1 || indexDiff.status === 1 || untrackedSource.length > 0;
+  return { sourceCommit, sourceDirty };
 }
 
 // The dispatcher: SEA argv is [exe, exe, ...args]; shift so both programs see the argv they were written for.
@@ -177,13 +264,14 @@ if (process.platform === "win32") {
 
 const managedRuntimePaths = [exeName, brokerExeName, shimName,
   ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "cua-driver-runtime", "m9r-overlay.exe"] : [])];
-writeRuntimeBuildManifest(out);
+writeRuntimeBuildManifest(out, undefined, provenance);
 const stagedIdentity = verifyRuntimeBuildManifest(out, { exact: true });
 const publishedIdentity = publishRuntimeBuild(out, output, managedRuntimePaths);
 if (publishedIdentity.buildId !== stagedIdentity.buildId) throw new Error("Published runtime identity differs from its staged artifact hashes.");
 console.log(`Built ${join(output, exeName)} (${Math.round(readFileSync(join(output, exeName)).length / 1e6)} MB)`);
 console.log(`Built ${join(output, brokerExeName)} (${Math.round(readFileSync(join(output, brokerExeName)).length / 1e6)} MB)`);
 console.log(`Runtime build identity ${publishedIdentity.buildId} verified across ${Object.keys(publishedIdentity.artifacts).length} files.`);
+console.log(`Runtime source ${provenance.sourceCommit} (${provenance.sourceDirty ? "dirty" : "clean"}).`);
 if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")} from the current desktop build.`);
 } finally {
   rmSync(buildRoot, { recursive: true, force: true });

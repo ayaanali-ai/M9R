@@ -57,7 +57,23 @@ test("OpenCode global paths follow XDG or ~/.config and preserve an existing sup
     exists: (path) => existing.has(path),
   });
   assert.equal(paths.configPath, join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc"));
+  assert.deepEqual(paths.configPaths, [join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc")]);
   assert.equal(paths.pluginDirectory, join("C:/Users/Ada", ".config", "opencode", "plugins"));
+
+  const dualConfigPaths = resolveOpenCodeGlobalPaths({
+    home: "C:/Users/Ada",
+    appData: "C:/Users/Ada/AppData/Roaming",
+    exists: (path) => [
+      join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc"),
+      join("C:/Users/Ada", ".config", "opencode", "opencode.json"),
+    ].includes(path),
+  });
+  assert.equal(dualConfigPaths.configPath, join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc"));
+  assert.deepEqual(dualConfigPaths.configPaths, [
+    join("C:/Users/Ada", ".config", "opencode", "opencode.jsonc"),
+    join("C:/Users/Ada", ".config", "opencode", "opencode.json"),
+  ]);
+  assert.equal(dualConfigPaths.pluginDirectory, join("C:/Users/Ada", ".config", "opencode", "plugins"));
 
   const xdgPaths = resolveOpenCodeGlobalPaths({
     home: "C:/Users/Ada",
@@ -65,6 +81,7 @@ test("OpenCode global paths follow XDG or ~/.config and preserve an existing sup
     exists: () => false,
   });
   assert.equal(xdgPaths.configPath, join("D:/Agent Config", "opencode", "opencode.json"));
+  assert.deepEqual(xdgPaths.configPaths, [join("D:/Agent Config", "opencode", "opencode.json")]);
   assert.equal(xdgPaths.pluginDirectory, join("D:/Agent Config", "opencode", "plugins"));
 
   const legacyConfig = resolveOpenCodeGlobalPaths({
@@ -73,6 +90,7 @@ test("OpenCode global paths follow XDG or ~/.config and preserve an existing sup
     exists: (path) => path === join("C:/Users/Ada", "AppData", "Roaming", "opencode", "opencode.json"),
   });
   assert.equal(legacyConfig.configPath, join("C:/Users/Ada", "AppData", "Roaming", "opencode", "opencode.json"));
+  assert.deepEqual(legacyConfig.configPaths, [join("C:/Users/Ada", "AppData", "Roaming", "opencode", "opencode.json")]);
   assert.equal(legacyConfig.pluginDirectory, join("C:/Users/Ada", "AppData", "Roaming", "opencode", "plugins"));
 });
 
@@ -141,6 +159,7 @@ test("Codex web MCP merge is idempotent, updates a pre-existing m9r table, and p
   assert.equal((once.match(/^\[mcp_servers\.m9r\]$/gm) ?? []).length, 1);
   assert.equal((once.match(/^\[mcp_servers\.m9r\.env\]$/gm) ?? []).length, 1);
   assert.match(once, /M9R_HOME = "C:\/Users\/Ada\/\.m9r"/);
+  assert.match(once, /M9R_PROVIDER = "codex"/);
   assert.match(once, /\[mcp_servers\.github\][\s\S]*command = "gh-mcp"/);
   assert.match(once, /\[profiles\.work\][\s\S]*model = "codex"/);
   const uninstalled = removeCodexWebMcp(once);
@@ -167,13 +186,14 @@ test("OpenCode JSONC merge uses legacy or v2 layout without rewriting unrelated 
   const parsed = JSON.parse(modern.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1"));
   assert.deepEqual(parsed.mcp.servers.m9r.command, [command.command, "mcp"]);
   assert.equal(parsed.mcp.servers.m9r.environment.M9R_HOME, command.m9rHome);
+  assert.equal(parsed.mcp.servers.m9r.environment.M9R_PROVIDER, "opencode");
   const uninstalled = removeOpenCodeWebMcp(modern, "servers");
   assert.doesNotMatch(uninstalled, /"m9r"/);
   assert.match(uninstalled, /\/\/ user comment stays/);
   assert.match(uninstalled, /"github"/);
 });
 
-test("OpenCode setup explicitly loads the M9R identity plugin beside the active config", () => {
+test("OpenCode setup relies on global plugin discovery and removes the legacy file entry", () => {
   const original = `{
   // keep the user's existing plugin path
   "plugin": ["./plugins"],
@@ -182,12 +202,75 @@ test("OpenCode setup explicitly loads the M9R identity plugin beside the active 
   const installed = mergeOpenCodeWebMcp(original, "legacy", command, true);
   const normalized = installed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1");
   const parsed = JSON.parse(normalized) as { plugin: string[] };
-  assert.deepEqual(parsed.plugin, ["./plugins", "./plugins/m9r-identity.js"]);
+  assert.deepEqual(parsed.plugin, ["./plugins"]);
   assert.equal(mergeOpenCodeWebMcp(installed, "legacy", command, true), installed);
   const removed = removeOpenCodeWebMcp(installed, "legacy", true);
   const removedParsed = JSON.parse(removed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1")) as { plugin: string[]; mcp?: Record<string, unknown> };
   assert.deepEqual(removedParsed.plugin, ["./plugins"]);
   assert.deepEqual(removedParsed.mcp, {});
+});
+
+test("OpenCode v2 setup removes only stale M9R entries and preserves user plugins", () => {
+  const original = `{
+  // keep unrelated user plugins and comments
+  "plugin": ["./plugins/m9r-identity.js", "./plugins/user-plugin.js"],
+  "plugins": ["./plugins/existing-v2-plugin.js"],
+  "mcp": {},
+}`;
+  const installed = mergeOpenCodeWebMcp(original, "servers", command, true);
+  const normalized = installed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1");
+  const parsed = JSON.parse(normalized) as { plugin: string[]; plugins: string[] };
+  assert.deepEqual(parsed.plugins, ["./plugins/existing-v2-plugin.js"]);
+  assert.deepEqual(parsed.plugin, ["./plugins/user-plugin.js"]);
+  assert.equal(mergeOpenCodeWebMcp(installed, "servers", command, true), installed);
+
+  const removed = removeOpenCodeWebMcp(installed, "servers", true);
+  const removedParsed = JSON.parse(removed.replace(/^\s*\/\/.*$/gm, "").replace(/,\s*([}\]])/g, "$1")) as { plugin: string[]; plugins: string[]; mcp?: Record<string, unknown> };
+  assert.deepEqual(removedParsed.plugins, ["./plugins/existing-v2-plugin.js"]);
+  assert.deepEqual(removedParsed.plugin, ["./plugins/user-plugin.js"]);
+  assert.deepEqual(removedParsed.mcp, { servers: {} });
+});
+
+test("OpenCode v2 setup does not create a fragile file plugin entry", () => {
+  const original = `{
+  "mcp": {},
+}`;
+  const installed = mergeOpenCodeWebMcp(original, "servers", command, true);
+  const normalized = installed.replace(/,\s*([}\]])/g, "$1");
+  const parsed = JSON.parse(normalized) as { plugin?: unknown; plugins?: string[] };
+  assert.equal(parsed.plugin, undefined);
+  assert.equal(parsed.plugins, undefined);
+});
+
+test("OpenCode v2 setup moves the M9R server out of the legacy mcp root without disturbing other servers", () => {
+  const original = `{
+  "mcp": {
+    "supabase": { "type": "remote", "url": "https://example.invalid/mcp" },
+    "m9r": { "type": "local", "command": ["old-m9r", "mcp"] },
+  },
+}`;
+  const installed = mergeOpenCodeWebMcp(original, "servers", command);
+  const parsed = JSON.parse(installed.replace(/,\s*([}\]])/g, "$1")) as { mcp: { m9r?: unknown; supabase: unknown; servers: { m9r: { command: string[] } } } };
+  assert.equal(parsed.mcp.m9r, undefined);
+  assert.ok(parsed.mcp.supabase);
+  assert.deepEqual(parsed.mcp.servers.m9r.command, [command.command, "mcp"]);
+});
+
+test("OpenCode legacy setup moves a modern M9R server back without disturbing other servers", () => {
+  const original = `{
+  "mcp": {
+    "supabase": { "type": "remote", "url": "https://example.invalid/mcp" },
+    "servers": {
+      "m9r": { "type": "local", "command": ["old-m9r", "mcp"] },
+      "other": { "type": "local", "command": ["other-mcp"] },
+    },
+  },
+}`;
+  const installed = mergeOpenCodeWebMcp(original, "legacy", command);
+  const parsed = JSON.parse(installed.replace(/,\s*([}\]])/g, "$1")) as { mcp: { m9r: { command: string[] }; servers: { m9r?: unknown; other: unknown } } };
+  assert.deepEqual(parsed.mcp.m9r.command, [command.command, "mcp"]);
+  assert.equal(parsed.mcp.servers.m9r, undefined);
+  assert.ok(parsed.mcp.servers.other);
 });
 
 test("invalid OpenCode JSONC is refused rather than replaced or truncated", () => {

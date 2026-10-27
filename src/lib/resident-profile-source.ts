@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { agentCredentialPath, agentCredentialRoot } from "./native/agent-credential-store";
 
 export type ResidentAgentKind = string;
 
@@ -8,12 +8,12 @@ export function isResidentAgentKind(provider: unknown): provider is string {
   return typeof provider === "string" && RESIDENT_PROVIDER_PATTERN.test(provider);
 }
 
-export function residentCredentialPaths(repositoryRoot: string, provider: ResidentAgentKind): string[] {
+export function residentCredentialPaths(repositoryRoot: string, provider: ResidentAgentKind, credentialRoot = agentCredentialRoot(repositoryRoot)): string[] {
   if (!isResidentAgentKind(provider)) throw new Error("Provider identity is invalid.");
-  return [
-    join(repositoryRoot, ".m9r", "agents", provider, "local.json"),
-    join(repositoryRoot, ".m9r", "local.json"),
-  ];
+  // Resident profiles are workspace metadata, but the bearer credential is
+  // always read from the user-scoped M9R store. There is intentionally no
+  // repository-local fallback and no shared legacy token fallback.
+  return [agentCredentialPath(credentialRoot, provider)];
 }
 
 /** Injects the current connection credential at runtime; resident config copies are never authoritative. */

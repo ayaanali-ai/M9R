@@ -5,6 +5,12 @@ import { createExtensionTransport } from "../pill/src/shells/extension";
 import { createDesktopTransport } from "../pill/src/shells/desktop";
 import { createFrameHost } from "../pill/src/shells/frame-host";
 
+test("both pill shells preserve host-allocated identity colors", () => {
+  const color = "#123ABC";
+  assert.equal(fromFeed({ agents: [{ handle: "custom", color }] }).agents[0]?.color, color);
+  assert.equal(fromUiState({ agents: [{ id: "custom", color }] }).agents[0]?.color, color);
+});
+
 test("provider detection covers handles, provider ids and unknown agents", () => {
   assert.equal(providerOf("claude"), "claude");
   assert.equal(providerOf("claude-code"), "claude");
@@ -130,6 +136,33 @@ test("desktop transport maps decisions and typed messages onto the overlay's com
   const sent = calls.find(([c]) => c === "send_message");
   assert.deepEqual(sent?.[1], { text: "@claude look at x" });
   assert.equal(transport.capabilities?.allowForADay, true);
+  if (typeof stop === "function") stop();
+});
+
+test("desktop transport prefers the broker-owned state and sends decisions through the owner broker", async () => {
+  const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+  const brokerState = JSON.stringify({
+    type: "ui-state",
+    agents: [{ id: "claude", provider: "claude", folder: "C:/demo", state: "idle", doing: "" }],
+    thread: [],
+    approvals: [{ id: "A1", agent: "claude", provider: "claude", text: "Approve the harmless action." }],
+    desktopPill: true,
+  });
+  const transport = createDesktopTransport(async (command, args) => {
+    calls.push([command, args]);
+    if (command === "read_pill_state") return brokerState;
+    return "";
+  });
+  const snapshots: unknown[] = [];
+  const stop = transport.subscribe((snapshot) => snapshots.push(snapshot));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal((snapshots.at(-1) as { agents?: Array<{ handle?: string }> })?.agents?.[0]?.handle, "claude");
+  assert.equal(transport.capabilities?.allowForADay, false, "the broker-owned UI does not advertise a legacy day grant");
+  await transport.decide("A1", "allow");
+  assert.deepEqual(calls.find(([command]) => command === "pill_decide")?.[1], { approvalId: "A1", decision: "allow" });
+  assert.equal(calls.some(([command]) => command === "decide"), false, "broker-owned approvals must not use the legacy feed command");
+  await assert.rejects(transport.decide("A1", "allow_day"), /unavailable/);
   if (typeof stop === "function") stop();
 });
 

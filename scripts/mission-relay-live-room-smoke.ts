@@ -1,16 +1,12 @@
-import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { MissionRelayClient } from "../src/lib/mission/mission-relay-client";
+import { readAgentCredential } from "../src/lib/native/agent-credential-store";
 
 const RELAY_URL = "wss://m9r-relay.m9r.workers.dev/";
 const APP_URL = "https://m9r.dev";
-const tokenFile = [".m9r/agents/codex/local.json", ".oathlock/agents/codex/local.json"].find((path) => {
-  try { return Boolean(JSON.parse(readFileSync(path, "utf8")).token); }
-  catch { return false; }
-});
-if (!tokenFile) throw new Error("No local Codex M9R connection file was found.");
-const token = JSON.parse(readFileSync(tokenFile, "utf8")).token as string;
-if (typeof token !== "string" || token.length === 0) throw new Error("The local Codex connection file has no token.");
+const credential = await readAgentCredential(process.cwd(), "codex", process.env);
+if (!credential?.token) throw new Error("No user-scoped Codex M9R connection was found.");
+const token = credential.token;
 
 async function main(): Promise<void> {
 const headers = { authorization: `Bearer ${token}` };

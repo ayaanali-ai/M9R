@@ -6,6 +6,11 @@ import type { NetworkCoreClient } from "./network-core-client";
 const LOCAL_TOKEN_FIELD = {
   token: z.string().min(1).describe("Your local M9R session token from the SessionStart card. This identifies the current Claude/Codex/OpenCode session to local M9R."),
 };
+// Accepts either a required or optional token schema: the caller (mcp-server.ts) now always
+// passes an optional one, since whether a token is actually needed is resolved per-call, not
+// frozen into the schema at startup. Both shapes infer to `string | undefined`, matching
+// requireIdentity's own parameter type below.
+type AuthField = { token?: z.ZodString | z.ZodOptional<z.ZodString> };
 
 const NETWORK_ID_FIELD = {
   network_id: z.string().uuid().describe("The M9R network UUID returned when this agent joined."),
@@ -24,22 +29,24 @@ function networkProvider(provider: string): string {
 export function registerNetworkCoreTools(input: {
   server: McpServer;
   client: NetworkCoreClient;
-  requireIdentity(token: string): VerifiedIdentity;
+  requireIdentity(token?: string): Promise<VerifiedIdentity>;
+  authField?: AuthField;
 }): void {
   const { server, client, requireIdentity } = input;
+  const authField = input.authField ?? LOCAL_TOKEN_FIELD;
 
   server.registerTool(
     "m9r_network_join",
     {
       description: "Join an M9R Network using an owner-issued one-time pairing code. Returns this agent's network bearer credential once. Copy it into this provider's M9R_NETWORK_CREDENTIALS_JSON MCP environment, keyed by network_id, then restart the MCP server. The credential is not saved by this tool.",
       inputSchema: {
-        ...LOCAL_TOKEN_FIELD,
+        ...authField,
         pairing_code: z.string().min(8).max(9).describe("The one-time code issued by the network owner."),
         agent_name: z.string().min(1).max(64).optional().describe("Network-local agent name; defaults to this local M9R handle."),
       },
     },
     async ({ token, pairing_code, agent_name }) => {
-      const identity = requireIdentity(token);
+      const identity = await requireIdentity(token);
       const registration = await client.registerAgent({
         pairing_code,
         agent_name: agent_name ?? identity.handle,
@@ -65,10 +72,10 @@ export function registerNetworkCoreTools(input: {
     "m9r_network_roster",
     {
       description: "Read the members and agents in a joined M9R Network. Uses this provider's separately configured network credential; the local M9R session token never grants network membership.",
-      inputSchema: { ...LOCAL_TOKEN_FIELD, ...NETWORK_ID_FIELD },
+      inputSchema: { ...authField, ...NETWORK_ID_FIELD },
     },
     async ({ token, network_id }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       return { content: [{ type: "text", text: asText(await client.roster(network_id)) }] };
     },
   );
@@ -78,7 +85,7 @@ export function registerNetworkCoreTools(input: {
     {
       description: "Send a message, task, update, file notice, or presence event to a joined agent in an M9R Network. Use a network handle such as @member/agent or * for the joined network. Reuse the same UUID idempotency_key if retrying the same send.",
       inputSchema: {
-        ...LOCAL_TOKEN_FIELD,
+        ...authField,
         ...NETWORK_ID_FIELD,
         to: z.string().min(1).max(80),
         body: z.string().min(1).max(20_000),
@@ -88,7 +95,7 @@ export function registerNetworkCoreTools(input: {
       },
     },
     async ({ token, network_id, to, body, type, thread_id, idempotency_key }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       const result = await client.sendEvent(network_id, { to, body, type, thread_id, idempotency_key });
       return { content: [{ type: "text", text: asText(result) }] };
     },
@@ -99,14 +106,14 @@ export function registerNetworkCoreTools(input: {
     {
       description: "Poll this agent's M9R Network inbox after a cursor. The response includes the next cursor; save it and supply it on the next poll to avoid replaying prior events.",
       inputSchema: {
-        ...LOCAL_TOKEN_FIELD,
+        ...authField,
         ...NETWORK_ID_FIELD,
         since: z.string().regex(/^(0|[1-9][0-9]{0,14})$/).default("0"),
         limit: z.number().int().min(1).max(200).default(100),
       },
     },
     async ({ token, network_id, since, limit }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       return { content: [{ type: "text", text: asText(await client.inbox(network_id, { since, limit })) }] };
     },
   );
@@ -116,14 +123,14 @@ export function registerNetworkCoreTools(input: {
     {
       description: "Read paginated event history for a joined M9R Network after a cursor.",
       inputSchema: {
-        ...LOCAL_TOKEN_FIELD,
+        ...authField,
         ...NETWORK_ID_FIELD,
         since: z.string().regex(/^(0|[1-9][0-9]{0,14})$/).default("0"),
         limit: z.number().int().min(1).max(200).default(100),
       },
     },
     async ({ token, network_id, since, limit }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       return { content: [{ type: "text", text: asText(await client.history(network_id, { since, limit })) }] };
     },
   );
@@ -133,7 +140,7 @@ export function registerNetworkCoreTools(input: {
     {
       description: "Request human approval for an action in a joined M9R Network. This records a pending approval; an agent cannot grant its own request.",
       inputSchema: {
-        ...LOCAL_TOKEN_FIELD,
+        ...authField,
         ...NETWORK_ID_FIELD,
         action: z.string().min(1).max(160),
         detail: z.string().min(1).max(8_000),
@@ -141,7 +148,7 @@ export function registerNetworkCoreTools(input: {
       },
     },
     async ({ token, network_id, action, detail, thread_id }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       return { content: [{ type: "text", text: asText(await client.requestApproval(network_id, { action, detail, thread_id })) }] };
     },
   );
@@ -150,10 +157,10 @@ export function registerNetworkCoreTools(input: {
     "m9r_network_revoke_self",
     {
       description: "Immediately revoke this agent's credential for the selected M9R Network. This cannot be undone; the agent must be paired again to rejoin.",
-      inputSchema: { ...LOCAL_TOKEN_FIELD, ...NETWORK_ID_FIELD },
+      inputSchema: { ...authField, ...NETWORK_ID_FIELD },
     },
     async ({ token, network_id }) => {
-      requireIdentity(token);
+      await requireIdentity(token);
       return { content: [{ type: "text", text: asText(await client.revokeSelf(network_id)) }] };
     },
   );
