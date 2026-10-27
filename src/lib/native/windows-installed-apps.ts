@@ -21,6 +21,53 @@ const APP_ALIASES: Record<string, readonly string[]> = {
 const WINDOWS_TERMINAL_NAMES = new Set(["terminal", "windowsterminal", "wt"]);
 const WINDOWS_TERMINAL_REGISTERED_NAME = "Terminal";
 
+/** Resolve compatibility launchers through Windows' installed app metadata.
+ * No per-app renderer aliases, title substring guesses, or unrelated fresh HWNDs.
+ * Data crosses the PowerShell boundary only through an environment variable.
+ */
+export const WINDOWS_RENDERER_DISCOVERY_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$launcher = Get-Item -LiteralPath $env:M9R_APP_LAUNCHER
+function Key([string] $value) { ($value.ToLowerInvariant() -replace '\.exe$', '' -replace '[^\p{L}\p{N}]', '') }
+$description = [string] $launcher.VersionInfo.FileDescription
+$names = @($launcher.BaseName, $description)
+# Windows compatibility stubs commonly retain the OS brand in FileDescription
+# while StartApps exposes the same registered product without that brand.
+if ($description -match '^Windows\s+(.+)$') { $names += $Matches[1] }
+$keys = @($names | Where-Object { $_ } | ForEach-Object { Key $_ })
+$shell = New-Object -ComObject Shell.Application
+$item = $shell.Namespace($launcher.DirectoryName).ParseName($launcher.Name)
+$aumid = [string] $item.ExtendedProperty('System.AppUserModel.ID')
+$found = @()
+foreach ($app in @(Get-StartApps | Where-Object { ($keys -contains (Key $_.Name)) -or ($aumid -and $_.AppID -eq $aumid) })) {
+  if ($app.AppID -notmatch '^([^!]+)!([^!]+)$') { continue }
+  $family = $Matches[1]; $id = $Matches[2]
+  $packageName = $family.Substring(0, $family.LastIndexOf('_'))
+  foreach ($package in @(Get-AppxPackage -Name $packageName | Where-Object PackageFamilyName -eq $family)) {
+    $manifest = $package | Get-AppxPackageManifest
+    foreach ($entry in @($manifest.Package.Applications.Application | Where-Object Id -eq $id)) {
+      if ($entry.Executable) { $found += [IO.Path]::GetFileName([string] $entry.Executable) }
+    }
+  }
+}
+ConvertTo-Json -InputObject @($found | Sort-Object -Unique) -Compress
+`;
+
+export async function discoverInstalledWindowExecutable(executable: string,
+  query?: (script: string, env: Record<string, string>) => Promise<string>): Promise<string | undefined> {
+  if (!query && process.platform !== "win32") return undefined;
+  const run = query ?? ((script: string, env: Record<string, string>) => new Promise<string>((resolve, reject) => {
+    execFile(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      { windowsHide: true, timeout: 15_000, maxBuffer: 64 * 1024, env: { ...process.env, ...env } },
+      (error, stdout) => error ? reject(new Error("Windows renderer identity lookup failed; no mismatched window was adopted.")) : resolve(stdout));
+  }));
+  const parsed: unknown = JSON.parse((await run(WINDOWS_RENDERER_DISCOVERY_SCRIPT, { M9R_APP_LAUNCHER: executable })).replace(/^\uFEFF/, ""));
+  if (!Array.isArray(parsed) || parsed.some((name) => typeof name !== "string" || !/^[^\\/\u0000-\u001f]+\.exe$/i.test(name))) return undefined;
+  const names = [...new Map((parsed as string[]).map((name) => [name.toLowerCase(), name])).values()];
+  return names.length === 1 ? names[0] : undefined;
+}
+
 function appNameKey(value: string): string {
   return value.toLowerCase().replace(/\.exe$/, "").replace(/[^\p{L}\p{N}]/gu, "");
 }
@@ -53,13 +100,14 @@ foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths',
     }
   }
 }
-if ($found.Count -gt 0) {
-  ConvertTo-Json -InputObject @($found) -Compress -Depth 3
-  exit 0
-}
-# Packaged apps have exact registered names and stable activation IDs. Resolve
-# those first; a successful package match makes a recursive shortcut walk both
-# slower and more likely to produce duplicate launch routes.
+# Packaged apps have exact registered names and stable activation IDs. Windows
+# keeps a legacy "App Paths" registration pointing at a compatibility stub
+# binary (e.g. the classic notepad.exe) alongside a newer Store-packaged
+# replacement of the same app; returning on the App Paths match alone (as an
+# earlier version of this script did) meant the legacy stub always won even
+# when the modern packaged app is the one actually pinned/updated. Collect
+# both routes before deciding anything, so the exact-match dedup below can
+# tell they are the same app and prefer the packaged one.
 foreach ($app in @(Get-StartApps | Where-Object { Matches $_.Name })) {
   if ($app.AppID -notmatch '^([^!]+)!([^!]+)$') { continue }
   $family = $Matches[1]; $id = $Matches[2]
@@ -75,6 +123,9 @@ if ($found.Count -gt 0) {
   ConvertTo-Json -InputObject @($found) -Compress -Depth 3
   exit 0
 }
+# Neither a registered App Paths entry nor a packaged app matched; only now
+# fall back to a recursive shortcut walk, which is slower and more likely to
+# produce duplicate or unrelated launch routes.
 $shell = New-Object -ComObject WScript.Shell
 $roots = @()
 if ($env:APPDATA) { $roots += Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar' }
@@ -94,15 +145,17 @@ foreach ($root in $roots) {
 ConvertTo-Json -InputObject @($found) -Compress -Depth 3
 `;
 
-export async function discoverInstalledWindowsApp(name: string): Promise<InstalledWindowsApp | undefined> {
-  if (process.platform !== "win32") return undefined;
-  const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const output = await new Promise<string>((resolve, reject) => {
-    execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_APP_DISCOVERY_SCRIPT], {
+export async function discoverInstalledWindowsApp(name: string,
+  query?: (script: string, env: Record<string, string>) => Promise<string>): Promise<InstalledWindowsApp | undefined> {
+  if (!query && process.platform !== "win32") return undefined;
+  const run = query ?? ((script: string, env: Record<string, string>) => new Promise<string>((resolve, reject) => {
+    const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
       windowsHide: true, timeout: 15_000, maxBuffer: 256 * 1024,
-      env: { ...process.env, M9R_APP_QUERY_NAMES: JSON.stringify(windowsAppSearchNames(name)) },
+      env: { ...process.env, ...env },
     }, (error, stdout, stderr) => error ? reject(new Error(`Windows app discovery failed: ${error.killed ? "Windows inventory query exceeded its 15-second deadline." : (stderr.trim() || error.message.split("\n")[0]).slice(0, 500)}`)) : resolve(stdout));
-  });
+  }));
+  const output = await run(WINDOWS_APP_DISCOVERY_SCRIPT, { M9R_APP_QUERY_NAMES: JSON.stringify(windowsAppSearchNames(name)) });
   const parsed: unknown = JSON.parse(output.replace(/^\uFEFF/, ""));
   if (!Array.isArray(parsed)) throw new Error("Windows app discovery returned an invalid inventory.");
   const apps = parsed.filter((app): app is InstalledWindowsApp => app && typeof app.executable === "string"
