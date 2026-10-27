@@ -13,6 +13,7 @@ import { createRuntimeBuildInfo } from "@/lib/native/runtime-build-identity";
 
 const autostartCalls: string[] = [];
 let autostartOn = false;
+const brokerAutostartCalls: string[] = [];
 // Every test gets a fake: nothing here may ever touch the real Windows registry.
 const fakeAutostart = { enable: (c: string) => { autostartCalls.push(`enable ${c}`); autostartOn = true; return true; }, disable: () => { autostartCalls.push("disable"); autostartOn = false; }, isOn: () => autostartOn };
 
@@ -31,6 +32,14 @@ function sandbox(opts: { confirm?: boolean | "none"; tempRoot?: string } = {}) {
     err: (l) => err.push(l),
     confirm: opts.confirm === "none" ? undefined : async () => opts.confirm !== false,
     autostart: fakeAutostart,
+    installLocalBrokerAutostart: async () => {
+      brokerAutostartCalls.push("install");
+      return { ok: true, message: "broker installed" };
+    },
+    removeLocalBrokerAutostart: async () => {
+      brokerAutostartCalls.push("remove");
+      return { ok: true, message: "broker removed" };
+    },
   };
   const p = nativePaths(io);
   return { home, io, out, err, p, run: (cmd: string, args: string[] = []) => runNativeCommand(cmd, args, io), done: () => rmSync(home, { recursive: true, force: true }) };
@@ -759,15 +768,18 @@ test("starting with Windows is optional: only with --autostart (or a yes to its 
   delete s.io.env.M9R_HOOK_ENTRY;
   s.io.env.M9R_ENGINE = engine;
   s.io.env.M9R_NO_DAEMON = "1";
-  autostartCalls.length = 0; autostartOn = false;
+  autostartCalls.length = 0; brokerAutostartCalls.length = 0; autostartOn = false;
   assert.equal(await s.run("setup", ["--yes"]), 0);
   assert.deepEqual(autostartCalls, [], "--yes alone never turns it on");
+  assert.deepEqual(brokerAutostartCalls, [], "--yes alone never installs the owner broker login task");
   assert.equal(await s.run("setup", ["--yes", "--autostart"]), 0);
   assert.equal(autostartCalls.length, 1);
+  assert.deepEqual(brokerAutostartCalls, ["install"], "--autostart installs the owner broker login task");
   assert.match(autostartCalls[0], /^enable ".*m9r-engine\.exe" feed --watch --serve-hooks$/);
   assert.equal(JSON.parse(readFileSync(s.p.manifest, "utf8")).autostart, true);
   assert.equal(await s.run("uninstall", ["--yes"]), 0);
   assert.equal(autostartCalls.at(-1), "disable");
+  assert.equal(brokerAutostartCalls.at(-1), "remove");
   s.done();
 });
 

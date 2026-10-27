@@ -149,7 +149,7 @@ export function transitionTaskReceipt(current: TaskReceipt | undefined, transiti
 
 /** A durable phase boundary for one request handled by the native desktop stage. */
 export type StageTimingPhase = "queue_wait" | "prepare" | "launch" | "action" | "close" | "stop"
-  | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion";
+  | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-visible";
 
 /**
  * Timing is deliberately kept on the task record so a later result or audit can reconcile

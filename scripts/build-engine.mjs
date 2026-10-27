@@ -25,7 +25,13 @@ const output = join(engineDir, "dist");
 const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
 const out = join(buildRoot, "artifacts");
 const work = join(buildRoot, "work");
-const overlayExe = join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
+// The desktop build may use an isolated Cargo target directory when a previous
+// generated target tree is locked or owned by another Windows boundary.  Never
+// silently fall back to an older pill in that case: callers may provide the
+// exact freshly-built executable explicitly.
+const overlayExe = process.env.M9R_OVERLAY_EXE
+  ? resolve(process.env.M9R_OVERLAY_EXE)
+  : join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(root, "cli", "dist", "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";

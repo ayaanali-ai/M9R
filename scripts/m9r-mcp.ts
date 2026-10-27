@@ -17,6 +17,7 @@ import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { reconcileProviderSessions } from "@/lib/native/provider-session-reconciliation";
 import { migrateLegacyAgentCredentials, readAgentCredential } from "@/lib/native/agent-credential-store";
 import { createM9rMcpServer } from "@/lib/native/mcp-server";
+import { startParentLivenessWatchdog } from "@/lib/native/process-liveness";
 import { createNetworkCoreClient, parseNetworkCredentials } from "@/lib/native/network-core-client";
 import { createWebBrokerClient } from "@/lib/native/web-broker-client";
 import { brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
@@ -42,7 +43,7 @@ async function localAgentToken(provider: string, env: NodeJS.ProcessEnv, reposit
 }
 
 async function startMcpPresence(connection: ReturnType<typeof readM9rMcpConnectionConfig>): Promise<ReturnType<typeof startLocalPresenceHeartbeat> | null> {
-  if (process.env.M9R_MCP_WORKER === "1" || !connection.provider) return null;
+  if (process.env.M9R_MCP_WORKER === "1" || connection.mode === "managed-owner" || !connection.provider) return null;
   // A provider MCP process is commonly launched from the user's home folder
   // (or from an arbitrary shell cwd), which is not proof of the project it is
   // serving. Never treat that cwd as a credential-migration target: doing so
@@ -94,6 +95,17 @@ async function main(): Promise<void> {
     }
     return;
   }
+  // This worker is a plain child of the outer supervisor, with no OS-level job/process-group tie
+  // on Windows: a crashed or forcibly-killed outer process leaves it running forever otherwise.
+  if (Number.isSafeInteger(process.ppid) && process.ppid > 0) {
+    startParentLivenessWatchdog({
+      parentPid: process.ppid,
+      onParentGone: () => {
+        process.stderr.write("M9R MCP worker exiting: outer supervisor process is no longer alive\n");
+        process.exit(0);
+      },
+    });
+  }
   const root = defaultStoreRoot(homedir(), process.env);
   const store = createLocalStore(root);
   const web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: Number(process.env.M9R_WEB_BROKER_PORT) || undefined });
@@ -107,12 +119,13 @@ async function main(): Promise<void> {
     web,
     networkCore,
     ...(Number.isSafeInteger(roomStartedAt) && roomStartedAt > 0 ? { roomStartedAt } : {}),
-    ...(connection.bindingId ? { connectionBindingId: connection.bindingId } : {}),
-    ...(connection.processId ? { connectionProcessId: connection.processId } : {}),
+    ...(connection.mode === "managed-owner" ? {} : connection.bindingId ? { connectionBindingId: connection.bindingId } : {}),
+    ...(connection.mode ? { connectionMode: connection.mode } : {}),
+    ...(connection.mode === "managed-owner" ? {} : connection.processId ? { connectionProcessId: connection.processId } : {}),
     ...(connection.provider ? { connectionProvider: connection.provider } : {}),
     connectionCwd: process.env.M9R_PROJECT_ROOT?.trim() || process.cwd(),
     ...(connection.sessionId ? { connectionSessionId: connection.sessionId } : {}),
-    ...(connection.provider ? {
+    ...(connection.mode !== "managed-owner" && connection.provider ? {
       reconcileProviderConnection: ({ provider, processId, sessionId, cwd }) => reconcileProviderSessions({
         root,
         store,

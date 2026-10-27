@@ -1,7 +1,7 @@
 /**
- * Starts the local web broker the M9R browser extension connects to. Spike entry point: run with
- * `npx tsx scripts/m9r-web-broker.ts`. The fixed development extension ID is allow-listed; M9R_WEB_BROKER_PORT
- * overrides the port. This entry point never enables arbitrary extension origins.
+ * Starts the local M9R owner broker. The desktop runtime uses the authenticated
+ * owner pipe and native desktop/browser routes; the legacy browser-extension
+ * transport is intentionally not enabled by this production entry point.
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -20,7 +20,6 @@ import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-s
 import type { StageApprovalRequest } from "@/lib/native/web-broker-core";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
-import { webExtensionAllowlist } from "@/lib/native/web-setup-core";
 import { clearDesktopPillState, writeDesktopPillState } from "@/lib/native/desktop-pill-state";
 
 async function main(): Promise<void> {
@@ -75,7 +74,7 @@ async function main(): Promise<void> {
     deliverOwnerTask: (taskId) => sessionOwner.current
       ? sessionOwner.current.deliverOwnerTask(taskId)
       : { ok: false, error: "M9R-owned provider supervisor is not ready" },
-    allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
+    ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
   stageApprovals.requestApproval = (request) => broker.requestStageApproval(request);
   const config = loadAgentsConfig(root, { cwd: projectRoot });
   const providerSessions = createManagedProviderOwner({
@@ -85,6 +84,20 @@ async function main(): Promise<void> {
   sessionOwner.current = providerSessions;
   ui.attachSessions(providerSessions);
   writeDesktopPillState(root, ui.snapshot());
+  // The broker is the M9R owner boundary for the desktop path. Restore every
+  // configured logical provider connection as soon as the broker is alive so
+  // the pill does not depend on a provider app, a provider hook, or an inbox
+  // read to make the first task usable after sign-in/reboot. Each provider is
+  // isolated: one missing CLI/login must not prevent the other connections or
+  // the owner broker from coming up.
+  void providerSessions.start().then((startup) => {
+    for (const failure of startup.failures) {
+      process.stderr.write(`M9R managed provider @${failure.handle} did not start: ${failure.error}\n`);
+    }
+    try { writeDesktopPillState(root, ui.snapshot()); } catch { /* the broker remains usable */ }
+  }).catch((error: unknown) => {
+    process.stderr.write(`M9R managed provider startup failed: ${error instanceof Error ? error.message : String(error)}\n`);
+  });
   // Keep the snapshot a live ownership signal. If the broker crashes, the
   // overlay rejects the stale file and returns to its compatibility feed
   // instead of displaying state whose owner pipe no longer exists.
@@ -111,10 +124,11 @@ async function main(): Promise<void> {
   let stopPromise: Promise<void> | undefined;
   const stop = (): Promise<void> => {
     if (stopPromise) return stopPromise;
-    clearInterval(webTimer); clearInterval(presenceTimer); clearInterval(pillStateTimer); providerSessions.close(); ui.close(); clearDesktopPillState(root);
+    clearInterval(webTimer); clearInterval(presenceTimer); clearInterval(pillStateTimer); ui.close(); clearDesktopPillState(root);
     // Keep the broker listener alive until stage/runtime cleanup finishes. The authenticated
     // shutdown caller uses listener closure as its signal that owned resources have drained.
     stopPromise = (async () => {
+      await providerSessions.shutdown();
       await taskStages.close();
       await broker.close();
     })().catch((error: unknown) => {
