@@ -60,7 +60,10 @@ async function main(): Promise<void> {
   // One owner-owned store instance is shared by the broker, stage service, and provider-session supervisor.
   // Restricted MCP child processes use the broker's narrow token-checked write endpoint instead of taking the
   // state.lock directory themselves; the owner-only store ACL stays intact.
-  const store = createLocalStore(root);
+  // The broker answers every connected agent's /health and every other request from this one thread, so it
+  // cannot afford the generous default lock wait a one-shot hook or CLI call can: a single contested write
+  // would otherwise stall the whole broker (and everyone's "is M9R alive" check) for up to LOCK_WAIT_MS.
+  const store = createLocalStore(root, { lockWaitMs: 400 });
   const taskStages = createTaskDesktopStageService({ store, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
   const broker = await startWebBroker({ key, port, taskStages, agentMcpStore: store, allowedExtensionIds: webExtensionAllowlist(), ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
   stageApprovals.requestApproval = (request) => broker.requestStageApproval(request);
