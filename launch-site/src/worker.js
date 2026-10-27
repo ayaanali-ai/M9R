@@ -8,28 +8,39 @@ export default {
     if (url.pathname !== "/api/waitlist") return env.ASSETS.fetch(request);
     if (request.method !== "POST") return json({ ok: false, error: "Use POST." }, 405);
     let email = "";
+    let name = "";
     let agents = "";
     try {
       const ct = request.headers.get("content-type") || "";
       const body = ct.includes("json") ? await request.json() : Object.fromEntries(await request.formData());
       email = String(body.email || "").trim().toLowerCase();
+      name = String(body.name || "").trim().slice(0, 200);
       const raw = Array.isArray(body.agents) ? body.agents : String(body.agents || "").split(",");
       agents = raw.map((a) => String(a).trim().toLowerCase()).filter((a) => ALLOWED_AGENTS.includes(a)).join(",");
     } catch { /* fall through to validation */ }
+    if (!name) return json({ ok: false, error: "Enter your name." }, 400);
     if (!EMAIL_RE.test(email) || email.length > 254) return json({ ok: false, error: "Enter a valid email address." }, 400);
     const now = new Date().toISOString();
-    const res = await env.DB.prepare("INSERT OR IGNORE INTO waitlist (email, created_at, source, agents) VALUES (?, ?, ?, ?)")
-      .bind(email, now, "homepage", agents).run();
+    const res = await env.DB.prepare("INSERT OR IGNORE INTO waitlist (email, created_at, source, agents, name) VALUES (?, ?, ?, ?, ?)")
+      .bind(email, now, "homepage", agents, name).run();
     const added = (res.meta?.changes ?? 0) > 0;
     if (added && env.EMAIL) {
       ctx.waitUntil((async () => {
         try {
           const total = await env.DB.prepare("SELECT COUNT(*) AS n FROM waitlist").first();
+          const agentList = agents ? agents.split(",") : [];
+          const agentSummary = agentList.length > 0 ? agentList.length + " agent" + (agentList.length === 1 ? "" : "s") + ": " + agentList.join(", ") : "no agents given";
           await env.EMAIL.send({
             from: "M9R <hello@m9r.dev>",
             to: OWNER,
-            subject: "New M9R waitlist signup (" + (total?.n ?? "?") + " total)",
-            text: [email, "Agents: " + (agents || "not given"), "Time: " + now].join(String.fromCharCode(10)),
+            subject: "New M9R waitlist signup: " + (name || email),
+            text: [
+              "Name: " + (name || "not given"),
+              "Email: " + email,
+              "Agents (" + agentSummary + ")",
+              "Time: " + now,
+              "Waitlist total so far: " + (total?.n ?? "?"),
+            ].join(String.fromCharCode(10)),
           });
         } catch (e) { console.log("owner notification failed", String(e)); }
         try {

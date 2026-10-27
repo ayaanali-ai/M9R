@@ -14,7 +14,7 @@ import { createManagedProviderOwner } from "@/lib/native/managed-provider-owner"
 import { createWebUiBridge } from "@/lib/native/web-ui-bridge";
 import { createPageNotesStore } from "@/lib/native/page-notes-store";
 import { pullCloudNotes, pushCloudNote } from "@/lib/native/cloud-memory";
-import { readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
+import { launchDesktopOverlayIfNeeded, readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
 import { DEFAULT_BROKER_PORT, brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
 import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-server";
 import type { StageApprovalRequest } from "@/lib/native/web-broker-core";
@@ -76,6 +76,9 @@ async function main(): Promise<void> {
       : { ok: false, error: "M9R-owned provider supervisor is not ready" },
     ownerId, authority, authorityStore, modeFile: join(root, "room-mode.txt"), ownerPipePath: ownerPipePath(root), ui, loopGuard: { repeat: 3, budget: 120, windowMs: 10 * 60_000 }, onShutdownRequested: () => requestShutdown() });
   stageApprovals.requestApproval = (request) => broker.requestStageApproval(request);
+  // The broker already autostarts at login; piggyback the desktop pill's launch onto that same moment
+  // while launchDesktopOverlayIfNeeded's process check prevents duplicate overlays.
+  launchDesktopOverlayIfNeeded(root);
   const config = loadAgentsConfig(root, { cwd: projectRoot });
   const providerSessions = createManagedProviderOwner({
     agents: config.agents, storeRoot: root, repoRoot: projectRoot, brokerPort: broker.port,

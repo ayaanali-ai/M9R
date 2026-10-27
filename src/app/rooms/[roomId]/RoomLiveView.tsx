@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/browser";
 import styles from "../room-url.module.css";
 
@@ -51,7 +51,6 @@ function validFramePayload(value: unknown): LiveFrame | null {
 }
 
 export default function RoomLiveView({ roomId, displayName }: { roomId: string; displayName: string }) {
-  const supabase = useMemo(() => createClient(), []);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mediaRef = useRef<MediaStream | null>(null);
@@ -63,6 +62,7 @@ export default function RoomLiveView({ roomId, displayName }: { roomId: string; 
   const componentActiveRef = useRef(false);
   const membershipInvalidRef = useRef(false);
   const stopRef = useRef<() => void>(() => {});
+  const [supabase] = useState(() => createClient());
   const [connected, setConnected] = useState(false);
   const [starting, setStarting] = useState(false);
   const [sharing, setSharing] = useState(false);

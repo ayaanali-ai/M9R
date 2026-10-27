@@ -146,6 +146,12 @@ async function main(): Promise<void> {
       : {}),
   });
   const transport = new StdioServerTransport();
+  // The SDK's stdio transport never listens for stdin closing, and on Windows a Node process commonly does not exit
+  // on its own when its pipe EOFs -- confirmed live: every closed Claude Code/Codex session left this process behind
+  // as a permanent orphan, stacking up indefinitely across restarts with nothing to ever reap them. The host closing
+  // its end of the pipe is the only signal this process gets that it is no longer wanted; act on it immediately.
+  process.stdin.on("end", () => process.exit(0));
+  process.stdin.on("close", () => process.exit(0));
   await server.connect(transport);
 }
 

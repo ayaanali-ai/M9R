@@ -78,8 +78,9 @@ export class Ticker {
   private queue: string[] = [];
   private startMs: number | null = null;
   private displayIndex = -1;
-  /** Which agent's steps are currently shown. Idle agents commonly share step index 0, so the task identity must
-   * participate in reset detection or a focus switch can leave the previous agent's text on screen. */
+  /** Which agent's steps are currently shown. A focus switch must always re-seed the display text, even when the
+   * newly-focused agent's stepIndex happens to equal the previous agent's -- idle agents commonly sit at index 0,
+   * which otherwise fell through every branch below and left the previous agent's text on screen indefinitely. */
   private displayTaskId: string | null = null;
 
   constructor() {
@@ -113,8 +114,9 @@ export class Ticker {
       return;
     }
 
-    // A focus switch or session restart (steps were cleared) must re-seed rather than scroll. A plain index comparison
-    // misses the common case where the newly focused agent is idle at the same index as the previous agent.
+    // The focus moved to a different agent, or that agent's own session restarted (steps were cleared):
+    // re-seed rather than scroll. A plain `idx < this.displayIndex` check alone missed the case where the
+    // new agent's stepIndex happens to equal the old one -- very common when it is idle at index 0.
     if (taskChanged || idx < this.displayIndex) {
       this.queue = [];
       this.startMs = null;

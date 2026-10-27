@@ -14,6 +14,9 @@ const env = {
   ...process.env,
   CLOUDFLARE_BUILD: "true",
   MISSION_RELAY_PUBLIC_URL: relayUrl,
+  // OpenNext invokes the package build internally. Keep that nested build on the
+  // plain Next path instead of recursively starting a second OpenNext build.
+  M9R_OPENNEXT_INNER: "1",
 };
 
 console.log("Building the Cloudflare Worker with the supported OpenNext build pipeline.");

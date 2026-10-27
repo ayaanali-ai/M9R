@@ -3,6 +3,9 @@
 // the window, tray, and local UI events; it never changes either source file.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod native_dictation;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -81,6 +84,9 @@ const PILL: &str = "pill";
 /// The full-window Clonk-style app, a real OS window (decorations, taskbar entry, resizable) --
 /// unlike the pill, closing it must never shut down the engine or the pill overlay.
 const APP_WINDOW: &str = "app";
+/// The real, live M9R workspace (agents, missions, memory, approvals, rooms) embedded as
+/// an ordinary native window -- the same data the web app already serves, not a reimplementation.
+const WORKSPACE: &str = "workspace";
 const COLLAPSED_W: f64 = 220.0;
 const TOP_MARGIN: f64 = 0.0;
 
@@ -99,6 +105,41 @@ fn next_mode() -> bool {
     // The one pill is the default; M9R_PILL_NEXT=0 starts the older overlay UI instead.
     std::env::var("M9R_PILL_NEXT").as_deref() != Ok("0")
 }
+
+/// WebView2 does not show its own permission prompt for an unhandled `getUserMedia` request from a window this
+/// small and chromeless (220x36, no decorations) -- there is nowhere for its default infobar to render, so the
+/// request is left pending and the page sees it as a silent, permanent "not-allowed". Confirmed live 2026-10-10:
+/// holding Alt+M opened the message view, but no Windows mic prompt ever appeared and the listening meter never
+/// moved. Registering our own `PermissionRequested` handler and auto-approving the microphone (our own first-party
+/// pill content, never third-party pages) is the standard fix; everything else stays default-denied.
+#[cfg(windows)]
+fn allow_microphone_permission(window: &WebviewWindow) {
+    use webview2_com::{
+        Microsoft::Web::WebView2::Win32::{COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_ALLOW},
+        PermissionRequestedEventHandler,
+    };
+    let result = window.with_webview(|webview| unsafe {
+        let Ok(core) = webview.controller().CoreWebView2() else { return };
+        let handler = PermissionRequestedEventHandler::create(Box::new(|_sender, args| {
+            if let Some(args) = args {
+                let mut kind = COREWEBVIEW2_PERMISSION_KIND_MICROPHONE;
+                kind.0 = 0;
+                if args.PermissionKind(&mut kind).is_ok() && kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE {
+                    let _ = args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
+                }
+            }
+            Ok(())
+        }));
+        let mut token: i64 = 0;
+        let _ = core.add_PermissionRequested(&handler, &mut token);
+    });
+    if let Err(e) = result {
+        eprintln!("M9R: could not install the microphone permission handler ({e})");
+    }
+}
+
+#[cfg(not(windows))]
+fn allow_microphone_permission(_window: &WebviewWindow) {}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct IslandRect {
@@ -933,6 +974,16 @@ mod output_reference_tests {
     }
 }
 
+/// Shows and focuses the real workspace window, reusing the one created at startup (defined in
+/// tauri.conf.json, same pattern as the pill) rather than ever building a second instance of it.
+fn show_workspace(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(WORKSPACE) {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
 fn stop_engine() {
     ENGINE_STOPPING.store(true, Ordering::SeqCst);
     if let Some(mut child) = ENGINE.lock().unwrap().take() {
@@ -1012,8 +1063,11 @@ fn main() {
                 shutdown_pill(app);
             } else if has_open_app_argument(&args) {
                 let _ = open_app_window(app.clone());
-            } else if let Some(window) = app.get_webview_window(PILL) {
-                let _ = window.show();
+            } else {
+                // The app already runs persistently in the background (tray + hidden pill), so a
+                // second launch is always a deliberate click on the app's icon -- the same gesture
+                // every other installed app treats as "open it," not "flash the pill."
+                show_workspace(app);
             }
         }))
         .plugin(
@@ -1029,6 +1083,11 @@ fn main() {
                                 if let Some(window) = app.get_webview_window(PILL) {
                                     let _ = window.show();
                                 }
+                                #[cfg(windows)]
+                                native_dictation::start();
+                            } else {
+                                #[cfg(windows)]
+                                native_dictation::stop();
                             }
                             let _ = app.emit("hold-to-talk", transition.as_str());
                         }
@@ -1048,6 +1107,9 @@ fn main() {
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
             let _ = window.set_focusable(false);
             let _ = window.set_always_on_top(true);
+            allow_microphone_permission(&window);
+            #[cfg(windows)]
+            native_dictation::init(app.handle().clone());
             if next_mode() {
                 // The one-pill UI ships inside the overlay's bundle under /pill-next; the window is its fixed panel.
                 let _ = window.set_size(LogicalSize::new(NEXT_W, NEXT_H));
@@ -1076,16 +1138,18 @@ fn main() {
                 window.open_devtools();
             }
 
-            let show = MenuItem::with_id(app, "toggle", &format!("Show / hide ({TOGGLE_HOTKEY_LABEL})"), true, None::<&str>)?;
-            let open_app = MenuItem::with_id(app, "open-app", "Open M9R", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open_workspace", "Open M9R", true, None::<&str>)?;
+            let open_app = MenuItem::with_id(app, "open-app", "Open M9R App", true, None::<&str>)?;
+            let show = MenuItem::with_id(app, "toggle", &format!("Show / hide pill ({TOGGLE_HOTKEY_LABEL})"), true, None::<&str>)?;
             let dnd = CheckMenuItem::with_id(app, "dnd", "Do not disturb", true, false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &open_app, &dnd, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &open_app, &show, &dnd, &quit])?;
             let mut tray = TrayIconBuilder::new().tooltip("M9R").menu(&menu);
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
             tray.on_menu_event(move |app, event| match event.id.as_ref() {
+                "open_workspace" => show_workspace(app),
                 "toggle" => toggle_pill(app),
                 "open-app" => { let _ = open_app_window(app.clone()); }
                 "dnd" => {
@@ -1115,21 +1179,22 @@ fn main() {
         .on_window_event(|window, event| {
             match event {
                 WindowEvent::Moved(pos) => {
+                    // Position persistence is pill-specific framing; the app and workspace windows
+                    // are ordinary resizable app windows with no saved-position concept.
                     if window.label() == PILL {
-                      if let Ok(size) = window.outer_size() {
-                        save_position(window.app_handle(), pos.x + size.width as i32 / 2, pos.y);
-                      }
+                        if let Ok(size) = window.outer_size() {
+                            save_position(window.app_handle(), pos.x + size.width as i32 / 2, pos.y);
+                        }
                     }
                 }
                 WindowEvent::CloseRequested { api, .. } => {
-                    if window.label() == APP_WINDOW {
-                        // A real window the owner can just close; it has no engine or tray
-                        // lifecycle of its own to tear down. Hide instead of destroying it so
-                        // reopening is instant and its scroll position/state survive.
+                    if window.label() == PILL {
+                        shutdown_pill(window.app_handle());
+                    } else {
+                        // Closing the app or workspace window should hide it, not quit the whole
+                        // app or destroy the window -- "Open M9R" from the tray must keep working.
                         api.prevent_close();
                         let _ = window.hide();
-                    } else {
-                        shutdown_pill(window.app_handle());
                     }
                 }
                 _ => {}

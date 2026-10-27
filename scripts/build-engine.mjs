@@ -20,6 +20,10 @@ import { publishRuntimeBuild, verifyRuntimeBuildManifest, writeRuntimeBuildManif
 const systemTarExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// Windows ships libarchive-based bsdtar at System32\\tar.exe. A bare tar.exe can
+// resolve to Git for Windows' GNU tar, which treats a C:\\ path as a remote host
+// and cannot reliably inspect or extract the verified ZIP on this build path.
+const systemTarExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
 const engineDir = join(root, "engine");
 const output = join(engineDir, "dist");
 const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
@@ -73,6 +77,10 @@ function isHeldLocalProvenancePath(path) {
 if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle)) throw new Error("cli/dist is missing: run `npm run build:cli` first.");
 if (process.platform === "win32" && !existsSync(overlayExe)) {
   throw new Error("The Windows desktop pill is missing: build it with `npm --prefix overlay run build` before building the standalone engine.");
+}
+rmSync(work, { recursive: true, force: true });
+for (const name of [exeName, brokerExeName, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native", ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "m9r-overlay.exe"] : [])]) {
+  rmSync(join(out, name), { force: true });
 }
 const postjectCli = join(root, "node_modules", "postject", "dist", "cli.js");
 if (!existsSync(postjectCli)) throw new Error("postject is missing; install the locked development dependencies before building the engine.");

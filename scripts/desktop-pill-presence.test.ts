@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { DESKTOP_PILL_MAX_AGE_MS, desktopPillHeartbeatPath, desktopPillRunning, readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
+import { DESKTOP_PILL_MAX_AGE_MS, desktopPillHeartbeatPath, desktopPillRunning, launchDesktopOverlayIfNeeded, readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
 import { createWebUiBridge, type UiState } from "@/lib/native/web-ui-bridge";
 
 const beat = (at: number, visible = true) => JSON.stringify({ pid: 1, at, visible });
@@ -49,4 +49,15 @@ test("the ui-state carries desktopPill only while it is true, and a change is pu
   assert.equal("desktopPill" in ui.snapshot(), false);
   assert.equal(pushed.length, initial + 2);
   ui.close();
+});
+
+test("launchDesktopOverlayIfNeeded never throws when the overlay binary is missing, and is a no-op off Windows", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-presence-launch-"));
+  try {
+    // No bin/m9r-overlay.exe was ever written here, so this exercises the "nothing to launch" path on every
+    // platform the test suite runs on, and the real win32-only launch path never fires off Windows.
+    assert.doesNotThrow(() => launchDesktopOverlayIfNeeded(root));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
