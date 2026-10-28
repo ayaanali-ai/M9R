@@ -10,6 +10,8 @@ Branch under test: `codex/m9r-phase0-11-checkpoint-2026-10-28`
 
 Starting checkpoint: `65fad7e2` (Phase 10 model picker)
 
+Verification commits: `0b717441` (contract fixes and qualification record), `0f336bea` (diagnostics provenance classification).
+
 ## Fixes found during qualification
 
 - Surface adapter registration now validates only the serializable descriptor. The executable `canHandle` and `bind` methods are deliberately outside that schema. Invalid target payloads now fail closed with a structured resolution error instead of throwing out of the catalog.
@@ -33,7 +35,7 @@ None of these changes alter the existing broker-owned browser route, desktop-sta
 | TypeScript repository check | passed |
 | Production pill bundle (`npm --prefix pill run build`) | passed |
 | CLI artifact (`node scripts/build-cli.mjs`) | passed |
-| Engine/broker/CUA artifacts (`node scripts/build-engine.mjs`) | passed; identity verified across 185 files |
+| Engine/broker/CUA artifacts (`node scripts/build-engine.mjs`) | passed; clean identity `a5b96c906254b286bde25b95813b6e31a385c36118dc7361a21870d0edfd04af` verified across 185 files |
 | `git diff --check` | passed |
 
 The web UI bridge socket test required host networking permission; its sandbox-only `EACCES` was an environment restriction, and the host-permission rerun passed.
@@ -51,6 +53,6 @@ The root Next production build was started but did not progress past the initial
 
 ## Cleanup decision
 
-No obsolete path was deleted. The reference audit found remaining legacy references in credential migration, compatibility/config layout handling, the explicit ACP escape hatch, and migration-era tests. They are still reachable by supported compatibility flows or referenced by tests, so blind deletion would be unsafe. The pre-existing untracked recovery, diagnostics, scratchpad, and test-temporary directories were left untouched.
+No obsolete path was deleted. The reference audit found remaining legacy references in credential migration, compatibility/config layout handling, the explicit ACP escape hatch, and migration-era tests. They are still reachable by supported compatibility flows or referenced by tests, so blind deletion would be unsafe. The pre-existing untracked recovery, diagnostics, scratchpad, and test-temporary directories were left untouched. `diagnostics/` is now explicitly classified as retained local evidence by the engine provenance check, so those incident traces cannot falsely mark a committed release dirty.
 
 Phase 11 is therefore source-qualified for the M9R contract surface, with the broad-suite/environment exceptions recorded above. Deployment and live three-provider desktop acceptance remain separate operational steps.
