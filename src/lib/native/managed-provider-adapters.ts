@@ -653,7 +653,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
   }
 
   capabilities(): ManagedProviderCapabilities {
-    const models = validateProviderModelCatalog(this.session?.handle.availableModels ?? null);
+    const models = validateProviderModelCatalog(this.session?.availableModels ?? null);
     return {
       connectionId: this.profile.connectionId,
       provider: this.profile.provider,

@@ -448,8 +448,8 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     let completionRecorded = false;
     let terminalObserved = false;
     let dispatchStartedMs: number | undefined;
-    let runtimeStartedMs = turnStartedMs;
     const turnStartedMs = Date.now();
+    let runtimeStartedMs = turnStartedMs;
     const storedTask = deps.store.getTask?.(taskId);
     const createdMs = storedTask ? Date.parse(storedTask.createdAt) : Number.NaN;
     if (Number.isFinite(createdMs) && createdMs <= turnStartedMs) {

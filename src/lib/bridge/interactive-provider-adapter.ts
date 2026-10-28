@@ -23,6 +23,9 @@ export interface AgentSessionHandle {
   /** Best-effort: this provider's real, live model choices from its own newSession response, when it exposes a "model" config option. Null when the provider doesn't expose one -- never a guessed/hardcoded list. */
   availableModels?: { id: string; label: string; efforts?: { id: string; label: string }[] | null }[] | null;
   availableEfforts?: { id: string; label: string }[] | null;
+  /** Provider-reported selection for the live session. Optional because not every provider exposes runtime selection state. */
+  model?: string | null;
+  effort?: string | null;
 }
 
 export interface InteractiveProviderEvent {

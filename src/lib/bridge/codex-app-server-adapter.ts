@@ -415,6 +415,8 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
     if (input.effort && !selectedEfforts.some(option => option.id === input.effort)) throw new Error("Effort is not supported by the selected Codex model.");
     session.model = selectedModel;
     session.effort = input.effort;
+    session.handle.model = selectedModel;
+    session.handle.effort = input.effort;
   }
 
   async *prompt(input: { session: AgentSessionHandle; text: string }): AsyncIterable<InteractiveProviderEvent> {
@@ -539,7 +541,7 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
   }
 
   private registerSession(state: ServerState, threadId: string, executionId: string, missionId: string): AgentSessionHandle {
-    const handle: AgentSessionHandle = { sessionId: `codex-session-${randomUUID()}`, providerSessionRef: threadId, availableModels: null };
+    const handle: AgentSessionHandle = { sessionId: `codex-session-${randomUUID()}`, providerSessionRef: threadId, availableModels: null, model: null, effort: null };
     state.sessions.set(handle.sessionId, { handle, threadId, queue: null, activeTurnId: null, permissions: new Map(), executionId, missionId, itemPaths: new Map(), lastError: null, lastUsage: null });
     return handle;
   }

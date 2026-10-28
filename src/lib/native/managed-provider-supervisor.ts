@@ -166,6 +166,11 @@ function generationFromReady(
 
 export function createManagedProviderSupervisor(options: ManagedProviderSupervisorOptions): ManagedProviderSupervisor {
   const entries = new Map<string, Entry>();
+  // A logical connection may be requested by startup reconciliation and a
+  // delivery at the same time. Coalesce those requests before they reach the
+  // provider adapter so one profile can never launch two runtimes for one
+  // generation.
+  const starting = new Map<string, Promise<ManagedProviderConnection>>();
   const store = options.continuationStore;
   let draining = false;
 
@@ -179,6 +184,12 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
     if (explicit !== undefined) return normalizeContinuation(explicit);
     if (!store) return undefined;
     return normalizeContinuation(await store.load(profile.connectionId, profile));
+  };
+
+  const waitForStarts = async (): Promise<void> => {
+    const pending = [...new Set(starting.values())];
+    if (pending.length === 0) return;
+    await Promise.all(pending.map((promise) => promise.catch(() => undefined)));
   };
 
   const ensureConnection = async (
@@ -211,11 +222,22 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
     }
     if (snapshot.status === "draining") throw new Error(`managed provider connection is draining: ${profile.connectionId}`);
 
-    const continuation = await load(profile, explicitContinuation);
-    const ready = await entry.connection.start(continuation);
-    generationFromReady(entry.connection, profile, ready);
-    await persist(entry);
-    return entry.connection;
+    const inFlight = starting.get(profile.connectionId);
+    if (inFlight) return inFlight;
+
+    const startPromise = (async (): Promise<ManagedProviderConnection> => {
+      const continuation = await load(profile, explicitContinuation);
+      const ready = await entry!.connection.start(continuation);
+      generationFromReady(entry!.connection, profile, ready);
+      await persist(entry!);
+      return entry!.connection;
+    })();
+    starting.set(profile.connectionId, startPromise);
+    try {
+      return await startPromise;
+    } finally {
+      if (starting.get(profile.connectionId) === startPromise) starting.delete(profile.connectionId);
+    }
   };
 
   const dispatch = async function* (task: ManagedProviderTask): AsyncIterable<ManagedProviderEvent> {
@@ -257,12 +279,14 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
 
   const drain = async (): Promise<void> => {
     draining = true;
+    await waitForStarts();
     await Promise.all([...entries.values()].map((entry) => entry.connection.drain()));
     await Promise.all([...entries.values()].map((entry) => persist(entry)));
   };
 
   const stop = async (): Promise<void> => {
     draining = true;
+    await waitForStarts();
     // `drain()` is a separate boundary. Once the caller has bounded active
     // work, stop only the exact connections this supervisor owns; never scan
     // or kill processes by provider name.
