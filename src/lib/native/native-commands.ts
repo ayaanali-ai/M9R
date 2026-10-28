@@ -1086,6 +1086,28 @@ export function runPillNote(io: NativeIo, text: string): Promise<number> {
   return runDesktopPillOwnerRequest(io, "/web/ui/save-note", { text: note }, "memory note");
 }
 
+/** Route a live provider model choice through the authenticated owner broker. */
+export function runPillModel(io: NativeIo, handle: string, model?: string, effort?: string): Promise<number> {
+  const normalizedHandle = handle?.replace(/^@/, "").trim().toLowerCase();
+  if (!/^[a-z][a-z0-9_.-]{0,39}$/.test(normalizedHandle)) {
+    io.err("Usage: m9r-cli pill-model @agent <provider-reported-model> [effort]");
+    return Promise.resolve(1);
+  }
+  if (model !== undefined && (!model.trim() || model.length > 160)) {
+    io.err("The model must be a non-empty provider-reported ID.");
+    return Promise.resolve(1);
+  }
+  if (effort !== undefined && (!effort.trim() || effort.length > 160)) {
+    io.err("The effort must be a non-empty provider-reported ID.");
+    return Promise.resolve(1);
+  }
+  return runDesktopPillOwnerRequest(io, "/web/ui/model", {
+    handle: normalizedHandle,
+    ...(model === undefined ? {} : { model: model.trim() }),
+    ...(effort === undefined ? {} : { effort: effort.trim() }),
+  }, "model selection");
+}
+
 export interface StatusRow { id: string; state: "ok" | "todo" | "info"; label: string; fix?: string }
 
 /** Live checklist rows for `doctor`: what is in place, what is still open, with the exact fix beside each. */
@@ -1233,6 +1255,7 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   if (command === "pill-send") return runPillSend(io, rest.join(" "));
   if (command === "pill-decide") return runPillDecision(io, rest[0] ?? "", rest[1] ?? "");
   if (command === "pill-note") return runPillNote(io, rest.join(" "));
+  if (command === "pill-model") return runPillModel(io, positionals[0] ?? "", positionals[1], positionals[2]);
   const root = nativePaths(io).m9r;
   if (command === "feed") {
     const controller = new AbortController();

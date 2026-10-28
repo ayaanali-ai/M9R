@@ -836,6 +836,31 @@ async fn send_message(text: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Persists and applies a provider-reported model through the resident owner
+/// broker. The overlay never talks to a provider process directly.
+#[tauri::command]
+async fn select_model(handle: String, model: Option<String>, effort: Option<String>) -> Result<String, String> {
+    if !plain_id(handle.trim().trim_start_matches('@')) {
+        return Err("Bad agent handle".into());
+    }
+    if model.as_ref().is_some_and(|value| value.trim().is_empty() || value.chars().count() > 160)
+        || effort.as_ref().is_some_and(|value| value.trim().is_empty() || value.chars().count() > 160) {
+        return Err("Bad provider model selection".into());
+    }
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    let handle = handle.trim().trim_start_matches('@').to_string();
+    let mut args = vec!["pill-model".to_string(), format!("@{handle}")];
+    if let Some(model) = model.filter(|value| !value.trim().is_empty()) { args.push(model); }
+    if let Some(effort) = effort.filter(|value| !value.trim().is_empty()) {
+        if args.len() == 2 { args.push(String::new()); }
+        args.push(effort);
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        engine_call(&engine, &refs)
+    }).await.map_err(|e| e.to_string())?
+}
+
 /// Approves or denies a broker-owned pill approval. The broker UI contract
 /// intentionally has no `allow for a day` route; that legacy grant remains
 /// available only through the compatibility feed path.
@@ -1205,7 +1230,7 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, select_model, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.

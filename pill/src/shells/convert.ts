@@ -1,6 +1,6 @@
 // Pure converters from what each host already produces into the pill's one snapshot shape. No DOM, no host APIs.
 
-import type { AgentRunState, PillSnapshot, Provider } from "../core/state";
+import type { AgentRunState, PillModelAgent, PillModelOption, PillModelState, PillSnapshot, Provider } from "../core/state";
 import { collaborationFromAgents, sanitizePillCollaboration } from "../core/presence";
 
 export function providerOf(value: unknown): Provider {
@@ -18,9 +18,46 @@ const clip = (text: unknown, n: number) => (typeof text === "string" ? text.repl
 interface UiAgent { id: string; provider?: string; state?: string; doing?: string }
 interface UiThread { id: string; kind: string; agent?: string; text: string; phase?: string }
 interface UiApproval { id: string; agent?: string; provider?: string; text: string; site?: string; url?: string; action?: string }
-export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; collaboration?: unknown; desktopPill?: boolean }
+interface UiModelEffort { id?: unknown; label?: unknown }
+interface UiModelOption { id?: unknown; label?: unknown; efforts?: unknown }
+interface UiModelAgent { handle?: unknown; provider?: unknown; availability?: unknown; models?: unknown; currentModel?: unknown; currentEffort?: unknown; status?: unknown }
+export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; collaboration?: unknown; models?: unknown; desktopPill?: boolean }
 
 const RUN_STATES = new Set<AgentRunState>(["idle", "starting", "working", "waiting", "blocked", "stopped", "failed", "seen", "unknown", "not_connected"]);
+
+function modelState(raw: unknown): PillModelState | undefined {
+  if (!raw || typeof raw !== "object" || !Array.isArray((raw as { agents?: unknown }).agents)) return undefined;
+  const agents: PillModelAgent[] = [];
+  for (const value of (raw as { agents: unknown[] }).agents.slice(0, 16)) {
+    if (!value || typeof value !== "object") continue;
+    const item = value as UiModelAgent;
+    const handle = typeof item.handle === "string" ? item.handle.replace(/^@/, "").trim().slice(0, 40) : "";
+    const availability = item.availability === "available" || item.availability === "not_connected" || item.availability === "catalog_unavailable" ? item.availability : "catalog_unavailable";
+    if (!handle) continue;
+    const models: PillModelOption[] = [];
+    if (Array.isArray(item.models)) for (const optionValue of item.models.slice(0, 64)) {
+      if (!optionValue || typeof optionValue !== "object") continue;
+      const option = optionValue as UiModelOption;
+      if (typeof option.id !== "string" || typeof option.label !== "string" || !option.id.trim() || !option.label.trim()) continue;
+      const efforts = Array.isArray(option.efforts) ? option.efforts.flatMap((effortValue): { id: string; label: string }[] => {
+        if (!effortValue || typeof effortValue !== "object") return [];
+        const effort = effortValue as UiModelEffort;
+        return typeof effort.id === "string" && typeof effort.label === "string" && effort.id.trim() && effort.label.trim() ? [{ id: effort.id.slice(0, 160), label: effort.label.slice(0, 240) }] : [];
+      }).slice(0, 32) : null;
+      models.push({ id: option.id.slice(0, 160), label: option.label.slice(0, 240), efforts });
+    }
+    agents.push({
+      handle,
+      provider: typeof item.provider === "string" ? item.provider.slice(0, 64) : "agent",
+      availability,
+      models,
+      currentModel: typeof item.currentModel === "string" ? item.currentModel.slice(0, 160) : null,
+      currentEffort: typeof item.currentEffort === "string" ? item.currentEffort.slice(0, 160) : null,
+      status: typeof item.status === "string" ? item.status.slice(0, 24) : "stopped",
+    });
+  }
+  return { agents };
+}
 
 export function fromUiState(message: UiState): PillSnapshot {
   const thread = Array.isArray(message.thread) ? message.thread : [];
@@ -53,7 +90,8 @@ export function fromUiState(message: UiState): PillSnapshot {
     .slice(-30)
     .map((t) => ({ id: String(t.id), from: String(t.agent ?? "").replace(/^@/, "") || "m9r", text: clip(t.text, 600) }));
   const collaboration = sanitizePillCollaboration(message.collaboration) ?? collaborationFromAgents(agents);
-  return { agents, collaboration, approvals, thread: replies, ...(message.desktopPill === true ? { desktopPill: true } : {}) };
+  const models = modelState(message.models);
+  return { agents, collaboration, approvals, thread: replies, ...(models ? { models } : {}), ...(message.desktopPill === true ? { desktopPill: true } : {}) };
 }
 
 // ── Desktop shell: the engine's feed.json merged with web-activity.json ────────────────────────────

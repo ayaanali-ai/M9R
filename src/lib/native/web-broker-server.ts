@@ -465,7 +465,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     "/web/mode", "/web/shutdown", "/web/approve", "/web/deny", "/web/revoke", "/web/revoke-all",
     "/web/actions/approve", "/web/actions/deny", "/web/aware/members/invite", "/web/aware/members/remove",
     "/web/aware/disclosures/decision", "/web/protocol",
-    "/web/ui/command", "/web/ui/approve", "/web/ui/deny", "/web/ui/save-note",
+    "/web/ui/command", "/web/ui/approve", "/web/ui/deny", "/web/ui/save-note", "/web/ui/model",
   ]);
   const ownerPipeReadPaths = new Set(["/web/aware/members", "/web/aware/disclosures"]);
   const ownerReply = (ok: boolean, extra: Record<string, unknown> = {}): Record<string, unknown> => ({ ok, ...extra });
@@ -536,6 +536,14 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       } else if (request.path === "/web/ui/approve" || request.path === "/web/ui/deny") {
         if (keys.length !== 1 || typeof body.id !== "string" || !body.id || body.id.length > 128) return ownerReply(false, { error: "desktop pill approval ID is invalid" });
         message = { type: request.path.endsWith("/approve") ? "ui-approve" : "ui-deny", id: body.id };
+      } else if (request.path === "/web/ui/model") {
+        if (keys.some((key) => !["handle", "model", "effort"].includes(key))
+          || typeof body.handle !== "string" || !/^@?[A-Za-z][A-Za-z0-9_.-]{0,39}$/.test(body.handle)
+          || (body.model !== undefined && body.model !== null && (typeof body.model !== "string" || !body.model.trim() || body.model.length > 160))
+          || (body.effort !== undefined && body.effort !== null && (typeof body.effort !== "string" || !body.effort.trim() || body.effort.length > 160))) {
+          return ownerReply(false, { error: "desktop pill model selection is invalid" });
+        }
+        message = { type: "ui-select-model", handle: body.handle, model: body.model ?? null, effort: body.effort ?? null };
       } else {
         if (keys.length !== 1 || typeof body.text !== "string" || !body.text.trim() || body.text.length > 2_000) return ownerReply(false, { error: "desktop pill note is invalid" });
         message = { type: "ui-save-note", text: body.text };

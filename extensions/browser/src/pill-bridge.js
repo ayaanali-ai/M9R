@@ -74,7 +74,18 @@
       return [item];
     });
     const collaboration = sanitizeCollaboration(message.collaboration);
-    return { type: "ui-state", agents, thread, approvals, ...(collaboration ? { collaboration } : {}), ...(message.desktopPill === true ? { desktopPill: true } : {}) };
+    const models = message.models && typeof message.models === "object" && Array.isArray(message.models.agents)
+      ? { agents: message.models.agents.slice(0, 16).flatMap((agent) => {
+          if (!agent || typeof agent !== "object" || typeof agent.handle !== "string") return [];
+          const options = Array.isArray(agent.models) ? agent.models.slice(0, 64).flatMap((model) => {
+            if (!model || typeof model !== "object" || typeof model.id !== "string" || typeof model.label !== "string") return [];
+            const efforts = Array.isArray(model.efforts) ? model.efforts.slice(0, 32).flatMap((effort) => effort && typeof effort === "object" && typeof effort.id === "string" && typeof effort.label === "string" ? [{ id: str(effort.id, 160), label: str(effort.label, 240) }] : []) : null;
+            return [{ id: str(model.id, 160), label: str(model.label, 240), efforts }];
+          }) : [];
+          return [{ handle: str(agent.handle, 40), provider: str(agent.provider, 64), availability: ["available", "not_connected", "catalog_unavailable"].includes(agent.availability) ? agent.availability : "catalog_unavailable", models: options, currentModel: typeof agent.currentModel === "string" ? str(agent.currentModel, 160) : null, currentEffort: typeof agent.currentEffort === "string" ? str(agent.currentEffort, 160) : null, status: str(agent.status, 24) }];
+        }) }
+      : null;
+    return { type: "ui-state", agents, thread, approvals, ...(collaboration ? { collaboration } : {}), ...(models ? { models } : {}), ...(message.desktopPill === true ? { desktopPill: true } : {}) };
   }
 
   function framePage(url) {
@@ -166,6 +177,12 @@
       const text = typeof command.text === "string" ? command.text.trim() : "";
       if (!text || text.length > 2000) return { error: "note is empty or too long" };
       return { message: { type: "ui-save-note", text } };
+    }
+    if (command.type === "ui-select-model") {
+      if (typeof command.handle !== "string" || !/^@?[A-Za-z][A-Za-z0-9_.-]{0,39}$/.test(command.handle)) return { error: "bad agent handle" };
+      const valid = (value) => value === null || value === undefined || (typeof value === "string" && value.trim() && value.length <= 160);
+      if (!valid(command.model) || !valid(command.effort)) return { error: "bad model selection" };
+      return { message: { type: "ui-select-model", handle: command.handle, model: command.model ?? null, effort: command.effort ?? null } };
     }
     if (command.type === "ui-stop-all") return { message: { type: "ui-stop-all" } };
     return { error: "unknown command" };

@@ -8,11 +8,26 @@ export type Provider = "claude" | "codex" | "opencode" | "agent";
 export type AgentRunState = "idle" | "starting" | "working" | "waiting" | "blocked" | "stopped" | "failed" | "seen" | "unknown" | "not_connected";
 export type PillBadge = "approval" | "finished" | "error";
 
+export interface PillModelEffort { id: string; label: string }
+export interface PillModelOption { id: string; label: string; efforts: PillModelEffort[] | null }
+export interface PillModelAgent {
+  handle: string;
+  provider: string;
+  availability: "available" | "not_connected" | "catalog_unavailable";
+  models: PillModelOption[];
+  currentModel: string | null;
+  currentEffort: string | null;
+  status: string;
+}
+export interface PillModelState { agents: PillModelAgent[] }
+
 /** Wire shape: what a shell gives the pill. */
 export interface PillSnapshot {
   agents: Array<{ handle: string; provider: Provider; state: AgentRunState; activity: string[]; task?: string }>;
   /** Optional structured collaboration layer; older hosts may omit it. */
   collaboration?: PillCollaboration;
+  /** Live provider-reported model choices; omitted when the host has no model surface. */
+  models?: PillModelState;
   approvals: Array<{ id: string; agent: string; title: string; detail: string }>;
   /** Replies and notices from agents, newest last. */
   thread: Array<{ id: string; from: string; text: string; link?: LinkOffer }>;
@@ -121,6 +136,7 @@ class AppState {
   approvals: ApprovalInfo[] = [];
   brokerConnection: "unknown" | "connecting" | "connected" | "disconnected" = "unknown";
   collaboration: PillCollaboration | null = null;
+  models: PillModelState | null = null;
   decisionError: { approvalId: string; message: string } | null = null;
 
   lastActivity = performance.now();
@@ -175,6 +191,7 @@ class AppState {
     }
 
     this.collaboration = snapshot.collaboration ?? null;
+    this.models = snapshot.models ?? null;
 
     for (const [id, resolvedAt] of this.resolvedApprovals) {
       if (now - resolvedAt >= APPROVAL_RECOVERY_MS) this.resolvedApprovals.delete(id);

@@ -15,6 +15,9 @@ import { randomUUID } from "node:crypto";
 import type { FeedWebActivityInput, FeedWebItem } from "./feed-core";
 import { redactSecrets } from "./inbox-core";
 import { presenceStateForUi, snapshotFromRecords } from "./multiplayer-presence";
+import type { ManagedProviderModelApply } from "./managed-provider-contract";
+import type { ProviderModelSelection } from "./provider-model-core";
+import type { ProviderModelUiState } from "./provider-model-picker";
 
 // ---------------------------------------------------------------------------------------------------------------
 // Plain-words narration
@@ -184,7 +187,7 @@ export interface UiCollaboration {
   headline: string;
 }
 /** `desktopPill` is present (true) only while the desktop pill is running, so the in-page pill can step aside. */
-export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThreadEntry[]; approvals: UiApproval[]; collaboration?: UiCollaboration; desktopPill?: true }
+export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThreadEntry[]; approvals: UiApproval[]; collaboration?: UiCollaboration; models?: ProviderModelUiState; desktopPill?: true }
 
 export interface UiPageContext { url?: string; title?: string; selection?: string }
 export type UiInbound =
@@ -193,9 +196,10 @@ export type UiInbound =
   | { type: "ui-stop"; agent: string }
   | { type: "ui-stop-all" }
   | { type: "ui-save-note"; text: string }
+  | { type: "ui-select-model"; handle: string; model?: string | null; effort?: string | null }
   | { type: "ui-subscribe" };
 
-export const UI_MESSAGE_TYPES: ReadonlySet<string> = new Set(["ui-command", "ui-approve", "ui-deny", "ui-stop", "ui-stop-all", "ui-save-note", "ui-subscribe"]);
+export const UI_MESSAGE_TYPES: ReadonlySet<string> = new Set(["ui-command", "ui-approve", "ui-deny", "ui-stop", "ui-stop-all", "ui-save-note", "ui-select-model", "ui-subscribe"]);
 export const MAX_COMMAND_CHARS = 4_000;
 /** Same cap as the m9r_note tool, so a note saved from the pill is one an agent could have written. */
 export const MAX_NOTE_CHARS = 2_000;
@@ -223,6 +227,11 @@ export function parseUiMessage(raw: unknown): UiInbound | null {
       return typeof m.id === "string" && m.id.length > 0 && m.id.length <= 128 ? { type: m.type, id: m.id } : null;
     case "ui-save-note":
       return typeof m.text === "string" && m.text.trim() && m.text.length <= MAX_NOTE_CHARS ? { type: "ui-save-note", text: m.text.trim() } : null;
+    case "ui-select-model": {
+      const validId = (value: unknown): value is string | null | undefined => value === undefined || value === null || (typeof value === "string" && value.trim().length > 0 && value.length <= 160 && !/[\u0000-\u001f\u007f]/.test(value));
+      if (typeof m.handle !== "string" || !/^@?[A-Za-z][A-Za-z0-9_.-]{0,39}$/.test(m.handle) || !validId(m.model) || !validId(m.effort)) return null;
+      return { type: "ui-select-model", handle: m.handle.replace(/^@/, "").toLowerCase(), model: typeof m.model === "string" ? m.model.trim() : m.model, effort: typeof m.effort === "string" ? m.effort.trim() : m.effort };
+    }
     case "ui-command": {
       if (typeof m.text !== "string" || !m.text.trim() || m.text.length > MAX_COMMAND_CHARS) return null;
       const ctx = (m.context && typeof m.context === "object" ? m.context : {}) as Record<string, unknown>;
@@ -362,7 +371,7 @@ const TOOL_WORDS: Record<string, string> = {
   m9r_result: "Reporting back",
 };
 
-export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void; colorFor?: (handle: string) => string; saveNote?: (text: string) => { ok: boolean; error?: string } } = {}) {
+export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void; colorFor?: (handle: string) => string; saveNote?: (text: string) => { ok: boolean; error?: string }; modelState?: () => ProviderModelUiState | undefined; selectModel?: (handle: string, selection: ProviderModelSelection) => Promise<ManagedProviderModelApply> | ManagedProviderModelApply } = {}) {
   const now = options.now ?? Date.now;
   const debounceMs = options.debounceMs ?? 100;
   const newId = options.newId ?? (() => randomUUID());
@@ -491,7 +500,8 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       const text = known?.text ?? narrateStep({ action: p.action, selector: p.selector, targetLabel: p.targetLabel }, "start");
       return { id: p.id, agent: p.actor, provider: known?.provider ?? providerOf(p.actor), text: redact(`${text}${p.origin ? ` on ${hostOf(p.origin) ?? p.origin}` : ""}`) };
     });
-    return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals, collaboration, ...(desktopPill ? { desktopPill: true as const } : {}) };
+    const models = options.modelState?.();
+    return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals, collaboration, ...(models ? { models } : {}), ...(desktopPill ? { desktopPill: true as const } : {}) };
   }
 
   /** Bounded identity/content fingerprint used only to suppress no-op UI frames. */
@@ -503,6 +513,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       // tail participates in change detection so hashing stays bounded.
       thread: state.thread.map((entry, index) => [entry.id, entry.kind, entry.agent, entry.provider, entry.to ?? "", entry.phase ?? "", entry.ok ?? null, index >= state.thread.length - 12 ? entry.text : entry.text.slice(0, 32)]),
       collaboration: state.collaboration ? [state.collaboration.headline, state.collaboration.activeCount, state.collaboration.overflowCount, state.collaboration.agents.map((agent) => [agent.agentId, agent.state, agent.cursor.mode, agent.cursor.visible, agent.summary ?? ""])] : null,
+      models: state.models ? state.models.agents.map((agent) => [agent.handle, agent.provider, agent.generation, agent.availability, agent.currentModel ?? "", agent.currentEffort ?? "", agent.models.map((model) => [model.id, model.label, model.efforts?.map((effort) => [effort.id, effort.label]) ?? null])]) : null,
       desktopPill: state.desktopPill === true,
     });
   }
@@ -722,6 +733,16 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       case "ui-save-note": {
         const saved = options.saveNote ? options.saveNote(redactSecrets(message.text)) : { ok: false, error: "memory is not available here" };
         system(saved.ok ? "Saved to shared memory." : `Could not save to memory: ${saved.error ?? "unknown error"}`);
+        return true;
+      }
+      case "ui-select-model": {
+        if (!options.selectModel) { system("Model selection is not available on this M9R connection.", message.handle); return true; }
+        void Promise.resolve(options.selectModel(message.handle, { model: message.model, effort: message.effort })).then((result) => {
+          if (result.ok) {
+            system(`@${message.handle} model selection saved${result.applies === "next-restart" ? " for its next provider restart" : " for the next turn"}.`, message.handle);
+          } else system(`Could not change @${message.handle}'s model: ${result.error.slice(0, 240)}`, message.handle);
+          changed();
+        }).catch(() => system(`Could not change @${message.handle}'s model; verify the provider connection.`, message.handle));
         return true;
       }
       case "ui-stop-all":

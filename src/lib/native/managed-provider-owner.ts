@@ -35,6 +35,7 @@ import { codexAppServerCommand } from "../bridge/codex-app-server-adapter";
 import type { SessionEvent, SessionStatus, SessionsPort } from "./web-ui-bridge";
 import { inboxMaxAgeMs, type StageTimingPhase, type Task } from "./inbox-core";
 import { createLatencyTelemetry, type LatencyTelemetry, type LatencyTelemetrySnapshot, type LatencyTemperature } from "./latency-telemetry";
+import { providerModelUiState, type ProviderModelUiState } from "./provider-model-picker";
 
 /**
  * The desktop owner boundary. M9R creates this once per broker and owns every
@@ -91,6 +92,8 @@ export type ManagedProviderOwner = SessionsPort & {
   capabilities(handle?: string): readonly ManagedProviderCapabilities[];
   /** Persist and, when supported, apply a validated model choice for the next turn. */
   selectModel(handle: string, selection: ProviderModelSelection): Promise<ManagedProviderModelApply>;
+  /** Bounded live model picker state for authenticated local UI consumers. */
+  modelState(): ProviderModelUiState;
   deliverOwnerTask(taskId: string): Promise<{ ok: true; sessionId: string } | { ok: false; error: string }>;
   latencySnapshot(): LatencyTelemetrySnapshot;
 };
@@ -777,6 +780,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       return { failures };
     },
     handles: () => profiles.map((profile) => profile.handle),
+    modelState: () => providerModelUiState(capabilitySnapshot(), supervisor.snapshots()),
     snapshot: () => profiles.map((profile) => {
       const snapshot = supervisor.snapshots().find((entry) => entry.connectionId === profile.connectionId);
       return {

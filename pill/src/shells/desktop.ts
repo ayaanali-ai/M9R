@@ -9,7 +9,7 @@
 
 import type { Decision, DesktopStage, DesktopStageActionProof, DesktopStageCapture, DesktopStageCursorMove, DesktopStageWindowOption, PillTransport, SessionRow } from "../core/transport";
 import { desktopSpeechEnv } from "../core/speech";
-import { fromFeed, type Feed } from "./convert";
+import { fromFeed, fromUiState, type Feed, type UiState } from "./convert";
 
 type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -113,8 +113,20 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
     },
     subscribe(listener) {
       let last = "";
+      let lastPillState = "";
       const tick = async () => {
         try {
+          // The resident owner broker publishes the authoritative state envelope.
+          // Keep the older feed as a compatibility fallback for a broker that is
+          // still starting; this does not change its existing delivery path.
+          const pillState = (await invoke("read_pill_state")) as string | null;
+          if (pillState) {
+            if (pillState !== lastPillState) {
+              lastPillState = pillState;
+              listener({ ...fromUiState(JSON.parse(pillState) as UiState), connection: "connected" });
+            }
+            return;
+          }
           const raw = (await invoke("read_feed")) as string | null;
           if (raw && raw !== last) {
             last = raw;
@@ -130,6 +142,9 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
     async send(text) {
       const reply = await invoke("send_message", { text });
       return typeof reply === "string" ? reply.trim().slice(0, 300) : undefined;
+    },
+    async selectModel(handle, model, effort) {
+      await invoke("select_model", { handle, model, effort });
     },
     async saveMemory(text) {
       await invoke("save_memory", { text });

@@ -100,6 +100,8 @@ export interface PillTransport {
   decide(approvalId: string, decision: Decision): Promise<void>;
   /** Saves a reply to the team's shared memory. Only with `capabilities.saveMemory`. */
   saveMemory?(text: string): Promise<void>;
+  /** Selects a live provider-reported model; the owner broker validates it. */
+  selectModel?(handle: string, model: string | null, effort: string | null): Promise<void>;
   /** Window-level hooks; no-ops in the browser shell. */
   setIslandRect?(x: number, y: number, width: number, height: number): void;
   setCollapsed?(collapsed: boolean): void;

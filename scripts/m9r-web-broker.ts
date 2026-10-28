@@ -48,8 +48,13 @@ async function main(): Promise<void> {
   // The in-page pill: agents the owner types to, one M9R-owned connection per agent and folder.
   const pageNotes = createPageNotesStore(root);
   // A note saved from the pill lands in the same project-room memory agents read at session start.
+  const sessionOwner: { current?: ReturnType<typeof createManagedProviderOwner> } = {};
   const ui = createWebUiBridge({
     colorFor: (handle) => colorStore.colorFor(handle),
+    modelState: () => sessionOwner.current?.modelState(),
+    selectModel: (handle, selection) => sessionOwner.current
+      ? sessionOwner.current.selectModel(handle, selection)
+      : { ok: false as const, applies: "next-restart" as const, error: "M9R-owned provider supervisor is not ready" },
     onChange: () => {
       try { writeDesktopPillState(root, ui.snapshot()); } catch { /* the pill keeps its last good state */ }
     },
@@ -73,7 +78,6 @@ async function main(): Promise<void> {
   // state.lock directory themselves; the owner-only store ACL stays intact.
   const store = createLocalStore(root);
   const taskStages = createTaskDesktopStageService({ store, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
-  const sessionOwner: { current?: ReturnType<typeof createManagedProviderOwner> } = {};
   const broker = await startWebBroker({ key, port, taskStages, agentMcpStore: store,
     onAgentTaskCreated: (token, taskId) => { void taskStages.primeCursor(token, taskId); },
     deliverOwnerTask: (taskId) => sessionOwner.current

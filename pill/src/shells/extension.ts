@@ -99,6 +99,7 @@ export function createExtensionTransport(runtime: ChromeRuntime): PillTransport 
     },
     send: (text) => command({ type: "ui-command", text }),
     saveMemory: (text) => command({ type: "ui-save-note", text }),
+    selectModel: (handle, model, effort) => command({ type: "ui-select-model", handle, model, effort }),
     decide: (approvalId: string, decision: Decision) =>
       command({ type: decision === "deny" ? "ui-deny" : "ui-approve", id: approvalId }),
   };

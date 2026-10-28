@@ -18,6 +18,7 @@ export interface ViewActions {
   send(text: string): Promise<string | void>;
   /** Present only when the host can save to shared memory (the in-page pill). */
   saveMemory?(text: string): Promise<void>;
+  selectModel?(handle: string, model: string | null, effort: string | null): Promise<void>;
   canAllowForADay(): boolean;
   /** Present only when the host has speech recognition (the page frame); hold the mic to talk. */
   dictation?: () => SpeechEnv;
@@ -323,11 +324,16 @@ function buildSettings(actions: ViewActions): ViewHost {
   const autoLabel = h("span", {});
   const segButtons = [10, 15, 30].map((s) => h("button", { onclick: () => actions.setAutoClose(s) }, `${s}s`));
 
+  const modelRows = h("div", { class: "settings-models", style: "display:flex;flex-direction:column;gap:5px;max-height:92px;overflow:auto;margin-top:8px" });
+  const modelStatus = h("div", { class: "detail", style: "font-size:10px;opacity:.65;margin-top:4px" });
+  let modelKey = "";
   const rows = h(
     "div",
     { class: "settings-rows" },
     h("div", { class: "settings-row" }, soundSwitch, h("span", { text: "Sound" })),
     h("div", { class: "settings-row" }, svg(ICONS.timer, 12), autoLabel, h("div", { class: "seg" }, ...segButtons)),
+    modelRows,
+    modelStatus,
   );
 
   const el = h("div", { class: "view" }, card(null, h("div", { class: "stack", style: "padding:14px 16px 14px 84px" }, rows)));
@@ -339,6 +345,44 @@ function buildSettings(actions: ViewActions): ViewHost {
       soundSwitch.classList.toggle("on", s.soundEnabled);
       autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;
       segButtons.forEach((b, i) => b.classList.toggle("on", s.autoCloseInterval === [10, 15, 30][i]));
+      const agents = State.models?.agents ?? [];
+      const nextKey = JSON.stringify(agents.map((agent) => [agent.handle, agent.availability, agent.currentModel, agent.currentEffort, agent.models]));
+      if (nextKey === modelKey) return;
+      modelKey = nextKey;
+      clear(modelRows);
+      if (!agents.length) return;
+      for (const agent of agents) {
+        const row = h("div", { class: "settings-row", style: "gap:5px;min-height:24px" });
+        const label = h("span", { text: `@${agent.handle}` , style: "min-width:66px;font-size:10px" });
+        if (agent.availability !== "available" || agent.models.length === 0 || !actions.selectModel) {
+          row.append(label, h("span", { class: "sub", text: agent.availability === "not_connected" ? "not connected" : "no live catalog" }));
+          modelRows.append(row);
+          continue;
+        }
+        const model = h("select", { class: "model-select", "aria-label": `Model for @${agent.handle}` }) as HTMLSelectElement;
+        model.append(h("option", { value: "", text: "Provider default" }));
+        for (const option of agent.models) model.append(h("option", { value: option.id, text: option.label }));
+        model.value = agent.currentModel ?? "";
+        const effort = h("select", { class: "model-select", "aria-label": `Reasoning effort for @${agent.handle}` }) as HTMLSelectElement;
+        const refreshEfforts = () => {
+          clear(effort);
+          const selected = agent.models.find((option) => option.id === model.value);
+          if (!selected?.efforts?.length) { effort.hidden = true; return; }
+          effort.hidden = false;
+          effort.append(h("option", { value: "", text: "Default effort" }));
+          for (const choice of selected.efforts) effort.append(h("option", { value: choice.id, text: choice.label }));
+          effort.value = agent.currentEffort ?? "";
+        };
+        refreshEfforts();
+        const request = (selectedEffort: string | null) => {
+          const pending = actions.selectModel?.(agent.handle, model.value || null, selectedEffort);
+          if (pending) void pending.catch(() => { modelStatus.textContent = `Could not change @${agent.handle}.`; });
+        };
+        model.addEventListener("change", () => { refreshEfforts(); request(effort.hidden ? null : (effort.value || null)); });
+        effort.addEventListener("change", () => request(effort.value || null));
+        row.append(label, model, effort);
+        modelRows.append(row);
+      }
     },
   };
 }

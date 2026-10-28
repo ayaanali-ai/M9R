@@ -87,6 +87,7 @@ export class Island {
         ? () => this.transport.createDictationEnvironment?.() ?? browserSpeechEnv(() => this.transport.openMicSetup?.())
         : undefined,
       saveMemory: this.transport.capabilities?.saveMemory && this.transport.saveMemory ? (text) => this.transport.saveMemory!(text) : undefined,
+      selectModel: this.transport.selectModel ? (handle, model, effort) => this.transport.selectModel!(handle, model, effort) : undefined,
       linking: this.transport.capabilities?.linkSessions && this.transport.listSessions && this.transport.linkSession
         ? { list: (handle) => this.transport.listSessions!(handle), link: (offer, session) => this.transport.linkSession!(offer, session) }
         : undefined,
