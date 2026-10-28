@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { discoverInstalledWindowsApp, WINDOWS_APP_DISCOVERY_SCRIPT } from "../src/lib/native/windows-installed-apps";
+import { discoverInstalledWindowsApp, WINDOWS_APP_DISCOVERY_SCRIPT, windowsAppSearchNames } from "../src/lib/native/windows-installed-apps";
 
 const LEGACY_NOTEPAD = { executable: "C:\\Windows\\System32\\notepad.exe", args: [] as string[] };
 const PACKAGED_NOTEPAD = {
@@ -23,6 +23,10 @@ test("still resolves the legacy exe when no packaged app exists for it", async (
 test("still resolves a packaged app when no legacy App Paths stub exists for it", async () => {
   const app = await discoverInstalledWindowsApp("notepad", async () => JSON.stringify([PACKAGED_NOTEPAD]));
   assert.deepEqual(app, PACKAGED_NOTEPAD);
+});
+
+test("queries both modern Notepad registration names before falling back to the legacy executable", () => {
+  assert.deepEqual(windowsAppSearchNames("notepad"), ["notepad", "Windows Notepad"]);
 });
 
 test("the discovery script collects App Paths matches without exiting before the packaged-app lookup runs", () => {

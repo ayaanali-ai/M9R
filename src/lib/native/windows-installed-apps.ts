@@ -14,6 +14,12 @@ const APP_ALIASES: Record<string, readonly string[]> = {
   "microsoft edge": ["edge", "Microsoft Edge", "msedge"],
   explorer: ["explorer", "File Explorer", "Windows Explorer"],
   "file explorer": ["explorer", "File Explorer", "Windows Explorer"],
+  // Windows 11 registers the modern packaged editor as either "Notepad" or
+  // "Windows Notepad" depending on the installed package generation. Keep
+  // the explicit legacy executable fallback below; this only broadens the
+  // StartApps names considered before that fallback is selected.
+  notepad: ["Notepad", "Windows Notepad"],
+  "windows notepad": ["Notepad", "Windows Notepad"],
   powershell: ["powershell", "Windows PowerShell", "PowerShell"],
   "windows powershell": ["powershell", "Windows PowerShell", "PowerShell"],
 };

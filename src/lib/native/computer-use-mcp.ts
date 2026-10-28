@@ -205,6 +205,11 @@ function identityKey(identity: VerifiedIdentity): string {
   return JSON.stringify([identity.handle, identity.provider, identity.sessionId]);
 }
 
+/** Opaque, stable browser identity derived from the authenticated M9R session. */
+function opaqueBrowserIdentity(value: string): string {
+  return `m9r-${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
+}
+
 function recordOf(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -598,7 +603,11 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       observedAt: input.observedAt,
       capabilities: input.capabilities,
       ...(input.kind === "desktop-window" ? { windowRef: targetId } : {}),
-      ...(input.kind === "browser-tab" && typeof input.extra?.url === "string" ? { url: input.extra.url } : {}),
+      ...(input.kind === "browser-tab" ? {
+        ...(typeof input.extra?.browserInstanceId === "string" ? { browserInstanceId: input.extra.browserInstanceId } : {}),
+        ...(typeof input.extra?.tabId === "string" ? { tabId: input.extra.tabId } : {}),
+        ...(typeof input.extra?.url === "string" ? { url: input.extra.url } : {}),
+      } : {}),
     };
     const target = parseComputerUseTarget(targetInput);
     const routeId = input.kind === "browser-tab" ? "m9r-browser-broker" : "m9r-desktop-stage";
@@ -888,6 +897,16 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     if (!response.ok) throw new Error(response.error ?? "The M9R browser snapshot failed.");
     const snapshot = browserSnapshotData(response);
     if (!snapshot || !Array.isArray(snapshot.elements)) throw new Error("The browser broker returned no structured page snapshot.");
+    // Prefer a resolved logical tab when the broker includes it in the
+    // snapshot envelope. If an older broker omits it, preserve the explicit
+    // requested tab or the documented default path rather than guessing a
+    // different window.
+    const resolvedTab = typeof snapshot.tab === "string" && snapshot.tab.length > 0
+      ? snapshot.tab.slice(0, 40)
+      : input.tab;
+    const browserInstanceId = opaqueBrowserIdentity(identityKey(input.identity));
+    const tabName = resolvedTab ?? "default";
+    const tabId = opaqueBrowserIdentity(`${browserInstanceId}\0${tabName}`);
     const rawElementRecords = snapshot.elements.map(recordOf).filter((value): value is Record<string, unknown> => Boolean(value));
     const browserCompleteness: FingerprintCompleteness = rawElementRecords.length > 150 ? "partial" : "complete";
     const rawElements = rawElementRecords.slice(0, 150);
@@ -926,13 +945,13 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     })) as unknown as Record<string, unknown>[], browserCompleteness);
     const record = saveObservation({
       identity: input.identity,
-      logicalKey: input.logicalKey ?? `browser:${input.tab ?? "default"}`,
+      logicalKey: input.logicalKey ?? `browser:${tabName}`,
       kind: "browser-tab",
       observedAt: observationStartedAt,
       capabilities: capabilitiesForBrowser(elements, snapshot.nativeClickAvailable === true),
-      context: { kind: "browser", ...(input.tab ? { tab: input.tab } : {}), ...(url ? { url } : {}), ...(title ? { title } : {}),
+      context: { kind: "browser", ...(resolvedTab ? { tab: resolvedTab } : {}), ...(url ? { url } : {}), ...(title ? { title } : {}),
         ...(typeof snapshot.text === "string" ? { text: snapshot.text.slice(0, 4_000) } : {}), elements: elementMap },
-      extra: { ...(url ? { url } : {}) },
+      extra: { browserInstanceId, tabId, ...(url ? { url } : {}) },
       fingerprint,
     });
     return {
