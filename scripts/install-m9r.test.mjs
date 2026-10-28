@@ -114,7 +114,7 @@ test("installer contains no Node/npm dependency and changes no saved PowerShell 
   assert.doesNotMatch(source, /(?:&\s*|Get-Command\s+)(?:npm|node)(?:\.exe)?\b/i);
   assert.doesNotMatch(source, /ExecutionPolicy\s+Bypass|Invoke-Expression|\biex\b/i);
   assert.match(source, /Get-FileHash[\s\S]*SHA256/);
-  assert.match(source, /\$dryRunArgs\s*=\s*@\('setup',\s*'--dry-run'\)/);
+  assert.match(source, /\$dryRunArgs\s*=\s*@\('setup',\s*'--dry-run',\s*'--yes'\)/);
   assert.match(source, /\$applyArgs\s*=\s*@\('setup',\s*'--yes'\)/);
   assert.match(source, /function Get-M9rHome/);
   assert.match(source, /Get-M9rHome/);

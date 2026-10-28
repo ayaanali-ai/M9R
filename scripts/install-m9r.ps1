@@ -429,7 +429,11 @@ try {
     Write-Host ''
     Write-Host 'Exact setup plan from the engine:' -ForegroundColor Cyan
     $engine = Join-Path $payload 'm9r-engine.exe'
-    $dryRunArgs = @('setup', '--dry-run')
+    # The plan is captured rather than run on the user's console, so the child
+    # engine has no interactive terminal.  Explicit consent is still collected
+    # below by this installer; --yes here only makes the preview deterministic
+    # and guarantees that setup --dry-run never mutates anything.
+    $dryRunArgs = @('setup', '--dry-run', '--yes')
     $applyArgs = @('setup', '--yes')
     if (-not $NoAutostart) {
         $dryRunArgs += '--autostart'
