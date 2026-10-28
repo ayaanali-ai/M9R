@@ -12,7 +12,8 @@ import { State, type PillSnapshot } from "../core/state";
 import type { Decision, PillTransport } from "../core/transport";
 import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
 import { providerLogo } from "../views/provider";
-import { h } from "../views/dom";
+import { h, svg } from "../views/dom";
+import { squirclePath } from "../core/squircle";
 import { IslandStateMachine } from "./fsm";
 
 /** Margin around the island that still counts as "over it" (the host uses the same value for click-through). */
@@ -34,6 +35,9 @@ export class Island {
   private miniGrid!: HTMLElement;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
+  /** Hitodama-style flared ears: separate siblings so the island's clip never cuts them off. */
+  private archLeft!: SVGSVGElement;
+  private archRight!: SVGSVGElement;
 
   private header!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
@@ -120,9 +124,18 @@ export class Island {
     this.contentEl = h("div", { id: "content" }, this.header.el, this.viewsEl);
 
     this.clipEl = h("div", { id: "island-clip" }, this.contentEl);
+    this.archLeft = svg("M 0 0 L 24 0 L 24 24 L 23 24 C 23 10 13.5 0 0 0 Z", 0, { fill: "var(--notch-ear, #000)" });
+    this.archRight = svg("M 24 0 L 0 0 L 0 24 L 1 24 C 1 10 10.5 0 24 0 Z", 0, { fill: "var(--notch-ear, #000)" });
+    for (const arch of [this.archLeft, this.archRight]) {
+      arch.setAttribute("preserveAspectRatio", "none");
+      arch.style.position = "absolute";
+      arch.style.top = "0";
+      arch.style.left = "50%";
+      arch.style.pointerEvents = "none";
+    }
     this.islandEl = h("div", { id: "island" }, this.clipEl, this.markGlow, this.markEl, this.miniGrid, this.countdown);
 
-    this.root.append(this.wakeStrip, this.islandEl);
+    this.root.append(this.wakeStrip, this.islandEl, this.archLeft, this.archRight);
     this.applyGeometry();
   }
 
@@ -324,7 +337,9 @@ export class Island {
     this.islandEl.style.width = `${w}px`;
     this.islandEl.style.height = `${hh}px`;
     this.islandEl.style.borderRadius = `0 0 ${r}px ${r}px`;
+    this.islandEl.style.clipPath = `path('${squirclePath(w, hh, { br: r, bl: r })}')`;
     this.islandEl.style.transform = `translateX(-50%)`;
+    this.applyArches(w, r);
     this.miniGrid.style.left = `${w - 40 - 14.5}px`;
     this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
 
@@ -334,6 +349,19 @@ export class Island {
       this.pushedRect = rect;
       this.transport.setIslandRect?.(rect.x, rect.y, rect.w, rect.h);
     }
+  }
+
+  /** Keep the two outward-curving top ears aligned as the pill springs between sizes. */
+  private applyArches(w: number, r: number) {
+    this.archLeft.style.display = r > 0 ? "" : "none";
+    this.archRight.style.display = r > 0 ? "" : "none";
+    if (r <= 0) return;
+    this.archLeft.setAttribute("width", `${r}`);
+    this.archLeft.setAttribute("height", `${r}`);
+    this.archLeft.style.transform = `translateX(${-(w / 2 + r)}px)`;
+    this.archRight.setAttribute("width", `${r}`);
+    this.archRight.setAttribute("height", `${r}`);
+    this.archRight.style.transform = `translateX(${w / 2}px)`;
   }
 
   private islandRect(): { x: number; y: number; w: number; h: number } {
