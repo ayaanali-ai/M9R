@@ -159,7 +159,7 @@ export type WebActivity =
 // ---------------------------------------------------------------------------------------------------------------
 
 export type UiAgentState = "idle" | "starting" | "working" | "waiting" | "blocked" | "stopped" | "failed";
-export interface UiAgent { id: string; provider: string; folder: string; state: UiAgentState; doing: string }
+export interface UiAgent { id: string; provider: string; folder: string; state: UiAgentState; doing: string; color?: string }
 export type UiThreadKind = "say" | "do" | "block" | "approval" | "system";
 export interface UiThreadEntry { id: string; at: string; kind: UiThreadKind; agent: string; provider: string; to?: string; text: string; phase?: "start" | "done"; ok?: boolean }
 export interface UiApproval { id: string; agent: string; provider: string; text: string }
@@ -284,7 +284,7 @@ export function composeAgentMessage(text: string, context: UiPageContext, recipi
       "",
       `Shared task: the owner sent this to ${others.map((h) => `@${h}`).join(" and ")} too. Work together without collisions, cheaply:`,
       "1. First, send each teammate ONE line with the part you are taking (m9r_send). Do not repeat a teammate's part.",
-      "2. Read only what you need. You may read or switch to any tab a teammate opened (m9r_web_tabs). Work on the same page a teammate is on unless you truly need a second page at the same time. Typing into a field is claimed for you; if a field is refused, work on another part and come back.",
+      "2. Read only what you need. Use the same owner-visible browser window and desktop surface a teammate is using through M9R's native observation/action tools; do not create a second profile or silently switch surfaces. Work on the same page a teammate is on unless you truly need a second page at the same time. Typing into a field is claimed for you; if a field is refused, work on another part and come back.",
       "3. Post short findings to teammates (one or two lines) with m9r_send. Never poll and never sit waiting: after you send something you need an answer to, END YOUR TURN with one line saying what you are waiting for. The teammate's reply is delivered to you automatically as your next message.",
       "4. At a hand-off point send 'ready: <one line>' to teammates, then end your turn; carry on when their reply arrives.",
       "5. Never repeat an action that already worked. Stop as soon as the task is done and give a two-sentence summary.",
@@ -310,7 +310,7 @@ export interface SessionsPort {
    * not "genuinely finished". Computed fresh on every snapshot from live task state, not baked in at exit time, so it
    * clears itself the moment the answer actually lands. */
   snapshot(): Array<{ handle: string; provider: string; folder: string; status: SessionStatus; doing: string; waitingOn?: string }>;
-  deliver(handle: string, text: string): { ok: true; mode: "sent" | "interrupted" | "started" | "restarted-worker" } | { ok: false; error: string };
+  deliver(handle: string, text: string, taskId?: string): { ok: true; mode: "sent" | "interrupted" | "started" | "restarted-worker" } | { ok: false; error: string };
   stop(handle: string): boolean;
   stopAll(): void;
   /** Strings that must never reach the pill (session tokens, interrupt markers). */
@@ -318,11 +318,11 @@ export interface SessionsPort {
 }
 
 export type SessionEvent =
-  | { kind: "say"; handle: string; provider: string; text: string }
-  | { kind: "tool"; handle: string; provider: string; name: string }
-  | { kind: "result"; handle: string; provider: string; text: string; isError: boolean }
-  | { kind: "system"; handle: string; provider: string; text: string }
-  | { kind: "state"; handle: string };
+  | { kind: "say"; handle: string; provider: string; text: string; /** M9R-owned turn fence; absent for legacy activity. */ runId?: string }
+  | { kind: "tool"; handle: string; provider: string; name: string; runId?: string }
+  | { kind: "result"; handle: string; provider: string; text: string; isError: boolean; runId?: string }
+  | { kind: "system"; handle: string; provider: string; text: string; runId?: string }
+  | { kind: "state"; handle: string; status?: SessionStatus; doing?: string };
 
 export interface BrokerPort {
   pendingApprovals(): Array<{ id: string; actor: string; action: string; tab?: string; selector?: string; targetLabel?: string; origin?: string }>;
@@ -342,7 +342,7 @@ const TOOL_WORDS: Record<string, string> = {
   m9r_result: "Reporting back",
 };
 
-export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void; saveNote?: (text: string) => { ok: boolean; error?: string } } = {}) {
+export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void; colorFor?: (handle: string) => string; saveNote?: (text: string) => { ok: boolean; error?: string } } = {}) {
   const now = options.now ?? Date.now;
   const debounceMs = options.debounceMs ?? 100;
   const newId = options.newId ?? (() => randomUUID());
@@ -359,7 +359,8 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   const approvalText = new Map<string, { agent: string; provider: string; text: string }>();
   const actionEntries = new Map<string, UiThreadEntry>();
   const typedValues = new Map<string, Array<{ value: string; expiresAt: number }>>();
-  let lastSay: { agent: string; at: number; entry: UiThreadEntry } | null = null;
+  /** The currently streamed bubble for each agent. A final result replaces this bubble in place. */
+  const liveSay = new Map<string, { at: number; entry: UiThreadEntry }>();
   let desktopPill = false;
 
   function redact(text: string): string {
@@ -389,7 +390,6 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     const full: UiThreadEntry = { id: entry.id ?? newId(), at: new Date(now()).toISOString(), ...entry, text: redact(entry.text) } as UiThreadEntry;
     thread.push(full);
     if (thread.length > THREAD_LIMIT) thread.splice(0, thread.length - THREAD_LIMIT);
-    if (full.kind !== "say") lastSay = null;
     changed();
     return full;
   }
@@ -420,7 +420,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       else if (s.waitingOn) { state = "waiting"; what = `Waiting for @${s.waitingOn}`; }
       else if (blocked.has(s.handle) && (s.status === "working" || s.status === "idle")) { state = "blocked"; what = doing.get(s.handle) ?? "Blocked by another agent"; }
       else if (s.status === "working" && doing.get(s.handle)) what = doing.get(s.handle)!;
-      return { id: s.handle, provider: s.provider, folder: s.folder, state, doing: redact(what) };
+      return { id: s.handle, provider: s.provider, folder: s.folder, state, doing: redact(what), ...(options.colorFor ? { color: options.colorFor(s.handle) } : {}) };
     });
     const approvals: UiApproval[] = pending.map((p) => {
       const known = approvalText.get(p.id);
@@ -496,14 +496,16 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
         const text = event.text.trim();
         if (!text) return;
         const at = now();
-        if (lastSay && lastSay.agent === event.handle && at - lastSay.at < SAY_MERGE_MS && thread[thread.length - 1] === lastSay.entry) {
-          lastSay.entry.text = redact(`${lastSay.entry.text}\n\n${text}`).slice(0, SAY_CHARS);
-          lastSay.at = at;
+        const runKey = event.runId ? `${event.handle}\0${event.runId}` : event.handle;
+        const current = liveSay.get(runKey);
+        if (current && at - current.at < SAY_MERGE_MS && thread[thread.length - 1] === current.entry) {
+          current.entry.text = redact(`${current.entry.text}\n\n${text}`).slice(0, SAY_CHARS);
+          current.at = at;
           changed();
           return;
         }
         const entry = push({ kind: "say", agent: event.handle, provider: event.provider, to: "you", text: text.slice(0, SAY_CHARS) });
-        lastSay = { agent: event.handle, at, entry };
+        liveSay.set(runKey, { at, entry });
         return;
       }
       case "tool": {
@@ -519,9 +521,20 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
         if (event.isError) system(`@${event.handle} stopped with an error: ${event.text.slice(0, 300) || "no details"}`, event.handle);
         else {
           const text = event.text.trim();
+          const runKey = event.runId ? `${event.handle}\0${event.runId}` : event.handle;
+          const streamed = liveSay.get(runKey);
           const lastOwn = [...thread].reverse().find((e) => e.agent === event.handle && e.kind === "say");
-          if (text && (!lastOwn || redact(text).trim() !== lastOwn.text.trim())) push({ kind: "say", agent: event.handle, provider: event.provider, to: "you", text: text.slice(0, SAY_CHARS) });
-          else changed();
+          if (text && streamed && thread[thread.length - 1] === streamed.entry) {
+            // Provider stream fragments are already one live bubble. The
+            // canonical result is its close, not a second message; replacing
+            // it also handles the common case where the final wording differs
+            // from the last streamed fragment.
+            streamed.entry.text = redact(text).slice(0, SAY_CHARS);
+            changed();
+          } else if (text && (event.runId || !lastOwn || redact(text).trim() !== lastOwn.text.trim())) {
+            push({ kind: "say", agent: event.handle, provider: event.provider, to: "you", text: text.slice(0, SAY_CHARS) });
+          } else changed();
+          liveSay.delete(runKey);
         }
         return;
       }
@@ -530,6 +543,9 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
         pushWeb({ agent: event.handle, provider: event.provider, kind: "worker", text: event.text });
         return;
       case "state":
+        if (event.status === "starting" || event.status === "working") {
+          for (const key of liveSay.keys()) if (key === event.handle || key.startsWith(`${event.handle}\0`)) liveSay.delete(key);
+        }
         changed();
         return;
     }

@@ -100,14 +100,10 @@ foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths',
     }
   }
 }
-# Packaged apps have exact registered names and stable activation IDs. Windows
-# keeps a legacy "App Paths" registration pointing at a compatibility stub
-# binary (e.g. the classic notepad.exe) alongside a newer Store-packaged
-# replacement of the same app; returning on the App Paths match alone (as an
-# earlier version of this script did) meant the legacy stub always won even
-# when the modern packaged app is the one actually pinned/updated. Collect
-# both routes before deciding anything, so the exact-match dedup below can
-# tell they are the same app and prefer the packaged one.
+# Packaged apps have exact registered names and stable activation IDs. Resolve
+# those alongside any compatibility stub. The final resolver can then prefer
+# the packaged route (for example, modern Notepad) instead of returning the
+# legacy App Paths shim merely because it was enumerated first.
 foreach ($app in @(Get-StartApps | Where-Object { Matches $_.Name })) {
   if ($app.AppID -notmatch '^([^!]+)!([^!]+)$') { continue }
   $family = $Matches[1]; $id = $Matches[2]
@@ -123,9 +119,6 @@ if ($found.Count -gt 0) {
   ConvertTo-Json -InputObject @($found) -Compress -Depth 3
   exit 0
 }
-# Neither a registered App Paths entry nor a packaged app matched; only now
-# fall back to a recursive shortcut walk, which is slower and more likely to
-# produce duplicate or unrelated launch routes.
 $shell = New-Object -ComObject WScript.Shell
 $roots = @()
 if ($env:APPDATA) { $roots += Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar' }
@@ -145,17 +138,21 @@ foreach ($root in $roots) {
 ConvertTo-Json -InputObject @($found) -Compress -Depth 3
 `;
 
-export async function discoverInstalledWindowsApp(name: string,
-  query?: (script: string, env: Record<string, string>) => Promise<string>): Promise<InstalledWindowsApp | undefined> {
+export async function discoverInstalledWindowsApp(
+  name: string,
+  query?: (script: string, env: Record<string, string>) => Promise<string>,
+): Promise<InstalledWindowsApp | undefined> {
   if (!query && process.platform !== "win32") return undefined;
-  const run = query ?? ((script: string, env: Record<string, string>) => new Promise<string>((resolve, reject) => {
-    const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-    execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
-      windowsHide: true, timeout: 15_000, maxBuffer: 256 * 1024,
-      env: { ...process.env, ...env },
-    }, (error, stdout, stderr) => error ? reject(new Error(`Windows app discovery failed: ${error.killed ? "Windows inventory query exceeded its 15-second deadline." : (stderr.trim() || error.message.split("\n")[0]).slice(0, 500)}`)) : resolve(stdout));
-  }));
-  const output = await run(WINDOWS_APP_DISCOVERY_SCRIPT, { M9R_APP_QUERY_NAMES: JSON.stringify(windowsAppSearchNames(name)) });
+  const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const env = { M9R_APP_QUERY_NAMES: JSON.stringify(windowsAppSearchNames(name)) };
+  const output = query
+    ? await query(WINDOWS_APP_DISCOVERY_SCRIPT, env)
+    : await new Promise<string>((resolve, reject) => {
+      execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_APP_DISCOVERY_SCRIPT], {
+        windowsHide: true, timeout: 15_000, maxBuffer: 256 * 1024,
+        env: { ...process.env, ...env },
+      }, (error, stdout, stderr) => error ? reject(new Error(`Windows app discovery failed: ${error.killed ? "Windows inventory query exceeded its 15-second deadline." : (stderr.trim() || error.message.split("\n")[0]).slice(0, 500)}`)) : resolve(stdout));
+    });
   const parsed: unknown = JSON.parse(output.replace(/^\uFEFF/, ""));
   if (!Array.isArray(parsed)) throw new Error("Windows app discovery returned an invalid inventory.");
   const apps = parsed.filter((app): app is InstalledWindowsApp => app && typeof app.executable === "string"

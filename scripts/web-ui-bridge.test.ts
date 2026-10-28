@@ -234,6 +234,15 @@ test("say events: one entry per assistant message, a duplicate final result is n
   assert.equal(thread[thread.length - 1].text, "line 249");
 });
 
+test("a canonical final result replaces the streamed bubble instead of appending a second bubble", () => {
+  const { ui } = bridgeWith();
+  ui.onSessionEvent({ kind: "state", handle: "claude", status: "working", doing: "Working" });
+  ui.onSessionEvent({ kind: "say", handle: "claude", provider: "claude-code", text: "Opening the page." });
+  ui.onSessionEvent({ kind: "result", handle: "claude", provider: "claude-code", text: "Finished the page.", isError: false });
+  const says = ui.snapshot().thread.filter((entry) => entry.kind === "say" && entry.agent === "claude");
+  assert.deepEqual(says.map((entry) => entry.text), ["Finished the page."]);
+});
+
 test("approvals appear with plain words and are decided from the pill; stop and stop-all reach the sessions", async () => {
   const sent: unknown[] = [];
   const decisions: string[] = [];

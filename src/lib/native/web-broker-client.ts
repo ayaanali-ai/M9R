@@ -6,6 +6,21 @@ import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import type { TaskStageMode } from "./task-desktop-stage";
 
 const MAX_STAGE_REQUEST_TIMEOUT_MS = 70_000;
+const CURSOR_PRIME_TIMEOUT_MS = 5_000;
+/** State writes use the same owner pipe but may serialize a large, locked local snapshot. */
+const AGENT_STORE_REQUEST_TIMEOUT_MS = 15_000;
+
+/** Common response envelope for stage operations and the provider-neutral computer-use adapter. */
+export interface StageClientResult {
+  ok: boolean;
+  result?: unknown;
+  data?: unknown;
+  error?: string;
+  code?: string;
+  dispatchState?: "not-dispatched" | "dispatched" | "unknown" | string;
+  nextStep?: string;
+  recovery?: unknown;
+}
 
 export interface WebBrokerClient {
   /** Durable task/inbox mutations performed by the owner broker under its own M9R-home ACL. */
@@ -13,9 +28,11 @@ export interface WebBrokerClient {
   claimAgentInbox?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; taskIds?: string[]; error?: string }>;
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
   recordAgentTaskResult?(token: string, taskId: string, summary: string): Promise<{ ok: boolean; error?: string }>;
-  taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode): Promise<{ ok: boolean; result?: unknown; error?: string }>;
-  taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string): Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
+  taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
   prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
+  /** Best-effort delivery-time cursor prime; never blocks the task transport. */
+  primeAgentCursor?(token: string, taskId: string): Promise<StageClientResult>;
   run(request: WebRequest): Promise<WebResponse>;
   runBatch?(request: WebBatchRequest): Promise<WebBatchResponse>;
   notifyMessage?(message: WebAgentMessage): Promise<boolean>;
@@ -65,9 +82,9 @@ async function agentStoreRequest<T extends { ok: boolean; error?: string }>(inpu
       method: "POST",
       path: "/web/mcp/store",
       body: input.body,
-    }, 3_000);
+    }, AGENT_STORE_REQUEST_TIMEOUT_MS);
     if (!result || typeof result !== "object" || typeof (result as { ok?: unknown }).ok !== "boolean") {
-      return { ok: false, error: "The owner broker did not return a valid M9R state response; no task was accepted." } as T;
+      return { ok: false, error: "The owner broker did not confirm this M9R state write before the timeout; it may already have been applied. Retry the same idempotent operation once rather than assuming it was lost." } as T;
     }
     return result as T;
   } catch {
@@ -148,10 +165,11 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
     async recordAgentTaskResult(token, taskId, summary) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary } });
     },
-    async taskStageApp(token, taskId, appId, mode = "owner-preview") {
+    async taskStageApp(token, taskId, appId, mode = "owner-preview", operationId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,
         url: `${baseUrl}/web/stage/${appId === undefined ? "close" : "launch"}`,
-        body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }) }, timeoutMs: 70_000 });
+        body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }), ...(operationId ? { operationId } : {}) },
+        timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
     async taskStageAction(token, taskId, action, mode = "owner-preview", operationId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/action`,
@@ -160,6 +178,10 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
     async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/prepare`,
         body: { token, taskId, mode }, timeoutMs });
+    },
+    async primeAgentCursor(token, taskId) {
+      return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,
+        url: `${baseUrl}/web/stage/prime-cursor`, body: { token, taskId }, timeoutMs: CURSOR_PRIME_TIMEOUT_MS });
     },
     async run(request) {
       let key: string;

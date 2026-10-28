@@ -1,12 +1,15 @@
 import { createOpenCodeAcpAdapter, type AcpStdioProviderAdapter } from "@/lib/bridge/acp-stdio-adapter";
 import type { AgentServerHandle, AgentSessionHandle, InteractiveProviderEvent } from "@/lib/bridge/interactive-provider-adapter";
 import type { ProviderAssignment } from "@/lib/mission/mission-provider-adapter";
+import type { ProviderModelOption } from "./provider-model-core";
 
 export interface OpenCodeLiveRuntime {
-  ready(): Promise<{ sessionId: string; restored?: boolean }>;
+  ready(): Promise<{ sessionId: string; restored?: boolean; availableModels?: readonly ProviderModelOption[] | null }>;
   /** False once the provider process has exited or the runtime was closed; the caller replaces a dead runtime instead of prompting it. */
   alive?(): boolean;
-  prompt(text: string): AsyncIterable<InteractiveProviderEvent>;
+  prompt(text: string, options?: { onRequestSubmitted?: () => void }): AsyncIterable<InteractiveProviderEvent>;
+  /** Apply a provider-validated model/effort between turns when ACP supports it. */
+  configureModel?(model: string | null, effort: string | null): Promise<void>;
   cancelTurn(): Promise<void>;
   close(): void;
 }
@@ -20,9 +23,11 @@ export interface OpenCodeLiveRuntimeOptions {
   model?: string;
   effort?: string;
   resumeId?: string;
+  /** Refuse a new session if the exact saved provider conversation cannot be resumed. */
+  strictResume?: boolean;
   /** Test seam for exercising the ACP lifecycle without spawning a provider binary. */
   adapterFactory?: (options: Parameters<typeof createOpenCodeAcpAdapter>[0]) => Pick<AcpStdioProviderAdapter,
-    "launchServer" | "initialize" | "createSession" | "resumeSession" | "prompt" | "cancelTurn" | "shutdown"> & Partial<Pick<AcpStdioProviderAdapter, "getServerHealth">>;
+    "launchServer" | "initialize" | "createSession" | "resumeSession" | "prompt" | "cancelTurn" | "shutdown"> & Partial<Pick<AcpStdioProviderAdapter, "getServerHealth" | "configureSession">>;
 }
 
 const PROVIDER_SESSION_ID = /^ses[_-][A-Za-z0-9_-]{1,100}$/;
@@ -55,10 +60,10 @@ export function createOpenCodeAcpRuntime(options: OpenCodeLiveRuntimeOptions): O
 
   let server: AgentServerHandle | undefined;
   let session: AgentSessionHandle | undefined;
-  let startup: Promise<{ sessionId: string; restored?: boolean }> | undefined;
+  let startup: Promise<{ sessionId: string; restored?: boolean; availableModels?: readonly ProviderModelOption[] | null }> | undefined;
   let closed = false;
 
-  async function start(): Promise<{ sessionId: string; restored?: boolean }> {
+  async function start(): Promise<{ sessionId: string; restored?: boolean; availableModels?: readonly ProviderModelOption[] | null }> {
     if (closed) throw new Error("OpenCode session was closed before it started.");
     const activeServer = await adapter.launchServer({
       assignment,
@@ -73,14 +78,21 @@ export function createOpenCodeAcpRuntime(options: OpenCodeLiveRuntimeOptions): O
         // A saved session that can no longer be resumed (deleted, or its store was reset) must not leave the agent permanently
         // unable to start: continue on a fresh session and say so, instead of failing every message.
         try { session = await adapter.resumeSession({ server: activeServer, providerSessionRef: options.resumeId, assignment }); }
-        catch { session = await adapter.createSession({ server: activeServer, assignment }); restored = false; }
+        catch (error) {
+          if (options.strictResume) throw error;
+          session = await adapter.createSession({ server: activeServer, assignment });
+          restored = false;
+        }
       } else {
         session = await adapter.createSession({ server: activeServer, assignment });
       }
       const sessionId = session.providerSessionRef;
       if (!sessionId || !PROVIDER_SESSION_ID.test(sessionId)) throw new Error("OpenCode ACP did not return a resumable session id.");
       if (closed) throw new Error("OpenCode session was closed while it started.");
-      return restored === false ? { sessionId, restored } : { sessionId };
+      const availableModels = session.availableModels;
+      return restored === false
+        ? { sessionId, restored, ...(availableModels !== undefined ? { availableModels } : {}) }
+        : { sessionId, ...(availableModels !== undefined ? { availableModels } : {}) };
     } catch (error) {
       await adapter.shutdown(activeServer).catch(() => undefined);
       if (server === activeServer) server = undefined;
@@ -95,7 +107,7 @@ export function createOpenCodeAcpRuntime(options: OpenCodeLiveRuntimeOptions): O
       if (!server) return true; // not launched yet, or still launching
       return adapter.getServerHealth?.(server).state !== "dead";
     },
-    ready(): Promise<{ sessionId: string; restored?: boolean }> {
+    ready(): Promise<{ sessionId: string; restored?: boolean; availableModels?: readonly ProviderModelOption[] | null }> {
       if (closed) return Promise.reject(new Error("OpenCode session is closed."));
       startup ??= start().catch((error: unknown) => {
         startup = undefined;
@@ -103,9 +115,21 @@ export function createOpenCodeAcpRuntime(options: OpenCodeLiveRuntimeOptions): O
       });
       return startup;
     },
-    async *prompt(text: string): AsyncIterable<InteractiveProviderEvent> {
+    async configureModel(model: string | null, effort: string | null): Promise<void> {
       if (closed || !session) throw new Error("OpenCode ACP session is not ready.");
-      yield* adapter.prompt({ session, text });
+      if (!adapter.configureSession) throw new Error("OpenCode ACP does not expose live model configuration.");
+      await adapter.configureSession({ session, model, effort });
+    },
+    async *prompt(text: string, promptOptions?: { onRequestSubmitted?: () => void }): AsyncIterable<InteractiveProviderEvent> {
+      if (closed || !session) throw new Error("OpenCode ACP session is not ready.");
+      // The ACP adapter's prompt call is the transport submission boundary.
+      // Notify the managed owner immediately after creating that request; the
+      // adapter then streams the provider result through the same iterator.
+      // Keep the callback at this wrapper boundary rather than widening the
+      // shared ACP protocol type with an M9R-only option.
+      const events = adapter.prompt({ session, text });
+      promptOptions?.onRequestSubmitted?.();
+      yield* events;
     },
     async cancelTurn(): Promise<void> {
       if (closed || !session) return;

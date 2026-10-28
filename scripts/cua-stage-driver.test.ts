@@ -177,6 +177,7 @@ function makeSdk(options: {
   windows?: Array<Record<string, unknown>>;
   screenSize?: { width: number; height: number };
   cursorVisible?: boolean;
+  cursorVisibleSequence?: boolean[];
   desktopMetadata?: Record<string, unknown>;
   sessionStateError?: Error;
   escalationError?: Error;
@@ -254,7 +255,10 @@ function makeSdk(options: {
         : { x: lastMove?.x ?? 42, y: lastMove?.y ?? 24 };
       return { isError: false, structuredJson: JSON.stringify(options.cursorState ?? { enabled: true, position }) };
     },
-    async getSession(input: unknown) { options.calls.push({ method: "getSession", value: input }); return { cursorVisible: options.cursorVisible ?? true }; },
+    async getSession(input: unknown) {
+      options.calls.push({ method: "getSession", value: input });
+      return { cursorVisible: options.cursorVisibleSequence?.shift() ?? options.cursorVisible ?? true };
+    },
     async listWindows(input: unknown) {
       options.calls.push({ method: "listWindows", value: input });
       return { windows: options.windows ?? [] };
@@ -715,6 +719,61 @@ test("does not report an agent cursor move as successful when the OS overlay is 
   await assert.rejects(() => driver.moveCursor("stage", 42, 24, { handle: "codex", sessionId: "overlay-missing" }), /desktop overlay is visible/);
   await driver.shutdown();
 }));
+
+test("accepts a cursor overlay that becomes visible during the bounded compositor poll", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    cursorVisiblePoll: { attempts: 6, intervalMs: 1 },
+    loadSdk: async () => makeSdk({ calls, cursorState: { enabled: true, position: { x: 42, y: 24 } }, cursorVisibleSequence: [false, false, true] }) as never,
+  });
+  const result = await driver.moveCursor("stage", 42, 24);
+  assert.equal(result.cursor.visible, true);
+  assert.equal(calls.filter((call) => call.method === "getSession").length, 3);
+  await driver.shutdown();
+}));
+
+test("fails closed after the bounded cursor visibility poll is exhausted", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    cursorVisiblePoll: { attempts: 3, intervalMs: 1 },
+    loadSdk: async () => makeSdk({ calls, cursorState: { enabled: true, position: { x: 42, y: 24 } }, cursorVisible: false }) as never,
+  });
+  await assert.rejects(() => driver.moveCursor("stage", 42, 24), /bounded confirmation window/);
+  assert.equal(calls.filter((call) => call.method === "getSession").length, 3);
+  await driver.shutdown();
+}));
+
+test("records compositor visibility as a separate privacy-safe timing phase", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const timings: Array<{ phase: string; status: string; durationMs: number; stageName?: string; detail?: string }> = [];
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    onTiming: (event) => timings.push(event),
+    loadSdk: async () => makeSdk({ calls, cursorVisible: false }) as never,
+  });
+  await assert.rejects(
+    () => driver.showAgentCursor!("stage", { handle: "codex", sessionId: "overlay-diagnostic" }),
+    /bounded confirmation window/,
+  );
+  const visibility = timings.find((event) => event.phase === "cursor-visible");
+  assert.deepEqual(visibility && { phase: visibility.phase, status: visibility.status, stageName: visibility.stageName }, {
+    phase: "cursor-visible", status: "error", stageName: "stage",
+  });
+  assert.equal(typeof visibility?.durationMs, "number");
+  assert.match(visibility?.detail ?? "", /^attempts=6;maxAttempts=6;intervalMs=150$/);
+  await driver.shutdown();
+}));
+
+test("bounds cursor visibility poll configuration", () => {
+  assert.throws(() => createCuaStageDriver({ cursorVisiblePoll: { attempts: 0, intervalMs: 1 } }), /cursor visibility poll/);
+  assert.throws(() => createCuaStageDriver({ cursorVisiblePoll: { attempts: 21, intervalMs: 1 } }), /cursor visibility poll/);
+  assert.throws(() => createCuaStageDriver({ cursorVisiblePoll: { attempts: 3, intervalMs: 5_000 } }), /cursor visibility poll/);
+});
 
 test("rejects stale or unverified Cua snapshots and still shuts down", async () => withRoot(async (root) => {
   await registerStage(root);

@@ -193,15 +193,15 @@ test("codexAppServerCommand honors CODEX_PATH, then the Windows npm shim, then t
   assert.deepEqual(codexAppServerCommand({}, "linux", () => false), { command: "codex", shell: false });
 });
 
-test("the default registry keeps ACP for Codex unless M9R_CODEX_APP_SERVER=1", async () => {
+test("the default registry uses the persistent Codex app-server unless the legacy ACP escape hatch is explicit", async () => {
   const { createDefaultAcpProviderRegistry } = await import("@/lib/bridge/acp-provider-registry");
-  const prior = process.env.M9R_CODEX_APP_SERVER;
+  const prior = process.env.M9R_CODEX_LEGACY_ACP;
   try {
-    delete process.env.M9R_CODEX_APP_SERVER;
-    assert.equal(createDefaultAcpProviderRegistry().get("codex-acp")?.constructor.name, "AcpStdioProviderAdapter");
-    process.env.M9R_CODEX_APP_SERVER = "1";
+    delete process.env.M9R_CODEX_LEGACY_ACP;
     assert.equal(createDefaultAcpProviderRegistry().get("codex-acp")?.constructor.name, "CodexAppServerAdapter");
+    process.env.M9R_CODEX_LEGACY_ACP = "1";
+    assert.equal(createDefaultAcpProviderRegistry().get("codex-acp")?.constructor.name, "AcpStdioProviderAdapter");
   } finally {
-    if (prior === undefined) delete process.env.M9R_CODEX_APP_SERVER; else process.env.M9R_CODEX_APP_SERVER = prior;
+    if (prior === undefined) delete process.env.M9R_CODEX_LEGACY_ACP; else process.env.M9R_CODEX_LEGACY_ACP = prior;
   }
 });

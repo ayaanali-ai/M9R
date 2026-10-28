@@ -8,6 +8,36 @@ export interface EngineUpdateManifest {
   artifact: { url: string; sha256: string; bytes: number };
 }
 
+export type UpdateEvaluation =
+  | { kind: "up_to_date"; currentVersion: string }
+  | { kind: "available"; currentVersion: string; availableVersion: string };
+
+function versionParts(value: string): [number, number, number] {
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(value)) throw new Error(`Invalid semantic version: ${value}`);
+  const parts = value.split(".").map(Number) as [number, number, number];
+  if (parts.some((part) => !Number.isSafeInteger(part))) throw new Error(`Invalid semantic version: ${value}`);
+  return parts;
+}
+
+/** Compare the release versions used by the signed M9R update manifest. */
+export function compareSemanticVersions(left: string, right: string): -1 | 0 | 1 {
+  const a = versionParts(left);
+  const b = versionParts(right);
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] < b[index]) return -1;
+    if (a[index] > b[index]) return 1;
+  }
+  return 0;
+}
+
+/** Decide whether a verified manifest is newer; equal and downgrade releases are never offered. */
+export function evaluateUpdate(currentVersion: string, manifest: EngineUpdateManifest): UpdateEvaluation {
+  versionParts(currentVersion);
+  return compareSemanticVersions(currentVersion, manifest.version) < 0
+    ? { kind: "available", currentVersion, availableVersion: manifest.version }
+    : { kind: "up_to_date", currentVersion };
+}
+
 function parseManifest(value: unknown): EngineUpdateManifest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const data = value as Record<string, unknown>;

@@ -14,6 +14,7 @@ export type AgentState = "open_working" | "open_idle" | "offline" | "unknown" | 
 export type FeedSurface = "native" | "web";
 
 export interface FeedAgent {
+  color?: string;
   surface: "native";
   handle: string;
   state: AgentState;
@@ -70,6 +71,7 @@ export interface SessionProbe {
 }
 
 export interface FeedInput {
+  colorFor?: (handle: string) => string;
   now: Date;
   endpoints: readonly EndpointRecord[];
   sessions: readonly SessionRecord[];
@@ -166,7 +168,7 @@ function inProgressFrom(input: FeedInput): InProgress[] {
   const nowMs = input.now.getTime();
   const out: InProgress[] = [];
   for (const t of input.tasks) {
-    if (t.dismissedAt || t.resultSummary || t.approval === "pending" || t.approval === "denied" || t.approval === "expired") continue;
+    if (t.dismissedAt || t.resultSummary || t.receipt?.state === "canceled" || t.approval === "pending" || t.approval === "denied" || t.approval === "expired") continue;
     if (nowMs - Date.parse(t.createdAt) > PROGRESS_WINDOW_MS) continue;
     const goal = safe(t.goal, 120);
     const claimAt = Date.parse(t.delivery?.claimedAt ?? "");
@@ -188,15 +190,15 @@ function needsYouFrom(input: FeedInput): NeedsYou[] {
   const out: NeedsYou[] = [];
   const nowMs = input.now.getTime();
   for (const t of input.tasks) {
-    if (t.dismissedAt) continue;
+    if (t.dismissedAt || t.receipt?.state === "canceled") continue;
     if (t.approval === "pending" && input.pendingIds.has(t.id)) {
       out.push({ surface: "native", kind: "approval", taskId: t.id, from: t.from, to: t.to, goal: safe(t.goal, GOAL_CHARS), protected: isProtectedAction(t.goal) });
     } else if ((t.delivery?.state === "uncertain"
       || (t.delivery?.state === "sending" && Number.isFinite(Date.parse(t.delivery.claimedAt ?? ""))
         && nowMs - Date.parse(t.delivery.claimedAt!) >= DELIVERY_CONFIRMATION_WINDOW_MS))
-      && t.approval !== "denied" && t.approval !== "expired" && nowMs - Date.parse(t.createdAt) < FAILED_WINDOW_MS) {
+      && !t.resultSummary && t.approval !== "denied" && t.approval !== "expired") {
       out.push({ surface: "native", kind: "delivery_uncertain", taskId: t.id, from: t.from, to: t.to,
-        reason: safe(t.delivery.error ?? "The provider did not confirm receipt. M9R will not resend this task automatically.", REASON_CHARS) });
+        reason: safe(`${t.delivery.error ?? "The provider did not confirm receipt."} Inspect the provider conversation before explicitly sending again. Clear this notice when resolved; M9R will not resend automatically.`, REASON_CHARS) });
     } else if (t.delivery?.state === "failed" && t.approval !== "denied" && t.approval !== "expired" && nowMs - Date.parse(t.createdAt) < FAILED_WINDOW_MS && !t.deliveredAt) {
       const reason = t.delivery.error ?? "The push failed.";
       out.push({ surface: "native", kind: "push_failed", taskId: t.id, from: t.from, fromSession: t.fromSession, to: t.to, reason: safe(reason, REASON_CHARS), fix: /To aim it/.test(reason) ? "" : /sessions are open/.test(reason) ? "m9r-cli sessions, then m9r-cli send @codex --session <id> \"...\"" : "m9r-cli tasks", linkable: !!t.fromSession });
@@ -212,7 +214,7 @@ function needsYouFrom(input: FeedInput): NeedsYou[] {
 /** Builds the feed. `previous` (the last feed written) supplies `seq` and decides which items are new pings. */
 export function buildFeed(input: FeedInput, previous: Feed | null): Feed {
   const handles = [...new Set<string>([...KNOWN_AGENTS, ...input.endpoints.map((e) => e.handle), ...input.sessions.map((s) => s.handle)])];
-  const agents = handles.map((h) => ({ ...agentFor(h, input), surface: "native" as const }));
+  const agents = handles.map((h) => ({ ...agentFor(h, input), surface: "native" as const, ...(input.colorFor ? { color: input.colorFor(h) } : {}) }));
   const needsYou = needsYouFrom(input);
   const inProgress = inProgressFrom(input);
   const recent = input.events.slice(-RECENT_ITEMS).reverse().map((e) => ({ surface: "native" as const, at: e.at, taskId: e.taskId, text: safe(e.text, 140) }));

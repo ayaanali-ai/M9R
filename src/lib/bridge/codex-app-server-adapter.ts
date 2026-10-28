@@ -135,6 +135,34 @@ function text(value: unknown, max: number, includeHeuristics = true): string {
   return redactSession(typeof value === "string" ? value : String(value ?? ""), { includeHeuristics }).redactedText.slice(0, max);
 }
 
+export type CodexAppServerFailureKind =
+  | "not-running"
+  | "active-writer"
+  | "timeout"
+  | "oversized-message"
+  | "authentication"
+  | "usage-limit"
+  | "unknown";
+
+/** Keep app-server failures distinguishable at the managed-provider boundary. */
+export function classifyCodexAppServerFailure(value: string): string {
+  const message = text(value, 1_200);
+  const kind: CodexAppServerFailureKind = /already has an active writer|active writer|another writer/i.test(message)
+    ? "active-writer"
+    : /usage limit|rate limit|quota|free usage/i.test(message)
+      ? "usage-limit"
+      : /oversized|too large|maximum message|max message/i.test(message)
+        ? "oversized-message"
+        : /authentication|unauthori[sz]ed|not authenticated|invalid (?:api )?key|\b401\b|login required/i.test(message)
+          ? "authentication"
+          : /timeout|timed out|did not finish within|no response within/i.test(message)
+            ? "timeout"
+            : /not running|closed its output|process exited|process error|could not write/i.test(message)
+              ? "not-running"
+              : "unknown";
+  return `Codex app-server ${kind}: ${message || "no diagnostic was returned"}`;
+}
+
 function diffCounts(diff: unknown): { additions: number; deletions: number } | null {
   if (typeof diff !== "string") return null;
   let additions = 0;
@@ -186,6 +214,22 @@ function killProcessTree(child: ChildProcessWithoutNullStreams): void {
   try { child.kill(); } catch { /* already exited */ }
 }
 
+/**
+ * Quote one argument for the Windows npm shim when `spawn(..., { shell: true
+ * })` has to be used. Node's shell form concatenates the argv itself; without
+ * this boundary a structured `-c mcp_servers=...` value can be split or have
+ * its TOML quotes consumed by cmd.exe before Codex sees it. This follows the
+ * Windows command-line backslash/quote rule and leaves ordinary literals
+ * readable.
+ */
+function quoteWindowsShellArg(value: string): string {
+  if (value.length > 0 && !/[\s"&|<>^()]/.test(value)) return value;
+  let quoted = `"${value.replace(/(\\*)"/g, "$1$1\\\"")}"`;
+  const trailing = /\\+$/.exec(value)?.[0];
+  if (trailing) quoted = `${quoted.slice(0, -1)}${trailing}${trailing}"`;
+  return quoted;
+}
+
 /** The Windows npm shim needs a shell; everywhere else the plain binary name works. An explicit CODEX_PATH always wins. */
 export function codexAppServerCommand(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -193,7 +237,7 @@ export function codexAppServerCommand(
   pathExists: (path: string) => boolean = existsSync,
 ): { command: string; shell: boolean } {
   const explicit = env.CODEX_PATH?.trim();
-  if (explicit) return { command: explicit, shell: /\.(cmd|bat)$/i.test(explicit) };
+  if (explicit) return { command: explicit, shell: platform === "win32" && /\.(cmd|bat)$/i.test(explicit) };
   if (platform === "win32") {
     const appData = env.APPDATA?.trim();
     const shim = appData ? resolve(appData, "npm", "codex.cmd") : null;
@@ -238,14 +282,18 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
     if (!isAbsolute(input.environment.workingDirectory)) throw new Error("The Codex app-server adapter requires an absolute working directory.");
     const serverId = `codex-server-${randomUUID()}`;
     const args = [...(this.options.args ?? [])];
-    // With a shell, fold command and args into one string (same reason as the ACP adapter: DEP0190).
-    const [spawnCommand, spawnArgs] = this.options.shell
-      ? [[/\s/.test(this.options.command) ? `"${this.options.command}"` : this.options.command, ...args].join(" "), []]
-      : [this.options.command, args];
+    // With a Windows shell, invoke cmd.exe explicitly rather than asking
+    // Node to add a second `/c "..."` quoting layer. This keeps the structured
+    // app-server `-c` values intact while retaining PATHEXT resolution for
+    // codex.cmd/codex.bat. Non-shell paths keep the direct argv form.
+    const spawnSpec: [string, string[], boolean] = this.options.shell
+      ? [process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", [quoteWindowsShellArg(this.options.command), ...args.map(quoteWindowsShellArg)].join(" ")], false]
+      : [this.options.command, args, false];
+    const [spawnCommand, spawnArgs, useShell] = spawnSpec;
     const child = spawn(spawnCommand, spawnArgs, {
       cwd: input.environment.workingDirectory,
       env: { ...process.env, ...this.options.env },
-      shell: this.options.shell ?? false,
+      shell: useShell,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams;
@@ -291,7 +339,9 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
   getServerHealth(handle: AgentServerHandle): AgentServerHealth {
     const state = this.servers.get(handle.serverId);
     if (!state) return { state: "unknown", detail: "Codex app-server is not known to this adapter instance." };
-    if (state.closed || state.child.exitCode !== null || state.child.killed) return { state: "dead", detail: state.stderrTail || "Codex app-server process exited." };
+    if (state.closed || state.child.exitCode !== null || state.child.killed) {
+      return { state: "dead", detail: classifyCodexAppServerFailure(state.stderrTail || "Codex app-server process exited.") };
+    }
     return { state: "alive", detail: "Codex app-server process is running." };
   }
 

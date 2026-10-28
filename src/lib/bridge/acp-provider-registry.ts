@@ -28,8 +28,10 @@ export class AcpProviderRegistry {
 export function createDefaultAcpProviderRegistry(genericProvider?: ProviderAdapterConfig): AcpProviderRegistry {
   const registry = new AcpProviderRegistry();
   registry.register(createClaudeAcpAdapter());
-  // Opt-in while the native adapter is proven live: same adapter id, so nothing else routes differently.
-  registry.register(process.env.M9R_CODEX_APP_SERVER === "1" ? createCodexAppServerAdapter({ id: "codex-acp" }) : createCodexAcpAdapter());
+  // The persistent app-server is the managed Codex path. Keep the old ACP
+  // wrapper available only as an explicit compatibility escape hatch; it is
+  // never selected implicitly by a provider session or a broker restart.
+  registry.register(process.env.M9R_CODEX_LEGACY_ACP === "1" ? createCodexAcpAdapter() : createCodexAppServerAdapter({ id: "codex-acp" }));
   registry.register(createOpenCodeAcpAdapter());
   if (genericProvider?.protocol === "acp-stdio" && !["codex", "claude-code", "opencode"].includes(genericProvider.provider)) {
     registry.register(createGenericAcpAdapter(genericProvider));

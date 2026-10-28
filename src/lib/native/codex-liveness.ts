@@ -10,6 +10,11 @@
 import { spawn } from "node:child_process";
 
 export type Liveness = "live" | "free" | "unknown";
+export interface FileHolderObservation {
+  state: Liveness;
+  /** Present only when Restart Manager reports exactly one valid owner process. */
+  processId?: number;
+}
 
 const CSHARP = String.raw`
 using System;
@@ -58,33 +63,60 @@ const POWERSHELL = [
 ].join("\n");
 
 /** Turns the program's output into a verdict per file; anything unclear is `unknown`, never `free`. */
-export function parseHolders(output: string, files: readonly string[]): Record<string, Liveness> {
-  const verdicts: Record<string, Liveness> = Object.fromEntries(files.map((f) => [f, "unknown" as Liveness]));
+export function parseHolderObservations(output: string, files: readonly string[]): Record<string, FileHolderObservation> {
+  const observations: Record<string, FileHolderObservation> = Object.fromEntries(files.map((file) => [file, { state: "unknown" as Liveness }]));
   for (const line of output.split(/\r?\n/)) {
     const tab = line.indexOf("\t");
     if (tab < 0) continue;
     const file = line.slice(0, tab);
     const holders = line.slice(tab + 1).trim();
-    if (!(file in verdicts) || holders === "ERR") continue;
-    verdicts[file] = holders === "" ? "free" : "live";
+    if (!(file in observations) || holders === "ERR") continue;
+    if (!holders) {
+      observations[file] = { state: "free" };
+      continue;
+    }
+
+    const entries = holders.split(";").filter(Boolean);
+    const pids = entries.map((entry) => {
+      const match = /^\s*(\d+):/.exec(entry);
+      const pid = match ? Number(match[1]) : Number.NaN;
+      return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+    });
+    const uniquePids = new Set(pids.filter((pid): pid is number => pid !== undefined));
+    observations[file] = {
+      state: "live",
+      ...(entries.length > 0 && pids.every((pid): pid is number => pid !== undefined) && uniquePids.size === 1
+        ? { processId: [...uniquePids][0]! }
+        : {}),
+    };
   }
-  return verdicts;
+  return observations;
 }
 
-/** One PowerShell start for all files (about a second), used only when a push has to choose between sessions. */
-export function windowsFileHolders(files: readonly string[], timeoutMs = 15_000): Promise<Record<string, Liveness>> {
-  const unknown = Object.fromEntries(files.map((f) => [f, "unknown" as Liveness]));
+export function parseHolders(output: string, files: readonly string[]): Record<string, Liveness> {
+  return Object.fromEntries(Object.entries(parseHolderObservations(output, files)).map(([file, observation]) => [file, observation.state]));
+}
+
+/** One Restart Manager query for all files, preserving a PID only when it uniquely owns that session file. */
+export function windowsFileHolderObservations(files: readonly string[], timeoutMs = 15_000): Promise<Record<string, FileHolderObservation>> {
+  const unknown = Object.fromEntries(files.map((file) => [file, { state: "unknown" as Liveness }]));
   if (process.platform !== "win32" || files.length === 0) return Promise.resolve(unknown);
   return new Promise((resolve) => {
     let out = "";
     let settled = false;
-    const done = (v: Record<string, Liveness>) => { if (!settled) { settled = true; resolve(v); } };
+    const done = (value: Record<string, FileHolderObservation>) => { if (!settled) { settled = true; resolve(value); } };
     try {
       const child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", POWERSHELL], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true, env: { ...process.env, M9R_RM_FILES: files.join("|") } });
       const timer = setTimeout(() => { child.kill(); done(unknown); }, timeoutMs);
       child.stdout?.on("data", (c) => { out += String(c); });
       child.on("error", () => { clearTimeout(timer); done(unknown); });
-      child.on("close", () => { clearTimeout(timer); done(parseHolders(out, files)); });
+      child.on("close", () => { clearTimeout(timer); done(parseHolderObservations(out, files)); });
     } catch { done(unknown); }
   });
+}
+
+/** State-only compatibility surface for callers that do not need session ownership. */
+export async function windowsFileHolders(files: readonly string[], timeoutMs = 15_000): Promise<Record<string, Liveness>> {
+  const observations = await windowsFileHolderObservations(files, timeoutMs);
+  return Object.fromEntries(Object.entries(observations).map(([file, observation]) => [file, observation.state]));
 }

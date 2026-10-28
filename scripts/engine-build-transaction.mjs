@@ -52,9 +52,18 @@ function buildIdFor(artifacts) {
   return createHash("sha256").update(JSON.stringify(Object.entries(artifacts))).digest("hex");
 }
 
-export function writeRuntimeBuildManifest(root, builtAt = new Date().toISOString()) {
+export function writeRuntimeBuildManifest(
+  root,
+  builtAt = new Date().toISOString(),
+  source = { sourceCommit: "unknown", sourceDirty: true },
+) {
   const artifacts = normalizeArtifacts(listFiles(resolve(root)));
-  const manifest = { schemaVersion: 1, buildId: buildIdFor(artifacts), builtAt, artifacts };
+  if (!source || typeof source !== "object"
+    || typeof source.sourceCommit !== "string"
+    || typeof source.sourceDirty !== "boolean") {
+    throw new Error("Runtime build source provenance is invalid.");
+  }
+  const manifest = { schemaVersion: 1, buildId: buildIdFor(artifacts), builtAt, artifacts, source };
   writeFileSync(join(root, RUNTIME_BUILD_INFO_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }

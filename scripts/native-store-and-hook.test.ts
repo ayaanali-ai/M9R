@@ -144,6 +144,33 @@ test("approvals and results are stored, results are capped and redacted", () => 
   done();
 });
 
+test("provider failures remain failed instead of becoming completed answers", () => {
+  const { store, done } = tempStore();
+  const created = store.addTask(task({ idempotencyKey: "provider-failure-state" }));
+  store.setDelivery(created.task.id, { state: "sending", threadId: "m9r-owner-claude" });
+  store.recordTaskFailure(created.task.id, "Provider session failed: Codex worker exited with code 1");
+  const saved = store.getTask(created.task.id)!;
+  assert.equal(saved.delivery?.state, "failed");
+  assert.equal(saved.receipt?.state, "failed");
+  assert.equal(saved.lifecycle?.state, "failed");
+  assert.equal(saved.resultSummary, undefined);
+  done();
+});
+
+test("startup reconciliation fences an abandoned sending claim without replaying it", () => {
+  let current = new Date("2026-10-28T01:00:00.000Z");
+  const { store, done } = tempStore(() => current);
+  const created = store.addTask(task({ idempotencyKey: "stale-sending-claim" }));
+  store.setDelivery(created.task.id, { state: "sending", threadId: "m9r-owner-codex", claimedAt: current.toISOString() });
+  current = new Date("2026-10-28T01:02:01.000Z");
+  assert.equal(store.reconcileStaleDeliveries(), 1);
+  const saved = store.getTask(created.task.id)!;
+  assert.equal(saved.delivery?.state, "uncertain");
+  assert.equal(saved.receipt?.state, "uncertain");
+  assert.match(saved.delivery?.error ?? "", /will not resend automatically/);
+  done();
+});
+
 test("a corrupt state file fails closed without losing identity or resetting task ids", () => {
   const { root, store, done } = tempStore();
   store.addTask(task());

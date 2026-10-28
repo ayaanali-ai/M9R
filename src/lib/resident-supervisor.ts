@@ -1,5 +1,7 @@
 export interface ResidentProcessHandle {
   kill(): void;
+  /** Optional graceful drain used by the terminal runtime before a hard kill. */
+  shutdown?(): Promise<void>;
 }
 
 /**
@@ -188,6 +190,31 @@ export function createResidentSupervisor(options: {
         setState(resident, "stopped");
         process?.kill();
       }
+    },
+
+    /**
+     * Ask residents to finish their bounded unit before falling back to the
+     * ordinary kill path. Providers that do not expose an IPC drain remain
+     * compatible and are terminated exactly as they were by stop().
+     */
+    async stopGracefully(): Promise<void> {
+      if (stopped) return;
+      stopped = true;
+      const drains: Promise<void>[] = [];
+      for (const resident of residents) {
+        resident.scheduled?.cancel();
+        resident.scheduled = null;
+        const process = resident.process;
+        resident.process = null;
+        setState(resident, "stopped");
+        if (!process) continue;
+        if (process.shutdown) {
+          drains.push(process.shutdown().catch(() => { process.kill(); }));
+        } else {
+          process.kill();
+        }
+      }
+      await Promise.all(drains);
     },
 
     snapshot(): ResidentSupervisorSnapshot[] {

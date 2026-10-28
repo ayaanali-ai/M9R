@@ -28,6 +28,12 @@ export function createBridgeToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+/** Encode the local terminal bearer as a WebSocket subprotocol. */
+export function bridgeTokenProtocol(token: string): string {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("The terminal bridge token is invalid.");
+  return `oathlock-bridge.${token}`;
+}
+
 export function providerProcessSpec(_provider: TerminalProvider, platform: NodeJS.Platform = process.platform): { command: string; args: string[] } {
   return platform === "win32"
     ? { command: "powershell.exe", args: ["-NoLogo"] }

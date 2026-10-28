@@ -1320,6 +1320,17 @@ export function createWebBroker(deps: WebBrokerDeps) {
       entry.resolve(false);
       doneNoticeAcks.delete(id);
     }
+    // Every tab this broker ever tracked necessarily closed along with the browser
+    // process that just disconnected -- a reconnect starts with zero real tabs, so
+    // stale bookkeeping must not survive it (it would otherwise claim tabs are open,
+    // or ambiguous between several, forever with nothing an agent could specify to fix it).
+    tabUrls.clear();
+    openedBy.clear();
+    tabsByActor.clear();
+    focusedTabByActor.clear();
+    tabLastActivity.clear();
+    tabLastBy.clear();
+    claims.clear();
   }
 
   /** Runs a bounded, ordered browser sequence. The broker owns the tab claim for every step and never continues after a refusal. */

@@ -32,7 +32,7 @@ function safeUser(): string {
   try { return userInfo().username.replace(/[^A-Za-z0-9_-]/g, "_"); } catch { return "user"; }
 }
 
-export interface ServerRequest { cmd?: string; event?: string; provider?: string; input?: HookInput | null; env?: Record<string, string | undefined> }
+export interface ServerRequest { cmd?: string; event?: string; provider?: string; input?: HookInput | null; providerProcessId?: number; env?: Record<string, string | undefined> }
 
 export function startHookServer(options: { path: string; handle: (req: ServerRequest) => string | Promise<string>; onShutdown: () => void }): Server {
   if (process.platform !== "win32" && existsSync(options.path)) rmSync(options.path, { force: true });
