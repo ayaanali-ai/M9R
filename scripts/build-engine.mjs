@@ -59,6 +59,9 @@ const heldLocalProvenancePatterns = [
   /^m9r-clean-cutover-[^/]+(?:\/|$)/i,
   /^m9r-release-package-[^/]+(?:\/|$)/i,
   /^m9r-runtime-clean-[^/]+(?:\/|$)/i,
+  // The current-release evidence root is retained for rollback/audit and is
+  // never part of the packaged source tree.
+  /^\.m9r-release-current-[^/]+(?:\/|$)/i,
   /^scratchpad(?:\/|$)/i,
   // Local incident traces and diagnostic scripts are retained evidence, not
   // release source; they must not make a committed runtime fingerprint dirty.
