@@ -126,11 +126,23 @@ export function createM9RSurfaceAdapterCatalog(adapters: readonly M9RSurfaceAdap
   const catalog: M9RSurfaceAdapterCatalog = {
     register(adapter) {
       if (byId.has(adapter.adapterId)) throw new Error(`Surface adapter is already registered: ${adapter.adapterId}`);
-      surfaceAdapterDescriptorSchema.parse(adapter);
+      // Validate only the serializable descriptor portion. The live adapter also
+      // carries its executable binding methods, which are intentionally not part
+      // of the strict descriptor schema.
+      const { canHandle: _canHandle, bind: _bind, ...descriptor } = adapter;
+      surfaceAdapterDescriptorSchema.parse(descriptor);
       byId.set(adapter.adapterId, adapter);
     },
     resolve(target, preferredAdapterId) {
-      const parsedTarget = parseComputerUseTarget(target);
+      let parsedTarget: ComputerUseTarget;
+      try {
+        parsedTarget = parseComputerUseTarget(target);
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? `invalid surface target: ${error.message}` : "invalid surface target",
+        };
+      }
       if (preferredAdapterId) {
         const preferred = byId.get(preferredAdapterId);
         if (!preferred || !preferred.canHandle(parsedTarget)) return { ok: false, error: "preferred surface adapter is unavailable for this target" };

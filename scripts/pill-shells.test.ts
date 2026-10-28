@@ -38,8 +38,15 @@ test("browser ui-state becomes a snapshot: agents with their recent actions, app
 });
 
 test("malformed ui-state degrades to an empty snapshot instead of throwing", () => {
-  assert.deepEqual(fromUiState({}), { agents: [], approvals: [], thread: [] });
-  assert.deepEqual(fromUiState({ agents: null, thread: "x", approvals: 3 } as never), { agents: [], approvals: [], thread: [] });
+  const emptyCollaboration = {
+    agents: [],
+    featuredAgentIds: [],
+    activeCount: 0,
+    overflowCount: 0,
+    headline: "No agents connected",
+  };
+  assert.deepEqual(fromUiState({}), { agents: [], collaboration: emptyCollaboration, approvals: [], thread: [] });
+  assert.deepEqual(fromUiState({ agents: null, thread: "x", approvals: 3 } as never), { agents: [], collaboration: emptyCollaboration, approvals: [], thread: [] });
 });
 
 test("the desktop feed keeps provider activity separate from queued asks, approvals and answers", () => {

@@ -57,13 +57,23 @@ interface Entry {
   readonly connection: ManagedProviderConnection;
 }
 
+function canonicalProfile(profile: ManagedProviderConnectionProfile): ManagedProviderConnectionProfile {
+  try {
+    return normalizeManagedProviderProfile(profile);
+  } catch {
+    return profile;
+  }
+}
+
 function sameProfile(left: ManagedProviderConnectionProfile, right: ManagedProviderConnectionProfile): boolean {
-  return left.connectionId === right.connectionId
-    && left.handle === right.handle
-    && left.provider === right.provider
-    && left.cwd === right.cwd
-    && left.model === right.model
-    && left.effort === right.effort;
+  const canonicalLeft = canonicalProfile(left);
+  const canonicalRight = canonicalProfile(right);
+  return canonicalLeft.connectionId === canonicalRight.connectionId
+    && canonicalLeft.handle === canonicalRight.handle
+    && canonicalLeft.provider === canonicalRight.provider
+    && canonicalLeft.cwd === canonicalRight.cwd
+    && canonicalLeft.model === canonicalRight.model
+    && canonicalLeft.effort === canonicalRight.effort;
 }
 
 function normalizeContinuation(value: unknown): ManagedProviderContinuation | undefined {
@@ -145,10 +155,13 @@ function profileForConnection(connection: ManagedProviderConnection, expected: M
 
 function snapshotForConnection(connection: ManagedProviderConnection, profile: ManagedProviderConnectionProfile): ManagedProviderConnectionSnapshot {
   const snapshot = connection.status();
-  if (snapshot.connectionId !== profile.connectionId
-    || snapshot.handle !== profile.handle
-    || snapshot.provider !== profile.provider
-    || snapshot.cwd !== profile.cwd) {
+  const snapshotProfile: ManagedProviderConnectionProfile = {
+    connectionId: snapshot.connectionId,
+    handle: snapshot.handle,
+    provider: snapshot.provider,
+    cwd: snapshot.cwd,
+  };
+  if (!sameProfile(snapshotProfile, profile)) {
     throw new Error(`managed provider adapter returned an identity different from ${profile.connectionId}`);
   }
   return snapshot;
@@ -171,6 +184,10 @@ function generationFromReady(
 
 export function createManagedProviderSupervisor(options: ManagedProviderSupervisorOptions): ManagedProviderSupervisor {
   const entries = new Map<string, Entry>();
+  // Keep the latest private continuation in memory even when a durable store
+  // is not configured. A provider restart within this supervisor must resume
+  // the same logical session rather than silently starting a new one.
+  const continuations = new Map<string, ManagedProviderContinuation | undefined>();
   // A logical connection may be requested by startup reconciliation and a
   // delivery at the same time. Coalesce those requests before they reach the
   // provider adapter so one profile can never launch two runtimes for one
@@ -193,16 +210,19 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
     readinessCache.invalidate(connectionId, reason);
   };
 
-  const persist = async (entry: Entry): Promise<void> => {
-    if (!store) return;
-    const continuation = normalizeContinuation(entry.connection.continuation());
-    await store.save(entry.profile.connectionId, entry.profile, continuation);
+  const persist = async (entry: Entry, returnedContinuation?: ManagedProviderContinuation): Promise<void> => {
+    const continuation = normalizeContinuation(returnedContinuation ?? entry.connection.continuation());
+    continuations.set(entry.profile.connectionId, continuation);
+    if (store) await store.save(entry.profile.connectionId, entry.profile, continuation);
   };
 
   const load = async (profile: ManagedProviderConnectionProfile, explicit?: ManagedProviderContinuation): Promise<ManagedProviderContinuation | undefined> => {
     if (explicit !== undefined) return normalizeContinuation(explicit);
-    if (!store) return undefined;
-    return normalizeContinuation(await store.load(profile.connectionId, profile));
+    if (store) {
+      const persisted = await store.load(profile.connectionId, profile);
+      if (persisted !== undefined) return normalizeContinuation(persisted);
+    }
+    return continuations.get(profile.connectionId);
   };
 
   const waitForStarts = async (): Promise<void> => {
@@ -261,7 +281,7 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
       // next reuse still has the adapter probe as a cache-miss fallback.
       const verified = readinessCache.verify(readinessIdentity(profile, live), true);
       if (!verified.ok) throw new Error(`managed provider readiness verification failed for ${profile.connectionId}: ${verified.reason}`);
-      await persist(entry!);
+      await persist(entry!, ready.continuation);
       return entry!.connection;
     })();
     starting.set(profile.connectionId, startPromise);
