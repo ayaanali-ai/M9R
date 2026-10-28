@@ -2,7 +2,7 @@
 // separate from cli/dist, which this repo rebuilds far more often. It went 5 days stale with nobody noticing because
 // nothing ever actually launched it and checked it spoke MCP correctly; the owner's real Codex session hit
 // "M9R browser tools are unavailable" as a result. This runs the real built exe through a real MCP handshake and
-// confirms the web tools are actually present, not just that the process didn't crash.
+// confirms the current native desktop tools are actually present, not just that the process didn't crash.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -11,7 +11,7 @@ import test from "node:test";
 
 const exe = join(process.cwd(), "engine", "dist", process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
 
-test("the built engine exe's `mcp` subcommand completes a real MCP handshake and exposes the web tools", { skip: !existsSync(exe) ? "engine/dist/m9r-engine.exe was not built (run: node scripts/build-engine.mjs)" : false }, async () => {
+test("the built engine exe's `mcp` subcommand completes a real MCP handshake and exposes the native tools", { skip: !existsSync(exe) ? "engine/dist/m9r-engine.exe was not built (run: node scripts/build-engine.mjs)" : false }, async () => {
   const child = spawn(exe, ["mcp"], { stdio: ["pipe", "pipe", "pipe"] });
   let out = "";
   let err = "";
@@ -40,17 +40,12 @@ test("the built engine exe's `mcp` subcommand completes a real MCP handshake and
     const toolsResult = messages.find((m) => m.id === 2);
     assert.ok(toolsResult?.result?.tools, "no response to tools/list");
     const names = toolsResult.result!.tools!.map((t) => t.name);
-    // These specifically require deps.web to be wired (scripts/m9r-mcp.ts) -- if the engine's MCP entry ever loses its
-    // web broker client again, these tools are simply absent from the list, exactly reproducing the real failure.
-    for (const required of ["m9r_web_open", "m9r_web_click", "m9r_web_read", "m9r_send", "m9r_inbox", "m9r_git_read", "m9r_read_file"]) {
+    // The active browser/app route is the owner-visible native desktop surface. The retired browser-extension tools
+    // must stay out of the provider tool list so an agent cannot silently select the wrong control plane.
+    for (const required of ["m9r_stage_prepare", "m9r_stage_app", "m9r_stage_action", "m9r_computer_observe", "m9r_computer_action", "m9r_send", "m9r_inbox", "m9r_git_read", "m9r_read_file"]) {
       assert.ok(names.includes(required), `${required} missing from the engine's real tool list: [${names.join(", ")}]`);
     }
-    const readTool = toolsResult.result!.tools!.find((tool) => tool.name === "m9r_web_read");
-    assert.equal(
-      readTool?.inputSchema?.properties?.ref?.pattern,
-      "^e[a-f0-9]{24}_\\d{1,3}$",
-      "the built engine must expose the current snapshot-scoped nonce-ref format",
-    );
+    assert.ok(!names.includes("m9r_web_open"), "the retired browser-extension route must not be registered in the active engine");
     for (const toolName of ["m9r_stage_prepare", "m9r_stage_app", "m9r_stage_action"]) {
       const stageTool: ToolInfo | undefined = toolsResult.result!.tools!.find((tool: ToolInfo) => tool.name === toolName);
       assert.ok(stageTool, `${toolName} missing from the built engine's real tool list`);
