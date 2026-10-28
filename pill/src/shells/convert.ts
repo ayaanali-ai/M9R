@@ -1,6 +1,7 @@
 // Pure converters from what each host already produces into the pill's one snapshot shape. No DOM, no host APIs.
 
 import type { AgentRunState, PillSnapshot, Provider } from "../core/state";
+import { collaborationFromAgents, sanitizePillCollaboration } from "../core/presence";
 
 export function providerOf(value: unknown): Provider {
   const v = String(value ?? "").toLowerCase();
@@ -17,7 +18,7 @@ const clip = (text: unknown, n: number) => (typeof text === "string" ? text.repl
 interface UiAgent { id: string; provider?: string; state?: string; doing?: string }
 interface UiThread { id: string; kind: string; agent?: string; text: string; phase?: string }
 interface UiApproval { id: string; agent?: string; provider?: string; text: string; site?: string; url?: string; action?: string }
-export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; desktopPill?: boolean }
+export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; collaboration?: unknown; desktopPill?: boolean }
 
 const RUN_STATES = new Set<AgentRunState>(["idle", "starting", "working", "waiting", "blocked", "stopped", "failed", "seen", "unknown", "not_connected"]);
 
@@ -51,7 +52,8 @@ export function fromUiState(message: UiState): PillSnapshot {
     .filter((t) => t.kind === "say" || t.kind === "system" || t.kind === "block")
     .slice(-30)
     .map((t) => ({ id: String(t.id), from: String(t.agent ?? "").replace(/^@/, "") || "m9r", text: clip(t.text, 600) }));
-  return { agents, approvals, thread: replies, ...(message.desktopPill === true ? { desktopPill: true } : {}) };
+  const collaboration = sanitizePillCollaboration(message.collaboration) ?? collaborationFromAgents(agents);
+  return { agents, collaboration, approvals, thread: replies, ...(message.desktopPill === true ? { desktopPill: true } : {}) };
 }
 
 // ── Desktop shell: the engine's feed.json merged with web-activity.json ────────────────────────────
@@ -117,5 +119,5 @@ export function fromFeed(feed: Feed): PillSnapshot {
           ? [{ id: `uncertain-${n.taskId}`, from: "m9r", text: clip(`Could not confirm delivery of ${n.taskId} to @${n.to}; it will not be resent automatically. ${n.reason}`, 300) }]
         : []),
   ];
-  return { agents, approvals, thread };
+  return { agents, collaboration: collaborationFromAgents(agents), approvals, thread };
 }

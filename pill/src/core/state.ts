@@ -2,6 +2,7 @@
 // (agents, approvals, thread) and receive owner commands back through the transport. Nothing here knows about Tauri or Chrome.
 
 import type { BotStateName, IslandMode, IslandViewName } from "./layout";
+import type { PillCollaboration, PillPresenceState } from "./presence";
 
 export type Provider = "claude" | "codex" | "opencode" | "agent";
 export type AgentRunState = "idle" | "starting" | "working" | "waiting" | "blocked" | "stopped" | "failed" | "seen" | "unknown" | "not_connected";
@@ -10,6 +11,8 @@ export type PillBadge = "approval" | "finished" | "error";
 /** Wire shape: what a shell gives the pill. */
 export interface PillSnapshot {
   agents: Array<{ handle: string; provider: Provider; state: AgentRunState; activity: string[]; task?: string }>;
+  /** Optional structured collaboration layer; older hosts may omit it. */
+  collaboration?: PillCollaboration;
   approvals: Array<{ id: string; agent: string; title: string; detail: string }>;
   /** Replies and notices from agents, newest last. */
   thread: Array<{ id: string; from: string; text: string; link?: LinkOffer }>;
@@ -42,6 +45,7 @@ export interface AgentTask {
   /** Current task goal supplied by the host feed when one is active. */
   task?: string;
   pillBadge?: PillBadge | null;
+  presenceState?: PillPresenceState;
 }
 
 export interface ApprovalInfo {
@@ -116,6 +120,7 @@ class AppState {
   chatHistory: ChatMessage[] = [];
   approvals: ApprovalInfo[] = [];
   brokerConnection: "unknown" | "connecting" | "connected" | "disconnected" = "unknown";
+  collaboration: PillCollaboration | null = null;
   decisionError: { approvalId: string; message: string } | null = null;
 
   lastActivity = performance.now();
@@ -169,6 +174,8 @@ class AppState {
       return { newApprovals: [], newReplies: [] };
     }
 
+    this.collaboration = snapshot.collaboration ?? null;
+
     for (const [id, resolvedAt] of this.resolvedApprovals) {
       if (now - resolvedAt >= APPROVAL_RECOVERY_MS) this.resolvedApprovals.delete(id);
     }
@@ -193,12 +200,13 @@ class AppState {
         id: a.handle,
         name: a.handle,
         provider: a.provider,
-        color: PROVIDER_COLORS[a.provider] ?? PROVIDER_COLORS.agent,
+        color: this.collaboration?.agents.find((presence) => presence.agentId === a.handle)?.color ?? PROVIDER_COLORS[a.provider] ?? PROVIDER_COLORS.agent,
         state: waiting.has(a.handle) ? "approval" : RUN_TO_BOT[a.state] ?? "idle",
         runState: a.state,
         stepIndex: Math.max(0, steps.length - 1),
         steps,
         ...(a.task ? { task: a.task } : {}),
+        ...(this.collaboration?.agents.find((presence) => presence.agentId === a.handle)?.state ? { presenceState: this.collaboration.agents.find((presence) => presence.agentId === a.handle)!.state } : {}),
         pillBadge: waiting.has(a.handle) ? "approval" : a.state === "failed" ? "error" : finished ? "finished" : prev?.pillBadge ?? null,
       };
     });

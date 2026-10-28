@@ -14,6 +14,7 @@
   const CONTENT_JS = ["src/presence-logic.js", "src/dock-logic.js", "src/presence-overlay.js", "src/content.js"];
   const LOCAL_ORIGINS = ["http://localhost/*", "http://127.0.0.1/*"];
   const AGENT_STATES = new Set(["idle", "starting", "working", "waiting", "blocked", "stopped", "failed"]);
+  const PRESENCE_STATES = new Set(["thinking", "asking", "preparing", "observing", "acting", "waiting", "blocked", "completed", "stopped"]);
   const THREAD_KINDS = new Set(["say", "do", "block", "approval", "system"]);
   const MAX_NONCES_PER_TAB = 6;
 
@@ -28,6 +29,29 @@
   const noncesByTab = new Map();
 
   const str = (value, limit) => (typeof value === "string" ? value.slice(0, limit) : "");
+
+  function sanitizeCollaboration(value) {
+    if (!value || typeof value !== "object") return null;
+    const agents = (Array.isArray(value.agents) ? value.agents : []).slice(0, 16).flatMap((a) => {
+      if (!a || typeof a.agentId !== "string" || !a.agentId || typeof a.label !== "string" || !PRESENCE_STATES.has(a.state)) return [];
+      const cursor = a.cursor && typeof a.cursor === "object" && PRESENCE_STATES.has(a.cursor.mode)
+        ? { mode: a.cursor.mode, visible: a.cursor.visible === true }
+        : { mode: a.state, visible: !["completed", "stopped"].includes(a.state) };
+      const item = {
+        agentId: str(a.agentId, 128), label: str(a.label, 80), provider: str(a.provider, 48), color: /^#[0-9a-f]{6}$/i.test(a.color) ? a.color : "#9AA1AC",
+        state: a.state, cursor,
+      };
+      if (typeof a.summary === "string" && a.summary) item.summary = str(a.summary, 160);
+      if (typeof a.surfaceId === "string" && a.surfaceId) item.surfaceId = str(a.surfaceId, 128);
+      if (typeof a.regionId === "string" && a.regionId) item.regionId = str(a.regionId, 128);
+      return [item];
+    });
+    const featuredAgentIds = (Array.isArray(value.featuredAgentIds) ? value.featuredAgentIds : [])
+      .filter((id) => typeof id === "string" && agents.some((agent) => agent.agentId === id)).slice(0, 3).map((id) => str(id, 128));
+    const activeCount = Number.isSafeInteger(value.activeCount) && value.activeCount >= 0 ? Math.min(value.activeCount, agents.length) : agents.filter((agent) => agent.cursor.visible).length;
+    const overflowCount = Number.isSafeInteger(value.overflowCount) && value.overflowCount >= 0 ? Math.min(value.overflowCount, agents.length) : Math.max(0, agents.length - featuredAgentIds.length);
+    return { agents, featuredAgentIds, activeCount, overflowCount, headline: str(value.headline, 240) };
+  }
 
   function sanitizeState(message) {
     const agents = (Array.isArray(message.agents) ? message.agents : []).slice(0, 24).flatMap((a) => {
@@ -49,7 +73,8 @@
       for (const key of ["site", "url", "action", "at"]) if (typeof p[key] === "string" && p[key]) item[key] = str(p[key], 400);
       return [item];
     });
-    return { type: "ui-state", agents, thread, approvals, ...(message.desktopPill === true ? { desktopPill: true } : {}) };
+    const collaboration = sanitizeCollaboration(message.collaboration);
+    return { type: "ui-state", agents, thread, approvals, ...(collaboration ? { collaboration } : {}), ...(message.desktopPill === true ? { desktopPill: true } : {}) };
   }
 
   function framePage(url) {

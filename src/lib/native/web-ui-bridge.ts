@@ -14,6 +14,7 @@
 import { randomUUID } from "node:crypto";
 import type { FeedWebActivityInput, FeedWebItem } from "./feed-core";
 import { redactSecrets } from "./inbox-core";
+import { presenceStateForUi, snapshotFromRecords } from "./multiplayer-presence";
 
 // ---------------------------------------------------------------------------------------------------------------
 // Plain-words narration
@@ -163,8 +164,27 @@ export interface UiAgent { id: string; provider: string; folder: string; state: 
 export type UiThreadKind = "say" | "do" | "block" | "approval" | "system";
 export interface UiThreadEntry { id: string; at: string; kind: UiThreadKind; agent: string; provider: string; to?: string; text: string; phase?: "start" | "done"; ok?: boolean }
 export interface UiApproval { id: string; agent: string; provider: string; text: string }
+/** Bounded presence data for the pill. This is additive; older shells ignore the field. */
+export interface UiCollaborationAgent {
+  agentId: string;
+  label: string;
+  provider: string;
+  color: string;
+  state: "thinking" | "asking" | "preparing" | "observing" | "acting" | "waiting" | "blocked" | "completed" | "stopped";
+  cursor: { mode: UiCollaborationAgent["state"]; visible: boolean };
+  summary?: string;
+  surfaceId?: string;
+  regionId?: string;
+}
+export interface UiCollaboration {
+  agents: UiCollaborationAgent[];
+  featuredAgentIds: string[];
+  activeCount: number;
+  overflowCount: number;
+  headline: string;
+}
 /** `desktopPill` is present (true) only while the desktop pill is running, so the in-page pill can step aside. */
-export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThreadEntry[]; approvals: UiApproval[]; desktopPill?: true }
+export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThreadEntry[]; approvals: UiApproval[]; collaboration?: UiCollaboration; desktopPill?: true }
 
 export interface UiPageContext { url?: string; title?: string; selection?: string }
 export type UiInbound =
@@ -422,12 +442,38 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       else if (s.status === "working" && doing.get(s.handle)) what = doing.get(s.handle)!;
       return { id: s.handle, provider: s.provider, folder: s.folder, state, doing: redact(what), ...(options.colorFor ? { color: options.colorFor(s.handle) } : {}) };
     });
+    const collaborationSnapshot = snapshotFromRecords(agents.map((agent) => ({
+      agentId: agent.id,
+      branchId: `${agent.id}-ui`,
+      provider: agent.provider,
+      handle: agent.id,
+      state: presenceStateForUi(agent.state, sessions?.snapshot().find((session) => session.handle === agent.id)?.waitingOn),
+      summary: agent.doing,
+      updatedAt: now(),
+    })));
+    const collaboration: UiCollaboration = {
+      agents: collaborationSnapshot.agents.map((agent) => ({
+        agentId: agent.agentId,
+        label: agent.label,
+        provider: agent.provider,
+        color: agent.color,
+        state: agent.state,
+        cursor: agent.cursor,
+        ...(agent.summary ? { summary: redact(agent.summary) } : {}),
+        ...(agent.surfaceId ? { surfaceId: agent.surfaceId } : {}),
+        ...(agent.regionId ? { regionId: agent.regionId } : {}),
+      })),
+      featuredAgentIds: collaborationSnapshot.featuredAgentIds,
+      activeCount: collaborationSnapshot.activeCount,
+      overflowCount: collaborationSnapshot.overflowCount,
+      headline: collaborationSnapshot.headline,
+    };
     const approvals: UiApproval[] = pending.map((p) => {
       const known = approvalText.get(p.id);
       const text = known?.text ?? narrateStep({ action: p.action, selector: p.selector, targetLabel: p.targetLabel }, "start");
       return { id: p.id, agent: p.actor, provider: known?.provider ?? providerOf(p.actor), text: redact(`${text}${p.origin ? ` on ${hostOf(p.origin) ?? p.origin}` : ""}`) };
     });
-    return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals, ...(desktopPill ? { desktopPill: true as const } : {}) };
+    return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals, collaboration, ...(desktopPill ? { desktopPill: true as const } : {}) };
   }
 
   function onActivity(activity: WebActivity): void {

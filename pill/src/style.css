@@ -518,6 +518,31 @@ body {
   padding: 0 8px;
 }
 
+.presence-summary {
+  position: relative;
+  z-index: 1;
+  min-height: 16px;
+  padding: 8px 10px 0;
+  color: var(--dim-3);
+  font: 500 9px var(--font);
+  letter-spacing: .01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.presence-more {
+  align-self: center;
+  justify-self: center;
+  color: var(--dim-3);
+  font: 600 9px var(--font);
+  white-space: nowrap;
+}
+
+.overview > .right .pills {
+  height: calc(100% - 24px);
+}
+
 .pill {
   position: relative;
   height: 28px;
