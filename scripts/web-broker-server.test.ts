@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,12 +16,13 @@ import { createWebAuthority, verifyAudit } from "@/lib/native/web-authority-core
 import { createWebAuthorityStore, renameWithRetry } from "@/lib/native/web-authority-store";
 import { applyAgentMcpStoreMutation, loadOrCreateBrokerKey, startWebBroker, tightenKeyFileAcl } from "@/lib/native/web-broker-server";
 import { webExtensionAllowlist, WEB_EXTENSION_ID } from "@/lib/native/web-setup-core";
+import { createTestFixtureRoot, removeTestFixtureRoot } from "./test-fixture-temp.ts";
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<ToolResult> }> };
 
 test("agent message receipts distinguish full goals and results respect the receiving session", () => {
-  const root = mkdtempSync(join(process.cwd(), ".workcache", "m9r-message-scope-"));
+  const root = createTestFixtureRoot("m9r-message-scope-");
   const store = createLocalStore(root);
   try {
     const sender = store.issueIdentity("codex", "codex", "sender");
@@ -39,7 +40,7 @@ test("agent message receipts distinguish full goals and results respect the rece
     assert.equal(result(other.token).status, 403);
     assert.equal(store.getTask(first.taskId!)?.resultSummary, undefined);
     assert.equal(result(recipient.token).status, 200);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally { removeTestFixtureRoot(root); }
 });
 
 test("task stage app/action routes require loopback key, reject origins and extra target fields", async () => {
@@ -255,7 +256,7 @@ test("authority snapshot replacement retries transient file locks but fails clos
 });
 
 test("legacy authority snapshots migrate to a bounded v2 audit chain and persist the migration", () => {
-  const root = mkdtempSync(join(process.cwd(), ".m9r-audit-migration-"));
+  const root = createTestFixtureRoot("m9r-audit-migration-");
   const filePath = join(root, "web-authority.json");
   try {
     const authority = createWebAuthority({ ownerId: "alice" });
@@ -271,14 +272,14 @@ test("legacy authority snapshots migrate to a bounded v2 audit chain and persist
     assert.deepEqual(verifyAudit(migrated.audit, migrated.auditAnchor), { ok: true });
     assert.equal(JSON.parse(readFileSync(filePath, "utf8")).version, 2, "startup migration should atomically replace the old snapshot");
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTestFixtureRoot(root);
   }
 });
 
 async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtension?: boolean; authority?: ReturnType<typeof createWebAuthority>; approvalTimeoutMs?: number; extensionConnectTimeoutMs?: number; ownerId?: string; requestTimeoutMs?: number; onShutdownRequested?: () => void | Promise<void> } = {}) {
-  // Keep broker fixtures inside the writable project tree: the sandbox intentionally blocks deleting arbitrary OS-temp
-  // directories. Production key ACL behavior is covered by its dedicated test below.
-  const root = mkdtempSync(join(process.cwd(), ".m9r-web-broker-"));
+  // Broker fixtures live in a managed OS-temp root, never in the repository.
+  // The helper also sweeps only its own marked roots after an interrupted run.
+  const root = createTestFixtureRoot();
   const key = randomBytes(32).toString("hex");
   writeFileSync(brokerKeyPath(root), `${key}\n`, "utf8");
   const authorityStore = createWebAuthorityStore(root);
@@ -369,7 +370,7 @@ async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtensio
     async done() {
       for (const ws of sockets) ws.terminate();
       await broker.close();
-      rmSync(root, { recursive: true, force: true });
+      removeTestFixtureRoot(root);
     },
   };
 }
@@ -1083,8 +1084,7 @@ test("an approved grant prompts the extension for site access and a denial revok
 });
 
 test("the broker key file's ACL is narrowed to the current user on Windows, since its 0o600 mode does nothing there", { skip: process.platform !== "win32" }, () => {
-  // Keep the fixture under the workspace so the test runner can remove it after the key ACL is narrowed.
-  const root = mkdtempSync(join(process.cwd(), ".m9r-key-acl-"));
+  const root = createTestFixtureRoot("m9r-key-acl-");
   const path = brokerKeyPath(root);
   try {
     loadOrCreateBrokerKey(path);
@@ -1095,7 +1095,7 @@ test("the broker key file's ACL is narrowed to the current user on Windows, sinc
   } finally {
     // Production intentionally denies the sandbox identity access to the key; restore inheritance only for this disposable test fixture.
     execFileSync("icacls", [path, "/reset"], { stdio: "ignore" });
-    rmSync(root, { recursive: true, force: true });
+    removeTestFixtureRoot(root);
   }
 });
 
@@ -1106,7 +1106,7 @@ test("Windows key ACL failures fail closed, without rotating an existing key or 
     platform: "win32", username: "owner", run: () => { throw new Error("simulated icacls failure"); },
   }), /cannot secure the M9R broker key ACL/);
 
-  const root = mkdtempSync(join(process.cwd(), ".m9r-key-acl-fail-"));
+  const root = createTestFixtureRoot("m9r-key-acl-fail-");
   const existingPath = join(root, "existing.key");
   const newPath = join(root, "new.key");
   const existingKey = "e".repeat(64);
@@ -1118,6 +1118,6 @@ test("Windows key ACL failures fail closed, without rotating an existing key or 
     assert.throws(() => loadOrCreateBrokerKey(newPath, () => { throw new Error("ACL refused"); }), /ACL refused/);
     assert.equal(existsSync(newPath), false, "a newly generated but unsecured key must not remain on disk");
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeTestFixtureRoot(root);
   }
 });
