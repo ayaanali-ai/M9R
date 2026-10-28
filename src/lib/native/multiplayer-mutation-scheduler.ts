@@ -94,6 +94,11 @@ export interface MutationSchedulerSnapshot {
   readonly regionRevisions: Readonly<Record<string, number>>;
 }
 
+export interface MutationLeaseScope {
+  readonly surfaceId: string;
+  readonly regionId?: string;
+}
+
 export interface MultiplayerMutationScheduler {
   begin(intent: MutationIntent): MutationBeginResult;
   commit(operationId: string): MutationCommitResult;
@@ -101,6 +106,10 @@ export interface MultiplayerMutationScheduler {
   receipt(operationId: string): MutationReceipt | undefined;
   sweepExpired(): readonly MutationReceipt[];
   snapshot(): MutationSchedulerSnapshot;
+  /** Subscribe to lease/revision changes; callers can react without polling. */
+  subscribe(listener: () => void): () => void;
+  /** Resolve when an overlapping lease is gone or expires, using notifications rather than a polling loop. */
+  waitForAvailability(scope: MutationLeaseScope, signal?: AbortSignal): Promise<void>;
 }
 
 export interface MutationSchedulerOptions {
@@ -173,6 +182,14 @@ export function createMultiplayerMutationScheduler(
   const surfaceRevisions = new Map<string, number>();
   const regionRevisions = new Map<string, number>();
   const surfaceMutationRevisions = new Map<string, number>();
+  const listeners = new Set<() => void>();
+
+  const notify = (): void => {
+    for (const listener of [...listeners]) {
+      try { listener(); } catch { /* observers never own the mutation fence */ }
+    }
+  };
+  const hasConflict = (scope: MutationLeaseScope): boolean => [...active.values()].some((candidate) => conflicts(candidate, scope));
 
   const currentSurfaceRevision = (surfaceId: string): number => surfaceRevisions.get(surfaceId) ?? initialSurfaceRevision;
   const currentRegionRevision = (surfaceId: string, regionId: string): number => regionRevisions.get(scopeKey(surfaceId, regionId)) ?? 0;
@@ -292,6 +309,7 @@ export function createMultiplayerMutationScheduler(
       const transaction: ActiveTransaction = { intent, operation, lease, controller, fingerprint: operationFingerprint, baseSurfaceRevision: surfaceRevision, ...(operation.regionId === undefined ? { baseSurfaceMutationRevision: surfaceMutationRevision } : {}), ...(regionRevision === undefined ? {} : { baseRegionRevision: regionRevision }) };
       active.set(operation.operationId, transaction);
       addReceipt(receipt);
+      notify();
       if (intent.signal) {
         if (intent.signal.aborted) scheduler.abort(operation.operationId, "Mutation was canceled before dispatch.");
         else intent.signal.addEventListener("abort", () => { scheduler.abort(operation.operationId, "Mutation was canceled by its parent operation."); }, { once: true });
@@ -323,6 +341,7 @@ export function createMultiplayerMutationScheduler(
         releaseActive(operationId);
         targetRegistry.release(operationId);
         const receipt = replaceReceipt({ ...prior!, status: currentTime >= transaction.lease.expiresAt ? "expired" : "aborted", updatedAt: currentTime, detail: currentTime >= transaction.lease.expiresAt ? "Mutation lease expired before commit." : "Mutation was canceled before commit." });
+        notify();
         return { ok: false, code: currentTime >= transaction.lease.expiresAt ? "expired" : "aborted", error: receipt.detail!, retry: { action: "new-operation-id", reason: "The short mutation transaction is no longer active." }, receipt };
       }
       const surfaceRevision = currentSurfaceRevision(transaction.operation.surfaceId);
@@ -334,6 +353,7 @@ export function createMultiplayerMutationScheduler(
         releaseActive(operationId);
         targetRegistry.release(operationId);
         const receipt = replaceReceipt({ ...prior!, status: "stale", updatedAt: currentTime, detail: "The target revision changed before commit; no mutation receipt was committed." });
+        notify();
         return { ok: false, code: "stale-revision", error: receipt.detail!, retry: { action: "rebase", reason: "Refresh the target and create a new operation." }, receipt };
       }
       releaseActive(operationId, false);
@@ -344,6 +364,7 @@ export function createMultiplayerMutationScheduler(
       else regionRevisions.set(scopeKey(transaction.operation.surfaceId, transaction.operation.regionId), nextRegionRevision!);
       surfaceMutationRevisions.set(transaction.operation.surfaceId, surfaceMutationRevision + 1);
       const receipt = replaceReceipt({ ...prior!, status: "committed", updatedAt: currentTime, resultingSurfaceRevision: nextSurfaceRevision, resultingSurfaceMutationRevision: surfaceMutationRevision + 1, ...(nextRegionRevision === undefined ? {} : { resultingRegionRevision: nextRegionRevision }) });
+      notify();
       return { ok: true, receipt };
     },
 
@@ -353,6 +374,7 @@ export function createMultiplayerMutationScheduler(
       if (!transaction) return prior ? { ok: false, code: "already-terminal", error: `Mutation operation is already ${prior.status}.`, receipt: prior } : { ok: false, code: "not-found", error: "Mutation operation was not found." };
       targetRegistry.release(operationId);
       const receipt = replaceReceipt({ ...prior!, status: "aborted", updatedAt: now(), detail: safeDetail(reason, "Mutation was aborted before commit.") });
+      notify();
       return { ok: true, receipt };
     },
 
@@ -367,7 +389,45 @@ export function createMultiplayerMutationScheduler(
         targetRegistry.release(operationId);
         expired.push(replaceReceipt({ ...receipts.get(operationId)!, status: "expired", updatedAt: currentTime, detail: "Mutation lease expired before commit." }));
       }
+      if (expired.length > 0) notify();
       return expired;
+    },
+
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+
+    waitForAvailability(scope, signal) {
+      if (!scope.surfaceId.trim()) return Promise.reject(new Error("Mutation lease scope requires a surface ID."));
+      if (!hasConflict(scope)) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let unsubscribe: (() => void) | undefined;
+        const cleanup = (): void => {
+          if (timer) clearTimeout(timer);
+          unsubscribe?.();
+          signal?.removeEventListener("abort", onAbort);
+        };
+        const onAbort = (): void => { cleanup(); reject(new Error("Mutation lease wait was canceled.")); };
+        const wake = (): void => {
+          if (timer) { clearTimeout(timer); timer = undefined; }
+          scheduler.sweepExpired();
+          if (hasConflict(scope)) {
+            const soonest = [...active.values()]
+              .filter((candidate) => conflicts(candidate, scope))
+              .reduce((earliest, candidate) => Math.min(earliest, candidate.lease.expiresAt), Number.POSITIVE_INFINITY);
+            if (Number.isFinite(soonest)) timer = setTimeout(wake, Math.max(1, soonest - now()));
+            return;
+          }
+          cleanup();
+          resolve();
+        };
+        if (signal?.aborted) { onAbort(); return; }
+        unsubscribe = scheduler.subscribe(wake);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        wake();
+      });
     },
 
     snapshot() {

@@ -34,6 +34,7 @@ import {
 import { codexAppServerCommand } from "../bridge/codex-app-server-adapter";
 import type { SessionEvent, SessionStatus, SessionsPort } from "./web-ui-bridge";
 import { inboxMaxAgeMs, type StageTimingPhase, type Task } from "./inbox-core";
+import { createLatencyTelemetry, type LatencyTelemetry, type LatencyTelemetrySnapshot, type LatencyTemperature } from "./latency-telemetry";
 
 /**
  * The desktop owner boundary. M9R creates this once per broker and owns every
@@ -58,6 +59,10 @@ export interface ManagedProviderOwnerDeps {
   codexCli?: WebLiveSessionsDeps["codexCli"];
   opencodeExe?: WebLiveSessionsDeps["opencodeExe"];
   openCodeRuntime?: WebLiveSessionsDeps["openCodeRuntime"];
+  /** Stable non-secret runtime/build identity used to invalidate readiness proofs after an update. */
+  runtimeBuildFingerprint?: string;
+  /** Optional injected bounded telemetry store; production creates one per owner. */
+  latencyTelemetry?: LatencyTelemetry;
   /** Test seam. Production uses the provider adapters below. */
   createConnection?: (profile: ManagedProviderConnectionProfile, context: ManagedProviderOwnerConnectionContext) => ManagedProviderConnection;
 }
@@ -87,6 +92,7 @@ export type ManagedProviderOwner = SessionsPort & {
   /** Persist and, when supported, apply a validated model choice for the next turn. */
   selectModel(handle: string, selection: ProviderModelSelection): Promise<ManagedProviderModelApply>;
   deliverOwnerTask(taskId: string): Promise<{ ok: true; sessionId: string } | { ok: false; error: string }>;
+  latencySnapshot(): LatencyTelemetrySnapshot;
 };
 
 type ActiveTask = { taskId: string; kind: "owner" | "room" | "internal"; sessionId: string };
@@ -282,6 +288,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
   const pendingAcceptance = new Map<string, PendingAcceptance>();
   const fenced = new Set<string>();
   const halted = { value: false };
+  const latencyTelemetry = deps.latencyTelemetry ?? createLatencyTelemetry();
   let closed = false;
 
   const emit = (event: SessionEvent): void => {
@@ -360,6 +367,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
   const supervisor = createManagedProviderSupervisor({
     createConnection,
     continuationStore: createFileManagedProviderContinuationStore(join(deps.storeRoot, "managed-provider-continuations")),
+    buildFingerprint: deps.runtimeBuildFingerprint ?? env.M9R_RUNTIME_BUILD_ID,
   });
 
   async function applyPersistedModelSelection(profile: ManagedProviderConnectionProfile, connection: ManagedProviderConnection): Promise<void> {
@@ -448,6 +456,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     let completionRecorded = false;
     let terminalObserved = false;
     let dispatchStartedMs: number | undefined;
+    let latencyTemperature: LatencyTemperature = "cold";
     const turnStartedMs = Date.now();
     let runtimeStartedMs = turnStartedMs;
     const storedTask = deps.store.getTask?.(taskId);
@@ -459,12 +468,22 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       if (completionRecorded) return;
       completionRecorded = true;
       recordTurnTiming(taskId, "completion", turnStartedMs, Date.now(), status, detail);
+      if (dispatchStartedMs !== undefined) {
+        latencyTelemetry.record({
+          kind: "action_completion",
+          temperature: latencyTemperature,
+          durationMs: Date.now() - dispatchStartedMs,
+          status,
+        });
+      }
     };
     try {
       emitState(profile);
       runtimeStartedMs = Date.now();
       let connection: ManagedProviderConnection;
       try {
+        const prior = supervisor.snapshots().find((candidate) => candidate.connectionId === profile.connectionId);
+        latencyTemperature = prior && ["ready", "working", "paused"].includes(prior.status) ? "warm" : "cold";
         connection = await supervisor.ensureConnection(profile);
         recordTurnTiming(taskId, "runtime-acquire", runtimeStartedMs, Date.now(), "ok");
       } catch (error) {
@@ -512,12 +531,14 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           if (!firstVisibleAction) {
             firstVisibleAction = true;
             recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok");
+            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: Date.now() - dispatchStart, status: "ok" });
           }
           emit({ kind: "say", handle: profile.handle, provider: profile.provider, text: event.text, runId });
         } else if (event.kind === "tool") {
           if (!firstVisibleAction) {
             firstVisibleAction = true;
             recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok");
+            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: Date.now() - dispatchStart, status: "ok" });
           }
           emit({ kind: "tool", handle: profile.handle, provider: profile.provider, name: event.name, runId });
         }
@@ -526,6 +547,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           if (!firstVisibleAction) {
             firstVisibleAction = true;
             recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok");
+            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: Date.now() - dispatchStart, status: event.isError ? "error" : "ok" });
           }
           emit({ kind: "result", handle: profile.handle, provider: profile.provider, text: event.text, isError: event.isError, runId });
           recordCompletion(event.isError ? "error" : "ok", event.isError ? "provider returned an error result" : undefined);
@@ -826,6 +848,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     capabilities: capabilitySnapshot,
     selectModel,
     deliverOwnerTask,
+    latencySnapshot: () => latencyTelemetry.snapshot(),
   };
   return owner;
 }

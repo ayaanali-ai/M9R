@@ -12,6 +12,7 @@ import {
   type ManagedProviderSupervisor,
   type ManagedProviderTask,
 } from "./managed-provider-contract";
+import { createRuntimeReadinessCache, type RuntimeReadinessCache, type RuntimeReadinessInvalidationReason } from "./runtime-readiness";
 
 const CONTINUATION_REF = /^[A-Za-z0-9_-]{1,200}$/;
 
@@ -36,6 +37,10 @@ export interface ManagedProviderContinuationStore {
 export interface ManagedProviderSupervisorOptions {
   createConnection(profile: ManagedProviderConnectionProfile): ManagedProviderConnection;
   continuationStore?: ManagedProviderContinuationStore;
+  /** Optional Phase 9 proof cache. It never replaces the adapter health check on a cache miss. */
+  readinessCache?: RuntimeReadinessCache;
+  /** Build identity used to invalidate cached runtime proofs after an update. */
+  buildFingerprint?: string;
 }
 
 interface PersistedContinuation {
@@ -172,7 +177,21 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
   // generation.
   const starting = new Map<string, Promise<ManagedProviderConnection>>();
   const store = options.continuationStore;
+  const readinessCache = options.readinessCache ?? createRuntimeReadinessCache({ buildFingerprint: options.buildFingerprint });
   let draining = false;
+
+  const readinessIdentity = (profile: ManagedProviderConnectionProfile, snapshot: ManagedProviderConnectionSnapshot) => ({
+    connectionId: snapshot.connectionId,
+    handle: snapshot.handle,
+    provider: snapshot.provider,
+    cwd: snapshot.cwd,
+    generation: snapshot.generation,
+    buildFingerprint: options.buildFingerprint ?? "unknown",
+  });
+
+  const invalidate = (connectionId: string, reason: RuntimeReadinessInvalidationReason): void => {
+    readinessCache.invalidate(connectionId, reason);
+  };
 
   const persist = async (entry: Entry): Promise<void> => {
     if (!store) return;
@@ -212,13 +231,20 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
     }
 
     const snapshot = snapshotForConnection(entry.connection, profile);
+    if (snapshot.status === "stopped" || snapshot.status === "failed") {
+      invalidate(profile.connectionId, "process-exit");
+    }
     if (snapshot.status === "ready" || snapshot.status === "working" || snapshot.status === "paused") {
       // A status snapshot alone is not proof that the provider process or SDK
       // transport is still alive. Reuse only after the adapter verifies its
       // own live binding; otherwise start() replaces the stale runtime through
       // the normal generation/continuation path.
+      const identity = readinessIdentity(profile, snapshot);
+      if (readinessCache.isValid(identity)) return entry.connection;
       const readiness = entry.connection.readiness();
-      if (readiness.healthy) return entry.connection;
+      const verified = readinessCache.verify(identity, readiness.healthy);
+      if (verified.ok) return entry.connection;
+      invalidate(profile.connectionId, verified.reason === "unhealthy" ? "health-failure" : "manual");
     }
     if (snapshot.status === "draining") throw new Error(`managed provider connection is draining: ${profile.connectionId}`);
 
@@ -229,6 +255,12 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
       const continuation = await load(profile, explicitContinuation);
       const ready = await entry!.connection.start(continuation);
       generationFromReady(entry!.connection, profile, ready);
+      const live = snapshotForConnection(entry!.connection, profile);
+      // `start()` is the adapter's explicit lifecycle receipt. Cache that
+      // receipt without immediately performing a second health probe; the
+      // next reuse still has the adapter probe as a cache-miss fallback.
+      const verified = readinessCache.verify(readinessIdentity(profile, live), true);
+      if (!verified.ok) throw new Error(`managed provider readiness verification failed for ${profile.connectionId}: ${verified.reason}`);
       await persist(entry!);
       return entry!.connection;
     })();
@@ -250,6 +282,12 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
     if (snapshot.status !== "ready") throw new Error(`managed provider connection is not ready: ${snapshot.status}`);
     try {
       for await (const event of entry.connection.send(task)) yield event;
+    } catch (error) {
+      // A transport/process failure invalidates the proof immediately. The
+      // next turn must perform a fresh readiness check and, if necessary,
+      // replace the runtime generation instead of reusing a stale handle.
+      invalidate(entry.profile.connectionId, "transport-error");
+      throw error;
     } finally {
       await persist(entry);
     }
@@ -279,6 +317,7 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
 
   const drain = async (): Promise<void> => {
     draining = true;
+    readinessCache.invalidateAll("manual");
     await waitForStarts();
     await Promise.all([...entries.values()].map((entry) => entry.connection.drain()));
     await Promise.all([...entries.values()].map((entry) => persist(entry)));
@@ -286,6 +325,7 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
 
   const stop = async (): Promise<void> => {
     draining = true;
+    readinessCache.invalidateAll("process-exit");
     await waitForStarts();
     // `drain()` is a separate boundary. Once the caller has bounded active
     // work, stop only the exact connections this supervisor owns; never scan
@@ -299,6 +339,7 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
 
   const restore = async (profiles?: readonly ManagedProviderConnectionProfile[]): Promise<readonly ManagedProviderConnectionSnapshot[]> => {
     draining = false;
+    readinessCache.restartBroker();
     const requested = profiles ?? [...entries.values()].map((entry) => entry.profile);
     try {
       await Promise.all(requested.map((profile) => ensureConnection(profile)));

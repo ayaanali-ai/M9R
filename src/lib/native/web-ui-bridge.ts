@@ -380,8 +380,12 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   const actionEntries = new Map<string, UiThreadEntry>();
   const typedValues = new Map<string, Array<{ value: string; expiresAt: number }>>();
   /** The currently streamed bubble for each agent. A final result replaces this bubble in place. */
-  const liveSay = new Map<string, { at: number; entry: UiThreadEntry }>();
+  const liveSay = new Map<string, { at: number; entry: UiThreadEntry; lastFragment: string }>();
   let desktopPill = false;
+  let changeSignals = 0;
+  let deliveredStates = 0;
+  let coalescedStates = 0;
+  let lastDeliveredFingerprint: string | null = null;
 
   function redact(text: string): string {
     let safe = redactSecrets(text);
@@ -398,11 +402,21 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   }
 
   function changed(): void {
+    changeSignals += 1;
     options.onChange?.();
     if (!sink || timer) return;
     timer = setTimeout(() => {
       timer = null;
-      if (sink) sink(snapshot());
+      if (!sink) return;
+      const next = snapshot();
+      const fingerprint = stateFingerprint(next);
+      if (fingerprint === lastDeliveredFingerprint) {
+        coalescedStates += 1;
+        return;
+      }
+      lastDeliveredFingerprint = fingerprint;
+      deliveredStates += 1;
+      sink(next);
     }, debounceMs);
   }
 
@@ -430,7 +444,11 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   function snapshot(): UiState {
     const pending = broker?.pendingApprovals() ?? [];
     const waiting = new Set(pending.map((p) => p.actor));
-    const agents: UiAgent[] = (sessions?.snapshot() ?? []).map((s) => {
+    // Read the provider snapshot once. Re-reading it while building presence
+    // used to multiply work during event bursts and made the pill appear to
+    // lag even when no visible state had changed.
+    const sessionRows = sessions?.snapshot() ?? [];
+    const agents: UiAgent[] = sessionRows.map((s) => {
       let state: UiAgentState = s.status;
       let what = s.doing;
       if (waiting.has(s.handle)) { state = "waiting"; what = "Waiting for your approval"; }
@@ -447,7 +465,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       branchId: `${agent.id}-ui`,
       provider: agent.provider,
       handle: agent.id,
-      state: presenceStateForUi(agent.state, sessions?.snapshot().find((session) => session.handle === agent.id)?.waitingOn),
+      state: presenceStateForUi(agent.state, sessionRows.find((session) => session.handle === agent.id)?.waitingOn),
       summary: agent.doing,
       updatedAt: now(),
     })));
@@ -474,6 +492,19 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       return { id: p.id, agent: p.actor, provider: known?.provider ?? providerOf(p.actor), text: redact(`${text}${p.origin ? ` on ${hostOf(p.origin) ?? p.origin}` : ""}`) };
     });
     return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals, collaboration, ...(desktopPill ? { desktopPill: true as const } : {}) };
+  }
+
+  /** Bounded identity/content fingerprint used only to suppress no-op UI frames. */
+  function stateFingerprint(state: UiState): string {
+    return JSON.stringify({
+      agents: state.agents.map((agent) => [agent.id, agent.provider, agent.state, agent.doing, agent.color ?? ""]),
+      approvals: state.approvals.map((approval) => [approval.id, approval.agent, approval.provider, approval.text]),
+      // The full thread remains available in a delivered snapshot; only the
+      // tail participates in change detection so hashing stays bounded.
+      thread: state.thread.map((entry, index) => [entry.id, entry.kind, entry.agent, entry.provider, entry.to ?? "", entry.phase ?? "", entry.ok ?? null, index >= state.thread.length - 12 ? entry.text : entry.text.slice(0, 32)]),
+      collaboration: state.collaboration ? [state.collaboration.headline, state.collaboration.activeCount, state.collaboration.overflowCount, state.collaboration.agents.map((agent) => [agent.agentId, agent.state, agent.cursor.mode, agent.cursor.visible, agent.summary ?? ""])] : null,
+      desktopPill: state.desktopPill === true,
+    });
   }
 
   function onActivity(activity: WebActivity): void {
@@ -545,13 +576,21 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
         const runKey = event.runId ? `${event.handle}\0${event.runId}` : event.handle;
         const current = liveSay.get(runKey);
         if (current && at - current.at < SAY_MERGE_MS && thread[thread.length - 1] === current.entry) {
+          // Providers may replay the same stream fragment during reconnect or
+          // a fast transport retry. It is not new text and must not trigger a
+          // pill redraw or grow the bubble indefinitely.
+          if (current.lastFragment === text) {
+            current.at = at;
+            return;
+          }
           current.entry.text = redact(`${current.entry.text}\n\n${text}`).slice(0, SAY_CHARS);
           current.at = at;
+          current.lastFragment = text;
           changed();
           return;
         }
         const entry = push({ kind: "say", agent: event.handle, provider: event.provider, to: "you", text: text.slice(0, SAY_CHARS) });
-        liveSay.set(runKey, { at, entry });
+        liveSay.set(runKey, { at, entry, lastFragment: text });
         return;
       }
       case "tool": {
@@ -653,7 +692,13 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     if (!message) return true;
     switch (message.type) {
       case "ui-subscribe":
-        if (reply) { sink = reply; reply(snapshot()); }
+        if (reply) {
+          sink = reply;
+          const initial = snapshot();
+          lastDeliveredFingerprint = stateFingerprint(initial);
+          deliveredStates += 1;
+          reply(initial);
+        }
         return true;
       case "ui-command":
         if (!sessions) { system("Agents are not set up on this broker."); return true; }
@@ -698,7 +743,12 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     /** Every agent handle configured in this room, for m9r_agents (a plain web-* endpoint lookup finds nobody). */
     roster: (): string[] => sessions?.handles() ?? [],
     /** The socket that subscribed went away. */
-    unsubscribe(reply?: (message: UiState) => boolean) { if (!reply || sink === reply) sink = null; },
+    unsubscribe(reply?: (message: UiState) => boolean) {
+      if (!reply || sink === reply) {
+        sink = null;
+        lastDeliveredFingerprint = null;
+      }
+    },
     snapshot,
     /** The desktop pill started or stopped; subscribers get the new state at once, and only when it actually changed. */
     setDesktopPill(running: boolean) {
@@ -708,7 +758,9 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     },
     /** Newest first, up to 30, already redacted; persisted separately as surface=web. */
     recentWeb: (): FeedWebItem[] => web.map((w) => ({ ...w, surface: "web" })),
-    close() { if (timer) clearTimeout(timer); timer = null; sink = null; },
+    /** Phase 9 diagnostics: counters contain no message text or provider data. */
+    uiMetrics: () => ({ changeSignals, deliveredStates, coalescedStates }),
+    close() { if (timer) clearTimeout(timer); timer = null; sink = null; lastDeliveredFingerprint = null; },
   };
 }
 
