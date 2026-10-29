@@ -176,6 +176,9 @@ export class Island {
       this.transport.setSuppressed?.(suppressed);
     }
     const { newApprovals, newReplies } = State.apply(snapshot);
+    // Startup can select the empty view before the first provider snapshot arrives.
+    // Once the authoritative snapshot contains agents, keep the home view in sync.
+    if (State.view === "empty" && State.tasks.length > 0) State.view = State.defaultView();
     for (const m of newReplies) State.chatHistory.push({ id: Date.now() + State.chatHistory.length, role: "assistant", content: `${m.from}: ${m.text}`, link: m.link });
     if (newApprovals.length > 0) {
       const asking = State.approvals.find((a) => a.id === newApprovals[0]);
