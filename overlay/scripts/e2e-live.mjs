@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..", "..");
-const exe = process.argv[2] ?? join(repo, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
+const exe = process.argv[2] ?? join(repo, "release-assets", "accepted-ui", "m9r-overlay.exe");
 const dist = join(repo, "cli", "dist");
 const home = mkdtempSync(join(tmpdir(), "m9r-e2e-"));
 const profile = mkdtempSync(join(tmpdir(), "m9r-e2e-webview-"));

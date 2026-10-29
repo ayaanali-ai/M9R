@@ -9,9 +9,52 @@ $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root 'engine\dist'
 $assets = @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-build-info.json')
 $overlay = Join-Path $dist 'm9r-overlay.exe'
+$acceptedRuntimePath = Join-Path $root 'release-assets\accepted-runtime.json'
 $extension = Join-Path $root 'cli\dist\extension'
 $cuaRuntime = Join-Path $dist 'cua-driver-runtime'
 $destination = [IO.Path]::GetFullPath($OutputDirectory)
+
+function Read-RuntimeIdentity([string]$Path, [string]$Label) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Label runtime identity is missing: $Path" }
+    try { $identity = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
+    catch { throw "$Label runtime identity is not valid JSON: $Path" }
+    if ($identity.schemaVersion -ne 1 -or [string]$identity.buildId -notmatch '^[a-fA-F0-9]{64}$' -or -not $identity.artifacts) {
+        throw "$Label runtime identity has an unsupported or incomplete format: $Path"
+    }
+    return $identity
+}
+
+function Assert-RuntimeIdentityMatches($Candidate, $Accepted, [string]$Label) {
+    if (-not [string]::Equals([string]$Candidate.buildId, [string]$Accepted.buildId, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label build ID differs from the owner-accepted runtime. Promote a reviewed runtime identity before packaging it."
+    }
+    $acceptedEntries = @($Accepted.artifacts.PSObject.Properties)
+    $candidateEntries = @($Candidate.artifacts.PSObject.Properties)
+    if ($candidateEntries.Count -ne $acceptedEntries.Count) {
+        throw "$Label artifact inventory differs from the owner-accepted runtime."
+    }
+    foreach ($entry in $acceptedEntries) {
+        $candidateEntry = @($candidateEntries | Where-Object { $_.Name -ceq $entry.Name })
+        if ($candidateEntry.Count -ne 1 -or -not [string]::Equals([string]$candidateEntry[0].Value, [string]$entry.Value, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "$Label artifact identity differs from the owner-accepted runtime at $($entry.Name)."
+        }
+    }
+}
+
+function Assert-RuntimeArtifactFiles($Identity, [string]$ArtifactRoot, [string]$Label) {
+    $base = [IO.Path]::GetFullPath($ArtifactRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    foreach ($entry in $Identity.artifacts.PSObject.Properties) {
+        $relative = [string]$entry.Name
+        if ($relative -match '(^[\\/]|^[A-Za-z]:|(^|[\\/])\.\.([\\/]|$))') { throw "$Label identity contains an unsafe artifact path: $relative" }
+        $path = [IO.Path]::GetFullPath((Join-Path $ArtifactRoot ($relative.Replace('/', [IO.Path]::DirectorySeparatorChar))))
+        if (-not $path.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { throw "$Label artifact escapes its root: $relative" }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "$Label is missing accepted runtime artifact: $relative" }
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        if (-not [string]::Equals($actual, [string]$entry.Value, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "$Label artifact hash differs from the accepted runtime at $relative."
+        }
+    }
+}
 
 if (-not (Test-Path -LiteralPath $dist -PathType Container)) { throw 'engine/dist is missing. Run npm run build:engine on Windows first.' }
 foreach ($asset in $assets) {
@@ -20,6 +63,10 @@ foreach ($asset in $assets) {
 if (-not (Test-Path -LiteralPath $overlay -PathType Leaf)) {
     throw 'Required release binary is missing: engine/dist/m9r-overlay.exe. Build the M9R desktop pill, then run npm run build:engine before packaging the standalone release.'
 }
+$acceptedRuntime = Read-RuntimeIdentity $acceptedRuntimePath 'Accepted'
+$runtimeIdentity = Read-RuntimeIdentity (Join-Path $dist 'm9r-build-info.json') 'Built'
+Assert-RuntimeIdentityMatches $runtimeIdentity $acceptedRuntime 'Built runtime'
+Assert-RuntimeArtifactFiles $runtimeIdentity $dist 'Built runtime'
 if (-not (Test-Path -LiteralPath (Join-Path $extension 'manifest.json') -PathType Leaf)) { throw 'cli/dist/extension is missing. Run npm run build:cli first.' }
 foreach ($runtimeFile in @(
     (Join-Path $cuaRuntime 'node_modules\@trycua\cua-driver\dist\index.js'),
@@ -49,6 +96,7 @@ $stage = Join-Path ([IO.Path]::GetTempPath()) ("m9r-release-stage-" + [guid]::Ne
 try {
     foreach ($asset in $assets) { Copy-Item -LiteralPath (Join-Path $dist $asset) -Destination (Join-Path $stage $asset) }
     Copy-Item -LiteralPath $overlay -Destination (Join-Path $stage 'm9r-overlay.exe')
+    Copy-Item -LiteralPath $acceptedRuntimePath -Destination (Join-Path $stage 'm9r-accepted-runtime.json')
     Copy-Item -LiteralPath $cuaRuntime -Destination (Join-Path $stage 'cua-driver-runtime') -Recurse
     Copy-Item -LiteralPath $extension -Destination (Join-Path $stage 'extension') -Recurse
     Copy-Item -LiteralPath (Join-Path $root 'cli\THIRD_PARTY_NOTICES.md') -Destination (Join-Path $stage 'THIRD_PARTY_NOTICES.md')

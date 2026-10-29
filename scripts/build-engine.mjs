@@ -25,13 +25,31 @@ const output = join(engineDir, "dist");
 const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
 const out = join(buildRoot, "artifacts");
 const work = join(buildRoot, "work");
-// The desktop build may use an isolated Cargo target directory when a previous
-// generated target tree is locked or owned by another Windows boundary.  Never
-// silently fall back to an older pill in that case: callers may provide the
-// exact freshly-built executable explicitly.
+// The accepted desktop pill is a versioned release input. Never choose a pill
+// from Cargo's mutable target directory: it may belong to another checkout or
+// an earlier build. A deliberate UI promotion updates the accepted runtime
+// identity and replaces this preserved artifact together.
+const acceptedRuntimePath = join(root, "release-assets", "accepted-runtime.json");
+if (!existsSync(acceptedRuntimePath)) {
+  throw new Error("The accepted runtime identity is missing at release-assets/accepted-runtime.json; refusing to select a desktop pill.");
+}
+const acceptedRuntime = JSON.parse(readFileSync(acceptedRuntimePath, "utf8"));
+const acceptedOverlayHash = acceptedRuntime?.artifacts?.["m9r-overlay.exe"];
+if (acceptedRuntime.schemaVersion !== 1 || !/^[a-f0-9]{64}$/.test(acceptedRuntime.buildId ?? "")
+  || !/^[a-f0-9]{64}$/.test(acceptedOverlayHash ?? "")) {
+  throw new Error("The accepted runtime identity is malformed; review it before building.");
+}
+const canonicalOverlayExe = join(root, "release-assets", "accepted-ui", "m9r-overlay.exe");
 const overlayExe = process.env.M9R_OVERLAY_EXE
   ? resolve(process.env.M9R_OVERLAY_EXE)
-  : join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
+  : canonicalOverlayExe;
+if (process.platform === "win32" && !existsSync(overlayExe)) {
+  throw new Error("The accepted M9R pill is missing at release-assets/accepted-ui/m9r-overlay.exe; Cargo target output is not an allowed fallback.");
+}
+if (process.platform === "win32"
+  && createHash("sha256").update(readFileSync(overlayExe)).digest("hex") !== acceptedOverlayHash) {
+  throw new Error("The selected pill does not match the accepted runtime identity. Review and explicitly promote a new UI before packaging it.");
+}
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(root, "cli", "dist", "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";
@@ -77,9 +95,6 @@ function isHeldLocalProvenancePath(path) {
 }
 
 if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle)) throw new Error("cli/dist is missing: run `npm run build:cli` first.");
-if (process.platform === "win32" && !existsSync(overlayExe)) {
-  throw new Error("The Windows desktop pill is missing: build it with `npm --prefix overlay run build` before building the standalone engine.");
-}
 rmSync(work, { recursive: true, force: true });
 for (const name of [exeName, brokerExeName, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native", ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "m9r-overlay.exe"] : [])]) {
   rmSync(join(out, name), { force: true });

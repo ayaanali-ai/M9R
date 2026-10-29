@@ -10,7 +10,7 @@
     "build": "tauri build",
     "ui": "vite",
     "typecheck": "tsc --noEmit -p .",
-    "verify:window": "powershell -NoProfile -File scripts/verify-window.ps1 -Exe src-tauri/target/release/m9r-overlay.exe -Feed public/mock-feed.json",
+    "verify:window": "powershell -NoProfile -File scripts/verify-window.ps1 -Exe ../release-assets/accepted-ui/m9r-overlay.exe -Feed public/mock-feed.json",
     "e2e": "node scripts/e2e-live.mjs"
   },
   "devDependencies": {

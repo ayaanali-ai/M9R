@@ -6,7 +6,8 @@ Installs the self-contained M9R Windows engine and runs its consent-driven setup
 No Node.js, npm, or administrator rights are required. The CMD launcher uses
 a process-only execution-policy bypass; it does not change any saved policy.
 The script downloads only a versioned GitHub release asset, verifies its SHA-256
-sidecar, previews the engine's exact setup plan, then asks once before writing.
+sidecar and owner-accepted runtime identity, previews the exact setup plan, then
+asks once before writing.
 
 .PARAMETER Version
 An exact release version such as 0.1.0. Defaults to the latest m9r-engine-v* release.
@@ -130,6 +131,78 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
     foreach ($name in @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Destination $name) -PathType Leaf)) {
             throw "The release package is incomplete; '$name' is missing."
+        }
+    }
+}
+
+function Get-AcceptedRuntimeIdentity {
+    # Packaged installers carry the accepted identity beside this script. When
+    # running from the source checkout, load the same file from release-assets.
+    # A package without an identity is not trusted just because its ZIP has a
+    # matching checksum sidecar.
+    $path = Join-Path $PSScriptRoot 'm9r-accepted-runtime.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        $path = Join-Path $repoRoot 'release-assets\accepted-runtime.json'
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'The installer has no owner-accepted runtime identity. Use the current M9R installer package; no files were installed.'
+    }
+    try { $identity = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json }
+    catch { throw "The owner-accepted runtime identity is invalid JSON: $path" }
+    if ($identity.schemaVersion -ne 1 -or [string]$identity.buildId -notmatch '^[a-fA-F0-9]{64}$' -or -not $identity.artifacts) {
+        throw "The owner-accepted runtime identity is malformed: $path"
+    }
+    return $identity
+}
+
+function Assert-AcceptedRuntimePackage([string]$PayloadRoot) {
+    $accepted = Get-AcceptedRuntimeIdentity
+    $runtimePath = Join-Path $PayloadRoot 'm9r-build-info.json'
+    try { $runtime = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json }
+    catch { throw 'The package runtime identity is invalid JSON. Nothing was installed.' }
+    if ($runtime.schemaVersion -ne 1 -or -not [string]::Equals([string]$runtime.buildId, [string]$accepted.buildId, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The package build ID is not the owner-accepted runtime ($($accepted.buildId)). Nothing was installed."
+    }
+    $expectedEntries = @($accepted.artifacts.PSObject.Properties)
+    $runtimeEntries = @($runtime.artifacts.PSObject.Properties)
+    if ($runtimeEntries.Count -ne $expectedEntries.Count) {
+        throw 'The package artifact inventory differs from the owner-accepted runtime. Nothing was installed.'
+    }
+    foreach ($entry in $expectedEntries) {
+        $matching = @($runtimeEntries | Where-Object { $_.Name -ceq $entry.Name })
+        if ($matching.Count -ne 1 -or -not [string]::Equals([string]$matching[0].Value, [string]$entry.Value, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The package runtime identity differs from the accepted runtime at $($entry.Name). Nothing was installed."
+        }
+        $relative = [string]$entry.Name
+        if ($relative -match '(^[\\/]|^[A-Za-z]:|(^|[\\/])\.\.([\\/]|$))') {
+            throw "The accepted runtime identity contains an unsafe artifact path: $relative"
+        }
+        $root = [IO.Path]::GetFullPath($PayloadRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        $artifact = [IO.Path]::GetFullPath((Join-Path $PayloadRoot ($relative.Replace('/', [IO.Path]::DirectorySeparatorChar))))
+        if (-not $artifact.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+            throw "The package is missing accepted runtime artifact $relative. Nothing was installed."
+        }
+        $actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+        if (-not [string]::Equals($actual, [string]$entry.Value, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The package artifact hash differs from the accepted runtime at $relative. Nothing was installed."
+        }
+    }
+
+    $embeddedPolicyPath = Join-Path $PayloadRoot 'm9r-accepted-runtime.json'
+    if (Test-Path -LiteralPath $embeddedPolicyPath -PathType Leaf) {
+        try { $embeddedPolicy = Get-Content -LiteralPath $embeddedPolicyPath -Raw | ConvertFrom-Json }
+        catch { throw 'The package accepted-runtime policy is invalid JSON. Nothing was installed.' }
+        if (-not [string]::Equals([string]$embeddedPolicy.buildId, [string]$accepted.buildId, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The package installer policy differs from the current owner-accepted runtime. Nothing was installed.'
+        }
+        $embeddedEntries = @($embeddedPolicy.artifacts.PSObject.Properties)
+        if ($embeddedEntries.Count -ne $expectedEntries.Count) { throw 'The package installer policy has a different artifact inventory. Nothing was installed.' }
+        foreach ($entry in $expectedEntries) {
+            $matching = @($embeddedEntries | Where-Object { $_.Name -ceq $entry.Name })
+            if ($matching.Count -ne 1 -or -not [string]::Equals([string]$matching[0].Value, [string]$entry.Value, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "The package installer policy differs from the accepted runtime at $($entry.Name). Nothing was installed."
+            }
         }
     }
 }
@@ -412,6 +485,7 @@ try {
     $payload = Join-Path $temporaryRoot 'payload'
     [void](New-Item -ItemType Directory -Path $payload)
     Expand-VerifiedPackage $package.ZipPath $payload
+    Assert-AcceptedRuntimePackage $payload
     $packageBroker = Join-Path $payload 'm9r-web-broker.exe'
     Assert-ManagedWebBrokerInstallable $packageBroker
 
@@ -460,8 +534,17 @@ try {
     $brokerStop = Invoke-ManagedBrokerUpdate $engine 'stop'
     $brokerNeedsResume = $brokerStop.managedTask
     Stop-InstalledM9rPill
-    & $engine @applyArgs
-    $setupExit = $LASTEXITCODE
+    # Native setup registers the owned broker task; this installer starts it
+    # only after the new broker image and its ownership record are installed.
+    $previousBrokerDefer = $env:M9R_DEFER_BROKER_START
+    try {
+        $env:M9R_DEFER_BROKER_START = '1'
+        & $engine @applyArgs
+        $setupExit = $LASTEXITCODE
+    } finally {
+        if ($null -eq $previousBrokerDefer) { Remove-Item Env:M9R_DEFER_BROKER_START -ErrorAction SilentlyContinue }
+        else { $env:M9R_DEFER_BROKER_START = $previousBrokerDefer }
+    }
     if ($setupExit -ne 0) { throw "M9R setup exited with code $setupExit. Review the engine output; do not rerun blindly." }
     $installedEngine = Join-Path $env:M9R_HOME 'bin\m9r-engine.exe'
     $brokerResumeEngine = $installedEngine
