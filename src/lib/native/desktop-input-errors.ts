@@ -4,7 +4,9 @@ export type DesktopInputGateCode =
   | "position-unconfirmed"
   | "overlay-not-visible"
   | "foreground-lease"
-  | "background-unavailable";
+  | "background-unavailable"
+  | "mutation-lease"
+  | "mutation-revision";
 
 /** Only throw before target input has been dispatched. Never infer this from message text. */
 export class DesktopInputNotDispatchedError extends Error {

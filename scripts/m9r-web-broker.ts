@@ -20,6 +20,7 @@ import { loadOrCreateBrokerKey, startWebBroker } from "@/lib/native/web-broker-s
 import type { StageApprovalRequest } from "@/lib/native/web-broker-core";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
+import { createMultiplayerDispatchFence } from "@/lib/native/multiplayer-dispatch-fence";
 import { clearDesktopPillState, writeDesktopPillState } from "@/lib/native/desktop-pill-state";
 
 async function main(): Promise<void> {
@@ -77,8 +78,12 @@ async function main(): Promise<void> {
   // Restricted MCP child processes use the broker's narrow token-checked write endpoint instead of taking the
   // state.lock directory themselves; the owner-only store ACL stays intact.
   const store = createLocalStore(root);
-  const taskStages = createTaskDesktopStageService({ store, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
-  const broker = await startWebBroker({ key, port, taskStages, agentMcpStore: store,
+  // One broker-owned mutation fence is shared by the browser route and the
+  // desktop stage service. Both dispatch real input from this process, so this
+  // is the only place a shared lease can arbitrate same-target contention.
+  const mutationFence = createMultiplayerDispatchFence({ store });
+  const taskStages = createTaskDesktopStageService({ store, mutationFence, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
+  const broker = await startWebBroker({ key, port, taskStages, agentMcpStore: store, mutationFence,
     onAgentTaskCreated: (token, taskId) => { void taskStages.primeCursor(token, taskId); },
     deliverOwnerTask: (taskId) => sessionOwner.current
       ? sessionOwner.current.deliverOwnerTask(taskId)

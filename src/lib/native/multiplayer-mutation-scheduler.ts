@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
+  parseMultiplayerAgent,
   parseMultiplayerLease,
   parseMultiplayerOperation,
+  type MultiplayerAgent,
   type MultiplayerLease,
   type MultiplayerOperation,
   type MultiplayerRoster,
@@ -14,7 +16,7 @@ import {
 
 export type MutationReceiptStatus = "claimed" | "committed" | "aborted" | "conflict" | "stale" | "expired";
 export type MutationRejectionCode = "invalid" | "lease-unavailable" | "stale-revision" | "operation-conflict" | "target-identity-conflict" | "already-terminal";
-export type MutationRetryAction = "wait" | "rebase" | "new-operation-id" | "inspect-receipt" | "never";
+export type MutationRetryAction = "wait" | "rebase" | "refresh-target" | "new-operation-id" | "inspect-receipt" | "never";
 
 export interface MutationReceipt {
   readonly operationId: string;
@@ -103,6 +105,21 @@ export interface MultiplayerMutationScheduler {
   begin(intent: MutationIntent): MutationBeginResult;
   commit(operationId: string): MutationCommitResult;
   abort(operationId: string, reason?: string): MutationAbortResult;
+  /**
+   * Add one broker-owned provider session to this run. The production broker
+   * learns its agents from authenticated requests, not from a startup roster,
+   * so registration is dynamic but still branch-unique.
+   */
+  registerAgent(agent: MultiplayerAgent): void;
+  /**
+   * Drop a short transaction that provably never dispatched. Unlike abort(),
+   * this leaves no terminal receipt, so the same operation ID may be retried.
+   */
+  release(operationId: string): boolean;
+  /** Extend a live dispatch lease while its single bounded action is still running. */
+  renew(operationId: string): boolean;
+  /** Advance the surface epoch after a fresh observation resolves an uncertain dispatch. */
+  advanceSurfaceRevision(surfaceId: string): number | undefined;
   receipt(operationId: string): MutationReceipt | undefined;
   sweepExpired(): readonly MutationReceipt[];
   snapshot(): MutationSchedulerSnapshot;
@@ -118,6 +135,12 @@ export interface MutationSchedulerOptions {
   readonly leaseTtlMs?: number;
   readonly maxReceipts?: number;
   readonly initialSurfaceRevision?: number;
+  /**
+   * Durable surface epochs restored by the owner broker after a restart. Without
+   * this seed a restarted broker would forget every committed revision and
+   * could accept a stale plan against a surface it had already mutated.
+   */
+  readonly initialSurfaceRevisions?: Readonly<Record<string, number>>;
   /** Injected for a run coordinator; a private registry is used otherwise. */
   readonly targetRegistry?: TargetIdentityRegistry;
 }
@@ -125,7 +148,7 @@ export interface MutationSchedulerOptions {
 type ActiveTransaction = {
   readonly intent: MutationIntent;
   readonly operation: MultiplayerOperation;
-  readonly lease: MultiplayerLease;
+  lease: MultiplayerLease;
   readonly controller: AbortController;
   readonly fingerprint: string;
   readonly baseSurfaceRevision: number;
@@ -183,6 +206,11 @@ export function createMultiplayerMutationScheduler(
   const regionRevisions = new Map<string, number>();
   const surfaceMutationRevisions = new Map<string, number>();
   const listeners = new Set<() => void>();
+  for (const [surfaceId, revision] of Object.entries(options.initialSurfaceRevisions ?? {})) {
+    if (!surfaceId.trim() || !Number.isSafeInteger(revision) || revision < 0) throw new Error("An initial surface revision is invalid.");
+    surfaceRevisions.set(surfaceId, revision);
+    surfaceMutationRevisions.set(surfaceId, revision);
+  }
 
   const notify = (): void => {
     for (const listener of [...listeners]) {
@@ -316,7 +344,7 @@ export function createMultiplayerMutationScheduler(
       }
       return { ok: true, duplicate: false, transaction: {
         operation,
-        lease,
+        get lease() { return active.get(operation.operationId)?.lease ?? lease; },
         signal: controller.signal,
         receipt,
         commit: () => scheduler.commit(operation.operationId),
@@ -376,6 +404,58 @@ export function createMultiplayerMutationScheduler(
       const receipt = replaceReceipt({ ...prior!, status: "aborted", updatedAt: now(), detail: safeDetail(reason, "Mutation was aborted before commit.") });
       notify();
       return { ok: true, receipt };
+    },
+
+    registerAgent(value) {
+      const agent = parseMultiplayerAgent(value);
+      const existing = agents.get(agent.agentId);
+      if (existing) {
+        if (existing.branchId !== agent.branchId) throw new Error("This mutation agent ID is already registered to a different branch.");
+        return;
+      }
+      if ([...agents.values()].some((candidate) => candidate.branchId === agent.branchId)) {
+        throw new Error("This mutation branch ID is already registered to a different agent.");
+      }
+      agents.set(agent.agentId, agent);
+    },
+
+    release(operationId) {
+      const transaction = releaseActive(operationId);
+      const prior = receipts.get(operationId);
+      if (!transaction || !prior) return false;
+      targetRegistry.release(operationId);
+      receipts.delete(operationId);
+      const index = receiptOrder.indexOf(operationId);
+      if (index >= 0) receiptOrder.splice(index, 1);
+      notify();
+      return true;
+    },
+
+    renew(operationId) {
+      const transaction = active.get(operationId);
+      if (!transaction) return false;
+      const currentTime = now();
+      if (currentTime >= transaction.lease.expiresAt) {
+        scheduler.sweepExpired();
+        return false;
+      }
+      transaction.lease = parseMultiplayerLease({
+        ...transaction.lease,
+        expiresAt: currentTime + leaseTtlMs,
+      });
+      notify();
+      return true;
+    },
+
+    advanceSurfaceRevision(surfaceId) {
+      if (!surfaceId.trim()) return undefined;
+      scheduler.sweepExpired();
+      if ([...active.values()].some((transaction) => transaction.operation.surfaceId === surfaceId)) return undefined;
+      const next = currentSurfaceRevision(surfaceId) + 1;
+      surfaceRevisions.set(surfaceId, next);
+      surfaceMutationRevisions.set(surfaceId, currentSurfaceMutationRevision(surfaceId) + 1);
+      notify();
+      return next;
     },
 
     receipt(operationId) { return receipts.get(operationId); },

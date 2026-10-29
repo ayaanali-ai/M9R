@@ -253,6 +253,7 @@ export function validateMultiplayerRoster(value: unknown): RosterValidation {
     : { ok: false, error: parsed.error.issues.map((issue) => `${issue.path.join(".") || "roster"}: ${issue.message}`).join("; ") };
 }
 
+export const parseMultiplayerAgent = (value: unknown): MultiplayerAgent => multiplayerAgentSchema.parse(value);
 export const parseMultiplayerCorrelation = (value: unknown): MultiplayerCorrelation => multiplayerCorrelationSchema.parse(value);
 export const parseMultiplayerSurface = (value: unknown): MultiplayerSurface => multiplayerSurfaceSchema.parse(value);
 export const parseMultiplayerOperation = (value: unknown): MultiplayerOperation => multiplayerOperationSchema.parse(value);

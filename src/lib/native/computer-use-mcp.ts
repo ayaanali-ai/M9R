@@ -133,6 +133,8 @@ interface TargetRecord {
   context: TargetContext;
   pinnedRouteId?: string;
   change: ObservationChange;
+  /** Last broker mutation epoch this target observed, when the broker exposes a fence. */
+  mutationRevision?: number;
 }
 
 type FingerprintCompleteness = "complete" | "partial" | "unavailable";
@@ -524,6 +526,29 @@ function stageCapture(response: StageClientResult): Record<string, unknown> | un
     : undefined;
 }
 
+function mutationRevisionOf(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** Broker codes that prove the mutation fence refused before any input was sent. */
+const FENCE_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  "mutation-invalid",
+  "mutation-invalid-agent",
+  "mutation-lease-unavailable",
+  "mutation-stale-revision",
+  "mutation-operation-conflict",
+  "mutation-target-identity-conflict",
+  "mutation-receipt-store-unavailable",
+  "mutation-already-terminal",
+  "mutation-already-claimed",
+  "mutation-surface-unresolved",
+  "mutation-operation-id-required",
+]);
+
+function stageMutationRevision(response: StageClientResult): number | undefined {
+  return mutationRevisionOf(recordOf(response.result)?.mutationRevision);
+}
+
 function browserSnapshotData(response: WebResponse): Record<string, unknown> | undefined {
   return recordOf(response.data);
 }
@@ -584,6 +609,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     context: TargetContext;
     extra?: Record<string, unknown>;
     fingerprint: ObservationFingerprint;
+    mutationRevision?: number;
   }): TargetRecord {
     const idKey = identityKey(input.identity);
     const logicalKey = `${idKey}\0${input.logicalKey}`;
@@ -627,6 +653,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       context: input.context,
       change,
       ...(previous?.pinnedRouteId ? { pinnedRouteId: previous.pinnedRouteId } : {}),
+      ...(input.mutationRevision !== undefined ? { mutationRevision: input.mutationRevision }
+        : previous?.mutationRevision !== undefined ? { mutationRevision: previous.mutationRevision } : {}),
     };
     changeBaselines.set(baselineKey, { ...input.fingerprint, revision, observedAt: input.observedAt });
     records.delete(targetId);
@@ -645,9 +673,11 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     logicalKey?: string;
     captureOverride?: Record<string, unknown>;
     inputSelectionConfirmed?: boolean;
+    mutationRevision?: number;
   }): Promise<{ record: TargetRecord; observation: Record<string, unknown>; image?: ImageBlock }> {
     if (!deps.web?.taskStageAction) throw new Error("The owner-launched desktop stage broker is unavailable.");
     let capture = input.captureOverride;
+    let mutationRevision = input.mutationRevision;
     let structure = recordOf(capture?.structure);
     if (!capture) {
       if (!deps.web.prepareTaskStage) throw new Error("The owner-launched desktop stage broker cannot prepare a target.");
@@ -656,6 +686,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (input.representation === "structured") {
         const response = await deps.web.taskStageAction(input.token, input.taskId, { kind: "read_structure", view: input.view }, input.mode);
         if (response.ok) {
+          mutationRevision = stageMutationRevision(response) ?? mutationRevision;
           const candidate = recordOf(response.result);
           structure = candidate && (typeof candidate.status === "string" || candidate.scope === "desktop" || Array.isArray(candidate.elements))
             ? candidate : undefined;
@@ -668,6 +699,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         if (!response.ok) {
           if (!structure) throw new Error(response.error ?? "The desktop capture failed.");
         } else {
+          mutationRevision = stageMutationRevision(response) ?? mutationRevision;
           capture = stageCapture(response);
           structure = recordOf(capture?.structure) ?? structure;
         }
@@ -689,6 +721,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         // This is one bounded fallback capture, never a route-probing loop.
         const fallback = await deps.web.taskStageAction(input.token, input.taskId, { kind: "capture", view: input.view }, input.mode);
         if (fallback.ok) {
+          mutationRevision = stageMutationRevision(fallback) ?? mutationRevision;
           visibleCapture = stageCapture(fallback);
           structure = recordOf(visibleCapture?.structure) ?? structure;
           structureStatus = typeof structure?.status === "string" ? structure.status : structureStatus;
@@ -793,6 +826,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       context: { kind: "desktop", taskId: input.taskId, mode: input.mode, view: input.view, representation: contextRepresentation,
         ...(structureStatus ? { structureStatus } : {}), width: width ?? 0, height: height ?? 0, controls: map, inputSelectionConfirmed },
       fingerprint,
+      ...(mutationRevision === undefined ? {} : { mutationRevision }),
     });
     const publicElements = structuredControls.map(({ ref, parentRef, depth, role, label, enabled, selected, actions, canReplaceValue, rect }) => ({
       ref, ...(parentRef ? { parentRef } : {}), ...(depth !== undefined ? { depth } : {}), ...(role ? { role } : {}), ...(label ? { label } : {}),
@@ -895,6 +929,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       args: { limit: 150 },
     });
     if (!response.ok) throw new Error(response.error ?? "The M9R browser snapshot failed.");
+    const mutationRevision = mutationRevisionOf(response.mutationRevision);
     const snapshot = browserSnapshotData(response);
     if (!snapshot || !Array.isArray(snapshot.elements)) throw new Error("The browser broker returned no structured page snapshot.");
     // Prefer a resolved logical tab when the broker includes it in the
@@ -953,6 +988,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ...(typeof snapshot.text === "string" ? { text: snapshot.text.slice(0, 4_000) } : {}), elements: elementMap },
       extra: { browserInstanceId, tabId, ...(url ? { url } : {}) },
       fingerprint,
+      ...(mutationRevision === undefined ? {} : { mutationRevision }),
     });
     return {
       record,
@@ -1150,6 +1186,9 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       provider: identity.provider,
       sessionId: identity.sessionId,
       ...(record.context.tab ? { tab: record.context.tab } : {}),
+      ...(action.operationId ? { operationId: action.operationId } : {}),
+      targetRevision: record.target.revision,
+      ...(record.mutationRevision === undefined ? {} : { expectedMutationRevision: record.mutationRevision }),
     };
     if (action.kind === "navigate") return { action: "open", ...shared, url: action.url };
     if (action.kind === "click") {
@@ -1257,7 +1296,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     } else {
       throw new Error(`The desktop route does not support ${action.kind}.`);
     }
-    return deps.web.taskStageAction(token, record.context.taskId, stageAction, record.context.mode, action.operationId);
+    return deps.web.taskStageAction(token, record.context.taskId, stageAction, record.context.mode, action.operationId,
+      record.mutationRevision);
   }
 
   function refusal(action: ComputerUseAction, targetId: string, code: string, message: string,
@@ -1584,6 +1624,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       }
       const capture = stageCapture(response);
       const resultObject = recordOf(response.result);
+      const responseMutationRevision = mutationRevisionOf(resultObject?.mutationRevision);
+      if (responseMutationRevision !== undefined) record.mutationRevision = responseMutationRevision;
       const outcome = recordOf(resultObject?.outcome);
       const nativePostcondition = recordOf(resultObject?.postcondition);
       const targetClosed = response.ok && nativePostcondition?.kind === "window-closed" && nativePostcondition.verified === true
@@ -1603,7 +1645,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (capture) {
         try {
           updated = await timing.measure("observationMs", () => observeDesktop({ token: authToken, identity, taskId: desktopContext.taskId, mode: desktopContext.mode, view: desktopContext.view,
-            representation: desktopContext.representation, logicalKey: record.scopeKey, captureOverride: capture, inputSelectionConfirmed }));
+            representation: desktopContext.representation, logicalKey: record.scopeKey, captureOverride: capture, inputSelectionConfirmed,
+            ...(responseMutationRevision === undefined ? {} : { mutationRevision: responseMutationRevision }) }));
           // The action response already contains this fresh capture; retain that exact observation as evidence.
           const recovery = recordOf(response.recovery);
           if (!response.ok && recovery?.kind !== "capture_refreshed") updated = undefined;
@@ -1632,9 +1675,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ? "not-checked"
         : targetClosed && !action.postcondition ? "verified"
           : postconditionStatus ?? (dispatchStatus === "dispatched" && updated ? "observed" : "unknown");
+      const notDispatchedRetry: "never" | "same-operation-id" | "refresh-target" =
+        response.gateCode === "mutation-lease" ? "same-operation-id"
+          : response.gateCode === "mutation-revision" || response.gateCode === "target-identity" ? "refresh-target" : "never";
       const resultError = !response.ok
-        ? { code: response.code ?? "desktop-action-failed", message: (response.error ?? "The desktop broker refused the action.").slice(0, 2_000),
-            retry: response.dispatchState === "not-dispatched" ? "never" as const : "same-operation-id" as const }
+        ? { code: response.gateCode ?? response.code ?? "desktop-action-failed", message: (response.error ?? "The desktop broker refused the action.").slice(0, 2_000),
+            retry: response.dispatchState === "not-dispatched" ? notDispatchedRetry : "same-operation-id" as const }
         : dispatchStatus === "unknown"
           ? { code: "dispatch-outcome-unknown", message: "The desktop broker did not return a conclusive dispatch receipt. Reconcile with the same operation ID before doing anything else.", retry: "same-operation-id" as const }
           : dispatchStatus === "dispatched" && !updated && !targetClosed
@@ -1689,10 +1735,25 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         reason: error instanceof Error ? error.message : "The browser route outcome is unknown." });
     }
     if (!response.ok) {
+      // A mutation-fence refusal happens before the broker sends anything to the
+      // page. Treat it as a clean pre-dispatch refusal, not an ambiguous outcome,
+      // so the provider gets an explicit reason instead of a stuck operation.
+      const fenceCode = response.code && FENCE_REFUSAL_CODES.has(response.code) ? response.code : undefined;
+      if (fenceCode) {
+        if (receiptInput) {
+          try { deps.store.releaseComputerOperation(receiptInput); } catch { /* the running receipt still blocks replay */ }
+        }
+        const retry = fenceCode === "mutation-lease-unavailable" ? "same-operation-id" as const
+          : fenceCode === "mutation-stale-revision" || fenceCode === "mutation-already-claimed" || fenceCode === "mutation-surface-unresolved" ? "refresh-target" as const
+            : fenceCode === "mutation-operation-conflict" ? "new-operation-id" as const : "never" as const;
+        return refusal(action, action.targetId, fenceCode, response.error ?? "The mutation fence refused this action before dispatch.", retry);
+      }
       const receipt = receiptInput ? settleReceipt(receiptInput, "uncertain") : { state: "uncertain" as const };
       return reconcileOperation({ action, identity, receipt, record, token: authToken, timing,
         reason: response.error ?? "The browser broker refused or lost the action." });
     }
+    const responseMutationRevision = mutationRevisionOf(response.mutationRevision);
+    if (responseMutationRevision !== undefined) record.mutationRevision = responseMutationRevision;
     const receipt = receiptInput ? settleReceipt(receiptInput, "applied") : undefined;
     let refreshed: { record: TargetRecord; observation: Record<string, unknown> } | undefined;
     let refreshError: string | undefined;

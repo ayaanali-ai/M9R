@@ -22,6 +22,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { findChrome, type BrowserTransport } from "./agent-chrome";
 import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
 import { createWebBroker, ROOM_MODES, type RoomMode, type StageApprovalRequest, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
+import type { MultiplayerDispatchFence } from "./multiplayer-dispatch-fence";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import { isStageAppReference } from "./task-stage-apps";
 import { startOwnerPipe, type OwnerPipeRequest } from "./owner-pipe";
@@ -162,7 +163,7 @@ function readBody(req: IncomingMessage): Promise<string | null> {
 
 export interface WebBrokerServerOptions {
   /** Owner-hosted, task-authorized desktop preparation; absent means desktop access is unavailable. */
-  taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>;
+  taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview", operationId?: string, expectedMutationRevision?: number): Promise<unknown>;
     launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>;
     primeCursor?(token: string, taskId: string): Promise<unknown>;
     primeCursorForOwner?(taskId: string): Promise<unknown> };
@@ -207,6 +208,11 @@ export interface WebBrokerServerOptions {
   onAgentTaskCreated?: (token: string, taskId: string) => void | Promise<void>;
   /** Deliver an eligible owner-created native task through the resident provider-session owner. Owner-pipe only. */
   deliverOwnerTask?: (taskId: string) => unknown | Promise<unknown>;
+  /**
+   * One owner-broker mutation fence shared by browser and desktop dispatch.
+   * Optional so existing brokers/tests keep their current serialization.
+   */
+  mutationFence?: MultiplayerDispatchFence;
 }
 
 type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string; taskId?: string; created?: boolean; taskIds?: string[]; alreadyRecorded?: boolean } };
@@ -455,6 +461,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     onAuthorityChange: persistAuthority,
     narrate: options.narrate ?? options.ui !== undefined,
     onActivity: options.ui ? (activity) => options.ui!.onActivity(activity) : undefined,
+    ...(options.mutationFence ? { mutationFence: options.mutationFence } : {}),
   });
   options.ui?.attachBroker(broker);
   const unsubscribeBrowser = options.browserTransport?.subscribe(
@@ -637,7 +644,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
           || !options.taskStages?.primeCursorForOwner) return { status: 503, body: { ok: false, error: "Task cursor presentation is unavailable on this broker." } };
         return { status: 200, body: { ok: true, result: await options.taskStages.primeCursorForOwner(value.taskId) } };
       }
-      const extraFields = path.endsWith("/launch") ? ["appId", "operationId"] : path.endsWith("/action") ? ["action", "operationId"] : [];
+      const extraFields = path.endsWith("/launch") ? ["appId", "operationId"] : path.endsWith("/action") ? ["action", "operationId", "expectedMutationRevision"] : [];
       const fields = path.endsWith("/prime-cursor") ? ["token", "taskId"] : ["token", "taskId", "mode", ...extraFields];
       if (!agentStagePaths.has(path) || Object.keys(value).some((key) => !fields.includes(key))
         || typeof value.token !== "string" || value.token.length > 128
@@ -652,6 +659,10 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       }
       if (path.endsWith("/prepare")) return { status: 200, body: { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, mode) } };
       if (value.operationId !== undefined && (typeof value.operationId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.operationId))) throw new Error("Invalid stage request.");
+      if (value.expectedMutationRevision !== undefined
+        && (typeof value.expectedMutationRevision !== "number" || !Number.isSafeInteger(value.expectedMutationRevision) || value.expectedMutationRevision < 0)) {
+        throw new Error("Invalid stage request.");
+      }
       const kind = value.action && typeof value.action === "object" && !Array.isArray(value.action) ? (value.action as { kind?: unknown }).kind : undefined;
       const requiresReceipt = path.endsWith("/launch") || (path.endsWith("/action") && !["capture", "read_structure", "window_status", "stop"].includes(String(kind)));
       if (requiresReceipt && typeof value.operationId !== "string") return { status: 409, body: { ok: false,
@@ -666,7 +677,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         return { status: 200, body: { ok: true, result: await options.taskStages.closeApp(value.token, value.taskId, mode) } };
       }
       if (!options.taskStages.act) return unavailable();
-      return { status: 200, body: { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, mode, value.operationId as string | undefined) } };
+      return { status: 200, body: { ok: true, result: await options.taskStages.act(value.token, value.taskId, value.action, mode, value.operationId as string | undefined, value.expectedMutationRevision as number | undefined) } };
     } catch (error) {
       const body = stageFailure(error, "Stage request failed.");
       return { status: body.driverError ? 502 : 403, body };

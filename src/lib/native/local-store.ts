@@ -113,6 +113,8 @@ const MAX_STAGE_TIMING_EVENTS_PER_TASK = 256;
 const MAX_STAGE_TIMING_DETAIL_CHARS = 240;
 /** Keep generic computer-use receipts across broker/client restarts; fail closed rather than evicting replay protection. */
 const MAX_COMPUTER_OPERATION_RECEIPTS = 10_000;
+/** Keep broker-owned multiplayer mutation receipts bounded; fail closed rather than evicting a terminal lease. */
+const MAX_MUTATION_RECEIPTS = 10_000;
 /** Hard ceiling for the complete local snapshot, including extensible cursor and rule maps. */
 export const MAX_LOCAL_STATE_BYTES = 16 * 1024 * 1024;
 /** Keep each rewritten local state file within a predictable task count when user work can be retired safely. */
@@ -167,6 +169,36 @@ export interface ComputerOperationInput {
   fingerprint: string;
 }
 
+/** Durable terminal/claimed evidence for one broker-owned multiplayer mutation lease. */
+export type MutationReceiptStatus = "claimed" | "committed" | "aborted" | "conflict" | "stale" | "expired" | "uncertain" | "reconciled";
+
+export interface MutationReceiptInput {
+  runId: string;
+  branchId: string;
+  agentId: string;
+  handle: string;
+  provider: string;
+  operationId: string;
+  surfaceId: string;
+  /** Stable target identity key (browser tab or desktop window), never a display name. */
+  targetKey: string;
+  status: MutationReceiptStatus;
+  /** Fence-owned surface epoch at the time of this receipt. */
+  surfaceRevision: number;
+  /** The provider-observed target revision string, when one was supplied. */
+  targetRevision?: string;
+  detail?: string;
+}
+
+export interface MutationReceiptRecord extends MutationReceiptInput {
+  key: string;
+  updatedAt: string;
+}
+
+export type MutationReceiptClaimResult =
+  | { claimed: true; record: MutationReceiptRecord }
+  | { claimed: false; reason: "operation-exists" | "surface-unresolved"; record: MutationReceiptRecord };
+
 interface ComputerOperationRecord extends ComputerOperationInput {
   key: string;
   state: "running" | "applied" | "uncertain";
@@ -204,6 +236,8 @@ interface StoreState {
   stageOperations: StageOperationRecord[];
   /** Durable one-shot receipts for provider-neutral computer-use operations. */
   computerOperations: ComputerOperationRecord[];
+  /** Durable claimed/terminal receipts for broker-owned multiplayer mutation leases. */
+  mutationReceipts: MutationReceiptRecord[];
   /** Private provider-to-MCP claims; never rendered in provider prompts or tool arguments. */
   connectionClaims: ConnectionClaim[];
   /** Durable MCP bindings; a worker restart may reuse one while the provider identity is active. */
@@ -242,7 +276,7 @@ export interface SessionLink {
   updatedAt: string;
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], connectionClaims: [], connectionBindings: [], activeProviderTurns: [], providerUpdates: createInitialProviderUpdateState().providers, cursorColors: {} });
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], mutationReceipts: [], connectionClaims: [], connectionBindings: [], activeProviderTurns: [], providerUpdates: createInitialProviderUpdateState().providers, cursorColors: {} });
 
 const stageOperationKey = (input: StageOperationInput): string => createHash("sha256")
   .update(JSON.stringify([normalizeHandle(input.handle), input.sessionId, input.taskId, input.operationId]))
@@ -250,6 +284,13 @@ const stageOperationKey = (input: StageOperationInput): string => createHash("sh
 
 const computerOperationKey = (input: ComputerOperationInput): string => createHash("sha256")
   .update(JSON.stringify([normalizeHandle(input.handle), input.sessionId, input.targetId, input.operationId]))
+  .digest("hex");
+
+// The action identity is global to one run/surface, not scoped to one provider
+// session. A restarted provider must not replay the same action under a new
+// session/branch identity.
+const mutationReceiptKey = (input: Pick<MutationReceiptInput, "runId" | "branchId" | "agentId" | "surfaceId" | "operationId">): string => createHash("sha256")
+  .update(JSON.stringify([input.runId, input.surfaceId, input.operationId]))
   .digest("hex");
 
 const normalizeSessionFolder = (cwd?: string): string => {
@@ -741,6 +782,144 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       if (!record) return undefined;
       if (record.fingerprint !== input.fingerprint) return { state: "conflict" };
       return { state: record.state === "running" ? "in_progress" : record.state, updatedAt: record.updatedAt };
+    },
+
+    /** Persist one broker-owned mutation lease state without dispatching anything. */
+    recordMutationReceipt(input: MutationReceiptInput): MutationReceiptRecord {
+      const runId = input.runId.trim();
+      const branchId = input.branchId.trim();
+      const agentId = input.agentId.trim();
+      const surfaceId = input.surfaceId.trim();
+      const operationId = input.operationId.trim();
+      const handle = normalizeHandle(input.handle);
+      const provider = input.provider.trim();
+      const targetKey = input.targetKey.trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(runId)
+        || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(branchId)
+        || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(agentId)
+        || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(surfaceId)
+        || !/^[a-zA-Z0-9._:-]{1,128}$/.test(operationId)
+        || !handle || !provider || provider.length > 160 || !targetKey || targetKey.length > 512
+        || !["claimed", "committed", "aborted", "conflict", "stale", "expired", "uncertain", "reconciled"].includes(input.status)
+        || !Number.isSafeInteger(input.surfaceRevision) || input.surfaceRevision < 0
+        || (input.targetRevision !== undefined && (typeof input.targetRevision !== "string" || input.targetRevision.length > 128))
+        || (input.detail !== undefined && input.detail.length > 240)) {
+        throw new Error("Invalid multiplayer mutation receipt.");
+      }
+      const key = mutationReceiptKey({ runId, branchId, agentId, surfaceId, operationId });
+      return update((s) => {
+        const existing = s.mutationReceipts.find((record) => record.key === key);
+        if (existing) {
+          // Receipts move forward only. A timed-out/uncertain operation may be
+          // reconciled by a fresh observation, but never silently replayed.
+          const allowed = existing.status === "claimed"
+            ? input.status !== "claimed"
+            : existing.status === "uncertain" && input.status === "reconciled";
+          if (!allowed) return { ...existing };
+          existing.status = input.status;
+          existing.surfaceRevision = input.surfaceRevision;
+          existing.targetRevision = input.targetRevision;
+          existing.detail = input.detail;
+          existing.updatedAt = now().toISOString();
+          return { ...existing };
+        }
+        if (s.mutationReceipts.length >= MAX_MUTATION_RECEIPTS) {
+          throw new Error(`The multiplayer mutation receipt store is at capacity (${MAX_MUTATION_RECEIPTS}); the mutation was refused.`);
+        }
+        const record: MutationReceiptRecord = { key, runId, branchId, agentId, handle, provider, operationId, surfaceId, targetKey,
+          status: input.status, surfaceRevision: input.surfaceRevision,
+          ...(input.targetRevision === undefined ? {} : { targetRevision: input.targetRevision }),
+          ...(input.detail === undefined ? {} : { detail: input.detail }),
+          updatedAt: now().toISOString() };
+        s.mutationReceipts.push(record);
+        return { ...record };
+      });
+    },
+
+    /** Atomically reserve an operation and refuse any unresolved claim on its surface. */
+    claimMutationReceipt(input: Omit<MutationReceiptInput, "status">): MutationReceiptClaimResult {
+      const claim: MutationReceiptInput = { ...input, status: "claimed" };
+      const runId = claim.runId.trim();
+      const branchId = claim.branchId.trim();
+      const agentId = claim.agentId.trim();
+      const surfaceId = claim.surfaceId.trim();
+      const operationId = claim.operationId.trim();
+      const handle = normalizeHandle(claim.handle);
+      const provider = claim.provider.trim();
+      const targetKey = claim.targetKey.trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(runId)
+        || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(branchId)
+        || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(agentId)
+        || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(surfaceId)
+        || !/^[a-zA-Z0-9._:-]{1,128}$/.test(operationId)
+        || !handle || !provider || provider.length > 160 || !targetKey || targetKey.length > 512
+        || !Number.isSafeInteger(claim.surfaceRevision) || claim.surfaceRevision < 0
+        || (claim.targetRevision !== undefined && (typeof claim.targetRevision !== "string" || claim.targetRevision.length > 128))) {
+        throw new Error("Invalid multiplayer mutation claim.");
+      }
+      const key = mutationReceiptKey({ runId, branchId, agentId, surfaceId, operationId });
+      return update((s) => {
+        const existing = s.mutationReceipts.find((record) => record.key === key);
+        if (existing) return { claimed: false, reason: "operation-exists", record: { ...existing } };
+        const unresolved = s.mutationReceipts.find((record) => record.surfaceId === surfaceId
+          && (record.status === "claimed" || record.status === "uncertain"));
+        if (unresolved) return { claimed: false, reason: "surface-unresolved", record: { ...unresolved } };
+        if (s.mutationReceipts.length >= MAX_MUTATION_RECEIPTS) {
+          throw new Error(`The multiplayer mutation receipt store is at capacity (${MAX_MUTATION_RECEIPTS}); the mutation was refused.`);
+        }
+        const record: MutationReceiptRecord = {
+          key, runId, branchId, agentId, handle, provider, operationId, surfaceId, targetKey,
+          status: "claimed", surfaceRevision: claim.surfaceRevision,
+          ...(claim.targetRevision === undefined ? {} : { targetRevision: claim.targetRevision }),
+          ...(claim.detail === undefined ? {} : { detail: claim.detail }),
+          updatedAt: now().toISOString(),
+        };
+        s.mutationReceipts.push(record);
+        return { claimed: true, record: { ...record } };
+      });
+    },
+
+    /** Mark claims on one surface reconciled only after a fresh target observation. */
+    reconcileMutationSurface(surfaceId: string, surfaceRevision: number): number {
+      const normalizedSurfaceId = surfaceId.trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(normalizedSurfaceId)
+        || !Number.isSafeInteger(surfaceRevision) || surfaceRevision < 0) {
+        throw new Error("Invalid multiplayer mutation reconciliation.");
+      }
+      return update((s) => {
+        let reconciled = 0;
+        for (const receipt of s.mutationReceipts) {
+          if (receipt.surfaceId !== normalizedSurfaceId || (receipt.status !== "claimed" && receipt.status !== "uncertain")) continue;
+          receipt.status = "reconciled";
+          receipt.surfaceRevision = surfaceRevision;
+          receipt.detail = "Reconciled after a fresh observation of the target surface.";
+          receipt.updatedAt = now().toISOString();
+          reconciled += 1;
+        }
+        return reconciled;
+      });
+    },
+
+    /** Read a mutation receipt without claiming or repeating the action. */
+    inspectMutationReceipt(input: Pick<MutationReceiptInput, "runId" | "branchId" | "agentId" | "surfaceId" | "operationId">): MutationReceiptRecord | undefined {
+      const record = readState().mutationReceipts.find((candidate) => candidate.key === mutationReceiptKey(input));
+      return record ? { ...record } : undefined;
+    },
+
+    /** Remove only a claimed receipt that provably never dispatched; terminal receipts are never removed. */
+    removeMutationReceipt(input: Pick<MutationReceiptInput, "runId" | "branchId" | "agentId" | "surfaceId" | "operationId">): boolean {
+      const key = mutationReceiptKey(input);
+      return update((s) => {
+        const record = s.mutationReceipts.find((candidate) => candidate.key === key);
+        if (!record || record.status !== "claimed") return false;
+        s.mutationReceipts = s.mutationReceipts.filter((candidate) => candidate !== record);
+        return true;
+      });
+    },
+
+    /** Bounded durable history used to restore surface epochs after an owner-broker restart. */
+    listMutationReceipts(): MutationReceiptRecord[] {
+      return readState().mutationReceipts.map((record) => ({ ...record }));
     },
 
     /** A typed pre-dispatch refusal may release its claim; ambiguous input never does. */

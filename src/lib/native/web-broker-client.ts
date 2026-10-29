@@ -17,6 +17,8 @@ export interface StageClientResult {
   data?: unknown;
   error?: string;
   code?: string;
+  /** Specific pre-dispatch gate that stopped delivery, when the broker reported one. */
+  gateCode?: string;
   dispatchState?: "not-dispatched" | "dispatched" | "unknown" | string;
   nextStep?: string;
   recovery?: unknown;
@@ -29,7 +31,7 @@ export interface WebBrokerClient {
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
   recordAgentTaskResult?(token: string, taskId: string, summary: string): Promise<{ ok: boolean; error?: string }>;
   taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
-  taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
+  taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string, expectedMutationRevision?: number): Promise<StageClientResult>;
   prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
   /** Best-effort delivery-time cursor prime; never blocks the task transport. */
   primeAgentCursor?(token: string, taskId: string): Promise<StageClientResult>;
@@ -171,9 +173,11 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
         body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }), ...(operationId ? { operationId } : {}) },
         timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
-    async taskStageAction(token, taskId, action, mode = "owner-preview", operationId) {
+    async taskStageAction(token, taskId, action, mode = "owner-preview", operationId, expectedMutationRevision) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/action`,
-        body: { token, taskId, action, mode, ...(operationId ? { operationId } : {}) }, timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
+        body: { token, taskId, action, mode, ...(operationId ? { operationId } : {}),
+          ...(expectedMutationRevision === undefined ? {} : { expectedMutationRevision }) },
+        timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
     async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/prepare`,

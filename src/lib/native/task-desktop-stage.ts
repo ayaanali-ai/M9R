@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -10,6 +10,12 @@ import { createWindowsDesktopStageManager, type WindowsStageDependencies } from 
 import { createCuaStageDriver, type CuaAgentCursorIdentity } from "./cua-stage-driver";
 import { parseTaskStageAction, runTaskStageAction, stageClickNeedsApproval } from "./task-stage-actions";
 import type { StageApprovalRequest } from "./web-broker-core";
+import {
+  desktopMutationTarget,
+  desktopWindowMutationTarget,
+  type MutationFenceTransaction,
+  type MultiplayerDispatchFence,
+} from "./multiplayer-dispatch-fence";
 import {
   launchStageApp,
   ownedBrowserLaunch,
@@ -217,6 +223,12 @@ export function createTaskDesktopStageService(input: {
    * approval list is constructed after this service. Absent in tests and in brokers without one.
    */
   approvals?: () => { requestApproval(request: StageApprovalRequest): Promise<boolean> } | undefined;
+  /**
+   * The same owner-broker fence the browser route uses. It closes the gap the
+   * per-operation stage receipt cannot: two different operations aimed at one
+   * verified HWND must contend on one lease. Absent keeps the current behavior.
+   */
+  mutationFence?: MultiplayerDispatchFence;
 }) {
   const root = input.store.root;
   const bundledHost = join(dirname(process.execPath), "m9r-native-input-host.exe");
@@ -535,7 +547,7 @@ export function createTaskDesktopStageService(input: {
     return enqueueTimedStage(queueName, taskId, "prepare", undefined, run, queueName);
   }
 
-  async function act(token: string, taskId: string, value: unknown, requestedMode?: TaskStageMode, operationId?: string) {
+  async function act(token: string, taskId: string, value: unknown, requestedMode?: TaskStageMode, operationId?: string, expectedMutationRevision?: number) {
     const mode = stageMode(requestedMode);
     const action = parseTaskStageAction(value);
     if (operationId !== undefined && !/^[a-zA-Z0-9._:-]{1,128}$/.test(operationId)) throw new Error("Invalid desktop-stage operation ID.");
@@ -691,6 +703,53 @@ export function createTaskDesktopStageService(input: {
           nextStep: "Capture the stage and inspect the current state before issuing a new action." };
       }
       let result: unknown;
+      let mutationRevision: number | undefined;
+      let mutationSurfaceId: string | undefined;
+      let fenceTransaction: MutationFenceTransaction | undefined;
+      if (input.mutationFence) {
+        const fenceTarget = effectiveAction.view === "app" && selected
+          ? desktopWindowMutationTarget({ pid: selected.pid, windowId: selected.windowId })
+          : desktopMutationTarget();
+        mutationSurfaceId = fenceTarget.surfaceId;
+        if (mutating) {
+          const begun = input.mutationFence.begin({
+            agent: identity.handle,
+            provider: identity.provider,
+            sessionId: identity.sessionId,
+            operationId: operationId ?? `stage-${randomUUID()}`,
+            target: fenceTarget,
+            ...(expectedMutationRevision === undefined ? {} : { expectedMutationRevision }),
+          });
+          if (!begun.ok) {
+            // A typed pre-dispatch refusal may release the stage claim: no input reached the OS.
+            if (receiptInput) input.store.releaseStageOperation(receiptInput);
+            throw new DesktopInputNotDispatchedError(
+              begun.error,
+              begun.code === "stale-revision" || begun.code === "surface-unresolved" || begun.code === "already-claimed" ? "mutation-revision"
+                : begun.code === "lease-unavailable" ? "mutation-lease"
+                  : begun.code === "target-identity-conflict" ? "target-identity"
+                    : "dispatch-gate",
+            );
+          }
+          if (begun.duplicate) {
+            // A still-claimed duplicate is another in-flight call for this exact
+            // operation; leave its durable stage claim in place. Only a terminal
+            // duplicate is safe to release, because no input is in flight then.
+            if (receiptInput && begun.receipt.status !== "claimed") input.store.releaseStageOperation(receiptInput);
+            throw new DesktopInputNotDispatchedError(
+              `This operation already has a ${begun.receipt.status} mutation receipt; it will not be replayed automatically.`,
+              "dispatch-gate",
+            );
+          }
+          fenceTransaction = begun.transaction;
+          mutationRevision = begun.surfaceRevision;
+        } else {
+          mutationRevision = input.mutationFence.surfaceRevision(fenceTarget.surfaceId);
+        }
+      }
+      const withMutationRevision = (value: unknown): unknown => mutationRevision === undefined
+        ? value
+        : { ...(value && typeof value === "object" ? value : { result: value }), mutationRevision };
       const controller = new AbortController();
       activeInputs.set(name, { controller, taskId });
       const cancellationPoll = setInterval(() => {
@@ -702,6 +761,16 @@ export function createTaskDesktopStageService(input: {
       cancellationPoll.unref();
       try {
         result = await runTaskStageAction(driver, name, effectiveAction, identity, mode, controller.signal);
+        if (fenceTransaction) {
+          const committed = fenceTransaction.commit({ status: "applied" });
+          mutationRevision = committed.surfaceRevision;
+          if (committed.status !== "committed") {
+            throw new Error("Desktop input may have been sent, but its mutation receipt is unresolved. Capture and inspect the target before another action.");
+          }
+        } else if (mutationSurfaceId && input.mutationFence
+          && (effectiveAction.kind === "capture" || effectiveAction.kind === "read_structure")) {
+          mutationRevision = input.mutationFence.observeSurface(mutationSurfaceId);
+        }
         // Opportunistic, free: a read_structure result already carries the window title
         // in memory (CuaStageStructure.windowTitle); stash it in case a future action in
         // this same stage needs to relaunch and give an honest recovery notice. No
@@ -715,12 +784,17 @@ export function createTaskDesktopStageService(input: {
         }
       } catch (error) {
         if (error instanceof DesktopInputNotDispatchedError) {
+          // This typed gate proves the OS input driver was never called. Remove
+          // the claim so the exact same operation ID can retry after the gate is fixed.
+          fenceTransaction?.release(error.message);
           if (receiptInput) input.store.releaseStageOperation(receiptInput);
           throw error;
         }
+        const detail = error instanceof Error ? error.message : String(error);
+        const aborted = fenceTransaction?.abort(detail, { status: "uncertain" });
+        if (aborted) mutationRevision = aborted.surfaceRevision;
         if (receiptInput) {
           try { input.store.settleStageOperation({ ...receiptInput, state: "uncertain" }); } catch { /* the durable running claim still blocks a replay */ }
-          const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`The desktop input outcome is uncertain; the operation will not be replayed automatically. Capture the stage before issuing a new action. ${detail}`, { cause: error });
         }
         throw error;
@@ -728,15 +802,15 @@ export function createTaskDesktopStageService(input: {
         clearInterval(cancellationPoll);
         if (activeInputs.get(name)?.controller === controller) activeInputs.delete(name);
       }
-      if (!receiptInput) return result;
+      if (!receiptInput) return withMutationRevision(result);
       try {
         const settled = input.store.settleStageOperation({ ...receiptInput, state: "applied" });
         return settled
-          ? { ...(result && typeof result === "object" ? result : { result }), operationReceipt: { operationId, status: "applied", driverReturned: true }, actionExecuted: true }
-          : { ...(result && typeof result === "object" ? result : { result }), operationReceipt: { operationId, status: "uncertain", driverReturned: true }, actionExecuted: true,
+          ? { ...(result && typeof result === "object" ? result : { result }), operationReceipt: { operationId, status: "applied", driverReturned: true }, actionExecuted: true, ...(mutationRevision === undefined ? {} : { mutationRevision }) }
+          : { ...(result && typeof result === "object" ? result : { result }), operationReceipt: { operationId, status: "uncertain", driverReturned: true }, actionExecuted: true, ...(mutationRevision === undefined ? {} : { mutationRevision }),
             nextStep: "The input was sent, but its receipt could not be finalized; capture and inspect before issuing another action." };
       } catch (error) {
-        return { ...(result && typeof result === "object" ? result : { result }), operationReceipt: { operationId, status: "uncertain", driverReturned: true }, actionExecuted: true,
+        return { ...(result && typeof result === "object" ? result : { result }), operationReceipt: { operationId, status: "uncertain", driverReturned: true }, actionExecuted: true, ...(mutationRevision === undefined ? {} : { mutationRevision }),
           receiptError: error instanceof Error ? error.message.slice(0, 180) : "The durable operation receipt could not be finalized.",
           nextStep: "The input was sent; capture and inspect before issuing another action." };
       }

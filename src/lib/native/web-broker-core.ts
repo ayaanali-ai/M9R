@@ -12,6 +12,7 @@ import { classifyWebActionRisk } from "./risk-core";
 import { narrateStep, type WebActivity } from "./web-ui-bridge";
 import { classifyPowerRisk, describePower, extraTimeoutFor, grantActionFor, isPowerAction, powerScopeFor, sanitizeLabel, validatePowerRequest, type WebPowerAction, type WebPowerArgs } from "./web-powers-core";
 import { createTurnScheduler, type TurnScheduler, type TurnSchedulerLane } from "./turn-scheduler-core";
+import { browserMutationTarget, type MutationFenceTransaction, type MultiplayerDispatchFence } from "./multiplayer-dispatch-fence";
 
 export type WebAction = "open" | "read" | "click" | "type" | WebPowerAction;
 
@@ -46,12 +47,26 @@ export interface WebRequest {
   args?: WebPowerArgs;
   /** Internal batch marker: the ordered operation owns one tab claim for its entire sequence. */
   batchClaim?: boolean;
+  /**
+   * Stable per-action identity from the provider-facing computer-use tool. The
+   * owner broker uses it to make the mutation lease idempotent; a retry with the
+   * same ID cannot replay a terminal mutation.
+   */
+  operationId?: string;
+  /** Provider-observed target revision string. Identity only; the fence owns its own epoch. */
+  targetRevision?: string;
+  /** Last broker mutation epoch the caller observed. Omit only on a first observation. */
+  expectedMutationRevision?: number;
 }
 
 export interface WebResponse {
   ok: boolean;
   data?: unknown;
   error?: string;
+  /** Stable refusal category for a mutation-fence or transport gate. */
+  code?: string;
+  /** Current broker mutation epoch for this tab after the action. */
+  mutationRevision?: number;
   /** Accessible name or nearest visible text of the target (the page title for page-level actions), max 80 chars. */
   label?: string;
   /** What teammates did since this agent's last action (newest last, at most 5): the shared-room awareness. */
@@ -168,6 +183,11 @@ export interface WebBrokerDeps {
   narrate?: boolean;
   /** In-process activity stream for the UI bridge (web-ui-bridge.ts). */
   onActivity?(activity: WebActivity): void;
+  /**
+   * The owner broker's one shared mutation fence. Absent in tests and in brokers
+   * that do not opt into multiplayer dispatch, preserving their current behavior.
+   */
+  mutationFence?: MultiplayerDispatchFence;
 }
 
 function parseSnapshotState(data: unknown, urlHint?: string): { state: WebPageState; visibleText: string } | null {
@@ -257,6 +277,12 @@ interface Pending {
   participantId: string;
   turnLaneKey?: string;
   turnToken?: string;
+  /** Short broker-owned mutation transaction covering this exact dispatched action. */
+  mutation?: MutationFenceTransaction;
+  /** Epoch observed at dispatch time; used for read-only responses too. */
+  mutationRevision?: number;
+  /** Fence surface this action observed, used to report the current epoch after a read-only result. */
+  mutationSurfaceId?: string;
 }
 
 interface TurnParticipant {
@@ -288,8 +314,24 @@ interface TurnDispatchContext {
   token: string;
 }
 
-function fail(error: string): WebResponse {
-  return { ok: false, error };
+function fail(error: string, code?: string): WebResponse {
+  return { ok: false, error, ...(code ? { code } : {}) };
+}
+
+/**
+ * Observing never mutates. Everything else (navigation, input, clipboard,
+ * window/close lifecycle, and power actions) takes the shared mutation fence.
+ */
+const NON_MUTATING_WEB_ACTIONS: ReadonlySet<string> = new Set([
+  "read", "find", "wait", "tabs", "snapshot", "screenshot", "extract", "link",
+]);
+
+const RECONCILING_WEB_OBSERVATIONS: ReadonlySet<string> = new Set([
+  "read", "find", "tabs", "snapshot", "screenshot", "extract",
+]);
+
+function isMutatingWebAction(action: WebAction): boolean {
+  return !NON_MUTATING_WEB_ACTIONS.has(action);
 }
 
 function describe(request: WebRequest): string {
@@ -354,6 +396,10 @@ export function validateRequest(request: WebRequest): string | null {
   if (request.shareWith !== undefined && (!Array.isArray(request.shareWith) || request.shareWith.length > 16 || request.shareWith.some((name) => typeof name !== "string" || !/^[A-Za-z0-9_.-]{1,80}$/.test(name)))) return "shared agent names are invalid";
   if (request.action === "type" && typeof request.text !== "string") return "type needs text";
   if (request.text !== undefined && request.text.length > MAX_TEXT_LENGTH) return "text is too long";
+  if (request.operationId !== undefined && !/^[a-zA-Z0-9._:-]{1,128}$/.test(request.operationId)) return "operation id is invalid";
+  if (request.targetRevision !== undefined && (typeof request.targetRevision !== "string" || request.targetRevision.length < 1 || request.targetRevision.length > 128)) return "target revision is invalid";
+  if (request.expectedMutationRevision !== undefined
+    && (!Number.isSafeInteger(request.expectedMutationRevision) || request.expectedMutationRevision < 0)) return "expected mutation revision is invalid";
   return null;
 }
 
@@ -923,8 +969,6 @@ export function createWebBroker(deps: WebBrokerDeps) {
       const mayShareActiveClaim = activeLaneClaim?.agent !== actor && activeLaneClaim?.sharedWith.has(actor) === true;
       if (activeLane && (deps.oneWriterPerTab || !mayShareActiveClaim)) return queueTurnRequest(activeLane, request, actor);
     }
-    let claimHolder: Claim | undefined;
-    let commandClaimKey: string | undefined;
     if (requestedScope) {
       const conflicting = activeClaims(tab).find((claim) => scopesOverlap(claim.scope, requestedScope) && claim.agent !== actor && !claim.sharedWith.has(actor));
       if (conflicting && request.action === "open" && !crossOwner) {
@@ -932,7 +976,12 @@ export function createWebBroker(deps: WebBrokerDeps) {
         const base = `${request.tab}-${actor.replace(/[^A-Za-z0-9_-]/g, "")}`.slice(0, 60);
         let fresh = base;
         for (let n = 2; tabsByActor.get(actorKey)?.has(fresh) || activeClaims(fresh).length > 0 || openedBy.has(fresh); n += 1) fresh = `${base}-${n}`;
-        return dispatch({ ...request, tab: fresh }).then((response) => response.ok
+        const freshRequest = { ...request, tab: fresh };
+        // A fresh tab is a different surface: the caller's observed epoch and
+        // target revision belong to the tab that was already in use.
+        delete freshRequest.expectedMutationRevision;
+        delete freshRequest.targetRevision;
+        return dispatch(freshRequest).then((response) => response.ok
           ? { ...response, data: { ...((typeof response.data === "object" && response.data) || {}), tab: fresh, note: `@${conflicting.agent} is using tab "${request.tab}", so this opened in a new tab "${fresh}". Use "${fresh}" for your next actions.` } as never }
           : response);
       }
@@ -940,6 +989,44 @@ export function createWebBroker(deps: WebBrokerDeps) {
         const lane = turnLaneForClaim(tab, conflicting);
         return queueTurnRequest(lane, request, actor);
       }
+    }
+
+    // The one owner broker is the only process that dispatches input, so its
+    // mutation fence is the shared lease every provider session contends on.
+    // Acquire it after all queue/fresh-tab decisions and before the tab claim so
+    // a refusal leaves no claim behind.
+    let mutation: MutationFenceTransaction | undefined;
+    let mutationRevision: number | undefined;
+    let mutationSurfaceId: string | undefined;
+    if (deps.mutationFence) {
+      const fenceTarget = browserMutationTarget({ ownerId: request.owner ?? deps.ownerId, tab, revision: request.targetRevision });
+      mutationSurfaceId = fenceTarget.surfaceId;
+      if (isMutatingWebAction(request.action)) {
+        const begun = deps.mutationFence.begin({
+          agent: actor,
+          provider: request.provider,
+          sessionId: request.sessionId,
+          operationId: request.operationId ?? `web-${newId()}`,
+          target: fenceTarget,
+          ...(request.expectedMutationRevision === undefined ? {} : { expectedMutationRevision: request.expectedMutationRevision }),
+        });
+        if (!begun.ok) return Promise.resolve(fail(begun.error, `mutation-${begun.code}`));
+        if (begun.duplicate) {
+          return Promise.resolve(fail(
+            `This operation already has a ${begun.receipt.status} mutation receipt; it will not be replayed automatically. Inspect the receipt or use a new operation ID.`,
+            "mutation-already-terminal",
+          ));
+        }
+        mutation = begun.transaction;
+        mutationRevision = begun.surfaceRevision;
+      } else {
+        mutationRevision = deps.mutationFence.surfaceRevision(fenceTarget.surfaceId);
+      }
+    }
+
+    let claimHolder: Claim | undefined;
+    let commandClaimKey: string | undefined;
+    if (requestedScope) {
       const key = claimKey(tab, requestedScope);
       commandClaimKey = key;
       const existing = claims.get(key);
@@ -1003,8 +1090,15 @@ export function createWebBroker(deps: WebBrokerDeps) {
     return new Promise<WebResponse>((resolve) => {
       const timer = setTimeout(() => {
         const entry = pending.get(id);
-        pending.delete(id);
-        resolve(fail("timed out waiting for the browser"));
+        if (!entry) return;
+        if (entry.mutation) {
+          // The extension may still be completing the action. Keep the exact
+          // operation and its lease until a response or transport close resolves it.
+          resolve(fail("timed out waiting for the browser; the action may still finish. Do not replay it until the target has been refreshed.", "mutation-outcome-uncertain"));
+        } else {
+          pending.delete(id);
+          resolve(fail("timed out waiting for the browser", "browser-timeout"));
+        }
         if (entry?.turnLaneKey && entry.turnToken) completeTurnLane(entry.turnLaneKey, entry.turnToken);
       }, timeoutMs + extraTimeoutFor(request as unknown as Parameters<typeof extraTimeoutFor>[0]));
       pending.set(id, {
@@ -1021,15 +1115,41 @@ export function createWebBroker(deps: WebBrokerDeps) {
         ...(commandClaimKey ? { claimKey: commandClaimKey } : {}),
         participantId: turnContext?.participantId ?? participantId,
         ...(turnContext ? { turnLaneKey: turnContext.laneKey, turnToken: turnContext.token } : {}),
+        ...(mutation ? { mutation } : {}),
+        ...(mutationRevision === undefined ? {} : { mutationRevision }),
+        ...(mutationSurfaceId === undefined ? {} : { mutationSurfaceId }),
       });
       if (deps.oneWriterPerTab && claimHolder && !turnContext) turnLaneForClaim(tab, claimHolder);
-      if (!deps.send(message)) {
+      let sent: boolean;
+      try {
+        sent = deps.send(message);
+      } catch {
+        const entry = pending.get(id);
+        if (entry?.mutation) {
+          // A transport exception does not prove that the browser never received
+          // the command. Keep the receipt and lease until a response or disconnect
+          // establishes the outcome; callers must not retry this operation ID.
+          entry.resolve(fail(
+            "the browser transport failed while dispatching; the action may have reached the page. Refresh the target before retrying.",
+            "mutation-outcome-uncertain",
+          ));
+        } else {
+          clearTimeout(timer);
+          pending.delete(id);
+          if (entry?.turnLaneKey && entry.turnToken) completeTurnLane(entry.turnLaneKey, entry.turnToken);
+          resolve(fail("the browser transport failed before the action could be confirmed", "browser-transport-unavailable"));
+        }
+        return;
+      }
+      if (!sent) {
         clearTimeout(timer);
         const entry = pending.get(id);
         pending.delete(id);
+        // Nothing reached the page, so this lease may be retried with the same operation ID.
+        entry?.mutation?.release("no browser transport was connected");
         if (entry?.turnLaneKey && entry.turnToken) completeTurnLane(entry.turnLaneKey, entry.turnToken);
         if (addedOpenCandidate) forgetTab(actorKey, tab);
-        resolve(fail("no browser extension is connected"));
+        resolve(fail("no browser extension is connected", "browser-transport-unavailable"));
       } else {
         recordPresence(tab, message.presence, request.owner);
         emit({ kind: "action", phase: "start", id, agent: actor, provider: request.provider, sessionId: request.sessionId, tab, action: request.action, step: narrateStep(request, "start"), url: request.url ?? tabUrls.get(tab), ...(request.action === "type" && request.text ? { typedText: request.text } : {}) });
@@ -1041,6 +1161,9 @@ export function createWebBroker(deps: WebBrokerDeps) {
     if (stopState.state === "stopped") return Promise.resolve(fail("browser actions are stopped by the owner; restart the local broker to resume"));
     const invalid = validateRequest(request);
     if (invalid) return Promise.resolve(fail(invalid));
+    if (deps.mutationFence && isMutatingWebAction(request.action) && !request.operationId) {
+      return Promise.resolve(fail("A stable operation ID is required for a browser mutation so an uncertain retry cannot replay input.", "mutation-operation-id-required"));
+    }
     const risk = isPowerAction(request.action)
       ? classifyPowerRisk(request as unknown as Parameters<typeof classifyPowerRisk>[0])
       : classifyWebActionRisk(request as Parameters<typeof classifyWebActionRisk>[0]);
@@ -1221,7 +1344,10 @@ export function createWebBroker(deps: WebBrokerDeps) {
         if (entry.tab !== closedTab) continue;
         clearTimeout(entry.timer);
         pending.delete(id);
-        entry.resolve(fail(`browser tab "${closedTab}" was closed`));
+        const uncertain = entry.mutation?.abort(`browser tab "${closedTab}" closed while the action outcome was pending`, { status: "uncertain" });
+        entry.resolve(uncertain
+          ? { ...fail(`browser tab "${closedTab}" closed while the action outcome was pending; refresh before another action`, "mutation-outcome-uncertain"), mutationRevision: uncertain.surfaceRevision }
+          : fail(`browser tab "${closedTab}" was closed`));
       }
       for (const key of claims.keys()) if (key.startsWith(`${closedTab}\u0000`)) claims.delete(key);
       tabUrls.delete(closedTab);
@@ -1264,7 +1390,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
     const reportedPath = reportedUrl ? pathOf(reportedUrl) : null;
     const outsideOrigin = entry.expectedOrigin !== undefined && reported !== entry.expectedOrigin;
     const outsidePath = entry.expectedPathPrefix !== undefined && (!reportedPath || !(entry.expectedPathPrefix === "/" || reportedPath === entry.expectedPathPrefix || reportedPath.startsWith(`${entry.expectedPathPrefix}/`)));
-    const response = outsideOrigin
+    let response: WebResponse = outsideOrigin
       ? fail("the page ended up outside the granted site")
       : outsidePath
         ? fail("the page ended up outside the granted path")
@@ -1304,6 +1430,23 @@ export function createWebBroker(deps: WebBrokerDeps) {
         if (room) (response as WebResponse).room = room;
       }
     }
+    if (entry.mutation) {
+      const readback = response.ok
+        ? entry.mutation.commit({ status: "applied", ...(response.label ? { detail: response.label } : {}) })
+        : entry.mutation.abort(response.error ?? "the browser reported a failure", { status: "uncertain" });
+      if (readback.status !== "committed") {
+        response = { ...response, ok: false,
+          error: "The browser action result could not be committed safely. Refresh the target and inspect its state before another action.",
+          code: "mutation-outcome-uncertain" };
+      }
+      response.mutationRevision = readback.surfaceRevision;
+    } else if (entry.mutationSurfaceId && deps.mutationFence) {
+      response.mutationRevision = response.ok && RECONCILING_WEB_OBSERVATIONS.has(entry.action)
+        ? deps.mutationFence.observeSurface(entry.mutationSurfaceId)
+        : deps.mutationFence.surfaceRevision(entry.mutationSurfaceId);
+    } else if (entry.mutationRevision !== undefined) {
+      response.mutationRevision = entry.mutationRevision;
+    }
     entry.resolve(response);
     if (entry.turnLaneKey && entry.turnToken) completeTurnLane(entry.turnLaneKey, entry.turnToken);
   }
@@ -1312,7 +1455,10 @@ export function createWebBroker(deps: WebBrokerDeps) {
     cancelAllTurnLanes("the browser extension disconnected");
     for (const [id, entry] of pending) {
       clearTimeout(entry.timer);
-      entry.resolve(fail("the browser extension disconnected"));
+      const uncertain = entry.mutation?.abort("the browser transport disconnected; the dispatch outcome is uncertain", { status: "uncertain" });
+      entry.resolve(uncertain
+        ? { ...fail("the browser extension disconnected during an action; refresh the target before another action", "mutation-outcome-uncertain"), mutationRevision: uncertain.surfaceRevision }
+        : fail("the browser extension disconnected", "browser-transport-unavailable"));
       pending.delete(id);
     }
     for (const [id, entry] of doneNoticeAcks) {
@@ -1498,8 +1644,15 @@ export function createWebBroker(deps: WebBrokerDeps) {
     emit({ kind: "stopped" });
     for (const [id, entry] of pending) {
       clearTimeout(entry.timer);
-      pending.delete(id);
-      entry.resolve(fail("browser work was stopped by the owner; an action already sent to the page may still finish"));
+      if (entry.mutation) {
+        // Stop All cannot undo input already sent to the page. Keep the receipt
+        // and lease alive for a late result; a restart will recover the claimed
+        // receipt as unresolved if no result arrives.
+        entry.resolve(fail("browser work was stopped by the owner; an action already sent to the page may still finish. Refresh before retrying.", "mutation-outcome-uncertain"));
+      } else {
+        pending.delete(id);
+        entry.resolve(fail("browser work was stopped by the owner", "owner-stopped"));
+      }
     }
     for (const [id, entry] of approvals) {
       clearTimeout(entry.timer);
