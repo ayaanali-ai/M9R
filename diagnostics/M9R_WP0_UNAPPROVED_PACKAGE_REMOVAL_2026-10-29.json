@@ -1,0 +1,35 @@
+{
+  "status": "removed_and_accepted_copies_reverified",
+  "removedFiles": [
+    {
+      "bytes": 111025832,
+      "sha256": "a60ec0a9d4cab00229ffa7595e4944e56bb317052739168a9b40764ab6fcafb9",
+      "path": "C:\\RunLeak\\runleak\\.m9r-release-current-b1897154f15d4d52a20eb4ef8e83a03e\\m9r-engine-windows-x64.zip"
+    },
+    {
+      "bytes": 94,
+      "sha256": "9a63c0dd38f38e63019f54d818614ce1500fa3113bfa881eeb97796503036ba2",
+      "path": "C:\\RunLeak\\runleak\\.m9r-release-current-b1897154f15d4d52a20eb4ef8e83a03e\\m9r-engine-windows-x64.zip.sha256"
+    }
+  ],
+  "emptyFolder": "C:\\RunLeak\\runleak\\.m9r-release-current-b1897154f15d4d52a20eb4ef8e83a03e",
+  "sourceCommit": "5552811cf7255bc40815f3547da632f27dc70ffa",
+  "sourceCommitReachableIn": [
+    "codex/m9r-phase0-11-checkpoint-2026-10-28",
+    "* codex/pill-recovery-20261028"
+  ],
+  "forensicInventory": "diagnostics\\checkpoints\\unapproved-build-0e630138ae311491087dc7f26a97688de7af5c1356c7fb9b3c732138b534e0a8\\package-inventory.json",
+  "forensicInventorySha256": "7dc63113503dcb1a3c698af02bcd6215e55d9d34c82ae8355ae6a7aa6494ad68",
+  "acceptedPackageCopies": [
+    {
+      "sha256": "2999a772a25a08abbdedf4169633f7f60180f492048bd946048041d353fba9f3",
+      "path": "C:\\Users\\kaina\\.m9r\\releases\\accepted-live-e507012c0ca6\\release-package.zip"
+    },
+    {
+      "sha256": "2999a772a25a08abbdedf4169633f7f60180f492048bd946048041d353fba9f3",
+      "path": "diagnostics\\checkpoints\\accepted-live-e507012c0ca6\\release-package.zip"
+    }
+  ],
+  "reason": "Unapproved wrong-pill package, not installed or accepted. Its clean source commit is reachable and the full 216-entry inventory plus all 185 runtime hashes are preserved. The bundled installer predates the current owner-accepted identity guard.",
+  "removedAt": "2026-10-29T13:23:23.5851493-05:00"
+}

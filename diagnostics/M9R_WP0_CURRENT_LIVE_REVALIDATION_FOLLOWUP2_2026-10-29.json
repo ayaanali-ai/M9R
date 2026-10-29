@@ -1,0 +1,17 @@
+{
+  "recordType": "wp0-current-live-revalidation-followup",
+  "observedAtUtc": "2026-10-29T06:47:54.0193374Z",
+  "buildId": "e507012c0ca6fd9f136a502b91e965cb99c0c4d5369e12d9e447d44171cc91c9",
+  "packageSha256": "2999a772a25a08abbdedf4169633f7f60180f492048bd946048041d353fba9f3",
+  "acceptedPillSha256": "4e909c063e955450b8b8bb97c01e264d73edbb92632cbe6d53bc7b5ae4e4bbbb",
+  "checks": {
+    "checkpointZipMatchesManifest": true,
+    "checkpointPayloadsMatched": 185,
+    "caseInsensitiveZipPathDifferences": 5,
+    "installedPayloadsMatched": 185,
+    "rollbackBuildId": "dddadff60f3e354fb50d37529f72385ff300d589ab13cad83f4cd885d5fa53e9",
+    "rollbackPayloadsMatched": 185,
+    "acceptedMirrorMatches": true
+  },
+  "scope": "Read-only hash verification; case-insensitive ZIP entry lookup accounts for Windows path casing. No tests, builds, installs, process stops, provider tasks, or cleanup."
+}

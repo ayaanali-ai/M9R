@@ -1,0 +1,1322 @@
+{
+  "status": "verified_before_removal",
+  "archivePath": "C:\\RunLeak\\runleak\\.m9r-release-current-b1897154f15d4d52a20eb4ef8e83a03e\\m9r-engine-windows-x64.zip",
+  "archiveBytes": 111025832,
+  "archiveSha256": "a60ec0a9d4cab00229ffa7595e4944e56bb317052739168a9b40764ab6fcafb9",
+  "sidecarPath": "C:\\RunLeak\\runleak\\.m9r-release-current-b1897154f15d4d52a20eb4ef8e83a03e\\m9r-engine-windows-x64.zip.sha256",
+  "sidecarText": "a60ec0a9d4cab00229ffa7595e4944e56bb317052739168a9b40764ab6fcafb9  m9r-engine-windows-x64.zip",
+  "buildId": "0e630138ae311491087dc7f26a97688de7af5c1356c7fb9b3c732138b534e0a8",
+  "sourceCommit": "5552811cf7255bc40815f3547da632f27dc70ffa",
+  "sourceDirty": false,
+  "sourceBranches": [
+    "codex/m9r-phase0-11-checkpoint-2026-10-28",
+    "* codex/pill-recovery-20261028"
+  ],
+  "acceptedBuildId": "e507012c0ca6fd9f136a502b91e965cb99c0c4d5369e12d9e447d44171cc91c9",
+  "overlaySha256": "fffb2bae5aa6ab89d057183fc8824dc3d21de155c10ab7f26623b9c3322dd89d",
+  "runtimeArtifactCount": 185,
+  "runtimeArtifactHashesVerified": 185,
+  "zipEntryCount": 216,
+  "fileEntryCount": 216,
+  "secretNamedEntries": 0,
+  "allFileEntries": [
+    {
+      "path": "install-m9r.cmd",
+      "originalZipPath": "install-m9r.cmd",
+      "bytes": 331,
+      "sha256": "a086b4ba010bc28a0c346d273884fe7450a6cc25975ee47cb0a5e027fbf89f7c"
+    },
+    {
+      "path": "install-m9r.ps1",
+      "originalZipPath": "install-m9r.ps1",
+      "bytes": 28691,
+      "sha256": "85d58d58035b8e39fee19e4e643601a22cd316d0db09c91f849e87ad19ff2752"
+    },
+    {
+      "path": "INSTALLATION.txt",
+      "originalZipPath": "INSTALLATION.txt",
+      "bytes": 1860,
+      "sha256": "462598a3b20f85b6fb52e4cb8a6d3b33aee20eb504debe313d00e4c4065d562d"
+    },
+    {
+      "path": "m9r-build-info.json",
+      "originalZipPath": "m9r-build-info.json",
+      "bytes": 26386,
+      "sha256": "c7ce75ce71a4e3347307672b83eee1a10c4b7d506bf6c847b5d2fcf63fb07165"
+    },
+    {
+      "path": "m9r-engine.exe",
+      "originalZipPath": "m9r-engine.exe",
+      "bytes": 94942720,
+      "sha256": "49851d147f92bd0417531a30bf005f8270da4435ee8982054da7daefd30fd245"
+    },
+    {
+      "path": "m9r-hook.exe",
+      "originalZipPath": "m9r-hook.exe",
+      "bytes": 248320,
+      "sha256": "94f13cb938ac579977bb40ff687f414e8a5462326073c80a53731196babcc068"
+    },
+    {
+      "path": "m9r-native-input-host.exe",
+      "originalZipPath": "m9r-native-input-host.exe",
+      "bytes": 229888,
+      "sha256": "c5d394ee537f4c1d16321e31fec7c176876ac97714688d2dde4c94fc72f6f4db"
+    },
+    {
+      "path": "m9r-overlay.exe",
+      "originalZipPath": "m9r-overlay.exe",
+      "bytes": 3382784,
+      "sha256": "fffb2bae5aa6ab89d057183fc8824dc3d21de155c10ab7f26623b9c3322dd89d"
+    },
+    {
+      "path": "m9r-web-broker.exe",
+      "originalZipPath": "m9r-web-broker.exe",
+      "bytes": 93228544,
+      "sha256": "51a8e878ea13db8c75335b0a5359e3d775e288c0c1587b7989b8a91ab8b94414"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "originalZipPath": "THIRD_PARTY_NOTICES.md",
+      "bytes": 1837,
+      "sha256": "2bc64062cf7a7ceb51e0d1fd703b8701fa90cf98818cbd3f1bda0f5849a0a6cc"
+    },
+    {
+      "path": "cua-driver-runtime/bin/cua-cursor-theme.exe",
+      "originalZipPath": "cua-driver-runtime\\bin\\cua-cursor-theme.exe",
+      "bytes": 2042704,
+      "sha256": "bc289b8cc0a4b6a088019115880c260bda2fedc67047c9df6309a3774cd59e25"
+    },
+    {
+      "path": "cua-driver-runtime/bin/cua-driver-uia.exe",
+      "originalZipPath": "cua-driver-runtime\\bin\\cua-driver-uia.exe",
+      "bytes": 22276432,
+      "sha256": "1c737385f3cf008240ca8ff2a58ffc6810ebd382c14bd3dccb87ccbdc4ced556"
+    },
+    {
+      "path": "cua-driver-runtime/bin/cua-driver.exe",
+      "originalZipPath": "cua-driver-runtime\\bin\\cua-driver.exe",
+      "bytes": 35312976,
+      "sha256": "77f5cac754b42b6a8bae126414fc8f7487432ace93466967965188e24e9e53fb"
+    },
+    {
+      "path": "cua-driver-runtime/bin/cua_driver_abi.h",
+      "originalZipPath": "cua-driver-runtime\\bin\\cua_driver_abi.h",
+      "bytes": 7998,
+      "sha256": "c17169f41da321baa5e7e953323c3ad660b00790176ba381e93189fba3506587"
+    },
+    {
+      "path": "cua-driver-runtime/bin/cua_driver_node_runtime.node",
+      "originalZipPath": "cua-driver-runtime\\bin\\cua_driver_node_runtime.node",
+      "bytes": 633168,
+      "sha256": "ff9194fec31c3279b5ba8bf45dd76335892d9a558090d6ee646b3483400c1ec6"
+    },
+    {
+      "path": "cua-driver-runtime/bin/cua_driver_sdk.dll",
+      "originalZipPath": "cua-driver-runtime\\bin\\cua_driver_sdk.dll",
+      "bytes": 27267920,
+      "sha256": "1dae9015f81bb81b093b12181a1970b0a5cb1c2c992684afc1c629bdfc41728d"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/package.json",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\package.json",
+      "bytes": 1437,
+      "sha256": "6b0fe00349246b7a7769bb101b24dab4209eca7f5d7520dfd06a075afe10f7b0"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/README.md",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\README.md",
+      "bytes": 9222,
+      "sha256": "9b25f52396f8e36983aead254e7363f593137cec8c24326ec9e23797cc668788"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/electron.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\electron.d.ts",
+      "bytes": 524,
+      "sha256": "bdf00d92d9b32ed0cb5b5ea73d2831a00708cd72a51181b3030fff42c39af4d9"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/electron.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\electron.js",
+      "bytes": 510,
+      "sha256": "6afe02a5ec66cbc8adb9ebc3308f76d64a6a71a04d4e2e09c7f843356842bf71"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/embedded.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\embedded.d.ts",
+      "bytes": 487,
+      "sha256": "4f3f8e36496011e099d65e72de8c9f56a24dbeccfd3182cd4964cfd05341a94b"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/embedded.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\embedded.js",
+      "bytes": 487,
+      "sha256": "4f3f8e36496011e099d65e72de8c9f56a24dbeccfd3182cd4964cfd05341a94b"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/fleet.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\fleet.d.ts",
+      "bytes": 1562,
+      "sha256": "b7d783193493ab9bfc3fdfb340298e57b4df201327dc41cf3c220e15a4c63739"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/fleet.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\fleet.js",
+      "bytes": 4333,
+      "sha256": "ff73250478feffcd318bc9ae46034f02221cddb9735da06c480dff6815f40285"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/index.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\index.d.ts",
+      "bytes": 80,
+      "sha256": "8834b6c37075145525a0556a1eeb32fd72c918e1f1198587c8032e47a615a2b6"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/index.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\index.js",
+      "bytes": 1549,
+      "sha256": "0bdb852e618d845931fa1a1cd1b781d651106ed60e1cc6a16e9afbd924b8ee75"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/cua_driver_contract-ffi.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\cua_driver_contract-ffi.d.ts",
+      "bytes": 5493,
+      "sha256": "e1cd2daaa0607debac2e7f4516e87f7d3d97132ed772030628b1ce224715b589"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/cua_driver_contract-ffi.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\cua_driver_contract-ffi.js",
+      "bytes": 11055,
+      "sha256": "73910e12302aab8e3f907e6d34acb0a47a860cf828b3e9de3040fb9d8183c68f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/cua_driver_contract.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\cua_driver_contract.d.ts",
+      "bytes": 132885,
+      "sha256": "d0f1f8b67aa0a1819c1455564cba8fce70e1174c6b41ae8ec9ae575e652c5d6f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/cua_driver_contract.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\cua_driver_contract.js",
+      "bytes": 209821,
+      "sha256": "ce4539a7fd4e00042e37a6f4d7b1ff54e91785219aa14cf56b807046ff2346ed"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/cua_driver_sdk-ffi.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\cua_driver_sdk-ffi.d.ts",
+      "bytes": 35734,
+      "sha256": "118c755841a773f3a4cd2568a975ddcfa1a8cc9b25ff7c4be87c91bfa4b96f91"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/cua_driver_sdk-ffi.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\cua_driver_sdk-ffi.js",
+      "bytes": 66294,
+      "sha256": "46396696a8435cf40ca8d4ecc1da30573dd4e69fa3da9bd8438d9d942e567541"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/cua_driver_sdk.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\cua_driver_sdk.d.ts",
+      "bytes": 141176,
+      "sha256": "91b1546173d8fbc5adf921ce5e5591853ca70d7c41c975d22df923aab17d8e42"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/cua_driver_sdk.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\cua_driver_sdk.js",
+      "bytes": 333971,
+      "sha256": "c772ea934ffa73323a041f419205e92f6693db7f59d8158e17a1036bf665d88b"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/index.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\index.d.ts",
+      "bytes": 407,
+      "sha256": "5f870717de6802c8172d86d9cdf13e6c44a18fa7753d560ecc55683402c5604f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/index.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\index.js",
+      "bytes": 527,
+      "sha256": "149af8bf026b5029d75110d57e76cb296fcb22c3a36d5b31dcfb2afcb365250e"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/node-runtime.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\node-runtime.d.ts",
+      "bytes": 1520,
+      "sha256": "4193166679f0e08b297388c73168ba7d9e878a73f333f0f59360a4c3604d556e"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver/dist/native/node-runtime.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver\\dist\\native\\node-runtime.js",
+      "bytes": 1354,
+      "sha256": "5aea3721cea7a22798d45cd16f09ff1b8db7b6ca17431b916c40c2e9387a1ed6"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver-win32-x64-msvc/cua_driver_node_runtime.node",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver-win32-x64-msvc\\cua_driver_node_runtime.node",
+      "bytes": 633168,
+      "sha256": "ff9194fec31c3279b5ba8bf45dd76335892d9a558090d6ee646b3483400c1ec6"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver-win32-x64-msvc/cua_driver_sdk.dll",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver-win32-x64-msvc\\cua_driver_sdk.dll",
+      "bytes": 27267920,
+      "sha256": "1dae9015f81bb81b093b12181a1970b0a5cb1c2c992684afc1c629bdfc41728d"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver-win32-x64-msvc/node-runtime-NOTICE.md",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver-win32-x64-msvc\\node-runtime-NOTICE.md",
+      "bytes": 531,
+      "sha256": "66a466cc022b4bf4a41f678e4d31d9b82098cc55cc364d6e9295366dfd02cef2"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@trycua/cua-driver-win32-x64-msvc/package.json",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@trycua\\cua-driver-win32-x64-msvc\\package.json",
+      "bytes": 478,
+      "sha256": "0e4cad33c2fcb1f2d563e8c61e1f435e51cf6273b6f4e983777ccee041856f75"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/package.json",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\package.json",
+      "bytes": 1365,
+      "sha256": "1c0ed45d2dc102ded7a39c2110d3ff30873663ec7fc9b28e3decc5b725fcbe0f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/README.md",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\README.md",
+      "bytes": 891,
+      "sha256": "97f10dd4fa2ba17b74ef3b95a212e0d8461d3264f745afd09b299d189db01fd8"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/async-callbacks.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\async-callbacks.d.ts",
+      "bytes": 1187,
+      "sha256": "1d29878a1e2cc0fffcb924e72ec05b3b205d9782c7687a6bbd15e71c2ee52f96"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/async-callbacks.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\async-callbacks.d.ts.map",
+      "bytes": 1160,
+      "sha256": "b4667f71a8dcca864ce0c4eb4c67ceb35ffcb5eeeda77ec4dbb62411340921d0"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/async-callbacks.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\async-callbacks.js",
+      "bytes": 3233,
+      "sha256": "916fd4dd9f84a50f1e7706de83abf4460b3da924a276344fffd8827499d28dd7"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/async-callbacks.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\async-callbacks.js.map",
+      "bytes": 2006,
+      "sha256": "7e6df09988a47ec6307881120a63475a0251b685384d2df289dcde1be86d06d2"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/async-rust-call.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\async-rust-call.d.ts",
+      "bytes": 1788,
+      "sha256": "521f0d9a3f57ec38cb8883af03c680825288d6ae1168bc1c409147c14b4faa37"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/async-rust-call.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\async-rust-call.d.ts.map",
+      "bytes": 1055,
+      "sha256": "013746fa1eda1c900ff8eedb76680e35d0a6b3d1c411af8be360c57f61436f45"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/async-rust-call.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\async-rust-call.js",
+      "bytes": 5668,
+      "sha256": "a8a3013d2ce57f7dc6b11107d5785a23c1fb55f64612e917ff747ca7492876dd"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/async-rust-call.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\async-rust-call.js.map",
+      "bytes": 2463,
+      "sha256": "67a0cda8914ea3a844859ebd5329c197e6429cff5bef8a0d93c2a2820712a3f2"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/callbacks.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\callbacks.d.ts",
+      "bytes": 1481,
+      "sha256": "f85e0180e8b64057139d3125bde17c504968bd4ac68c7ab2d3ee25519af63077"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/callbacks.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\callbacks.d.ts.map",
+      "bytes": 1508,
+      "sha256": "0595b371b3fb5b5abe3b46bc5c7d6fdeb0e985056774576a05af37400f1a1826"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/callbacks.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\callbacks.js",
+      "bytes": 2316,
+      "sha256": "577c67c950505752b64396ed722847b2dcaf4927f044676124c5ddd5af3ab7e6"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/callbacks.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\callbacks.js.map",
+      "bytes": 1730,
+      "sha256": "0dfae6c940f378ad076168dd237382299504acd3d74f1f021d41674cba3db52e"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/enums.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\enums.d.ts",
+      "bytes": 112,
+      "sha256": "a1c5c22330f27629e7db2510923c8bbb4be02f77e663b1f2498b5e49cf53cfd6"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/enums.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\enums.d.ts.map",
+      "bytes": 164,
+      "sha256": "e62d54c14bde65a77768b0059202a305bbb5414eb35ae08a91f4d1459974e054"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/enums.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\enums.js",
+      "bytes": 430,
+      "sha256": "955821107cbad32895e11d0e1054c65eedbc6992d1e804d11d79d87f282e22d9"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/enums.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\enums.js.map",
+      "bytes": 184,
+      "sha256": "cfb91cef830d17c611039bb0a2cda8ec323b76c5b117f00bbd134d6eb6823f48"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/errors.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\errors.d.ts",
+      "bytes": 3060,
+      "sha256": "53a5227cd4f014b49bb9521df6516edc0f955da2e9e7ae53864e19ab17f121e3"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/errors.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\errors.d.ts.map",
+      "bytes": 759,
+      "sha256": "a522ca0c18ed61563b354cda3d1ad739ed8146def0d65005593e86b8954431aa"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/errors.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\errors.js",
+      "bytes": 5332,
+      "sha256": "6af9ad73db0c824c3313ab7ba6278752d508c9ec53700d903c4bfe9b2333df04"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/errors.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\errors.js.map",
+      "bytes": 3156,
+      "sha256": "ffd3dedd6939842dcacf9ac23eb6b8a366b71bb93f8f2838452c1412f0e74236"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/ffi-converters.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\ffi-converters.d.ts",
+      "bytes": 5552,
+      "sha256": "8b59b173eeec1b8eb24b160e1b45e0449a407132fd2769fd10c2cd2a7499db59"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/ffi-converters.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\ffi-converters.d.ts.map",
+      "bytes": 4633,
+      "sha256": "849262115807c41cc0fd644f51740c4493f13d6d693d8e93aec41e045d8d310f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/ffi-converters.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\ffi-converters.js",
+      "bytes": 13844,
+      "sha256": "df8df313626b7e324c8c44ef2a7620152d9187a07d7dc9d79053f503cdae6fb5"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/ffi-converters.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\ffi-converters.js.map",
+      "bytes": 12483,
+      "sha256": "464d9cac854bb2bcd61844a371723e7b9e79b608e75d63ac23b02acfc4ec2891"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/ffi-types.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\ffi-types.d.ts",
+      "bytes": 2025,
+      "sha256": "a31e96aef5ea800e7178c10a9aec0452e3f547ab2a3353476f67c278ab7868f3"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/ffi-types.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\ffi-types.d.ts.map",
+      "bytes": 1110,
+      "sha256": "55526705f4a70188cb928fc87f5399363c05661750cb95bb7d1ab9f916090185"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/ffi-types.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\ffi-types.js",
+      "bytes": 4611,
+      "sha256": "b1346a33c20a3b6aaf183c5725787aced065356798fd51bbe074123ab2311ea6"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/ffi-types.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\ffi-types.js.map",
+      "bytes": 3670,
+      "sha256": "c20c2727d29b36690edaabae065dfa3bfaf26e5b3b6596f209675b4724b602c9"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/handle-map.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\handle-map.d.ts",
+      "bytes": 884,
+      "sha256": "3080e18d635ef7a482ea88c4d69e9e01e115695639c5b9dad4987c5cdd771f55"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/handle-map.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\handle-map.d.ts.map",
+      "bytes": 534,
+      "sha256": "a306802dae24b181da773736071773b8f0767ebd2171384683b2fbd82ed3a13a"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/handle-map.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\handle-map.js",
+      "bytes": 3432,
+      "sha256": "ededae242b7ffeb3af8ab3984110cb0b0c9990c4692b71a5e18ff0d9df863637"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/handle-map.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\handle-map.js.map",
+      "bytes": 1670,
+      "sha256": "d42aedcb0ba92ce37e285036672c2e5d3fb741e0396b61603588ebb603c439d9"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/index.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\index.d.ts",
+      "bytes": 486,
+      "sha256": "beb9cfea28c2d5c73e50f5beb1d148d99b2a0d0d9ad119f4b5205d5e506fbd13"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/index.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\index.d.ts.map",
+      "bytes": 415,
+      "sha256": "824513edc99a099428bca87ac1370c3da9ead61919498f60285a75cba7f3d61b"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/index.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\index.js",
+      "bytes": 1845,
+      "sha256": "34da532956e5c72aff1933a4b037e620fda58e4916a733ed2343fce25cd770d9"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/index.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\index.js.map",
+      "bytes": 350,
+      "sha256": "b51a900390b6275d76e618803b97fd018be4b54bd8abf9d34cc99692ba0fdb7c"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/objects.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\objects.d.ts",
+      "bytes": 3174,
+      "sha256": "a5c7585f461d880c57f51975aaec12f59c723a25a6cccfa60c22ca580ef43437"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/objects.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\objects.d.ts.map",
+      "bytes": 2160,
+      "sha256": "9bf8f0e2887bc021d165581b56865e3f2d1fe31194af5c21796f55083c75efef"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/objects.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\objects.js",
+      "bytes": 4251,
+      "sha256": "7990d7c001bb2473607ddd64dd3916f2b317b0e03fec9279f83517f1f1540ae8"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/objects.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\objects.js.map",
+      "bytes": 2679,
+      "sha256": "8221f7df07dd9ffd524f6c4f169e5e2769b797b10eda5ed02035f69922182f8d"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/package.json",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\package.json",
+      "bytes": 19,
+      "sha256": "fa6944a20ca5e6fbaf98fd202eb8c7004d5b4ab786e36b9ed02ee31dbe196c9f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/records.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\records.d.ts",
+      "bytes": 579,
+      "sha256": "fe1436dc3e641db2cb6ee5aaf08fc134a4e9cbba51e59a7f430b0d9f097e8209"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/records.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\records.d.ts.map",
+      "bytes": 286,
+      "sha256": "679acd014aa54efd9dac7cf18db9cfbd8a4bd0500379a08579d1f84d4f3bb51e"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/records.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\records.js",
+      "bytes": 849,
+      "sha256": "bcee72240ee882cff116e7fab8a48e52e193e4bfbba67b23811622de6fd6a6b3"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/records.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\records.js.map",
+      "bytes": 329,
+      "sha256": "babfe3af61af9a1439596e29559ec727e603b6684cc72d13cc151cda89722df1"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/result.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\result.d.ts",
+      "bytes": 577,
+      "sha256": "75d70be718841901ea902ce56d9d88ec3f1d719f7214d81c1d5e4d1894847627"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/result.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\result.d.ts.map",
+      "bytes": 598,
+      "sha256": "f0e701025b95516fd4ba2ac0e548033da668745883e386f746b7876f51b897ea"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/result.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\result.js",
+      "bytes": 773,
+      "sha256": "696c49ebc4ced8884a6248c57187f7a6300c0ffbe3643bc5ad02839919f5276c"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/result.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\result.js.map",
+      "bytes": 586,
+      "sha256": "347ca0fff39e14de26b9b81b527d862fd6290cc1d9543cc2934b06819e363358"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/rust-call.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\rust-call.d.ts",
+      "bytes": 1441,
+      "sha256": "034451532e3efb81f7a4c1950c40df01672f70ba388f323fe28a84a8d67d40b8"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/rust-call.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\rust-call.d.ts.map",
+      "bytes": 1196,
+      "sha256": "2415910537118543521a038ae6b181d1925c6032f710ca7a664f9d57a3e843db"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/rust-call.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\rust-call.js",
+      "bytes": 3398,
+      "sha256": "60325d002a2ac66c06fdc7256400413e9e964a4855e028591fc0cde6721bbcb7"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/rust-call.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\rust-call.js.map",
+      "bytes": 2113,
+      "sha256": "0a6822caf26a20542691dac9c9ca1a847879f8e00be240181b9a8b8364f58bee"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/symbols.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\symbols.d.ts",
+      "bytes": 854,
+      "sha256": "2f94d86bc5ebe906831428176c62b82548d3c5c2d223b052b58282f54eb92128"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/symbols.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\symbols.d.ts.map",
+      "bytes": 300,
+      "sha256": "2df0bc79e1a3e05b5d7ccb7eecc9948354ab404826a9ed4d006d27f426a5a94d"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/symbols.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\symbols.js",
+      "bytes": 1454,
+      "sha256": "1b81440a6ac4791008cb4d10b267975fca0fd0050c44a93af0e41874f94867ec"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/symbols.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\symbols.js.map",
+      "bytes": 472,
+      "sha256": "9024c2d8711dc843553463f6b0dba2cb256c2344dafa290b7b56ba3b4c61faad"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/type-utils.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\type-utils.d.ts",
+      "bytes": 137,
+      "sha256": "f69ecd3c62c483c97d4ebc61ab6e0a844af762aa3b07f5809c4dbc4011997706"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/type-utils.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\type-utils.d.ts.map",
+      "bytes": 274,
+      "sha256": "37b95131bee60b68bdd8af4130ed1faa14d869108204807076342d65ddf75ac3"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/type-utils.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\type-utils.js",
+      "bytes": 115,
+      "sha256": "28313325530072638387664cd1f9989b947f675f9624d593c11cc7f884d0ee46"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/cjs/type-utils.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\cjs\\type-utils.js.map",
+      "bytes": 115,
+      "sha256": "c6720e8f862f51a7d082a96af78f07675dae78b95be33a25a8cfa49361d20038"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/async-callbacks.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\async-callbacks.d.ts",
+      "bytes": 1187,
+      "sha256": "1d29878a1e2cc0fffcb924e72ec05b3b205d9782c7687a6bbd15e71c2ee52f96"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/async-callbacks.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\async-callbacks.d.ts.map",
+      "bytes": 1160,
+      "sha256": "b4667f71a8dcca864ce0c4eb4c67ceb35ffcb5eeeda77ec4dbb62411340921d0"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/async-callbacks.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\async-callbacks.js",
+      "bytes": 2915,
+      "sha256": "80dd60b497e7e9c9c3cf9396b4c5ebe6d617b7c55681882107fc67a2e3c4fd35"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/async-callbacks.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\async-callbacks.js.map",
+      "bytes": 2050,
+      "sha256": "9ef8dcd5857399aedd290a0ed522665692a0011a210fff4fe9672c5f4b887c1b"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/async-rust-call.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\async-rust-call.d.ts",
+      "bytes": 1788,
+      "sha256": "521f0d9a3f57ec38cb8883af03c680825288d6ae1168bc1c409147c14b4faa37"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/async-rust-call.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\async-rust-call.d.ts.map",
+      "bytes": 1055,
+      "sha256": "013746fa1eda1c900ff8eedb76680e35d0a6b3d1c411af8be360c57f61436f45"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/async-rust-call.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\async-rust-call.js",
+      "bytes": 5465,
+      "sha256": "75dc1ac3a1332b85d84adcfacc231e13af05f6bfd4cdb01841ae852e634fb8bd"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/async-rust-call.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\async-rust-call.js.map",
+      "bytes": 2509,
+      "sha256": "58386e6248bd10fa778b6526a7bd48c8b7206c4219fba03c95063357c9afc1c5"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/callbacks.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\callbacks.d.ts",
+      "bytes": 1481,
+      "sha256": "f85e0180e8b64057139d3125bde17c504968bd4ac68c7ab2d3ee25519af63077"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/callbacks.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\callbacks.d.ts.map",
+      "bytes": 1508,
+      "sha256": "0595b371b3fb5b5abe3b46bc5c7d6fdeb0e985056774576a05af37400f1a1826"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/callbacks.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\callbacks.js",
+      "bytes": 1970,
+      "sha256": "75dfa7f97890c923122c3cf0493db7b2d3633f9c5d556f2700d65e7b51d6ba5f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/callbacks.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\callbacks.js.map",
+      "bytes": 1819,
+      "sha256": "78e8f4f71053d02b270b002f8865ee0a58db32f4dfd729619b27e94dab569f2d"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/enums.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\enums.d.ts",
+      "bytes": 112,
+      "sha256": "a1c5c22330f27629e7db2510923c8bbb4be02f77e663b1f2498b5e49cf53cfd6"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/enums.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\enums.d.ts.map",
+      "bytes": 164,
+      "sha256": "e62d54c14bde65a77768b0059202a305bbb5414eb35ae08a91f4d1459974e054"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/enums.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\enums.js",
+      "bytes": 298,
+      "sha256": "5bd9d5054066a92501437d6e67cbb13fc89728c964df6570e5e5253865bd0408"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/enums.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\enums.js.map",
+      "bytes": 175,
+      "sha256": "479d5862d0a8c896b3f0c8cfac6faa2680c307eebfe8a45392756051cbc14646"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/errors.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\errors.d.ts",
+      "bytes": 3060,
+      "sha256": "53a5227cd4f014b49bb9521df6516edc0f955da2e9e7ae53864e19ab17f121e3"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/errors.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\errors.d.ts.map",
+      "bytes": 759,
+      "sha256": "a522ca0c18ed61563b354cda3d1ad739ed8146def0d65005593e86b8954431aa"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/errors.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\errors.js",
+      "bytes": 5095,
+      "sha256": "6159ede3c8f598d788cffd990d5bd9b3fb5b465451a522525f49be6d6513563d"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/errors.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\errors.js.map",
+      "bytes": 3179,
+      "sha256": "91224f97862c338945ba1553e8ab89d04a9812a5b9414369d796b932b57662a2"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/ffi-converters.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\ffi-converters.d.ts",
+      "bytes": 5552,
+      "sha256": "8b59b173eeec1b8eb24b160e1b45e0449a407132fd2769fd10c2cd2a7499db59"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/ffi-converters.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\ffi-converters.d.ts.map",
+      "bytes": 4633,
+      "sha256": "849262115807c41cc0fd644f51740c4493f13d6d693d8e93aec41e045d8d310f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/ffi-converters.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\ffi-converters.js",
+      "bytes": 12794,
+      "sha256": "206de62e8a1882e8eb8679d030ea5b27d8aeaa5d07caf115f527a5d538f2d5e1"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/ffi-converters.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\ffi-converters.js.map",
+      "bytes": 12641,
+      "sha256": "b8e753044863ccf4cb85aef0cd8952f9db832ece6bb99935fdc0a76d05e5e7ac"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/ffi-types.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\ffi-types.d.ts",
+      "bytes": 2025,
+      "sha256": "a31e96aef5ea800e7178c10a9aec0452e3f547ab2a3353476f67c278ab7868f3"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/ffi-types.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\ffi-types.d.ts.map",
+      "bytes": 1110,
+      "sha256": "55526705f4a70188cb928fc87f5399363c05661750cb95bb7d1ab9f916090185"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/ffi-types.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\ffi-types.js",
+      "bytes": 4462,
+      "sha256": "7588f44a08bea449b25f543410b06a6b0256a8e3763bbd0658703f1475f09ac9"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/ffi-types.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\ffi-types.js.map",
+      "bytes": 3689,
+      "sha256": "f7147695114532d30e2209ae78cab4a48f13060f1c6179d1901ffc6e634efdf4"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/handle-map.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\handle-map.d.ts",
+      "bytes": 884,
+      "sha256": "3080e18d635ef7a482ea88c4d69e9e01e115695639c5b9dad4987c5cdd771f55"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/handle-map.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\handle-map.d.ts.map",
+      "bytes": 534,
+      "sha256": "a306802dae24b181da773736071773b8f0767ebd2171384683b2fbd82ed3a13a"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/handle-map.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\handle-map.js",
+      "bytes": 3243,
+      "sha256": "7f70e6f962dbc02183673864461be5b278b65f9d9c7527dbfbfe2989d51b444e"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/handle-map.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\handle-map.js.map",
+      "bytes": 1699,
+      "sha256": "07ea9a92bcbf04bb50600445a1a586eb33788736638c85fa62c5fbcd240e84ea"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/index.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\index.d.ts",
+      "bytes": 486,
+      "sha256": "beb9cfea28c2d5c73e50f5beb1d148d99b2a0d0d9ad119f4b5205d5e506fbd13"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/index.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\index.d.ts.map",
+      "bytes": 415,
+      "sha256": "824513edc99a099428bca87ac1370c3da9ead61919498f60285a75cba7f3d61b"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/index.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\index.js",
+      "bytes": 836,
+      "sha256": "72ba4a531e11acb1c459e7c0482bfbf8fb57017122557143f1143e6c0b1915bf"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/index.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\index.js.map",
+      "bytes": 462,
+      "sha256": "3d2ddbbf19bc3962a1bad9ba07ae08c2d82bdbf528d299084d51a897e512e622"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/objects.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\objects.d.ts",
+      "bytes": 3174,
+      "sha256": "a5c7585f461d880c57f51975aaec12f59c723a25a6cccfa60c22ca580ef43437"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/objects.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\objects.d.ts.map",
+      "bytes": 2160,
+      "sha256": "9bf8f0e2887bc021d165581b56865e3f2d1fe31194af5c21796f55083c75efef"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/objects.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\objects.js",
+      "bytes": 3783,
+      "sha256": "b5ffee05e01d44ec78869330a166d0180d5204f50d4eabcac3fd35393f8a94c5"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/objects.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\objects.js.map",
+      "bytes": 2751,
+      "sha256": "b0032328ca5c3d06fe43eba9f28a6f1a7c6b2cab3877f0a962847b1b5384405f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/records.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\records.d.ts",
+      "bytes": 579,
+      "sha256": "fe1436dc3e641db2cb6ee5aaf08fc134a4e9cbba51e59a7f430b0d9f097e8209"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/records.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\records.d.ts.map",
+      "bytes": 286,
+      "sha256": "679acd014aa54efd9dac7cf18db9cfbd8a4bd0500379a08579d1f84d4f3bb51e"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/records.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\records.js",
+      "bytes": 693,
+      "sha256": "12269720355defada31e1a04952626ea5124d38f055349219ee73ee826a272f2"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/records.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\records.js.map",
+      "bytes": 312,
+      "sha256": "43822496e1d84c20ff30f031637561002af25672887ccb39d0ffb934ce814ec2"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/result.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\result.d.ts",
+      "bytes": 577,
+      "sha256": "75d70be718841901ea902ce56d9d88ec3f1d719f7214d81c1d5e4d1894847627"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/result.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\result.d.ts.map",
+      "bytes": 598,
+      "sha256": "f0e701025b95516fd4ba2ac0e548033da668745883e386f746b7876f51b897ea"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/result.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\result.js",
+      "bytes": 670,
+      "sha256": "d036d598a6b21d387e0f21bc53aaea37fad02792cb695afbbc0ac24065c0175c"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/result.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\result.js.map",
+      "bytes": 593,
+      "sha256": "99fdf2ba0922e2fa403c53920103cd8c72bfc4e219c9b2b4b2ad1f2bd7834e9c"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/rust-call.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\rust-call.d.ts",
+      "bytes": 1441,
+      "sha256": "034451532e3efb81f7a4c1950c40df01672f70ba388f323fe28a84a8d67d40b8"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/rust-call.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\rust-call.d.ts.map",
+      "bytes": 1196,
+      "sha256": "2415910537118543521a038ae6b181d1925c6032f710ca7a664f9d57a3e843db"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/rust-call.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\rust-call.js",
+      "bytes": 3074,
+      "sha256": "23839d8ac7ff6278ce7150a30e9fb4cf7b5eef5e2a183e0ecfed6288991f3e1f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/rust-call.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\rust-call.js.map",
+      "bytes": 2169,
+      "sha256": "9539d2280846aa900ccfd574f9fca2b70b314aaec2c1a6af1fb5f59770fde6d4"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/symbols.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\symbols.d.ts",
+      "bytes": 854,
+      "sha256": "2f94d86bc5ebe906831428176c62b82548d3c5c2d223b052b58282f54eb92128"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/symbols.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\symbols.d.ts.map",
+      "bytes": 300,
+      "sha256": "2df0bc79e1a3e05b5d7ccb7eecc9948354ab404826a9ed4d006d27f426a5a94d"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/symbols.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\symbols.js",
+      "bytes": 1264,
+      "sha256": "2aeed30f063c5588bc9690ed68a8399e013fc0a2b17fda0ffd562e76fd0d8185"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/symbols.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\symbols.js.map",
+      "bytes": 509,
+      "sha256": "dc5c04ee76feaa35901b20d11dd998b778be30b0b648037cd917bfb5399527ac"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/type-utils.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\type-utils.d.ts",
+      "bytes": 137,
+      "sha256": "f69ecd3c62c483c97d4ebc61ab6e0a844af762aa3b07f5809c4dbc4011997706"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/type-utils.d.ts.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\type-utils.d.ts.map",
+      "bytes": 274,
+      "sha256": "37b95131bee60b68bdd8af4130ed1faa14d869108204807076342d65ddf75ac3"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/type-utils.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\type-utils.js",
+      "bytes": 49,
+      "sha256": "a7ef0890cf447140f03e8342331ecd9b2af0a8ab4641ade7b5533ecf6bd8807a"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/dist/esm/type-utils.js.map",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\dist\\esm\\type-utils.js.map",
+      "bytes": 115,
+      "sha256": "c6720e8f862f51a7d082a96af78f07675dae78b95be33a25a8cfa49361d20038"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/async-callbacks.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\async-callbacks.ts",
+      "bytes": 4366,
+      "sha256": "6ca52e9d80cb3411f33c833cffcc377c8f79c8cd8ff058abfcc655e2ae284b85"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/async-rust-call.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\async-rust-call.ts",
+      "bytes": 6931,
+      "sha256": "3724996bdb48e992554600f6edb9bc814e44e016c9c1ad33a0156a8dd4a5e23d"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/callbacks.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\callbacks.ts",
+      "bytes": 2716,
+      "sha256": "a37ed028d519da8e4b716064f8147b2b8bb721fcf863e706eb5913d077c168bd"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/enums.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\enums.ts",
+      "bytes": 277,
+      "sha256": "3b772f32908f9c25648a531dc0174a6f284ace77c76df9682929cfe44f1c6748"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/errors.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\errors.ts",
+      "bytes": 5023,
+      "sha256": "e4ebab7a7e437fd15b9ac89f8a9ed1903ca14272c484b004f79f4600efbd8b54"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/ffi-converters.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\ffi-converters.ts",
+      "bytes": 15786,
+      "sha256": "db87237a86de86c5892fb568bccadb74425ac147271d07ef3a020c23b059c38f"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/ffi-types.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\ffi-types.ts",
+      "bytes": 4576,
+      "sha256": "94801cbe2e0854ecea5151c517f73ac8c716a275f716fccf0f71dbab76fae1e5"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/handle-map.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\handle-map.ts",
+      "bytes": 3146,
+      "sha256": "046a0e1ecedc382e96fe6679f861daad0f9253a2c4a4d33dc7ca45905960c3d5"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/index.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\index.ts",
+      "bytes": 803,
+      "sha256": "b5fe13a91084af95330ea96b57b4d5af10ea9e5e5b64b61ef5837128d46986c8"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/objects.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\objects.ts",
+      "bytes": 4902,
+      "sha256": "cb1f3ddbd6ad9a9ca41dc512edd1ee335a86795be1b5c89e4384d4042edacc47"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/records.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\records.ts",
+      "bytes": 955,
+      "sha256": "657f1dc2d784c6f38a17b71a00b2a8beff785d8d206c408a8f873f3e200622d8"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/result.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\result.ts",
+      "bytes": 1211,
+      "sha256": "1f9364d20f4e05f8abbaf60cdd17a486007445796318edb06d62bede285990b6"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/rust-call.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\rust-call.ts",
+      "bytes": 3752,
+      "sha256": "aa8527e052ba70914de4f8e895039eccde501bc2afed937b1bb29d138f37c012"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/symbols.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\symbols.ts",
+      "bytes": 1234,
+      "sha256": "0229bb519041fd888bd1b5b1f58adf50387d8f4216a90c2ca18dadf4ef75e472"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/core/src/type-utils.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\core\\src\\type-utils.ts",
+      "bytes": 380,
+      "sha256": "06da2cadc9e386295157641c3046b4fac0333ef67a00c293fc02cf8a77211e48"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/node/index.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\node\\index.d.ts",
+      "bytes": 2242,
+      "sha256": "73bb62656f5ca80bb9c1e6addfeecc0573807b07c3e4723144edd08afd266f09"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/node/index.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\node\\index.js",
+      "bytes": 9572,
+      "sha256": "076c258f9c97406e5a6b52d9e1b5da5b4566d809a11e3d8f3e8fedc01be6d3dd"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/node/lib.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\node\\lib.js",
+      "bytes": 1191,
+      "sha256": "29038956becbc8ef9fb642e15d1267dd5e417fcbf073ce387ad11fa72a71556b"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/node/package.json",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\node\\package.json",
+      "bytes": 1219,
+      "sha256": "a532e802502e409cc7e8dbf799037fe6f7bf54b8ecd0ceb4b48440d7a5bbc2ea"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/node/README.md",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\node\\README.md",
+      "bytes": 4963,
+      "sha256": "11e5dbeb25331e10eb30b8af3a7e50275225e3806b6fe0f55db85db0ed21b8e7"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/node/typescript/dist/resolve-lib.d.ts",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\node\\typescript\\dist\\resolve-lib.d.ts",
+      "bytes": 1515,
+      "sha256": "32c737545ff3d885d004a276b8099bf3ebbb050ca124bf39c9c741ac39461515"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/node/typescript/dist/resolve-lib.js",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\node\\typescript\\dist\\resolve-lib.js",
+      "bytes": 6795,
+      "sha256": "133624993961574f194a1bbdac8f3c2bccd49892de92d0359f711f4dbfc1a0da"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/node-win32-x64-msvc/package.json",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\node-win32-x64-msvc\\package.json",
+      "bytes": 969,
+      "sha256": "7b9111774e2f54889015ee8dbcd74225dfd8f82aed2bcb61290f7dbc253ed0ff"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/node-win32-x64-msvc/README.md",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\node-win32-x64-msvc\\README.md",
+      "bytes": 94,
+      "sha256": "912e35eadbf24b9530c4fd5af3b85e1e57287e20126604907ec2ba18a96e112d"
+    },
+    {
+      "path": "cua-driver-runtime/node_modules/@ubjs/node-win32-x64-msvc/uniffi-runtime-napi.win32-x64-msvc.node",
+      "originalZipPath": "cua-driver-runtime\\node_modules\\@ubjs\\node-win32-x64-msvc\\uniffi-runtime-napi.win32-x64-msvc.node",
+      "bytes": 537088,
+      "sha256": "b38574a3b3076521b8d127d92357cc96667930a83fd9cd6d656b6d165de75801"
+    },
+    {
+      "path": "extension/manifest.json",
+      "originalZipPath": "extension\\manifest.json",
+      "bytes": 1613,
+      "sha256": "f8e320c83afde1b39b3d0fe400f8fd81976b1800b6793230d9a58ded7dae17e0"
+    },
+    {
+      "path": "extension/permission.html",
+      "originalZipPath": "extension\\permission.html",
+      "bytes": 4535,
+      "sha256": "ce6784ff34924fac2cff3bc5206b14c340f6af3c2a892cb446869c75bfb2643c"
+    },
+    {
+      "path": "extension/assets/m9r-mark.jpg",
+      "originalZipPath": "extension\\assets\\m9r-mark.jpg",
+      "bytes": 28788,
+      "sha256": "cc871312bdb2e4f6cd526655721bae797f98f030d631e33719e12cd860c02208"
+    },
+    {
+      "path": "extension/assets/m9r-mark.png",
+      "originalZipPath": "extension\\assets\\m9r-mark.png",
+      "bytes": 9168,
+      "sha256": "ab4c12c7b608611035f9aa819bee24e22f24661478753f4d57d56b751024f25a"
+    },
+    {
+      "path": "extension/assets/m9r-mark.svg",
+      "originalZipPath": "extension\\assets\\m9r-mark.svg",
+      "bytes": 188,
+      "sha256": "e5788ba5f6ef72f82e3074ba0dae6f843e28bc5abca98579e3e2167bd79b1128"
+    },
+    {
+      "path": "extension/assets/providers/claude.svg",
+      "originalZipPath": "extension\\assets\\providers\\claude.svg",
+      "bytes": 1659,
+      "sha256": "c7fb457dee134cdba1fb6c5a681325b74350c5c6832e2a37998b4639dc44b5fc"
+    },
+    {
+      "path": "extension/assets/providers/codex.svg",
+      "originalZipPath": "extension\\assets\\providers\\codex.svg",
+      "bytes": 1326,
+      "sha256": "d50dab83977606e13f9601eb1f6b858a0c49d4930d04a6ac4f12829b3f94ddad"
+    },
+    {
+      "path": "extension/assets/providers/opencode.svg",
+      "originalZipPath": "extension\\assets\\providers\\opencode.svg",
+      "bytes": 193,
+      "sha256": "82e7015b3694c95d200ddd62d96e73e2254ac72f8f5917758934def49a3617f2"
+    },
+    {
+      "path": "extension/assets/providers/README.md",
+      "originalZipPath": "extension\\assets\\providers\\README.md",
+      "bytes": 416,
+      "sha256": "c8f3f883e684fbccfc22ad48e3773ef9072e92165f5de054ca964be9846d6e8e"
+    },
+    {
+      "path": "extension/pill-next/index.html",
+      "originalZipPath": "extension\\pill-next\\index.html",
+      "bytes": 400,
+      "sha256": "e8a146a0812e561d27ae4c427af949b259b71b3426b6f92d4fd75e6441b95be7"
+    },
+    {
+      "path": "extension/pill-next/assets/index-B4ihpwZ_.css",
+      "originalZipPath": "extension\\pill-next\\assets\\index-B4ihpwZ_.css",
+      "bytes": 22109,
+      "sha256": "29b6131fc3d0056ae7742fc9eefbba46eaf8d0ee2bf1cade298a1cd3dc629e33"
+    },
+    {
+      "path": "extension/pill-next/assets/index-Luj16fiI.js",
+      "originalZipPath": "extension\\pill-next\\assets\\index-Luj16fiI.js",
+      "bytes": 63714,
+      "sha256": "e5f76b7092a1bba83c3b7e8c98881c0da2ca8937b89e91dee0512e22d2aa8227"
+    },
+    {
+      "path": "extension/src/background.js",
+      "originalZipPath": "extension\\src\\background.js",
+      "bytes": 50131,
+      "sha256": "171bdf35b5011b66982a098ef920d4e2ab28a8cdbc636a3b517887e39afcbff6"
+    },
+    {
+      "path": "extension/src/content.js",
+      "originalZipPath": "extension\\src\\content.js",
+      "bytes": 12716,
+      "sha256": "a138eacc1f94d07879af3bc2ffedbc514b4f82d9df58a7e6bbaba72be8eb1101"
+    },
+    {
+      "path": "extension/src/dock-logic.js",
+      "originalZipPath": "extension\\src\\dock-logic.js",
+      "bytes": 8442,
+      "sha256": "d64806dc95b77d866a97d7c7e9389512dbbb973f3547cdf26df8f8a5bef21ee5"
+    },
+    {
+      "path": "extension/src/page-actions.js",
+      "originalZipPath": "extension\\src\\page-actions.js",
+      "bytes": 60198,
+      "sha256": "13b535cb6a806c4f1db04cd9c0826ec33d9feda3c875f0a0da4ef394addfdd84"
+    },
+    {
+      "path": "extension/src/permission-logic.js",
+      "originalZipPath": "extension\\src\\permission-logic.js",
+      "bytes": 1934,
+      "sha256": "c4ac2b6207c7a98c26c658e616c237e9132638fc8db40bb7e82f0eebf0862494"
+    },
+    {
+      "path": "extension/src/permission-page.js",
+      "originalZipPath": "extension\\src\\permission-page.js",
+      "bytes": 5376,
+      "sha256": "55af79345e43e7f3bcf02c9c494a3a72d49a5f902a0cf027896aa02fcedb0efa"
+    },
+    {
+      "path": "extension/src/pill-bridge.js",
+      "originalZipPath": "extension\\src\\pill-bridge.js",
+      "bytes": 19878,
+      "sha256": "9ac3e425dd73704cb7fa43f890316c0f295acd3b42f5b66b22b93f71e803a9ce"
+    },
+    {
+      "path": "extension/src/powers.js",
+      "originalZipPath": "extension\\src\\powers.js",
+      "bytes": 25218,
+      "sha256": "15171213c05be32ad9da06af937a78cd642adb2a43dcf5329ee30472894a7d2b"
+    },
+    {
+      "path": "extension/src/presence-logic.js",
+      "originalZipPath": "extension\\src\\presence-logic.js",
+      "bytes": 4890,
+      "sha256": "b7d761ea9fb627b3d8820bd146653f40a22ad3834502634e1abcecb68e771fd4"
+    },
+    {
+      "path": "extension/src/presence-overlay.js",
+      "originalZipPath": "extension\\src\\presence-overlay.js",
+      "bytes": 72938,
+      "sha256": "20d785695406553f59c346e86c316c2fb5a9f5f72b9c0dcad6e574c4d6a86e14"
+    },
+    {
+      "path": "extension/src/quiet-input.js",
+      "originalZipPath": "extension\\src\\quiet-input.js",
+      "bytes": 9679,
+      "sha256": "cf8a43b880ca0cff11dacfccc314613941974c6357ec82a9a9ad8a56597e88e7"
+    },
+    {
+      "path": "licenses/Cua-Driver-Node-Runtime-NOTICE.md",
+      "originalZipPath": "licenses\\Cua-Driver-Node-Runtime-NOTICE.md",
+      "bytes": 531,
+      "sha256": "66a466cc022b4bf4a41f678e4d31d9b82098cc55cc364d6e9295366dfd02cef2"
+    },
+    {
+      "path": "licenses/MIT-Cua.txt",
+      "originalZipPath": "licenses\\MIT-Cua.txt",
+      "bytes": 1069,
+      "sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9"
+    },
+    {
+      "path": "licenses/MPL-2.0.txt",
+      "originalZipPath": "licenses\\MPL-2.0.txt",
+      "bytes": 16725,
+      "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+    }
+  ],
+  "sourceCommitStatus": "commit object exists and is contained by a local branch",
+  "disposition": "Rejected wrong-pill build; source commit and full package inventory retained; not part of accepted or installed runtime. The old bundled installer predates the current identity guard."
+}

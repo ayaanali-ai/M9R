@@ -1,0 +1,11 @@
+{
+  "recordType": "wp0-live-install-manifest-capture",
+  "capturedAtUtc": "2026-10-29T06:40:06.8928408Z",
+  "sourcePath": "C:\\Users\\kaina\\.m9r\\install-manifest.json",
+  "checkpointPath": "C:\\RunLeak\\runleak\\diagnostics\\checkpoints\\wp0-live-install-manifest-20261029\\install-manifest.json",
+  "sha256": "479368ebca93f6f8e1c93eaf6656e40d10421adf98436d269a9c6990bf1ba24f",
+  "activeBuildId": "e507012c0ca6fd9f136a502b91e965cb99c0c4d5369e12d9e447d44171cc91c9",
+  "runtimeFileCount": 189,
+  "retiredEngineCount": 3,
+  "scope": "Copied M9R ownership metadata into the project checkpoint. No live manifest or runtime file was changed."
+}

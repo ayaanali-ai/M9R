@@ -1,0 +1,30 @@
+{
+  "status": "removed_and_retained_copies_reverified",
+  "duplicateDirectory": "C:\\RunLeak\\runleak\\diagnostics\\pill-command-contract-package",
+  "removed": [
+    {
+      "sha256": "2999a772a25a08abbdedf4169633f7f60180f492048bd946048041d353fba9f3",
+      "path": "C:\\RunLeak\\runleak\\diagnostics\\pill-command-contract-package\\m9r-engine-windows-x64.zip",
+      "bytes": 115049614
+    },
+    {
+      "sha256": "c2985a6a8c0230a776f63bce3fbd3d53d0e76f97aae26df2c68b0c9c9f079d1a",
+      "path": "C:\\RunLeak\\runleak\\diagnostics\\pill-command-contract-package\\m9r-engine-windows-x64.zip.sha256",
+      "bytes": 94
+    }
+  ],
+  "retainedIdenticalCopies": [
+    {
+      "zip": "C:\\Users\\kaina\\.m9r\\releases\\accepted-live-e507012c0ca6\\release-package.zip",
+      "sha256": "2999a772a25a08abbdedf4169633f7f60180f492048bd946048041d353fba9f3"
+    },
+    {
+      "zip": "C:\\RunLeak\\runleak\\diagnostics\\checkpoints\\accepted-live-e507012c0ca6\\release-package.zip",
+      "sha256": "2999a772a25a08abbdedf4169633f7f60180f492048bd946048041d353fba9f3"
+    }
+  ],
+  "verification": "Both retained ZIP copies matched the removed ZIP byte-for-byte by SHA-256. Both retained sidecars matched the removed sidecar text. The duplicate folder contained only the two removed files.",
+  "removedAt": "2026-10-29T13:17:40.4568491-05:00",
+  "emptyDirectoryRemoved": true,
+  "directoryRemovalVerifiedAt": "2026-10-29T13:18:15.1246719-05:00"
+}
