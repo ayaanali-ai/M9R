@@ -360,7 +360,12 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
   async initialize(handle: AgentServerHandle): Promise<InitializedAgent> {
     const state = this.server(handle);
     if (!state.initialized) {
-      const response = record(await state.client.request("initialize", { clientInfo: { name: "oathlock-bridge", title: "M9R Bridge", version: "1.0.0" }, capabilities: null }));
+      const response = record(await state.client.request("initialize", {
+        clientInfo: { name: "oathlock-bridge", title: "M9R Bridge", version: "1.0.0" },
+        // Bounded thread resume is an opt-in app-server capability. M9R does
+        // not need Codex to inline every historical turn into one JSONL frame.
+        capabilities: { experimentalApi: true },
+      }));
       state.client.notify("initialized");
       state.initialized = true;
       state.agentName = typeof response?.userAgent === "string" ? response.userAgent : "codex";
@@ -393,6 +398,11 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
       cwd: state.workingDirectory,
       approvalPolicy: this.options.approvalPolicy ?? "on-request",
       sandbox: this.options.sandbox ?? "workspace-write",
+      // The owner supervisor resumes Codex's stored thread directly. M9R only
+      // consumes the model metadata here; asking for all turns can inline large
+      // image/tool outputs into one JSONL response and exceed the bounded reader.
+      // This keeps the same thread and its provider-side history intact.
+      excludeTurns: true,
       ...(input.assignment.model ? { model: input.assignment.model } : {}),
     }));
     const handle = this.registerSession(state, input.providerSessionRef, input.executionId ?? input.providerSessionRef, input.assignment.missionId);

@@ -106,15 +106,20 @@ export class CodexAppServerClient {
 
   private receive(chunk: string): void {
     this.buffer += chunk;
-    if (this.buffer.length > MAX_LINE_CHARS && !this.buffer.includes("\n")) {
-      this.fail("The Codex app-server sent an oversized message.");
-      return;
-    }
     let index: number;
     while ((index = this.buffer.indexOf("\n")) >= 0) {
+      if (index > MAX_LINE_CHARS) {
+        this.buffer = "";
+        this.fail("The Codex app-server sent an oversized message.");
+        return;
+      }
       const line = this.buffer.slice(0, index).trim();
       this.buffer = this.buffer.slice(index + 1);
       if (line) this.dispatch(line);
+    }
+    if (this.buffer.length > MAX_LINE_CHARS) {
+      this.buffer = "";
+      this.fail("The Codex app-server sent an oversized message.");
     }
   }
 
