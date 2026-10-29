@@ -76,3 +76,15 @@ test-fixtures/
 *.docx
 *.png
 M9R_*
+
+# Local M9R runtime state, held recovery data, and disconnected checkouts are
+# never application build inputs. Keep them on disk for recovery, but do not
+# send them into root-context container builds or copy them into an image.
+/.m9r/
+**/.m9r/
+/.worktrees/
+/.release-excluded/
+/.m9r-recovery-quarantine-*/
+/.test-tmp*/
+/scratchpad/
+/diagnostics/

@@ -51,6 +51,20 @@
     "extensions",
     "overlay",
     "pill/vite.config.ts",
-    "runleak-analyzer-mvp"
+    "runleak-analyzer-mvp",
+    ".m9r",
+    "**/.m9r/**",
+    ".worktrees",
+    "**/.worktrees/**",
+    ".release-excluded",
+    "**/.release-excluded/**",
+    ".m9r-recovery-quarantine-*",
+    "**/.m9r-recovery-quarantine-*/**",
+    ".test-tmp*",
+    "**/.test-tmp*/**",
+    "scratchpad",
+    "**/scratchpad/**",
+    "diagnostics",
+    "**/diagnostics/**"
   ]
 }
