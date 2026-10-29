@@ -374,6 +374,17 @@ pub fn click_visible_chrome_tab(
     request: &ClickRequest,
     progress: &mut impl FnMut(f64, f64, bool) -> bool,
 ) -> Result<(), &'static str> {
+    crate::virtual_desktop::with_owner_pointer_restored(
+        crate::virtual_desktop::owner_pointer::get_cursor_position,
+        crate::virtual_desktop::owner_pointer::restore_cursor_position,
+        || click_visible_chrome_tab_inner(request, progress),
+    )
+}
+
+fn click_visible_chrome_tab_inner(
+    request: &ClickRequest,
+    progress: &mut impl FnMut(f64, f64, bool) -> bool,
+) -> Result<(), &'static str> {
     let window = unsafe { GetForegroundWindow() };
     if !foreground_is_supported_browser(window) {
         return Err("the visible foreground window is not Chrome or Edge");

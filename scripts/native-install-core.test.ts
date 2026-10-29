@@ -180,7 +180,8 @@ test("broker task plan is a per-user hidden logon task with an exact, hashable a
   assert.match(register, /New-ScheduledTaskTrigger -AtLogOn -User "\$env:USERDOMAIN\\\$env:USERNAME"/);
   assert.match(register, /New-ScheduledTaskPrincipal -UserId .* -LogonType Interactive -RunLevel Limited/);
   assert.match(register, /-TaskPath '\\'/);
-  assert.match(register, /New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit \(\[TimeSpan\]::Zero\)/);
+  assert.match(register, /New-ScheduledTaskSettingsSet -Compatibility Win8 -Hidden/);
+  assert.match(register, /New-ScheduledTaskSettingsSet -Compatibility Win8 -Hidden -ExecutionTimeLimit \(\[TimeSpan\]::Zero\)/);
   assert.doesNotMatch(register, /-RunLevel Highest|SYSTEM/i);
   assert.doesNotMatch(register, /-Force/);
   assert.match(buildLocalBrokerScheduledTaskRegisterScript({ ...input, replaceExisting: true }), /-Force/);
@@ -295,6 +296,40 @@ test("a recorded M9R broker task remains owned when M9R changes its project-root
     "an action changed outside M9R no longer matches the recorded ownership hash");
 });
 
+test("broker task compatibility is hashed and an exact legacy Win7 marker remains upgradeable", () => {
+  const action = buildLocalBrokerScheduledTaskAction({
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    executable: "C:\\Users\\Kai\\.m9r\\bin\\m9r-web-broker.exe",
+    args: ["--home", "C:\\Users\\Kai\\.m9r", "--port", "47821"],
+    workingDirectory: "C:\\repo",
+    hideConsole: true,
+  });
+  const base = {
+    taskName: LOCAL_BROKER_AUTOSTART_TASK_NAME,
+    taskPath: "\\",
+    actions: [action],
+    triggers: [{ kind: "Logon", enabled: true, userId: "MSI\\Kai" }],
+    principal: { userId: "MSI\\Kai", logonType: "Interactive", runLevel: "Limited" },
+    settings: {
+      hidden: true,
+      executionTimeLimit: "PT0S",
+      allowStartIfOnBatteries: true,
+      dontStopIfGoingOnBatteries: true,
+      startWhenAvailable: true,
+    },
+  };
+  const oldWin7Task = { ...base, settings: { ...base.settings, compatibility: "Win7" } };
+  const newWin8Task = { ...base, settings: { ...base.settings, compatibility: "Win8" } };
+  const legacyDefinition = hashLocalBrokerScheduledTaskDefinition(base);
+
+  assert.equal(isLocalBrokerScheduledTaskOwned(oldWin7Task, "MSI\\Kai", legacyDefinition), true,
+    "the recorded pre-compatibility definition remains owned for one normal upgrade");
+  assert.notEqual(hashLocalBrokerScheduledTaskDefinition(oldWin7Task), hashLocalBrokerScheduledTaskDefinition(newWin8Task),
+    "the current definition hash distinguishes compatibility targets");
+  assert.equal(matchesLocalBrokerScheduledTaskContract({ ...base, settings: { ...base.settings, compatibility: "Vista" } }, action, "MSI\\Kai"), false,
+    "unsupported/legacy compatibility targets are not accepted as the current broker contract");
+});
+
 test("broker uninstall only removes the marker and stops the broker after ownership and task cleanup are verified", () => {
   const plan = (overrides: Partial<Parameters<typeof planLocalBrokerUninstall>[0]> = {}) => planLocalBrokerUninstall({
     inspectionSucceeded: true,
@@ -366,7 +401,7 @@ test("the standing instruction is created, appended with a separator, and never 
   assert.equal(created.content.startsWith(STANDING_START), true);
   const appended = applyStandingInstruction("# My rules\nBe terse.");
   assert.equal(appended.action, "installed");
-  assert.match(appended.content, /^# My rules\nBe terse\.\n\n<!-- M9R:STANDING-INSTRUCTION:START v5 -->/);
+  assert.match(appended.content, /^# My rules\nBe terse\.\n\n<!-- M9R:STANDING-INSTRUCTION:START v6 -->/);
   const again = applyStandingInstruction(appended.content);
   assert.equal(again.action, "unchanged");
   assert.equal((again.content.match(/STANDING-INSTRUCTION:START/g) ?? []).length, 1);

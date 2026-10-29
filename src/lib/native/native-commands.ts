@@ -88,6 +88,10 @@ export interface NativeIo {
   startProviderLifecycle?(root: string): { stop(): Promise<void> } | undefined;
   /** Start-with-Windows switch; tests inject a fake so nothing ever touches the real registry. */
   autostart?: Autostart;
+  /** Install the M9R-owned broker login task that restores provider processes before the first task. */
+  installLocalBrokerAutostart?(): Promise<{ ok: boolean; message: string }>;
+  /** Remove only the broker login task owned by this native install. */
+  removeLocalBrokerAutostart?(): Promise<{ ok: boolean; message: string }>;
 }
 
 /**
@@ -167,6 +171,8 @@ interface Manifest {
   runtimeFiles?: string[];
   /** M9R starts when you sign in to Windows (removed on uninstall). */
   autostart?: boolean;
+  /** This install also owns the local broker login task. */
+  brokerAutostart?: boolean;
   /** Source-owned identity of the runtime image currently installed in the stable bin folder. */
   activeRuntime?: ActiveRuntimeManifest;
 }
@@ -335,16 +341,6 @@ function replaceRuntimeFile(from: string, to: string): string[] {
   }
 }
 
-function pruneRetiredRuntimeFile(target: string): void {
-  let names: string[];
-  try { names = readdirSync(dirname(target)); } catch { return; }
-  const prefix = `${basename(target)}.m9r-retired-`;
-  for (const name of names) {
-    if (!name.startsWith(prefix)) continue;
-    try { rmSync(join(dirname(target), name), { force: true }); } catch { /* still mapped by an open agent process */ }
-  }
-}
-
 function isRetiredRuntimePath(path: string): boolean {
   return /\.m9r-retired-[^\\/]+$/i.test(path);
 }
@@ -382,6 +378,7 @@ function inspectRetiredRuntimeFile(path: string): "file" | "missing" | "unknown"
 }
 
 function pruneOwnedRetiredRuntimeFiles(manifest: Manifest, candidates: readonly string[]): { removed: number; remaining: number } {
+  if (process.env.M9R_PRESERVE_RUNTIME_EVIDENCE === "1") return { removed: 0, remaining: candidates.length };
   const known = new Set(candidates.map((file) => process.platform === "win32" ? resolve(file).toLowerCase() : resolve(file)));
   let removed = 0;
   for (const path of candidates) {
@@ -400,18 +397,17 @@ function pruneOwnedRetiredRuntimeFiles(manifest: Manifest, candidates: readonly 
 
 function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> }): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
+  // Do not sweep sibling names by prefix. Existing retired images are removed only by the manifest-scoped cleanup.
   if (plan.engine) {
     recoverRuntimeTransactions(plan.targetDir, replaceRuntimeFile);
     const files = [plan.engine, ...(plan.shim ? [plan.shim] : []), ...(plan.nativeInputHost ? [plan.nativeInputHost] : []), ...(plan.companions ?? [])];
     const written = installRuntimeTransaction(plan.targetDir, files, replaceRuntimeFile);
-    for (const file of files) pruneRetiredRuntimeFile(file.to);
     pruneCompletedRuntimeTransactions(plan.targetDir);
     return written;
   }
   const written: string[] = [];
   for (const f of HOOK_RUNTIME_FILES) {
     const target = join(plan.targetDir, f);
-    pruneRetiredRuntimeFile(target);
     written.push(...replaceRuntimeFile(join(plan.sourceDir, f), target), target);
   }
   // The runtime files are ES modules; this keeps them working wherever the folder lives.
@@ -819,9 +815,11 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   // A previously installed user can opt into startup without reinstalling hooks.
   const startupRequested = flags.autostart === true && !!runtime.engine && !!runtime.shim
     && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
+  const canAutostart = !!runtime.engine && !!runtime.shim && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
   if (todo.length === 0 && !runtime.needed && !startupRequested && !identityNeedsReconcile && modelRepair?.plan.status !== "updated" && retiredRuntimeEntries.length === 0) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
   io.out("This will:");
   if (startupRequested) io.out("  - start the M9R desktop pill when this Windows user signs in (uninstall removes this entry)");
+  if (flags.autostart === true && canAutostart) io.out("  - install the M9R-owned broker login task so provider processes start before the first pill message");
   if (runtime.needed) io.out(`  - copy the small hook program to ${runtime.targetDir} (so the hooks keep working even if this CLI moves or is updated)`);
   if (runtime.engine && runtime.shim) io.out("  - start the M9R background engine, which answers your agents' hooks in milliseconds (uninstall stops it)");
   if (identityNeedsReconcile) io.out(`  - reconcile the verified installed runtime identity in ${p.manifest}`);
@@ -834,8 +832,24 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   if (flags.dryRun) { io.out("Dry run: nothing was written."); return 0; }
   if (!(await ask(io, !!flags.yes, "Go ahead?"))) { io.out("Nothing was changed."); return 1; }
   // Starting with Windows is its own, optional yes: nothing about it is implied by the rest.
-  const canAutostart = !!runtime.engine && !!runtime.shim && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
   const wantAutostart = canAutostart && (flags.autostart === true || (flags.autostart === undefined && !flags.yes && !!io.confirm && (await io.confirm("Also start M9R when you sign in to Windows, so it is ready before your first prompt? (Uninstall turns this off.)"))));
+  let brokerAutostartInstalled = false;
+  if (wantAutostart) {
+    io.out("  - install the M9R-owned broker login task so provider processes start before the first pill message");
+    if (!io.installLocalBrokerAutostart) {
+      io.err("The packaged CLI cannot install the M9R-owned broker login task; rebuild or reinstall the packaged CLI before enabling desktop autostart.");
+      io.err("Nothing was changed.");
+      return 1;
+    }
+    const broker = await io.installLocalBrokerAutostart();
+    if (!broker.ok) {
+      io.err(`Could not install the M9R-owned broker login task: ${broker.message}`);
+      io.err("Nothing was changed.");
+      return 1;
+    }
+    brokerAutostartInstalled = true;
+    io.out(`[PASS] ${broker.message}`);
+  }
 
   mkdirSync(p.backups, { recursive: true });
   const manifest: Manifest = manifestBefore ?? { version: 1, installedAt: new Date().toISOString(), entries: [] };
@@ -892,6 +906,7 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
     manifest.autostart = autostartOf(io).enable(command);
     io.out(manifest.autostart ? "M9R will start when you sign in to Windows." : "Could not turn on starting with Windows; M9R still starts itself when an agent first needs it.");
   }
+  if (brokerAutostartInstalled) manifest.brokerAutostart = true;
   const verifiedInstalledIdentity = existsSync(installedEngine) ? readRuntimeBuildIdentity(installedEngine) : null;
   const verifiedActiveRuntime = verifiedInstalledIdentity ? activeRuntimeFromIdentity(io, runtime.targetDir, verifiedInstalledIdentity) : null;
   if (verifiedActiveRuntime) {
@@ -941,6 +956,19 @@ export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?:
   for (const e of manifest.entries) io.out(`  - ${e.existedBefore ? "restore or clean" : "remove"} ${e.path}`);
   if (flags.purge) io.out(`  - delete the local M9R data in ${p.m9r}`);
   if (!(await ask(io, !!flags.yes, "Go ahead?"))) { io.out("Nothing was changed."); return 1; }
+
+  if (manifest.brokerAutostart) {
+    if (!io.removeLocalBrokerAutostart) {
+      io.err("This install owns an M9R broker login task, but this CLI cannot safely remove it. Reinstall the packaged CLI before uninstalling.");
+      return 1;
+    }
+    const broker = await io.removeLocalBrokerAutostart();
+    if (!broker.ok) {
+      io.err(`Could not remove the M9R-owned broker login task: ${broker.message}`);
+      return 1;
+    }
+    io.out(`[PASS] ${broker.message}`);
+  }
 
   for (const e of manifest.entries) {
     const current = readText(e.path);
@@ -1024,19 +1052,50 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
   if (created && canQueue(task)) {
     store.setDelivery(task.id, { state: "deferred", ...(input.session ? { threadId: input.session } : {}) });
   }
+  const ownerTask = created && task.origin === "human_typed" && task.from === "you";
+  const ownerPipe = ownerTask ? ownerPipePath(nativePaths(io).m9r) : undefined;
+  // `existsSync` does not reliably report a Windows named pipe. Probe the
+  // authenticated owner-only read route when the path is not visible, but
+  // keep the probe short so a standalone CLI remains responsive without a
+  // running M9R broker.
+  const ownerPipeReady = ownerPipe
+    ? process.platform !== "win32" && existsSync(ownerPipe)
+      || (await requestOwnerPipe(ownerPipe, { method: "GET", path: "/web/aware/members" }, 250)) !== null
+    : false;
   // The owner-launched broker owns the Cua surface.  Ask it to show the
   // recipient's logical cursor immediately after a human task is accepted;
   // this is fire-and-forget so task delivery never waits on a visual overlay.
   // The owner-pipe endpoint accepts only owner-originated human tasks and
   // performs no desktop focus or physical-pointer operation.
   if (created && task.origin === "human_typed" && task.from === "you") {
-    const pipe = ownerPipePath(nativePaths(io).m9r);
     // `existsSync` is a cheap no-op for the normal CLI/test path when the
     // broker is not running; do not leave a five-second named-pipe probe
     // behind every standalone send.
-    if (existsSync(pipe)) void requestOwnerPipe(pipe, {
+    if (ownerPipeReady && ownerPipe) void requestOwnerPipe(ownerPipe, {
       method: "POST", path: "/web/stage/prime-cursor-owner", body: { taskId: task.id },
     }, 5_000);
+  }
+  // Once the M9R owner broker is running, an owner task must enter the
+  // managed provider connection directly. Do not let the compatibility pump
+  // or a provider inbox become the normal path again: that is the old
+  // provider-owned STDIO model this cutover replaces. An explicit --session
+  // remains a compatibility escape hatch for an already provider-owned
+  // session; normal owner sends intentionally have no session selector.
+  if (ownerTask && !input.session && ownerPipeReady && ownerPipe) {
+    const result = await requestOwnerPipe<{ ok?: unknown; sessionId?: unknown; error?: unknown }>(ownerPipe, {
+      method: "POST", path: "/web/provider-delivery", body: { taskId: task.id },
+    }, 70_000);
+    if (!result) {
+      io.err(`M9R owner delivery did not answer for task ${task.id}; the task was not sent through a provider inbox fallback.`);
+      return 1;
+    }
+    if (result.ok !== true) {
+      const reason = typeof result.error === "string" && result.error.trim() ? result.error : "the managed provider owner rejected delivery";
+      io.err(`M9R owner delivery rejected task ${task.id}: ${reason}`);
+      return 1;
+    }
+    io.out(`Sent to @${task.to} as task ${task.id}; M9R owner accepted it on the managed provider connection.`);
+    return 0;
   }
   if (task.to === "codex" && created && canQueue(task)) {
     const outcome = await deliverToCodex(store, task.id, io.codexDeps ?? realDeps(io.env));
@@ -1069,7 +1128,9 @@ async function runDesktopPillOwnerRequest(io: NativeIo, path: string, body: Reco
 export function runPillSend(io: NativeIo, text: string): Promise<number> {
   const message = text.trim();
   if (!message) { io.err("The desktop pill message is empty."); return Promise.resolve(1); }
-  return runDesktopPillOwnerRequest(io, "/web/ui/command", { text: message, context: {} }, "message");
+  // Keep retries idempotent at the owner boundary. The id is transport-only;
+  // it is never rendered, added to an M9R task, or sent to the provider.
+  return runDesktopPillOwnerRequest(io, "/web/ui/command", { text: message, context: {}, requestId: randomUUID() }, "message");
 }
 
 export function runPillDecision(io: NativeIo, approvalId: string, decision: string): Promise<number> {

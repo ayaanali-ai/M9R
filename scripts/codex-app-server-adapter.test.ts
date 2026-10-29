@@ -185,10 +185,16 @@ test("resumeSession reopens the same thread id", async () => {
   } finally { await stop(); }
 });
 
-test("codexAppServerCommand honors CODEX_PATH, then the Windows npm shim, then the bare name", () => {
+test("codexAppServerCommand preserves overrides and prefers native argv over the Windows npm shim", () => {
   assert.deepEqual(codexAppServerCommand({ CODEX_PATH: "C:/x/codex.cmd" }, "win32", () => false), { command: "C:/x/codex.cmd", shell: true });
   assert.deepEqual(codexAppServerCommand({ CODEX_PATH: "/opt/codex" }, "linux", () => false), { command: "/opt/codex", shell: false });
-  assert.deepEqual(codexAppServerCommand({ APPDATA: "C:/Users/t/AppData/Roaming" }, "win32", () => true), { command: resolve("C:/Users/t/AppData/Roaming", "npm", "codex.cmd"), shell: true });
+  const roaming = "C:/Users/t/AppData/Roaming";
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  const target = arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc";
+  const native = resolve(roaming, "npm", "node_modules", "@openai", "codex", "node_modules", "@openai", `codex-win32-${arch}`, "vendor", target, "bin", "codex.exe");
+  assert.deepEqual(codexAppServerCommand({ APPDATA: roaming }, "win32", path => path === native), { command: native, shell: false });
+  const shim = resolve(roaming, "npm", "codex.cmd");
+  assert.deepEqual(codexAppServerCommand({ APPDATA: roaming }, "win32", path => path === shim), { command: shim, shell: true });
   assert.deepEqual(codexAppServerCommand({}, "win32", () => false), { command: "codex", shell: true });
   assert.deepEqual(codexAppServerCommand({}, "linux", () => false), { command: "codex", shell: false });
 });

@@ -42,31 +42,10 @@ function runPowerShell(script, args = [], { input, env = process.env } = {}) {
 }
 
 function createPackage(directory) {
-  const stage = join(directory, "package");
-  mkdirSync(stage);
-  for (const file of ["m9r-engine.exe", "m9r-hook.exe", "m9r-native-input-host.exe", "m9r-web-broker.exe"]) {
-    cpSync(join(engineDist, file), join(stage, file));
-  }
-  cpSync(join(engineDist, "m9r-overlay.exe"), join(stage, "m9r-overlay.exe"));
-  cpSync(join(engineDist, "m9r-build-info.json"), join(stage, "m9r-build-info.json"));
-  cpSync(installer, join(stage, "install-m9r.ps1"));
-  cpSync(resolve("scripts/install-m9r.cmd"), join(stage, "install-m9r.cmd"));
-  writeFileSync(join(stage, "INSTALLATION.txt"), "M9R Windows standalone installer test package\n");
+  const packaged = runPowerShell(releasePackager, [directory]);
+  assert.equal(packaged.status, 0, packaged.stderr || packaged.stdout);
   const zipPath = join(directory, "m9r-engine-windows-x64.zip");
-  const zipScript = [
-    "Add-Type -AssemblyName System.IO.Compression.FileSystem",
-    `$stage = '${stage.replaceAll("'", "''")}'`,
-    `$zip = '${zipPath.replaceAll("'", "''")}'`,
-    "[IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Fastest, $false)",
-  ].join("\n");
-  const zipResult = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-EncodedCommand", Buffer.from(zipScript, "utf16le").toString("base64")], {
-    encoding: "utf8",
-    timeout: 180_000,
-  });
-  if (zipResult.error) throw zipResult.error;
-  assert.equal(zipResult.status, 0, zipResult.stderr || zipResult.stdout);
-  const digest = createHash("sha256").update(readFileSync(zipPath)).digest("hex");
-  writeFileSync(`${zipPath}.sha256`, `${digest}  m9r-engine-windows-x64.zip\n`);
+  assert.ok(existsSync(zipPath), "the accepted release packager must create the complete test package");
   return zipPath;
 }
 
@@ -182,7 +161,9 @@ test("runtime updates replace a Windows-locked engine image without stopping act
   assert.match(nativeSource, /function replaceRuntimeFile\([\s\S]*?renameSync\(staged, to\)/);
   assert.match(nativeSource, /m9r-retired-/);
   assert.match(nativeSource, /manifest\.runtimeFiles = \[\.\.\.new Set\(\[\.\.\.\(manifest\.runtimeFiles \?\? \[\]\)/);
-  assert.match(nativeSource, /pruneRetiredRuntimeFile\(file\.to\)/);
+  assert.match(nativeSource, /function ownedRetiredRuntimeEntries\([\s\S]*?manifest\?\.runtimeFiles/);
+  assert.match(nativeSource, /function pruneOwnedRetiredRuntimeFiles\(manifest(?:: [^,]+)?,\s*candidates(?:: [^)]+)?\)/);
+  assert.match(nativeSource, /M9R_PRESERVE_RUNTIME_EVIDENCE === "1"/);
   assert.match(nativeSource, /filter\(\(file\) => !isRetiredRuntimePath\(file\) \|\| existsSync\(file\)\)/);
 });
 

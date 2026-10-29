@@ -136,6 +136,8 @@ export interface LiveLaunchConfig {
   cwd: string;
   profile: "web-only" | "hands";
   mcpConfigPath: string;
+  /** Exact provider entrypoint selected by the M9R owner; defaults to legacy `claude`. */
+  command?: string;
   /** Resume an earlier session by id, so a slept session wakes with its context. */
   resumeSessionId?: string;
   model?: string;
@@ -201,6 +203,8 @@ export function startLiveSession(options: {
   env?: Record<string, string | undefined>;
   allowApiKey?: boolean;
   onEvent?: (event: LiveEvent, state: LiveState) => void;
+  /** Provider diagnostics used by the owner boundary to classify startup failures. */
+  onStderr?: (text: string) => void;
   /** Called once when the provider process exits, including a spawn/runtime error. */
   onExit?: (code: number | null) => void;
   /** Marker for signed user messages. Generated if not given; read it back from `session.marker`. */
@@ -209,7 +213,7 @@ export function startLiveSession(options: {
   const blocked = liveLaunchBlock(options.env ?? {}, options.allowApiKey);
   if (blocked) throw new Error(blocked);
   const marker = options.marker ?? newInterruptMarker();
-  const child = options.spawn("claude", buildClaudeLiveArgs({ ...options.config, appendSystemPrompt: [options.config.appendSystemPrompt, interruptSystemPrompt(marker)].filter(Boolean).join("\n\n") }), options.config.cwd);
+  const child = options.spawn(options.config.command ?? "claude", buildClaudeLiveArgs({ ...options.config, appendSystemPrompt: [options.config.appendSystemPrompt, interruptSystemPrompt(marker)].filter(Boolean).join("\n\n") }), options.config.cwd);
   let state = createLiveState();
   let buffer = "";
   let exitNotified = false;
@@ -231,6 +235,7 @@ export function startLiveSession(options: {
       }
     }
   });
+  child.stderr?.on("data", (chunk) => options.onStderr?.(chunk.toString()));
   child.on("exit", ((code: number | null) => { notifyExit(code); }) as never);
   child.on("error", (() => { notifyExit(null); }) as never);
   return {

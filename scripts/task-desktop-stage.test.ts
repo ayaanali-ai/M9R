@@ -233,8 +233,9 @@ test("an owner desktop app request reuses personal Chrome without creating anoth
     assert.equal(f.desktopActions.length, 1);
     await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview");
     const next = f.store.addTask({ from: "you", to: "codex", goal: "Next app task", origin: "human_typed", targetSession: "session-one", idempotencyKey: "next-app" }).task;
-    assert.equal((await f.service.prepare(f.identity.token, next.id, "owner-preview")).hasAnchor, false);
-    await assert.rejects(f.service.act(f.identity.token, next.id, { kind: "capture", view: "app" }, "owner-preview"), /selected app/);
+    assert.equal((await f.service.prepare(f.identity.token, next.id, "owner-preview")).hasAnchor, true,
+      "a newly authorized task in the same authenticated session retains its exact selected window");
+    await f.service.act(f.identity.token, next.id, { kind: "capture", view: "app" }, "owner-preview");
     assert.equal(f.creations(), 0, "launch without an explicit background mode must not create a desktop or process");
   } finally { f.cleanup(); }
 });
@@ -302,9 +303,9 @@ test("pending and finished tasks cannot provision stages", async () => {
   const f = fixture();
   try {
     const { task: pending } = f.store.addTask({ from: "claude", to: "codex", goal: "Pending", origin: "agent_initiated", idempotencyKey: "pending" });
-    await assert.rejects(f.service.prepare(f.identity.token, pending.id), /approved, unfinished/);
+    await assert.rejects(f.service.prepare(f.identity.token, pending.id), /unfinished owner-authorized or approved/);
     f.store.setResult(f.task.id, "Done");
-    await assert.rejects(f.service.prepare(f.identity.token, f.task.id), /approved, unfinished/);
+    await assert.rejects(f.service.prepare(f.identity.token, f.task.id), /unfinished owner-authorized or approved/);
     assert.equal(f.creations(), 0);
   } finally { f.cleanup(); }
 });
@@ -404,13 +405,12 @@ test("a benign stage click never bothers the owner", async () => {
   } finally { f.cleanup(); }
 });
 
-test("an undescribed click target holds for the owner instead of guessing", async () => {
+test("an unresolved click target sends no input and requires a fresh observation", async () => {
   const f = moneyFixture(undefined, false);
   try {
     await f.service.prepare(f.identity.token, f.task.id, "background");
-    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background"), /did not approve/);
-    assert.equal(f.seen.length, 1);
-    assert.equal(f.seen[0].targetLabel, undefined);
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background"), /target could not be resolved.*No input was sent/);
+    assert.equal(f.seen.length, 0, "an unresolved target is refused before asking to approve an unknown action");
     assert.equal(f.clicks.length, 0);
   } finally { f.cleanup(); }
 });

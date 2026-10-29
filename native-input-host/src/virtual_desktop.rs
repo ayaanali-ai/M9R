@@ -2,6 +2,76 @@ use serde_json::{json, Value};
 
 const MAX_HANDLE: u64 = usize::MAX as u64;
 
+fn popup_candidate_is_owned(root: usize, window: usize, owner: usize, pid: u32, candidate_pid: u32, visible: bool) -> bool {
+    root != 0 && window != root && owner == root && pid == candidate_pid && visible
+}
+
+/// Shared pointer preservation contract. A refusal before dispatch never moves
+/// an active owner's pointer; every returned action outcome restores its snapshot.
+pub(crate) fn with_owner_pointer_restored(
+    mut read: impl FnMut() -> Result<(i32, i32), &'static str>,
+    mut restore: impl FnMut(i32, i32) -> Result<(), &'static str>,
+    action: impl FnOnce() -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    let before = read()?;
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    if read()? != before {
+        return Err("owner pointer is active; no browser input was sent");
+    }
+    let outcome = action();
+    restore(before.0, before.1)?;
+    outcome
+}
+
+/// The real system pointer position, and a way to put it back. Added for the owner-cursor-
+/// isolation fix: any action that must fall back to real SendInput now captures the owner's
+/// exact position with `getCursorPosition` immediately before, and restores it with
+/// `restoreCursorPosition` immediately after, so the owner's pointer is never left wherever the
+/// agent's action happened to leave it. Deliberately self-contained (its own minimal FFI
+/// declarations) rather than reaching into win32.rs's private click-path internals, which exist
+/// for a different, narrower purpose (the browser-native click helper) and must not be
+/// conflated with every action that can fall back to SendInput.
+#[cfg(windows)]
+pub(crate) mod owner_pointer {
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetCursorPos(point: *mut Point) -> i32;
+        fn SetCursorPos(x: i32, y: i32) -> i32;
+    }
+
+    pub fn get_cursor_position() -> Result<(i32, i32), &'static str> {
+        let mut point = Point { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut point) } == 0 {
+            return Err("could not read the owner's pointer position");
+        }
+        Ok((point.x, point.y))
+    }
+
+    pub fn restore_cursor_position(x: i32, y: i32) -> Result<(), &'static str> {
+        if unsafe { SetCursorPos(x, y) } == 0 {
+            return Err("could not restore the owner's pointer position");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) mod owner_pointer {
+    pub fn get_cursor_position() -> Result<(i32, i32), &'static str> {
+        Err("owner pointer position is available only on Windows")
+    }
+    pub fn restore_cursor_position(_x: i32, _y: i32) -> Result<(), &'static str> {
+        Err("owner pointer position is available only on Windows")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DesktopInfo {
     desktop_id: Guid,
@@ -182,6 +252,26 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             }
         },
         #[cfg(windows)]
+        Some("inspectDesktopStructure") => match crate::shell_accessibility::desktop_structure(value) {
+            Ok(structure) => json!({"ok":true,"requestId":request_id,"desktopStructure":structure}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("windowStatus") => match platform::window_status(value) {
+            Ok(state) => json!({"ok":true,"requestId":request_id,"windowState":state}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("setWindowState") => match platform::set_window_state(value) {
+            Ok(state) => json!({"ok":true,"requestId":request_id,"state":state}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("listOwnedPopups") => match platform::list_owned_popups(value) {
+            Ok(windows) => json!({"ok":true,"requestId":request_id,"windows":windows}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
         Some("windowAtPoint") => match platform::window_at_point(value) {
             Ok((pid, hwnd, shell, keyboard_window, origin_x, origin_y)) => json!({"ok":true,"requestId":request_id,"pointWindow":{"pid":pid,"windowId":hwnd.to_string(),"shell":shell,"keyboardWindow":keyboard_window,"screenOrigin":{"x":origin_x,"y":origin_y}}}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
@@ -217,6 +307,25 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
                     json!({ "ok": true, "requestId": request_id, "desktop": desktop_to_json(desktop) })
                 }
                 Err(error) => json!({ "ok": false, "requestId": request_id, "error": error }),
+            }
+        }
+        Some("getCursorPosition") => match owner_pointer::get_cursor_position() {
+            Ok((x, y)) => json!({ "ok": true, "requestId": request_id, "position": { "x": x, "y": y } }),
+            Err(error) => json!({ "ok": false, "requestId": request_id, "error": error }),
+        },
+        Some("restoreCursorPosition") => {
+            let point = value
+                .get("x")
+                .and_then(Value::as_i64)
+                .zip(value.get("y").and_then(Value::as_i64));
+            match point {
+                Some((x, y)) if (i32::MIN as i64..=i32::MAX as i64).contains(&x) && (i32::MIN as i64..=i32::MAX as i64).contains(&y) => {
+                    match owner_pointer::restore_cursor_position(x as i32, y as i32) {
+                        Ok(()) => json!({ "ok": true, "requestId": request_id }),
+                        Err(error) => json!({ "ok": false, "requestId": request_id, "error": error }),
+                    }
+                }
+                _ => json!({ "ok": false, "requestId": request_id, "error": "invalid cursor restore coordinates" }),
             }
         }
         _ => {
@@ -504,6 +613,7 @@ mod platform {
         fn ShowWindow(window: Hwnd, command: i32) -> i32;
         fn ShowWindowAsync(window: Hwnd, command: i32) -> i32;
         fn IsIconic(window: Hwnd) -> i32;
+        fn IsZoomed(window: Hwnd) -> i32;
         fn IsWindowVisible(window: Hwnd) -> i32;
         fn SetWindowPos(window: Hwnd, after: Hwnd, x: i32, y: i32, width: i32, height: i32, flags: u32) -> i32;
         fn FlashWindowEx(info: *const FlashWindowInfo) -> i32;
@@ -533,6 +643,62 @@ mod platform {
     struct Point {
         x: i32,
         y: i32,
+    }
+
+    pub(super) fn list_owned_popups(value: &serde_json::Value) -> Result<Vec<serde_json::Value>, &'static str> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let root = validate_window(pid, handle)?;
+        struct Search { root: Hwnd, pid: u32, windows: Vec<serde_json::Value> }
+        unsafe extern "system" fn visit(window: Hwnd, parameter: isize) -> i32 {
+            let search = &mut *(parameter as *mut Search);
+            let mut pid = 0;
+            GetWindowThreadProcessId(window, &mut pid);
+            if !super::popup_candidate_is_owned(search.root as usize, window as usize,
+                GetAncestor(window, 3) as usize, search.pid, pid, IsWindowVisible(window) != 0) { return 1; }
+            let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+            if GetWindowRect(window, &mut rect) == 0 { return 1; }
+            let width = rect.right - rect.left; let height = rect.bottom - rect.top;
+            if width <= 0 || height <= 0 { return 1; }
+            search.windows.push(serde_json::json!({"pid":pid,"windowId":(window as usize).to_string(),"title":"Owned popup","width":width,"height":height}));
+            if search.windows.len() >= 8 { 0 } else { 1 }
+        }
+        let mut search = Search { root, pid, windows: Vec::new() };
+        let ok = unsafe { EnumWindows(visit, &mut search as *mut Search as isize) };
+        if ok == 0 && search.windows.len() < 8 { return Err("owned popup enumeration failed"); }
+        Ok(search.windows)
+    }
+
+    pub(super) fn set_window_state(value: &serde_json::Value) -> Result<&'static str, &'static str> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        let (command, state) = match value["state"].as_str() {
+            Some("minimized") => (6, "minimized"), Some("maximized") => (3, "maximized"),
+            Some("restored") => (9, "restored"), _ => return Err("invalid window state"),
+        };
+        unsafe { ShowWindow(window, command); }
+        let verified = match state {
+            "minimized" => unsafe { IsIconic(window) != 0 },
+            "maximized" => unsafe { IsZoomed(window) != 0 },
+            _ => unsafe { IsIconic(window) == 0 && IsZoomed(window) == 0 },
+        };
+        if !verified { return Err("requested window state was not verified"); }
+        Ok(state)
+    }
+
+    pub(super) fn window_status(value: &serde_json::Value) -> Result<&'static str, &'static str> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = handle as Hwnd;
+        if unsafe { IsWindow(window) } == 0 { return Ok("closed"); }
+        let window = validate_window(pid, handle)?;
+        if unsafe { IsIconic(window) } != 0 { return Ok("minimized"); }
+        let info = inspect_window(pid, handle)?;
+        if !info.on_current_desktop { return Ok("moved"); }
+        if unsafe { IsWindowVisible(window) } == 0 { return Ok("hidden"); }
+        let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { GetWindowRect(window, &mut rect) } == 0 { return Err("could not read window bounds"); }
+        let center = Point { x: rect.left + (rect.right - rect.left) / 2, y: rect.top + (rect.bottom - rect.top) / 2 };
+        let top = unsafe { GetAncestor(WindowFromPoint(center), 2) };
+        Ok(if top != window { "occluded" } else { "visible" })
     }
 
     pub(super) fn window_at_point(value: &serde_json::Value) -> Result<(u32, usize, bool, bool, i32, i32), &'static str> {
@@ -1331,6 +1497,14 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn popup_scope_requires_exact_root_owner_pid_and_visibility() {
+        assert!(super::popup_candidate_is_owned(1, 2, 1, 100, 100, true));
+        assert!(!super::popup_candidate_is_owned(1, 1, 1, 100, 100, true));
+        assert!(!super::popup_candidate_is_owned(1, 2, 3, 100, 100, true));
+        assert!(!super::popup_candidate_is_owned(1, 2, 1, 100, 200, true));
+        assert!(!super::popup_candidate_is_owned(1, 2, 1, 100, 100, false));
+    }
     use super::{handle_desktop_stage_request, supports_internal_desktop_api, Guid};
     use serde_json::json;
 
@@ -1379,6 +1553,47 @@ mod tests {
             handle_desktop_stage_request(&json!({ "op":"createDesktop" }))["error"],
             "Windows virtual desktop control is available only on Windows"
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn owner_cursor_position_round_trips_through_get_and_restore() {
+        // Real system-call round trip, not a mock: read the owner's actual current pointer
+        // position, ask to restore it to a nearby point, confirm getCursorPosition reports that
+        // exact point, then restore it back to where it started so the test leaves no trace.
+        let original = handle_desktop_stage_request(&json!({ "op": "getCursorPosition" }));
+        assert_eq!(original["ok"], true);
+        let original_x = original["position"]["x"].as_i64().unwrap();
+        let original_y = original["position"]["y"].as_i64().unwrap();
+
+        let moved = handle_desktop_stage_request(
+            &json!({ "op": "restoreCursorPosition", "x": original_x + 3, "y": original_y + 3 }),
+        );
+        assert_eq!(moved["ok"], true);
+
+        let after = handle_desktop_stage_request(&json!({ "op": "getCursorPosition" }));
+        assert_eq!(after["position"]["x"], original_x + 3);
+        assert_eq!(after["position"]["y"], original_y + 3);
+
+        let restored = handle_desktop_stage_request(
+            &json!({ "op": "restoreCursorPosition", "x": original_x, "y": original_y }),
+        );
+        assert_eq!(restored["ok"], true);
+    }
+
+    #[test]
+    fn restore_cursor_position_refuses_missing_or_out_of_range_coordinates() {
+        for request in [
+            json!({ "op": "restoreCursorPosition" }),
+            json!({ "op": "restoreCursorPosition", "x": 10 }),
+            json!({ "op": "restoreCursorPosition", "x": 10, "y": "not a number" }),
+            json!({ "op": "restoreCursorPosition", "x": (i32::MAX as i64) + 1, "y": 10 }),
+        ] {
+            assert_eq!(
+                handle_desktop_stage_request(&request)["error"],
+                "invalid cursor restore coordinates"
+            );
+        }
     }
 
     #[test]

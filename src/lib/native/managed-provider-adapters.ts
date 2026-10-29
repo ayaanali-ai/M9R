@@ -80,6 +80,15 @@ function boundedWorkerDiagnostic(value: string): string {
     : clean;
 }
 
+function isMissingClaudeContinuationError(stderr: string): boolean {
+  return /(?:no conversation found|conversation.*(?:not found|does not exist)|session.*(?:not found|does not exist)|could not find.*(?:conversation|session)|unknown session)/i.test(stderr);
+}
+
+function providerDiagnostic(text: string): string {
+  const compact = text.trim().replace(/\s+/g, " ");
+  return compact ? `: ${compact.slice(-1_024)}` : "";
+}
+
 function publicSnapshot(input: {
   profile: ManagedProviderConnectionProfile;
   status: ManagedProviderStatus;
@@ -254,6 +263,8 @@ abstract class ManagedProviderConnectionBase implements ManagedProviderConnectio
 export interface ClaudeManagedProviderConnectionOptions {
   profile: ManagedProviderConnectionProfile;
   mcpConfigPath: string;
+  command?: string;
+  diagnostic?: (kind: "stderr" | "exit", details?: { text?: string; exitCode?: number | null }) => void;
   environment?: Record<string, string | undefined>;
   allowApiKey?: boolean;
   profileMode?: "web-only" | "hands";
@@ -303,7 +314,7 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
     let resolveReady!: (ready: ManagedProviderReady) => void;
     let rejectReady!: (error: Error) => void;
     let settled = false;
-    let handshakeSeen = false;
+    let readyEstablished = false;
     const fail = (error: unknown): void => {
       if (settled) return;
       settled = true;
@@ -315,13 +326,18 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
       rejectReady = reject;
     });
     this.startup = promise;
-    try {
-      this.live = startLiveSession({
+    let attemptResumeId = expectedResumeId;
+    let stderrTail = "";
+    let freshFallbackUsed = false;
+    const launch = (): void => {
+      stderrTail = "";
+      const live = startLiveSession({
         config: {
           cwd: this.profile.cwd,
           profile: this.options.profileMode ?? "web-only",
           mcpConfigPath: this.options.mcpConfigPath,
-          resumeSessionId: expectedResumeId,
+          command: this.options.command,
+          resumeSessionId: attemptResumeId,
           model: this.options.model ?? this.profile.model,
           effort: this.options.effort ?? this.profile.effort,
           allowedTools: this.options.allowedTools,
@@ -330,11 +346,16 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
         spawn: this.options.spawn ?? defaultClaudeSpawn,
         env: this.options.environment,
         allowApiKey: this.options.allowApiKey,
+        onStderr: (text) => {
+          const clean = redactSecrets(text);
+          stderrTail = `${stderrTail}${clean}`.slice(-4_096);
+          this.options.diagnostic?.("stderr", { text: clean });
+        },
         onEvent: (event: LiveEvent) => {
           if (generation !== this.generationValue || this.stopping) return;
           if (event.kind === "init") {
-            handshakeSeen = true;
-            if (expectedResumeId && event.sessionId !== expectedResumeId) {
+            readyEstablished = true;
+            if (attemptResumeId && event.sessionId !== attemptResumeId) {
               const error = new Error("Claude resumed a different provider conversation");
               this.live?.stop();
               fail(error);
@@ -350,6 +371,26 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
           if (event.kind === "tool") this.queue?.push({ kind: "tool", name: event.name, summary: event.summary });
           else if (event.kind === "text") this.queue?.push({ kind: "text", text: event.text });
           else if (event.kind === "result") {
+            // Claude's stream-json process initializes on the first user
+            // message. An eager M9R-owned process is therefore live before
+            // its init event; only an error before the first task is a startup
+            // failure.
+            if (!readyEstablished && !this.activeTaskId && event.isError) {
+              const detail = event.text.trim() || stderrTail.trim() || "Claude reported a startup failure";
+              // Some CLI versions report a missing resumed conversation as a
+              // result rather than stderr. Let the same bounded exit recovery
+              // classify it; no user task has been dispatched at this point.
+              if (attemptResumeId && !freshFallbackUsed && isMissingClaudeContinuationError(detail)) {
+                stderrTail = `${stderrTail}\n${redactSecrets(detail)}`.slice(-4_096);
+                this.live?.stop();
+                return;
+              }
+              const error = new Error(`Claude startup failed: ${detail.slice(0, 1_024)}`);
+              if (!settled) fail(error);
+              else this.fail(error.message);
+              this.live?.stop();
+              return;
+            }
             if (event.sessionId) this.providerSessionRef = event.sessionId;
             this.queue?.push({ kind: "result", text: event.text, isError: event.isError });
             this.finishTask();
@@ -361,30 +402,54 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
         },
         onExit: (code) => {
           if (generation !== this.generationValue) return;
+          this.options.diagnostic?.("exit", { exitCode: code });
           this.live = undefined;
-          if (!settled) fail(new Error(`Claude exited before readiness (exit ${code ?? "unknown"})`));
-          else if (!handshakeSeen && !this.activeTaskId) this.fail(`Claude exited before its initialization handshake (exit ${code ?? "unknown"})`);
+          const missingContinuation = Boolean(
+            attemptResumeId
+            && !readyEstablished
+            && !freshFallbackUsed
+            && isMissingClaudeContinuationError(stderrTail),
+          );
+          if (missingContinuation && !this.stopping && !this.draining) {
+            // Claude owns its conversation store. If that store no longer has
+            // the persisted conversation, replace only that stale continuation
+            // once; the fresh init event becomes the new durable reference.
+            freshFallbackUsed = true;
+            attemptResumeId = undefined;
+            this.providerSessionRef = undefined;
+            queueMicrotask(() => {
+              if (generation !== this.generationValue || readyEstablished || this.activeTaskId || this.stopping || this.draining) return;
+              try { launch(); } catch (error) { fail(error); }
+            });
+            return;
+          }
+          if (!readyEstablished && !this.activeTaskId) {
+            fail(new Error(`Claude exited before readiness (exit ${code ?? "unknown"})${providerDiagnostic(stderrTail)}`));
+          }
           if (this.activeTaskId) {
             this.queue?.push({ kind: "error", error: `Claude exited with code ${code ?? "unknown"}`, retryable: true });
             this.finishTask();
             this.queue?.end();
           }
-          if (!this.stopping && !this.draining) this.fail(`Claude exited with code ${code ?? "unknown"}`);
+          if (readyEstablished && !this.stopping && !this.draining) this.fail(`Claude exited with code ${code ?? "unknown"}`);
         },
       });
-      // Claude Code's stream-json CLI can keep the process open without
-      // emitting its `system/init` line until it receives the first user
-      // message. The owner broker must be able to send that first task; if we
-      // wait for init during eager startup, the provider remains "Starting"
-      // forever and the first task can never reach stdin. Resume requests are
-      // different: they must still wait for and verify the requested session.
-      if (!expectedResumeId && !settled) {
-        settled = true;
-        resolveReady(this.ready());
+      this.live = live;
+      if (live.state().status === "exited") {
+        fail(new Error(`Claude exited before readiness${providerDiagnostic(stderrTail)}`));
+        return;
       }
-    } catch (error) {
-      fail(error);
-    }
+      // The stream-json protocol does not emit `system/init` until the first
+      // real user turn. Resolve the owner startup at the process boundary so
+      // eager boot can launch Claude without deadlocking every connection for
+      // a fake initialization timeout. The first task supplies the turn that
+      // completes provider initialization and authentication.
+      if (!attemptResumeId && !settled) {
+        settled = true;
+        resolveReady(this.ready("Ready (Claude managed process; first turn initializes provider)"));
+      }
+    };
+    try { launch(); } catch (error) { fail(error); }
     try {
       return await promise;
     } finally {

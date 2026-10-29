@@ -11,6 +11,48 @@ const desktopId = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
 const windowId = "9223372036854775807";
 const imageData = Buffer.from("stage-window-image").toString("base64");
 
+test("raw observed refs survive token-prefix rotation but refuse changed controls", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{method: string; value?: unknown}> = [];
+  const element = { elementIndex: BigInt(0), elementToken: "walk1:0", role: "Button", depth: 1, label: "Search", enabled: true,
+    actions: ["invoke"], frame: { x: 120, y: 70, w: 40, h: 20 } };
+  const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 }, elements: [element], images: [{mimeType:"image/png", dataBase64:imageData}] };
+  const driver = createCuaStageDriver({stage:stageDependencies(root),loadSdk:async()=>makeSdk({calls,state}) as never});
+  const snapshot = await driver.readStructure("stage");
+  element.elementToken = "walk2:0";
+  assert.equal((await driver.describeElementTarget("stage", snapshot.elements[0]!.ref, {}))?.label, "Search");
+  element.label = "Pay now";
+  assert.equal(await driver.describeElementTarget("stage", snapshot.elements[0]!.ref, {}), undefined);
+  element.label = "Search"; element.frame.x += 100;
+  assert.equal(await driver.describeElementTarget("stage", snapshot.elements[0]!.ref, {}), undefined);
+  assert.equal(calls.some(call=>call.method==="callTool"),false,"resolution does not dispatch input");
+  await driver.shutdown();
+}));
+
+test("background refusal cannot silently take over the physical pointer", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{method:string;value?:unknown}> = [];
+  const driver=createCuaStageDriver({stage:stageDependencies(root),loadSdk:async()=>makeSdk({calls,
+    callToolResult:{isError:true,errorCode:"background_unavailable",text:"background input is unavailable"}}) as never});
+  await assert.rejects(driver.click("stage",42,24),/owner's pointer was not used/);
+  const inputs=calls.filter(call=>call.method==="callTool").map(call=>call.value as {name:string;args:{delivery_mode?:string}});
+  assert.equal(inputs.length,1);
+  assert.equal(inputs[0]!.args.delivery_mode,"background");
+  assert.equal(inputs.some(input=>input.name==="bring_to_front"||input.args.delivery_mode==="foreground"),false);
+  await driver.shutdown();
+}));
+
+test("explicit foreground input refuses before dispatch when pointer preservation is unavailable", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls:Array<{method:string;value?:unknown}>=[];
+  const driver=createCuaStageDriver({stage:stageDependencies(root),loadSdk:async()=>makeSdk({calls}) as never,
+    ownerPointer:{get:async()=>{throw Error("native pointer operation missing")},restore:async()=>{throw Error("must not restore")}}});
+  await assert.rejects(driver.click("stage",42,24,undefined,{confirmFocusForeground:true}),/pointer position could not be preserved/);
+  assert.equal(calls.some(call=>call.method==="callTool"),false);
+  await driver.shutdown();
+}));
+
 function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   let connected: Awaited<ReturnType<NonNullable<CuaStageDriverDependencies["connectRuntime"]>>>;
   return createCuaStageDriverCore({

@@ -862,6 +862,9 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   let cursorSlotQueue: Promise<void> = Promise.resolve();
   const desktopCaptures = new Map<string, CachedDesktopCapture>();
   const desktopInputTargets = new Map<string, DesktopInputTarget>();
+  // Keep the semantics from the observation that issued each raw UIA ref.
+  // Native token prefixes rotate on every walk, including the money-gate read.
+  const observedElements = new Map<string, Map<string, CuaWindowElement>>();
   let agentRuntimePromise: Promise<CuaRuntime> | undefined;
 
   function emitTiming(event: CuaStageTimingEvent): void {
@@ -1213,13 +1216,12 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       throw new DesktopInputNotDispatchedError("The foreground action is missing the exact target window identity; no input was sent.", "target-identity");
     }
     const saved = await ownerPointer.get().catch(() => undefined);
+    if (!saved) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be preserved; no foreground input was sent.", "foreground-lease");
     if (saved) {
       await delay(OWNER_ACTIVITY_CHECK_MS);
       const after = await ownerPointer.get().catch(() => undefined);
       if (after && (Math.abs(after.x - saved.x) > OWNER_ACTIVITY_THRESHOLD_PX || Math.abs(after.y - saved.y) > OWNER_ACTIVITY_THRESHOLD_PX)) {
-        // The owner is actively moving the real pointer right now. Wait once for a natural
-        // gap rather than holding indefinitely -- the task must still make progress.
-        await delay(OWNER_ACTIVITY_CHECK_MS);
+        throw new DesktopInputNotDispatchedError("The owner is actively using the pointer; no foreground input was sent.", "foreground-lease");
       }
     }
     // `delivery_mode: foreground` selects SendInput in the native driver, but
@@ -1281,7 +1283,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     }
   }
 
-  return runForeground();
+  throw new DesktopInputNotDispatchedError("Background input is unavailable for the selected window. The owner's pointer was not used; foreground input requires an explicit foreground action.", "background-unavailable");
 }
 
   async function deliverTextToExactWindow(input: {
@@ -1511,6 +1513,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     const sdk = runtime.sdk;
     const driver = runtime.driver;
     const session = persistent?.session.session ?? safeSessionName(stage.name);
+    const observationKey = `${stage.name}\0${session}\0${pid}\0${windowId}`;
     let started = false;
     try {
       if (!persistent) {
@@ -1629,6 +1632,16 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         }
         const fallback = { ...imageFromWindowState(state, pid, windowId), ...await captureOwnedPopups() };
         const byIndex = new Map((state.elements ?? []).map((element) => [element.elementIndex.toString(), element]));
+        const observed = new Map<string, CuaWindowElement>();
+        for (const element of state.elements ?? []) {
+          if (element.elementToken) observed.set(element.elementToken, {
+            ...element, ...(element.frame ? { frame: { ...element.frame } } : {}),
+            ...(element.actions ? { actions: [...element.actions] } : {}),
+          });
+        }
+        observedElements.delete(observationKey);
+        observedElements.set(observationKey, observed);
+        while (observedElements.size > 64) observedElements.delete(observedElements.keys().next().value!);
         const elements = (state.elements ?? []).flatMap((element) => {
           if (!element.elementToken) return [];
           const actions = Array.isArray(element.actions)
@@ -1675,6 +1688,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
               || element.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name)) === true);
       };
       const elementByToken = async (token: string, expected?: { role?: string; label?: string }) => {
+        const observed = observedElements.get(observationKey)?.get(token);
+        if (observed && ((expected?.role !== undefined && observed.role !== expected.role)
+          || (expected?.label !== undefined && observed.label?.replace(/[\r\n\t]+/g, " ").slice(0, 160) !== expected.label))) return undefined;
+        const identity = observed ? { role: observed.role, label: observed.label } : expected;
         const state = await driver.getWindowState({ pid, windowId, session, includeAccessibilityTree: true,
           includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, maxElements: 512, maxDepth: 24, timeoutMs: 1_500 });
         const image = imageFromWindowState(state, pid, windowId);
@@ -1704,10 +1721,11 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           const suffix = token.includes(":") ? token.slice(token.lastIndexOf(":")) : undefined;
           if (suffix) {
             const suffixMatches = candidates.filter((candidate) => candidate.elementToken?.endsWith(suffix));
-            if (expected?.role !== undefined || expected?.label !== undefined) {
+            if (identity?.role !== undefined || identity?.label !== undefined) {
               element = suffixMatches.find((candidate) =>
-                (expected.role === undefined || candidate.role === expected.role)
-                && (expected.label === undefined || candidate.label === expected.label));
+                (identity.role === undefined || candidate.role === identity.role)
+                && (identity.label === undefined || candidate.label === identity.label)
+                && (!observed || JSON.stringify(candidate.frame) === JSON.stringify(observed.frame)));
             }
           }
         }

@@ -230,7 +230,7 @@ function quoteWindowsShellArg(value: string): string {
   return quoted;
 }
 
-/** The Windows npm shim needs a shell; everywhere else the plain binary name works. An explicit CODEX_PATH always wins. */
+/** Prefer npm's native binary: cmd -> npm -> native double-quoting loses structured -c overrides. */
 export function codexAppServerCommand(
   env: Readonly<Record<string, string | undefined>> = process.env,
   platform: NodeJS.Platform = process.platform,
@@ -240,6 +240,18 @@ export function codexAppServerCommand(
   if (explicit) return { command: explicit, shell: platform === "win32" && /\.(cmd|bat)$/i.test(explicit) };
   if (platform === "win32") {
     const appData = env.APPDATA?.trim();
+    if (appData) {
+      const arch = process.arch === "arm64" ? "arm64" : "x64";
+      const target = arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc";
+      for (const packageRoot of [
+        resolve(appData, "npm", "node_modules", "@openai", "codex", "node_modules", "@openai", `codex-win32-${arch}`),
+        resolve(appData, "npm", "node_modules", "@openai", `codex-win32-${arch}`),
+        resolve(appData, "npm", "node_modules", "@openai", "codex"),
+      ]) {
+        const native = resolve(packageRoot, "vendor", target, "bin", "codex.exe");
+        if (pathExists(native)) return { command: native, shell: false };
+      }
+    }
     const shim = appData ? resolve(appData, "npm", "codex.cmd") : null;
     if (shim && pathExists(shim)) return { command: shim, shell: true };
     return { command: "codex", shell: true };

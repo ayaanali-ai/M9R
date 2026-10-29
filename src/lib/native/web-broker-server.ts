@@ -528,11 +528,12 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       const keys = Object.keys(body);
       let message: unknown;
       if (request.path === "/web/ui/command") {
-        if (keys.some((key) => !["text", "context"].includes(key)) || typeof body.text !== "string" || !body.text.trim() || body.text.length > 4_000
+        if (keys.some((key) => !["text", "context", "requestId"].includes(key)) || typeof body.text !== "string" || !body.text.trim() || body.text.length > 4_000
+          || (body.requestId !== undefined && (typeof body.requestId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(body.requestId)))
           || (body.context !== undefined && (typeof body.context !== "object" || body.context === null || Array.isArray(body.context)))) {
           return ownerReply(false, { error: "desktop pill command is invalid" });
         }
-        message = { type: "ui-command", text: body.text, context: body.context ?? {} };
+        message = { type: "ui-command", text: body.text, context: body.context ?? {}, ...(body.requestId ? { requestId: body.requestId } : {}) };
       } else if (request.path === "/web/ui/approve" || request.path === "/web/ui/deny") {
         if (keys.length !== 1 || typeof body.id !== "string" || !body.id || body.id.length > 128) return ownerReply(false, { error: "desktop pill approval ID is invalid" });
         message = { type: request.path.endsWith("/approve") ? "ui-approve" : "ui-deny", id: body.id };

@@ -11,6 +11,32 @@ import test from "node:test";
 
 const exe = join(process.cwd(), "engine", "dist", process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
 
+test("the configured native hook serves MCP beyond the short per-event hook timeout", { skip: !existsSync(exe) ? "engine runtime was not built" : false }, async () => {
+  const shim = join(process.cwd(), "engine", "dist", process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native");
+  assert.ok(existsSync(shim), "the engine package must include its configured MCP launcher");
+  const child = spawn(shim, ["mcp"], { stdio: ["pipe", "pipe", "pipe"] });
+  let output = "";
+  let stderr = "";
+  child.stdout.on("data", chunk => { output += chunk.toString(); });
+  child.stderr.on("data", chunk => { stderr += chunk.toString(); });
+  try {
+    const send = (message: unknown) => child.stdin.write(`${JSON.stringify(message)}\n`);
+    send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "hook-mcp-smoke", version: "1" } } });
+    await new Promise(done => setTimeout(done, 4200));
+    assert.equal(child.exitCode, null, `MCP must not take the short-lived hook path: ${stderr}`);
+    send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    await new Promise(done => setTimeout(done, 600));
+    const messages = output.trim().split("\n").flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+    const tools = messages.find(message => message.id === 2)?.result?.tools ?? [];
+    assert.ok(tools.some((tool: { name: string }) => tool.name === "m9r_stage_app"), `configured hook did not expose desktop tools: ${stderr}`);
+  } finally {
+    child.stdin.end();
+    await new Promise(done => setTimeout(done, 400));
+    if (child.exitCode === null) child.kill();
+  }
+});
+
 test("the built engine exe's `mcp` subcommand completes a real MCP handshake and exposes the native tools", { skip: !existsSync(exe) ? "engine/dist/m9r-engine.exe was not built (run: node scripts/build-engine.mjs)" : false }, async () => {
   const child = spawn(exe, ["mcp"], { stdio: ["pipe", "pipe", "pipe"] });
   let out = "";

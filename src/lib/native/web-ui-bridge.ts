@@ -191,7 +191,7 @@ export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThread
 
 export interface UiPageContext { url?: string; title?: string; selection?: string }
 export type UiInbound =
-  | { type: "ui-command"; text: string; context: UiPageContext }
+  | { type: "ui-command"; text: string; context: UiPageContext; requestId?: string }
   | { type: "ui-approve" | "ui-deny"; id: string }
   | { type: "ui-stop"; agent: string }
   | { type: "ui-stop-all" }
@@ -244,7 +244,8 @@ export function parseUiMessage(raw: unknown): UiInbound | null {
       }
       if (typeof ctx.title === "string" && ctx.title.trim()) context.title = ctx.title.replace(/\s+/g, " ").trim().slice(0, 300);
       if (typeof ctx.selection === "string" && ctx.selection.trim()) context.selection = ctx.selection.trim().slice(0, MAX_SELECTION_CHARS);
-      return { type: "ui-command", text: m.text.trim(), context };
+      const requestId = typeof m.requestId === "string" && /^[a-zA-Z0-9._:-]{1,128}$/.test(m.requestId) ? m.requestId : undefined;
+      return { type: "ui-command", text: m.text.trim(), context, ...(requestId ? { requestId } : {}) };
     }
     default:
       return null;
@@ -390,6 +391,10 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   const typedValues = new Map<string, Array<{ value: string; expiresAt: number }>>();
   /** The currently streamed bubble for each agent. A final result replaces this bubble in place. */
   const liveSay = new Map<string, { at: number; entry: UiThreadEntry; lastFragment: string }>();
+  // The native pill retries only with the same private request id. Keep a
+  // bounded short-lived receipt so a lost owner-pipe response cannot inject
+  // the same conversational turn twice. This id never enters the UI thread.
+  const seenCommandIds = new Map<string, number>();
   let desktopPill = false;
   let changeSignals = 0;
   let deliveredStates = 0;
@@ -648,6 +653,14 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   }
 
   function command(message: Extract<UiInbound, { type: "ui-command" }>): void {
+    if (message.requestId) {
+      const at = now();
+      const prior = seenCommandIds.get(message.requestId);
+      if (prior !== undefined && at - prior < 30 * 60_000) return;
+      seenCommandIds.set(message.requestId, at);
+      for (const [id, seenAt] of seenCommandIds) if (at - seenAt >= 30 * 60_000) seenCommandIds.delete(id);
+      while (seenCommandIds.size > 256) seenCommandIds.delete(seenCommandIds.keys().next().value!);
+    }
     const known = sessions?.handles() ?? [];
     // "@claude stop" names one agent, unlike a bare "stop" or "@all stop" (not a real handle): stop only that one.
     const named = known.find((h) => new RegExp(`^\\s*@${h}\\b`, "i").test(message.text));

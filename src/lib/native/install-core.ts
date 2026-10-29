@@ -11,6 +11,7 @@
  *   byte when the file is unchanged since; if the user edited it in the meantime it removes only our entries.
  */
 import { createHash } from "node:crypto";
+import { isAbsolute, resolve } from "node:path";
 
 export const HOOK_MARKER = "m9r-hook";
 
@@ -466,6 +467,8 @@ export interface LocalBrokerScheduledTaskSnapshot {
     allowStartIfOnBatteries: boolean;
     dontStopIfGoingOnBatteries: boolean;
     startWhenAvailable: boolean;
+    /** Task Scheduler compatibility target reported by Windows (for example Win7 or Win8). */
+    compatibility?: string;
   };
 }
 
@@ -526,7 +529,13 @@ export function isLocalBrokerScheduledTaskOwned(
   if (snapshot.actions.length !== 1) return false;
   const action: LocalBrokerScheduledTaskAction = { taskName: snapshot.taskName, ...snapshot.actions[0] };
   if (!matchesLocalBrokerScheduledTaskContract(snapshot, action, currentUserId)) return false;
-  if (recordedDefinitionHash) return hashLocalBrokerScheduledTaskDefinition(snapshot) === recordedDefinitionHash;
+  if (recordedDefinitionHash) {
+    // Older M9R task markers hashed the same definition before compatibility
+    // was included in the snapshot. Accept that exact recorded definition once
+    // so the next normal setup can upgrade it to the explicit Win8 target.
+    return hashLocalBrokerScheduledTaskDefinition(snapshot) === recordedDefinitionHash
+      || hashLegacyLocalBrokerScheduledTaskDefinition(snapshot) === recordedDefinitionHash;
+  }
   return Boolean(recordedActionHash) && hashLocalBrokerScheduledTaskAction(action) === recordedActionHash;
 }
 
@@ -544,6 +553,8 @@ export function matchesLocalBrokerScheduledTaskContract(
   const samePath = (left: string, right: string) => left.trim().replaceAll("/", "\\").toLocaleLowerCase() === right.trim().replaceAll("/", "\\").toLocaleLowerCase();
   const sameUser = (userId: string, userSid?: string) => sameIdentity(userSid || userId, currentUserId);
   const noTimeLimit = /^(?:PT0S|P0D|00:00:00)$/i.test(snapshot.settings.executionTimeLimit.trim());
+  const supportedCompatibility = snapshot.settings.compatibility === undefined
+    || ["Win7", "Win8"].includes(snapshot.settings.compatibility);
 
   return sameIdentity(snapshot.taskName, expectedAction.taskName)
     && snapshot.taskPath.replaceAll("/", "\\") === "\\"
@@ -559,10 +570,69 @@ export function matchesLocalBrokerScheduledTaskContract(
     && sameIdentity(snapshot.principal.logonType, "Interactive")
     && sameIdentity(snapshot.principal.runLevel, "Limited")
     && snapshot.settings.hidden === true
+    && supportedCompatibility
     && noTimeLimit
     && snapshot.settings.allowStartIfOnBatteries === true
     && snapshot.settings.dontStopIfGoingOnBatteries === true
     && snapshot.settings.startWhenAvailable === true;
+}
+
+export interface CanonicalLocalBrokerTaskRecovery {
+  port: number;
+  projectRoot: string;
+  taskActionHash: string;
+  taskDefinitionHash: string;
+}
+
+/**
+ * Recover ownership only when the task itself is an exact M9R native-broker
+ * contract. This is deliberately narrower than trusting a task name or an
+ * executable path: the current-user identity, hidden logon trigger, safety
+ * settings, headless conhost wrapper, home, broker path, port, and selected
+ * project folder must all match. It repairs lost metadata after a cleanup or
+ * interrupted install without adopting an arbitrary Windows task.
+ */
+export function recoverCanonicalLocalBrokerTask(
+  snapshot: LocalBrokerScheduledTaskSnapshot,
+  currentUserId: string,
+  input: { taskName: string; root: string; brokerPath: string; systemRoot?: string },
+): CanonicalLocalBrokerTaskRecovery | null {
+  if (snapshot.taskName !== input.taskName || snapshot.actions.length !== 1) return null;
+  const rawAction = snapshot.actions[0]!;
+  const action: LocalBrokerScheduledTaskAction = { taskName: snapshot.taskName, ...rawAction };
+  const samePath = (left: string, right: string) => resolve(left).replace(/[\\/]+$/, "").toLocaleLowerCase()
+    === resolve(right).replace(/[\\/]+$/, "").toLocaleLowerCase();
+  const systemRoot = input.systemRoot ?? process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
+  const expectedConsoleHost = `${systemRoot.replace(/[\\/]+$/, "")}\\System32\\conhost.exe`;
+  if (!samePath(action.executable, expectedConsoleHost)) return null;
+
+  // M9R writes every task argument as one quoted token. Requiring that exact
+  // shape prevents a path substring match from accepting extra commands or a
+  // different runtime hidden inside the task arguments.
+  const text = action.arguments.trim();
+  const tokens = text.match(/"[^\"]*"/g);
+  if (!tokens || tokens.join(" ") !== text) return null;
+  const args = tokens.map((token) => token.slice(1, -1));
+  if (args.length !== 8 || args[0] !== "--headless" || args[2] !== "--home"
+    || args[4] !== "--port" || args[6] !== "--project-root"
+    || !samePath(args[1]!, input.brokerPath) || !samePath(args[3]!, input.root)) return null;
+
+  const port = Number(args[5]);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) return null;
+  if (!isAbsolute(args[7]!)) return null;
+  const projectRoot = resolve(args[7]!);
+  if (!samePath(action.workingDirectory, projectRoot)) return null;
+  const normalizedRoot = resolve(input.root).replace(/[\\/]+$/, "").toLocaleLowerCase();
+  const normalizedProjectRoot = projectRoot.replace(/[\\/]+$/, "").toLocaleLowerCase();
+  if (normalizedProjectRoot === normalizedRoot || normalizedProjectRoot.startsWith(`${normalizedRoot}\\`)) return null;
+  if (!matchesLocalBrokerScheduledTaskContract(snapshot, action, currentUserId)) return null;
+
+  return {
+    port,
+    projectRoot,
+    taskActionHash: hashLocalBrokerScheduledTaskAction(action),
+    taskDefinitionHash: hashLocalBrokerScheduledTaskDefinition(snapshot),
+  };
 }
 
 /** Hash a previously validated task snapshot; scheduler run state is intentionally excluded. */
@@ -574,6 +644,19 @@ export function hashLocalBrokerScheduledTaskDefinition(snapshot: LocalBrokerSche
     triggers: snapshot.triggers.map(({ kind, enabled, userId }) => ({ kind, enabled, userId })),
     principal: { userId: snapshot.principal.userId, logonType: snapshot.principal.logonType, runLevel: snapshot.principal.runLevel },
     settings: snapshot.settings,
+  }));
+}
+
+/** Reproduces the pre-compatibility hash so an exact prior owner marker can migrate once. */
+function hashLegacyLocalBrokerScheduledTaskDefinition(snapshot: LocalBrokerScheduledTaskSnapshot): string {
+  const { compatibility: _compatibility, ...legacySettings } = snapshot.settings;
+  return sha256(JSON.stringify({
+    taskName: snapshot.taskName,
+    taskPath: snapshot.taskPath,
+    actions: snapshot.actions,
+    triggers: snapshot.triggers.map(({ kind, enabled, userId }) => ({ kind, enabled, userId })),
+    principal: { userId: snapshot.principal.userId, logonType: snapshot.principal.logonType, runLevel: snapshot.principal.runLevel },
+    settings: legacySettings,
   }));
 }
 
@@ -609,7 +692,11 @@ export function buildLocalBrokerScheduledTaskRegisterScript(input: LocalBrokerSc
     `$action = New-ScheduledTaskAction -Execute ${powerShellLiteral(action.executable)} -Argument ${powerShellLiteral(action.arguments)} -WorkingDirectory ${powerShellLiteral(action.workingDirectory)}`,
     '$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\\$env:USERNAME"',
     '$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\\$env:USERNAME" -LogonType Interactive -RunLevel Limited',
-    "$settings = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable",
+    // The broker is the owner boundary for all managed provider children. If
+    // Windows terminates that boundary, Task Scheduler must restart it rather
+    // than leaving the pill alive with no provider owner behind it. This is a
+    // bounded crash-recovery policy, not an unbounded process respawner.
+    "$settings = New-ScheduledTaskSettingsSet -Compatibility Win8 -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable",
     `Register-ScheduledTask -TaskName ${powerShellLiteral(action.taskName)} -TaskPath '\\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings${input.replaceExisting ? " -Force" : ""} | Out-Null`,
   ].join("\n");
 }
@@ -627,7 +714,7 @@ export function buildLocalBrokerScheduledTaskInspectScript(taskName: string): st
     "  $triggers = @($task.Triggers | ForEach-Object { $kind = if ($_.CimClass.CimClassName -match 'LogonTrigger$') { 'Logon' } else { [string]$_.CimClass.CimClassName }; $userId = [string]$_.UserId; [pscustomobject]@{ kind = $kind; enabled = [bool]$_.Enabled; userId = $userId; userSid = [string](& $resolveSid $userId) } })",
     "  $principalUserId = [string]$task.Principal.UserId",
     "  $principal = [pscustomobject]@{ userId = $principalUserId; userSid = [string](& $resolveSid $principalUserId); logonType = [string]$task.Principal.LogonType; runLevel = [string]$task.Principal.RunLevel }",
-    "  $settings = [pscustomobject]@{ hidden = [bool]$task.Settings.Hidden; executionTimeLimit = [string]$task.Settings.ExecutionTimeLimit; allowStartIfOnBatteries = [bool](-not $task.Settings.DisallowStartIfOnBatteries); dontStopIfGoingOnBatteries = [bool](-not $task.Settings.StopIfGoingOnBatteries); startWhenAvailable = [bool]$task.Settings.StartWhenAvailable }",
+    "  $settings = [pscustomobject]@{ hidden = [bool]$task.Settings.Hidden; executionTimeLimit = [string]$task.Settings.ExecutionTimeLimit; allowStartIfOnBatteries = [bool](-not $task.Settings.DisallowStartIfOnBatteries); dontStopIfGoingOnBatteries = [bool](-not $task.Settings.StopIfGoingOnBatteries); startWhenAvailable = [bool]$task.Settings.StartWhenAvailable; compatibility = [string]$task.Settings.Compatibility }",
     "  [pscustomobject]@{ taskName = [string]$task.TaskName; taskPath = [string]$task.TaskPath; actions = $actions; triggers = $triggers; principal = $principal; settings = $settings; state = [string]$task.State; currentUserId = $currentUserId } | ConvertTo-Json -Compress -Depth 6",
     "}",
   ].join("\n");

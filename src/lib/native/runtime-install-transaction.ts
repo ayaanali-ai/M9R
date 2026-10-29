@@ -143,6 +143,7 @@ export function hasPendingRuntimeTransaction(targetDir: string): boolean {
  */
 export function pruneCompletedRuntimeTransactions(targetDir: string, keepCount = DEFAULT_COMPLETED_TRANSACTION_RETENTION): string[] {
   if (!Number.isInteger(keepCount) || keepCount < 0 || keepCount > 32) throw new Error("Runtime backup retention count is invalid.");
+  if (process.env.M9R_PRESERVE_RUNTIME_EVIDENCE === "1") return [];
   const root = resolve(targetDir);
   const backupRoot = join(dirname(root), "runtime-backups");
   const pruned: string[] = [];

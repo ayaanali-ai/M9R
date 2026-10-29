@@ -97,6 +97,7 @@ import {
   hashLocalBrokerScheduledTaskDefinition,
   isLocalBrokerScheduledTaskOwned,
   matchesLocalBrokerScheduledTaskContract,
+  recoverCanonicalLocalBrokerTask,
   planLocalBrokerUninstall,
   type LocalBrokerScheduledTaskAction,
   type LocalBrokerScheduledTaskSnapshot,
@@ -207,6 +208,7 @@ const deps: CliDeps = {
   }),
   listDirectory: (path) => readdir(path),
   installLocalBrokerAutostart: ensureLocalBrokerAutostart,
+  removeLocalBrokerAutostart,
   startProviderLifecycle: startNativeProviderLifecycle,
 };
 
@@ -1832,6 +1834,7 @@ type ManagedBrokerUpdateTarget = {
   taskDefinitionHash?: string;
   taskActionHash?: string;
   recovery?: ManagedBrokerTaskRecovery;
+  canonicalTaskRecovery?: boolean;
 };
 
 async function inspectLocalBrokerTask(taskName: string): Promise<InspectedLocalBrokerTask | null> {
@@ -1858,7 +1861,7 @@ async function inspectLocalBrokerTask(taskName: string): Promise<InspectedLocalB
   if (actions.some((value) => !record(value) || !stringField(value, "executable") || !stringField(value, "arguments") || !stringField(value, "workingDirectory"))
     || triggers.some((value) => !record(value) || !stringField(value, "kind") || typeof value.enabled !== "boolean" || !stringField(value, "userId") || !stringField(value, "userSid"))
     || !stringField(principal, "userId") || !stringField(principal, "userSid") || !stringField(principal, "logonType") || !stringField(principal, "runLevel")
-    || typeof settings.hidden !== "boolean" || !stringField(settings, "executionTimeLimit")
+    || typeof settings.hidden !== "boolean" || !stringField(settings, "executionTimeLimit") || !stringField(settings, "compatibility")
     || typeof settings.allowStartIfOnBatteries !== "boolean" || typeof settings.dontStopIfGoingOnBatteries !== "boolean"
     || typeof settings.startWhenAvailable !== "boolean") {
     throw new Error(`Windows Task Scheduler returned an incomplete definition for ${taskName}.`);
@@ -1880,6 +1883,7 @@ async function inspectLocalBrokerTask(taskName: string): Promise<InspectedLocalB
       allowStartIfOnBatteries: settings.allowStartIfOnBatteries as boolean,
       dontStopIfGoingOnBatteries: settings.dontStopIfGoingOnBatteries as boolean,
       startWhenAvailable: settings.startWhenAvailable as boolean,
+      compatibility: settings.compatibility as string,
     },
     state: task.state as string,
     currentUserId: task.currentUserId as string,
@@ -1904,7 +1908,11 @@ function localBrokerTaskDefinitionOwned(
   return isLocalBrokerScheduledTaskOwned(task, task.currentUserId, recordedDefinitionHash, recordedLegacyActionHash);
 }
 
-async function stopAuthenticatedLocalBroker(root: string, port: number): Promise<"stopped" | "already-stopped" | "not-owned-or-unavailable"> {
+async function stopAuthenticatedLocalBroker(
+  root: string,
+  port: number,
+  options: { stopTaskBeforeShutdown?: boolean } = {},
+): Promise<"stopped" | "already-stopped" | "not-owned-or-unavailable"> {
   const baseUrl = `http://127.0.0.1:${port}`;
   const health = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(500) }).catch(() => null);
   if (!health?.ok) return "already-stopped";
@@ -1920,8 +1928,28 @@ async function stopAuthenticatedLocalBroker(root: string, port: number): Promise
     signal: AbortSignal.timeout(1_000),
   }).catch(() => null);
   if (!shutdown?.ok) return "not-owned-or-unavailable";
+  // The broker schedules its owner drain immediately after sending the 200
+  // response. On Windows, a managed provider child can keep that response
+  // body from being observed before the listener closes, even though the
+  // authenticated shutdown request was accepted and the broker is already
+  // draining. Treat an unreadable body as an incomplete receipt, not as a
+  // rejected shutdown; the health/process-exit checks below are the stronger
+  // proof that makes replacement safe. An explicit negative acknowledgement
+  // still fails closed.
   const acknowledgement = await shutdown.json().catch(() => null) as { ok?: unknown; stopped?: unknown } | null;
-  if (acknowledgement?.ok !== true || acknowledgement.stopped !== true) return "not-owned-or-unavailable";
+  if (acknowledgement !== null && (acknowledgement.ok !== true || acknowledgement.stopped !== true)) {
+    return "not-owned-or-unavailable";
+  }
+  // Task Scheduler can immediately respawn the exact broker after its
+  // authenticated shutdown request closes the listener. For the installer
+  // lifecycle, ownership was already proven by loadManagedBrokerUpdateTarget;
+  // stop that exact owned task immediately after the authenticated request is
+  // accepted, while the broker is still draining, so a healthy shutdown
+  // cannot race a scheduler restart. Stopping the task before the request
+  // would terminate the only server capable of accepting that request.
+  if (options.stopTaskBeforeShutdown) {
+    await powerShell(buildLocalBrokerScheduledTaskStopScript(WEB_TASK_NAME));
+  }
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     const after = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(500) }).catch(() => null);
@@ -2124,11 +2152,24 @@ async function loadManagedBrokerUpdateTarget(root: string): Promise<ManagedBroke
     },
   ].filter((proof) => proof.definition || proof.action);
   const ownershipProof = ownershipProofs.find((proof) => localBrokerTaskDefinitionOwned(task, proof.definition, proof.action));
-  if (!ownershipProof) {
+  const canonicalRecovery = ownershipProof ? null : recoverCanonicalLocalBrokerTask(task, task.currentUserId, {
+    taskName: WEB_TASK_NAME,
+    root,
+    brokerPath,
+  });
+  if (!ownershipProof && !canonicalRecovery) {
     throw new Error("The scheduled task targets the installed broker but its current-user M9R ownership cannot be proven; no installed files were replaced.");
   }
   const port = brokerPortFromTask(task, marker?.version === 1 && marker.taskName === WEB_TASK_NAME ? marker : null);
-  return { task, port, brokerPath, installManifest, taskDefinitionHash: ownershipProof.definition, taskActionHash: ownershipProof.action };
+  return {
+    task,
+    port,
+    brokerPath,
+    installManifest,
+    taskDefinitionHash: ownershipProof?.definition ?? canonicalRecovery?.taskDefinitionHash,
+    taskActionHash: ownershipProof?.action ?? canonicalRecovery?.taskActionHash,
+    canonicalTaskRecovery: Boolean(canonicalRecovery),
+  };
 }
 
 async function persistRecoveredManagedBrokerTask(root: string, taskDefinitionHash: string): Promise<void> {
@@ -2161,7 +2202,8 @@ async function restoreMissingManagedBrokerTask(
   }));
   const registered = await inspectLocalBrokerTask(WEB_TASK_NAME);
   if (!registered || localBrokerTaskActionHash(registered) !== target.recovery.taskActionHash
-    || !localBrokerTaskMatchesContract(registered, target.recovery.action)) {
+    || !localBrokerTaskMatchesContract(registered, target.recovery.action)
+    || registered.settings.compatibility !== "Win8") {
     throw new Error("M9R recreated the broker task but could not verify its exact current-user definition.");
   }
   const definitionHash = hashLocalBrokerScheduledTaskDefinition(registered);
@@ -2184,13 +2226,25 @@ async function waitForBrokerTaskState(taskName: string, shouldBeActive: boolean,
 }
 
 async function stopManagedBrokerForUpdate(target: NonNullable<Awaited<ReturnType<typeof loadManagedBrokerUpdateTarget>>>): Promise<void> {
-  const stopped = await stopAuthenticatedLocalBroker(defaultStoreRoot(homeDirectory(), process.env), target.port);
+  const stopped = await stopAuthenticatedLocalBroker(
+    defaultStoreRoot(homeDirectory(), process.env),
+    target.port,
+    { stopTaskBeforeShutdown: true },
+  );
   if (stopped === "not-owned-or-unavailable") {
-    throw new Error("The scheduled task is M9R-owned, but authenticated broker shutdown failed; no installed files were replaced.");
+    if (!target.canonicalTaskRecovery) {
+      throw new Error("The scheduled task is M9R-owned, but authenticated broker shutdown failed; no installed files were replaced.");
+    }
+    // The exact current-user M9R task contract was verified above, but the
+    // broker key/health endpoint is unavailable. Stop only that named task;
+    // never fall back to a process-name kill or a broad service shutdown.
+    await powerShell(buildLocalBrokerScheduledTaskStopScript(WEB_TASK_NAME));
+    await stopExactManagedBrokerImage(target.brokerPath);
   }
-  // Health closes only after the broker's shutdown hook has drained its owned resources.
-  // Still prove the exact installed image exited before asking Task Scheduler to clean up
-  // its wrapper; stopping the task while this child is alive can orphan it on Windows.
+  // Health closes only after the broker's shutdown hook has drained its owned
+  // resources. The verified task was stopped before the request, so Task
+  // Scheduler cannot respawn the broker between listener shutdown and this
+  // exact-image check.
   const processDeadline = Date.now() + 15_000;
   let image = await readManagedBrokerProcessState(target.brokerPath);
   while (image.processes.length > 0 && Date.now() < processDeadline) {
@@ -2226,6 +2280,38 @@ async function stopManagedBrokerForUpdate(target: NonNullable<Awaited<ReturnType
   }
   const finalImage = await readManagedBrokerProcessState(target.brokerPath);
   if (finalImage.processes.length) throw new Error("The broker process returned during shutdown; no installed files were replaced.");
+}
+
+/**
+ * Task Scheduler stops the conhost wrapper but Windows can leave a detached
+ * native child alive. If, and only if, the caller already proved the exact
+ * M9R task contract, terminate the exact PID/path/start-time tuple that was
+ * observed. This is intentionally not a process-name kill and cannot touch a
+ * replacement process that reused the PID.
+ */
+async function stopExactManagedBrokerImage(brokerPath: string): Promise<void> {
+  const image = await readManagedBrokerProcessState(brokerPath);
+  if (!image.processes.length) return;
+  const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  const expected = image.processes.map((process) => `${process.id} = ${literal(process.startedUtc)}`).join("; ");
+  const ids = image.processes.map((process) => process.id).join(", ");
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$target = [IO.Path]::GetFullPath(${literal(brokerPath)})`,
+    `$expected = @{${expected}}`,
+    `$ids = @(${ids})`,
+    "$processes = @()",
+    "foreach ($id in $ids) {",
+    "  $process = Get-Process -Id ([int]$id) -ErrorAction Stop",
+    "  $path = [IO.Path]::GetFullPath($process.Path)",
+    "  $started = $process.StartTime.ToUniversalTime().ToString('o')",
+    "  if (-not [string]::Equals($path, $target, [StringComparison]::OrdinalIgnoreCase) -or $started -ne $expected[[int]$id]) { throw 'The observed M9R broker PID changed before the exact-image stop.' }",
+    "  $processes += $process",
+    "}",
+    "if ($processes.Count -ne $ids.Count) { throw 'The exact M9R broker image set changed before the stop.' }",
+    "$processes | Stop-Process -Force",
+  ].join("\n");
+  await powerShell(script);
 }
 
 async function startManagedBrokerAfterUpdate(target: NonNullable<Awaited<ReturnType<typeof loadManagedBrokerUpdateTarget>>>): Promise<void> {
@@ -2906,7 +2992,8 @@ async function runWebSetup(args: string[]): Promise<number> {
     }
     await powerShell(buildLocalBrokerScheduledTaskRegisterScript({ ...brokerTaskInput, replaceExisting: Boolean(taskBeforeRegistration) }));
     const registeredTask = await inspectLocalBrokerTask(WEB_TASK_NAME);
-    if (!registeredTask || localBrokerTaskActionHash(registeredTask) !== desiredBrokerTaskHash || !localBrokerTaskMatchesContract(registeredTask, desiredBrokerTask)) {
+    if (!registeredTask || localBrokerTaskActionHash(registeredTask) !== desiredBrokerTaskHash || !localBrokerTaskMatchesContract(registeredTask, desiredBrokerTask)
+      || registeredTask.settings.compatibility !== "Win8") {
       throw new Error("Windows Task Scheduler did not retain the exact current-user M9R broker definition that setup requested.");
     }
     manifest.brokerTaskDefinitionHash = hashLocalBrokerScheduledTaskDefinition(registeredTask);
@@ -3000,7 +3087,7 @@ async function uninstallBrokerOnlySetup(root: string, args: string[]): Promise<n
   if (task) {
     const ownedByMarker = localBrokerTaskMatchesContract(task, expectedAction)
       && (recordedDefinitionHash
-        ? hashLocalBrokerScheduledTaskDefinition(task) === recordedDefinitionHash
+        ? localBrokerTaskDefinitionOwned(task, recordedDefinitionHash, recordedActionHash ?? undefined)
         : recordedActionHash
           ? localBrokerTaskActionHash(task) === recordedActionHash
           : localBrokerTaskActionHash(task) === hashLocalBrokerScheduledTaskAction(expectedAction));
@@ -3025,6 +3112,21 @@ async function uninstallBrokerOnlySetup(root: string, args: string[]): Promise<n
   await unlink(markerPath).catch(() => undefined);
   process.stdout.write(`[PASS] broker-only login setup removed${stopped === "already-stopped" ? "; the broker was already stopped" : " and authenticated broker stopped"}.\n`);
   return 0;
+}
+
+/** Native setup may share the broker with the optional browser setup. Only remove the broker here when the
+ * native install owns a broker-only marker; the browser setup remains the owner when its manifest exists. */
+async function removeLocalBrokerAutostart(): Promise<{ ok: boolean; message: string }> {
+  const root = defaultStoreRoot(homeDirectory(), process.env);
+  const markerPath = join(root, "broker-autostart.json");
+  if (!await canRead(markerPath)) return { ok: true, message: "No separate M9R broker login task needed removal." };
+  if (await canRead(join(root, WEB_SETUP_MANIFEST))) {
+    return { ok: true, message: "The M9R broker remains owned by the existing Web setup; native uninstall left it untouched." };
+  }
+  const code = await uninstallBrokerOnlySetup(root, ["--yes"]);
+  return code === 0
+    ? { ok: true, message: "The M9R-owned broker login task was removed." }
+    : { ok: false, message: "The M9R-owned broker login task could not be removed safely; its ownership marker was preserved." };
 }
 
 async function runWebUninstall(args: string[]): Promise<number> {
@@ -3261,27 +3363,14 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
   if (platform() !== "win32") {
     return { ok: false, message: "Automatic local web broker startup is currently supported on Windows 10/11 only; provider connections remain saved." };
   }
+  const standalone = isStandaloneEngine();
   const home = homeDirectory();
   const root = defaultStoreRoot(home, process.env);
   const port = Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT;
   const sourceEntry = process.argv[1] ? resolve(process.argv[1]) : "";
-  if (!sourceEntry || !awaitableExists(sourceEntry) || ![".js", ".cjs", ".mjs"].includes(extname(sourceEntry).toLowerCase())) {
+  if (!standalone && (!sourceEntry || !awaitableExists(sourceEntry) || ![".js", ".cjs", ".mjs"].includes(extname(sourceEntry).toLowerCase()))) {
     return { ok: false, message: "Could not identify the installed JavaScript CLI entry for broker autostart. Run connect from the packaged m9r-cli command; provider connections remain saved." };
   }
-  // Persist the self-contained broker, not the CLI in npm's disposable cache.
-  // Its argument parser accepts the same --home/--port/--project-root flags.
-  const bundledBroker = join(dirname(sourceEntry), "m9r-web-broker.cjs");
-  if (!await canRead(bundledBroker)) return { ok: false, message: "Packaged web broker is missing; rebuild the CLI before enabling login startup." };
-  const brokerBytes = await readFile(bundledBroker);
-  const digest = createHash("sha256").update(brokerBytes).digest("hex");
-  const managedDirectory = join(root, "bin", "broker", digest);
-  const entry = join(managedDirectory, "m9r-web-broker.cjs");
-  for (const path of [join(root, "bin"), join(root, "bin", "broker"), managedDirectory, entry]) {
-    const info = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
-    if (info?.isSymbolicLink()) return { ok: false, message: "Managed broker path is a symbolic link; refusing to overwrite it." };
-  }
-  await mkdir(managedDirectory, { recursive: true });
-  await writeFile(entry, brokerBytes, { mode: 0o600 });
 
   const keyPath = brokerKeyPath(root);
   const healthUrl = `http://127.0.0.1:${port}/health`;
@@ -3327,32 +3416,77 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
     return { ok: false, message: "A broker autostart marker exists but is not owned by M9R; refusing to overwrite it." };
   }
 
-  const spec = buildLocalBrokerAutostartSpec({
-    nodeExecutable: process.execPath,
-    nodeArgs: [],
-    cliEntryPath: entry,
-    m9rHome: root,
-    projectRoot,
-    port,
-  });
+  // A standalone package owns a native broker executable beside the installed
+  // engine. The task must point at that persistent path, never at the
+  // installer's temporary extraction directory and never at an npm cache.
+  // JavaScript CLI installs retain the historical bundled-CJS path.
+  let entry: string;
+  let taskExecutable: string;
+  let taskArguments: string[];
+  let taskWorkingDirectory = projectRoot;
+  if (standalone) {
+    const packaged = standaloneWebBrokerRuntime({
+      engineExecutable: process.execPath,
+      home: root,
+      projectRoot,
+      port,
+      exists: awaitableExists,
+    });
+    entry = join(root, "bin", "m9r-web-broker.exe");
+    taskExecutable = entry;
+    taskArguments = packaged.args;
+  } else {
+    // Persist the self-contained broker, not the CLI in npm's disposable
+    // cache. Its argument parser accepts the same flags as the native broker.
+    const bundledBroker = join(dirname(sourceEntry), "m9r-web-broker.cjs");
+    if (!await canRead(bundledBroker)) return { ok: false, message: "Packaged web broker is missing; rebuild the CLI before enabling login startup." };
+    const brokerBytes = await readFile(bundledBroker);
+    const digest = createHash("sha256").update(brokerBytes).digest("hex");
+    const managedDirectory = join(root, "bin", "broker", digest);
+    entry = join(managedDirectory, "m9r-web-broker.cjs");
+    for (const path of [join(root, "bin"), join(root, "bin", "broker"), managedDirectory, entry]) {
+      const info = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+      if (info?.isSymbolicLink()) return { ok: false, message: "Managed broker path is a symbolic link; refusing to overwrite it." };
+    }
+    await mkdir(managedDirectory, { recursive: true });
+    await writeFile(entry, brokerBytes, { mode: 0o600 });
+    const spec = buildLocalBrokerAutostartSpec({
+      nodeExecutable: process.execPath,
+      nodeArgs: [],
+      cliEntryPath: entry,
+      m9rHome: root,
+      projectRoot,
+      port,
+    });
+    taskExecutable = spec.nodeExecutable;
+    taskArguments = [...spec.nodeArgs, spec.cliEntryPath, ...spec.args];
+    taskWorkingDirectory = spec.workingDirectory;
+  }
   const brokerTaskInput = {
-    taskName: spec.taskName,
-    executable: spec.nodeExecutable,
-    args: [...spec.nodeArgs, spec.cliEntryPath, ...spec.args],
-    workingDirectory: spec.workingDirectory,
+    taskName: WEB_TASK_NAME,
+    executable: taskExecutable,
+    args: taskArguments,
+    workingDirectory: taskWorkingDirectory,
     hideConsole: true,
   };
   const desiredTaskAction = buildLocalBrokerScheduledTaskAction(brokerTaskInput);
   const desiredTaskHash = hashLocalBrokerScheduledTaskAction(desiredTaskAction);
   let existingTask: InspectedLocalBrokerTask | null;
-  try { existingTask = await inspectLocalBrokerTask(spec.taskName); }
+  try { existingTask = await inspectLocalBrokerTask(WEB_TASK_NAME); }
   catch (error) {
     return { ok: false, message: `Could not safely inspect the M9R broker login task: ${error instanceof Error ? error.message : "unknown Windows Task Scheduler error"}.` };
   }
-  if (existingTask && !hasMarker && !hasSetupManifest) {
+  // A cleanup or interrupted install can remove both M9R metadata records
+  // while leaving the exact current-user native task behind. Adopt only when
+  // the task already equals the action this invocation is about to register;
+  // any other unrecorded task remains a hard refusal.
+  const orphanedCanonicalTask = Boolean(existingTask && standalone && !hasMarker && !hasSetupManifest
+    && localBrokerTaskActionHash(existingTask) === desiredTaskHash
+    && localBrokerTaskMatchesContract(existingTask, desiredTaskAction));
+  if (existingTask && !hasMarker && !hasSetupManifest && !orphanedCanonicalTask) {
     return { ok: false, message: `A login task named ${WEB_TASK_NAME} already exists but is not recorded as M9R-managed; refusing to overwrite it.` };
   }
-  if (existingTask) {
+  if (existingTask && !orphanedCanonicalTask) {
     const recordedActionHash = typeof marker?.taskActionHash === "string"
       ? marker.taskActionHash
       : typeof setupManifest?.brokerTaskActionHash === "string" ? setupManifest.brokerTaskActionHash : null;
@@ -3363,21 +3497,35 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
       return { ok: false, message: `The ${WEB_TASK_NAME} task changed outside M9R; refusing to replace it.` };
     }
   }
+  // A new managed broker bundle is a new owner process, not merely a new file.
+  // If the current owner is still serving the previous digest, drain that exact
+  // authenticated broker before registering and starting the new one. Otherwise
+  // setup can report success while the old provider lifecycle remains in memory.
+  const activeEntry = typeof marker?.entry === "string" ? marker.entry : undefined;
+  const activeTaskAction = typeof marker?.taskActionHash === "string" ? marker.taskActionHash : undefined;
+  if (brokerAlreadyRunning && (activeEntry !== entry || activeTaskAction !== desiredTaskHash)) {
+    const stopped = await stopAuthenticatedLocalBroker(root, port);
+    if (stopped === "not-owned-or-unavailable") {
+      return { ok: false, message: "The current M9R broker is running, but authenticated shutdown could not be confirmed; refusing to leave the old owner active while installing a new one." };
+    }
+    brokerAlreadyRunning = false;
+  }
   try {
     // Persist the ownership intent first so a crash between task registration and
     // the final marker write cannot strand a task that every retry must refuse.
     await writeAtomic(markerPath, JSON.stringify(buildLocalBrokerAutostartMarker({
-      entry, port, executable: spec.nodeExecutable, projectRoot, workingDirectory: spec.workingDirectory,
+      entry, port, executable: taskExecutable, projectRoot, workingDirectory: taskWorkingDirectory,
       taskActionHash: desiredTaskHash, state: "registering",
     })) + "\n");
     await powerShell(buildLocalBrokerScheduledTaskRegisterScript({ ...brokerTaskInput, replaceExisting: Boolean(existingTask) }));
-    const registeredTask = await inspectLocalBrokerTask(spec.taskName);
-    if (!registeredTask || localBrokerTaskActionHash(registeredTask) !== desiredTaskHash || !localBrokerTaskMatchesContract(registeredTask, desiredTaskAction)) {
+    const registeredTask = await inspectLocalBrokerTask(WEB_TASK_NAME);
+    if (!registeredTask || localBrokerTaskActionHash(registeredTask) !== desiredTaskHash || !localBrokerTaskMatchesContract(registeredTask, desiredTaskAction)
+      || registeredTask.settings.compatibility !== "Win8") {
       return { ok: false, message: "Windows Task Scheduler did not retain the exact current-user M9R broker definition that setup requested." };
     }
     const taskDefinitionHash = hashLocalBrokerScheduledTaskDefinition(registeredTask);
     await writeAtomic(markerPath, JSON.stringify(buildLocalBrokerAutostartMarker({
-      entry, port, executable: spec.nodeExecutable, projectRoot, workingDirectory: spec.workingDirectory,
+      entry, port, executable: taskExecutable, projectRoot, workingDirectory: taskWorkingDirectory,
       taskActionHash: desiredTaskHash, taskDefinitionHash, state: "configured",
     })) + "\n");
     if (hasSetupManifest && setupManifest) {
@@ -3386,9 +3534,18 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
       setupManifest.projectRoot = projectRoot;
       await writeAtomic(setupManifestPath, JSON.stringify(setupManifest, null, 2) + "\n");
     }
-    if (!brokerAlreadyRunning) await powerShell(buildLocalBrokerScheduledTaskStartScript(spec.taskName));
+    // The standalone installer copies and records the native broker after the
+    // engine setup phase. Starting the task before that copy would either run
+    // the previous image or point at a missing file, so defer only that first
+    // start to the installer's authenticated broker-update step.
+    const deferStandaloneStart = standalone && process.env.M9R_DEFER_BROKER_START === "1";
+    if (!brokerAlreadyRunning && !deferStandaloneStart) await powerShell(buildLocalBrokerScheduledTaskStartScript(WEB_TASK_NAME));
   } catch (error) {
     return { ok: false, message: `Could not register or start the current-user M9R broker task: ${error instanceof Error ? error.message : "unknown Windows Task Scheduler error"}.` };
+  }
+
+  if (standalone && process.env.M9R_DEFER_BROKER_START === "1") {
+    return { ok: true, message: "M9R native broker login task is registered against the persistent installed broker path; its first start is deferred until the verified package copy is installed." };
   }
 
   let authenticated = false;
