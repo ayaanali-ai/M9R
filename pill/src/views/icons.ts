@@ -41,4 +41,6 @@ export const ICONS = {
   // doc.text
   doc: "M6.5 2.6h7l4 4v14.8h-11V2.6zm6.6 1.6v3.3h3.3l-3.3-3.3zM8.6 11h6.8v1.5H8.6V11zm0 3.4h6.8v1.5H8.6v-1.5z",
   display: "M3 4.5h18v12H3v-12zm1.8 1.8v8.4h14.4V6.3H4.8zM9 18h6v1.7H9V18zm2.15-1.5h1.7V19h-1.7v-2.5z",
+  // square.stack.3d.up (three offset layers — model picker)
+  layers: "M12 3 2.5 8.2 12 13.4l9.5-5.2L12 3zM4.4 11.6 2.5 12.65 12 17.85l9.5-5.2-1.9-1.05L12 15.75 4.4 11.6zm0 4.2L2.5 16.85 12 22.05l9.5-5.2-1.9-1.05L12 19.95l-7.6-4.15z",
 } as const;

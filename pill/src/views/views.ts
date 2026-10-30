@@ -5,8 +5,8 @@ import { ICONS } from "./icons";
 import { Ticker } from "./ticker";
 import { providerLogo } from "./provider";
 import { buildPrompt } from "./composer";
-import { State, type AgentTask, type LinkOffer } from "../core/state";
-import type { DesktopStage, DesktopStageTransport, SessionRow } from "../core/transport";
+import { State, type AgentTask, type LinkOffer, type PillModelAgent } from "../core/state";
+import type { SessionRow } from "../core/transport";
 import type { SpeechEnv } from "../core/speech";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 
@@ -28,7 +28,6 @@ export interface ViewActions {
     list(handle: string): Promise<SessionRow[]>;
     link(offer: LinkOffer, toSession: string): Promise<void>;
   };
-  desktopStages?: DesktopStageTransport;
   toggleSound(): void;
   setAutoClose(seconds: number): void;
   blip(): void;
@@ -85,9 +84,7 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 export function buildHeader(actions: ViewActions): ViewHost {
   const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
   const tabChat = h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
-  const tabStage = actions.desktopStages
-    ? h("button", { class: "tab", title: "Desktop stage", onclick: () => go("stage") }, svg(ICONS.display, 14, { stroke: 1.7 }))
-    : null;
+  const tabModels = h("button", { class: "tab", title: "Models", onclick: () => go("models") }, svg(ICONS.layers, 13));
   const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
@@ -100,7 +97,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat, tabStage),
+    h("div", { class: "tabs" }, tabHome, tabChat, tabModels),
     h("div", { class: "header-actions" }, brokerStatus, gearBtn, soundBtn),
   );
 
@@ -110,7 +107,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
       const v = State.view;
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");
-      tabStage?.classList.toggle("on", v === "stage");
+      tabModels.classList.toggle("on", v === "models");
       gearBtn.classList.toggle("on", v === "settings");
       const connection = State.brokerConnection;
       brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";
@@ -325,16 +322,11 @@ function buildSettings(actions: ViewActions): ViewHost {
   const autoLabel = h("span", {});
   const segButtons = [10, 15, 30].map((s) => h("button", { onclick: () => actions.setAutoClose(s) }, `${s}s`));
 
-  const modelRows = h("div", { class: "settings-models", style: "display:flex;flex-direction:column;gap:5px;max-height:92px;overflow:auto;margin-top:8px" });
-  const modelStatus = h("div", { class: "detail", style: "font-size:10px;opacity:.65;margin-top:4px" });
-  let modelKey = "";
   const rows = h(
     "div",
     { class: "settings-rows" },
     h("div", { class: "settings-row" }, soundSwitch, h("span", { text: "Sound" })),
     h("div", { class: "settings-row" }, svg(ICONS.timer, 12), autoLabel, h("div", { class: "seg" }, ...segButtons)),
-    modelRows,
-    modelStatus,
   );
 
   const el = h("div", { class: "view" }, card(null, h("div", { class: "stack", style: "padding:14px 16px 14px 84px" }, rows)));
@@ -346,315 +338,108 @@ function buildSettings(actions: ViewActions): ViewHost {
       soundSwitch.classList.toggle("on", s.soundEnabled);
       autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;
       segButtons.forEach((b, i) => b.classList.toggle("on", s.autoCloseInterval === [10, 15, 30][i]));
-      const agents = State.models?.agents ?? [];
-      const nextKey = JSON.stringify(agents.map((agent) => [agent.handle, agent.availability, agent.currentModel, agent.currentEffort, agent.selectedModel, agent.selectedEffort, agent.models]));
-      if (nextKey === modelKey) return;
-      modelKey = nextKey;
-      clear(modelRows);
-      if (!agents.length) return;
-      const describeModel = (agent: (typeof agents)[number], id: string | null | undefined) =>
-        id ? agent.models.find((option) => option.id === id)?.label ?? id : "provider default / unknown";
-      modelStatus.textContent = agents.map((agent) => {
-        const preference = describeModel(agent, agent.selectedModel ?? agent.currentModel);
-        const reported = agent.availability === "not_connected" ? "not connected"
-          : describeModel(agent, agent.currentModel);
-        return `@${agent.handle} · configured: ${preference} · provider reports: ${reported}`;
-      }).join("  |  ");
-      for (const agent of agents) {
-        const row = h("div", { class: "settings-row", style: "gap:5px;min-height:24px" });
-        const label = h("span", { text: `@${agent.handle}` , style: "min-width:66px;font-size:10px" });
-        if (agent.availability !== "available" || agent.models.length === 0 || !actions.selectModel) {
-          row.append(label, h("span", { class: "sub", text: agent.availability === "not_connected" ? "not connected" : "no live catalog" }));
-          modelRows.append(row);
-          continue;
-        }
-        const model = h("select", { class: "model-select", "aria-label": `Model for @${agent.handle}` }) as HTMLSelectElement;
-        model.append(h("option", { value: "", text: "Provider default" }));
-        for (const option of agent.models) model.append(h("option", { value: option.id, text: option.label }));
-        model.value = agent.selectedModel ?? agent.currentModel ?? "";
-        const effort = h("select", { class: "model-select", "aria-label": `Reasoning effort for @${agent.handle}` }) as HTMLSelectElement;
-        const refreshEfforts = () => {
-          clear(effort);
-          const selected = agent.models.find((option) => option.id === model.value);
-          if (!selected?.efforts?.length) { effort.hidden = true; return; }
-          effort.hidden = false;
-          effort.append(h("option", { value: "", text: "Default effort" }));
-          for (const choice of selected.efforts) effort.append(h("option", { value: choice.id, text: choice.label }));
-          effort.value = agent.selectedEffort ?? agent.currentEffort ?? "";
-        };
-        refreshEfforts();
-        const request = (selectedEffort: string | null) => {
-          const pending = actions.selectModel?.(agent.handle, model.value || null, selectedEffort);
-          if (pending) void pending.then(
-            () => { modelStatus.textContent = `@${agent.handle}: request sent to M9R. Its reply below says whether the provider accepted it for the next turn or needs a restart. Current provider report: ${agent.currentModel ?? "no current model reported"}.`; },
-            () => { model.value = agent.selectedModel ?? agent.currentModel ?? ""; refreshEfforts(); modelStatus.textContent = `Could not change @${agent.handle}; the previous selection is still shown.`; },
-          );
-        };
-        model.addEventListener("change", () => { refreshEfforts(); request(effort.hidden ? null : (effort.value || null)); });
-        effort.addEventListener("change", () => request(effort.value || null));
-        row.append(label, model, effort);
-        modelRows.append(row);
-      }
     },
   };
 }
 
-// ── Desktop stage ────────────────────────────────────────────────
+// ── Models ───────────────────────────────────────────────────────
 
-function buildDesktopStage(actions: ViewActions): ViewHost {
-  const desktopStages = actions.desktopStages;
-  const rows = h("div", { class: "stage-list" });
-  const status = h("div", { class: "stage-message", "aria-live": "polite" });
-  const detailTitle = h("div", { class: "stage-detail-title" });
-  const detailSession = h("div", { class: "stage-detail-session" });
-  const detailStatus = h("div", { class: "stage-detail-status" });
-  const activityLabel = h("div", { class: "stage-detail-label" });
-  const activity = h("div", { class: "stage-detail-task" });
-  const cursorNote = h("div", { class: "stage-detail-note", text: "Agent cursors are native Windows overlays. This view switches to a desktop; it does not stream video." });
-  const detailAction = h("div", { class: "stage-detail-action" });
-  const refresh = h("button", {
-    class: "stage-icon-button",
-    title: "Refresh agent desktops",
-    "aria-label": "Refresh agent desktops",
-    onclick: () => void refreshStages(),
-  }, "↻");
-  const listWrap = h("div", { class: "stage-list-wrap" },
-    h("div", { class: "stage-rail-heading" },
-      h("span", { text: "AGENT DESKTOPS" }),
-      h("div", { class: "stage-rail-tools" }, refresh),
-    ),
-    rows,
-  );
-  const detail = h("div", { class: "stage-workspace" },
-    h("div", { class: "stage-heading" }, svg(ICONS.display, 18), detailStatus),
-    detailTitle,
-    detailSession,
-    h("div", { class: "stage-detail-activity" }, activityLabel, activity),
-    cursorNote,
-    detailAction,
-    status,
-  );
-  const el = h("div", { class: "view stage-view" }, card(null, listWrap, detail));
+function buildModelPicker(actions: ViewActions): ViewHost {
+  const list = h("div", { class: "model-picker-list" });
+  const el = h("div", { class: "view model-picker-view" }, card(null, h("div", { class: "model-picker" }, list)));
+  let key = "";
 
-  let stages: DesktopStage[] = [];
-  let loaded = false;
-  let busy = false;
-  let message = "";
-  let selectedName: string | null = null;
-  let refreshTimer: number | null = null;
+  function agentSection(agent: PillModelAgent): HTMLElement {
+    const section = h("div", { class: "model-picker-agent" });
+    const statusNote = h("div", { class: "model-picker-note" });
+    section.append(
+      h("div", { class: "model-picker-agent-head" },
+        providerLogo(agent.provider as Parameters<typeof providerLogo>[0], 16),
+        h("span", { class: "model-picker-agent-name", text: "@" + agent.handle }),
+      ),
+    );
 
-  function agentTask(handle: string): AgentTask | undefined {
-    return State.tasks.find((task) => task.name.toLowerCase() === handle.toLowerCase());
-  }
-
-  function agentStateLabel(task: AgentTask | undefined): string {
-    if (!task) return "Not connected";
-    if (task.runState === "working") return "Working";
-    if (task.runState === "starting") return "Starting";
-    if (task.state === "approval") return "Waiting for approval";
-    if (task.runState === "failed") return "Error";
-    if (task.runState === "stopped") return "Stopped";
-    if (task.runState === "not_connected") return "Not connected";
-    if (task.runState === "seen") return "Seen recently · live status unavailable";
-    if (task.runState === "unknown") return "Live status unavailable";
-    if (task.runState === "idle") return "Idle";
-    return "Waiting";
-  }
-
-  function currentTaskText(task: AgentTask | undefined): string {
-    if (!task) return "No current task reported.";
-    if (task.runState === "working" || task.runState === "starting") return task.task ?? (task.runState === "working" ? "Working on a turn" : "Starting a turn");
-    if (task.state === "approval") return "Waiting for approval.";
-    if (task.runState === "failed") return "The agent reported an error.";
-    if (task.runState === "stopped") return "The agent is stopped.";
-    if (task.runState === "not_connected") return "No session for this agent has been seen on this computer.";
-    if (task.runState === "seen") return "Seen recently; M9R cannot confirm its current activity.";
-    if (task.runState === "unknown") return "M9R cannot confirm this agent's current activity.";
-    if (task.runState === "waiting") return "The agent is waiting.";
-    return "No current task reported.";
-  }
-
-  function stageLabel(stage: DesktopStage): string {
-    if (stage.status === "current") return "Your current desktop";
-    if (stage.status === "background") return "Windows desktop · background";
-    return "Unavailable";
-  }
-
-  function render() {
-    status.textContent = message;
-    status.hidden = !message;
-    refresh.disabled = busy || !desktopStages;
-    rows.replaceChildren();
-
-    if (!desktopStages) {
-      rows.append(h("div", { class: "stage-empty", text: "Agent desktops are available in the Windows desktop pill." }));
-      detailTitle.textContent = "Windows agent desktops";
-      detailSession.textContent = "";
-      detailStatus.textContent = "";
-      activityLabel.textContent = "";
-      activity.textContent = "This computer does not expose the local Stage controls.";
-      cursorNote.hidden = true;
-      detailAction.replaceChildren();
-      return;
+    if (agent.availability === "not_connected") {
+      section.append(h("div", { class: "model-picker-empty", text: "Not connected." }));
+      return section;
     }
-    if (!loaded) rows.append(h("div", { class: "stage-empty", text: "Loading agent desktops…" }));
-
-    const assigned = stages.filter((stage) => stage.agentAssignment);
-    const assignedHandles = new Set(assigned.map((stage) => stage.agentAssignment!.handle.toLowerCase()));
-    for (const stage of assigned) {
-      const assignment = stage.agentAssignment!;
-      const task = agentTask(assignment.handle);
-      const selected = stage.name === selectedName;
-      const row = h("div", { class: "stage-row" + (selected ? " selected" : "") });
-      const select = h("button", {
-        class: "stage-row-select",
-        "aria-pressed": String(selected),
-        "aria-label": "Show @" + assignment.handle + " desktop details",
-        onclick: () => { selectedName = stage.name; render(); },
-      },
-        dot(task?.color ?? "#9AA1AC", 8),
-        h("div", { class: "stage-row-main" },
-          h("div", { class: "stage-row-name", text: "@" + assignment.handle }),
-          h("div", { class: "stage-row-state", "data-state": stage.status, text: stageLabel(stage) }),
-          h("div", { class: "stage-row-task", text: task ? currentTaskText(task) : "No current task reported" }),
-        ),
-      );
-      const joinLabel = stage.status === "current" ? "Here" : stage.status === "unavailable" ? "Unavailable" : "Join";
-      const join = h("button", {
-        class: "stage-join",
-        disabled: busy || stage.status !== "background",
-        "aria-label": stage.status === "background" ? "Join @" + assignment.handle + " desktop" : joinLabel,
-        onclick: () => void runStageAction("join", stage.name),
-      }, joinLabel);
-      row.append(select, join);
-      rows.append(row);
+    if (agent.availability !== "available" || agent.models.length === 0 || !actions.selectModel) {
+      section.append(h("div", { class: "model-picker-empty", text: "This provider has not reported a live model catalog." }));
+      return section;
     }
 
-    const withoutDesktop = State.tasks.filter((task) => !assignedHandles.has(task.name.toLowerCase()));
-    if (withoutDesktop.length > 0) {
-      rows.append(h("div", { class: "stage-roster-subheading", text: "NO DESKTOP ASSIGNED" }));
-      for (const task of withoutDesktop) {
-        rows.append(h("div", { class: "stage-row stage-row-unassigned" },
-          dot(task.color, 8),
-          h("div", { class: "stage-row-main" },
-            h("div", { class: "stage-row-name", text: "@" + task.name }),
-            h("div", { class: "stage-row-state", text: agentStateLabel(task) }),
-            h("div", { class: "stage-row-task", text: currentTaskText(task) }),
-          ),
+    const search = h("input", { class: "model-picker-search", type: "text", placeholder: "Search models…", "aria-label": `Search models for @${agent.handle}` }) as HTMLInputElement;
+    const rows = h("div", { class: "model-picker-rows" });
+    const effortRow = h("div", { class: "model-picker-efforts" });
+    const selectedId = agent.selectedModel ?? agent.currentModel ?? "";
+
+    function renderEfforts() {
+      effortRow.replaceChildren();
+      const chosen = agent.models.find((option) => option.id === selectedId);
+      if (!chosen?.efforts?.length) { effortRow.hidden = true; return; }
+      effortRow.hidden = false;
+      const currentEffort = agent.selectedEffort ?? agent.currentEffort ?? "";
+      for (const choice of chosen.efforts) {
+        effortRow.append(h("button", {
+          class: "model-picker-chip" + (choice.id === currentEffort ? " on" : ""),
+          onclick: () => void pick(selectedId, choice.id),
+        }, choice.label));
+      }
+    }
+
+    async function pick(modelId: string, effortId: string | null) {
+      try {
+        await actions.selectModel?.(agent.handle, modelId || null, effortId);
+        statusNote.textContent = `Sent to M9R for @${agent.handle}. Applies now or on the next restart, depending on the provider.`;
+      } catch {
+        statusNote.textContent = `Could not change @${agent.handle}; the previous selection is still active.`;
+      }
+    }
+
+    function renderRows(filter: string) {
+      rows.replaceChildren();
+      const needle = filter.trim().toLowerCase();
+      const options = needle ? agent.models.filter((option) => option.label.toLowerCase().includes(needle)) : agent.models;
+      if (options.length === 0) {
+        rows.append(h("div", { class: "model-picker-empty", text: "No models match." }));
+        return;
+      }
+      for (const option of options) {
+        const on = option.id === selectedId;
+        rows.append(h("button", {
+          class: "model-picker-row" + (on ? " on" : ""),
+          onclick: () => { void pick(option.id, on ? (agent.selectedEffort ?? agent.currentEffort ?? null) : null); },
+        },
+          h("span", { class: "model-picker-row-label", text: option.label }),
+          on ? svg(ICONS.check, 13) : null,
         ));
       }
     }
 
-    if (loaded && assigned.length === 0) {
-      rows.prepend(h("div", { class: "stage-empty", text: "No agent desktop yet. Send an agent a task; its assigned desktop appears here." }));
-    }
+    search.addEventListener("input", () => renderRows(search.value));
+    renderRows("");
+    renderEfforts();
+    section.append(search, rows, effortRow, statusNote);
+    return section;
+  }
 
-    const selected = assigned.find((stage) => stage.name === selectedName)
-      ?? assigned.find((stage) => stage.isCurrent)
-      ?? assigned[0];
-    selectedName = selected?.name ?? null;
-    detailAction.replaceChildren();
-    if (!selected) {
-      detailTitle.textContent = "Your agents’ desktops";
-      detailSession.textContent = "";
-      detailStatus.textContent = "";
-      activityLabel.textContent = "";
-      activity.textContent = loaded ? "When an agent starts a Stage task, its desktop and activity will appear here." : "Connecting to this computer’s Stage registry…";
-      cursorNote.hidden = true;
+  function render() {
+    const agents = State.models?.agents ?? [];
+    const nextKey = JSON.stringify(agents.map((agent) => [agent.handle, agent.availability, agent.currentModel, agent.currentEffort, agent.selectedModel, agent.selectedEffort, agent.models]));
+    if (nextKey === key && list.childElementCount > 0) return;
+    key = nextKey;
+    list.replaceChildren();
+    if (!agents.length) {
+      list.append(h("div", { class: "model-picker-empty", text: "No connected agents yet." }));
       return;
     }
-
-    const assignment = selected.agentAssignment!;
-    const task = agentTask(assignment.handle);
-    detailTitle.textContent = "@" + assignment.handle;
-    detailSession.textContent = "Session " + assignment.sessionTag;
-    detailStatus.textContent = stageLabel(selected);
-    detailStatus.dataset.state = selected.status;
-    activityLabel.textContent = task?.runState === "working" || task?.runState === "starting" ? "CURRENT TASK" : "CURRENT STATUS";
-    activity.textContent = currentTaskText(task);
-    cursorNote.hidden = !selected.hasAnchor;
-    if (selected.error) {
-      status.textContent = selected.error;
-      status.hidden = false;
-    }
-    if (selected.status === "background") {
-      detailAction.append(h("button", {
-        class: "btn primary stage-join-primary",
-        disabled: busy,
-        onclick: () => void runStageAction("join", selected.name),
-      }, "Join this desktop", svg(ICONS.display, 12)));
-    } else if (selected.status === "current" && selected.returnToDesktopId) {
-      detailAction.append(h("button", {
-        class: "btn secondary stage-join-primary",
-        disabled: busy,
-        onclick: () => void runStageAction("return", selected.name),
-      }, "Return to my desktop"));
-    }
-  }
-
-  async function refreshStages(silent = false) {
-    if (!desktopStages || busy) return;
-    busy = true;
-    if (!silent) message = "Refreshing agent desktops…";
-    render();
-    try {
-      stages = await desktopStages.list();
-      loaded = true;
-      if (!silent) message = "";
-      if (!selectedName || !stages.some((stage) => stage.name === selectedName)) {
-        selectedName = stages.find((stage) => stage.isCurrent && stage.agentAssignment)?.name
-          ?? stages.find((stage) => stage.agentAssignment)?.name
-          ?? null;
-      }
-    } catch (error) {
-      loaded = true;
-      message = "Could not read agent desktops: " + (error instanceof Error ? error.message : String(error));
-    } finally {
-      busy = false;
-      render();
-    }
-  }
-
-  async function runStageAction(action: "join" | "return", stageName: string) {
-    if (!desktopStages || busy) return;
-    busy = true;
-    message = action === "join" ? "Joining the agent’s Windows desktop…" : "Returning to your desktop…";
-    render();
-    try {
-      if (action === "join") await desktopStages.activate(stageName);
-      else await desktopStages.returnToOwner(stageName);
-      stages = await desktopStages.list();
-      loaded = true;
-      message = action === "join" ? "You joined the agent’s Windows desktop." : "Returned to your desktop.";
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
-    } finally {
-      busy = false;
-      render();
-    }
-  }
-
-  function startPolling() {
-    if (!desktopStages || refreshTimer !== null) return;
-    void refreshStages();
-    refreshTimer = window.setInterval(() => {
-      if (State.mode === "expanded" && State.view === "stage") void refreshStages(true);
-    }, 3_000);
-  }
-
-  function stopPolling() {
-    if (refreshTimer !== null) window.clearInterval(refreshTimer);
-    refreshTimer = null;
+    for (const agent of agents) list.append(agentSection(agent));
   }
 
   render();
-  return {
-    el,
-    activate: startPolling,
-    deactivate: stopPolling,
-    sync: render,
-  };
+  return { el, sync: render };
 }
+
 // ── Registry ─────────────────────────────────────────────────────
 
 export function buildViews(actions: ViewActions, onChatHeightChange: () => void): Map<IslandViewName, ViewHost> {
@@ -667,6 +452,6 @@ export function buildViews(actions: ViewActions, onChatHeightChange: () => void)
   map.set("note", buildNote());
   map.set("settings", buildSettings(actions));
   map.set("prompt", buildPrompt(actions, onChatHeightChange));
-  if (actions.desktopStages) map.set("stage", buildDesktopStage(actions));
+  map.set("models", buildModelPicker(actions));
   return map;
 }
