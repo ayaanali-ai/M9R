@@ -16,6 +16,7 @@ if (resumeIndex >= 0 && !resumePath) throw new Error("Usage: npm run build:candi
 let candidateRoot;
 let candidateId;
 let sourceCommit;
+let resumedRuntime;
 if (resumePath) {
   candidateRoot = resolve(resumePath);
   if (!candidateRoot.toLowerCase().startsWith(`${candidatesRoot}${sep}`.toLowerCase())) {
@@ -24,10 +25,22 @@ if (resumePath) {
   candidateId = basename(candidateRoot);
   const priorManifest = verifyRuntimeBuildManifest(join(candidateRoot, "runtime"), { exact: true });
   sourceCommit = priorManifest.source?.sourceCommit;
+  resumedRuntime = priorManifest;
   if (!/^[a-f0-9]{40}$/i.test(sourceCommit ?? "") || !candidateId.endsWith(sourceCommit.slice(0, 8))) {
     throw new Error("Candidate source identity is missing or does not match its directory name.");
   }
   if (existsSync(join(candidateRoot, "candidate.json"))) throw new Error(`Candidate already has a completion receipt: ${candidateRoot}`);
+  const buildReceiptPath = join(candidateRoot, "candidate-build.json");
+  if (!existsSync(buildReceiptPath)) {
+    throw new Error("This candidate predates the fresh-source pill build receipt and cannot be resumed. Create a new candidate; the old directory was left untouched.");
+  }
+  const priorBuildReceipt = JSON.parse(readFileSync(buildReceiptPath, "utf8"));
+  if (priorBuildReceipt.schemaVersion !== 1 || priorBuildReceipt.buildMode !== "fresh-source-overlay"
+    || priorBuildReceipt.runtimeBuildId !== priorManifest.buildId
+    || priorBuildReceipt.sourceCommit !== sourceCommit
+    || priorBuildReceipt.pillSha256 !== priorManifest.artifacts["m9r-overlay.exe"]) {
+    throw new Error("Candidate build receipt does not match its runtime manifest; refusing to package it.");
+  }
 } else {
   const commitResult = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
   if (commitResult.error || commitResult.status !== 0) {
@@ -66,10 +79,25 @@ if (!resumePath) {
 }
 
 const runtimeIdentity = verifyRuntimeBuildManifest(runtimeOutput, { exact: true });
-const acceptedPath = join(root, "release-assets", "accepted-runtime.json");
-const accepted = JSON.parse(readFileSync(acceptedPath, "utf8"));
-if (runtimeIdentity.artifacts["m9r-overlay.exe"] !== accepted.artifacts?.["m9r-overlay.exe"]) {
-  throw new Error("Candidate pill hash differs from the accepted pill; refusing to package a different UI.");
+const pillSha256 = runtimeIdentity.artifacts["m9r-overlay.exe"];
+if (!/^[a-f0-9]{64}$/.test(pillSha256 ?? "") || !existsSync(join(runtimeOutput, "m9r-overlay.exe"))) {
+  throw new Error("Candidate runtime does not contain the pill built from the current checkout.");
+}
+if (createHash("sha256").update(readFileSync(join(runtimeOutput, "m9r-overlay.exe"))).digest("hex") !== pillSha256) {
+  throw new Error("Candidate runtime pill hash does not match its complete runtime manifest.");
+}
+if (!resumePath) {
+  const buildReceipt = {
+    schemaVersion: 1,
+    buildMode: "fresh-source-overlay",
+    candidateId,
+    sourceCommit,
+    runtimeBuildId: runtimeIdentity.buildId,
+    pillSha256,
+  };
+  writeFileSync(join(candidateRoot, "candidate-build.json"), `${JSON.stringify(buildReceipt, null, 2)}\n`);
+} else if (resumedRuntime?.buildId !== runtimeIdentity.buildId) {
+  throw new Error("Resumed runtime changed after its fresh-source pill receipt was created.");
 }
 
 const packageResult = spawnSync("powershell.exe", [
@@ -78,6 +106,7 @@ const packageResult = spawnSync("powershell.exe", [
   "-RuntimeDirectory", runtimeOutput,
   "-CliDistDirectory", cliOutput,
   "-AcceptedRuntimePath", join(runtimeOutput, "m9r-build-info.json"),
+  "-Candidate",
 ], { cwd: root, stdio: "inherit", windowsHide: true });
 if (packageResult.error || packageResult.status !== 0) {
   throw new Error(`Candidate packaging failed with exit ${packageResult.status ?? "unknown"}. Verified runtime remains at ${runtimeOutput}.`, { cause: packageResult.error });
@@ -91,11 +120,12 @@ if (!new RegExp(`^${zipHash}\\s+\\*?m9r-engine-windows-x64\\.zip$`, "i").test(si
 }
 const receipt = {
   schemaVersion: 1,
+  buildMode: "fresh-source-overlay",
   candidateId,
   sourceCommit,
   runtimeBuildId: runtimeIdentity.buildId,
   sourceDirty: runtimeIdentity.source?.sourceDirty ?? null,
-  acceptedPillSha256: accepted.artifacts["m9r-overlay.exe"],
+  pillSha256,
   package: {
     path: "package/m9r-engine-windows-x64.zip",
     sha256: zipHash,
@@ -103,7 +133,7 @@ const receipt = {
   verified: {
     runtimeManifest: true,
     exactRuntimeArtifactSet: true,
-    acceptedPillHash: true,
+    sourceBuiltPillHash: true,
     packageChecksum: true,
   },
 };

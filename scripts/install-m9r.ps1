@@ -15,6 +15,13 @@ An exact release version such as 0.1.0. Defaults to the latest m9r-engine-v* rel
 .PARAMETER PackagePath
 Use a previously downloaded release ZIP. Its adjacent .sha256 file is required.
 
+.PARAMETER AllowLocalCandidate
+Explicitly install a locally built candidate after its external candidate.json receipt
+matches the exact ZIP and runtime artifacts. This never accepts a policy embedded in the ZIP by itself.
+
+.PARAMETER CandidateReceiptPath
+Path to the candidate.json stored outside the candidate ZIP. Required with -AllowLocalCandidate.
+
 .PARAMETER Uninstall
 Run the installed engine's reversible uninstall. It runs from a temporary copy
 because Windows does not allow a process to delete its own executable.
@@ -32,6 +39,8 @@ Install without starting the desktop pill after setup. Intended for automated te
 param(
     [string]$Version,
     [string]$PackagePath,
+    [switch]$AllowLocalCandidate,
+    [string]$CandidateReceiptPath,
     [switch]$Uninstall,
     [switch]$Web,
     [switch]$NoAutostart,
@@ -43,7 +52,13 @@ $ProgressPreference = 'SilentlyContinue'
 $repo = 'ayaanali-ai/M9R'
 $assetName = 'm9r-engine-windows-x64.zip'
 $checksumName = "$assetName.sha256"
+$policyName = 'm9r-accepted-runtime.json'
 $releaseTagPrefix = 'm9r-engine-v'
+$script:TrustedRuntimePolicyPath = $null
+$script:CandidateReceipt = $null
+$script:CandidateReceiptPath = $null
+$script:PackageSha256 = $null
+$script:VerifiedZipPath = $null
 
 function Assert-M9rWindows {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -80,25 +95,56 @@ function Get-ReleaseAssets([string]$RequestedVersion) {
     }
     $zip = $release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
     $sha = $release.assets | Where-Object { $_.name -eq $checksumName } | Select-Object -First 1
-    if (-not $zip -or -not $sha) { throw "Release $($release.tag_name) is missing the engine ZIP or its SHA-256 sidecar." }
-    return @{ Release = $release; Zip = $zip; Checksum = $sha }
+    $policy = $release.assets | Where-Object { $_.name -eq $policyName } | Select-Object -First 1
+    if (-not $zip -or -not $sha -or -not $policy) { throw "Release $($release.tag_name) is missing the engine ZIP, checksum, or separate runtime policy." }
+    return @{ Release = $release; Zip = $zip; Checksum = $sha; Policy = $policy }
 }
 
 function Get-VerifiedPackage([string]$LocalPackagePath, [string]$DownloadRoot) {
+    if ($AllowLocalCandidate -and (-not $LocalPackagePath -or [string]::IsNullOrWhiteSpace($CandidateReceiptPath))) {
+        throw 'A local candidate install requires both -PackagePath and an external -CandidateReceiptPath.'
+    }
+    if ($AllowLocalCandidate -and $Version) {
+        throw 'Do not combine -AllowLocalCandidate with -Version; a local candidate is verified by its external receipt.'
+    }
     if ($LocalPackagePath) {
         $zipPath = (Resolve-Path -LiteralPath $LocalPackagePath -ErrorAction Stop).Path
         $shaPath = "$zipPath.sha256"
+        if ($AllowLocalCandidate) {
+            $receiptPath = (Resolve-Path -LiteralPath $CandidateReceiptPath -ErrorAction Stop).Path
+            try { $script:CandidateReceipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json }
+            catch { throw 'The external candidate receipt is invalid JSON. Nothing was installed.' }
+            $script:CandidateReceiptPath = $receiptPath
+        } else {
+            $repoRoot = Split-Path -Parent $PSScriptRoot
+            $localPolicy = Join-Path $repoRoot 'release-assets\accepted-runtime.json'
+            if ($Version -or -not (Test-Path -LiteralPath $localPolicy -PathType Leaf)) {
+                $assets = Get-ReleaseAssets $Version
+                $policyPath = Join-Path $DownloadRoot $policyName
+                if ($assets.Policy.browser_download_url -notmatch '^https://github\.com/ayaanali-ai/M9R/releases/download/m9r-engine-v\d+\.\d+\.\d+/') {
+                    throw 'Release runtime policy URL is outside the expected M9R GitHub release host/path.'
+                }
+                Invoke-WebRequest -Uri $assets.Policy.browser_download_url -OutFile $policyPath -Headers @{ 'User-Agent' = 'M9R-Windows-Installer' }
+                $script:TrustedRuntimePolicyPath = $policyPath
+            } else {
+                $script:TrustedRuntimePolicyPath = $localPolicy
+            }
+        }
     } else {
+        if ($AllowLocalCandidate) { throw '-AllowLocalCandidate only accepts an explicit local package path.' }
         $assets = Get-ReleaseAssets $Version
         $zipPath = Join-Path $DownloadRoot $assetName
         $shaPath = "$zipPath.sha256"
-        foreach ($asset in @($assets.Zip, $assets.Checksum)) {
+        $policyPath = Join-Path $DownloadRoot $policyName
+        foreach ($asset in @($assets.Zip, $assets.Checksum, $assets.Policy)) {
             if ($asset.browser_download_url -notmatch '^https://github\.com/ayaanali-ai/M9R/releases/download/m9r-engine-v\d+\.\d+\.\d+/') {
                 throw 'Release asset URL is outside the expected M9R GitHub release host/path.'
             }
         }
         Invoke-WebRequest -Uri $assets.Zip.browser_download_url -OutFile $zipPath -Headers @{ 'User-Agent' = 'M9R-Windows-Installer' }
         Invoke-WebRequest -Uri $assets.Checksum.browser_download_url -OutFile $shaPath -Headers @{ 'User-Agent' = 'M9R-Windows-Installer' }
+        Invoke-WebRequest -Uri $assets.Policy.browser_download_url -OutFile $policyPath -Headers @{ 'User-Agent' = 'M9R-Windows-Installer' }
+        $script:TrustedRuntimePolicyPath = $policyPath
     }
 
     if (-not (Test-Path -LiteralPath $shaPath -PathType Leaf)) { throw "Checksum sidecar is missing: $shaPath" }
@@ -109,6 +155,8 @@ function Get-VerifiedPackage([string]$LocalPackagePath, [string]$DownloadRoot) {
     $expected = $Matches[1].ToLowerInvariant()
     $actual = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $expected) { throw 'The downloaded package SHA-256 does not match its sidecar. Nothing was installed.' }
+    $script:PackageSha256 = $actual
+    $script:VerifiedZipPath = [IO.Path]::GetFullPath($zipPath)
     return @{ ZipPath = $zipPath }
 }
 
@@ -136,12 +184,11 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
 }
 
 function Get-AcceptedRuntimeIdentity {
-    # Packaged installers carry the accepted identity beside this script. When
-    # running from the source checkout, load the same file from release-assets.
-    # A package without an identity is not trusted just because its ZIP has a
-    # matching checksum sidecar.
-    $path = Join-Path $PSScriptRoot 'm9r-accepted-runtime.json'
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    # Never trust the policy copied beside an installer inside the ZIP: an old
+    # package could otherwise approve its own old runtime. Use the checkout's
+    # owner-controlled policy or the separate policy asset fetched from GitHub.
+    $path = $script:TrustedRuntimePolicyPath
+    if ([string]::IsNullOrWhiteSpace($path)) {
         $repoRoot = Split-Path -Parent $PSScriptRoot
         $path = Join-Path $repoRoot 'release-assets\accepted-runtime.json'
     }
@@ -156,11 +203,46 @@ function Get-AcceptedRuntimeIdentity {
     return $identity
 }
 
+function Assert-LocalCandidateReceipt($Runtime, [string]$PayloadRoot) {
+    if (-not $AllowLocalCandidate) { return }
+    $receipt = $script:CandidateReceipt
+    if (-not $receipt -or $receipt.schemaVersion -ne 1 -or $receipt.buildMode -ne 'fresh-source-overlay' -or
+        [string]$receipt.candidateId -notmatch '^\d{4}-\d{2}-\d{2}T.+-[a-fA-F0-9]{8}$') {
+        throw 'The external candidate receipt is malformed. Nothing was installed.'
+    }
+    $receiptRoot = Split-Path -Parent $script:CandidateReceiptPath
+    if (-not [string]::Equals((Split-Path -Leaf $receiptRoot), [string]$receipt.candidateId, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The candidate receipt ID does not match its directory. Nothing was installed.'
+    }
+    $relativePackagePath = [string]$receipt.package.path
+    if ($relativePackagePath -match '(^[\\/]|^[A-Za-z]:|(^|[\\/])\.\.([\\/]|$))') {
+        throw 'The candidate receipt contains an unsafe package path. Nothing was installed.'
+    }
+    $expectedPackagePath = [IO.Path]::GetFullPath((Join-Path $receiptRoot $relativePackagePath.Replace('/', [IO.Path]::DirectorySeparatorChar)))
+    if (-not [string]::Equals($expectedPackagePath, $script:VerifiedZipPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The external candidate receipt points to a different package. Nothing was installed.'
+    }
+    if (-not [string]::Equals([string]$receipt.package.sha256, [string]$script:PackageSha256, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$receipt.runtimeBuildId, [string]$Runtime.buildId, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$receipt.sourceCommit, [string]$Runtime.source.sourceCommit, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$receipt.pillSha256, [string]$Runtime.artifacts.'m9r-overlay.exe', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The external candidate receipt does not match the exact ZIP, source, runtime, or pill. Nothing was installed.'
+    }
+    foreach ($field in @('runtimeManifest', 'exactRuntimeArtifactSet', 'sourceBuiltPillHash', 'packageChecksum')) {
+        if ($receipt.verified.$field -ne $true) { throw "The candidate receipt does not verify $field. Nothing was installed." }
+    }
+}
+
 function Assert-AcceptedRuntimePackage([string]$PayloadRoot) {
-    $accepted = Get-AcceptedRuntimeIdentity
     $runtimePath = Join-Path $PayloadRoot 'm9r-build-info.json'
     try { $runtime = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json }
     catch { throw 'The package runtime identity is invalid JSON. Nothing was installed.' }
+    if ($AllowLocalCandidate) {
+        Assert-LocalCandidateReceipt $runtime $PayloadRoot
+        $accepted = $runtime
+    } else {
+        $accepted = Get-AcceptedRuntimeIdentity
+    }
     if ($runtime.schemaVersion -ne 1 -or -not [string]::Equals([string]$runtime.buildId, [string]$accepted.buildId, [StringComparison]::OrdinalIgnoreCase)) {
         throw "The package build ID is not the owner-accepted runtime ($($accepted.buildId)). Nothing was installed."
     }

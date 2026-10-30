@@ -4,7 +4,8 @@ param(
     [string]$OutputDirectory,
     [string]$RuntimeDirectory,
     [string]$CliDistDirectory,
-    [string]$AcceptedRuntimePath
+    [string]$AcceptedRuntimePath,
+    [switch]$Candidate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,7 +13,15 @@ $root = Split-Path -Parent $PSScriptRoot
 $dist = if ([string]::IsNullOrWhiteSpace($RuntimeDirectory)) { Join-Path $root 'engine\dist' } else { [IO.Path]::GetFullPath($RuntimeDirectory) }
 $assets = @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-build-info.json')
 $overlay = Join-Path $dist 'm9r-overlay.exe'
-$acceptedRuntimePath = if ([string]::IsNullOrWhiteSpace($AcceptedRuntimePath)) { Join-Path $root 'release-assets\accepted-runtime.json' } else { [IO.Path]::GetFullPath($AcceptedRuntimePath) }
+$canonicalRuntimePath = [IO.Path]::GetFullPath((Join-Path $root 'release-assets\accepted-runtime.json'))
+if (-not $Candidate -and -not [string]::IsNullOrWhiteSpace($AcceptedRuntimePath) -and
+    -not [string]::Equals([IO.Path]::GetFullPath($AcceptedRuntimePath), $canonicalRuntimePath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Only -Candidate packaging may use a noncanonical runtime identity. Stable release packaging must use release-assets\accepted-runtime.json.'
+}
+if ($Candidate -and [string]::IsNullOrWhiteSpace($AcceptedRuntimePath)) {
+    throw 'Candidate packaging requires an explicit runtime identity path.'
+}
+$acceptedRuntimePath = if ([string]::IsNullOrWhiteSpace($AcceptedRuntimePath)) { $canonicalRuntimePath } else { [IO.Path]::GetFullPath($AcceptedRuntimePath) }
 $cliDist = if ([string]::IsNullOrWhiteSpace($CliDistDirectory)) { Join-Path $root 'cli\dist' } else { [IO.Path]::GetFullPath($CliDistDirectory) }
 $extension = Join-Path $cliDist 'extension'
 $cuaRuntime = Join-Path $dist 'cua-driver-runtime'
@@ -138,13 +147,17 @@ This package does not request administrator privileges. Setup changes are record
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = Join-Path $destination 'm9r-engine-windows-x64.zip'
     $checksum = "$zip.sha256"
+    $policyAsset = Join-Path $destination 'm9r-accepted-runtime.json'
     if (Test-Path -LiteralPath $zip) { throw "Refusing to overwrite existing release asset: $zip" }
     if (Test-Path -LiteralPath $checksum) { throw "Refusing to overwrite existing checksum: $checksum" }
+    if (-not $Candidate -and (Test-Path -LiteralPath $policyAsset)) { throw "Refusing to overwrite existing runtime policy asset: $policyAsset" }
     [IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
     $hash = Get-Sha256 $zip
     "$hash  m9r-engine-windows-x64.zip" | Set-Content -LiteralPath $checksum -Encoding ASCII
+    if (-not $Candidate) { Copy-Item -LiteralPath $acceptedRuntimePath -Destination $policyAsset }
     Write-Output "Created $zip"
     Write-Output "Created $checksum"
+    if (-not $Candidate) { Write-Output "Created $policyAsset" }
 } finally {
     if (Test-Path -LiteralPath $stage) {
         $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar

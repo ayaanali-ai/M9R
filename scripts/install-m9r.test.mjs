@@ -97,6 +97,11 @@ test("installer contains no Node/npm dependency and changes no saved PowerShell 
   assert.match(source, /\$applyArgs\s*=\s*@\('setup',\s*'--yes'\)/);
   assert.match(source, /function Get-M9rHome/);
   assert.match(source, /Get-M9rHome/);
+  assert.match(source, /\$AllowLocalCandidate[\s\S]*\$CandidateReceiptPath/);
+  assert.match(source, /Never trust the policy copied beside an installer inside the ZIP/);
+  assert.match(source, /external candidate receipt does not match the exact ZIP, source, runtime, or pill/);
+  assert.doesNotMatch(source, /Join-Path \$PSScriptRoot 'm9r-accepted-runtime\.json'/,
+    "a package must not use its own embedded runtime policy as its trust root");
   assert.match(source, /\[switch\]\$NoAutostart/);
   assert.match(source, /\[switch\]\$NoLaunch/);
   assert.match(source, /function Stop-InstalledM9rPill/);
@@ -124,9 +129,17 @@ test("standalone release packages runtime companions from the canonical engine d
   const builderSource = readFileSync(engineBuilder, "utf8");
   const workflowSource = readFileSync(resolve(".github/workflows/m9r-engine-release.yml"), "utf8");
   const cliSource = readFileSync(resolve("scripts/m9r-cli.ts"), "utf8");
-  const overlayPreflightIndex = builderSource.indexOf('if (process.platform === "win32" && !existsSync(overlayExe))');
+  const pillBuildIndex = builderSource.indexOf('"overlay", "run", "build"');
+  const overlayPreflightIndex = builderSource.indexOf('if (!existsSync(overlayExe))');
   const stagingIndex = builderSource.indexOf("mkdirSync(out, { recursive: true });");
-  assert.ok(overlayPreflightIndex >= 0 && stagingIndex > overlayPreflightIndex, "missing pill input must fail before a new build staging directory is created");
+  assert.ok(pillBuildIndex >= 0 && overlayPreflightIndex > pillBuildIndex && stagingIndex > overlayPreflightIndex,
+    "the current-source pill must be built and verified before the runtime is staged");
+  assert.match(builderSource, /CARGO_TARGET_DIR: overlayTarget/,
+    "the pill must build in the same isolated staging root as its engine/runtime");
+  assert.doesNotMatch(builderSource, /release-assets[\\/]accepted-ui/,
+    "the runtime builder must not source a stale preserved pill binary");
+  assert.match(builderSource, /M9R_OVERLAY_EXE is no longer a supported build input/,
+    "callers must not substitute an arbitrary previous pill executable");
   assert.match(builderSource, /m9r-web-broker\.cjs[\s\S]*m9r-web-broker\.exe/, "the build must turn the bundled broker into its own executable");
   assert.match(builderSource, /copyFileSync\(overlayExe, join\(out, "m9r-overlay\.exe"\)\)/, "the engine distribution must capture the just-built desktop pill");
   const manifestWriteIndex = builderSource.indexOf("writeRuntimeBuildManifest(out");
@@ -142,9 +155,11 @@ test("standalone release packages runtime companions from the canonical engine d
   assert.match(packagerSource, /m9r-build-info\.json/, "the release ZIP must contain the runtime artifact identity manifest");
   assert.match(packagerSource, /\$overlay\s*=\s*Join-Path\s+\$dist\s+'m9r-overlay\.exe'/, "the release ZIP must take the pill from the same engine distribution used by local setup");
   assert.doesNotMatch(packagerSource, /overlay\\src-tauri\\target\\release\\m9r-overlay\.exe/i, "release packaging must not bypass the canonical engine distribution");
-  const pillBuildIndex = workflowSource.indexOf("npm --prefix overlay run build");
   const engineBuildIndex = workflowSource.indexOf("npm run build:engine");
-  assert.ok(pillBuildIndex >= 0 && engineBuildIndex > pillBuildIndex, "the release workflow must build the pill before the engine captures it");
+  assert.ok(engineBuildIndex >= 0 && !workflowSource.includes("npm --prefix overlay run build"),
+    "the release workflow must use the engine builder's same-checkout pill build, not a separate pill build step");
+  assert.match(packagerSource, /m9r-accepted-runtime\.json/,
+    "the release must publish an independent runtime policy asset for installer verification");
   assert.match(installerSource, /m9r-web-broker\.exe/, "the installer must require the broker from the verified package");
   assert.match(installerSource, /m9r-overlay\.exe/, "the installer must require the M9R desktop pill from the verified package");
   assert.match(installerSource, /m9r-build-info\.json/, "the installer must require the runtime artifact identity manifest");

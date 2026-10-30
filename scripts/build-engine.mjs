@@ -26,30 +26,36 @@ const cliOutput = resolve(process.env.M9R_CLI_OUTPUT_DIR || join(root, "cli", "d
 const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
 const out = join(buildRoot, "artifacts");
 const work = join(buildRoot, "work");
-// The accepted desktop pill is a versioned release input. Never choose a pill
-// from Cargo's mutable target directory: it may belong to another checkout or
-// an earlier build. A deliberate UI promotion updates the accepted runtime
-// identity and replaces this preserved artifact together.
-const acceptedRuntimePath = join(root, "release-assets", "accepted-runtime.json");
-if (!existsSync(acceptedRuntimePath)) {
-  throw new Error("The accepted runtime identity is missing at release-assets/accepted-runtime.json; refusing to select a desktop pill.");
+// Build the pill from this checkout in the same isolated staging root as the
+// runtime. Never source it from accepted-ui or a caller-selected executable:
+// either can silently pair a newer engine with an older pill.
+if (process.env.M9R_OVERLAY_EXE) {
+  throw new Error("M9R_OVERLAY_EXE is no longer a supported build input. The pill must be built from this checkout with the runtime.");
 }
-const acceptedRuntime = JSON.parse(readFileSync(acceptedRuntimePath, "utf8"));
-const acceptedOverlayHash = acceptedRuntime?.artifacts?.["m9r-overlay.exe"];
-if (acceptedRuntime.schemaVersion !== 1 || !/^[a-f0-9]{64}$/.test(acceptedRuntime.buildId ?? "")
-  || !/^[a-f0-9]{64}$/.test(acceptedOverlayHash ?? "")) {
-  throw new Error("The accepted runtime identity is malformed; review it before building.");
-}
-const canonicalOverlayExe = join(root, "release-assets", "accepted-ui", "m9r-overlay.exe");
-const overlayExe = process.env.M9R_OVERLAY_EXE
-  ? resolve(process.env.M9R_OVERLAY_EXE)
-  : canonicalOverlayExe;
-if (process.platform === "win32" && !existsSync(overlayExe)) {
-  throw new Error("The accepted M9R pill is missing at release-assets/accepted-ui/m9r-overlay.exe; Cargo target output is not an allowed fallback.");
-}
-if (process.platform === "win32"
-  && createHash("sha256").update(readFileSync(overlayExe)).digest("hex") !== acceptedOverlayHash) {
-  throw new Error("The selected pill does not match the accepted runtime identity. Review and explicitly promote a new UI before packaging it.");
+const overlayTarget = join(buildRoot, "overlay-target");
+const overlayExe = join(overlayTarget, "release", "m9r-overlay.exe");
+if (process.platform === "win32") {
+  const npmExecPath = process.env.npm_execpath;
+  const npmCommand = npmExecPath ? process.execPath : (process.env.ComSpec ?? "cmd.exe");
+  const npmArgs = npmExecPath
+    ? [npmExecPath, "--prefix", "overlay", "run", "build"]
+    : ["/d", "/s", "/c", "npm --prefix overlay run build"];
+  const overlayBuild = spawnSync(npmCommand, npmArgs, {
+    cwd: root,
+    env: { ...process.env, CARGO_TARGET_DIR: overlayTarget },
+    stdio: "inherit",
+    windowsHide: true,
+  });
+  if (overlayBuild.error || overlayBuild.status !== 0) {
+    rmSync(buildRoot, { recursive: true, force: true });
+    throw new Error(`Building the M9R pill from the current checkout failed with exit ${overlayBuild.status ?? "unknown"}. No runtime was published.`, { cause: overlayBuild.error });
+  }
+  if (!existsSync(overlayExe)) {
+    rmSync(buildRoot, { recursive: true, force: true });
+    throw new Error(`The current-source pill build completed without producing ${overlayExe}. No runtime was published.`);
+  }
+  const overlayHash = createHash("sha256").update(readFileSync(overlayExe)).digest("hex");
+  console.log(`Built current-source M9R pill ${overlayHash} in the isolated runtime staging directory.`);
 }
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(cliOutput, "m9r-web-broker.cjs");
@@ -274,8 +280,7 @@ if (process.platform === "win32") {
   }
 
   // Keep engine/dist as the single runtime source used by local setup and release packaging.
-  // The release workflow builds the pill before this script, so this copy cannot silently retain
-  // a previous overlay when a new desktop build has been produced.
+  // overlayExe was built from this checkout in this invocation, inside buildRoot.
   copyFileSync(overlayExe, join(out, "m9r-overlay.exe"));
   console.log(`Packaged Cua Driver ${cuaDriverVersion} Windows standalone host (SHA-256 verified).`);
 }

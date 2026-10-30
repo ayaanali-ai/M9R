@@ -22,7 +22,6 @@ jobs:
       - run: npm --prefix pill ci
       - run: npm --prefix overlay ci
       - run: npm --prefix overlay run typecheck
-      - run: npm --prefix overlay run build
       - run: npm run build:engine
       - run: node --test ./scripts/install-m9r.test.mjs
       - name: Package standalone installer assets
@@ -34,4 +33,4 @@ jobs:
         shell: pwsh
         run: |
           if ($env:GITHUB_REF_NAME -notmatch '^m9r-engine-v\d+\.\d+\.\d+$') { throw "Refusing non-stable engine release tag: $env:GITHUB_REF_NAME" }
-          gh release create "$env:GITHUB_REF_NAME" "$env:RUNNER_TEMP/m9r-release/m9r-engine-windows-x64.zip" "$env:RUNNER_TEMP/m9r-release/m9r-engine-windows-x64.zip.sha256" --verify-tag --generate-notes --title "$env:GITHUB_REF_NAME"
+          gh release create "$env:GITHUB_REF_NAME" "$env:RUNNER_TEMP/m9r-release/m9r-engine-windows-x64.zip" "$env:RUNNER_TEMP/m9r-release/m9r-engine-windows-x64.zip.sha256" "$env:RUNNER_TEMP/m9r-release/m9r-accepted-runtime.json" --verify-tag --generate-notes --title "$env:GITHUB_REF_NAME"
