@@ -56,7 +56,7 @@ $policyName = 'm9r-accepted-runtime.json'
 $releaseTagPrefix = 'm9r-engine-v'
 $script:TrustedRuntimePolicyPath = $null
 $script:CandidateReceipt = $null
-$script:CandidateReceiptPath = $null
+$script:VerifiedCandidateReceiptPath = $null
 $script:PackageSha256 = $null
 $script:VerifiedZipPath = $null
 
@@ -114,7 +114,7 @@ function Get-VerifiedPackage([string]$LocalPackagePath, [string]$DownloadRoot) {
             $receiptPath = (Resolve-Path -LiteralPath $CandidateReceiptPath -ErrorAction Stop).Path
             try { $script:CandidateReceipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json }
             catch { throw 'The external candidate receipt is invalid JSON. Nothing was installed.' }
-            $script:CandidateReceiptPath = $receiptPath
+            $script:VerifiedCandidateReceiptPath = $receiptPath
         } else {
             $repoRoot = Split-Path -Parent $PSScriptRoot
             $localPolicy = Join-Path $repoRoot 'release-assets\accepted-runtime.json'
@@ -210,7 +210,7 @@ function Assert-LocalCandidateReceipt($Runtime, [string]$PayloadRoot) {
         [string]$receipt.candidateId -notmatch '^\d{4}-\d{2}-\d{2}T.+-[a-fA-F0-9]{8}$') {
         throw 'The external candidate receipt is malformed. Nothing was installed.'
     }
-    $receiptRoot = Split-Path -Parent $script:CandidateReceiptPath
+    $receiptRoot = Split-Path -Parent $script:VerifiedCandidateReceiptPath
     if (-not [string]::Equals((Split-Path -Leaf $receiptRoot), [string]$receipt.candidateId, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'The candidate receipt ID does not match its directory. Nothing was installed.'
     }
