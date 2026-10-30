@@ -32,10 +32,10 @@ if (resumePath) {
   if (existsSync(join(candidateRoot, "candidate.json"))) throw new Error(`Candidate already has a completion receipt: ${candidateRoot}`);
   const buildReceiptPath = join(candidateRoot, "candidate-build.json");
   if (!existsSync(buildReceiptPath)) {
-    throw new Error("This candidate predates the fresh-source pill build receipt and cannot be resumed. Create a new candidate; the old directory was left untouched.");
+    throw new Error("This candidate predates the accepted-live-pill build receipt and cannot be resumed. Create a new candidate; the old directory was left untouched.");
   }
   const priorBuildReceipt = JSON.parse(readFileSync(buildReceiptPath, "utf8"));
-  if (priorBuildReceipt.schemaVersion !== 1 || priorBuildReceipt.buildMode !== "fresh-source-overlay"
+  if (priorBuildReceipt.schemaVersion !== 1 || priorBuildReceipt.buildMode !== "accepted-live-overlay"
     || priorBuildReceipt.runtimeBuildId !== priorManifest.buildId
     || priorBuildReceipt.sourceCommit !== sourceCommit
     || priorBuildReceipt.pillSha256 !== priorManifest.artifacts["m9r-overlay.exe"]) {
@@ -80,16 +80,21 @@ if (!resumePath) {
 
 const runtimeIdentity = verifyRuntimeBuildManifest(runtimeOutput, { exact: true });
 const pillSha256 = runtimeIdentity.artifacts["m9r-overlay.exe"];
+const acceptedPath = join(root, "release-assets", "accepted-runtime.json");
+const accepted = JSON.parse(readFileSync(acceptedPath, "utf8"));
 if (!/^[a-f0-9]{64}$/.test(pillSha256 ?? "") || !existsSync(join(runtimeOutput, "m9r-overlay.exe"))) {
-  throw new Error("Candidate runtime does not contain the pill built from the current checkout.");
+  throw new Error("Candidate runtime does not contain the owner-accepted live pill.");
 }
 if (createHash("sha256").update(readFileSync(join(runtimeOutput, "m9r-overlay.exe"))).digest("hex") !== pillSha256) {
   throw new Error("Candidate runtime pill hash does not match its complete runtime manifest.");
 }
+if (pillSha256 !== accepted.artifacts?.["m9r-overlay.exe"]) {
+  throw new Error("Candidate runtime pill differs from the owner-accepted live pill; refusing to package it.");
+}
 if (!resumePath) {
   const buildReceipt = {
     schemaVersion: 1,
-    buildMode: "fresh-source-overlay",
+    buildMode: "accepted-live-overlay",
     candidateId,
     sourceCommit,
     runtimeBuildId: runtimeIdentity.buildId,
@@ -97,7 +102,7 @@ if (!resumePath) {
   };
   writeFileSync(join(candidateRoot, "candidate-build.json"), `${JSON.stringify(buildReceipt, null, 2)}\n`);
 } else if (resumedRuntime?.buildId !== runtimeIdentity.buildId) {
-  throw new Error("Resumed runtime changed after its fresh-source pill receipt was created.");
+  throw new Error("Resumed runtime changed after its accepted-live-pill receipt was created.");
 }
 
 const packageResult = spawnSync("powershell.exe", [
@@ -120,7 +125,7 @@ if (!new RegExp(`^${zipHash}\\s+\\*?m9r-engine-windows-x64\\.zip$`, "i").test(si
 }
 const receipt = {
   schemaVersion: 1,
-  buildMode: "fresh-source-overlay",
+  buildMode: "accepted-live-overlay",
   candidateId,
   sourceCommit,
   runtimeBuildId: runtimeIdentity.buildId,
@@ -133,7 +138,7 @@ const receipt = {
   verified: {
     runtimeManifest: true,
     exactRuntimeArtifactSet: true,
-    sourceBuiltPillHash: true,
+    acceptedPillHash: true,
     packageChecksum: true,
   },
 };

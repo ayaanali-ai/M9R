@@ -129,19 +129,14 @@ test("standalone release packages runtime companions from the canonical engine d
   const builderSource = readFileSync(engineBuilder, "utf8");
   const workflowSource = readFileSync(resolve(".github/workflows/m9r-engine-release.yml"), "utf8");
   const cliSource = readFileSync(resolve("scripts/m9r-cli.ts"), "utf8");
-  const pillBuildIndex = builderSource.indexOf('"overlay", "run", "build"');
-  const overlayPreflightIndex = builderSource.indexOf('if (!existsSync(overlayExe))');
-  const stagingIndex = builderSource.indexOf("mkdirSync(out, { recursive: true });");
-  assert.ok(pillBuildIndex >= 0 && overlayPreflightIndex > pillBuildIndex && stagingIndex > overlayPreflightIndex,
-    "the current-source pill must be built and verified before the runtime is staged");
-  assert.match(builderSource, /CARGO_TARGET_DIR: overlayTarget/,
-    "the pill must build in the same isolated staging root as its engine/runtime");
-  assert.doesNotMatch(builderSource, /release-assets[\\/]accepted-ui/,
-    "the runtime builder must not source a stale preserved pill binary");
-  assert.match(builderSource, /M9R_OVERLAY_EXE is no longer a supported build input/,
-    "callers must not substitute an arbitrary previous pill executable");
+  assert.match(builderSource, /release-assets", "accepted-ui", "m9r-overlay\.exe"/,
+    "the runtime builder must use the exact owner-accepted live pill artifact");
+  assert.match(builderSource, /acceptedOverlayHash/,
+    "the packaged pill must match the accepted runtime hash before staging");
+  assert.match(builderSource, /M9R_OVERLAY_EXE is not a supported build input/,
+    "callers must not substitute an arbitrary pill executable");
   assert.match(builderSource, /m9r-web-broker\.cjs[\s\S]*m9r-web-broker\.exe/, "the build must turn the bundled broker into its own executable");
-  assert.match(builderSource, /copyFileSync\(overlayExe, join\(out, "m9r-overlay\.exe"\)\)/, "the engine distribution must capture the just-built desktop pill");
+  assert.match(builderSource, /copyFileSync\(overlayExe, join\(out, "m9r-overlay\.exe"\)\)/, "the engine distribution must capture the owner-accepted live pill");
   const manifestWriteIndex = builderSource.indexOf("writeRuntimeBuildManifest(out");
   const stagedVerifyIndex = builderSource.indexOf("verifyRuntimeBuildManifest(out, { exact: true })");
   const publishIndex = builderSource.indexOf("publishRuntimeBuild(out, output, managedRuntimePaths)");
@@ -157,7 +152,7 @@ test("standalone release packages runtime companions from the canonical engine d
   assert.doesNotMatch(packagerSource, /overlay\\src-tauri\\target\\release\\m9r-overlay\.exe/i, "release packaging must not bypass the canonical engine distribution");
   const engineBuildIndex = workflowSource.indexOf("npm run build:engine");
   assert.ok(engineBuildIndex >= 0 && !workflowSource.includes("npm --prefix overlay run build"),
-    "the release workflow must use the engine builder's same-checkout pill build, not a separate pill build step");
+    "the release workflow must package the accepted live pill rather than compile an unreviewed target binary");
   assert.match(packagerSource, /m9r-accepted-runtime\.json/,
     "the release must publish an independent runtime policy asset for installer verification");
   assert.match(installerSource, /m9r-web-broker\.exe/, "the installer must require the broker from the verified package");

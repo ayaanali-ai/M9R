@@ -206,7 +206,7 @@ function Get-AcceptedRuntimeIdentity {
 function Assert-LocalCandidateReceipt($Runtime, [string]$PayloadRoot) {
     if (-not $AllowLocalCandidate) { return }
     $receipt = $script:CandidateReceipt
-    if (-not $receipt -or $receipt.schemaVersion -ne 1 -or $receipt.buildMode -ne 'fresh-source-overlay' -or
+    if (-not $receipt -or $receipt.schemaVersion -ne 1 -or $receipt.buildMode -ne 'accepted-live-overlay' -or
         [string]$receipt.candidateId -notmatch '^\d{4}-\d{2}-\d{2}T.+-[a-fA-F0-9]{8}$') {
         throw 'The external candidate receipt is malformed. Nothing was installed.'
     }
@@ -228,7 +228,7 @@ function Assert-LocalCandidateReceipt($Runtime, [string]$PayloadRoot) {
         -not [string]::Equals([string]$receipt.pillSha256, [string]$Runtime.artifacts.'m9r-overlay.exe', [StringComparison]::OrdinalIgnoreCase)) {
         throw 'The external candidate receipt does not match the exact ZIP, source, runtime, or pill. Nothing was installed.'
     }
-    foreach ($field in @('runtimeManifest', 'exactRuntimeArtifactSet', 'sourceBuiltPillHash', 'packageChecksum')) {
+    foreach ($field in @('runtimeManifest', 'exactRuntimeArtifactSet', 'acceptedPillHash', 'packageChecksum')) {
         if ($receipt.verified.$field -ne $true) { throw "The candidate receipt does not verify $field. Nothing was installed." }
     }
 }
