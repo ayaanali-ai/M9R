@@ -468,8 +468,17 @@ function Invoke-ManagedBrokerUpdate([string]$EnginePath, [ValidateSet('stop', 's
     if (-not (Test-Path -LiteralPath $EnginePath -PathType Leaf)) {
         throw "The M9R engine required to manage the broker update is missing: $EnginePath"
     }
-    $output = @(& $EnginePath web broker-update $Phase 2>&1)
-    $code = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # The native engine writes informational migration/lifecycle notices to
+        # stderr. They are data, not PowerShell failures; capture them without
+        # allowing the wrapper's Stop preference to abort the transaction.
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $EnginePath web broker-update $Phase 2>&1)
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     foreach ($line in $output) { Write-Host ([string]$line) }
     if ($code -ne 0) { throw "M9R could not safely $Phase the managed Web broker (exit $code). No further installer files were replaced." }
     $resultLine = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^\{.*"phase"\s*:\s*"' + [regex]::Escape($Phase) + '".*\}$' } | Select-Object -Last 1)
@@ -601,7 +610,15 @@ try {
         # the broker's separate ownership record. Include the broker in the same
         # verified file transaction; the second manifest is refreshed afterward.
         $env:M9R_INCLUDE_MANAGED_BROKER = '1'
-        $plan = @(& $engine @dryRunArgs 2>&1)
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            # The native engine writes informational migration notices to stderr.
+            # They are part of the human-readable plan, not wrapper failures.
+            $ErrorActionPreference = 'Continue'
+            $plan = @(& $engine @dryRunArgs 2>&1)
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
     } finally {
         if ($null -eq $previousIncludeManagedBroker) { Remove-Item Env:M9R_INCLUDE_MANAGED_BROKER -ErrorAction SilentlyContinue }
         else { $env:M9R_INCLUDE_MANAGED_BROKER = $previousIncludeManagedBroker }
@@ -633,8 +650,14 @@ try {
     try {
         $env:M9R_DEFER_BROKER_START = '1'
         $env:M9R_INCLUDE_MANAGED_BROKER = '1'
-        & $engine @applyArgs
-        $setupExit = $LASTEXITCODE
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $engine @applyArgs
+            $setupExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
     } finally {
         if ($null -eq $previousBrokerDefer) { Remove-Item Env:M9R_DEFER_BROKER_START -ErrorAction SilentlyContinue }
         else { $env:M9R_DEFER_BROKER_START = $previousBrokerDefer }
@@ -657,8 +680,14 @@ try {
         $env:M9R_EXTENSION_SOURCE = $extensionPackage
         Write-Host ''
         Write-Host 'Starting the separate M9R Web setup. It previews its agent/browser changes and asks before applying them.' -ForegroundColor Cyan
-        & $installedEngine web setup
-        $webExit = $LASTEXITCODE
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $installedEngine web setup
+            $webExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         if ($webExit -ne 0) { throw "M9R Web setup exited with code $webExit. Native setup remains installed and can be removed with -Uninstall." }
     }
     $brokerStart = Invoke-ManagedBrokerUpdate $installedEngine 'start'
