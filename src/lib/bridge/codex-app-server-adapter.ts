@@ -421,6 +421,7 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
       session.handle.availableModels = models.flatMap(model => typeof model.model === "string" ? [{
         id: model.model,
         label: typeof model.displayName === "string" ? model.displayName : model.model,
+        ...(typeof model.description === "string" && model.description.trim() ? { description: model.description } : {}),
         efforts: Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts.flatMap(value => {
           const option = record(value);
           return typeof option?.reasoningEffort === "string" ? [{ id: option.reasoningEffort, label: option.reasoningEffort }] : [];

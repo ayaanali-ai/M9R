@@ -14,6 +14,8 @@ export interface ProviderModelOption {
   readonly label: string;
   /** `null` means the provider did not report an effort catalog. */
   readonly efforts?: readonly ProviderModelEffort[] | null;
+  /** The provider's own one-line description, when it reports one. */
+  readonly description?: string;
 }
 
 export interface ProviderModelSelection {
@@ -82,7 +84,9 @@ export function validateProviderModelCatalog(raw: unknown): readonly ProviderMod
       }
       efforts = normalized;
     }
-    models.push({ id, label, efforts });
+    // Description is optional provider copy: an invalid one is dropped, never repaired.
+    const description = safeText(record?.description, MAX_LABEL);
+    models.push({ id, label, efforts, ...(description ? { description } : {}) });
   }
   return models;
 }

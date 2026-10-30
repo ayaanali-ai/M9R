@@ -520,7 +520,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       // tail participates in change detection so hashing stays bounded.
       thread: state.thread.map((entry, index) => [entry.id, entry.kind, entry.agent, entry.provider, entry.to ?? "", entry.phase ?? "", entry.ok ?? null, index >= state.thread.length - 12 ? entry.text : entry.text.slice(0, 32)]),
       collaboration: state.collaboration ? [state.collaboration.headline, state.collaboration.activeCount, state.collaboration.overflowCount, state.collaboration.agents.map((agent) => [agent.agentId, agent.state, agent.cursor.mode, agent.cursor.visible, agent.summary ?? ""])] : null,
-      models: state.models ? state.models.agents.map((agent) => [agent.handle, agent.provider, agent.generation, agent.availability, agent.currentModel ?? "", agent.currentEffort ?? "", agent.selectedModel ?? "", agent.selectedEffort ?? "", agent.models.map((model) => [model.id, model.label, model.efforts?.map((effort) => [effort.id, effort.label]) ?? null])]) : null,
+      models: state.models ? state.models.agents.map((agent) => [agent.handle, agent.provider, agent.generation, agent.availability, agent.currentModel ?? "", agent.currentEffort ?? "", agent.selectedModel ?? "", agent.selectedEffort ?? "", agent.models.map((model) => [model.id, model.label, model.description ?? "", model.efforts?.map((effort) => [effort.id, effort.label]) ?? null])]) : null,
       desktopPill: state.desktopPill === true,
     });
   }

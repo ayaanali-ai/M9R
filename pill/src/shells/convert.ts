@@ -19,7 +19,7 @@ interface UiAgent { id: string; provider?: string; state?: string; doing?: strin
 interface UiThread { id: string; kind: string; agent?: string; text: string; phase?: string }
 interface UiApproval { id: string; agent?: string; provider?: string; text: string; site?: string; url?: string; action?: string }
 interface UiModelEffort { id?: unknown; label?: unknown }
-interface UiModelOption { id?: unknown; label?: unknown; efforts?: unknown }
+interface UiModelOption { id?: unknown; label?: unknown; efforts?: unknown; description?: unknown }
 interface UiModelAgent { handle?: unknown; provider?: unknown; availability?: unknown; models?: unknown; currentModel?: unknown; currentEffort?: unknown; selectedModel?: unknown; selectedEffort?: unknown; status?: unknown }
 export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; collaboration?: unknown; models?: unknown; desktopPill?: boolean }
 
@@ -44,7 +44,8 @@ function modelState(raw: unknown): PillModelState | undefined {
         const effort = effortValue as UiModelEffort;
         return typeof effort.id === "string" && typeof effort.label === "string" && effort.id.trim() && effort.label.trim() ? [{ id: effort.id.slice(0, 160), label: effort.label.slice(0, 240) }] : [];
       }).slice(0, 32) : null;
-      models.push({ id: option.id.slice(0, 160), label: option.label.slice(0, 240), efforts });
+      const description = typeof option.description === "string" && option.description.trim() ? option.description.trim().slice(0, 240) : undefined;
+      models.push({ id: option.id.slice(0, 160), label: option.label.slice(0, 240), efforts, ...(description ? { description } : {}) });
     }
     agents.push({
       handle,

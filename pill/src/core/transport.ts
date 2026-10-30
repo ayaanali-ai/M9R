@@ -132,6 +132,23 @@ const SAMPLE: PillSnapshot = {
   ],
   approvals: [],
   thread: [],
+  // Developer sample shaped like the real catalogs Claude Code and Codex report; never used by a real host.
+  models: { agents: [
+    { handle: "claude", provider: "claude-code", availability: "available", status: "ready", currentModel: "default", currentEffort: "high", models: [
+      { id: "default", label: "Default (recommended)", description: "Opus 5.5 · Best for everyday, complex tasks", efforts: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }, { id: "high", label: "High" }, { id: "xhigh", label: "Extra high" }, { id: "max", label: "Max" }] },
+      { id: "claude-fable-5-1", label: "Fable 5.1", description: "Most capable for your hardest and longest-running tasks", efforts: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }, { id: "high", label: "High" }, { id: "xhigh", label: "Extra high" }, { id: "max", label: "Max" }] },
+      { id: "opus", label: "Opus 5.5", description: "Best for everyday, complex tasks", efforts: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }, { id: "high", label: "High" }, { id: "xhigh", label: "Extra high" }, { id: "max", label: "Max" }] },
+      { id: "sonnet", label: "Sonnet 5", description: "Efficient for routine tasks", efforts: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }, { id: "high", label: "High" }] },
+      { id: "haiku", label: "Haiku 4.5", description: "Fastest for quick answers", efforts: null },
+    ] },
+    { handle: "codex", provider: "codex", availability: "available", status: "ready", currentModel: "gpt-5.6-luna", currentEffort: "low", models: [
+      { id: "gpt-6-astra", label: "GPT-6-Astra", efforts: [{ id: "low", label: "low" }, { id: "medium", label: "medium" }, { id: "high", label: "high" }] },
+      { id: "gpt-5.6-sol", label: "GPT-5.6-Sol", efforts: [{ id: "low", label: "low" }, { id: "medium", label: "medium" }, { id: "high", label: "high" }] },
+      { id: "gpt-5.6-terra", label: "GPT-5.6-Terra", efforts: [{ id: "low", label: "low" }, { id: "medium", label: "medium" }] },
+      { id: "gpt-5.6-luna", label: "GPT-5.6-Luna", efforts: [{ id: "low", label: "low" }, { id: "medium", label: "medium" }] },
+    ] },
+    { handle: "opencode", provider: "opencode", availability: "catalog_unavailable", status: "ready", currentModel: null, currentEffort: null, models: [] },
+  ] },
 };
 
 /** Developer mock: a few agents, an approval that appears after a while, and echoed replies. */
@@ -160,6 +177,12 @@ export function createMockTransport(): PillTransport {
     },
     async decide(id) {
       snap.approvals = snap.approvals.filter((a) => a.id !== id);
+      push();
+    },
+    async selectModel(handle, model, effort) {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const agent = snap.models?.agents.find((a) => a.handle === handle);
+      if (agent) { agent.selectedModel = model; agent.selectedEffort = effort; }
       push();
     },
   };

@@ -306,6 +306,7 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
       this.availableModels = validateProviderModelCatalog(raw.map((model) => ({
         id: model.value,
         label: model.displayName,
+        description: model.description,
         efforts: Array.isArray(model.supportedEffortLevels)
           ? (model.supportedEffortLevels as unknown[]).filter((level): level is string => typeof level === "string")
             .map((level) => ({ id: level, label: level === "xhigh" ? "Extra high" : level.charAt(0).toUpperCase() + level.slice(1) }))

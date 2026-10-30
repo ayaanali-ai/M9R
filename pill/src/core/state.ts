@@ -9,7 +9,7 @@ export type AgentRunState = "idle" | "starting" | "working" | "waiting" | "block
 export type PillBadge = "approval" | "finished" | "error";
 
 export interface PillModelEffort { id: string; label: string }
-export interface PillModelOption { id: string; label: string; efforts: PillModelEffort[] | null }
+export interface PillModelOption { id: string; label: string; efforts: PillModelEffort[] | null; description?: string }
 export interface PillModelAgent {
   handle: string;
   provider: string;
