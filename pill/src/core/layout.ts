@@ -108,7 +108,8 @@ export function botPosition(
     case "hidden":
       return { cx: 46, cy: 16, diameter: 6, opacity: 0 };
     case "compact":
-      return { cx: 40, cy: 16, diameter: 20, opacity: 1 };
+      // Collapsed means solid black, nothing overlaid — no status mark, no provider logo.
+      return { cx: 40, cy: 16, diameter: 20, opacity: 0 };
     case "expanded": {
       if (view === "models") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
       const layout = VIEW_LAYOUTS[view];

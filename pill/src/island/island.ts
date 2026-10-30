@@ -586,8 +586,9 @@ export class Island {
       this.markEl.dataset.state = focus?.state ?? "idle";
     }
 
-    // Compact mini grid: the other agents.
-    const showGrid = State.mode === "compact";
+    // Compact mini grid: disabled — the collapsed pill must render solid black,
+    // with no provider-logo chips overlaid on it (owner-confirmed requirement).
+    const showGrid = false;
     this.miniGrid.style.opacity = showGrid ? "1" : "0";
     if (showGrid) {
       const others = State.otherTasks.slice(0, 4);

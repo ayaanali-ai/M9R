@@ -54,7 +54,8 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
   if (message.role === "user") {
     return h("div", { class: "chat-row user" }, h("div", { class: "bubble", text: message.content }));
   }
-  const reply = h("div", { class: "reply", text: message.content });
+  // The agent's own reply gets the same bubble treatment as the user's message (light/white here, blue for "user").
+  const reply = h("div", { class: "bubble", text: message.content });
   const clearNotice = message.dismissTaskId && actions.dismissTask
     ? h("button", { class: "save-note", type: "button", text: "Clear notice", title: "Hide this notice; keep its task record" })
     : null;
