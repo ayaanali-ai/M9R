@@ -1,16 +1,20 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    [string]$RuntimeDirectory,
+    [string]$CliDistDirectory,
+    [string]$AcceptedRuntimePath
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$dist = Join-Path $root 'engine\dist'
+$dist = if ([string]::IsNullOrWhiteSpace($RuntimeDirectory)) { Join-Path $root 'engine\dist' } else { [IO.Path]::GetFullPath($RuntimeDirectory) }
 $assets = @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-build-info.json')
 $overlay = Join-Path $dist 'm9r-overlay.exe'
-$acceptedRuntimePath = Join-Path $root 'release-assets\accepted-runtime.json'
-$extension = Join-Path $root 'cli\dist\extension'
+$acceptedRuntimePath = if ([string]::IsNullOrWhiteSpace($AcceptedRuntimePath)) { Join-Path $root 'release-assets\accepted-runtime.json' } else { [IO.Path]::GetFullPath($AcceptedRuntimePath) }
+$cliDist = if ([string]::IsNullOrWhiteSpace($CliDistDirectory)) { Join-Path $root 'cli\dist' } else { [IO.Path]::GetFullPath($CliDistDirectory) }
+$extension = Join-Path $cliDist 'extension'
 $cuaRuntime = Join-Path $dist 'cua-driver-runtime'
 $destination = [IO.Path]::GetFullPath($OutputDirectory)
 

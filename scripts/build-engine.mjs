@@ -21,7 +21,8 @@ const systemTarExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const engineDir = join(root, "engine");
-const output = join(engineDir, "dist");
+const output = resolve(process.env.M9R_ENGINE_OUTPUT_DIR || join(engineDir, "dist"));
+const cliOutput = resolve(process.env.M9R_CLI_OUTPUT_DIR || join(root, "cli", "dist"));
 const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
 const out = join(buildRoot, "artifacts");
 const work = join(buildRoot, "work");
@@ -51,7 +52,7 @@ if (process.platform === "win32"
   throw new Error("The selected pill does not match the accepted runtime identity. Review and explicitly promote a new UI before packaging it.");
 }
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
-const brokerBundle = join(root, "cli", "dist", "m9r-web-broker.cjs");
+const brokerBundle = join(cliOutput, "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";
 const cuaDriverVersion = "0.34.0";
 const cuaDriverArchiveSha256 = "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b408608b0ea4423a8b888";
@@ -94,7 +95,7 @@ function isHeldLocalProvenancePath(path) {
   return heldLocalProvenancePatterns.some((pattern) => pattern.test(normalized));
 }
 
-if (!existsSync(join(root, "cli", "dist", "m9r.js")) || !existsSync(brokerBundle)) throw new Error("cli/dist is missing: run `npm run build:cli` first.");
+if (!existsSync(join(cliOutput, "m9r.js")) || !existsSync(brokerBundle)) throw new Error(`CLI build output is missing: ${cliOutput}. Run npm run build:cli first or set M9R_CLI_OUTPUT_DIR to its completed output.`);
 rmSync(work, { recursive: true, force: true });
 for (const name of [exeName, brokerExeName, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native", ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "m9r-overlay.exe"] : [])]) {
   rmSync(join(out, name), { force: true });
@@ -160,10 +161,10 @@ function sourceProvenance() {
 }
 
 // The dispatcher: SEA argv is [exe, exe, ...args]; shift so both programs see the argv they were written for.
-const hookJs = join(root, "cli", "dist", "m9r-hook.js").split(String.fromCharCode(92)).join("/");
-const mcpJs = join(root, "cli", "dist", "m9r-mcp.js").split(String.fromCharCode(92)).join("/");
-const devMcpJs = join(root, "cli", "dist", "dev-mcp-server.js").split(String.fromCharCode(92)).join("/");
-const cliJs = join(root, "cli", "dist", "m9r.js").split(String.fromCharCode(92)).join("/");
+const hookJs = join(cliOutput, "m9r-hook.js").split(String.fromCharCode(92)).join("/");
+const mcpJs = join(cliOutput, "m9r-mcp.js").split(String.fromCharCode(92)).join("/");
+const devMcpJs = join(cliOutput, "dev-mcp-server.js").split(String.fromCharCode(92)).join("/");
+const cliJs = join(cliOutput, "m9r.js").split(String.fromCharCode(92)).join("/");
 const entry = join(work, "entry.mjs");
 try {
 writeFileSync(entry, `

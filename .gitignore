@@ -134,6 +134,7 @@ M9R_COMPLETE_HANDOFF*.docx
 /overlay/src-tauri/target
 /overlay/src-tauri/gen
 engine/dist/
+/engine/candidates/
 /hook/target
 /native-input-host/target/
 runleak-analyzer-mvp/node_modules/

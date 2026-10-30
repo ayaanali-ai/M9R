@@ -17,8 +17,11 @@ import { publishGeneratedDirectory } from "./engine-build-transaction.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cliDir = resolve(repoRoot, "cli");
-const finalOutDir = resolve(cliDir, "dist");
-const outDir = resolve(cliDir, `.dist-stage-${process.pid}-${randomUUID()}`);
+// Normal development still publishes to cli/dist. Candidate/release builds can
+// point elsewhere so assembling an update never mutates the currently accepted
+// build inputs.
+const finalOutDir = resolve(process.env.M9R_CLI_OUTPUT_DIR || resolve(cliDir, "dist"));
+const outDir = resolve(dirname(finalOutDir), `.dist-stage-${process.pid}-${randomUUID()}`);
 
 const SHEBANG = "#!/usr/bin/env node\n";
 
