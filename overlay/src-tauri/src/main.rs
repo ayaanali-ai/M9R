@@ -93,7 +93,7 @@ const WORKSPACE: &str = "workspace";
 const COLLAPSED_W: f64 = 220.0;
 const TOP_MARGIN: f64 = 0.0;
 
-// ── One-pill window (default; M9R_PILL_NEXT=0 for the older overlay UI) ───────────────────────────────────────────────────────────────
+// ── One-pill window (the only packaged desktop frontend) ────────────────────────────────────────────────────────────────────────────
 // The new pill UI draws its own island inside a fixed, transparent, top-centre window and tells this side three things:
 // where the island is (so everything around it stays click-through), when it has folded away (the window shrinks to a
 // wake handle), and when it needs the keyboard (the message field). The old overlay UI does not use any of this.
@@ -105,8 +105,10 @@ const NEXT_H: f64 = 320.0;
 const HIT_MARGIN: f64 = 14.0;
 
 fn next_mode() -> bool {
-    // The one pill is the default; M9R_PILL_NEXT=0 starts the older overlay UI instead.
-    std::env::var("M9R_PILL_NEXT").as_deref() != Ok("0")
+    // The legacy overlay is no longer a desktop build input. Keep this helper
+    // as a small compatibility seam for the existing placement code, but never
+    // allow a local flag to select a second frontend.
+    true
 }
 
 /// WebView2 does not show its own permission prompt for an unhandled `getUserMedia` request from a window this
@@ -1305,10 +1307,10 @@ fn main() {
             #[cfg(windows)]
             native_dictation::init(app.handle().clone());
             if next_mode() {
-                // The one-pill UI ships inside the overlay's bundle under /pill-next; the window is its fixed panel.
+                // The one-pill UI is the root of the single canonical frontend bundle.
                 let _ = window.set_size(LogicalSize::new(NEXT_W, NEXT_H));
                 let _ = window.set_ignore_cursor_events(true);
-                match "http://tauri.localhost/pill-next/index.html".parse() {
+                match "http://tauri.localhost/index.html".parse() {
                     Ok(url) => { let _ = window.navigate(url); }
                     Err(e) => eprintln!("M9R: could not open the one-pill UI ({e})"),
                 }
