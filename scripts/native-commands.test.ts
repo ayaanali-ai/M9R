@@ -27,6 +27,8 @@ function sandbox(opts: { confirm?: boolean | "none" } = {}) {
     err: (l) => err.push(l),
     confirm: opts.confirm === "none" ? undefined : async () => opts.confirm !== false,
     autostart: fakeAutostart,
+    installLocalBrokerAutostart: async () => ({ ok: true, message: "Test broker login task installed." }),
+    removeLocalBrokerAutostart: async () => ({ ok: true, message: "Test broker login task removed." }),
   };
   const p = nativePaths(io);
   return { home, io, out, err, p, run: (cmd: string, args: string[] = []) => runNativeCommand(cmd, args, io), done: () => rmSync(home, { recursive: true, force: true }) };
@@ -378,6 +380,40 @@ test("an engine update removes dead retired-image entries from the install owner
   assert.equal(existsSync(removableRetired), false, "the runtime update prunes an unlocked retired image");
   assert.equal(after.runtimeFiles.includes(missingRetired), false, "missing retired images are removed from ownership metadata");
   assert.equal(after.runtimeFiles.includes(removableRetired), false, "pruned retired images are removed from ownership metadata");
+  s.done();
+});
+
+test("hook-only setup preserves runtime files it cannot authoritatively reconcile", async () => {
+  const s = sandbox();
+  const extension = process.platform === "win32" ? ".exe" : "";
+  const engine = join(s.home, `m9r-engine${extension}`);
+  const shim = join(s.home, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native");
+  const overlay = join(s.home, "m9r-overlay.exe");
+  const broker = join(s.home, "m9r-web-broker.exe");
+  for (const path of [engine, shim, overlay, broker]) writeFileSync(path, `fixture:${path}`, "utf8");
+  delete s.io.env.M9R_HOOK_ENTRY;
+  s.io.env.M9R_ENGINE = engine;
+  s.io.env.M9R_NO_DAEMON = "1";
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+
+  const bin = join(s.p.m9r, "bin");
+  const priorRuntimeFiles = JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles as string[];
+  const hookSource = join(s.home, "hook-source");
+  mkdirSync(hookSource, { recursive: true });
+  for (const file of HOOK_RUNTIME_FILES) writeFileSync(join(hookSource, file), `hook-only:${file}`, "utf8");
+  delete s.io.env.M9R_ENGINE;
+  s.io.env.M9R_HOOK_SOURCE = hookSource;
+
+  assert.equal(await s.run("setup", ["--yes"]), 0);
+  for (const path of [
+    join(bin, `m9r-engine${extension}`),
+    join(bin, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native"),
+    join(bin, "m9r-overlay.exe"),
+    join(bin, "m9r-web-broker.exe"),
+  ]) assert.equal(existsSync(path), true, `hook-only setup preserves ${path}`);
+  const after = JSON.parse(readFileSync(s.p.manifest, "utf8")).runtimeFiles as string[];
+  for (const path of priorRuntimeFiles) assert.equal(after.includes(path), true, `ownership record retains ${path}`);
+  assert.equal(readFileSync(join(bin, "m9r-hook.js"), "utf8"), "hook-only:m9r-hook.js");
   s.done();
 });
 

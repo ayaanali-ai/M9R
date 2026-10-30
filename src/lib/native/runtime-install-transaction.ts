@@ -15,7 +15,8 @@ function isCompletedFileManifest(value: unknown): boolean {
     if (typeof file.path !== "string" || !file.path || file.path.includes("\0")
       || isAbsolute(file.path) || file.path.includes(":")
       || file.path.split(/[\\/]+/).some((segment) => !segment || segment === "." || segment === "..")
-      || !/^[a-f0-9]{64}$/i.test(String(file.sha256 ?? ""))
+      || (file.operation !== undefined && file.operation !== "replace" && file.operation !== "remove")
+      || (file.operation === "remove" ? file.sha256 !== null : !/^[a-f0-9]{64}$/i.test(String(file.sha256 ?? "")))
       || typeof file.existed !== "boolean") return false;
     const previousHashValid = file.existed
       ? typeof file.previousSha256 === "string" && /^[a-f0-9]{64}$/i.test(file.previousSha256)
@@ -143,7 +144,6 @@ export function hasPendingRuntimeTransaction(targetDir: string): boolean {
  */
 export function pruneCompletedRuntimeTransactions(targetDir: string, keepCount = DEFAULT_COMPLETED_TRANSACTION_RETENTION): string[] {
   if (!Number.isInteger(keepCount) || keepCount < 0 || keepCount > 32) throw new Error("Runtime backup retention count is invalid.");
-  if (process.env.M9R_PRESERVE_RUNTIME_EVIDENCE === "1") return [];
   const root = resolve(targetDir);
   const backupRoot = join(dirname(root), "runtime-backups");
   const pruned: string[] = [];
@@ -186,8 +186,10 @@ export function pruneCompletedRuntimeTransactions(targetDir: string, keepCount =
       if ((record.status !== "committed" && record.status !== "rolled_back")
         || (process.platform === "win32" ? recordedTarget.toLowerCase() : recordedTarget) !== normalizedRoot
         || !isCompletedFileManifest(record.files)) continue;
-      const manifest = record.files as Array<{ path: string; sha256: string; existed: boolean; previousSha256: string | null }>;
-      const nextFiles = new Map(manifest.map((file) => [normalizeSnapshotPath(file.path), file.sha256.toLowerCase()]));
+      const manifest = record.files as Array<{ path: string; operation?: string; sha256: string | null; existed: boolean; previousSha256: string | null }>;
+      const nextFiles = new Map(manifest
+        .filter((file) => file.operation !== "remove")
+        .map((file) => [normalizeSnapshotPath(file.path), file.sha256!.toLowerCase()]));
       const previousFiles = new Map(manifest
         .filter((file) => file.existed)
         .map((file) => [normalizeSnapshotPath(file.path), file.previousSha256!.toLowerCase()]));
@@ -246,12 +248,12 @@ export function pruneCompletedRuntimeTransactions(targetDir: string, keepCount =
  * Callers must quiesce their owned services first. This does not claim an atomic directory switch.
  */
 export function installRuntimeTransaction(targetDir: string, files: readonly RuntimeFile[],
-  replace: (from: string, to: string) => string[]): string[] {
+  replace: (from: string, to: string) => string[], removeTargets: readonly string[] = []): string[] {
   const root = resolve(targetDir);
   rejectRedirectedAncestors(root);
   rejectRedirectedAncestors(join(dirname(root), "runtime-backups"));
   const seen = new Set<string>();
-  const plan = files.map((file) => {
+  const replacements = files.map((file) => {
     const path = relative(root, resolve(file.to));
     if (!path || isAbsolute(path) || path === ".." || path.startsWith("..\\") || path.startsWith("../")) throw new Error("Runtime destination is outside the installation directory.");
     const key = process.platform === "win32" ? path.toLowerCase() : path;
@@ -264,21 +266,44 @@ export function installRuntimeTransaction(targetDir: string, files: readonly Run
       if (ancestor === root || ancestor === dirname(ancestor)) break;
     }
     if (existsSync(file.to) && (!lstatSync(file.to).isFile() || lstatSync(file.to).isSymbolicLink())) throw new Error("Runtime target must be a regular file.");
-    return { ...file, path, sha256: digest(file.from), existed: existsSync(file.to), previousSha256: existsSync(file.to) ? digest(file.to) : null };
+    const sha256 = digest(file.from);
+    const existed = existsSync(file.to);
+    const previousSha256 = existed ? digest(file.to) : null;
+    return { ...file, operation: "replace" as const, path, sha256, existed, previousSha256 };
+  }).filter((file) => !file.existed || file.previousSha256 !== file.sha256);
+  const removals = removeTargets.flatMap((target) => {
+    const absoluteTarget = resolve(target);
+    const path = relative(root, absoluteTarget);
+    if (!path || isAbsolute(path) || path === ".." || path.startsWith("..\\") || path.startsWith("../")) throw new Error("Runtime removal target is outside the installation directory.");
+    const key = process.platform === "win32" ? path.toLowerCase() : path;
+    if (seen.has(key)) throw new Error("Duplicate runtime destination.");
+    seen.add(key);
+    for (let ancestor = dirname(absoluteTarget); ; ancestor = dirname(ancestor)) {
+      if (existsSync(ancestor) && lstatSync(ancestor).isSymbolicLink()) throw new Error("Runtime removal traverses a symbolic link.");
+      if (ancestor === root || ancestor === dirname(ancestor)) break;
+    }
+    if (!existsSync(absoluteTarget)) return [];
+    const info = lstatSync(absoluteTarget);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error("Runtime removal target must be a regular file.");
+    return [{ operation: "remove" as const, path, to: absoluteTarget, sha256: null, existed: true, previousSha256: digest(absoluteTarget) }];
   });
+  const plan = [...replacements, ...removals];
+  if (plan.length === 0) return [];
   const transaction = join(dirname(root), "runtime-backups", randomUUID());
   mkdirSync(transaction, { recursive: true });
-  const record = { status: "preparing", targetDir: root, files: plan.map(({ path, sha256, existed, previousSha256 }) => ({ path, sha256, existed, previousSha256 })) };
+  const record = { status: "preparing", targetDir: root, files: plan.map(({ path, operation, sha256, existed, previousSha256 }) => ({ path, operation, sha256, existed, previousSha256 })) };
   const journal = () => writeFileSync(join(transaction, "transaction.json"), JSON.stringify(record, null, 2) + "\n");
   journal();
   const applied: typeof plan = [];
   const retired: string[] = [];
   try {
     for (const file of plan) {
-      const staged = join(transaction, "next", file.path);
-      mkdirSync(dirname(staged), { recursive: true });
-      copyFileSync(file.from, staged);
-      if (digest(staged) !== file.sha256) throw new Error("Staged runtime hash mismatch.");
+      if (file.operation === "replace") {
+        const staged = join(transaction, "next", file.path);
+        mkdirSync(dirname(staged), { recursive: true });
+        copyFileSync(file.from, staged);
+        if (digest(staged) !== file.sha256) throw new Error("Staged runtime hash mismatch.");
+      }
       if (file.existed) {
         const backup = join(transaction, "previous", file.path);
         mkdirSync(dirname(backup), { recursive: true });
@@ -289,18 +314,33 @@ export function installRuntimeTransaction(targetDir: string, files: readonly Run
     record.status = "applying";
     journal();
     for (const file of plan) {
+      rejectRedirectedAncestors(dirname(file.to));
+      const targetExists = existsSync(file.to);
+      if (file.existed) {
+        if (!targetExists) throw new Error(`Runtime target disappeared during update: ${file.to}`);
+        const current = lstatSync(file.to);
+        if (!current.isFile() || current.isSymbolicLink()) throw new Error(`Runtime target changed type during update: ${file.to}`);
+        if (digest(file.to) !== file.previousSha256) throw new Error(`Runtime target changed during update; refusing to overwrite or remove it: ${file.to}`);
+      } else if (targetExists) {
+        throw new Error(`Runtime target appeared during update; refusing to overwrite it: ${file.to}`);
+      }
       // Include a possibly partially replaced target in rollback.
       applied.push(file);
       mkdirSync(dirname(file.to), { recursive: true });
-      retired.push(...replace(join(transaction, "next", file.path), file.to));
-      if (digest(file.to) !== file.sha256) throw new Error("Installed runtime hash mismatch.");
+      if (file.operation === "replace") {
+        retired.push(...replace(join(transaction, "next", file.path), file.to));
+        if (digest(file.to) !== file.sha256) throw new Error("Installed runtime hash mismatch.");
+      } else {
+        unlinkSync(file.to);
+        if (existsSync(file.to)) throw new Error("Obsolete runtime file remains after cleanup.");
+      }
     }
     record.status = "committed";
     journal();
     // Rollback evidence is no longer needed after the complete new set verifies.
     // Cleanup failure must not roll back the already verified runtime.
     try { pruneCompletedRuntimeTransactions(root); } catch { /* cleanup is retried without rolling back the verified runtime */ }
-    return [...retired, ...plan.map((file) => file.to)];
+    return [...retired, ...plan.filter((file) => file.operation === "replace").map((file) => file.to), ...plan.filter((file) => file.operation === "remove").map((file) => file.to)];
   } catch (error) {
     const failures: string[] = [];
     for (const file of applied.reverse()) {

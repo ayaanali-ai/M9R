@@ -98,103 +98,135 @@ export function verifyRuntimeBuildManifest(root, { exact = false } = {}) {
   return { ...manifest, artifacts };
 }
 
-function safeManagedPath(value) {
-  const normalized = value.replaceAll("\\", "/");
-  if (!normalized || normalized.startsWith("/") || normalized.includes(":")
-    || normalized.split("/").some((part) => !part || part === "." || part === "..")) {
-    throw new Error(`Invalid managed runtime path: ${value}`);
+function runtimePublishBackupPaths(output) {
+  const parent = dirname(output);
+  if (!existsSync(parent)) return [];
+  return readdirSync(parent)
+    .filter((name) => /^\.m9r-engine-publish-backup-\d+-[a-f0-9-]{36}$/i.test(name))
+    .map((name) => join(parent, name));
+}
+
+function verifyRuntimeDirectory(path) {
+  const info = lstatSync(path);
+  if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`Runtime output is not a regular directory: ${path}`);
+  return verifyRuntimeBuildManifest(path, { exact: true });
+}
+
+function removeVerifiedRuntimeDirectory(path) {
+  verifyRuntimeDirectory(path);
+  rmSync(path, { recursive: true, force: true });
+  if (existsSync(path)) throw new Error(`Verified prior runtime output remains after cleanup: ${path}`);
+}
+
+/** Recover only verified prior snapshots. Unknown files are never discarded. */
+function recoverRuntimePublishBackups(output) {
+  const backups = runtimePublishBackupPaths(output);
+  if (backups.length === 0) return;
+  if (existsSync(output)) {
+    verifyRuntimeDirectory(output);
+    for (const backup of backups) removeVerifiedRuntimeDirectory(backup);
+    return;
   }
-  return normalized;
+  if (backups.length !== 1) throw new Error(`Multiple prior runtime snapshots need review before publishing: ${backups.join(", ")}`);
+  const backup = backups[0];
+  verifyRuntimeDirectory(backup);
+  renameSync(backup, output);
+  verifyRuntimeDirectory(output);
 }
 
-function isCoveredByManagedPath(path, managedPaths) {
-  return managedPaths.some((managed) => path === managed.toLowerCase() || path.startsWith(`${managed.toLowerCase()}/`));
-}
-
-/**
- * Publish only after the complete staged artifact set has a valid hash manifest.
- * Managed paths are swapped with rollback; unrelated files in engine/dist stay untouched.
- */
-export function publishRuntimeBuild(stagedRoot, outputRoot, managedPaths) {
+/** Publish a complete exact runtime snapshot; no files from the prior output are carried forward. */
+export function publishRuntimeBuild(stagedRoot, outputRoot) {
   const staged = resolve(stagedRoot);
   const output = resolve(outputRoot);
   const manifest = verifyRuntimeBuildManifest(staged, { exact: true });
-  const roots = [...new Set(managedPaths.map(safeManagedPath))];
-  const lowerRoots = roots.map((path) => path.toLowerCase()).sort();
-  if (lowerRoots.includes(RUNTIME_BUILD_INFO_FILE)
-    || lowerRoots.some((path, index) => lowerRoots.slice(index + 1).some((other) => other.startsWith(`${path}/`)))) {
-    throw new Error("Managed runtime paths must not overlap or include the identity manifest.");
-  }
-  for (const artifact of Object.keys(manifest.artifacts)) {
-    if (!isCoveredByManagedPath(artifact, roots)) throw new Error(`Managed runtime paths do not include artifact: ${artifact}`);
-  }
-  for (const root of roots) {
-    if (!existsSync(join(staged, ...root.split("/")))) throw new Error(`Staged runtime output is missing: ${root}`);
-  }
-
   mkdirSync(dirname(output), { recursive: true });
-  mkdirSync(output, { recursive: true });
-  const backup = join(dirname(output), `.m9r-engine-publish-backup-${process.pid}-${randomUUID()}`);
-  mkdirSync(backup, { recursive: true });
-  const backedUp = [];
-  const published = [];
-  const orderedRoots = [...roots, RUNTIME_BUILD_INFO_FILE];
+  recoverRuntimePublishBackups(output);
 
+  const hadPrevious = existsSync(output);
+  if (hadPrevious) verifyRuntimeDirectory(output);
+  const backup = join(dirname(output), `.m9r-engine-publish-backup-${process.pid}-${randomUUID()}`);
+  if (hadPrevious) renameSync(output, backup);
   try {
-    for (const path of orderedRoots) {
-      const source = join(staged, ...path.split("/"));
-      const destination = join(output, ...path.split("/"));
-      const previous = join(backup, ...path.split("/"));
-      mkdirSync(dirname(destination), { recursive: true });
-      if (existsSync(destination)) {
-        mkdirSync(dirname(previous), { recursive: true });
-        renameSync(destination, previous);
-        backedUp.push(path);
-      }
-      renameSync(source, destination);
-      published.push(path);
-    }
-    const publishedManifest = verifyRuntimeBuildManifest(output);
+    renameSync(staged, output);
+    const publishedManifest = verifyRuntimeDirectory(output);
     if (publishedManifest.buildId !== manifest.buildId) throw new Error("Published runtime build identity does not match the staged build.");
   } catch (error) {
     const rollbackErrors = [];
-    for (const path of published.reverse()) {
-      try { rmSync(join(output, ...path.split("/")), { recursive: true, force: true }); }
-      catch (rollbackError) { rollbackErrors.push(String(rollbackError)); }
-    }
-    for (const path of backedUp.reverse()) {
-      const previous = join(backup, ...path.split("/"));
-      const destination = join(output, ...path.split("/"));
+    try { if (existsSync(output)) rmSync(output, { recursive: true, force: true }); }
+    catch (rollbackError) { rollbackErrors.push(String(rollbackError)); }
+    if (hadPrevious) {
       try {
-        if (existsSync(previous)) {
-          mkdirSync(dirname(destination), { recursive: true });
-          renameSync(previous, destination);
-        }
+        if (!existsSync(backup)) throw new Error("verified prior runtime snapshot is missing");
+        renameSync(backup, output);
+        verifyRuntimeDirectory(output);
       } catch (rollbackError) { rollbackErrors.push(String(rollbackError)); }
     }
-    if (rollbackErrors.length) {
-      throw new Error(`Runtime build publish failed and rollback needs recovery. Prior files remain in ${backup}. ${rollbackErrors.join("; ")}`, { cause: error });
-    }
-    rmSync(backup, { recursive: true, force: true });
-    throw new Error(`Runtime build publish failed; previous artifacts were restored. ${String(error)}`, { cause: error });
+    if (rollbackErrors.length) throw new Error(`Runtime build publish failed; recovery needs review. Prior runtime snapshot: ${backup}. ${rollbackErrors.join("; ")}`, { cause: error });
+    throw new Error(`Runtime build publish failed; the previous exact runtime was restored. ${String(error)}`, { cause: error });
   }
 
-  try { rmSync(backup, { recursive: true, force: true }); }
-  catch { /* A locked retired artifact is recoverable; it is not part of the published build. */ }
+  if (hadPrevious) {
+    try { removeVerifiedRuntimeDirectory(backup); }
+    catch (error) {
+      throw new Error(`New runtime output is verified, but its prior snapshot still needs cleanup before packaging: ${backup}. ${String(error)}`, { cause: error });
+    }
+  }
   return manifest;
 }
 
-/** Replace a generated directory only after it is complete; never clear the last output before the build passes. */
+function generatedPublishBackupPaths(output) {
+  const parent = dirname(output);
+  if (!existsSync(parent)) return [];
+  return readdirSync(parent)
+    .filter((name) => /^\.m9r-generated-backup-\d+-[a-f0-9-]{36}$/i.test(name))
+    .map((name) => join(parent, name));
+}
+
+function verifyGeneratedDirectory(path) {
+  const info = lstatSync(path);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(`Generated CLI output is incomplete or redirected: ${path}`);
+  }
+  const files = listFiles(path).map(([relativePath]) => relativePath);
+  if (!files.includes("m9r.js") || !files.includes("build-info.json")) {
+    throw new Error(`Generated CLI output is incomplete or redirected: ${path}`);
+  }
+}
+
+function removeVerifiedGeneratedDirectory(path) {
+  verifyGeneratedDirectory(path);
+  rmSync(path, { recursive: true, force: true });
+  if (existsSync(path)) throw new Error(`Verified prior CLI output remains after cleanup: ${path}`);
+}
+
+function recoverGeneratedPublishBackups(output) {
+  const backups = generatedPublishBackupPaths(output);
+  if (backups.length === 0) return;
+  if (existsSync(output)) {
+    verifyGeneratedDirectory(output);
+    for (const backup of backups) removeVerifiedGeneratedDirectory(backup);
+    return;
+  }
+  if (backups.length !== 1) throw new Error(`Multiple prior CLI outputs need review before publishing: ${backups.join(", ")}`);
+  verifyGeneratedDirectory(backups[0]);
+  renameSync(backups[0], output);
+  verifyGeneratedDirectory(output);
+}
+
+/** Replace a generated directory only after it is complete; remove only verified prior output. */
 export function publishGeneratedDirectory(stagedRoot, outputRoot) {
   const staged = resolve(stagedRoot);
   const output = resolve(outputRoot);
   if (!existsSync(staged) || !lstatSync(staged).isDirectory()) throw new Error("Generated output staging directory is missing.");
   if (dirname(staged) !== dirname(output)) throw new Error("Generated output staging and destination must share a parent directory.");
-  const backup = join(dirname(output), `.m9r-generated-backup-${process.pid}-${randomUUID()}`);
+  recoverGeneratedPublishBackups(output);
   const hadPrevious = existsSync(output);
+  if (hadPrevious) verifyGeneratedDirectory(output);
+  const backup = join(dirname(output), `.m9r-generated-backup-${process.pid}-${randomUUID()}`);
   if (hadPrevious) renameSync(output, backup);
   try {
     renameSync(staged, output);
+    verifyGeneratedDirectory(output);
   } catch (error) {
     if (hadPrevious && existsSync(backup)) {
       try { renameSync(backup, output); }
@@ -205,7 +237,9 @@ export function publishGeneratedDirectory(stagedRoot, outputRoot) {
     throw new Error(`Generated output publish failed; the previous directory was restored. ${String(error)}`, { cause: error });
   }
   if (hadPrevious) {
-    try { rmSync(backup, { recursive: true, force: true }); }
-    catch { /* Published output is valid; a locked prior output remains recoverable beside it. */ }
+    try { removeVerifiedGeneratedDirectory(backup); }
+    catch (error) {
+      throw new Error(`New CLI output is published, but its prior snapshot still needs cleanup: ${backup}. ${String(error)}`, { cause: error });
+    }
   }
 }

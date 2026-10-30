@@ -278,11 +278,9 @@ if (process.platform === "win32") {
   console.log(`Packaged Cua Driver ${cuaDriverVersion} Windows standalone host (SHA-256 verified).`);
 }
 
-const managedRuntimePaths = [exeName, brokerExeName, shimName,
-  ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "cua-driver-runtime", "m9r-overlay.exe"] : [])];
 writeRuntimeBuildManifest(out, undefined, provenance);
 const stagedIdentity = verifyRuntimeBuildManifest(out, { exact: true });
-const publishedIdentity = publishRuntimeBuild(out, output, managedRuntimePaths);
+const publishedIdentity = publishRuntimeBuild(out, output);
 if (publishedIdentity.buildId !== stagedIdentity.buildId) throw new Error("Published runtime identity differs from its staged artifact hashes.");
 console.log(`Built ${join(output, exeName)} (${Math.round(readFileSync(join(output, exeName)).length / 1e6)} MB)`);
 console.log(`Built ${join(output, brokerExeName)} (${Math.round(readFileSync(join(output, brokerExeName)).length / 1e6)} MB)`);

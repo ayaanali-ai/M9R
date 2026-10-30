@@ -139,12 +139,12 @@ test("standalone release packages runtime companions from the canonical engine d
   assert.match(builderSource, /copyFileSync\(overlayExe, join\(out, "m9r-overlay\.exe"\)\)/, "the engine distribution must capture the owner-accepted live pill");
   const manifestWriteIndex = builderSource.indexOf("writeRuntimeBuildManifest(out");
   const stagedVerifyIndex = builderSource.indexOf("verifyRuntimeBuildManifest(out, { exact: true })");
-  const publishIndex = builderSource.indexOf("publishRuntimeBuild(out, output, managedRuntimePaths)");
+  const publishIndex = builderSource.indexOf("publishRuntimeBuild(out, output)");
   assert.ok(manifestWriteIndex >= 0 && stagedVerifyIndex > manifestWriteIndex && publishIndex > stagedVerifyIndex,
     "the complete artifact set must be hashed and verified before it is published");
   assert.match(builderSource, /rmSync\(buildRoot, \{ recursive: true, force: true \}\)/, "only the unique build staging directory may be removed after publication");
-  assert.doesNotMatch(builderSource, /rmSync\(out,\s*\{\s*recursive:\s*true/, "the build must preserve other files already in engine/dist");
-  assert.match(builderSource, /publishRuntimeBuild/, "the last runtime remains intact until the complete staged build is ready");
+  assert.doesNotMatch(builderSource, /rmSync\(out,\s*\{\s*recursive:\s*true/, "the build must not delete its only staged runtime before verification");
+  assert.match(builderSource, /publishRuntimeBuild\(out, output\)/, "the exact staged runtime replaces the dedicated engine/dist snapshot");
   assert.match(packagerSource, /m9r-web-broker\.exe/, "the release ZIP must contain the standalone broker");
   assert.match(packagerSource, /m9r-overlay\.exe/, "the release ZIP must contain the M9R desktop pill");
   assert.match(packagerSource, /m9r-build-info\.json/, "the release ZIP must contain the runtime artifact identity manifest");
@@ -166,15 +166,25 @@ test("standalone release packages runtime companions from the canonical engine d
   assert.match(cliSource, /args\[0\] === "broker-update"/, "the packaged engine must expose the installer's broker lifecycle command");
 });
 
-test("runtime updates replace a Windows-locked engine image without stopping active MCP sessions", () => {
+test("runtime updates fail closed on a locked image and never create retired executable siblings", () => {
   const nativeSource = readFileSync(resolve("src/lib/native/native-commands.ts"), "utf8");
   assert.match(nativeSource, /function replaceRuntimeFile\([\s\S]*?renameSync\(staged, to\)/);
-  assert.match(nativeSource, /m9r-retired-/);
-  assert.match(nativeSource, /manifest\.runtimeFiles = \[\.\.\.new Set\(\[\.\.\.\(manifest\.runtimeFiles \?\? \[\]\)/);
-  assert.match(nativeSource, /function ownedRetiredRuntimeEntries\([\s\S]*?manifest\?\.runtimeFiles/);
-  assert.match(nativeSource, /function pruneOwnedRetiredRuntimeFiles\(manifest(?:: [^,]+)?,\s*candidates(?:: [^)]+)?\)/);
-  assert.match(nativeSource, /M9R_PRESERVE_RUNTIME_EVIDENCE === "1"/);
-  assert.match(nativeSource, /filter\(\(file\) => !isRetiredRuntimePath\(file\) \|\| existsSync\(file\)\)/);
+  assert.match(nativeSource, /locked runtime file at its stable path/);
+  assert.doesNotMatch(nativeSource, /\.m9r-retired-/);
+  assert.match(nativeSource, /installRuntimeTransaction\(plan\.targetDir, files, replaceRuntimeFile, removeTargets\)/);
+  assert.match(nativeSource, /obsoleteOwnedRuntimeEntries/);
+  const transactionSource = readFileSync(resolve("src/lib/native/runtime-install-transaction.ts"), "utf8");
+  assert.match(transactionSource, /removeTargets: readonly string\[\] = \[\]/);
+  assert.match(transactionSource, /DEFAULT_COMPLETED_TRANSACTION_RETENTION = 0/);
+  assert.doesNotMatch(transactionSource, /M9R_PRESERVE_RUNTIME_EVIDENCE/);
+});
+
+test("standalone installer includes the separately managed broker in its complete runtime transaction", () => {
+  const installerSource = readFileSync(resolve("scripts/install-m9r.ps1"), "utf8");
+  assert.equal((installerSource.match(/\$env:M9R_INCLUDE_MANAGED_BROKER = '1'/g) ?? []).length, 2,
+    "the broker must be part of both the reviewed dry-run plan and the applied package transaction");
+  assert.match(installerSource, /Install-ManagedWebBroker \$packageBroker/,
+    "the standalone broker ownership record is refreshed only after the runtime transaction");
 });
 
 test("release ZIP contains the built standalone broker", { skip: skipNative }, (t) => {

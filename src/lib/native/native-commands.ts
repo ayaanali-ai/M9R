@@ -9,6 +9,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -167,7 +168,7 @@ interface Manifest {
   version: 1;
   installedAt: string;
   entries: Array<ManifestEntry & { kind: Kind; openCodeLayout?: WebOpenCodeLayout }>;
-  /** Bundled runtimes installed by M9R, including retired images retained by still-running agent sessions. */
+  /** Exact M9R-owned files in the stable runtime directory. No retired generations are recorded here. */
   runtimeFiles?: string[];
   /** M9R starts when you sign in to Windows (removed on uninstall). */
   autostart?: boolean;
@@ -295,7 +296,8 @@ function runtimePlan(io: NativeIo): { needed: boolean; sourceDir: string; target
       // The standalone installer owns the web broker's hash manifest and has
       // an authenticated stop/replace/start lifecycle. A plain engine setup
       // must not overwrite that image behind the installer's ownership record.
-      if (name === "m9r-web-broker.exe" && existsSync(join(nativePaths(io).m9r, "web-broker-install.json"))) continue;
+      if (name === "m9r-web-broker.exe" && existsSync(join(nativePaths(io).m9r, "web-broker-install.json"))
+        && io.env.M9R_INCLUDE_MANAGED_BROKER !== "1") continue;
       const source = join(dirname(engine), name);
       if (existsSync(source)) collect(source, join(targetDir, name));
     }
@@ -314,107 +316,101 @@ function replaceRuntimeFile(from: string, to: string): string[] {
   try {
     copyFileSync(from, staged);
     try {
-      // Prefer same-directory replacement; Windows may reject it while the image is mapped.
+      // Replace at the stable path. Never rename a locked old executable aside:
+      // that created persistent retired generations in the user's install.
       renameSync(staged, to);
       return [];
     } catch (replaceError) {
-      if (process.platform !== "win32" || !existsSync(to)) throw replaceError;
-      const retired = `${to}.m9r-retired-${Date.now()}-${randomUUID()}`;
-      renameSync(to, retired);
-      try {
-        renameSync(staged, to);
-      } catch (installError) {
-        try { renameSync(retired, to); } catch { /* keep the old image recoverable if rollback is also blocked */ }
-        throw installError;
+      if (process.platform === "win32" && existsSync(to)) {
+        throw new Error(`M9R could not replace the locked runtime file at its stable path: ${to}. Close M9R-owned work and retry; no retired copy was created.`, { cause: replaceError });
       }
-      // A running MCP server may still be mapped to the renamed image. Keep it tracked until a later setup/uninstall
-      // can remove it after the owner closes that agent session.
-      try {
-        rmSync(retired, { force: true });
-        return [];
-      } catch {
-        return [retired];
-      }
+      throw replaceError;
     }
   } finally {
     rmSync(staged, { force: true });
   }
 }
 
-function isRetiredRuntimePath(path: string): boolean {
-  return /\.m9r-retired-[^\\/]+$/i.test(path);
+function plannedRuntimeTargets(runtime: { targetDir: string; engine?: { to: string }; shim?: { to: string }; nativeInputHost?: { to: string }; companions?: Array<{ to: string }> }): string[] {
+  if (runtime.engine) return [runtime.engine.to, ...(runtime.shim ? [runtime.shim.to] : []), ...(runtime.nativeInputHost ? [runtime.nativeInputHost.to] : []), ...(runtime.companions ?? []).map((file) => file.to)];
+  return [...HOOK_RUNTIME_FILES.map((file) => join(runtime.targetDir, file)), join(runtime.targetDir, "package.json")];
 }
 
-function ownedRetiredRuntimeEntries(
+function obsoleteOwnedRuntimeEntries(
   manifest: Manifest | null,
   runtime: { targetDir: string; engine?: { to: string }; shim?: { to: string }; nativeInputHost?: { to: string }; companions?: Array<{ to: string }> },
-): string[] {
+  io: NativeIo,
+): { removeTargets: string[]; preservedEntries: string[]; staleEntries: string[] } {
   const root = resolve(runtime.targetDir);
   const rootPrefix = `${root}${sep}`;
   const normalize = (path: string) => process.platform === "win32" ? path.toLowerCase() : path;
-  const stableTargets = new Set([
-    runtime.engine?.to,
-    runtime.shim?.to,
-    runtime.nativeInputHost?.to,
-    ...(runtime.companions ?? []).map((file) => file.to),
-  ].filter((path): path is string => !!path).map((path) => normalize(resolve(path))));
-  return (manifest?.runtimeFiles ?? []).filter((file) => {
-    if (!isRetiredRuntimePath(file)) return false;
-    const retiredPath = resolve(file);
-    if (!normalize(retiredPath).startsWith(normalize(rootPrefix))) return false;
-    const stablePath = retiredPath.replace(/\.m9r-retired-[^\\/]+$/i, "");
-    return stableTargets.has(normalize(stablePath));
-  });
-}
-
-function inspectRetiredRuntimeFile(path: string): "file" | "missing" | "unknown" {
-  try {
-    const info = lstatSync(path);
-    return info.isFile() && !info.isSymbolicLink() ? "file" : "unknown";
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
-  }
-}
-
-function pruneOwnedRetiredRuntimeFiles(manifest: Manifest, candidates: readonly string[]): { removed: number; remaining: number } {
-  if (process.env.M9R_PRESERVE_RUNTIME_EVIDENCE === "1") return { removed: 0, remaining: candidates.length };
-  const known = new Set(candidates.map((file) => process.platform === "win32" ? resolve(file).toLowerCase() : resolve(file)));
-  let removed = 0;
-  for (const path of candidates) {
-    const before = inspectRetiredRuntimeFile(path);
-    if (before === "file") {
-      try { rmSync(path, { force: true }); } catch { /* a still-mapped image is retained and retried next setup */ }
-      if (inspectRetiredRuntimeFile(path) === "missing") removed += 1;
+  const desired = new Set(plannedRuntimeTargets(runtime).map((path) => normalize(resolve(path))));
+  const brokerPath = resolve(join(root, "m9r-web-broker.exe"));
+  const separatelyManagedBroker = existsSync(join(nativePaths(io).m9r, "web-broker-install.json"))
+    && io.env.M9R_INCLUDE_MANAGED_BROKER !== "1";
+  const removeTargets: string[] = [];
+  const preservedEntries: string[] = [];
+  const staleEntries: string[] = [];
+  for (const entry of manifest?.runtimeFiles ?? []) {
+    if (typeof entry !== "string" || !entry.trim()) throw new Error("The M9R runtime ownership manifest contains an invalid path; refusing to update or delete runtime files.");
+    const absolute = resolve(entry);
+    const key = normalize(absolute);
+    if (!normalize(absolute).startsWith(normalize(rootPrefix))) {
+      // A legacy manifest entry outside the M9R runtime directory is not safe to
+      // purge as part of runtime reconciliation; preserve it for explicit audit.
+      preservedEntries.push(entry);
+      continue;
     }
+    if (desired.has(key)) continue;
+    if (separatelyManagedBroker && key === normalize(brokerPath)) {
+      preservedEntries.push(entry);
+      continue;
+    }
+    staleEntries.push(entry);
+    if (!existsSync(absolute)) continue;
+    const info = lstatSync(absolute);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Refusing to remove an M9R runtime entry that is not a regular file: ${absolute}`);
+    removeTargets.push(absolute);
   }
-  manifest.runtimeFiles = (manifest.runtimeFiles ?? []).filter((file) => {
-    const key = process.platform === "win32" ? resolve(file).toLowerCase() : resolve(file);
-    return !known.has(key) || inspectRetiredRuntimeFile(file) !== "missing";
-  });
-  return { removed, remaining: candidates.filter((file) => inspectRetiredRuntimeFile(file) !== "missing").length };
+  return { removeTargets, preservedEntries, staleEntries };
 }
 
-function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> }): string[] {
+function copyRuntime(plan: { sourceDir: string; targetDir: string; engine?: { from: string; to: string }; shim?: { from: string; to: string }; nativeInputHost?: { from: string; to: string }; companions?: Array<{ from: string; to: string }> }, previousRuntimeFiles: readonly string[], io: NativeIo, reconcileObsolete: boolean): string[] {
   mkdirSync(plan.targetDir, { recursive: true });
-  // Do not sweep sibling names by prefix. Existing retired images are removed only by the manifest-scoped cleanup.
+  const desired = plannedRuntimeTargets(plan);
+  const previousManifest = { runtimeFiles: [...previousRuntimeFiles] } as Manifest;
+  // A hook-only CLI package cannot authoritatively describe the complete
+  // installed runtime. Preserve its existing ownership list; only a complete
+  // engine package may reconcile and remove files from that full runtime.
+  const obsolete = reconcileObsolete
+    ? obsoleteOwnedRuntimeEntries(previousManifest, plan, io)
+    : { removeTargets: [], preservedEntries: [...previousRuntimeFiles], staleEntries: [] };
+  const removeTargets = obsolete.removeTargets;
   if (plan.engine) {
     recoverRuntimeTransactions(plan.targetDir, replaceRuntimeFile);
     const files = [plan.engine, ...(plan.shim ? [plan.shim] : []), ...(plan.nativeInputHost ? [plan.nativeInputHost] : []), ...(plan.companions ?? [])];
-    const written = installRuntimeTransaction(plan.targetDir, files, replaceRuntimeFile);
+    installRuntimeTransaction(plan.targetDir, files, replaceRuntimeFile, removeTargets);
     pruneCompletedRuntimeTransactions(plan.targetDir);
-    return written;
+    return [...desired, ...obsolete.preservedEntries];
   }
-  const written: string[] = [];
+  const files: Array<{ from: string; to: string }> = [];
   for (const f of HOOK_RUNTIME_FILES) {
     const target = join(plan.targetDir, f);
-    written.push(...replaceRuntimeFile(join(plan.sourceDir, f), target), target);
+    files.push({ from: join(plan.sourceDir, f), to: target });
   }
   // The runtime files are ES modules; this keeps them working wherever the folder lives.
-  const pkg = join(plan.targetDir, "package.json");
-  writeFileSync(pkg, JSON.stringify({ type: "module", private: true }) + "\n", "utf8");
-  written.push(pkg);
-  return written;
+  const packagePath = join(plan.targetDir, "package.json");
+  const packageSource = join(tmpdir(), `m9r-package-${process.pid}-${randomUUID()}.json`);
+  try {
+    writeFileSync(packageSource, JSON.stringify({ type: "module", private: true }) + "\n", "utf8");
+    files.push({ from: packageSource, to: packagePath });
+    recoverRuntimeTransactions(plan.targetDir, replaceRuntimeFile);
+    installRuntimeTransaction(plan.targetDir, files, replaceRuntimeFile, removeTargets);
+  } finally {
+    rmSync(packageSource, { force: true });
+  }
+  pruneCompletedRuntimeTransactions(plan.targetDir);
+  return [...desired, ...obsolete.preservedEntries];
 }
 
 const slash = (p: string) => p.replace(/\\/g, "/");
@@ -793,7 +789,10 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   const runtime = runtimePlan(io);
   const manifestBefore = readManifest(p.manifest);
   const installedEngine = installedEnginePath(io, runtime);
-  const retiredRuntimeEntries = ownedRetiredRuntimeEntries(manifestBefore, runtime);
+  const runtimeReconcileEnabled = !!runtime.engine;
+  const obsoleteRuntime = runtimeReconcileEnabled
+    ? obsoleteOwnedRuntimeEntries(manifestBefore, runtime, io)
+    : { removeTargets: [], preservedEntries: manifestBefore?.runtimeFiles ?? [], staleEntries: [] };
   const installedIdentity = existsSync(installedEngine) ? readRuntimeBuildIdentity(installedEngine) : null;
   const activeRuntime = installedIdentity ? activeRuntimeFromIdentity(io, runtime.targetDir, installedIdentity) : null;
   // A legacy hook-only install has no build manifest and remains supported. Once
@@ -816,14 +815,14 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   const startupRequested = flags.autostart === true && !!runtime.engine && !!runtime.shim
     && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
   const canAutostart = !!runtime.engine && !!runtime.shim && process.platform === "win32" && !io.env.M9R_HOOK_ENTRY?.trim();
-  if (todo.length === 0 && !runtime.needed && !startupRequested && !identityNeedsReconcile && modelRepair?.plan.status !== "updated" && retiredRuntimeEntries.length === 0) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
+  if (todo.length === 0 && !runtime.needed && !startupRequested && !identityNeedsReconcile && modelRepair?.plan.status !== "updated" && obsoleteRuntime.staleEntries.length === 0) { io.out("Already set up. Nothing to change."); printOpenSteps(io); return 0; }
   io.out("This will:");
   if (startupRequested) io.out("  - start the M9R desktop pill when this Windows user signs in (uninstall removes this entry)");
   if (flags.autostart === true && canAutostart) io.out("  - install the M9R-owned broker login task so provider processes start before the first pill message");
   if (runtime.needed) io.out(`  - copy the small hook program to ${runtime.targetDir} (so the hooks keep working even if this CLI moves or is updated)`);
   if (runtime.engine && runtime.shim) io.out("  - start the M9R background engine, which answers your agents' hooks in milliseconds (uninstall stops it)");
   if (identityNeedsReconcile) io.out(`  - reconcile the verified installed runtime identity in ${p.manifest}`);
-  if (retiredRuntimeEntries.length > 0) io.out(`  - retry cleanup of ${retiredRuntimeEntries.length} M9R-owned retired runtime image(s); locked or unreadable images will remain tracked`);
+  if (obsoleteRuntime.staleEntries.length > 0) io.out(`  - remove ${obsoleteRuntime.staleEntries.length} obsolete M9R-owned runtime file(s) as part of the same verified runtime transaction`);
   for (const f of todo) io.out(`  - ${f.summary}`);
   if (modelRepair?.plan.status === "updated") io.out(`  - repair stale OpenCode model references in ${modelRepair.statePath} using the cached provider catalog (a rollback copy will be retained)`);
   if (modelRepair?.plan.status === "blocked") io.out(`  [WAIT] OpenCode model state was not changed: ${modelRepair.plan.reason}`);
@@ -854,17 +853,10 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
   mkdirSync(p.backups, { recursive: true });
   const manifest: Manifest = manifestBefore ?? { version: 1, installedAt: new Date().toISOString(), entries: [] };
   // The hook program goes first, so a hook can never point at a file that is not there yet.
-  if (runtime.needed) {
+  if (runtime.needed || obsoleteRuntime.staleEntries.length > 0) {
     if (runtime.engine) await stopResidentEngine(io);
-    manifest.runtimeFiles = [...new Set([...(manifest.runtimeFiles ?? []), ...copyRuntime(runtime)])]
-      // Retired images that were unlocked get pruned during copyRuntime. Drop their now-dead ownership
-      // records; keep any image still on disk because a running provider MCP process may have it mapped.
-      .filter((file) => !isRetiredRuntimePath(file) || existsSync(file));
-  }
-  if (retiredRuntimeEntries.length > 0) {
-    const cleanup = pruneOwnedRetiredRuntimeFiles(manifest, retiredRuntimeEntries);
-    if (cleanup.removed > 0) io.out(`[PASS] Removed ${cleanup.removed} unlocked retired runtime image(s).`);
-    if (cleanup.remaining > 0) io.out(`[WAIT] Kept ${cleanup.remaining} retired runtime image(s) that remain locked or unreadable; setup will retry later.`);
+    manifest.runtimeFiles = [...new Set(copyRuntime(runtime, manifest.runtimeFiles ?? [], io, runtimeReconcileEnabled))];
+    if (obsoleteRuntime.staleEntries.length > 0) io.out(`[PASS] Reconciled the owned runtime list and removed ${obsoleteRuntime.removeTargets.length} obsolete runtime file(s).`);
   }
   if (modelRepair?.plan.status === "updated") {
     const backupPath = applyNativeOpenCodeModelRepair(modelRepair);

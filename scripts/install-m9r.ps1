@@ -595,7 +595,17 @@ try {
         $dryRunArgs += '--autostart'
         $applyArgs += '--autostart'
     }
-    $plan = @(& $engine @dryRunArgs 2>&1)
+    $previousIncludeManagedBroker = $env:M9R_INCLUDE_MANAGED_BROKER
+    try {
+        # The standalone installer owns both the engine's runtime manifest and
+        # the broker's separate ownership record. Include the broker in the same
+        # verified file transaction; the second manifest is refreshed afterward.
+        $env:M9R_INCLUDE_MANAGED_BROKER = '1'
+        $plan = @(& $engine @dryRunArgs 2>&1)
+    } finally {
+        if ($null -eq $previousIncludeManagedBroker) { Remove-Item Env:M9R_INCLUDE_MANAGED_BROKER -ErrorAction SilentlyContinue }
+        else { $env:M9R_INCLUDE_MANAGED_BROKER = $previousIncludeManagedBroker }
+    }
     $planExit = $LASTEXITCODE
     if ($planExit -ne 0) { $plan | ForEach-Object { Write-Host $_ }; throw "M9R could not prepare its setup plan (exit $planExit). Nothing was installed." }
     foreach ($line in $plan) {
@@ -619,13 +629,17 @@ try {
     # Native setup registers the owned broker task; this installer starts it
     # only after the new broker image and its ownership record are installed.
     $previousBrokerDefer = $env:M9R_DEFER_BROKER_START
+    $previousIncludeManagedBroker = $env:M9R_INCLUDE_MANAGED_BROKER
     try {
         $env:M9R_DEFER_BROKER_START = '1'
+        $env:M9R_INCLUDE_MANAGED_BROKER = '1'
         & $engine @applyArgs
         $setupExit = $LASTEXITCODE
     } finally {
         if ($null -eq $previousBrokerDefer) { Remove-Item Env:M9R_DEFER_BROKER_START -ErrorAction SilentlyContinue }
         else { $env:M9R_DEFER_BROKER_START = $previousBrokerDefer }
+        if ($null -eq $previousIncludeManagedBroker) { Remove-Item Env:M9R_INCLUDE_MANAGED_BROKER -ErrorAction SilentlyContinue }
+        else { $env:M9R_INCLUDE_MANAGED_BROKER = $previousIncludeManagedBroker }
     }
     if ($setupExit -ne 0) { throw "M9R setup exited with code $setupExit. Review the engine output; do not rerun blindly." }
     $installedEngine = Join-Path $env:M9R_HOME 'bin\m9r-engine.exe'
