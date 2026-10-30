@@ -1105,8 +1105,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (record.context.kind === "desktop") {
         if (action.unit === "pixel") return "The desktop driver exposes line or page scroll units, not pixel-distance scrolling.";
         if (Math.abs(action.deltaX || action.deltaY) > 50) return "The desktop driver supports at most 50 scroll ticks per operation; no input was sent.";
-        if (action.at?.kind !== "point") return "Desktop scrolling requires a fresh point on the exact target window.";
-        return checkLocator(record, action.at);
+        if (!action.at) return "Desktop scrolling requires a fresh point or element on the exact target window.";
+        return checkLocator(record, action.at) ?? desktopBoundsError(record, action.at);
       }
       if (action.unit !== "pixel") return "The browser broker accepts scroll distances in pixels only.";
       if (action.deltaX !== 0) return "The browser route currently exposes vertical page scrolling only.";
@@ -1115,9 +1115,11 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     }
     if (action.kind === "drag") {
       if (record.context.kind === "desktop") {
-        if (action.from.kind !== "point" || action.to.kind !== "point") return "The desktop stage drag route requires two captured points.";
-        const fromError = checkLocator(record, action.from);
-        return fromError ?? checkLocator(record, action.to);
+        if (action.from.kind === "point" && action.to.kind === "point" && action.from.coordinateSpace !== action.to.coordinateSpace) {
+          return "A point drag must use one coordinate frame.";
+        }
+        return checkLocator(record, action.from) ?? checkLocator(record, action.to)
+          ?? desktopBoundsError(record, action.from) ?? desktopBoundsError(record, action.to);
       }
       if (action.from.kind !== "element" || action.to.kind !== "element") return "The browser drag route requires source and destination element references.";
       const fromError = checkLocator(record, action.from);
@@ -1141,6 +1143,13 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     const elements = record.context.kind === "browser" ? record.context.elements : record.context.controls;
     if (!elements.has(locator.ref) || locator.snapshotId !== record.target.revision) throw new Error("The element reference is stale.");
     return locator.ref;
+  }
+
+  function desktopBoundsError(record: TargetRecord, locator: ComputerUseLocator): string | undefined {
+    if (locator.kind !== "element" || record.context.kind !== "desktop") return undefined;
+    return record.context.controls.get(locator.ref)?.rect
+      ? undefined
+      : "This structured element has no visual bounds; request a fresh visual observation before a coordinate-based action.";
   }
 
   function desktopPoint(record: TargetRecord, locator: ComputerUseLocator): { x: number; y: number } {
@@ -1266,8 +1275,11 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
           ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) }
         : { kind: "hotkey", keys, view: record.context.view,
           ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
-    } else if (action.kind === "drag" && action.from.kind === "point" && action.to.kind === "point") {
-      stageAction = { kind: "drag", fromX: action.from.x, fromY: action.from.y, toX: action.to.x, toY: action.to.y,
+    } else if (action.kind === "drag") {
+      // Element endpoints resolve to their visual centers, exactly as click does.
+      const from = desktopPoint(record, action.from);
+      const to = desktopPoint(record, action.to);
+      stageAction = { kind: "drag", fromX: from.x, fromY: from.y, toX: to.x, toY: to.y,
         ...(action.durationMs !== undefined ? { durationMs: action.durationMs } : {}), view: record.context.view,
         ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
     } else if (action.kind === "text" && action.mode === "insert") {
@@ -1282,8 +1294,9 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         stageAction = { kind: "type", mode: "replace", ...point, expectedRole: control.role, ...(control.label !== undefined ? { expectedLabel: control.label } : {}),
           text: action.text, view: record.context.view };
       }
-    } else if (action.kind === "scroll" && action.at?.kind === "point") {
-      stageAction = { kind: "scroll_delta", x: action.at.x, y: action.at.y,
+    } else if (action.kind === "scroll" && action.at) {
+      const at = desktopPoint(record, action.at);
+      stageAction = { kind: "scroll_delta", x: at.x, y: at.y,
         deltaX: action.deltaX, deltaY: action.deltaY, unit: action.unit, view: record.context.view,
         ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
     } else if (action.kind === "window_frame") {
