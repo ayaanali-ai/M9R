@@ -288,7 +288,7 @@ console.log(`Built ${join(output, exeName)} (${Math.round(readFileSync(join(outp
 console.log(`Built ${join(output, brokerExeName)} (${Math.round(readFileSync(join(output, brokerExeName)).length / 1e6)} MB)`);
 console.log(`Runtime build identity ${publishedIdentity.buildId} verified across ${Object.keys(publishedIdentity.artifacts).length} files.`);
 console.log(`Runtime source ${provenance.sourceCommit} (${provenance.sourceDirty ? "dirty" : "clean"}).`);
-if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")} from the current desktop build.`);
+if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")} from the owner-accepted live pill artifact (${acceptedOverlayHash}).`);
 } finally {
   rmSync(buildRoot, { recursive: true, force: true });
 }
