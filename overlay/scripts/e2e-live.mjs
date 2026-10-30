@@ -1,6 +1,6 @@
 // End-to-end check of the whole pipeline with real parts: a real `m9r-cli feed --watch`, a real hook and CLI creating
 // tasks, and the real overlay window, read back through WebView2's debugging port. No mock feed.
-//   node overlay/scripts/e2e-live.mjs [path to m9r-overlay.exe]
+//   node overlay/scripts/e2e-live.mjs <current candidate m9r-overlay.exe>
 // Uses a scratch M9R home (never your real ~/.m9r) and a scratch WebView profile, so nothing of yours is touched.
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..", "..");
-const exe = process.argv[2] ?? join(repo, "release-assets", "accepted-ui", "m9r-overlay.exe");
+const exe = process.argv[2];
+if (!exe) throw new Error("Pass the current candidate m9r-overlay.exe explicitly; a preserved pill is never selected automatically.");
 const dist = join(repo, "cli", "dist");
 const home = mkdtempSync(join(tmpdir(), "m9r-e2e-"));
 const profile = mkdtempSync(join(tmpdir(), "m9r-e2e-webview-"));

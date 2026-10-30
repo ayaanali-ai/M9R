@@ -1,6 +1,6 @@
 // End-to-end check of clicking Approve / Deny on the real pill: the real overlay starts its own engine (no Node used for M9R),
 // real tasks are created by an agent-marked CLI call, and real mouse events are sent to the buttons through WebView2's debug port.
-//   node overlay/scripts/e2e-approve.mjs [overlay exe] [engine exe]
+//   node overlay/scripts/e2e-approve.mjs <current candidate overlay exe> <matching candidate engine exe>
 // Uses a scratch M9R home and a scratch WebView profile. Tasks are aimed at @claude so nothing is ever pushed into a real Codex.
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -9,8 +9,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const exe = process.argv[2] ?? join(repo, "release-assets", "accepted-ui", "m9r-overlay.exe");
-const engine = process.argv[3] ?? join(repo, "engine", "dist", "m9r-engine.exe");
+const exe = process.argv[2];
+const engine = process.argv[3];
+if (!exe || !engine) throw new Error("Pass the matching current candidate overlay and engine executables explicitly; stale defaults are disabled.");
 const home = mkdtempSync(join(tmpdir(), "m9r-appr-"));
 const profile = mkdtempSync(join(tmpdir(), "m9r-appr-webview-"));
 const port = 9345;

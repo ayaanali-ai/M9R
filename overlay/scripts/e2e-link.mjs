@@ -1,7 +1,7 @@
 // End-to-end check of the pill's link picker on the real overlay: a push that fails for lack of a session in the sender's
 // folder shows "Link a session...", clicking a listed session links it with a real click, and the SAME task, retried,
 // now finds the link. Scratch M9R home; nothing touches the owner's real Codex.
-//   node overlay/scripts/e2e-link.mjs [overlay exe] [engine exe]
+//   node overlay/scripts/e2e-link.mjs <current candidate overlay exe> <matching candidate engine exe>
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,8 +9,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const exe = process.argv[2] ?? join(repo, "release-assets", "accepted-ui", "m9r-overlay.exe");
-const engine = process.argv[3] ?? join(repo, "engine", "dist", "m9r-engine.exe");
+const exe = process.argv[2];
+const engine = process.argv[3];
+if (!exe || !engine) throw new Error("Pass the matching current candidate overlay and engine executables explicitly; stale defaults are disabled.");
 const home = mkdtempSync(join(tmpdir(), "m9r-link-"));
 const profile = mkdtempSync(join(tmpdir(), "m9r-link-webview-"));
 const port = 9349;

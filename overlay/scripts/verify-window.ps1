@@ -5,11 +5,13 @@
 # It moves the mouse and clicks ON THE PILL only (near the top centre of the primary screen). It never clicks anywhere else.
 #   powershell -NoProfile -File overlay/scripts/verify-window.ps1 -Exe <m9r-overlay.exe> -Feed <feed.json> [-Shot <png>]
 param(
-  [Parameter(Mandatory = $true)][string]$Exe,
+  [string]$Exe,
   [Parameter(Mandatory = $true)][string]$Feed,
   [string]$Shot = ""
 )
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($Exe)) { $Exe = $env:M9R_VERIFY_OVERLAY_EXE }
+if ([string]::IsNullOrWhiteSpace($Exe)) { throw 'Pass -Exe with a freshly built candidate pill (or set M9R_VERIFY_OVERLAY_EXE). No preserved binary is selected automatically.' }
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System; using System.Runtime.InteropServices;
