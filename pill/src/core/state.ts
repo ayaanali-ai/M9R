@@ -222,7 +222,11 @@ class AppState {
         id: a.handle,
         name: a.handle,
         provider: a.provider,
-        color: this.collaboration?.agents.find((presence) => presence.agentId === a.handle)?.color ?? PROVIDER_COLORS[a.provider] ?? PROVIDER_COLORS.agent,
+        // A known provider's brand color is its fixed identity and must never be overridden by a
+        // presence-hash color; the hash only stands in for a provider with no fixed brand (bare "agent").
+        color: a.provider !== "agent"
+          ? PROVIDER_COLORS[a.provider]
+          : this.collaboration?.agents.find((presence) => presence.agentId === a.handle)?.color ?? PROVIDER_COLORS.agent,
         state: waiting.has(a.handle) ? "approval" : RUN_TO_BOT[a.state] ?? "idle",
         runState: a.state,
         stepIndex: Math.max(0, steps.length - 1),
