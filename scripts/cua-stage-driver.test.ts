@@ -285,16 +285,16 @@ function makeSdk(options: {
       const lastMove = (latest?.method === "callTool" ? (latest.value as { args: unknown }).args : latest?.value) as {
         x?: number; y?: number; target?: { input?: { pid?: number; windowId?: bigint } };
       } | undefined;
-      const windowTarget = lastMove?.target?.input;
-      const state = options.state ?? { screenshotWidth: 200, screenshotHeight: 100,
-        windowBounds: { x: 100, y: 50, width: 400, height: 200 } };
-      const bounds = state.windowBounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
-      const screenshotWidth = Number(state.screenshotWidth ?? 200);
-      const screenshotHeight = Number(state.screenshotHeight ?? 100);
-      const position = windowTarget?.pid && bounds
-        ? { x: (bounds.x ?? 0) + (lastMove?.x ?? 0) * (bounds.width ?? screenshotWidth) / screenshotWidth,
-          y: (bounds.y ?? 0) + (lastMove?.y ?? 0) * (bounds.height ?? screenshotHeight) / screenshotHeight }
-        : { x: lastMove?.x ?? 42, y: lastMove?.y ?? 24 };
+      // Cua reports a window-target cursor in the same window-local screenshot
+      // space the caller moved it in (see cua-stage-driver.ts's own comment on
+      // this): moveCursor/getAgentCursorState round-trip in window-local
+      // pixels, never desktop-screen pixels, for a real window target. This
+      // fixture previously rescaled the reported position into desktop-screen
+      // space via windowBounds whenever a window target was present, which
+      // does not match that documented real-driver behavior and made every
+      // position-confirmation check in production code fail against a
+      // correctly-moved cursor (Package 3 diagnosis, M9R Source of Truth 5.0).
+      const position = { x: lastMove?.x ?? 42, y: lastMove?.y ?? 24 };
       return { isError: false, structuredJson: JSON.stringify(options.cursorState ?? { enabled: true, position }) };
     },
     async getSession(input: unknown) {
