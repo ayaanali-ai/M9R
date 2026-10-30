@@ -4,6 +4,7 @@ import { fromFeed, fromUiState, providerOf } from "../pill/src/shells/convert";
 import { createExtensionTransport } from "../pill/src/shells/extension";
 import { createDesktopTransport } from "../pill/src/shells/desktop";
 import { createFrameHost } from "../pill/src/shells/frame-host";
+import { State } from "../pill/src/core/state";
 
 test("provider detection covers handles, provider ids and unknown agents", () => {
   assert.equal(providerOf("claude"), "claude");
@@ -35,6 +36,39 @@ test("browser ui-state becomes a snapshot: agents with their recent actions, app
   assert.deepEqual(snap.agents[1].activity, ["Clicked Buy"]);
   assert.deepEqual(snap.approvals, [{ id: "p1", agent: "codex", title: "post", detail: "Click “Post” on the composer  ·  x.com" }]);
   assert.deepEqual(snap.thread.map((m) => [m.id, m.from]), [["3", "claude"], ["5", "m9r"]]);
+});
+
+test("a live model catalog in ui-state reaches State.models through fromUiState, so the settings picker has data to render", () => {
+  const snap = fromUiState({
+    agents: [{ id: "claude", provider: "claude-code", state: "working" }],
+    models: {
+      agents: [{
+        handle: "claude",
+        provider: "claude",
+        availability: "available",
+        models: [{ id: "opus", label: "Opus", efforts: [{ id: "high", label: "High" }] }],
+        currentModel: "opus",
+        currentEffort: "high",
+        selectedModel: "opus",
+        selectedEffort: "high",
+        status: "working",
+      }],
+    },
+  });
+  assert.ok(snap.models, "fromUiState must carry a live model catalog onto the snapshot");
+  assert.deepEqual(snap.models?.agents.map((a) => [a.handle, a.availability, a.models.length]), [["claude", "available", 1]]);
+
+  const applied = State.apply({ agents: [], approvals: [], thread: [], models: snap.models });
+  assert.deepEqual(applied, { newApprovals: [], newReplies: [] });
+  assert.equal(State.models?.agents[0]?.handle, "claude", "State.models is what the settings view reads to build the picker rows");
+  assert.equal(State.models?.agents[0]?.models[0]?.id, "opus");
+});
+
+test("a malformed or absent model catalog clears State.models instead of leaving a stale picker", () => {
+  State.apply({ agents: [], approvals: [], thread: [], models: { agents: [{ handle: "claude", provider: "claude", availability: "available", models: [], currentModel: null, currentEffort: null, status: "working" }] } });
+  assert.ok(State.models);
+  State.apply({ agents: [], approvals: [], thread: [] });
+  assert.equal(State.models, null);
 });
 
 test("malformed ui-state degrades to an empty snapshot instead of throwing", () => {
