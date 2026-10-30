@@ -81,7 +81,7 @@ export interface DesktopStageTransport {
 
 export interface PillTransport {
   /** What this host can actually do; the UI hides controls a host cannot honour instead of faking them. */
-  capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean; saveMemory?: boolean };
+  capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean; saveMemory?: boolean; dismissTask?: boolean };
   /** Present only in the Windows desktop pill; the browser pill cannot control this machine's desktops. */
   desktopStages?: DesktopStageTransport;
   /** Opens the one-time microphone setup. Only with `capabilities.dictation`. */
@@ -100,6 +100,8 @@ export interface PillTransport {
   decide(approvalId: string, decision: Decision): Promise<void>;
   /** Saves a reply to the team's shared memory. Only with `capabilities.saveMemory`. */
   saveMemory?(text: string): Promise<void>;
+  /** Dismisses a surfaced feed notice while preserving its task and delivery record. */
+  dismissTask?(taskId: string): Promise<void>;
   /** Selects a live provider-reported model; the owner broker validates it. */
   selectModel?(handle: string, model: string | null, effort: string | null): Promise<void>;
   /** Window-level hooks; no-ops in the browser shell. */

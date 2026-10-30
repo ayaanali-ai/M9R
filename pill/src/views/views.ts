@@ -18,6 +18,7 @@ export interface ViewActions {
   send(text: string): Promise<string | void>;
   /** Present only when the host can save to shared memory (the in-page pill). */
   saveMemory?(text: string): Promise<void>;
+  dismissTask?(taskId: string): Promise<void>;
   selectModel?(handle: string, model: string | null, effort: string | null): Promise<void>;
   canAllowForADay(): boolean;
   /** Present only when the host has speech recognition (the page frame); hold the mic to talk. */
@@ -346,11 +347,19 @@ function buildSettings(actions: ViewActions): ViewHost {
       autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;
       segButtons.forEach((b, i) => b.classList.toggle("on", s.autoCloseInterval === [10, 15, 30][i]));
       const agents = State.models?.agents ?? [];
-      const nextKey = JSON.stringify(agents.map((agent) => [agent.handle, agent.availability, agent.currentModel, agent.currentEffort, agent.models]));
+      const nextKey = JSON.stringify(agents.map((agent) => [agent.handle, agent.availability, agent.currentModel, agent.currentEffort, agent.selectedModel, agent.selectedEffort, agent.models]));
       if (nextKey === modelKey) return;
       modelKey = nextKey;
       clear(modelRows);
       if (!agents.length) return;
+      const describeModel = (agent: (typeof agents)[number], id: string | null | undefined) =>
+        id ? agent.models.find((option) => option.id === id)?.label ?? id : "provider default / unknown";
+      modelStatus.textContent = agents.map((agent) => {
+        const preference = describeModel(agent, agent.selectedModel ?? agent.currentModel);
+        const reported = agent.availability === "not_connected" ? "not connected"
+          : describeModel(agent, agent.currentModel);
+        return `@${agent.handle} · configured: ${preference} · provider reports: ${reported}`;
+      }).join("  |  ");
       for (const agent of agents) {
         const row = h("div", { class: "settings-row", style: "gap:5px;min-height:24px" });
         const label = h("span", { text: `@${agent.handle}` , style: "min-width:66px;font-size:10px" });
@@ -362,7 +371,7 @@ function buildSettings(actions: ViewActions): ViewHost {
         const model = h("select", { class: "model-select", "aria-label": `Model for @${agent.handle}` }) as HTMLSelectElement;
         model.append(h("option", { value: "", text: "Provider default" }));
         for (const option of agent.models) model.append(h("option", { value: option.id, text: option.label }));
-        model.value = agent.currentModel ?? "";
+        model.value = agent.selectedModel ?? agent.currentModel ?? "";
         const effort = h("select", { class: "model-select", "aria-label": `Reasoning effort for @${agent.handle}` }) as HTMLSelectElement;
         const refreshEfforts = () => {
           clear(effort);
@@ -371,12 +380,15 @@ function buildSettings(actions: ViewActions): ViewHost {
           effort.hidden = false;
           effort.append(h("option", { value: "", text: "Default effort" }));
           for (const choice of selected.efforts) effort.append(h("option", { value: choice.id, text: choice.label }));
-          effort.value = agent.currentEffort ?? "";
+          effort.value = agent.selectedEffort ?? agent.currentEffort ?? "";
         };
         refreshEfforts();
         const request = (selectedEffort: string | null) => {
           const pending = actions.selectModel?.(agent.handle, model.value || null, selectedEffort);
-          if (pending) void pending.catch(() => { modelStatus.textContent = `Could not change @${agent.handle}.`; });
+          if (pending) void pending.then(
+            () => { modelStatus.textContent = `@${agent.handle}: request sent to M9R. Its reply below says whether the provider accepted it for the next turn or needs a restart. Current provider report: ${agent.currentModel ?? "no current model reported"}.`; },
+            () => { model.value = agent.selectedModel ?? agent.currentModel ?? ""; refreshEfforts(); modelStatus.textContent = `Could not change @${agent.handle}; the previous selection is still shown.`; },
+          );
         };
         model.addEventListener("change", () => { refreshEfforts(); request(effort.hidden ? null : (effort.value || null)); });
         effort.addEventListener("change", () => request(effort.value || null));

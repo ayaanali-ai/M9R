@@ -13,6 +13,9 @@ export interface ProviderModelUiAgent {
   readonly models: readonly ProviderModelOption[];
   readonly currentModel: string | null;
   readonly currentEffort: string | null;
+  /** Persisted M9R preference; may not be effective until the provider accepts the next turn/restart. */
+  readonly selectedModel?: string | null;
+  readonly selectedEffort?: string | null;
   readonly status: ManagedProviderConnectionSnapshot["status"];
 }
 

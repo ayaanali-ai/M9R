@@ -463,6 +463,7 @@ function capabilitiesForDesktop(controls: readonly DesktopControl[], view: "desk
       "input.click.double.point" as const,
       ...(visualControls.length ? ["input.click.double.element" as const] : []),
     ] : []),
+    ...(visualAvailable ? ["input.click.middle" as const] : []),
     ...(visualAvailable ? ["input.drag" as const, "input.drag.duration" as const] : []),
     ...(view === "app" || inputSelectionConfirmed ? ["input.key" as const] : []),
     ...(inputSelectionConfirmed ? ["input.text.insert" as const] : []),
@@ -470,10 +471,15 @@ function capabilitiesForDesktop(controls: readonly DesktopControl[], view: "desk
     // explicit foreground confirming click -- never the desktop-wide view,
     // which has no single bounded target to momentarily focus.
     ...(view === "app" ? ["input.shared-os" as const, "input.focus" as const] : []),
+    "system.display-brightness" as const,
+    "system.output-audio" as const,
+    "system.media" as const,
+    "system.microphone" as const,
     ...(view === "app" ? ["window.frame" as const, "window.state" as const, "menu.invoke" as const, "clipboard.read" as const, "clipboard.write" as const] : []),
     ...(controls.some((control) => control.enabled !== false && control.canReplaceValue && Boolean(control.role?.trim()))
       ? ["input.text.replace" as const] : []),
-    ...(visualAvailable ? ["input.scroll.line.horizontal" as const, "input.scroll.line.vertical" as const,
+    ...(visualAvailable ? ["input.scroll.pixel.horizontal" as const, "input.scroll.pixel.vertical" as const,
+      "input.scroll.line.horizontal" as const, "input.scroll.line.vertical" as const,
       "input.scroll.page.horizontal" as const, "input.scroll.page.vertical" as const] : []),
   ];
 }
@@ -1286,6 +1292,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       stageAction = { kind: "window_state", view: "app", state: action.state };
     } else if (action.kind === "focus") {
       stageAction = { kind: "focus", view: "app", confirmFocusForeground: true };
+    } else if (action.kind === "system_control") {
+      stageAction = { kind: "system_control", control: action.control, action: action.action,
+        ...(action.value === undefined ? {} : { value: action.value }),
+        ...(action.step === undefined ? {} : { step: action.step }) };
     } else if (action.kind === "invoke_menu") {
       stageAction = { kind: "invoke_menu", view: "app", path: action.path };
     } else if (action.kind === "clipboard") {

@@ -20,7 +20,7 @@ interface UiThread { id: string; kind: string; agent?: string; text: string; pha
 interface UiApproval { id: string; agent?: string; provider?: string; text: string; site?: string; url?: string; action?: string }
 interface UiModelEffort { id?: unknown; label?: unknown }
 interface UiModelOption { id?: unknown; label?: unknown; efforts?: unknown }
-interface UiModelAgent { handle?: unknown; provider?: unknown; availability?: unknown; models?: unknown; currentModel?: unknown; currentEffort?: unknown; status?: unknown }
+interface UiModelAgent { handle?: unknown; provider?: unknown; availability?: unknown; models?: unknown; currentModel?: unknown; currentEffort?: unknown; selectedModel?: unknown; selectedEffort?: unknown; status?: unknown }
 export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; collaboration?: unknown; models?: unknown; desktopPill?: boolean }
 
 const RUN_STATES = new Set<AgentRunState>(["idle", "starting", "working", "waiting", "blocked", "stopped", "failed", "seen", "unknown", "not_connected"]);
@@ -53,6 +53,8 @@ function modelState(raw: unknown): PillModelState | undefined {
       models,
       currentModel: typeof item.currentModel === "string" ? item.currentModel.slice(0, 160) : null,
       currentEffort: typeof item.currentEffort === "string" ? item.currentEffort.slice(0, 160) : null,
+      ...(typeof item.selectedModel === "string" ? { selectedModel: item.selectedModel.slice(0, 160) } : {}),
+      ...(typeof item.selectedEffort === "string" ? { selectedEffort: item.selectedEffort.slice(0, 160) } : {}),
       status: typeof item.status === "string" ? item.status.slice(0, 24) : "stopped",
     });
   }
@@ -154,7 +156,7 @@ export function fromFeed(feed: Feed): PillSnapshot {
           ...(n.linkable === true ? { link: { taskId: n.taskId, from: n.from, ...(n.fromSession ? { fromSession: n.fromSession } : {}), to: n.to } } : {}),
         }]
         : n.kind === "delivery_uncertain"
-          ? [{ id: `uncertain-${n.taskId}`, from: "m9r", text: clip(`Could not confirm delivery of ${n.taskId} to @${n.to}; it will not be resent automatically. ${n.reason}`, 300) }]
+          ? [{ id: `uncertain-${n.taskId}`, from: "m9r", text: clip(`Could not confirm delivery of ${n.taskId} to @${n.to}; it will not be resent automatically. ${n.reason}`, 300), dismissTaskId: n.taskId }]
         : []),
   ];
   return { agents, collaboration: collaborationFromAgents(agents), approvals, thread };

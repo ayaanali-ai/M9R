@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import type { ActionResult, ActionTarget, ClickPosition as CuaClickPosition, CuaDriverLike, ToolResult } from "@trycua/cua-driver";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { startCuaDriverHost, type CuaDriverHostConnection } from "./cua-driver-host";
-import { createWindowsDesktopStageManager, type WindowsStageDependencies, type NativePointControl } from "./windows-desktop-stage";
+import { createWindowsDesktopStageManager, type WindowsStageDependencies, type NativePointControl, type WindowsSystemControlRequest } from "./windows-desktop-stage";
 import type { VerifiedIdentity } from "./identity-core";
 import { createForegroundInputLease, ForegroundInputLeaseError, type ForegroundInputLease } from "./foreground-input-lease";
 
@@ -2576,8 +2576,20 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       foregroundLease.run(name, options.signal, async () => {
         const outcome = actionOutcome(await driver.callTool("bring_to_front", JSON.stringify({ pid, window_id: Number(windowId), session }),
           options.signal ? { signal: options.signal } : undefined), "Cua Driver could not bring the selected window to the foreground.");
+        options.signal?.throwIfAborted();
+        const foreground = await manager.foregroundWindow(pid, windowId.toString(), 500);
+        if (foreground.pid !== pid || BigInt(foreground.windowId) !== windowId) {
+          throw new Error("Windows focused a different window; the selected application was not confirmed in front.");
+        }
         return { capture: stageCapture(await captureWindow(), now), outcome };
       }), cursorIdentity);
+  }
+
+  async function systemControl(request: WindowsSystemControlRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    signal?.throwIfAborted();
+    const result = await manager.systemControl(request);
+    signal?.throwIfAborted();
+    return result;
   }
 
   async function invokeMenu(name: string, path: string[], cursorIdentity?: CuaAgentCursorIdentity,
@@ -2658,7 +2670,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
   }
 
   return { capture, readStructure, readDesktopStructure, describeTarget, describeElementTarget, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, drag,
-    clickElement, replaceElement, windowFrame, windowState, focusWindow, invokeMenu, clipboardRead, clipboardWrite,
+    clickElement, replaceElement, windowFrame, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown };
 }

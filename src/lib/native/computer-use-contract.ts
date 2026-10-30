@@ -40,6 +40,10 @@ export const computerUseCapabilitySchema = z.enum([
   "menu.invoke",
   "clipboard.read",
   "clipboard.write",
+  "system.display-brightness",
+  "system.output-audio",
+  "system.media",
+  "system.microphone",
 ]);
 
 const targetIdentity = {
@@ -144,6 +148,24 @@ const actionEnvelope = {
 export const computerUseActionSchema = z.discriminatedUnion("kind", [
   z.object({ ...actionEnvelope, kind: z.literal("observe") }).strict(),
   z.object({ ...actionEnvelope, kind: z.literal("focus") }).strict(),
+  z.object({
+    ...actionEnvelope,
+    kind: z.literal("system_control"),
+    control: z.enum(["display_brightness", "output_audio", "media", "microphone"]),
+    action: z.enum(["get", "set", "increase", "decrease", "mute", "unmute", "play_pause", "next", "previous"]),
+    value: z.number().int().min(0).max(100).optional(),
+    step: z.number().int().min(1).max(50).optional(),
+  }).strict().superRefine((action, context) => {
+    const allowed = action.control === "media" ? ["play_pause", "next", "previous"]
+      : action.control === "display_brightness" ? ["get", "set", "increase", "decrease"]
+        : ["get", "set", "increase", "decrease", "mute", "unmute"];
+    if (!allowed.includes(action.action)) context.addIssue({ code: "custom", path: ["action"], message: `That action is not supported for ${action.control}.` });
+    if (action.action === "set" && action.value === undefined) context.addIssue({ code: "custom", path: ["value"], message: "Set requires a level from 0 to 100." });
+    if (action.action !== "set" && action.value !== undefined) context.addIssue({ code: "custom", path: ["value"], message: "Only set accepts an explicit level." });
+    if (["increase", "decrease"].includes(action.action)) {
+      // The default step is 10 when omitted.
+    } else if (action.step !== undefined) context.addIssue({ code: "custom", path: ["step"], message: "Only increase and decrease accept a step." });
+  }),
   z.object({
     ...actionEnvelope,
     kind: z.literal("click"),
@@ -291,6 +313,11 @@ export function computerUseActionRequirements(action: ComputerUseAction): Comput
   switch (action.kind) {
     case "observe": return { capabilities: ["observe.screenshot", "observe.accessibility", "observe.dom"], match: "any" };
     case "focus": return { capabilities: ["input.focus", "input.shared-os"], match: "all" };
+    case "system_control": return { capabilities: [
+      action.control === "display_brightness" ? "system.display-brightness"
+        : action.control === "output_audio" ? "system.output-audio"
+          : action.control === "media" ? "system.media" : "system.microphone",
+    ], match: "all" };
     case "click": {
       const capabilities: ComputerUseCapability[] = [action.locator.kind === "element" ? "input.click.element" : "input.click.point"];
       if (action.button === "middle") capabilities.push("input.click.middle");

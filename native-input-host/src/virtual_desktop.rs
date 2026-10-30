@@ -261,6 +261,16 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Ok(state) => json!({"ok":true,"requestId":request_id,"windowState":state}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
+        Some("systemControl") => match crate::system_controls::handle(value) {
+            Ok(result) => json!({"ok":true,"requestId":request_id,"result":result}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("foregroundWindow") => match parse_window_identity(value)
+            .and_then(|(pid, handle)| platform::verify_foreground_window(pid, handle, value.get("timeoutMs").and_then(Value::as_u64).unwrap_or(0))) {
+            Ok(window) => json!({"ok":true,"requestId":request_id,"foregroundWindow":window}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
         #[cfg(windows)]
         Some("setWindowState") => match platform::set_window_state(value) {
             Ok(state) => json!({"ok":true,"requestId":request_id,"state":state}),
@@ -699,6 +709,23 @@ mod platform {
         let center = Point { x: rect.left + (rect.right - rect.left) / 2, y: rect.top + (rect.bottom - rect.top) / 2 };
         let top = unsafe { GetAncestor(WindowFromPoint(center), 2) };
         Ok(if top != window { "occluded" } else { "visible" })
+    }
+
+    pub(super) fn verify_foreground_window(pid: u32, expected: usize, timeout_ms: u64) -> Result<serde_json::Value, &'static str> {
+        if timeout_ms > 1_000 { return Err("foreground verification timeout exceeds its limit"); }
+        let expected_window = validate_window(pid, expected)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            let window = unsafe { GetForegroundWindow() };
+            let mut actual_pid = 0;
+            if !window.is_null() && unsafe { GetWindowThreadProcessId(window, &mut actual_pid) } != 0
+                && window == expected_window && actual_pid == pid {
+                return Ok(serde_json::json!({ "pid": actual_pid, "windowId": (window as usize).to_string() }));
+            }
+            if std::time::Instant::now() >= deadline { break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Err("Windows did not confirm the selected application as the foreground window")
     }
 
     pub(super) fn window_at_point(value: &serde_json::Value) -> Result<(u32, usize, bool, bool, i32, i32), &'static str> {

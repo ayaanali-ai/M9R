@@ -214,8 +214,8 @@ abstract class ManagedProviderConnectionBase implements ManagedProviderConnectio
       provider: this.profile.provider,
       generation: this.generationValue,
       models: null,
-      currentModel: this.profile.model ?? null,
-      currentEffort: this.profile.effort ?? null,
+      currentModel: null,
+      currentEffort: null,
     };
   }
 
@@ -757,8 +757,8 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
       provider: this.profile.provider,
       generation: this.generationValue,
       models,
-      currentModel: this.session?.model ?? this.profile.model ?? null,
-      currentEffort: this.session?.effort ?? this.profile.effort ?? null,
+      currentModel: this.session?.model ?? null,
+      currentEffort: this.session?.effort ?? null,
     };
   }
 
@@ -965,8 +965,6 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
   private cancelledTask?: string;
   private interruptedTask?: string;
   private availableModels: ManagedProviderCapabilities["models"] = null;
-  private currentModel?: string | null;
-  private currentEffort?: string | null;
 
   constructor(options: OpenCodeManagedProviderConnectionOptions) {
     super(options.profile);
@@ -993,8 +991,10 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
       provider: this.profile.provider,
       generation: this.generationValue,
       models: this.availableModels,
-      currentModel: this.currentModel ?? this.profile.model ?? null,
-      currentEffort: this.currentEffort ?? this.profile.effort ?? null,
+      // ACP exposes the available catalog and accepts configuration updates,
+      // but this runtime does not report the model actually used by a turn.
+      currentModel: null,
+      currentEffort: null,
     };
   }
 
@@ -1005,8 +1005,6 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
     if (!runtime?.configureModel) return { ok: false, applies: "next-restart", error: "OpenCode ACP does not expose live model configuration" };
     try {
       await runtime.configureModel(validation.selection.model ?? null, validation.selection.effort ?? null);
-      this.currentModel = validation.selection.model ?? null;
-      this.currentEffort = validation.selection.effort ?? null;
       return { ok: true, applies: "next-turn" };
     } catch (error) {
       return { ok: false, applies: "next-restart", error: error instanceof Error ? error.message : String(error) };
@@ -1045,8 +1043,6 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
       }
       this.providerSessionRef = ready.sessionId;
       this.availableModels = validateProviderModelCatalog(ready.availableModels ?? null);
-      this.currentModel = this.profile.model ?? null;
-      this.currentEffort = this.profile.effort ?? null;
       return this.ready("Ready (OpenCode ACP session)");
     })().catch((error: unknown) => {
       this.fail(error instanceof Error ? error.message : String(error));

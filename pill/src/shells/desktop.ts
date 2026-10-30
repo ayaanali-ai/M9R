@@ -8,7 +8,8 @@
 // runs in one-pill mode (M9R_PILL_NEXT=1); the Rust side validates every value.
 
 import type { Decision, DesktopStage, DesktopStageActionProof, DesktopStageCapture, DesktopStageCursorMove, DesktopStageWindowOption, PillTransport, SessionRow } from "../core/transport";
-import { desktopSpeechEnv } from "../core/speech";
+import { listen } from "@tauri-apps/api/event";
+import type { SpeechEnv } from "../core/speech";
 import { fromFeed, fromUiState, type Feed, type UiState } from "./convert";
 
 type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -22,6 +23,38 @@ const POLL_MS = 1000;
 
 export function createDesktopTransport(invoke: Invoke): PillTransport {
   let feed: Feed | null = null;
+  type NativeSpeechHandlers = NonNullable<SpeechEnv["native"]> extends { start(handlers: infer T): Promise<void> } ? T : never;
+  let nativeSpeechHandlers: NativeSpeechHandlers | null = null;
+  let nativeSpeechListeners: Promise<void> | null = null;
+  const ensureNativeSpeechListeners = () => {
+    nativeSpeechListeners ??= Promise.all([
+      listen<string>("dictation-interim", ({ payload }) => nativeSpeechHandlers?.interim(payload)),
+      listen<string>("dictation-final", ({ payload }) => nativeSpeechHandlers?.final(payload)),
+      listen("dictation-ended", () => { const handlers = nativeSpeechHandlers; nativeSpeechHandlers = null; handlers?.ended(); }),
+      listen<string>("dictation-error", ({ payload }) => { const handlers = nativeSpeechHandlers; nativeSpeechHandlers = null; handlers?.error(payload); }),
+      listen<string>("dictation-unavailable", ({ payload }) => { const handlers = nativeSpeechHandlers; nativeSpeechHandlers = null; handlers?.error(payload); }),
+    ]).then(() => undefined).catch((error) => { nativeSpeechListeners = null; throw error; });
+    return nativeSpeechListeners;
+  };
+  const desktopNativeSpeechEnv = (openMicSetup: () => void): SpeechEnv => ({
+    Recognition: null,
+    lang: navigator.language || "en-US",
+    openMicSetup,
+    native: {
+      async start(handlers) {
+        await ensureNativeSpeechListeners();
+        nativeSpeechHandlers = handlers;
+        await invoke("start_dictation");
+      },
+      stop() {
+        void invoke("stop_dictation").catch((error) => {
+          const current = nativeSpeechHandlers;
+          nativeSpeechHandlers = null;
+          current?.error(error instanceof Error ? error.message : "Windows dictation could not stop cleanly.");
+        });
+      },
+    },
+  });
 
   type StageAction = "list" | "create" | "activate" | "return" | "capture" | "cursor" | "windows" | "attach" | "click" | "type" | "scroll" | "drag" | "allow-agent" | "allow-control" | "revoke-agent";
   async function stageRequest(action: StageAction, name?: string, args: Record<string, unknown> = {}): Promise<{
@@ -85,8 +118,8 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
   }
 
   return {
-    capabilities: { allowForADay: true, linkSessions: true, dictation: true, saveMemory: true },
-    createDictationEnvironment() { return desktopSpeechEnv(() => { void invoke("open_microphone_settings").catch(() => {}); }); },
+    capabilities: { allowForADay: true, linkSessions: true, dictation: true, saveMemory: true, dismissTask: true },
+    createDictationEnvironment() { return desktopNativeSpeechEnv(() => { void invoke("open_microphone_settings").catch(() => {}); }); },
     desktopStages: /Windows/i.test(navigator.userAgent) ? {
       async setAgentPermission(handle, enabled, control = false) { await stageRequest(enabled ? (control ? "allow-control" : "allow-agent") : "revoke-agent", handle); },
       async list() { return (await stageRequest("list")).stages ?? []; },
@@ -148,6 +181,9 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
     },
     async saveMemory(text) {
       await invoke("save_memory", { text });
+    },
+    async dismissTask(taskId) {
+      await invoke("dismiss_task", { taskId });
     },
     setIslandRect(x, y, width, height) {
       void invoke("pill_set_rect", { x, y, width, height }).catch(() => { /* a rejected rectangle keeps the last good one */ });

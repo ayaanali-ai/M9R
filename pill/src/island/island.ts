@@ -91,6 +91,7 @@ export class Island {
         ? () => this.transport.createDictationEnvironment?.() ?? browserSpeechEnv(() => this.transport.openMicSetup?.())
         : undefined,
       saveMemory: this.transport.capabilities?.saveMemory && this.transport.saveMemory ? (text) => this.transport.saveMemory!(text) : undefined,
+      dismissTask: this.transport.capabilities?.dismissTask && this.transport.dismissTask ? (taskId) => this.transport.dismissTask!(taskId) : undefined,
       selectModel: this.transport.selectModel ? (handle, model, effort) => this.transport.selectModel!(handle, model, effort) : undefined,
       linking: this.transport.capabilities?.linkSessions && this.transport.listSessions && this.transport.linkSession
         ? { list: (handle) => this.transport.listSessions!(handle), link: (offer, session) => this.transport.linkSession!(offer, session) }
@@ -179,7 +180,6 @@ export class Island {
     // Startup can select the empty view before the first provider snapshot arrives.
     // Once the authoritative snapshot contains agents, keep the home view in sync.
     if (State.view === "empty" && State.tasks.length > 0) State.view = State.defaultView();
-    for (const m of newReplies) State.chatHistory.push({ id: Date.now() + State.chatHistory.length, role: "assistant", content: `${m.from}: ${m.text}`, link: m.link });
     if (newApprovals.length > 0) {
       const asking = State.approvals.find((a) => a.id === newApprovals[0]);
       if (asking) State.setFocus(asking.agent);

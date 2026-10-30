@@ -206,7 +206,6 @@ export const MAX_NOTE_CHARS = 2_000;
 export const MAX_SELECTION_CHARS = 2_000;
 export const THREAD_LIMIT = 200;
 const SAY_CHARS = 4_000;
-const SAY_MERGE_MS = 400;
 
 export function isUiMessage(raw: unknown): boolean {
   return !!raw && typeof raw === "object" && typeof (raw as { type?: unknown }).type === "string" && UI_MESSAGE_TYPES.has((raw as { type: string }).type);
@@ -393,7 +392,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   const actionEntries = new Map<string, UiThreadEntry>();
   const typedValues = new Map<string, Array<{ value: string; expiresAt: number }>>();
   /** The currently streamed bubble for each agent. A final result replaces this bubble in place. */
-  const liveSay = new Map<string, { at: number; entry: UiThreadEntry; lastFragment: string }>();
+  const liveSay = new Map<string, { entry: UiThreadEntry; lastFragment: string }>();
   // The native pill retries only with the same private request id. Keep a
   // bounded short-lived receipt so a lost owner-pipe response cannot inject
   // the same conversational turn twice. This id never enters the UI thread.
@@ -521,7 +520,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       // tail participates in change detection so hashing stays bounded.
       thread: state.thread.map((entry, index) => [entry.id, entry.kind, entry.agent, entry.provider, entry.to ?? "", entry.phase ?? "", entry.ok ?? null, index >= state.thread.length - 12 ? entry.text : entry.text.slice(0, 32)]),
       collaboration: state.collaboration ? [state.collaboration.headline, state.collaboration.activeCount, state.collaboration.overflowCount, state.collaboration.agents.map((agent) => [agent.agentId, agent.state, agent.cursor.mode, agent.cursor.visible, agent.summary ?? ""])] : null,
-      models: state.models ? state.models.agents.map((agent) => [agent.handle, agent.provider, agent.generation, agent.availability, agent.currentModel ?? "", agent.currentEffort ?? "", agent.models.map((model) => [model.id, model.label, model.efforts?.map((effort) => [effort.id, effort.label]) ?? null])]) : null,
+      models: state.models ? state.models.agents.map((agent) => [agent.handle, agent.provider, agent.generation, agent.availability, agent.currentModel ?? "", agent.currentEffort ?? "", agent.selectedModel ?? "", agent.selectedEffort ?? "", agent.models.map((model) => [model.id, model.label, model.efforts?.map((effort) => [effort.id, effort.label]) ?? null])]) : null,
       desktopPill: state.desktopPill === true,
     });
   }
@@ -591,25 +590,37 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       case "say": {
         const text = event.text.trim();
         if (!text) return;
-        const at = now();
         const runKey = event.runId ? `${event.handle}\0${event.runId}` : event.handle;
         const current = liveSay.get(runKey);
-        if (current && at - current.at < SAY_MERGE_MS && thread[thread.length - 1] === current.entry) {
-          // Providers may replay the same stream fragment during reconnect or
-          // a fast transport retry. It is not new text and must not trigger a
-          // pill redraw or grow the bubble indefinitely.
-          if (current.lastFragment === text) {
-            current.at = at;
-            return;
+        if (current) {
+          // One provider turn owns one stable bubble, even when stream chunks
+          // arrive slowly or another agent emits a message between them.
+          // Providers may send cumulative snapshots, exact replays, or token
+          // fragments; merge those forms without turning each into a new bubble.
+          if (current.lastFragment === text || current.entry.text === text) return;
+          const existing = current.entry.text;
+          let merged: string;
+          if (text.startsWith(existing)) merged = text;
+          else if (existing.startsWith(text)) return;
+          else {
+            let overlap = Math.min(existing.length, text.length);
+            while (overlap > 1 && !existing.endsWith(text.slice(0, overlap))) overlap -= 1;
+            const tail = text.slice(overlap);
+            const left = existing.trimEnd();
+            const right = tail.trimStart();
+            const needsSpace = left.length > 0 && right.length > 0
+              && !/^[,.;:!?%)\]}’'”]/.test(right)
+              && !/[([{‘“'\-–—/]$/.test(left);
+            merged = `${left}${needsSpace ? " " : ""}${right}`;
           }
-          current.entry.text = redact(`${current.entry.text}\n\n${text}`).slice(0, SAY_CHARS);
-          current.at = at;
+          current.entry.text = redact(merged).slice(0, SAY_CHARS);
           current.lastFragment = text;
           changed();
           return;
         }
         const entry = push({ kind: "say", agent: event.handle, provider: event.provider, to: "you", text: text.slice(0, SAY_CHARS) });
-        liveSay.set(runKey, { at, entry, lastFragment: text });
+        liveSay.set(runKey, { entry, lastFragment: text });
+        while (liveSay.size > 64) liveSay.delete(liveSay.keys().next().value!);
         return;
       }
       case "tool": {
@@ -628,7 +639,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
           const runKey = event.runId ? `${event.handle}\0${event.runId}` : event.handle;
           const streamed = liveSay.get(runKey);
           const lastOwn = [...thread].reverse().find((e) => e.agent === event.handle && e.kind === "say");
-          if (text && streamed && thread[thread.length - 1] === streamed.entry) {
+          if (text && streamed) {
             // Provider stream fragments are already one live bubble. The
             // canonical result is its close, not a second message; replacing
             // it also handles the common case where the final wording differs

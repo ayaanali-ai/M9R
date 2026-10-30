@@ -61,6 +61,8 @@ interface NativeStageResponse {
   windows?: { pid: number; windowId: string; title: string; width: number; height: number }[];
   position?: { x: number; y: number };
   windowState?: "closed" | "moved" | "minimized" | "occluded" | "hidden" | "visible";
+  foregroundWindow?: { pid: number; windowId: string };
+  result?: unknown;
   state?: "minimized" | "maximized" | "restored";
 }
 
@@ -72,6 +74,13 @@ export interface NativePointControl {
   rect: { x: number; y: number; width: number; height: number };
   invoked: boolean;
   confirmed?: boolean;
+}
+
+export interface WindowsSystemControlRequest {
+  control: "display_brightness" | "output_audio" | "media" | "microphone";
+  action: "get" | "set" | "increase" | "decrease" | "mute" | "unmute" | "play_pause" | "next" | "previous";
+  value?: number;
+  step?: number;
 }
 
 /** Public, handle-free result from the native Windows UI Automation desktop snapshot. */
@@ -800,6 +809,43 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return result.windowState!;
   }
 
+  async function foregroundWindow(pid: number, windowId: string, timeoutMs = 400): Promise<{ pid: number; windowId: string }> {
+    assertWindows();
+    parsePid(String(pid));
+    parseWindowId(windowId);
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 1_000) throw new Error("Invalid foreground verification timeout.");
+    const result = await invokeNative({ op: "foregroundWindow", pid, windowId, timeoutMs });
+    const current = result.foregroundWindow;
+    if (!result.ok || !current || !Number.isSafeInteger(current.pid) || current.pid < 1
+      || typeof current.windowId !== "string" || !WINDOW_ID_RE.test(current.windowId) || !/[^0]/.test(current.windowId)) {
+      throw new Error(result.error ?? "Windows returned an invalid foreground window identity.");
+    }
+    return current;
+  }
+
+  async function systemControl(request: WindowsSystemControlRequest): Promise<Record<string, unknown>> {
+    assertWindows(); assertOwner();
+    if (!request || !["display_brightness", "output_audio", "media", "microphone"].includes(request.control)
+      || !["get", "set", "increase", "decrease", "mute", "unmute", "play_pause", "next", "previous"].includes(request.action)
+      || (request.value !== undefined && (!Number.isSafeInteger(request.value) || request.value < 0 || request.value > 100))
+      || (request.step !== undefined && (!Number.isSafeInteger(request.step) || request.step < 1 || request.step > 50))) {
+      throw new Error("Invalid system-control request.");
+    }
+    const result = await invokeNative({ op: "systemControl", ...request });
+    if (!result.ok || !result.result || typeof result.result !== "object" || Array.isArray(result.result)) {
+      throw new Error(result.error ?? "Windows returned no system-control result.");
+    }
+    const value = result.result as Record<string, unknown>;
+    if (value.control !== request.control) throw new Error("Windows returned a result for a different system control.");
+    if (request.control === "media") {
+      if (value.action !== request.action || value.dispatched !== true || typeof value.effect !== "string") throw new Error("Windows returned an invalid media-control result.");
+    } else if (!Number.isInteger(value.level) || (value.level as number) < 0 || (value.level as number) > 100
+      || ((request.control === "output_audio" || request.control === "microphone") && typeof value.muted !== "boolean")) {
+      throw new Error("Windows returned an invalid system-control level.");
+    }
+    return value;
+  }
+
   async function ownedPopups(pid: number, windowId: string) {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
@@ -870,7 +916,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, setWindowState, ownedPopups };
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, systemControl, setWindowState, ownedPopups };
 }
 
 function parsePid(value: string): number {

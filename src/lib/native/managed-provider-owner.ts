@@ -795,8 +795,8 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       provider: profile.provider,
       generation: 0,
       models: null,
-      currentModel: profile.model ?? null,
-      currentEffort: profile.effort ?? null,
+      currentModel: null,
+      currentEffort: null,
     });
   }
 
@@ -845,7 +845,17 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       return { failures };
     },
     handles: () => profiles.map((profile) => profile.handle),
-    modelState: () => providerModelUiState(capabilitySnapshot(), supervisor.snapshots()),
+    modelState: () => {
+      const state = providerModelUiState(capabilitySnapshot(), supervisor.snapshots());
+      return { ...state, agents: state.agents.map((agent) => {
+        const profile = resolveProfile(agent.handle);
+        const configured = profile ? modelSelectionStore.load(profile.connectionId, profile) : undefined;
+        return { ...agent,
+          selectedModel: configured?.model ?? profile?.model ?? agent.currentModel,
+          selectedEffort: configured?.effort ?? profile?.effort ?? agent.currentEffort,
+        };
+      }) };
+    },
     snapshot: () => profiles.map((profile) => {
       const snapshot = supervisor.snapshots().find((entry) => entry.connectionId === profile.connectionId);
       const paused = pausedConnections.has(profile.connectionId);

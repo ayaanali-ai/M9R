@@ -60,6 +60,7 @@ pub enum MouseButton {
 mod win32;
 
 mod virtual_desktop;
+mod system_controls;
 #[cfg(windows)]
 mod shell_accessibility;
 

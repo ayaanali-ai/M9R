@@ -1,4 +1,5 @@
 import { createCuaStageDriver, type CuaAgentCursorIdentity, type CuaStageTargetDescription } from "./cua-stage-driver";
+import type { WindowsSystemControlRequest } from "./windows-desktop-stage";
 import { classifyWebActionRisk } from "./risk-core";
 
 type TaskStageActionBody =
@@ -21,7 +22,8 @@ type TaskStageActionBody =
   | { kind: "focus"; confirmFocusForeground?: boolean }
   | { kind: "invoke_menu"; path: string[] }
   | { kind: "clipboard_read"; includeText: boolean; confirmSharedClipboard?: boolean }
-  | { kind: "clipboard_write"; text?: string; imagePath?: string; filePath?: string; confirmSharedClipboard: true };
+  | { kind: "clipboard_write"; text?: string; imagePath?: string; filePath?: string; confirmSharedClipboard: true }
+  | ({ kind: "system_control" } & WindowsSystemControlRequest);
 export type TaskStageAction = TaskStageActionBody & { view?: "desktop" | "app" };
 
 const OWNER_PREVIEW_FOREGROUND_ACTIONS = new Set<TaskStageAction["kind"]>([
@@ -48,10 +50,11 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   const fields: Record<string, string[]> = { capture: [], stop: [], read_structure: [], window_status: [], click: ["x", "y"], double_click: ["x", "y"], middle_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
     type: ["text", "mode", "x", "y", "expectedRole", "expectedLabel"], scroll: ["x", "y", "direction"], drag: ["fromX", "fromY", "toX", "toY", "durationMs"], press_key: ["key"], hotkey: ["keys"],
     click_element: ["ref", "expectedRole", "expectedLabel"], replace_element: ["ref", "text", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
-    window_frame: ["x", "y", "width", "height"], window_state: ["state"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "imagePath", "filePath", "confirmSharedClipboard"] };
+    window_frame: ["x", "y", "width", "height"], window_state: ["state"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "imagePath", "filePath", "confirmSharedClipboard"],
+    system_control: ["control", "action", "value", "step"] };
   if (typeof action.kind !== "string" || !Object.hasOwn(fields, action.kind)) throw new Error("Unsupported stage action.");
   const allowedFields = fields[action.kind]!;
-  const requiredFields = action.kind === "type" ? ["text"] : action.kind === "read_structure" ? ["view"]
+  const requiredFields = action.kind === "system_control" ? ["control", "action"] : action.kind === "type" ? ["text"] : action.kind === "read_structure" ? ["view"]
     : action.kind === "scroll_delta" ? ["x", "y", "deltaX", "deltaY", "unit"] : action.kind === "window_frame" ? allowedFields
       : action.kind === "clipboard_read" ? ["includeText"] : action.kind === "clipboard_write" ? ["confirmSharedClipboard"] : action.kind === "click_element" ? ["ref"]
         : action.kind === "replace_element" ? ["ref", "text"] : allowedFields;
@@ -88,6 +91,20 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     || Math.abs(action.deltaX as number) > 16383 || Math.abs(action.deltaY as number) > 16383
     || ((action.deltaX as number) === 0 && (action.deltaY as number) === 0)
     || ((action.deltaX as number) !== 0 && (action.deltaY as number) !== 0))) throw new Error("Invalid scroll delta.");
+  if (action.kind === "system_control") {
+    const control = action.control;
+    const choice = action.action;
+    if (!["display_brightness", "output_audio", "media", "microphone"].includes(String(control))) throw new Error("Invalid system-control category.");
+    const allowed = control === "media" ? ["play_pause", "next", "previous"]
+      : control === "display_brightness" ? ["get", "set", "increase", "decrease"]
+        : ["get", "set", "increase", "decrease", "mute", "unmute"];
+    if (!allowed.includes(String(choice))) throw new Error(`Unsupported ${String(control)} action.`);
+    if (choice === "set" && (!Number.isSafeInteger(action.value) || (action.value as number) < 0 || (action.value as number) > 100)) throw new Error("Set level requires an integer from 0 to 100.");
+    if (choice !== "set" && action.value !== undefined) throw new Error("Only a set action accepts an explicit level.");
+    if (["increase", "decrease"].includes(String(choice))) {
+      if (action.step !== undefined && (!Number.isSafeInteger(action.step) || (action.step as number) < 1 || (action.step as number) > 50)) throw new Error("Level step must be from 1 to 50.");
+    } else if (action.step !== undefined) throw new Error("Only increase and decrease accept a step.");
+  }
   if (action.kind === "drag" && action.durationMs !== undefined
     && (typeof action.durationMs !== "number" || !Number.isSafeInteger(action.durationMs) || action.durationMs < 1 || action.durationMs > 10_000)) {
     throw new Error("Invalid drag duration.");
@@ -178,6 +195,8 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "clipboard_write": return driver.clipboardWrite(name, action.text ?? "", identity,
       action.imagePath || action.filePath ? { imagePath: action.imagePath, filePath: action.filePath } : undefined,
       stageOptions({ confirmFocusForeground }));
+    case "system_control": return driver.systemControl({ control: action.control, action: action.action,
+      ...(action.value === undefined ? {} : { value: action.value }), ...(action.step === undefined ? {} : { step: action.step }) }, signal);
   }
 }
 

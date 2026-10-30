@@ -923,6 +923,30 @@ async fn dismiss_task(task_id: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+#[cfg(windows)]
+#[tauri::command]
+async fn start_dictation() -> Result<(), String> {
+    native_dictation::start()
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+async fn start_dictation() -> Result<(), String> {
+    Err("Windows dictation is available only on Windows.".into())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn stop_dictation() -> Result<(), String> {
+    native_dictation::stop()
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+async fn stop_dictation() -> Result<(), String> {
+    Err("Windows dictation is available only on Windows.".into())
+}
+
 /// Is a fullscreen app in front (a game, a video, a presentation)? Heuristic: the foreground window is not this pill, covers
 /// its whole monitor (no border), and is not the desktop or the shell. Windows has no single official "is fullscreen" flag.
 #[cfg(windows)]
@@ -1218,11 +1242,6 @@ fn main() {
                                 if let Some(window) = app.get_webview_window(PILL) {
                                     let _ = window.show();
                                 }
-                                #[cfg(windows)]
-                                native_dictation::start();
-                            } else {
-                                #[cfg(windows)]
-                                native_dictation::stop();
                             }
                             let _ = app.emit("hold-to-talk", transition.as_str());
                         }
@@ -1230,7 +1249,7 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, select_model, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, select_model, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, start_dictation, stop_dictation, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.

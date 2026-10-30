@@ -27,6 +27,11 @@ export interface SpeechEnv {
   lang: string;
   /** Optional real audio level (0..1) while listening; returns a stop function. */
   startMeter?(onLevel: (level: number) => void): Promise<() => void>;
+  /** Desktop hosts may provide their native recognizer instead of WebView speech. */
+  native?: {
+    start(handlers: { interim(text: string): void; final(text: string): void; ended(): void; error(message: string): void }): Promise<void>;
+    stop(): void;
+  };
 }
 
 export interface DictationEvents {
@@ -62,6 +67,7 @@ export function createDictation(env: SpeechEnv, events: DictationEvents, timers 
   let stopping = false;
   let recognizer: RecognitionLike | null = null;
   let heard = "";
+  let nativeHeard = "";
   let cap: ReturnType<typeof setTimeout> | null = null;
   let stopMeter: (() => void) | null = null;
 
@@ -71,12 +77,59 @@ export function createDictation(env: SpeechEnv, events: DictationEvents, timers 
   async function start() {
     if (listening || want) return;
     want = true;
-    if (!env.Recognition) { want = false; events.onNotice("Speech isn't available in this browser", true); return; }
+    if (!env.native && !env.Recognition) { want = false; events.onNotice("Speech isn't available in this browser", true); return; }
     if (env.micIsOn && !(await env.micIsOn())) { want = false; events.onNotice("Turn on the microphone for M9R first (opening setup)", true); env.openMicSetup(); return; }
     if (!want) return; // released while the permission check ran
+    if (env.native) {
+      nativeHeard = "";
+      stopping = false;
+      listening = true;
+      clearCap();
+      cap = timers.setTimeout(stop, MAX_TALK_MS);
+      events.onListening(true);
+      events.onLive("Listening…");
+      try {
+        await env.native.start({
+          interim: (text) => { if (listening) events.onLive(`${nativeHeard}${nativeHeard && text ? " " : ""}${text}`.trim() || "Listening…"); },
+          final: (text) => {
+            if (!listening || !text.trim()) return;
+            nativeHeard = `${nativeHeard}${nativeHeard && !/\s$/.test(nativeHeard) ? " " : ""}${text.trim()}`;
+            events.onLive(nativeHeard);
+          },
+          ended: () => {
+            const wasListening = listening;
+            want = false;
+            listening = false;
+            stopping = false;
+            clearCap();
+            events.onListening(false);
+            const words = nativeHeard.trim();
+            nativeHeard = "";
+            if (wasListening && words) events.onText(words);
+          },
+          error: (message) => {
+            want = false;
+            listening = false;
+            stopping = false;
+            clearCap();
+            events.onListening(false);
+            events.onNotice(message || "Couldn't start speech recognition. Check microphone access and try again.", true);
+          },
+        });
+      } catch {
+        listening = false;
+        want = false;
+        clearCap();
+        events.onListening(false);
+        events.onNotice("Couldn't start Windows dictation. Check microphone access and try again.", true);
+      }
+      return;
+    }
+    const Recognition = env.Recognition;
+    if (!Recognition) { want = false; events.onNotice("Speech isn't available in this browser", true); return; }
     heard = "";
     stopping = false;
-    const r = new env.Recognition();
+    const r = new Recognition();
     recognizer = r;
     r.lang = env.lang;
     r.interimResults = true;
@@ -138,6 +191,12 @@ export function createDictation(env: SpeechEnv, events: DictationEvents, timers 
 
   function stop() {
     want = false;
+    if (env.native) {
+      if (!listening || stopping) return;
+      stopping = true;
+      env.native.stop();
+      return;
+    }
     // Both a key and a button can end it; the recognizer should only be told once.
     if (!recognizer || !listening || stopping) return;
     stopping = true;

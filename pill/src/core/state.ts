@@ -17,6 +17,8 @@ export interface PillModelAgent {
   models: PillModelOption[];
   currentModel: string | null;
   currentEffort: string | null;
+  selectedModel?: string | null;
+  selectedEffort?: string | null;
   status: string;
 }
 export interface PillModelState { agents: PillModelAgent[] }
@@ -30,7 +32,7 @@ export interface PillSnapshot {
   models?: PillModelState;
   approvals: Array<{ id: string; agent: string; title: string; detail: string }>;
   /** Replies and notices from agents, newest last. */
-  thread: Array<{ id: string; from: string; text: string; link?: LinkOffer }>;
+  thread: Array<{ id: string; from: string; text: string; link?: LinkOffer; dismissTaskId?: string }>;
   /** Browser-broker connection health, when the host can observe it. */
   connection?: "connecting" | "connected" | "disconnected";
   /** A connection-only update must not replace the last provider snapshot. */
@@ -75,9 +77,12 @@ export interface ApprovalInfo {
 
 export interface ChatMessage {
   id: number;
+  /** Stable host message identity. A streaming update edits this bubble in place. */
+  sourceId?: string;
   role: "user" | "assistant";
   content: string;
   link?: LinkOffer;
+  dismissTaskId?: string;
 }
 
 export interface Settings {
@@ -239,19 +244,46 @@ class AppState {
     if (!this.threadSeeded && snapshot.connection !== "disconnected") {
       this.chatHistory = snapshot.thread.map((message, index) => ({
         id: Date.now() + index,
+        sourceId: message.id,
         role: "assistant",
         content: `${message.from}: ${message.text}`,
         link: message.link,
+        dismissTaskId: message.dismissTaskId,
       }));
       this.threadSeeded = true;
       this.lastThread = ids.at(-1) ?? "";
     } else if (this.threadSeeded && snapshot.connection !== "disconnected") {
       const at = this.lastThread === "" ? 0 : ids.indexOf(this.lastThread) + 1;
-      newReplies = at <= 0 && this.lastThread !== "" ? snapshot.thread : snapshot.thread.slice(at);
+      newReplies = at <= 0 && this.lastThread !== ""
+        ? snapshot.thread.filter((message) => !this.chatHistory.some((entry) => entry.sourceId === message.id))
+        : snapshot.thread.slice(at);
+      for (const message of snapshot.thread) {
+        const existing = this.chatHistory.find((entry) => entry.sourceId === message.id);
+        if (existing) {
+          existing.content = `${message.from}: ${message.text}`;
+          existing.link = message.link;
+          existing.dismissTaskId = message.dismissTaskId;
+        }
+      }
+      for (const message of newReplies) {
+        this.chatHistory.push({
+          id: Date.now() + this.chatHistory.length,
+          sourceId: message.id,
+          role: "assistant",
+          content: `${message.from}: ${message.text}`,
+          link: message.link,
+          dismissTaskId: message.dismissTaskId,
+        });
+      }
       this.lastThread = ids.at(-1) ?? this.lastThread;
     }
     this.notify();
     return { newApprovals, newReplies };
+  }
+
+  dismissChatMessage(id: number) {
+    this.chatHistory = this.chatHistory.filter((message) => message.id !== id);
+    this.notify();
   }
 
   /** Remove an approval only after the transport accepted the owner's decision. */

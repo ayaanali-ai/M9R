@@ -55,6 +55,16 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
     return h("div", { class: "chat-row user" }, h("div", { class: "bubble", text: message.content }));
   }
   const reply = h("div", { class: "reply", text: message.content });
+  const clearNotice = message.dismissTaskId && actions.dismissTask
+    ? h("button", { class: "save-note", type: "button", text: "Clear notice", title: "Hide this notice; keep its task record" })
+    : null;
+  clearNotice?.addEventListener("click", () => {
+    clearNotice.setAttribute("disabled", "true");
+    void actions.dismissTask!(message.dismissTaskId!).then(
+      () => { State.dismissChatMessage(message.id); onHeightChange(); },
+      () => { clearNotice.removeAttribute("disabled"); clearNotice.textContent = "Couldn't clear"; },
+    );
+  });
   if (actions.saveMemory && message.content.trim().length >= 8 && !message.link) {
     const save = h("button", { class: "save-note", type: "button", text: "Save to memory", title: "Share this with your team's agents" });
     save.addEventListener("click", () => {
@@ -65,10 +75,10 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
         () => { save.textContent = "Couldn't save"; save.removeAttribute("disabled"); },
       );
     });
-    return h("div", { class: "chat-row reply-row" }, reply, save);
+    return h("div", { class: "chat-row reply-row" }, reply, save, clearNotice);
   }
-  if (message.link && actions.linking) return h("div", { class: "chat-row link-row" }, reply, linkPicker(message.link, actions.linking, onHeightChange));
-  return h("div", { class: "chat-row" }, reply);
+  if (message.link && actions.linking) return h("div", { class: "chat-row link-row" }, reply, linkPicker(message.link, actions.linking, onHeightChange), clearNotice);
+  return h("div", { class: "chat-row" }, reply, clearNotice);
 }
 
 /** The @handle being typed at the caret, if any: its start index and the partial text after the @. */
@@ -103,7 +113,7 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   (el.querySelector(".card") as HTMLElement).style.setProperty("--wash", "rgba(99,102,241,0.5)");
 
   let sending = false;
-  let renderedCount = -1;
+  let renderedFingerprint = "";
   let suggestKey = "";
 
   function renderSuggestions() {
@@ -203,12 +213,13 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   return {
     el,
     sync() {
-      const count = State.chatHistory.length;
-      if (count !== renderedCount) {
-        renderedCount = count;
+      const fingerprint = JSON.stringify(State.chatHistory.map((message) => [message.id, message.content, message.link, message.dismissTaskId]));
+      if (fingerprint !== renderedFingerprint) {
+        const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+        renderedFingerprint = fingerprint;
         clear(log);
         for (const m of State.chatHistory) log.append(bubble(m, actions, onHeightChange));
-        log.scrollTop = log.scrollHeight;
+        if (nearBottom) log.scrollTop = log.scrollHeight;
       }
       renderSuggestions();
       input.disabled = sending;

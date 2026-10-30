@@ -192,6 +192,7 @@ interface StageLaunchResult {
   appId?: string;
   running?: boolean;
   reused?: boolean;
+  foregroundConfirmed?: boolean;
   view?: "app";
   capture?: unknown;
   operationReceipt?: { operationId?: string; status: "already_applied" | "in_progress" | "applied" | "uncertain"; updatedAt?: string; driverReturned?: boolean };
@@ -710,7 +711,7 @@ export function createTaskDesktopStageService(input: {
       let mutationSurfaceId: string | undefined;
       let fenceTransaction: MutationFenceTransaction | undefined;
       if (input.mutationFence) {
-        const fenceTarget = effectiveAction.view === "app" && selected
+        const fenceTarget = action.kind !== "system_control" && effectiveAction.view === "app" && selected
           ? desktopWindowMutationTarget({ pid: selected.pid, windowId: selected.windowId })
           : desktopMutationTarget();
         mutationSurfaceId = fenceTarget.surfaceId;
@@ -894,6 +895,14 @@ export function createTaskDesktopStageService(input: {
           : { ...result, operationReceipt: { operationId, status: "uncertain", driverReturned: true }, actionExecuted: true,
             nextStep: "The launch completed, but its durable receipt could not be finalized; inspect the stage before issuing another launch." };
       };
+      const presentAndFocusOwnerWindow = async (pid: number, windowId: string, coordinationKey?: string) => {
+        authorize(token, taskId, mode);
+        if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
+        await manager.presentOwnerWindow(name, pid, windowId, coordinationKey);
+        await manager.attachWindow(name, String(pid), windowId, appId, coordinationKey);
+        const focused = await driver.focusWindow(name, identity);
+        return focused.capture;
+      };
       if (receiptInput) {
         const claim = input.store.claimStageOperation(receiptInput);
         if (claim.state === "conflict") throw new Error("This desktop-stage operation ID already belongs to a different launch; no app was started.");
@@ -939,12 +948,19 @@ export function createTaskDesktopStageService(input: {
       // window instead of reusing the one already open, regardless of mode.
       const priorOwned = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
       if (priorOwned && priorOwned.appId === appId) {
+        if (mode === "owner-preview") await manager.adoptCurrentDesktop(name);
+        let sameWindowIsRunning = false;
         try {
           const inspected = await manager.inspectStage(name);
-          if (inspected.anchor?.pid === priorOwned.pid && inspected.anchor.windowId === priorOwned.windowId) {
-            return finishLaunch({ name, taskId, appId, running: true });
-          }
+          sameWindowIsRunning = inspected.anchor?.pid === priorOwned.pid && inspected.anchor.windowId === priorOwned.windowId;
         } catch { /* the window may have been closed; fall through to a fresh launch */ }
+        if (sameWindowIsRunning) {
+          if (mode === "owner-preview") {
+            const capture = await presentAndFocusOwnerWindow(priorOwned.pid, priorOwned.windowId, coordinationKey);
+            return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", foregroundConfirmed: true, capture });
+          }
+          return finishLaunch({ name, taskId, appId, running: true });
+        }
       }
       if (mode === "owner-preview") {
         const preLoopStartedAt = Date.now();
@@ -973,10 +989,9 @@ export function createTaskDesktopStageService(input: {
             const selected = coordinated[0]!;
             authorize(token, taskId, mode);
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
-            await manager.presentOwnerWindow(name, selected.pid, selected.windowId, coordinationKey);
-            await manager.attachWindow(name, String(selected.pid), selected.windowId, appId, coordinationKey);
             ownedApps.set(name, { taskId, appId, pid: selected.pid, windowId: selected.windowId, ownsProcess: false });
-            return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", capture: await driver.capture(name, identity) });
+            const capture = await presentAndFocusOwnerWindow(selected.pid, selected.windowId, coordinationKey);
+            return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", foregroundConfirmed: true, capture });
           }
         }
         const existingMatches = kind ? undefined : await matchesLaunchedWindows(before);
@@ -985,10 +1000,9 @@ export function createTaskDesktopStageService(input: {
         if (existing) {
           authorize(token, taskId, mode);
           if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
-          await manager.presentOwnerWindow(name, existing.pid, existing.windowId, coordinationKey);
-          await manager.attachWindow(name, String(existing.pid), existing.windowId, appId, coordinationKey);
           ownedApps.set(name, { taskId, appId, pid: existing.pid, windowId: existing.windowId, ownsProcess: false });
-          return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", capture: await driver.capture(name, identity) });
+          const capture = await presentAndFocusOwnerWindow(existing.pid, existing.windowId, coordinationKey);
+          return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", foregroundConfirmed: true, capture });
         }
         // Normal profile, normal executable, fixed owner-resolved arguments.
         // If no existing personal browser window was discoverable, open a fresh same-profile
@@ -1022,13 +1036,12 @@ export function createTaskDesktopStageService(input: {
             const matches = await matchesLaunchedWindows(windows.filter((window) => !beforeKeys.has(`${window.pid}:${window.windowId}`)));
             if (matches.length > 1) throw new Error("The requested application opened multiple windows; select the intended window before continuing.");
             if (matches.length === 1) {
-              await manager.presentOwnerWindow(name, matches[0]!.pid, matches[0]!.windowId, coordinationKey);
-              await manager.attachWindow(name, String(matches[0]!.pid), matches[0]!.windowId, appId, coordinationKey);
               ownedApps.set(name, { taskId, appId, pid: matches[0]!.pid, windowId: matches[0]!.windowId, ownsProcess: false });
-              // "Present" places the window on the owner's current desktop without
-              // activating it. Launch is deliberately non-stealing; an explicit focus
-              // action or unavoidable foreground input acquires the broker-wide lease.
-              return finishLaunch({ name, taskId, appId, running: true, reused: false, view: "app", capture: await driver.capture(name, identity) });
+              // An explicit owner-preview app launch owns this focus transition:
+              // activate the exact new HWND once, verify its PID/HWND natively, and
+              // return that same capture. No taskbar hunt or extra observe round trip.
+              const capture = await presentAndFocusOwnerWindow(matches[0]!.pid, matches[0]!.windowId, coordinationKey);
+              return finishLaunch({ name, taskId, appId, running: true, reused: false, view: "app", foregroundConfirmed: true, capture });
             }
             await delay(100);
           }

@@ -17,8 +17,8 @@ use windows::Media::SpeechRecognition::{
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
 enum Command {
-    Start,
-    Stop,
+    Start(Sender<Result<(), String>>),
+    Stop(Sender<Result<(), String>>),
 }
 
 static COMMANDS: OnceLock<Sender<Command>> = OnceLock::new();
@@ -38,16 +38,18 @@ pub fn init(app: AppHandle) {
     });
 }
 
-pub fn start() {
-    if let Some(tx) = COMMANDS.get() {
-        let _ = tx.send(Command::Start);
-    }
+pub fn start() -> Result<(), String> {
+    let tx = COMMANDS.get().ok_or("Windows dictation is not initialized")?;
+    let (reply, receive) = channel();
+    tx.send(Command::Start(reply)).map_err(|_| "Windows dictation stopped".to_string())?;
+    receive.recv_timeout(std::time::Duration::from_secs(4)).map_err(|_| "Windows dictation did not start in time".to_string())?
 }
 
-pub fn stop() {
-    if let Some(tx) = COMMANDS.get() {
-        let _ = tx.send(Command::Stop);
-    }
+pub fn stop() -> Result<(), String> {
+    let tx = COMMANDS.get().ok_or("Windows dictation is not initialized")?;
+    let (reply, receive) = channel();
+    tx.send(Command::Stop(reply)).map_err(|_| "Windows dictation stopped".to_string())?;
+    receive.recv_timeout(std::time::Duration::from_secs(4)).map_err(|_| "Windows dictation did not stop in time".to_string())?
 }
 
 fn run(app: AppHandle, rx: std::sync::mpsc::Receiver<Command>) -> windows::core::Result<()> {
@@ -97,25 +99,33 @@ fn run(app: AppHandle, rx: std::sync::mpsc::Receiver<Command>) -> windows::core:
     let mut listening = false;
     for command in rx {
         match command {
-            Command::Start => {
+            Command::Start(reply) => {
                 if listening {
+                    let _ = reply.send(Ok(()));
                     continue;
                 }
                 match session.StartAsync().and_then(|op| op.get()) {
-                    Ok(()) => listening = true,
+                    Ok(()) => { listening = true; let _ = reply.send(Ok(())); }
                     Err(e) => {
                         eprintln!("M9R: native dictation could not start ({e})");
-                        let _ = app.emit("dictation-error", e.message());
+                        let message = e.to_string();
+                        let _ = reply.send(Err(message));
                     }
                 }
             }
-            Command::Stop => {
+            Command::Stop(reply) => {
                 if !listening {
+                    let _ = reply.send(Ok(()));
                     continue;
                 }
                 listening = false;
-                if let Err(e) = session.StopAsync().and_then(|op| op.get()) {
-                    eprintln!("M9R: native dictation did not stop cleanly ({e})");
+                match session.StopAsync().and_then(|op| op.get()) {
+                    Ok(()) => { let _ = reply.send(Ok(())); }
+                    Err(e) => {
+                        eprintln!("M9R: native dictation did not stop cleanly ({e})");
+                        let message = e.to_string();
+                        let _ = reply.send(Err(message));
+                    }
                 }
             }
         }
