@@ -56,7 +56,7 @@
       "name": "pill-ui",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "pill", "run", "dev"],
-      "port": 5173
+      "port": 1431
     },
     {
       "name": "presence-test",
