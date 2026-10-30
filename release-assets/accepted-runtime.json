@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildId": "cc0968ff71509cf448c2f27040d50a4b72a56bddbea6210d8c497f042815f7a4",
-  "builtAt": "2026-10-30T09:00:27.121Z",
+  "buildId": "2c42436ea371d0331812c0841f01b523578bdcc4e48a5a99eb876966d32288e3",
+  "builtAt": "2026-10-30T07:41:34.094Z",
   "artifacts": {
     "cua-driver-runtime/bin/cua-cursor-theme.exe": "bc289b8cc0a4b6a088019115880c260bda2fedc67047c9df6309a3774cd59e25",
     "cua-driver-runtime/bin/cua-driver-uia.exe": "1c737385f3cf008240ca8ff2a58ffc6810ebd382c14bd3dccb87ccbdc4ced556",
@@ -186,11 +186,11 @@
     "m9r-engine.exe": "1d1c320f261cab496e6e567c869a82b196d77ad727f24a5abdc4c54cb92a1413",
     "m9r-hook.exe": "ccce320e1aad757b06cc10865fc67b487de8b285f934691853009f8ad14c8547",
     "m9r-native-input-host.exe": "c1597dbd077f1e1491f41b9e49f482bde9a360dafb7b7dd580bf0e02653597c0",
-    "m9r-overlay.exe": "c48910a8f9355146a4a2bbe5bffe80d8be48d70d3539c2ec00bbd1b70403c710",
+    "m9r-overlay.exe": "4e909c063e955450b8b8bb97c01e264d73edbb92632cbe6d53bc7b5ae4e4bbbb",
     "m9r-web-broker.exe": "7c8e9c7fd66c53b741df11f0c29cf4138c3a158bdef51f34cbe3d2fe86db8eb4"
   },
   "source": {
-    "sourceCommit": "bfc162b50b7f2607cdd9fade8970ff846a527d60",
+    "sourceCommit": "b88e65611c9e302b9c7459d8783ad98e65a55426",
     "sourceDirty": false
   }
 }
