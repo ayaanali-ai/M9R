@@ -46,6 +46,8 @@ export interface ViewHost {
   talk?(active: boolean): void;
   /** Called every frame while the view is on screen. */
   tick?(nowMs: number): void;
+  /** True while `tick` still has motion to finish; keeps the frame loop alive until it does. */
+  readonly animating?: boolean;
 }
 
 // ── Shared pieces ────────────────────────────────────────────────
@@ -129,8 +131,7 @@ function buildOverview(actions: ViewActions): ViewHost {
   const leftBody = h("div", { class: "left-body" }, tickerBody);
   const left = card(null, leftBody);
   const pills = h("div", { class: "pills" });
-  const presenceSummary = h("div", { class: "presence-summary", role: "status", "aria-live": "polite" });
-  const right = card(null, presenceSummary, pills);
+  const right = card(null, pills);
 
   const el = h("div", { class: "view overview" },
     h("div", { class: "left" }, left),
@@ -143,6 +144,9 @@ function buildOverview(actions: ViewActions): ViewHost {
     el,
     tick(nowMs: number) {
       ticker.tick(nowMs);
+    },
+    get animating() {
+      return ticker.animating;
     },
     sync() {
       const task = State.focusTask;
@@ -165,9 +169,7 @@ function buildOverview(actions: ViewActions): ViewHost {
         .sort((a, b) => (featured.indexOf(a.id) < 0 ? 999 : featured.indexOf(a.id)) - (featured.indexOf(b.id) < 0 ? 999 : featured.indexOf(b.id)))
         .slice(0, 4);
       const overflow = State.collaboration?.overflowCount ?? Math.max(0, State.otherTasks.length - others.length);
-      presenceSummary.textContent = State.collaboration?.headline ?? "";
-      presenceSummary.hidden = !State.collaboration?.headline;
-      const key = `${State.collaboration?.headline ?? ""}|${overflow}|${others.map((t) => `${t.id}:${t.state}:${t.pillBadge ?? ""}`).join("|")}`;
+      const key = `${overflow}|${others.map((t) => `${t.id}:${t.state}:${t.pillBadge ?? ""}`).join("|")}`;
       if (key !== pillKey) {
         pillKey = key;
         clear(pills);

@@ -400,6 +400,8 @@ body {
 
 .overview > .right {
   flex: 1 1 auto;
+  /* A flex item may not shrink below its widest unbreakable content; without this, one long line pushed the card past the pill edge. */
+  min-width: 0;
 }
 
 .card-body {
@@ -519,7 +521,7 @@ body {
   z-index: 1;
   height: 100%;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   grid-auto-rows: 28px;
   gap: 4px;
   align-content: center;
@@ -548,7 +550,7 @@ body {
 }
 
 .overview > .right .pills {
-  height: calc(100% - 24px);
+  height: 100%;
 }
 
 .pill {

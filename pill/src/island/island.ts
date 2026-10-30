@@ -493,7 +493,9 @@ export class Island {
     const settling = this.width.animating || this.height.animating || this.radius.animating;
     const busy = State.mode === "hidden"
       ? settling
-      : settling || !this.markCx.settled || !this.markCy.settled || !this.markSize.settled || this.countdownActive;
+      : settling || !this.markCx.settled || !this.markCy.settled || !this.markSize.settled || this.countdownActive
+        // Without this the loop stopped mid-transition and the ticker's rows froze on top of each other.
+        || this.views.get(State.view)?.animating === true;
 
     if (busy) {
       requestAnimationFrame(this.frame);
