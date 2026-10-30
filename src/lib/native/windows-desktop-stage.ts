@@ -117,6 +117,27 @@ export interface WindowsStageDependencies {
   env?: Record<string, string | undefined>;
   now?: () => Date;
   invokeNative?: (request: Record<string, unknown>) => Promise<NativeStageResponse>;
+  /** Whether a process id still exists; injectable for tests. */
+  processAlive?: (pid: number) => boolean;
+}
+
+function defaultProcessAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+/**
+ * Owner-preview stages only map an agent onto the desktop the owner already
+ * uses; dropping one closes no window and no desktop. Once the window they
+ * were bound to has exited they are dead bookkeeping, and without this they
+ * accumulate until every new stage is refused at the registry limit.
+ * Stages that own an M9R-created desktop are never pruned here.
+ */
+function withoutStaleOwnerPreviewStages(stages: WindowsStageRecord[], alive: (pid: number) => boolean): WindowsStageRecord[] {
+  return stages.filter((stage) => !(stage.name.startsWith("preview-")
+    && stage.returnToDesktopId === null
+    && stage.anchor
+    && !alive(stage.anchor.pid)));
 }
 
 function normalizedName(value: string): string {
@@ -328,6 +349,11 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   const platform = deps.platform ?? process.platform;
   const root = deps.root ?? defaultStoreRoot(homedir(), deps.env ?? process.env);
   const now = deps.now ?? (() => new Date());
+  const processAlive = deps.processAlive ?? defaultProcessAlive;
+  /** Prune dead owner-preview stages only when the registry is full. */
+  function roomFor(registry: { stages: WindowsStageRecord[] }): WindowsStageRecord[] {
+    return registry.stages.length >= MAX_STAGES ? withoutStaleOwnerPreviewStages(registry.stages, processAlive) : registry.stages;
+  }
   const invokeNative = deps.invokeNative ?? ((request) => invokeWindowsStageHelper(
     deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"), request,
   ));
@@ -463,12 +489,13 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
         ...(existing?.agentAssignment ? { agentAssignment: existing.agentAssignment } : {}),
         registeredAt: existing?.registeredAt ?? now().toISOString(),
       };
-      if (!existing && registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
+      const kept = existing ? registry.stages : roomFor(registry);
+      if (!existing && kept.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
       writeRegistryWhileLocked(root, {
         version: STAGE_REGISTRY_VERSION,
         stages: existing
           ? registry.stages.map((item) => item.name === name ? record : item)
-          : [...registry.stages, record],
+          : [...kept, record],
       });
       return record;
     } finally {
@@ -484,6 +511,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     try {
       const registry = readRegistry(root);
       if (registry.stages.some((stage) => stage.name === name)) throw new Error(`A local stage named “${name}” already exists.`);
+      registry.stages = roomFor(registry);
       if (registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
 
       // Prepare durable recovery evidence before crossing the native side-effect
@@ -540,6 +568,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     try {
       const registry = readRegistry(root);
       const existing = registry.stages.find((stage) => stage.name === name);
+      if (!existing) registry.stages = roomFor(registry);
       if (!existing && registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
       const record: WindowsStageRecord = {
         name,

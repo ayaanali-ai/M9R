@@ -82,6 +82,30 @@ test("registers a machine-local stage from an exact window and persists opaque r
   assert.match(registered.roomWindowId ?? "", /^[0-9a-f-]{36}$/i);
 }));
 
+test("a full registry drops only owner-preview stages whose window process has exited", async () => withRoot(async (root) => {
+  const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const stages = [
+    ...Array.from({ length: 13 }, (_, i) => ({ name: `preview-agent-dead${i}`, desktopId: stageDesktop, roomDesktopId: uuid(i), returnToDesktopId: null,
+      anchor: { pid: 9_000 + i, windowId: String(100 + i) }, roomWindowId: uuid(100 + i), registeredAt: "2026-10-26T08:00:00.000Z" })),
+    { name: "preview-agent-live", desktopId: stageDesktop, roomDesktopId: uuid(50), returnToDesktopId: null,
+      anchor: { pid: 7_777, windowId: "777" }, roomWindowId: uuid(150), registeredAt: "2026-10-27T08:00:00.000Z" },
+    { name: "agent-owned-desktop", desktopId: createdDesktop, roomDesktopId: uuid(51), returnToDesktopId: ownerDesktop,
+      anchor: { pid: 9_500, windowId: "950" }, roomWindowId: uuid(151), registeredAt: "2026-10-27T08:00:00.000Z" },
+    { name: "agent-no-anchor", desktopId: stageDesktop, roomDesktopId: uuid(52), returnToDesktopId: null,
+      anchor: null, roomWindowId: null, registeredAt: "2026-10-27T08:00:00.000Z" },
+  ];
+  assert.equal(stages.length, 16);
+  writeFileSync(join(root, "windows-stages.json"), JSON.stringify({ version: 3, stages }));
+  const manager = createWindowsDesktopStageManager({
+    platform: "win32", root, terminal: true, env: {}, now: () => new Date("2026-10-30T12:00:00Z"),
+    processAlive: (pid) => pid === 7_777 || pid === 4_321,
+    invokeNative: async (request) => ({ ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } }),
+  });
+  await manager.register("preview-agent-new", "4321", anchor.windowId);
+  assert.deepEqual(manager.list().map((stage) => stage.name).sort(),
+    ["agent-no-anchor", "agent-owned-desktop", "preview-agent-live", "preview-agent-new"]);
+}));
+
 test("creates a local stage without switching desktops and later activates it explicitly", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const manager = createWindowsDesktopStageManager({
