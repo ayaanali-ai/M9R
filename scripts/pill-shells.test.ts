@@ -247,6 +247,29 @@ test("the desktop transport forwards the island's window hooks to the overlay co
   ], "a rejected rectangle does not throw into the UI");
 });
 
+test("the desktop transport persists settings through the overlay commands and reads them back, so sound/auto-close survive a restart", async () => {
+  const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+  const stored: Record<string, unknown> = {};
+  const transport = createDesktopTransport(async (command, args) => {
+    calls.push([command, args]);
+    if (command === "save_settings") { Object.assign(stored, args); return ""; }
+    if (command === "load_settings") return { soundEnabled: stored.soundEnabled ?? null, soundVolume: stored.soundVolume ?? null, autoCloseInterval: stored.autoCloseInterval ?? null };
+    return "";
+  });
+  transport.saveSettings!({ soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(calls, [["save_settings", { soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 }]]);
+  const loaded = await transport.loadSettings!();
+  assert.deepEqual(loaded, { soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 }, "a fresh pill process reads back exactly what the last one saved");
+});
+
+test("the desktop transport's loadSettings leaves unset fields out instead of inventing zero/false, and swallows a host that cannot persist yet", async () => {
+  const neverSaved = createDesktopTransport(async (command) => (command === "load_settings" ? { soundEnabled: null, soundVolume: null, autoCloseInterval: null } : ""));
+  assert.deepEqual(await neverSaved.loadSettings!(), {}, "first run / no file yet: no field is guessed");
+  const brokenHost = createDesktopTransport(async (command) => { if (command === "load_settings") throw new Error("no app config dir"); return ""; });
+  assert.equal(await brokenHost.loadSettings!(), undefined, "a host that cannot read settings back must not throw into boot");
+});
+
 test("desktop dictation uses the WebView permission flow and opens Windows settings only after denial", () => {
   const oldWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");

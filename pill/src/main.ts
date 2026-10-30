@@ -7,6 +7,7 @@ import { chromeRuntime, createExtensionTransport } from "./shells/extension";
 import { createFrameHost } from "./shells/frame-host";
 import { createDesktopTransport, tauriInvoke } from "./shells/desktop";
 import { Island } from "./island/island";
+import { State } from "./core/state";
 
 async function main() {
   const root = document.getElementById("root");
@@ -34,6 +35,12 @@ async function main() {
     if (kind === "open-message") island.openMessage();
     else if (kind === "talk") island.talk(data.active === true);
   });
+  // A host that can persist settings (today: the desktop pill) hands back what it saved
+  // last; a host with no such transport, or one with nothing saved yet, leaves defaults.
+  try {
+    const saved = await transport.loadSettings?.();
+    if (saved) Object.assign(State.settings, saved);
+  } catch { /* defaults still apply */ }
   island.applySettings();
   transport.subscribe((snapshot) => island.applySnapshot(snapshot));
   island.launch();

@@ -111,6 +111,8 @@ export interface PillTransport {
   setSuppressed?(suppressed: boolean): void;
   focusWindow?(focused: boolean): void;
   saveSettings?(settings: Settings): void;
+  /** Reads back the last saved settings, if the host can persist them. Called once at boot. */
+  loadSettings?(): Promise<Partial<Settings> | void>;
 }
 
 declare global {

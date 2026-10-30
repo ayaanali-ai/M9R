@@ -10,6 +10,7 @@
 import type { Decision, DesktopStage, DesktopStageActionProof, DesktopStageCapture, DesktopStageCursorMove, DesktopStageWindowOption, PillTransport, SessionRow } from "../core/transport";
 import { listen } from "@tauri-apps/api/event";
 import type { SpeechEnv } from "../core/speech";
+import type { Settings } from "../core/state";
 import { fromFeed, fromUiState, type Feed, type UiState } from "./convert";
 
 type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -183,6 +184,18 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
     },
     async saveMemory(text) {
       await invoke("save_memory", { text });
+    },
+    saveSettings(settings) {
+      void invoke("save_settings", { soundEnabled: settings.soundEnabled, soundVolume: settings.soundVolume, autoCloseInterval: settings.autoCloseInterval }).catch(() => { /* the running settings still apply; only persistence failed */ });
+    },
+    async loadSettings() {
+      const raw = await invoke("load_settings").catch(() => null) as { soundEnabled?: boolean | null; soundVolume?: number | null; autoCloseInterval?: number | null } | null;
+      if (!raw) return;
+      const out: Partial<Settings> = {};
+      if (typeof raw.soundEnabled === "boolean") out.soundEnabled = raw.soundEnabled;
+      if (typeof raw.soundVolume === "number" && Number.isFinite(raw.soundVolume)) out.soundVolume = raw.soundVolume;
+      if (typeof raw.autoCloseInterval === "number" && Number.isFinite(raw.autoCloseInterval)) out.autoCloseInterval = raw.autoCloseInterval;
+      return out;
     },
     async dismissTask(taskId) {
       await invoke("dismiss_task", { taskId });

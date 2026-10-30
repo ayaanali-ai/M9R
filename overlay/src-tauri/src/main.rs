@@ -296,6 +296,15 @@ struct Saved {
     /// Horizontal centre and top of the pill in physical pixels, so growing the panel keeps it where you put it.
     cx: Option<i32>,
     y: Option<i32>,
+    /// Pill settings (sound, auto-close delay). Previously only held in the JS
+    /// island's in-memory `State.settings`: the pill called `saveSettings` on
+    /// every change but no transport ever implemented it, so a restart always
+    /// reset sound/auto-close to their defaults (Package 4, M9R Source of
+    /// Truth 5.0 diagnosis). Stored alongside the window position in the same
+    /// file so settings persistence does not depend on any provider session.
+    sound_enabled: Option<bool>,
+    sound_volume: Option<f64>,
+    auto_close_interval: Option<f64>,
 }
 
 fn saved_path(app: &AppHandle) -> Option<PathBuf> {
@@ -314,7 +323,11 @@ fn save_position(app: &AppHandle, cx: i32, y: i32) {
         if let Some(dir) = p.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let _ = fs::write(p, serde_json::to_string(&Saved { cx: Some(cx), y: Some(y) }).unwrap_or_default());
+        // Preserve whatever settings are already on disk; this call only ever moves the pill.
+        let mut saved = load_saved(app);
+        saved.cx = Some(cx);
+        saved.y = Some(y);
+        let _ = fs::write(p, serde_json::to_string(&saved).unwrap_or_default());
     }
 }
 
@@ -923,6 +936,33 @@ async fn dismiss_task(task_id: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Persists the pill's own settings (sound, auto-close delay) beside its saved window
+/// position, so they survive a restart without depending on any provider session.
+#[tauri::command]
+fn save_settings(app: AppHandle, sound_enabled: bool, sound_volume: f64, auto_close_interval: f64) -> Result<(), String> {
+    let mut saved = load_saved(&app);
+    saved.sound_enabled = Some(sound_enabled);
+    saved.sound_volume = Some(sound_volume);
+    saved.auto_close_interval = Some(auto_close_interval);
+    let path = saved_path(&app).ok_or("No app config directory is available.")?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    fs::write(path, serde_json::to_string(&saved).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+/// Reads back the last saved pill settings, if any. The pill applies its own defaults
+/// for any field this returns as `null` (first run, or an older file with none saved).
+#[tauri::command]
+fn load_settings(app: AppHandle) -> Result<serde_json::Value, String> {
+    let saved = load_saved(&app);
+    Ok(serde_json::json!({
+        "soundEnabled": saved.sound_enabled,
+        "soundVolume": saved.sound_volume,
+        "autoCloseInterval": saved.auto_close_interval,
+    }))
+}
+
 #[cfg(windows)]
 #[tauri::command]
 async fn start_dictation() -> Result<(), String> {
@@ -1249,7 +1289,7 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, select_model, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, start_dictation, stop_dictation, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, select_model, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, start_dictation, stop_dictation, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.
