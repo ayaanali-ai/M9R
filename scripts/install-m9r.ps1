@@ -17,7 +17,8 @@ Use a previously downloaded release ZIP. Its adjacent .sha256 file is required.
 
 .PARAMETER AllowLocalCandidate
 Explicitly install a locally built candidate after its external candidate.json receipt
-matches the exact ZIP and runtime artifacts. This never accepts a policy embedded in the ZIP by itself.
+matches the exact ZIP and runtime artifacts. It must also match the current owner-accepted
+runtime policy; a historical receipt never promotes a runtime.
 
 .PARAMETER CandidateReceiptPath
 Path to the candidate.json stored outside the candidate ZIP. Required with -AllowLocalCandidate.
@@ -239,10 +240,9 @@ function Assert-AcceptedRuntimePackage([string]$PayloadRoot) {
     catch { throw 'The package runtime identity is invalid JSON. Nothing was installed.' }
     if ($AllowLocalCandidate) {
         Assert-LocalCandidateReceipt $runtime $PayloadRoot
-        $accepted = $runtime
-    } else {
-        $accepted = Get-AcceptedRuntimeIdentity
     }
+    # A historical receipt is provenance only, never promotion authority.
+    $accepted = Get-AcceptedRuntimeIdentity
     if ($runtime.schemaVersion -ne 1 -or -not [string]::Equals([string]$runtime.buildId, [string]$accepted.buildId, [StringComparison]::OrdinalIgnoreCase)) {
         throw "The package build ID is not the owner-accepted runtime ($($accepted.buildId)). Nothing was installed."
     }

@@ -28,6 +28,22 @@ const canRunNativeInstaller = process.platform === "win32"
   && existsSync(join(engineDist, "m9r-build-info.json"));
 const skipNative = canRunNativeInstaller ? false : "Windows engine binaries are required (CI builds them first).";
 
+test("a historically verified candidate cannot authorize itself over the current policy", () => {
+  const directory = mkdtempSync(join(tmpdir(), "m9r-policy-authority-"));
+  try {
+    const source = readFileSync(installer, "utf8");
+    const start = source.indexOf("function Assert-AcceptedRuntimePackage(");
+    const end = source.indexOf("function Get-ManagedWebBrokerPaths", start);
+    assert.ok(start >= 0 && end > start);
+    writeFileSync(join(directory, "m9r-build-info.json"), JSON.stringify({ schemaVersion: 1, buildId: "b".repeat(64), artifacts: {} }));
+    const script = join(directory, "check.ps1");
+    writeFileSync(script, `$ErrorActionPreference = 'Stop'\n$AllowLocalCandidate = $true\nfunction Assert-LocalCandidateReceipt { }\nfunction Get-AcceptedRuntimeIdentity { return @{ schemaVersion=1; buildId=('a' * 64); artifacts=@{} } }\n${source.slice(start, end)}\ntry { Assert-AcceptedRuntimePackage $PSScriptRoot; throw 'SELF_AUTHORIZED' } catch { if ($_.Exception.Message -notlike '*not the owner-accepted runtime*') { throw }; Write-Output 'REJECTED_BY_CURRENT_POLICY' }\n`);
+    const result = runPowerShell(script);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /REJECTED_BY_CURRENT_POLICY/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 function runPowerShell(script, args = [], { input, env = process.env } = {}) {
   const result = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File", script, ...args], {
     cwd: root,

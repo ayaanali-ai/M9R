@@ -3,10 +3,19 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { DESKTOP_PILL_MAX_AGE_MS, desktopPillHeartbeatPath, desktopPillRunning, launchDesktopOverlayIfNeeded, readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
+import { DESKTOP_PILL_MAX_AGE_MS, classifyOverlayProcesses, desktopPillHeartbeatPath, desktopPillRunning, launchDesktopOverlayIfNeeded, readDesktopPillRunning } from "@/lib/native/desktop-pill-presence";
 import { createWebUiBridge, type UiState } from "@/lib/native/web-ui-bridge";
 
 const beat = (at: number, visible = true) => JSON.stringify({ pid: 1, at, visible });
+
+test("startup distinguishes the canonical pill, other generations, and unreadable process identities", () => {
+  const canonical = join(tmpdir(), "canonical", "m9r-overlay.exe");
+  assert.equal(classifyOverlayProcesses("[]", canonical), "absent");
+  assert.equal(classifyOverlayProcesses(JSON.stringify({ ExecutablePath: canonical }), canonical), "running");
+  assert.equal(classifyOverlayProcesses(JSON.stringify([{ ExecutablePath: canonical }, { ExecutablePath: join(tmpdir(), "old", "m9r-overlay.exe") }]), canonical), "conflict");
+  assert.throws(() => classifyOverlayProcesses('[{"ExecutablePath":null}]', canonical), /unreadable/);
+  assert.throws(() => classifyOverlayProcesses("not json", canonical));
+});
 
 test("only a fresh, visible heartbeat counts as the desktop pill running", () => {
   const now = 1_000_000;

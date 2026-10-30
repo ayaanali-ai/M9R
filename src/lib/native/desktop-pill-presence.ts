@@ -3,9 +3,10 @@
  * in-page pill, so the owner sees one pill, not two. Everything is local and unauthenticated on purpose: the worst a
  * stray writer can do is hide the in-page pill, which the owner can bring back with the message shortcut.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
+import { readRuntimeBuildIdentity } from "./runtime-build-identity";
 
 export const DESKTOP_PILL_FILE = "pill-desktop.json";
 /** The desktop pill beats every 2 s; three missed beats means it is gone (quit, crashed, or the machine slept). */
@@ -36,32 +37,62 @@ export function readDesktopPillRunning(root: string, nowMs = Date.now()): boolea
   }
 }
 
-/** True if a process with this exact image name is already running (Windows only; `tasklist` ships with the OS). */
-function windowsProcessRunning(imageName: string): boolean {
-  try {
-    const out = execFileSync("tasklist", ["/FI", `IMAGENAME eq ${imageName}`, "/FO", "CSV", "/NH"], { encoding: "utf8", windowsHide: true });
-    return out.toLowerCase().includes(imageName.toLowerCase());
-  } catch {
-    // tasklist failing to run at all is not evidence the pill is up; err toward not double-launching a visible window.
-    return true;
+export function classifyOverlayProcesses(text: string, canonicalPath: string): "running" | "absent" | "conflict" {
+  const parsed: unknown = JSON.parse(text);
+  const rows = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+  if (rows.some((row) => !row || typeof row.ExecutablePath !== "string" || !row.ExecutablePath)) {
+    throw new Error("An overlay process has an unreadable executable path");
   }
+  const canonical = resolve(canonicalPath).toLowerCase();
+  if (rows.some((row) => resolve(row.ExecutablePath).toLowerCase() !== canonical)) return "conflict";
+  return rows.length ? "running" : "absent";
 }
 
 /**
- * Launches the desktop overlay once, at broker startup, if it isn't already running. Nothing ever installed or
- * started this on its own before: a user who rebooted had to double-click the exe by hand every time. The broker
- * itself already has its own login-triggered autostart task, so piggybacking the overlay launch onto its own
- * startup needs no new scheduled task and runs exactly once per login, not on a repeating timer.
+ * Launch only the installed canonical overlay. Unknown process identity and other
+ * generations fail closed and are recorded instead of silently looking successful.
  */
-export function launchDesktopOverlayIfNeeded(root: string): void {
-  if (process.platform !== "win32") return;
+export function launchDesktopOverlayIfNeeded(root: string): "running" | "pending" | "failed" | "unsupported" {
+  if (process.platform !== "win32") return "unsupported";
   const exe = join(root, "bin", "m9r-overlay.exe");
-  if (!existsSync(exe)) return;
-  if (windowsProcessRunning("m9r-overlay.exe")) return;
+  const report = (state: string, detail?: string) => {
+    const record = JSON.stringify({ at: new Date().toISOString(), executable: exe, state, detail });
+    try { appendFileSync(join(root, "pill-startup.jsonl"), record + "\n"); } catch { /* stderr remains available */ }
+    if (state !== "running") process.stderr.write(`M9R pill startup: ${record}\n`);
+  };
   try {
-    const child = spawn(exe, [], { detached: true, stdio: "ignore", windowsHide: false });
+    if (!existsSync(exe)) throw new Error("Canonical overlay is missing");
+    const identity = readRuntimeBuildIdentity(exe);
+    if (identity.status !== "verified") throw new Error(`Canonical overlay integrity is not verified: ${identity.status}`);
+    const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "@(Get-CimInstance Win32_Process -Filter \"Name='m9r-overlay.exe'\" -ErrorAction Stop | Select-Object ExecutablePath) | ConvertTo-Json -Compress"],
+    { encoding: "utf8", windowsHide: true, timeout: 5_000 });
+    const state = classifyOverlayProcesses(output.trim() || "[]", exe);
+    if (state === "conflict") throw new Error("Another overlay generation is running; canonical startup was not attempted");
+    if (state === "running") { report(state); return "running"; }
+    const child = spawn(exe, [], { detached: true, stdio: "ignore", windowsHide: false, cwd: join(root, "bin") });
+    child.once("error", (error) => report("failed", error.message));
     child.unref();
-  } catch {
-    // Best-effort: a failed launch here must never take the broker itself down.
+    report("pending");
+    return "pending";
+  } catch (error) {
+    report("failed", error instanceof Error ? error.message : String(error));
+    return "failed";
   }
+}
+
+/** Retry only during startup, so intentionally quitting the pill stays respected. */
+export function startDesktopOverlay(root: string): () => void {
+  let attempts = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const attempt = () => {
+    attempts += 1;
+    const state = launchDesktopOverlayIfNeeded(root);
+    if ((state === "failed" || state === "pending") && attempts < 4) {
+      timer = setTimeout(attempt, 10_000);
+      timer.unref();
+    }
+  };
+  attempt();
+  return () => { if (timer) clearTimeout(timer); };
 }
