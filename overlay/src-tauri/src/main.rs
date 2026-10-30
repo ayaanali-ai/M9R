@@ -1292,18 +1292,16 @@ fn main() {
                 window.open_devtools();
             }
 
-            let open = MenuItem::with_id(app, "open_workspace", "Open M9R", true, None::<&str>)?;
-            let open_app = MenuItem::with_id(app, "open-app", "Open M9R App", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open-app", "Open M9R", true, None::<&str>)?;
             let show = MenuItem::with_id(app, "toggle", &format!("Show / hide pill ({TOGGLE_HOTKEY_LABEL})"), true, None::<&str>)?;
             let dnd = CheckMenuItem::with_id(app, "dnd", "Do not disturb", true, false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &open_app, &show, &dnd, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &show, &dnd, &quit])?;
             let mut tray = TrayIconBuilder::new().tooltip("M9R").menu(&menu);
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
             tray.on_menu_event(move |app, event| match event.id.as_ref() {
-                "open_workspace" => show_workspace(app),
                 "toggle" => toggle_pill(app),
                 "open-app" => { let _ = open_app_window(app.clone()); }
                 "dnd" => {

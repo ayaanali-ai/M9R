@@ -220,8 +220,8 @@ function buildEmpty(actions: ViewActions): ViewHost {
     h(
       "div",
       { style: "display:flex;flex-direction:column;gap:5px" },
-      h("div", { class: "title", text: "No agents connected yet." }),
-      h("div", { class: "sub", text: "Start Claude Code, Codex or OpenCode in an M9R room." }),
+      h("div", { class: "title", text: "No active agent work yet." }),
+      h("div", { class: "sub", text: "M9R manages your provider processes on this device. Their work appears here when they start acting." }),
     ),
     h("div", { class: "grow" }),
     btn("Send a message", "primary", () => actions.setView("prompt")),
@@ -273,7 +273,7 @@ function buildApproval(actions: ViewActions): ViewHost {
 
 function buildError(actions: ViewActions): ViewHost {
   const who = h("div");
-  const title = h("div", { class: "title", text: "Session stopped on an error." });
+  const title = h("div", { class: "title", text: "Agent task stopped with an error." });
   const detail = h("div", { class: "detail" });
   const row = h("div", { class: "actions" }, btn("OK", "secondary", () => actions.collapse()));
   const el = h("div", { class: "view" }, card("red", stack(116, 16, who, title, detail, row)));

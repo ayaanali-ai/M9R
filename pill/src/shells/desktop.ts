@@ -118,7 +118,9 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
   }
 
   return {
-    capabilities: { allowForADay: true, linkSessions: true, dictation: true, saveMemory: true, dismissTask: true },
+    // The desktop runtime owns long-lived provider processes. Session linking
+    // belongs only to the legacy extension transport and must not surface here.
+    capabilities: { allowForADay: true, dictation: true, saveMemory: true, dismissTask: true },
     createDictationEnvironment() { return desktopNativeSpeechEnv(() => { void invoke("open_microphone_settings").catch(() => {}); }); },
     desktopStages: /Windows/i.test(navigator.userAgent) ? {
       async setAgentPermission(handle, enabled, control = false) { await stageRequest(enabled ? (control ? "allow-control" : "allow-agent") : "revoke-agent", handle); },
