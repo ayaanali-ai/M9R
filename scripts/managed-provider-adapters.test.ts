@@ -2,10 +2,70 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
+  createClaudeManagedProviderConnection,
   createCodexAppServerManagedProviderConnection,
   createCodexManagedProviderConnection,
   type CodexWorkerProcess,
 } from "../src/lib/native/managed-provider-adapters";
+
+/** A fake Claude stream-json process that answers control requests the way Claude Code 2.1.283 does. */
+function fakeClaude(knownModels: string[]) {
+  const stdout = new EventEmitter();
+  const proc = new EventEmitter();
+  const written: Array<Record<string, unknown>> = [];
+  const reply = (line: unknown) => setImmediate(() => stdout.emit("data", `${JSON.stringify(line)}\n`));
+  const child = Object.assign(proc, {
+    stdin: {
+      write(chunk: string) {
+        for (const line of chunk.split("\n").filter(Boolean)) {
+          const message = JSON.parse(line) as { type: string; request_id: string; request: { subtype: string; model?: string } };
+          written.push(message as unknown as Record<string, unknown>);
+          if (message.type !== "control_request") continue;
+          if (message.request.subtype === "initialize") {
+            reply({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {
+              models: knownModels.map((value) => ({ value, displayName: value.toUpperCase(), supportedEffortLevels: ["low", "high", "xhigh"] })),
+            } } });
+          } else if (message.request.subtype === "set_model") {
+            reply(knownModels.includes(message.request.model ?? "")
+              ? { type: "control_response", response: { subtype: "success", request_id: message.request_id } }
+              : { type: "control_response", response: { subtype: "error", request_id: message.request_id, error: `Model '${message.request.model}' not found` } });
+          }
+        }
+        return true;
+      },
+      end() { return undefined; },
+    },
+    stdout,
+    stderr: new EventEmitter(),
+    kill() { proc.emit("exit", 0); return true; },
+  });
+  return { child, written };
+}
+
+test("Claude reports its own live model catalog and switches models on the running process", async () => {
+  const fake = fakeClaude(["default", "opus", "sonnet"]);
+  const connection = createClaudeManagedProviderConnection({
+    profile: { connectionId: "m9r:claude:test", handle: "claude", provider: "claude-code", cwd: "C:/RunLeak/runleak" },
+    mcpConfigPath: "C:/RunLeak/runleak/.mcp.json",
+    environment: {},
+    spawn: () => fake.child as never,
+  });
+  await connection.start();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const capabilities = connection.capabilities();
+  assert.deepEqual(capabilities.models?.map((model) => model.id), ["default", "opus", "sonnet"]);
+  assert.equal(capabilities.currentModel, "default");
+  assert.deepEqual(capabilities.models?.[1].efforts?.map((effort) => effort.label), ["Low", "High", "Extra high"]);
+
+  assert.deepEqual(await connection.applyModelSelection({ model: "sonnet" }), { ok: true, applies: "next-turn" });
+  assert.equal(connection.capabilities().currentModel, "sonnet");
+  assert.ok(fake.written.some((line) => (line.request as { subtype?: string; model?: string } | undefined)?.model === "sonnet"));
+
+  const refused = await connection.applyModelSelection({ model: "not-in-catalog" });
+  assert.equal(refused.ok, false, "a model outside the reported catalog is refused before reaching Claude");
+  assert.equal(connection.capabilities().currentModel, "sonnet");
+  await connection.stop();
+});
 
 function profile() {
   return { connectionId: "m9r:codex:test", handle: "codex", provider: "codex", cwd: "C:/RunLeak/runleak" } as const;

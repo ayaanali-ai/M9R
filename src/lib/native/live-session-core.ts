@@ -129,6 +129,10 @@ export const signUserMessage = (marker: string, text: string): string => `[${mar
 /** Ends the agent's current turn but keeps the session and its context (the SDK's interrupt control request). */
 export const encodeInterrupt = (requestId: string): string => `${JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "interrupt" } })}\n`;
 
+/** One stream-json control request (the SDK's initialize, set_model, ...); never a user turn. */
+export const encodeControlRequest = (requestId: string, request: Record<string, unknown>): string =>
+  `${JSON.stringify({ type: "control_request", request_id: requestId, request })}\n`;
+
 /** The line to write to stdin for one user message. */
 export const encodeUserMessage = (text: string): string => `${JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })}\n`;
 
@@ -194,6 +198,8 @@ export interface LiveSession {
   interrupt(text: string): void;
   /** Ends the current turn without adding a replacement user message. */
   interruptCurrentTurn(): void;
+  /** Sends one control request and resolves with its success payload; rejects on an error response, timeout, or exit. */
+  control(request: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>>;
   readonly marker: string;
   stop(): void;
   state(): LiveState;
@@ -219,10 +225,34 @@ export function startLiveSession(options: {
   let state = createLiveState();
   let buffer = "";
   let exitNotified = false;
+  let controlSequence = 0;
+  const pendingControl = new Map<string, { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  const settleControl = (line: string): boolean => {
+    if (!line.includes("\"control_response\"")) return false;
+    let parsed: { type?: unknown; response?: { subtype?: unknown; request_id?: unknown; response?: unknown; error?: unknown } };
+    try { parsed = JSON.parse(line); } catch { return false; }
+    if (parsed.type !== "control_response" || typeof parsed.response?.request_id !== "string") return false;
+    const pending = pendingControl.get(parsed.response.request_id);
+    if (!pending) return true;
+    pendingControl.delete(parsed.response.request_id);
+    clearTimeout(pending.timer);
+    if (parsed.response.subtype === "success") {
+      const payload = parsed.response.response;
+      pending.resolve(payload && typeof payload === "object" ? payload as Record<string, unknown> : {});
+    } else {
+      pending.reject(new Error(typeof parsed.response.error === "string" ? parsed.response.error : "Claude rejected the control request"));
+    }
+    return true;
+  };
   const notifyExit = (code: number | null): void => {
     if (exitNotified) return;
     exitNotified = true;
     state = reduceLive(state, { kind: "exit", code });
+    for (const [id, pending] of pendingControl) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("the Claude process exited before answering"));
+      pendingControl.delete(id);
+    }
     options.onExit?.(code);
   };
   child.stdout.on("data", (chunk) => {
@@ -231,6 +261,7 @@ export function startLiveSession(options: {
     while ((at = buffer.indexOf("\n")) >= 0) {
       const line = buffer.slice(0, at);
       buffer = buffer.slice(at + 1);
+      if (settleControl(line)) continue;
       for (const event of parseStreamLine(line)) {
         state = reduceLive(state, event);
         options.onEvent?.(event, state);
@@ -257,6 +288,24 @@ export function startLiveSession(options: {
       if (state.status === "exited") throw new Error("this live session has ended; start or resume one");
       if (state.status !== "working") return;
       child.stdin.write(encodeInterrupt(`m9r-int-${state.messagesSent + 1}`));
+    },
+    control(request, timeoutMs = 10_000) {
+      if (state.status === "exited") return Promise.reject(new Error("this live session has ended; start or resume one"));
+      const requestId = `m9r-ctl-${++controlSequence}`;
+      return new Promise<Record<string, unknown>>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingControl.delete(requestId);
+          reject(new Error("Claude did not answer the control request in time"));
+        }, timeoutMs);
+        (timer as { unref?: () => void }).unref?.();
+        pendingControl.set(requestId, { resolve, reject, timer });
+        try { child.stdin.write(encodeControlRequest(requestId, request)); }
+        catch (error) {
+          clearTimeout(timer);
+          pendingControl.delete(requestId);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
     },
     stop() {
       try { child.stdin.end(); } catch { /* already closed */ }

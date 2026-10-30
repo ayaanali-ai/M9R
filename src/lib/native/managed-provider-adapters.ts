@@ -288,11 +288,71 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
   private startup?: Promise<ManagedProviderReady>;
   private queue?: AsyncEventQueue<ManagedProviderEvent>;
   private interruptedTask?: string;
+  private availableModels: ManagedProviderCapabilities["models"] = null;
+  private selectedModel?: string;
+  private selectedEffort?: string;
 
   constructor(options: ClaudeManagedProviderConnectionOptions) {
     super(options.profile);
     assertProvider(options.profile, "claude-code");
     this.options = options;
+  }
+
+  /** Claude Code reports its account's own model list (what its /model picker shows) on initialize. */
+  private async loadModelCatalog(live: LiveSession): Promise<void> {
+    try {
+      const response = await live.control({ subtype: "initialize" });
+      const raw = Array.isArray(response.models) ? response.models as Array<Record<string, unknown>> : [];
+      this.availableModels = validateProviderModelCatalog(raw.map((model) => ({
+        id: model.value,
+        label: model.displayName,
+        efforts: Array.isArray(model.supportedEffortLevels)
+          ? (model.supportedEffortLevels as unknown[]).filter((level): level is string => typeof level === "string")
+            .map((level) => ({ id: level, label: level === "xhigh" ? "Extra high" : level.charAt(0).toUpperCase() + level.slice(1) }))
+          : null,
+      })));
+    } catch {
+      // A CLI that cannot report its catalog stays "catalog unavailable"; nothing is guessed.
+      this.availableModels = null;
+    }
+  }
+
+  capabilities(): ManagedProviderCapabilities {
+    return {
+      connectionId: this.profile.connectionId,
+      provider: this.profile.provider,
+      generation: this.generationValue,
+      models: this.availableModels,
+      // Claude runs its "default" model when launched without --model.
+      currentModel: this.selectedModel ?? this.options.model ?? this.profile.model ?? (this.availableModels ? "default" : null),
+      currentEffort: this.selectedEffort ?? this.options.effort ?? this.profile.effort ?? null,
+    };
+  }
+
+  async applyModelSelection(selection: ProviderModelSelection): Promise<ManagedProviderModelApply> {
+    const validation = validateProviderModelSelection(this.capabilities(), selection);
+    if (!validation.ok) return { ok: false, applies: "next-restart", error: validation.reason };
+    const { model, effort } = validation.selection;
+    const live = this.live;
+    if (effort) this.selectedEffort = effort;
+    if (!model) {
+      return effort
+        ? { ok: true, applies: "next-restart", detail: "Claude takes a new effort level when its process next starts." }
+        : { ok: false, applies: "next-restart", error: "No model or effort was selected." };
+    }
+    if (!live || live.state().status === "exited") {
+      this.selectedModel = model;
+      return { ok: true, applies: "next-restart", detail: "Claude is not running; the model applies when it next starts." };
+    }
+    try {
+      await live.control({ subtype: "set_model", model });
+      this.selectedModel = model;
+      return effort
+        ? { ok: true, applies: "next-turn", detail: "Model changed now; the effort level applies when Claude next starts." }
+        : { ok: true, applies: "next-turn" };
+    } catch (error) {
+      return { ok: false, applies: "next-restart", error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   readiness(): ManagedProviderReadiness {
@@ -340,8 +400,8 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
           mcpConfigPath: this.options.mcpConfigPath,
           command: this.options.command,
           resumeSessionId: attemptResumeId,
-          model: this.options.model ?? this.profile.model,
-          effort: this.options.effort ?? this.profile.effort,
+          model: this.selectedModel ?? this.options.model ?? this.profile.model,
+          effort: this.selectedEffort ?? this.options.effort ?? this.profile.effort,
           allowedTools: this.options.allowedTools,
           appendSystemPrompt: this.options.appendSystemPrompt,
         },
@@ -444,6 +504,7 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
         fail(new Error(`Claude exited before readiness${providerDiagnostic(stderrTail)}`));
         return;
       }
+      void this.loadModelCatalog(live);
       // The stream-json protocol does not emit `system/init` until the first
       // real user turn. Resolve the owner startup at the process boundary so
       // eager boot can launch Claude without deadlocking every connection for
