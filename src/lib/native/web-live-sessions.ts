@@ -359,6 +359,8 @@ export interface WebLiveSessionsDeps {
     reconcileStaleDeliveries?(maxAgeMs?: number): number;
     /** Fence an active task when the owner explicitly stops it. */
     cancelTask?(id: string, reason?: string): unknown;
+    /** Pause only the active provider turn while retaining task and conversation history. */
+    pauseTask?(id: string): unknown;
     /** Owner-pilled tasks use one atomic state-store claim before a resident worker receives the task text. */
     claimProviderDelivery?(id: string, token: string, expected: { handle: string; provider: string; cwd: string }): Task | undefined;
     setDelivery?(id: string, patch: { state: "deferred" | "queued" | "failed" | "uncertain"; attempts?: number; threadId?: string; queuedAt?: string; failedAt?: string; uncertainAt?: string; correlation?: "internal-context"; error?: string }): Task | undefined;

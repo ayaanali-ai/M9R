@@ -485,6 +485,9 @@ export function createTaskDesktopStageService(input: {
     if (task.receipt?.state === "canceled") {
       throw new Error("This task was canceled; no desktop work is allowed.");
     }
+    if (task.receipt?.state === "paused") {
+      throw new Error("This task is paused; no desktop work is allowed for that turn.");
+    }
     activeAgentCursors.set(cursorIdentityKey(identity), { handle, sessionId: identity.sessionId });
     // Session-scoped reuse bounds desktop creation; task text never becomes a desktop name.
     const name = cursorStageName(identity, mode);

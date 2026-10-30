@@ -256,6 +256,7 @@ abstract class ManagedProviderConnectionBase implements ManagedProviderConnectio
 
   abstract start(continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady>;
   abstract send(task: ManagedProviderTask): AsyncIterable<ManagedProviderEvent>;
+  abstract interrupt(taskId: string): Promise<void>;
   abstract cancel(taskId: string): Promise<void>;
   abstract stop(): Promise<void>;
 }
@@ -286,6 +287,7 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
   private live?: LiveSession;
   private startup?: Promise<ManagedProviderReady>;
   private queue?: AsyncEventQueue<ManagedProviderEvent>;
+  private interruptedTask?: string;
 
   constructor(options: ClaudeManagedProviderConnectionOptions) {
     super(options.profile);
@@ -393,8 +395,11 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
             }
             if (event.sessionId) this.providerSessionRef = event.sessionId;
             this.queue?.push({ kind: "result", text: event.text, isError: event.isError });
+            const interrupted = this.interruptedTask === this.activeTaskId;
+            if (interrupted) this.interruptedTask = undefined;
             this.finishTask();
-            if (event.isError) this.fail("Claude reported a provider failure");
+            if (interrupted) this.ready("Paused; waiting for the owner's next instruction");
+            else if (event.isError) this.fail("Claude reported a provider failure");
             else if (!this.draining) this.ready();
             this.queue?.push({ kind: "status", status: this.statusValue, doing: this.doingValue });
             this.queue?.end();
@@ -478,6 +483,17 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
     if (this.queue === queue) this.queue = undefined;
   }
 
+  async interrupt(taskId: string): Promise<void> {
+    if (this.activeTaskId !== taskId || !this.live) return;
+    this.interruptedTask = taskId;
+    try {
+      this.live.interruptCurrentTurn();
+    } catch (error) {
+      this.interruptedTask = undefined;
+      throw error;
+    }
+  }
+
   async cancel(taskId: string): Promise<void> {
     if (this.activeTaskId !== taskId) return;
     await this.stop("Task canceled");
@@ -534,6 +550,7 @@ class CodexManagedProviderConnection extends ManagedProviderConnectionBase {
   private readonly options: CodexManagedProviderConnectionOptions;
   private worker?: CodexWorkerProcess;
   private queue?: AsyncEventQueue<ManagedProviderEvent>;
+  private interruptedTask?: string;
 
   constructor(options: CodexManagedProviderConnectionOptions) {
     super(options.profile);
@@ -590,6 +607,15 @@ class CodexManagedProviderConnection extends ManagedProviderConnectionBase {
         if (terminal || generation !== this.generationValue) return;
         terminal = true;
         this.worker = undefined;
+        const interrupted = this.interruptedTask === task.taskId;
+        if (interrupted) this.interruptedTask = undefined;
+        if (interrupted) {
+          this.finishTask();
+          this.ready("Paused; waiting for the owner's next instruction");
+          queue.push({ kind: "status", status: this.statusValue, doing: this.doingValue });
+          queue.end();
+          return;
+        }
         if (code === 0) {
           queue.push({ kind: "result", text: answer, isError: false });
           this.finishTask();
@@ -626,6 +652,12 @@ class CodexManagedProviderConnection extends ManagedProviderConnectionBase {
     }
     yield* queue;
     if (this.queue === queue) this.queue = undefined;
+  }
+
+  async interrupt(taskId: string): Promise<void> {
+    if (this.activeTaskId !== taskId || !this.worker) return;
+    this.interruptedTask = taskId;
+    this.worker.kill();
   }
 
   async cancel(taskId: string): Promise<void> {
@@ -694,6 +726,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
   private session?: AgentSessionHandle;
   private startup?: Promise<ManagedProviderReady>;
   private cancelledTask?: string;
+  private interruptedTask?: string;
 
   constructor(options: CodexAppServerManagedProviderConnectionOptions) {
     super(options.profile);
@@ -863,6 +896,14 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
     }
+    if (this.interruptedTask === task.taskId) {
+      this.interruptedTask = undefined;
+      this.cancelledTask = undefined;
+      this.finishTask();
+      this.ready("Paused; waiting for the owner's next instruction");
+      yield { kind: "status", status: this.statusValue, doing: this.doingValue };
+      return;
+    }
     if (this.cancelledTask === task.taskId) failure = "Task canceled";
     if (failure || !completed) {
       this.finishTask();
@@ -879,6 +920,17 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     }
     yield { kind: "result", text: answer.trim(), isError: false };
     yield { kind: "status", status: this.statusValue, doing: this.doingValue };
+  }
+
+  async interrupt(taskId: string): Promise<void> {
+    if (this.activeTaskId !== taskId || !this.adapter || !this.session) return;
+    this.interruptedTask = taskId;
+    try {
+      await this.adapter.cancelTurn({ session: this.session });
+    } catch (error) {
+      this.interruptedTask = undefined;
+      throw error;
+    }
   }
 
   async cancel(taskId: string): Promise<void> {
@@ -911,6 +963,7 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
   private runtime?: OpenCodeLiveRuntime;
   private startup?: Promise<ManagedProviderReady>;
   private cancelledTask?: string;
+  private interruptedTask?: string;
   private availableModels: ManagedProviderCapabilities["models"] = null;
   private currentModel?: string | null;
   private currentEffort?: string | null;
@@ -1047,6 +1100,14 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
     }
+    if (this.interruptedTask === task.taskId) {
+      this.interruptedTask = undefined;
+      this.cancelledTask = undefined;
+      this.finishTask();
+      this.ready("Paused; waiting for the owner's next instruction");
+      yield { kind: "status", status: this.statusValue, doing: this.doingValue };
+      return;
+    }
     if (this.cancelledTask === task.taskId) failure = "Task canceled";
     if (failure || !completed) {
       this.finishTask();
@@ -1062,6 +1123,17 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
     }
     yield { kind: "result", text: answer.trim(), isError: false };
     yield { kind: "status", status: "ready", doing: "Ready (OpenCode ACP session)" };
+  }
+
+  async interrupt(taskId: string): Promise<void> {
+    if (this.activeTaskId !== taskId || !this.runtime) return;
+    this.interruptedTask = taskId;
+    try {
+      await this.runtime.cancelTurn();
+    } catch (error) {
+      this.interruptedTask = undefined;
+      throw error;
+    }
   }
 
   async cancel(taskId: string): Promise<void> {

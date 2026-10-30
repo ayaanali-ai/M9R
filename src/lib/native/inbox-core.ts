@@ -42,7 +42,7 @@ export interface TaskCoordination {
  * contract every delivery path updates.
  */
 export type TaskReceiptState = "accepted" | "dispatched" | "provider_received" | "started"
-  | "completed" | "canceled" | "failed" | "retryable" | "uncertain";
+  | "completed" | "paused" | "canceled" | "failed" | "retryable" | "uncertain";
 export type TaskReceiptSource = "owner-broker" | "provider-transport" | "provider-session" | "prompt" | "system";
 export type TaskReceiptBasis = "observed" | "inferred";
 
@@ -78,10 +78,11 @@ export interface TaskReceiptTransition {
 
 const MAX_TASK_RECEIPT_EVENTS = 32;
 const RECEIPT_TRANSITIONS: Readonly<Record<TaskReceiptState, readonly TaskReceiptState[]>> = {
-  accepted: ["dispatched", "provider_received", "started", "completed", "canceled", "failed", "retryable", "uncertain"],
-  dispatched: ["provider_received", "started", "completed", "canceled", "failed", "retryable", "uncertain"],
-  provider_received: ["started", "completed", "canceled", "failed", "uncertain"],
-  started: ["completed", "canceled", "failed", "uncertain"],
+  accepted: ["dispatched", "provider_received", "started", "completed", "paused", "canceled", "failed", "retryable", "uncertain"],
+  dispatched: ["provider_received", "started", "completed", "paused", "canceled", "failed", "retryable", "uncertain"],
+  provider_received: ["started", "completed", "paused", "canceled", "failed", "uncertain"],
+  started: ["completed", "paused", "canceled", "failed", "uncertain"],
+  paused: ["canceled"],
   retryable: ["dispatched", "canceled", "failed"],
   uncertain: ["completed", "canceled"],
   failed: ["completed", "canceled", "retryable"],
@@ -108,7 +109,7 @@ function pushReceiptEvent(receipt: TaskReceipt, event: TaskReceiptEvent): TaskRe
     updatedAt: event.at,
     source: event.source,
     ...(event.sessionId ? { sessionId: event.sessionId } : receipt.sessionId ? { sessionId: receipt.sessionId } : {}),
-    ...(event.error ? { error: event.error } : event.state === "completed" || event.state === "canceled" ? { error: undefined } : {}),
+    ...(event.error ? { error: event.error } : event.state === "completed" || event.state === "paused" || event.state === "canceled" ? { error: undefined } : {}),
     history: [...receipt.history, event].slice(-MAX_TASK_RECEIPT_EVENTS),
   };
 }
@@ -146,7 +147,7 @@ export function transitionTaskReceipt(current: TaskReceipt | undefined, transiti
     ...(transition.error && (state === transition.state || state === "failed" || state === "uncertain" || state === "retryable") ? { error: transition.error } : {}),
   });
 
-  if (transition.state === "completed" && receipt.state !== "completed" && receipt.state !== "canceled") {
+  if (transition.state === "completed" && receipt.state !== "completed" && receipt.state !== "canceled" && receipt.state !== "paused") {
     if (receipt.state !== "provider_received") receipt = pushReceiptEvent(receipt, event("provider_received", "inferred"));
     if (receipt.state !== "started") receipt = pushReceiptEvent(receipt, event("started", "inferred"));
     return pushReceiptEvent(receipt, event("completed"));
@@ -451,7 +452,7 @@ export function renderInboxInjection(tasks: readonly Task[], cursor: number, opt
     // A task claimed or pushed by a direct transport must not race a second provider route through the inbox.
     // A task that already has a result is finished, and one older than the age limit is history, not work to hand a new session.
     .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired"
-      && t.receipt?.state !== "canceled"
+      && t.receipt?.state !== "canceled" && t.receipt?.state !== "paused"
       && !["sending", "queued", "uncertain", "done"].includes(t.delivery?.state ?? "")
       && !t.resultSummary && !(now - Date.parse(t.createdAt) > maxAge))
     .sort((a, b) => a.seq - b.seq);

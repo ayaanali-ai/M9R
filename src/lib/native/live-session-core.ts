@@ -192,6 +192,8 @@ export interface LiveSession {
    * ends the current turn first, then sends the message as a fresh, signed user turn.
    */
   interrupt(text: string): void;
+  /** Ends the current turn without adding a replacement user message. */
+  interruptCurrentTurn(): void;
   readonly marker: string;
   stop(): void;
   state(): LiveState;
@@ -250,6 +252,11 @@ export function startLiveSession(options: {
       child.stdin.write(encodeInterrupt(`m9r-int-${state.messagesSent + 1}`));
       child.stdin.write(encodeUserMessage(signUserMessage(marker, text)));
       state = reduceLive(state, { kind: "interrupted" });
+    },
+    interruptCurrentTurn() {
+      if (state.status === "exited") throw new Error("this live session has ended; start or resume one");
+      if (state.status !== "working") return;
+      child.stdin.write(encodeInterrupt(`m9r-int-${state.messagesSent + 1}`));
     },
     stop() {
       try { child.stdin.end(); } catch { /* already closed */ }

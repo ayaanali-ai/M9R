@@ -117,6 +117,8 @@ export interface ManagedProviderConnection {
   readonly profile: ManagedProviderConnectionProfile;
   start(continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady>;
   send(task: ManagedProviderTask): AsyncIterable<ManagedProviderEvent>;
+  /** Interrupt an active provider turn without ending its session. */
+  interrupt?(taskId: string): Promise<void>;
   cancel(taskId: string): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -140,6 +142,8 @@ export interface ManagedProviderSupervisor {
     continuation?: ManagedProviderContinuation,
   ): Promise<ManagedProviderConnection>;
   dispatch(task: ManagedProviderTask): AsyncIterable<ManagedProviderEvent>;
+  /** Interrupt one active provider turn while preserving its connection/session. */
+  interrupt(connectionId: string, taskId: string): Promise<void>;
   cancel(connectionId: string, taskId: string): Promise<void>;
   pause(connectionId: string): Promise<void>;
   resume(connectionId: string): Promise<void>;

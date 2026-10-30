@@ -341,7 +341,10 @@ export interface SessionsPort {
    * clears itself the moment the answer actually lands. */
   snapshot(): Array<{ handle: string; provider: string; folder: string; status: SessionStatus; doing: string; waitingOn?: string }>;
   deliver(handle: string, text: string, taskId?: string): { ok: true; mode: "sent" | "interrupted" | "started" | "restarted-worker" } | { ok: false; error: string };
+  /** Pause one active provider turn without closing its conversation. */
   stop(handle: string): boolean;
+  /** Pause active turns while keeping provider conversations available for follow-up. */
+  pauseAll?(): void;
   stopAll(): void;
   /** Strings that must never reach the pill (session tokens, interrupt markers). */
   secrets(): string[];
@@ -669,14 +672,15 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       if (named) {
         for (const p of broker?.pendingApprovals() ?? []) if (p.actor === named) broker?.decideApproval(p.id, "deny");
         sessions?.stop(named);
-        system(`Stopped @${named}. Message it to start again.`, named);
+        system(`Paused @${named}. Its provider conversation is preserved; send the next instruction to continue or redirect it.`, named);
         return;
       }
-      // Same as the real Stop button: deny anything already waiting for approval too, so an action that was mid-flight
-      // when "stop" was typed cannot still go through after the agents themselves have been killed.
+      // Stop pauses provider turns, and any action that was still waiting for
+      // owner approval is withdrawn so it cannot execute after the pause.
       for (const p of broker?.pendingApprovals() ?? []) broker?.decideApproval(p.id, "deny");
-      sessions?.stopAll();
-      system(`Stopped ${known.join(", ")} and turned down anything waiting for approval. Message any of them to start again.`);
+      if (sessions?.pauseAll) sessions.pauseAll();
+      else sessions?.stopAll();
+      system(`Paused ${known.join(", ")} and withdrew anything waiting for approval. Their provider conversations are preserved; message any of them to continue or redirect.`);
       return;
     }
     broker?.noteOwnerUrls?.(message.text);
@@ -741,7 +745,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
         sessions.stop(message.agent);
         doing.delete(message.agent);
         blocked.delete(message.agent);
-        system(`Stopped @${message.agent}. Its next message starts it again with its memory.`, message.agent);
+        system(`Paused @${message.agent}. Its provider conversation is preserved; send the next instruction to continue or redirect it.`, message.agent);
         return true;
       case "ui-save-note": {
         const saved = options.saveNote ? options.saveNote(redactSecrets(message.text)) : { ok: false, error: "memory is not available here" };
@@ -760,10 +764,11 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       }
       case "ui-stop-all":
         for (const p of broker?.pendingApprovals() ?? []) broker?.decideApproval(p.id, "deny");
-        sessions?.stopAll();
+        if (sessions?.pauseAll) sessions.pauseAll();
+        else sessions?.stopAll();
         doing.clear();
         blocked.clear();
-        system("Stopped all agents and turned down anything waiting for approval.");
+        system("Paused all agents and withdrew anything waiting for approval. Their provider conversations are preserved.");
         return true;
     }
   }

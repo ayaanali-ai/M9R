@@ -99,6 +99,7 @@ export type ManagedProviderOwner = SessionsPort & {
 };
 
 type ActiveTask = { taskId: string; kind: "owner" | "room" | "internal"; sessionId: string };
+type QueuedOwnerPrompt = { taskId: string; text: string };
 type PendingAcceptance = {
   resolve(result: { ok: true; sessionId: string } | { ok: false; error: string }): void;
   settled: boolean;
@@ -257,6 +258,9 @@ function withIdentity(base: ManagedProviderConnection): ManagedProviderConnectio
     profile: base.profile,
     start: (continuation) => base.start(continuation),
     send: (task) => base.send(task),
+    interrupt: (taskId) => base.interrupt
+      ? base.interrupt(taskId)
+      : Promise.reject(new Error("The selected provider adapter cannot interrupt a turn while preserving its connection.")),
     cancel: (taskId) => base.cancel(taskId),
     pause: () => base.pause(),
     resume: () => base.resume(),
@@ -288,6 +292,8 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
   const connections = new Map<string, ManagedProviderConnection>();
   const modelSelectionStore: ManagedProviderModelSelectionStore = createFileManagedProviderModelSelectionStore(join(deps.storeRoot, "managed-provider-model-selections"));
   const active = new Map<string, ActiveTask>();
+  const queuedOwnerPrompts = new Map<string, QueuedOwnerPrompt[]>();
+  const pausedConnections = new Set<string>();
   const pendingAcceptance = new Map<string, PendingAcceptance>();
   const fenced = new Set<string>();
   const halted = { value: false };
@@ -397,6 +403,67 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     waiter.resolve(result);
   }
 
+  function makeOwnerTask(profile: ManagedProviderConnectionProfile, text: string): string | undefined {
+    if (!deps.store.addTask || !deps.store.setDelivery || !deps.store.claimProviderDelivery) return undefined;
+    const created = deps.store.addTask({
+      from: "you",
+      to: profile.handle,
+      goal: text,
+      origin: "human_typed",
+      cwd: profile.cwd,
+      idempotencyKey: `owner:${profile.connectionId}:${Date.now()}:${randomUUID()}`,
+    });
+    const id = created.task.id;
+    const deferred = deps.store.setDelivery(id, { state: "deferred" });
+    if (!deferred || deferred.delivery?.state !== "deferred") throw new Error("M9R could not preserve the owner task before provider delivery.");
+    void Promise.resolve(deps.onOwnerTaskCreated?.(id)).catch(() => undefined);
+    return id;
+  }
+
+  function startOwnerTask(profile: ManagedProviderConnectionProfile, taskId: string, text: string, redirected = false): boolean {
+    const context = contextFor(profile);
+    const claimed = deps.store.claimProviderDelivery?.(taskId, context.token, {
+      handle: profile.handle,
+      provider: profile.provider,
+      cwd: profile.cwd,
+    });
+    if (!claimed) {
+      const reason = "M9R could not bind this owner task to its managed provider conversation.";
+      deps.store.setDelivery?.(taskId, { state: "failed", error: reason });
+      emit({ kind: "system", handle: profile.handle, provider: profile.provider, text: reason });
+      return false;
+    }
+    pausedConnections.delete(profile.connectionId);
+    const ownerText = redirected
+      ? `The owner paused or redirected the previous task. Keep this provider conversation and its useful context, but follow this newest instruction instead of continuing the paused task unless the owner explicitly asks you to resume it:\n\n${text}`
+      : text;
+    void runTask(profile, taskId, `${context.prompt}\n\nThe owner says:\n${ownerText}`, "owner");
+    return true;
+  }
+
+  function requestPause(profile: ManagedProviderConnectionProfile, task: ActiveTask): void {
+    if (fenced.has(task.taskId)) return;
+    fenced.add(task.taskId);
+    try { deps.store.pauseTask?.(task.taskId); }
+    catch (error) { emit({ kind: "system", handle: profile.handle, provider: profile.provider, text: `M9R could not record the paused task: ${errorText(error)}` }); }
+    accept(task.taskId, { ok: false, error: "The owner paused this task before provider acceptance." });
+    void supervisor.interrupt(profile.connectionId, task.taskId).catch((error) => {
+      emit({ kind: "system", handle: profile.handle, provider: profile.provider, text: `M9R could not interrupt the current provider turn: ${errorText(error)}` });
+    });
+  }
+
+  function startNextOwnerPrompt(profile: ManagedProviderConnectionProfile): void {
+    if (active.has(profile.connectionId) || pausedConnections.has(profile.connectionId) || halted.value || closed) return;
+    const queue = queuedOwnerPrompts.get(profile.connectionId);
+    const next = queue?.shift();
+    if (!next) {
+      queuedOwnerPrompts.delete(profile.connectionId);
+      return;
+    }
+    if (queue?.length === 0) queuedOwnerPrompts.delete(profile.connectionId);
+    if (!startOwnerTask(profile, next.taskId, next.text, true)) startNextOwnerPrompt(profile);
+  }
+
   function markQueued(profile: ManagedProviderConnectionProfile, taskId: string, kind: ActiveTask["kind"], context: ManagedProviderOwnerConnectionContext): void {
     if (kind === "owner") {
       const current = deps.store.getTask?.(taskId);
@@ -452,6 +519,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     const runId = randomUUID();
     if (active.has(profile.connectionId)) throw new Error(`@${profile.handle} is already handling another turn.`);
     const running: ActiveTask = { taskId, kind, sessionId: context.sessionId };
+    pausedConnections.delete(profile.connectionId);
     active.set(profile.connectionId, running);
     let accepted = false;
     let acceptanceRecorded = false;
@@ -496,7 +564,6 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       }
       emitState(profile);
       if (fenced.has(taskId)) {
-        await connection.stop();
         throw new Error("The owner-delivery window expired before the provider accepted the task; M9R did not send it.");
       }
       const generation = connection.status().generation;
@@ -507,10 +574,9 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
         // A stopped/replaced turn may still yield one queued provider event
         // while its transport is shutting down. Only the currently fenced
         // task may publish state, text, tools, or results into the pill.
-        // Stop/stop-all fences the logical run before asking the provider to
-        // cancel. A provider can still flush one queued event while its
-        // transport is unwinding; that event must not reach the pill or close
-        // a canceled task.
+        // Stop fences the logical run before interrupting the provider turn.
+        // A provider can still flush queued events while that interruption
+        // unwinds; those events must not reach the pill or close a paused task.
         if (fenced.has(taskId) || active.get(profile.connectionId)?.taskId !== taskId) continue;
         // A status event only describes the adapter's local state. It is not a
         // receipt: OpenCode, for example, can report "working" before its ACP
@@ -585,7 +651,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       if (kind === "owner" && !fenced.has(taskId) && current?.delivery?.state !== "uncertain") {
         if (deps.store.recordTaskFailure) deps.store.recordTaskFailure(taskId, `Provider session failed: ${reason}`);
         else deps.store.setDelivery?.(taskId, { state: "failed", threadId: context.sessionId, failedAt: now().toISOString(), correlation: "internal-context", error: reason });
-      } else if (kind === "room") {
+      } else if (kind === "room" && !fenced.has(taskId)) {
         if (deps.store.recordTaskFailure) deps.store.recordTaskFailure(taskId, `Provider session failed: ${reason}`);
       }
       accept(taskId, { ok: false, error: reason });
@@ -598,6 +664,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       active.delete(profile.connectionId);
       fenced.delete(taskId);
       emitState(profile);
+      startNextOwnerPrompt(profile);
     }
   }
 
@@ -606,53 +673,51 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     const profile = resolveProfile(handle);
     if (!profile) return { ok: false, error: `no agent called @${handle}` };
     if (apiKeyLaunchBlock(env, deps.allowApiKey === true)) return { ok: false, error: apiKeyLaunchBlock(env, deps.allowApiKey === true)! };
-    if (active.has(profile.connectionId)) return { ok: false, error: `@${profile.handle} is already handling another turn; M9R did not replace it.` };
-    const context = contextFor(profile);
-    let id = taskId;
-    let kind: ActiveTask["kind"] = taskId ? "room" : "owner";
-    if (!id) {
-      // A direct owner-pill command is still governed M9R work. The managed
-      // adapter must not receive a free-floating prompt: stage tools resolve
-      // their omitted taskId from this durable record, and result recording
-      // uses the same record to close the turn. The old internal UUID path
-      // skipped the store entirely, which produced "no pending task ID" as
-      // soon as Codex/Claude tried native desktop control.
-      if (!deps.store.addTask || !deps.store.setDelivery || !deps.store.claimProviderDelivery) {
-        return { ok: false, error: "M9R owner-task state is unavailable; the managed provider turn was not started." };
+    const currentTask = active.get(profile.connectionId);
+    if (currentTask) {
+      if (taskId) return { ok: false, error: `@${profile.handle} is handling another task; M9R did not replace the teammate delivery.` };
+      let queuedTaskId: string | undefined;
+      try { queuedTaskId = makeOwnerTask(profile, text); }
+      catch (error) { return { ok: false, error: errorText(error) }; }
+      if (!queuedTaskId) return { ok: false, error: "M9R owner-task state is unavailable; the managed provider turn was not queued." };
+      const queue = queuedOwnerPrompts.get(profile.connectionId) ?? [];
+      if (queue.length >= 8) {
+        deps.store.setDelivery?.(queuedTaskId, { state: "failed", error: "The provider already has eight owner follow-ups queued." });
+        return { ok: false, error: `@${profile.handle} already has eight follow-up messages queued.` };
       }
-      try {
-        const created = deps.store.addTask({
-          from: "you",
-          to: profile.handle,
-          goal: text,
-          origin: "human_typed",
-          cwd: profile.cwd,
-          idempotencyKey: `owner:${profile.connectionId}:${Date.now()}:${randomUUID()}`,
-        });
-        id = created.task.id;
-        // claimProviderDelivery requires the explicit deferred state. It then
-        // binds the task to this exact owner-launched provider session before
-        // the prompt can call any M9R MCP tool.
-        deps.store.setDelivery(id, { state: "deferred" });
-        const claimed = deps.store.claimProviderDelivery(id, context.token, {
-          handle: profile.handle,
-          provider: profile.provider,
-          cwd: profile.cwd,
-        });
-        if (!claimed) {
-          deps.store.setDelivery(id, { state: "failed", error: "M9R could not bind the owner task to its managed provider session." });
-          return { ok: false, error: "M9R could not bind the owner task to its managed provider session." };
-        }
-        // The cursor is best effort and intentionally cannot veto delivery.
-        void Promise.resolve(deps.onOwnerTaskCreated?.(id)).catch(() => undefined);
-      } catch (error) {
-        return { ok: false, error: errorText(error) };
-      }
+      queue.push({ taskId: queuedTaskId, text });
+      queuedOwnerPrompts.set(profile.connectionId, queue);
+      pausedConnections.delete(profile.connectionId);
+      requestPause(profile, currentTask);
+      return { ok: true, mode: "interrupted" };
     }
-    // `id` is a durable task for owner turns and an existing task for room
-    // turns. The old no-task internal path is intentionally gone.
-    const prompt = `${context.prompt}\n\nThe owner says:\n${text}`;
-    void runTask(profile, id, prompt, kind);
+
+    const queued = queuedOwnerPrompts.get(profile.connectionId);
+    if (!taskId && queued?.length) {
+      let queuedTaskId: string | undefined;
+      try { queuedTaskId = makeOwnerTask(profile, text); }
+      catch (error) { return { ok: false, error: errorText(error) }; }
+      if (!queuedTaskId) return { ok: false, error: "M9R owner-task state is unavailable; the managed provider turn was not queued." };
+      if (queued.length >= 8) {
+        deps.store.setDelivery?.(queuedTaskId, { state: "failed", error: "The provider already has eight owner follow-ups queued." });
+        return { ok: false, error: `@${profile.handle} already has eight follow-up messages queued.` };
+      }
+      queued.push({ taskId: queuedTaskId, text });
+      pausedConnections.delete(profile.connectionId);
+      startNextOwnerPrompt(profile);
+      return { ok: true, mode: "interrupted" };
+    }
+
+    if (taskId) {
+      const context = contextFor(profile);
+      void runTask(profile, taskId, `${context.prompt}\n\nThe owner says:\n${text}`, "room");
+    } else {
+      let ownerTaskId: string | undefined;
+      try { ownerTaskId = makeOwnerTask(profile, text); }
+      catch (error) { return { ok: false, error: errorText(error) }; }
+      if (!ownerTaskId) return { ok: false, error: "M9R owner-task state is unavailable; the managed provider turn was not started." };
+      if (!startOwnerTask(profile, ownerTaskId, text)) return { ok: false, error: "M9R could not bind the owner task to its managed provider conversation." };
+    }
     const current = supervisor.snapshots().find((snapshot) => snapshot.connectionId === profile.connectionId);
     return { ok: true, mode: statusIsActive(current?.status) ? "sent" : "started" };
   }
@@ -783,32 +848,41 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     modelState: () => providerModelUiState(capabilitySnapshot(), supervisor.snapshots()),
     snapshot: () => profiles.map((profile) => {
       const snapshot = supervisor.snapshots().find((entry) => entry.connectionId === profile.connectionId);
+      const paused = pausedConnections.has(profile.connectionId);
       return {
         handle: profile.handle,
         provider: profile.provider,
         folder: profile.cwd,
-        status: sessionStatus(snapshot?.status ?? "ready"),
-        doing: snapshot?.doing ?? "Ready",
+        status: paused ? "idle" : sessionStatus(snapshot?.status ?? "ready"),
+        doing: paused ? "Paused — waiting for your next instruction" : snapshot?.doing ?? "Ready",
       };
     }),
     deliver,
     stop(handle) {
       const profile = resolveProfile(handle);
       if (!profile) return false;
-      const connection = connections.get(profile.connectionId);
-      if (!connection) return false;
+      pausedConnections.add(profile.connectionId);
       const task = active.get(profile.connectionId);
-      if (task) {
-        fenced.add(task.taskId);
-        deps.store.cancelTask?.(task.taskId, "Task canceled by the owner.");
-        accept(task.taskId, { ok: false, error: "Task canceled by the owner." });
-        void connection.cancel(task.taskId).catch(() => undefined);
-      }
-      void connection.stop().then(() => emitState(profile)).catch(() => undefined);
+      if (task) requestPause(profile, task);
+      emitState(profile);
       return true;
+    },
+    pauseAll() {
+      for (const profile of profiles) {
+        pausedConnections.add(profile.connectionId);
+        const task = active.get(profile.connectionId);
+        if (task) requestPause(profile, task);
+        emitState(profile);
+      }
     },
     stopAll() {
       halted.value = true;
+      for (const profile of profiles) {
+        for (const queued of queuedOwnerPrompts.get(profile.connectionId) ?? []) {
+          deps.store.cancelTask?.(queued.taskId, "Owner stopped all provider work.");
+        }
+        queuedOwnerPrompts.delete(profile.connectionId);
+      }
       for (const profile of profiles) {
         const connection = connections.get(profile.connectionId);
         if (!connection) continue;

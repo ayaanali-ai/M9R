@@ -44,7 +44,7 @@ export function sessionHasUnfinishedDelivery(store: LocalStore, handle: string, 
   const maxAge = inboxMaxAgeMs();
   const now = Date.now();
   return store.tasksFor(handle).some(task => task.id !== exceptTaskId && !task.resultSummary
-    && task.receipt?.state !== "canceled"
+    && task.receipt?.state !== "canceled" && task.receipt?.state !== "paused"
     && task.goal === goal
     && (task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId) === sessionId
     && ["sending", "queued", "uncertain"].includes(task.delivery?.state ?? "")
@@ -77,7 +77,7 @@ export function createTaskDeliveryPump(
         const now = Date.now();
         const maxAge = inboxMaxAgeMs();
         const tasks = store.snapshot().tasks.filter(task => task.delivery?.state === "deferred"
-          && task.receipt?.state !== "canceled"
+          && task.receipt?.state !== "canceled" && task.receipt?.state !== "paused"
           && !task.resultSummary && !task.deliveredAt && canQueue(task)
           && isFreshInboxTask(task.createdAt, now, maxAge));
         // One attempt per adapter per pass. Its own atomic claim must prevent

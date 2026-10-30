@@ -320,6 +320,14 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
     await persist(entry);
   };
 
+  const interrupt = async (connectionId: string, taskId: string): Promise<void> => {
+    const entry = entries.get(connectionId);
+    if (!entry) throw new Error(`managed provider connection is not registered: ${connectionId}`);
+    if (!entry.connection.interrupt) throw new Error("The selected provider adapter cannot interrupt a turn while preserving its connection.");
+    await entry.connection.interrupt(taskId);
+    await persist(entry);
+  };
+
   const pause = async (connectionId: string): Promise<void> => {
     const entry = entries.get(connectionId);
     if (!entry) throw new Error(`managed provider connection is not registered: ${connectionId}`);
@@ -373,6 +381,7 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
   return {
     ensureConnection,
     dispatch,
+    interrupt,
     cancel,
     pause,
     resume,

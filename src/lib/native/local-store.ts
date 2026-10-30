@@ -1126,7 +1126,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const identity = s.identities.find((item) => item.token === token && !item.revokedAt);
         const task = s.tasks.find((item) => item.id === id);
-        if (!identity || !task || task.resultSummary || !canQueue(task) || normalizeHandle(task.to) !== normalizeHandle(identity.handle)) return false;
+        if (!identity || !task || task.resultSummary || task.receipt?.state === "paused" || task.receipt?.state === "canceled" || !canQueue(task) || normalizeHandle(task.to) !== normalizeHandle(identity.handle)) return false;
         const owner = task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId;
         if (owner && owner !== identity.sessionId) return false;
         // Same staleness bound as sessionHasUnfinishedDelivery (task-delivery-pump.ts), and for the
@@ -1137,6 +1137,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         const occupiedAt = now().getTime();
         const occupied = s.tasks.some((other) => other.id !== id && normalizeHandle(other.to) === normalizeHandle(identity.handle)
           && !other.resultSummary && other.goal === task.goal
+          && other.receipt?.state !== "paused" && other.receipt?.state !== "canceled"
           && (other.targetSession ?? other.deliveredSession ?? other.delivery?.threadId) === identity.sessionId
           && ["sending", "queued", "uncertain"].includes(other.delivery?.state ?? "")
           && occupiedAt - Date.parse(other.createdAt) <= maxAge);
@@ -1165,7 +1166,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           || task.delivery?.state !== "deferred"
           || task.receipt?.state === "completed"
           || task.receipt?.state === "uncertain"
-          || task.receipt?.state === "canceled"
+          || task.receipt?.state === "canceled" || task.receipt?.state === "paused"
           || task.resultSummary || task.deliveredAt || task.deliveredSession || task.targetSession
           || task.delivery.threadId
           || (task.cwd && normCwd(task.cwd) !== folder)
@@ -2014,7 +2015,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           if (task.delivery?.state === "sending" || task.delivery?.state === "uncertain") continue;
           const failedPush = task.delivery?.state === "failed";
           if (task.approval === "denied" || task.approval === "expired"
-            || task.receipt?.state === "canceled"
+            || task.receipt?.state === "canceled" || task.receipt?.state === "paused"
             || task.delivery?.state === "queued" || task.delivery?.state === "done" || task.resultSummary
             || at.getTime() - Date.parse(task.createdAt) > maxAge) {
             cursor = Math.max(cursor, task.seq);
@@ -2081,7 +2082,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
             && t.origin === "agent_initiated"
             && normalizeHandle(t.to) === "claude"
             && !t.delivery && !t.resultSummary && !t.deliveredAt && !t.deliveredSession
-            && t.receipt?.state !== "canceled"
+            && t.receipt?.state !== "canceled" && t.receipt?.state !== "paused"
             && isFreshInboxTask(t.createdAt, now().getTime(), inboxMaxAgeMs())) {
             t.delivery = { state: "deferred", attempts: 0 };
           }
@@ -2095,7 +2096,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     claimCodexDelivery(id: string): Task | undefined {
       return update((s) => {
         const task = s.tasks.find((item) => item.id === id);
-        if (!task || task.to !== "codex" || task.resultSummary || task.deliveredAt || task.receipt?.state === "completed" || task.receipt?.state === "uncertain" || task.receipt?.state === "canceled" || !canQueue(task)
+        if (!task || task.to !== "codex" || task.resultSummary || task.deliveredAt || task.receipt?.state === "completed" || task.receipt?.state === "uncertain" || task.receipt?.state === "canceled" || task.receipt?.state === "paused" || !canQueue(task)
           || !isFreshInboxTask(task.createdAt, now().getTime(), inboxMaxAgeMs())) return undefined;
         if (task.delivery && task.delivery.state !== "failed" && task.delivery.state !== "deferred") return undefined;
         const claimedAt = now().toISOString();
@@ -2127,7 +2128,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const t = s.tasks.find((x) => x.id === id);
         if (!t) return undefined;
-        if (t.delivery?.state === "done" || t.resultSummary || t.receipt?.state === "completed" || t.receipt?.state === "canceled") return t;
+        if (t.delivery?.state === "done" || t.resultSummary || t.receipt?.state === "completed" || t.receipt?.state === "canceled" || t.receipt?.state === "paused") return t;
         // A failed receipt may only be reopened through an explicit retry
         // boundary (`sending`/`deferred` records `retryable` first). Do not let
         // a late compatibility callback mark it queued/done without that
@@ -2196,7 +2197,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         let changed = 0;
         for (const task of s.tasks) {
           const delivery = task.delivery;
-          if (!delivery || delivery.state !== "sending" || task.resultSummary || task.receipt?.state === "completed" || task.receipt?.state === "canceled") continue;
+          if (!delivery || delivery.state !== "sending" || task.resultSummary || task.receipt?.state === "completed" || task.receipt?.state === "canceled" || task.receipt?.state === "paused") continue;
           const claimedAt = Date.parse(delivery.claimedAt ?? "");
           // A persisted claim without a valid timestamp cannot be proven to be
           // current. Reconciliation runs before new provider connections are
@@ -2245,7 +2246,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           || (task.delivery && task.delivery.state !== "deferred")
           || task.receipt?.state === "completed"
           || task.receipt?.state === "uncertain"
-          || task.receipt?.state === "canceled"
+          || task.receipt?.state === "canceled" || task.receipt?.state === "paused"
           || task.deliveredAt || task.resultSummary || !canQueue(task)) return undefined;
         const cursor = s.cursors[cursorKey(handle, input.sessionId, folder)] ?? 0;
         if (task.seq <= cursor || !(task.targetSession === input.sessionId
@@ -2288,7 +2289,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (!identity) return false;
         const task = s.tasks.find((candidate) => candidate.id === id);
         if (!task || normalizeHandle(task.to) !== handle) return false;
-        if (task.receipt?.state === "canceled") return false;
+        if (task.receipt?.state === "canceled" || task.receipt?.state === "paused") return false;
         const delivery = task.delivery;
         if (delivery?.threadId !== sessionId) return false;
         if (outcome.state === "queued" && (delivery.state === "queued" || delivery.state === "done")) return true;
@@ -2334,7 +2335,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       const at = now().getTime();
       const requestedProvider = provider ? normalizeHandle(provider) : undefined;
       return readState().tasks.filter((t) => {
-        if (t.resultSummary || (requestedProvider && normalizeHandle(t.to) !== requestedProvider)) return false;
+        if (t.resultSummary || t.receipt?.state === "paused" || t.receipt?.state === "canceled"
+          || (requestedProvider && normalizeHandle(t.to) !== requestedProvider)) return false;
         const createdAt = Date.parse(t.createdAt);
         if (!Number.isFinite(createdAt) || createdAt > at || at - createdAt > RESULT_RECONCILIATION_MAX_AGE_MS) return false;
         return t.delivery?.state === "queued"
@@ -2378,11 +2380,21 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
+    /** Pause only the provider turn; leave its thread and provider connection available for a follow-up. */
+    pauseTask(id: string): Task | undefined {
+      return update((s) => {
+        const task = s.tasks.find((candidate) => candidate.id === id);
+        if (!task || task.resultSummary || task.receipt?.state === "completed" || task.receipt?.state === "canceled" || task.receipt?.state === "paused") return task;
+        recordTaskReceipt(task, { state: "paused", at: now().toISOString(), source: "owner-broker" });
+        return task;
+      });
+    },
+
     setResult(id: string, summary: string): Task | undefined {
       return update((s) => {
         const t = s.tasks.find((x) => x.id === id);
         if (!t) return undefined;
-        if (t.receipt?.state === "completed" || t.receipt?.state === "canceled" || t.receipt?.state === "failed" || t.delivery?.state === "failed" || t.lifecycle?.state === "failed") return t;
+        if (t.receipt?.state === "completed" || t.receipt?.state === "canceled" || t.receipt?.state === "paused" || t.receipt?.state === "failed" || t.delivery?.state === "failed" || t.lifecycle?.state === "failed") return t;
         const clean = redactSecrets(summary.trim());
         const at = now().toISOString();
         rememberDelivery(t);
@@ -2405,7 +2417,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     recordTaskFailure(id: string, error: string): Task | undefined {
       return update((s) => {
         const task = s.tasks.find((candidate) => candidate.id === id);
-        if (!task || task.receipt?.state === "completed" || task.receipt?.state === "canceled") return task;
+        if (!task || task.receipt?.state === "completed" || task.receipt?.state === "canceled" || task.receipt?.state === "paused") return task;
         const clean = redactSecrets(error.trim()).slice(0, 500) || "Provider execution failed.";
         const at = now().toISOString();
         rememberDelivery(task);
@@ -2462,6 +2474,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           return { ok: false, error: `Task ${id} already has a recorded result; it was not overwritten.` };
         }
         if (task.receipt?.state === "completed") return { ok: false, error: `Task ${id} already has a terminal completion; its late result was refused.` };
+        if (task.receipt?.state === "paused") return { ok: false, error: `Task ${id} is paused; results from that turn were refused.` };
         if (task.receipt?.state === "canceled") return { ok: false, error: `Task ${id} was canceled; its late result was refused.` };
         if (task.receipt?.state === "failed" || task.delivery?.state === "failed" || task.lifecycle?.state === "failed") {
           return { ok: false, error: `Task ${id} already has a terminal provider failure; retry it explicitly before reporting a result.` };

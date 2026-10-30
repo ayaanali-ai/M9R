@@ -1205,6 +1205,7 @@ export function nativeStatus(io: NativeIo): StatusRow[] {
     const createdAt = Date.parse(t.createdAt);
     return t.approval !== "denied" && t.approval !== "expired"
       && t.receipt?.state !== "canceled"
+      && t.receipt?.state !== "paused"
       && !t.resultSummary
       && t.delivery?.state !== "queued" && t.delivery?.state !== "done"
       && Number.isFinite(createdAt) && createdAt <= statusNow && createdAt >= inboxCutoff
