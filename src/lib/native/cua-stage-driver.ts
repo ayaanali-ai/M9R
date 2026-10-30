@@ -1050,7 +1050,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
    * a cursor-overlay operation only: it does not focus a window or move the
    * owner's physical pointer.
    */
-  async function showAgentCursor(name: string, identity: CuaAgentCursorIdentity): Promise<{ label: string; visible: true }> {
+  async function showAgentCursor(name: string, identity: CuaAgentCursorIdentity, retried = false): Promise<{ label: string; visible: true }> {
     const { runtime, session } = await ensureAgentSession(identity, name);
     resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not show the agent cursor before the first desktop action.");
     await withCursorSlotLock(async () => {
@@ -1077,6 +1077,15 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       }
     });
     if (!await confirmCursorVisible(name, () => runtime.driver.getSession({ session: session.session }))) {
+      // A cached driver whose overlay stopped drawing never recovers on its
+      // own (this is not a transport error), so every later action failed
+      // until the broker restarted. Showing the cursor sends no input, so one
+      // retry on a fresh driver carries no duplicate-action risk.
+      if (!retried) {
+        cursorStartSlots.delete(session.key);
+        await resetDeadRuntime().catch(() => undefined);
+        return showAgentCursor(name, identity, true);
+      }
       throw new DesktopInputNotDispatchedError("Cua Driver enabled the agent cursor but did not confirm that its desktop overlay is visible within the bounded confirmation window.", "overlay-not-visible");
     }
     return { label: session.session, visible: true };

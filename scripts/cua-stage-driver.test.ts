@@ -811,6 +811,24 @@ test("records compositor visibility as a separate privacy-safe timing phase", as
   await driver.shutdown();
 }));
 
+test("a driver whose overlay stopped drawing is replaced once instead of failing every later action", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  let loads = 0;
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    cursorVisiblePoll: { attempts: 2, intervalMs: 1 },
+    loadSdk: async () => {
+      loads += 1;
+      return makeSdk({ calls, cursorVisible: loads > 1 }) as never;
+    },
+  });
+  const shown = await driver.showAgentCursor!("stage", { handle: "codex", sessionId: "overlay-recovered" });
+  assert.equal(shown.visible, true);
+  assert.equal(loads, 2, "exactly one fresh driver, no retry loop");
+  await driver.shutdown();
+}));
+
 test("bounds cursor visibility poll configuration", () => {
   assert.throws(() => createCuaStageDriver({ cursorVisiblePoll: { attempts: 0, intervalMs: 1 } }), /cursor visibility poll/);
   assert.throws(() => createCuaStageDriver({ cursorVisiblePoll: { attempts: 21, intervalMs: 1 } }), /cursor visibility poll/);
