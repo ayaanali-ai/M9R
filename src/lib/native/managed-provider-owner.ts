@@ -602,7 +602,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
             recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok");
             latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: Date.now() - dispatchStart, status: "ok" });
           }
-          emit({ kind: "say", handle: profile.handle, provider: profile.provider, text: event.text, runId });
+          emit({ kind: "say", handle: profile.handle, provider: profile.provider, text: event.text, runId, ...(event.delta ? { delta: true } : {}) });
         } else if (event.kind === "tool") {
           if (!firstVisibleAction) {
             firstVisibleAction = true;

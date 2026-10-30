@@ -880,7 +880,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
         const event: InteractiveProviderEvent = next.value;
         if (event.type === "provider.reply_text" && typeof event.payload.text === "string") {
           answer += event.payload.text;
-          yield { kind: "text", text: event.payload.text };
+          yield { kind: "text", text: event.payload.text, delta: true };
         } else if (event.type === "provider.activity") {
           const name = typeof event.payload.summary === "string"
             ? event.payload.summary
@@ -1079,7 +1079,7 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
         const event = next.value;
         if (event.type === "provider.reply_text" && typeof event.payload.text === "string") {
           answer += event.payload.text;
-          yield { kind: "text", text: event.payload.text };
+          yield { kind: "text", text: event.payload.text, delta: true };
         } else if (event.type === "provider.activity") {
           const name = typeof event.payload.summary === "string" ? event.payload.summary : typeof event.payload.activityKind === "string" ? event.payload.activityKind : "OpenCode activity";
           yield { kind: "tool", name };

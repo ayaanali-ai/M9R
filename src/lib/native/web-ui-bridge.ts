@@ -350,7 +350,7 @@ export interface SessionsPort {
 }
 
 export type SessionEvent =
-  | { kind: "say"; handle: string; provider: string; text: string; /** M9R-owned turn fence; absent for legacy activity. */ runId?: string }
+  | { kind: "say"; handle: string; provider: string; text: string; /** M9R-owned turn fence; absent for legacy activity. */ runId?: string; /** A raw stream chunk that must be appended verbatim. */ delta?: boolean }
   | { kind: "tool"; handle: string; provider: string; name: string; runId?: string }
   | { kind: "result"; handle: string; provider: string; text: string; isError: boolean; runId?: string }
   | { kind: "system"; handle: string; provider: string; text: string; runId?: string }
@@ -392,7 +392,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   const actionEntries = new Map<string, UiThreadEntry>();
   const typedValues = new Map<string, Array<{ value: string; expiresAt: number }>>();
   /** The currently streamed bubble for each agent. A final result replaces this bubble in place. */
-  const liveSay = new Map<string, { entry: UiThreadEntry; lastFragment: string }>();
+  const liveSay = new Map<string, { entry: UiThreadEntry; lastFragment: string; raw?: string }>();
   // The native pill retries only with the same private request id. Keep a
   // bounded short-lived receipt so a lost owner-pipe response cannot inject
   // the same conversational turn twice. This id never enters the UI thread.
@@ -588,9 +588,28 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     if (event.kind !== "state") providers.set(event.handle, event.provider);
     switch (event.kind) {
       case "say": {
+        const runKey = event.runId ? `${event.handle}\0${event.runId}` : event.handle;
+        if (event.delta) {
+          // Raw stream chunks carry their own spacing and may be a single
+          // character ("M", "9", "R") or a mid-word piece ("Tube"). Trimming
+          // or overlap-matching them drops letters, so append them verbatim.
+          if (!event.text) return;
+          const streaming = liveSay.get(runKey);
+          if (streaming) {
+            streaming.raw = (streaming.raw ?? streaming.entry.text) + event.text;
+            streaming.entry.text = redact(streaming.raw.trim()).slice(0, SAY_CHARS);
+            streaming.lastFragment = event.text;
+            changed();
+            return;
+          }
+          if (!event.text.trim()) return;
+          const entry = push({ kind: "say", agent: event.handle, provider: event.provider, to: "you", text: event.text.trim().slice(0, SAY_CHARS) });
+          liveSay.set(runKey, { entry, lastFragment: event.text, raw: event.text });
+          while (liveSay.size > 64) liveSay.delete(liveSay.keys().next().value!);
+          return;
+        }
         const text = event.text.trim();
         if (!text) return;
-        const runKey = event.runId ? `${event.handle}\0${event.runId}` : event.handle;
         const current = liveSay.get(runKey);
         if (current) {
           // One provider turn owns one stable bubble, even when stream chunks
@@ -603,8 +622,11 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
           if (text.startsWith(existing)) merged = text;
           else if (existing.startsWith(text)) return;
           else {
+            // Only a real overlap of several characters is a repeated window;
+            // a one-letter "overlap" is coincidence and used to eat a letter.
             let overlap = Math.min(existing.length, text.length);
-            while (overlap > 1 && !existing.endsWith(text.slice(0, overlap))) overlap -= 1;
+            while (overlap > 0 && !existing.endsWith(text.slice(0, overlap))) overlap -= 1;
+            if (overlap < 4) overlap = 0;
             const tail = text.slice(overlap);
             const left = existing.trimEnd();
             const right = tail.trimStart();

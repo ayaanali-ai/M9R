@@ -235,6 +235,23 @@ test("say events: one entry per assistant message, a duplicate final result is n
   assert.equal(thread[thread.length - 1].text, "line 249");
 });
 
+test("raw stream chunks are appended verbatim: no dropped first letters, no lost single-character tokens", () => {
+  const { ui } = bridgeWith();
+  const chunks = ["I", "'ll", " open", " Chrome", ",", " find", " Strawberry", " Park", "'s", " latest", " You", "Tube", " video", ".", " M", "9", "R", " is", " blocked", " (\"", "overlay", "-not", "-visible", "\")."];
+  for (const text of chunks) ui.onSessionEvent({ kind: "say", handle: "codex", provider: "codex", text, runId: "r1", delta: true });
+  const says = ui.snapshot().thread.filter((entry) => entry.kind === "say" && entry.agent === "codex");
+  assert.equal(says.length, 1);
+  assert.equal(says[0].text, "I'll open Chrome, find Strawberry Park's latest YouTube video. M9R is blocked (\"overlay-not-visible\").");
+});
+
+test("whole-message say events never lose a letter to a one-character coincidental overlap", () => {
+  const { ui } = bridgeWith();
+  ui.onSessionEvent({ kind: "say", handle: "claude", provider: "claude-code", text: "I checked the video", runId: "r2" });
+  ui.onSessionEvent({ kind: "say", handle: "claude", provider: "claude-code", text: "opened it", runId: "r2" });
+  const says = ui.snapshot().thread.filter((entry) => entry.kind === "say" && entry.agent === "claude");
+  assert.equal(says[0].text, "I checked the video opened it");
+});
+
 test("a canonical final result replaces the streamed bubble instead of appending a second bubble", () => {
   const { ui } = bridgeWith();
   ui.onSessionEvent({ kind: "state", handle: "claude", status: "working", doing: "Working" });
