@@ -28,6 +28,13 @@ function Read-RuntimeIdentity([string]$Path, [string]$Label) {
     return $identity
 }
 
+function Get-Sha256([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+    finally { $stream.Dispose(); $algorithm.Dispose() }
+}
+
 function Assert-RuntimeIdentityMatches($Candidate, $Accepted, [string]$Label) {
     if (-not [string]::Equals([string]$Candidate.buildId, [string]$Accepted.buildId, [StringComparison]::OrdinalIgnoreCase)) {
         throw "$Label build ID differs from the owner-accepted runtime. Promote a reviewed runtime identity before packaging it."
@@ -53,7 +60,7 @@ function Assert-RuntimeArtifactFiles($Identity, [string]$ArtifactRoot, [string]$
         $path = [IO.Path]::GetFullPath((Join-Path $ArtifactRoot ($relative.Replace('/', [IO.Path]::DirectorySeparatorChar))))
         if (-not $path.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { throw "$Label artifact escapes its root: $relative" }
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "$Label is missing accepted runtime artifact: $relative" }
-        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        $actual = Get-Sha256 $path
         if (-not [string]::Equals($actual, [string]$entry.Value, [StringComparison]::OrdinalIgnoreCase)) {
             throw "$Label artifact hash differs from the accepted runtime at $relative."
         }
@@ -134,7 +141,7 @@ This package does not request administrator privileges. Setup changes are record
     if (Test-Path -LiteralPath $zip) { throw "Refusing to overwrite existing release asset: $zip" }
     if (Test-Path -LiteralPath $checksum) { throw "Refusing to overwrite existing checksum: $checksum" }
     [IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
-    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = Get-Sha256 $zip
     "$hash  m9r-engine-windows-x64.zip" | Set-Content -LiteralPath $checksum -Encoding ASCII
     Write-Output "Created $zip"
     Write-Output "Created $checksum"

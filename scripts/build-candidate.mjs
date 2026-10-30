@@ -2,27 +2,48 @@
 // engine/dist, the accepted runtime policy, or the installed ~/.m9r/bin.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { verifyRuntimeBuildManifest } from "./engine-build-transaction.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const engineDir = join(root, "engine");
-const commitResult = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
-if (commitResult.error || commitResult.status !== 0) {
-  throw new Error("Cannot identify the source commit; refusing to build an unlabeled candidate.", { cause: commitResult.error });
+const candidatesRoot = resolve(engineDir, "candidates");
+const resumeIndex = process.argv.indexOf("--resume");
+const resumePath = resumeIndex >= 0 ? process.argv[resumeIndex + 1] : undefined;
+if (resumeIndex >= 0 && !resumePath) throw new Error("Usage: npm run build:candidate -- --resume <candidate-directory>");
+let candidateRoot;
+let candidateId;
+let sourceCommit;
+if (resumePath) {
+  candidateRoot = resolve(resumePath);
+  if (!candidateRoot.toLowerCase().startsWith(`${candidatesRoot}${sep}`.toLowerCase())) {
+    throw new Error(`Resume path must be inside ${candidatesRoot}; refusing to read or write elsewhere.`);
+  }
+  candidateId = basename(candidateRoot);
+  const priorManifest = verifyRuntimeBuildManifest(join(candidateRoot, "runtime"), { exact: true });
+  sourceCommit = priorManifest.source?.sourceCommit;
+  if (!/^[a-f0-9]{40}$/i.test(sourceCommit ?? "") || !candidateId.endsWith(sourceCommit.slice(0, 8))) {
+    throw new Error("Candidate source identity is missing or does not match its directory name.");
+  }
+  if (existsSync(join(candidateRoot, "candidate.json"))) throw new Error(`Candidate already has a completion receipt: ${candidateRoot}`);
+} else {
+  const commitResult = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
+  if (commitResult.error || commitResult.status !== 0) {
+    throw new Error("Cannot identify the source commit; refusing to build an unlabeled candidate.", { cause: commitResult.error });
+  }
+  sourceCommit = String(commitResult.stdout).trim();
+  if (!/^[a-f0-9]{40}$/i.test(sourceCommit)) throw new Error("Git returned an invalid source commit.");
+  const timestamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
+  candidateId = `${timestamp}-${sourceCommit.slice(0, 8)}`;
+  candidateRoot = join(candidatesRoot, candidateId);
+  if (existsSync(candidateRoot)) throw new Error(`Candidate path already exists; refusing to overwrite it: ${candidateRoot}`);
 }
-const sourceCommit = String(commitResult.stdout).trim();
-if (!/^[a-f0-9]{40}$/i.test(sourceCommit)) throw new Error("Git returned an invalid source commit.");
 
-const timestamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
-const candidateId = `${timestamp}-${sourceCommit.slice(0, 8)}`;
-const candidateRoot = join(engineDir, "candidates", candidateId);
 const cliOutput = join(candidateRoot, "cli-dist");
 const runtimeOutput = join(candidateRoot, "runtime");
 const packageOutput = join(candidateRoot, "package");
-if (existsSync(candidateRoot)) throw new Error(`Candidate path already exists; refusing to overwrite it: ${candidateRoot}`);
 
 function runNodeScript(script, env) {
   const result = spawnSync(process.execPath, [join(root, "scripts", script)], {
@@ -36,11 +57,13 @@ function runNodeScript(script, env) {
   }
 }
 
-runNodeScript("build-cli.mjs", { M9R_CLI_OUTPUT_DIR: cliOutput });
-runNodeScript("build-engine.mjs", {
-  M9R_CLI_OUTPUT_DIR: cliOutput,
-  M9R_ENGINE_OUTPUT_DIR: runtimeOutput,
-});
+if (!resumePath) {
+  runNodeScript("build-cli.mjs", { M9R_CLI_OUTPUT_DIR: cliOutput });
+  runNodeScript("build-engine.mjs", {
+    M9R_CLI_OUTPUT_DIR: cliOutput,
+    M9R_ENGINE_OUTPUT_DIR: runtimeOutput,
+  });
+}
 
 const runtimeIdentity = verifyRuntimeBuildManifest(runtimeOutput, { exact: true });
 const acceptedPath = join(root, "release-assets", "accepted-runtime.json");

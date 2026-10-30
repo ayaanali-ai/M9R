@@ -8,6 +8,8 @@ From the repository root, run `npm run build:candidate` on Windows. The command 
 
 The candidate builder reads the accepted pill at `release-assets/accepted-ui/m9r-overlay.exe` and verifies it against `release-assets/accepted-runtime.json`. It does not publish into `cli/dist` or `engine/dist`, update the accepted runtime policy, or write to the installed `%USERPROFILE%\.m9r\bin`.
 
+If packaging fails after the runtime has been built, resume packaging that exact verified runtime with `npm run build:candidate -- --resume .\engine\candidates\<candidate-id>`. Resume refuses paths outside `engine/candidates/`, rechecks the full runtime manifest, and will not overwrite a completed candidate.
+
 ## Review and promote
 
 Review `candidate.json` and `runtime/m9r-build-info.json`. The source commit identifies the code; the runtime build ID identifies the exact packaged files; the package SHA-256 identifies the installer archive. The candidate must retain the currently accepted pill hash unless a pill change is deliberately reviewed and promoted.
