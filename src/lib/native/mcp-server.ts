@@ -513,6 +513,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     const pending = deps.store.tasksForSession(identity.handle, identity.sessionId)
       .filter((task) => taskIsFreshForIdentity(identity, task)
         && !task.resultSummary
+        // Stop is terminal for the current task, but it must not poison the
+        // provider session's next task. Exclude canceled receipts here so an
+        // omitted taskId resolves to the fresh follow-up instead of sending
+        // its desktop call back through the canceled-task guard.
+        && task.receipt?.state !== "canceled"
         && task.approval !== "denied"
         && task.approval !== "expired"
         && task.delivery?.state !== "failed"
@@ -539,6 +544,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       .filter((task) => taskIsFreshForIdentity(identity, task)
         && (task.approval === "approved" || task.approval === "not_needed")
         && !task.resultSummary
+        && task.receipt?.state !== "canceled"
         && task.deliveredAt
         && (inRoom(identity) || (task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId) === identity.sessionId));
     if (candidates.length === 0) throw new Error("No single open M9R work item is currently delivered to this session.");
