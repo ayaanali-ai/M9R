@@ -2,6 +2,8 @@
 
 Status: working contract for the provider-neutral desktop runtime.
 
+Selected architecture: **single-install atomic release system**. M9R uses one user-facing installation, one active canonical runtime, temporary transaction staging, and an internal recovery checkpoint that is never part of normal startup. MSIX/App Installer remains a future packaging option after code signing is available.
+
 This document records the operating model that keeps M9R easy to maintain without reducing capabilities, action coverage, provider support, or runtime efficiency.
 
 ## 1. Product boundary
