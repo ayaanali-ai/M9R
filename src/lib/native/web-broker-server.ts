@@ -163,7 +163,7 @@ function readBody(req: IncomingMessage): Promise<string | null> {
 
 export interface WebBrokerServerOptions {
   /** Owner-hosted, task-authorized desktop preparation; absent means desktop access is unavailable. */
-  taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview", operationId?: string, expectedMutationRevision?: number): Promise<unknown>;
+  taskStages?: { prepare(token: string, taskId: string, mode?: "background" | "owner-preview", options?: { bindForeground?: boolean }): Promise<unknown>; act?(token: string, taskId: string, action: unknown, mode?: "background" | "owner-preview", operationId?: string, expectedMutationRevision?: number): Promise<unknown>;
     launch?(token: string, taskId: string, appId: string, mode?: "background" | "owner-preview", operationId?: string): Promise<unknown>; closeApp?(token: string, taskId: string, mode?: "background" | "owner-preview"): Promise<unknown>;
     primeCursor?(token: string, taskId: string): Promise<unknown>;
     primeCursorForOwner?(taskId: string): Promise<unknown> };
@@ -644,20 +644,21 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
           || !options.taskStages?.primeCursorForOwner) return { status: 503, body: { ok: false, error: "Task cursor presentation is unavailable on this broker." } };
         return { status: 200, body: { ok: true, result: await options.taskStages.primeCursorForOwner(value.taskId) } };
       }
-      const extraFields = path.endsWith("/launch") ? ["appId", "operationId"] : path.endsWith("/action") ? ["action", "operationId", "expectedMutationRevision"] : [];
+      const extraFields = path.endsWith("/launch") ? ["appId", "operationId"] : path.endsWith("/action") ? ["action", "operationId", "expectedMutationRevision"] : path.endsWith("/prepare") ? ["bindForeground"] : [];
       const fields = path.endsWith("/prime-cursor") ? ["token", "taskId"] : ["token", "taskId", "mode", ...extraFields];
       if (!agentStagePaths.has(path) || Object.keys(value).some((key) => !fields.includes(key))
         || typeof value.token !== "string" || value.token.length > 128
         || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
         || (path !== "/web/stage/prime-cursor" && value.mode !== undefined && value.mode !== "background" && value.mode !== "owner-preview")) throw new Error("Invalid stage request.");
       const mode = value.mode as "background" | "owner-preview" | undefined;
+      if (path.endsWith("/prepare") && value.bindForeground !== undefined && typeof value.bindForeground !== "boolean") throw new Error("Invalid stage request.");
       const unavailable = () => ({ status: 503, body: { ok: false, error: "Task stage operations are unavailable on this broker." } });
       if (!options.taskStages) return unavailable();
       if (path.endsWith("/prime-cursor")) {
         if (!options.taskStages.primeCursor) return unavailable();
         return { status: 200, body: { ok: true, result: await options.taskStages.primeCursor(value.token, value.taskId) } };
       }
-      if (path.endsWith("/prepare")) return { status: 200, body: { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, mode) } };
+      if (path.endsWith("/prepare")) return { status: 200, body: { ok: true, stage: await options.taskStages.prepare(value.token, value.taskId, mode, { bindForeground: value.bindForeground === true }) } };
       if (value.operationId !== undefined && (typeof value.operationId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.operationId))) throw new Error("Invalid stage request.");
       if (value.expectedMutationRevision !== undefined
         && (typeof value.expectedMutationRevision !== "number" || !Number.isSafeInteger(value.expectedMutationRevision) || value.expectedMutationRevision < 0)) {

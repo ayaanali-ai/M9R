@@ -53,6 +53,22 @@ test("explicit foreground input refuses before dispatch when pointer preservatio
   await driver.shutdown();
 }));
 
+test("foreground input waits through a brief owner pointer interaction and rechecks the exact window", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const positions = [{ x: 10, y: 10 }, { x: 30, y: 30 }, { x: 30, y: 30 }, { x: 30, y: 30 }];
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ calls }) as never,
+    ownerPointer: { get: async () => positions.shift() ?? { x: 30, y: 30 }, restore: async () => undefined },
+  });
+  const result = await driver.click("stage", 42, 24, undefined, { confirmFocusForeground: true });
+  assert.equal(result.outcome.foregroundConfirmed, true);
+  assert.ok(calls.some((call) => call.method === "getWindowState"), "the selected window is re-observed after owner activity");
+  assert.ok(calls.some((call) => call.method === "click"), "input resumes after the owner becomes idle");
+  await driver.shutdown();
+}));
+
 function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   let connected: Awaited<ReturnType<NonNullable<CuaStageDriverDependencies["connectRuntime"]>>>;
   return createCuaStageDriverCore({
@@ -305,10 +321,14 @@ function makeSdk(options: {
       options.calls.push({ method: "listWindows", value: input });
       return { windows: options.windows ?? [] };
     },
-    async click(input: unknown) { options.calls.push({ method: "click", value: input }); return actionResult; },
+    async click(input: unknown) {
+      options.calls.push({ method: "click", value: input });
+      if (options.callToolResult) options.calls.push({ method: "callTool", value: { name: "click", args: { delivery_mode: "background" } } });
+      return (options.callToolResult ?? actionResult) as never;
+    },
     async pressKey(input: unknown) { options.calls.push({ method: "pressKey", value: input }); return toolResult; },
     async hotkey(input: unknown) { options.calls.push({ method: "hotkey", value: input }); return toolResult; },
-    async typeText(input: unknown) { options.calls.push({ method: "typeText", value: input }); if (options.typeTextError) throw options.typeTextError; return toolResult; },
+    async typeText(input: unknown) { options.calls.push({ method: "typeText", value: input }); if (options.typeTextError) throw options.typeTextError; return (options.callToolResult ?? toolResult) as never; },
     async scroll(input: unknown) { options.calls.push({ method: "scroll", value: input }); return toolResult; },
     async drag(input: unknown) { options.calls.push({ method: "drag", value: input }); return toolResult; },
     async endSession(input: unknown) { options.calls.push({ method: "endSession", value: input }); },

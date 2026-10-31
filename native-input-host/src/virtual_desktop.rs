@@ -272,6 +272,11 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         #[cfg(windows)]
+        Some("currentForegroundWindow") => match platform::current_foreground_window() {
+            Ok(window) => json!({"ok":true,"requestId":request_id,"foregroundWindow":window}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
         Some("setWindowState") => match platform::set_window_state(value) {
             Ok(state) => json!({"ok":true,"requestId":request_id,"state":state}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
@@ -726,6 +731,34 @@ mod platform {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         Err("Windows did not confirm the selected application as the foreground window")
+    }
+
+    /// Reads the actual foreground HWND without activating or moving anything.
+    /// This is the binding primitive for vague requests such as "look at my
+    /// screen" or "I'm on Chrome"; the caller may then attach this exact
+    /// window to an owner-preview stage before observing it.
+    pub(super) fn current_foreground_window() -> Result<serde_json::Value, &'static str> {
+        let window = unsafe { GetForegroundWindow() };
+        if window.is_null() { return Err("Windows returned no foreground window"); }
+        let mut pid = 0;
+        if unsafe { GetWindowThreadProcessId(window, &mut pid) } == 0 || pid == 0 {
+            return Err("Windows returned no foreground process identity");
+        }
+        let info = super::inspect_window(pid, window as usize)?;
+        let mut title = [0u16; 512];
+        let title_len = unsafe { GetWindowTextW(window, title.as_mut_ptr(), title.len() as i32) }.max(0) as usize;
+        let mut class_name = [0u16; 256];
+        let class_len = unsafe { GetClassNameW(window, class_name.as_mut_ptr(), class_name.len() as i32) }.max(0) as usize;
+        Ok(serde_json::json!({
+            "pid": pid,
+            "windowId": (window as usize).to_string(),
+            "desktopId": info.desktop_id,
+            "onCurrentDesktop": info.on_current_desktop,
+            "title": String::from_utf16_lossy(&title[..title_len.min(title.len())]),
+            "className": String::from_utf16_lossy(&class_name[..class_len.min(class_name.len())]),
+            "visible": unsafe { IsWindowVisible(window) != 0 },
+            "minimized": unsafe { IsIconic(window) != 0 },
+        }))
     }
 
     pub(super) fn window_at_point(value: &serde_json::Value) -> Result<(u32, usize, bool, bool, i32, i32), &'static str> {

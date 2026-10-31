@@ -1128,26 +1128,31 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   function stop(handle: string, options: { cancelTask?: boolean } = {}): boolean {
     const slot = slots.get(handle);
     if (!slot) return false;
-    // Stop is a task-wide cancellation fence, not a provider-failure report.
-    // Cancel every task association before tearing down the transport so a
-    // late provider event cannot complete it or be replayed into a new turn.
+    // A user-visible stop pauses the current turn and fences late provider
+    // events; it does not destroy the conversation or mark the work canceled.
+    // An explicit cancelTask:true remains available for destructive shutdowns.
     const taskId = slot.activeTaskId ?? slot.ownerTaskId ?? slot.pendingOwnerTaskId;
     if (taskId) {
-      if (options.cancelTask !== false && deps.store.cancelTask) deps.store.cancelTask(taskId, "Task canceled by the owner.");
-      else if (options.cancelTask !== false && slot.ownerTaskId) {
+      if (options.cancelTask === true && deps.store.cancelTask) deps.store.cancelTask(taskId, "Task canceled by the owner.");
+      else if (options.cancelTask !== true) deps.store.pauseTask?.(taskId);
+      else if (options.cancelTask === true && slot.ownerTaskId) {
         // Compatibility fallback for older injected stores. Production uses
         // the durable cancellation operation above; it must never report a
         // deliberate stop as a provider failure.
         finalizeFailedTask(slot, "The owner stopped this provider session before the task completed.");
       }
       if (slot.ownerTaskId || slot.pendingOwnerTaskId) {
-        settleOwnerDelivery(slot, { ok: false, error: "The task was canceled by the owner before the provider turn completed." });
+        settleOwnerDelivery(slot, options.cancelTask === true
+          ? { ok: false, error: "The task was canceled by the owner before the provider turn completed." }
+          : { ok: false, error: "The provider turn was paused by the owner; a new message can redirect it." });
       }
     } else if (slot.ownerDeliveryWaiter) {
       // A provider claim can fail before its task association is installed;
       // stop-all/close must still release the acceptance waiter rather than
       // leaving a promise that can never settle.
-      settleOwnerDelivery(slot, { ok: false, error: "The provider turn was stopped before M9R could bind its task." });
+      settleOwnerDelivery(slot, { ok: false, error: options.cancelTask === true
+        ? "The provider turn was stopped before M9R could bind its task."
+        : "The provider turn was paused before M9R could bind its task." });
     }
     slot.pendingOwnerTaskId = undefined;
     slot.pendingOwnerText = undefined;

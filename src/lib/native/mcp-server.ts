@@ -35,6 +35,7 @@ import { pushCloudNote } from "./cloud-memory";
 import { gitRead, readGovernedFile } from "../bridge/governed-agent-tools";
 import { prepareTaskStageNotice } from "./task-stage-notice";
 import { registerComputerUseTools } from "./computer-use-mcp";
+import { createWorkflowPreferenceLedger } from "./workflow-preferences";
 
 export interface McpServerDeps {
   store: LocalStore;
@@ -161,6 +162,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const server = new ProviderContextMcpServer(providerCallContext, { name: "m9r-mcp", version: runtimeServerVersion() });
   const operationNamespace = randomUUID();
   const pageNotes = deps.pageNotes ?? createPageNotesStore(deps.store.root);
+  const workflowPreferences = createWorkflowPreferenceLedger(deps.store.root, deps.now ?? (() => new Date()));
   // Whether this process was ever told anything connection-mode-shaped at startup. This stays a
   // static fact about how the process was launched (its env/deps genuinely never changes after
   // that) -- what changed is that it no longer freezes the *schema* or skips a fresh resolution
@@ -563,6 +565,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     now: deps.now,
     monotonicNow: deps.monotonicNow,
     authField: AUTH_FIELD,
+    workflowPreferences,
   });
 
   function workingDirectory(identity: VerifiedIdentity): string {

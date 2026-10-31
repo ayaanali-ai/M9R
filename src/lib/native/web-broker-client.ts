@@ -32,7 +32,7 @@ export interface WebBrokerClient {
   recordAgentTaskResult?(token: string, taskId: string, summary: string): Promise<{ ok: boolean; error?: string }>;
   taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
   taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string, expectedMutationRevision?: number): Promise<StageClientResult>;
-  prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
+  prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number, options?: { bindForeground?: boolean }): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
   /** Best-effort delivery-time cursor prime; never blocks the task transport. */
   primeAgentCursor?(token: string, taskId: string): Promise<StageClientResult>;
   run(request: WebRequest): Promise<WebResponse>;
@@ -179,9 +179,9 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
           ...(expectedMutationRevision === undefined ? {} : { expectedMutationRevision }) },
         timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
-    async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000) {
+    async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000, prepareOptions) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/prepare`,
-        body: { token, taskId, mode }, timeoutMs });
+        body: { token, taskId, mode, ...(prepareOptions?.bindForeground ? { bindForeground: true } : {}) }, timeoutMs });
     },
     async primeAgentCursor(token, taskId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,

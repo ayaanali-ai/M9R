@@ -122,6 +122,14 @@ const navigationUrl = z.string().max(4096).url().refine((value) => {
   return protocol === "http:" || protocol === "https:";
 }, "Navigation only accepts HTTP or HTTPS URLs.");
 
+/** Durable user boundary carried with an action; it is provider-neutral and
+ * enforced before any native input is dispatched. */
+export const computerUseIntentSchema = z.object({
+  mode: z.enum(["explain", "prepare", "advance", "submit"]),
+  allowAdvance: z.boolean(),
+  allowSubmit: z.boolean(),
+}).strict();
+
 export const computerUsePostconditionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("url-equals"), url: navigationUrl }).strict(),
   z.object({ kind: z.literal("visible-text-contains"), text: textValue }).strict(),
@@ -143,6 +151,8 @@ const actionEnvelope = {
   targetRevision: observationRevision,
   /** Optional generic postcondition. Only a fresh observable match can produce a verified result. */
   postcondition: computerUsePostconditionSchema.optional(),
+  /** Optional durable intent boundary from m9r_computer_intent. */
+  intent: computerUseIntentSchema.optional(),
 };
 
 export const computerUseActionSchema = z.discriminatedUnion("kind", [

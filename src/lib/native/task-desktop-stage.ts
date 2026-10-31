@@ -495,7 +495,7 @@ export function createTaskDesktopStageService(input: {
     return { identity, task, name, mode };
   }
 
-  async function prepare(token: string, taskId: string, requestedMode?: TaskStageMode) {
+  async function prepare(token: string, taskId: string, requestedMode?: TaskStageMode, options: { bindForeground?: boolean } = {}) {
     const mode = stageMode(requestedMode);
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
@@ -510,6 +510,26 @@ export function createTaskDesktopStageService(input: {
         else await manager.create(name);
         assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
       } else {
+        if (options.bindForeground) {
+          if (typeof manager.currentForegroundWindow !== "function") throw new Error("The native stage helper cannot bind the current foreground window.");
+          const foreground = await manager.currentForegroundWindow();
+          // Never bind M9R's own overlay or a hidden/minimized window. This
+          // keeps "look at my screen" from targeting the control surface that
+          // is issuing the request.
+          if (!foreground.visible || foreground.minimized || !foreground.onCurrentDesktop) {
+            throw new Error("The current foreground window is not visible on the owner's desktop.");
+          }
+          if (/\bm9r\b|m9r[-_ ]?(?:overlay|pill|broker)/i.test(`${foreground.title} ${foreground.className}`)) {
+            throw new Error("The current foreground window is M9R's own overlay; focus the app you want the agent to inspect.");
+          }
+          await manager.adoptCurrentDesktop(name);
+          const attached = await manager.attachWindow(name, String(foreground.pid), foreground.windowId);
+          assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
+          ownedApps.set(name, { taskId, appId: "", pid: foreground.pid, windowId: foreground.windowId, ownsProcess: false });
+          if (!attached.window || attached.window.pid !== foreground.pid || attached.window.windowId !== foreground.windowId) {
+            throw new Error("Windows did not confirm the current foreground window binding.");
+          }
+        } else {
         // Owner preview is desktop-wide, follows the desktop the user is
         // viewing now, and detaches only stale registry HWND metadata. It never
         // creates, activates, moves, or closes a desktop or user window.
@@ -537,6 +557,7 @@ export function createTaskDesktopStageService(input: {
         // (refuse without spawning). Clearing it here destroys that evidence,
         // including for a fresh broker that must recover from disk.
         assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
+        }
       }
       // Publish the agent's labeled overlay before launch or the first input
       // action. The native cursor is visual-only here: it does not focus a
@@ -568,7 +589,11 @@ export function createTaskDesktopStageService(input: {
       const endedMs = Date.now();
       recordStageTiming(taskId, { phase: "stop", startedAt: new Date(startedMs).toISOString(), endedAt: new Date(endedMs).toISOString(),
         durationMs: endedMs - startedMs, status: "ok" });
-      return { stopped: active?.taskId === taskId, cancellationRequested: true };
+      // Stop is an interruption boundary, not a destructive cancellation. The
+      // receipt stays paused so late input from this turn is fenced, while a
+      // subsequent owner message can create a fresh redirect task.
+      input.store.pauseTask(taskId);
+      return { stopped: active?.taskId === taskId, paused: true, cancellationRequested: false };
     }
     let recoveryNotice: string | undefined;
     const run = async () => {

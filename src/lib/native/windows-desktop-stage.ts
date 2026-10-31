@@ -61,7 +61,7 @@ interface NativeStageResponse {
   windows?: { pid: number; windowId: string; title: string; width: number; height: number }[];
   position?: { x: number; y: number };
   windowState?: "closed" | "moved" | "minimized" | "occluded" | "hidden" | "visible";
-  foregroundWindow?: { pid: number; windowId: string };
+  foregroundWindow?: { pid: number; windowId: string; desktopId?: string; onCurrentDesktop?: boolean; title?: string; className?: string; visible?: boolean; minimized?: boolean };
   result?: unknown;
   state?: "minimized" | "maximized" | "restored";
 }
@@ -852,6 +852,22 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return current;
   }
 
+  async function currentForegroundWindow(): Promise<{ pid: number; windowId: string; desktopId: string; onCurrentDesktop: boolean; title: string; className: string; visible: boolean; minimized: boolean }> {
+    assertWindows(); assertOwner();
+    const result = await invokeNative({ op: "currentForegroundWindow" });
+    const current = result.foregroundWindow;
+    if (!result.ok || !current || !Number.isSafeInteger(current.pid) || current.pid < 1
+      || typeof current.windowId !== "string" || !WINDOW_ID_RE.test(current.windowId) || !/[^0]/.test(current.windowId.replace(/^0[xX]/, ""))
+      || typeof current.desktopId !== "string" || !DESKTOP_ID_RE.test(current.desktopId)
+      || typeof current.onCurrentDesktop !== "boolean" || typeof current.title !== "string" || current.title.length > 512
+      || typeof current.className !== "string" || current.className.length > 256
+      || typeof current.visible !== "boolean" || typeof current.minimized !== "boolean") {
+      throw new Error(result.error ?? "Windows returned an invalid foreground-window identity.");
+    }
+    return { pid: current.pid, windowId: current.windowId, desktopId: current.desktopId.toLowerCase(), onCurrentDesktop: current.onCurrentDesktop,
+      title: current.title, className: current.className, visible: current.visible, minimized: current.minimized };
+  }
+
   async function systemControl(request: WindowsSystemControlRequest): Promise<Record<string, unknown>> {
     assertWindows(); assertOwner();
     if (!request || !["display_brightness", "output_audio", "media", "microphone"].includes(request.control)
@@ -945,7 +961,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, systemControl, setWindowState, ownedPopups };
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups };
 }
 
 function parsePid(value: string): number {

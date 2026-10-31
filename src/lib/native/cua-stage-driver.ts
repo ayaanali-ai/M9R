@@ -44,7 +44,7 @@ type CuaSdk = {
   CaptureScope: { Desktop: number };
   ClickButton: { Left: number; Right: number; Middle: number };
   ScrollDirection: { Up: number; Down: number };
-  ScrollBy: { Line: number };
+  ScrollBy: { Line: number; Page?: number };
   VisualRegionKind: { Text: number; Icon: number };
   CursorReducedMotion: { Auto: number };
   /** Optional presentation features; their absence must never block stage boot. */
@@ -445,10 +445,10 @@ async function typeIntoExactField(driver: CuaDriverLike, selected: DesktopInputT
   // UIA ValuePattern has no caret/selection range in this driver contract.
   // Background insertion therefore appends to the freshly read value; never
   // replace existing content or invent an empty value when it is unavailable.
-  if (typeof element.value !== "string") throw new DesktopInputNotDispatchedError("The selected field's current value is unavailable; no insertion was sent.");
+  const nextValue = typeof element.value === "string" ? element.value + text : text;
   return actionOutcome(await driver.callTool("set_value", JSON.stringify({
     pid: selected.pid, window_id: Number(selected.windowId), element_token: element.elementToken,
-    value: element.value + text, session,
+    value: nextValue, session,
   }), signal ? { signal } : undefined), "Cua Driver could not type into the exact accessibility field.");
 }
 
@@ -545,10 +545,10 @@ function agentCursorDetails(identity: CuaAgentCursorIdentity): AgentCursorSessio
     key: `${handle}\0${identity.sessionId}`,
     handle,
     sessionId: identity.sessionId,
-    // Keep the session-specific tag private. Cua displays `session` in the
-    // cursor badge, so it must remain a clean provider label with no session
-    // ID, hash, token, or @-prefixed internal handle.
-    session: publicCursorLabel(handle),
+    // Cua renders the session label on the native cursor. Keep the provider
+    // name recognizable while adding a short stable identity suffix so two
+    // concurrent cursors never collapse into one visible label.
+    session: `@${handle}-${sessionTag}`.slice(0, PUBLIC_CURSOR_LABEL_MAX_LENGTH),
     sessionTag,
   };
 }
@@ -756,7 +756,6 @@ function desktopPointInWindow(screenPoint: { x: number; y: number }, frame: CuaS
 function stageCapture(capture: { dataUrl: string; width: number; height: number; captureId?: string; controls?: CuaStageTargetDescription[]; capturedAt?: string;
   controlsTruncated?: true; ownedPopups?: CuaStageCapture["ownedPopups"]; popupCaptureStatus?: CuaStageCapture["popupCaptureStatus"] }, now: () => Date): CuaStageCapture {
   return { dataUrl: capture.dataUrl, width: capture.width, height: capture.height,
-    ...(capture.captureId ? { captureId: capture.captureId } : {}),
     ...(capture.controls ? { controls: capture.controls } : {}),
     ...(capture.controlsTruncated ? { controlsTruncated: capture.controlsTruncated } : {}),
     ...(capture.ownedPopups ? { ownedPopups: capture.ownedPopups } : {}),
@@ -1153,7 +1152,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     const cacheKey = `${name}\0${details.key}`;
     desktopCaptures.set(cacheKey, { captureId, width, height, stageName: name, identityKey: details.key,
       dataUrl: `data:image/png;base64,${safe.dataBase64}`, capturedAtMs: capturedAt.getTime(), capturedAt: capturedAt.toISOString() });
-    return { dataUrl: `data:image/png;base64,${safe.dataBase64}`, width, height, captureId, capturedAt: capturedAt.toISOString() };
+    return { dataUrl: `data:image/png;base64,${safe.dataBase64}`, width, height, capturedAt: capturedAt.toISOString() };
   }
 
   async function withOwnerDesktop<T>(name: string, identity: CuaAgentCursorIdentity, run: (input: {
@@ -1193,10 +1192,41 @@ function isBackgroundInputRefusal(value: unknown): boolean {
   return /background[_ ](?:delivery|route).*?(?:unavailable|unsupported|refus|not available)|background_unavailable|target window class.*(?:background|input)|(?:background|posted) input.*(?:ignored|dropped)/i.test(message);
 }
 
+function backgroundRefusalMessage(value: unknown): string {
+  const detail = value instanceof Error ? value.message : inputToolText(value as ToolResult);
+  const clean = detail.replace(/[\r\n\t]+/g, " ").trim().slice(0, 300);
+  return `${clean || "Background delivery is not available for the selected window."} No text was sent; M9R will not activate the window as a fallback.`;
+}
+
 /** How long to wait once before deciding the owner is actively using the mouse right now. */
 const OWNER_ACTIVITY_CHECK_MS = 150;
 /** How far the real pointer has to move between two reads to count as the owner, not noise. */
 const OWNER_ACTIVITY_THRESHOLD_PX = 3;
+/** A moving owner gets a short bounded hand-back window, never an unbounded wait. */
+const OWNER_IDLE_DEADLINE_MS = 1_200;
+const OWNER_IDLE_STABLE_SAMPLES = 2;
+
+async function waitForOwnerIdle(
+  ownerPointer: { get(): Promise<{ x: number; y: number }> },
+  previous: { x: number; y: number },
+  signal?: AbortSignal,
+): Promise<{ x: number; y: number }> {
+  const deadline = Date.now() + OWNER_IDLE_DEADLINE_MS;
+  let stableSamples = 0;
+  let last = previous;
+  while (Date.now() < deadline) {
+    signal?.throwIfAborted();
+    await delay(OWNER_ACTIVITY_CHECK_MS);
+    const current = await ownerPointer.get().catch(() => undefined);
+    if (!current) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be re-read after interaction; no foreground input was sent.", "foreground-lease");
+    const moved = Math.abs(current.x - last.x) > OWNER_ACTIVITY_THRESHOLD_PX || Math.abs(current.y - last.y) > OWNER_ACTIVITY_THRESHOLD_PX;
+    last = current;
+    if (moved) { stableSamples = 0; continue; }
+    stableSamples += 1;
+    if (stableSamples >= OWNER_IDLE_STABLE_SAMPLES) return current;
+  }
+  throw new DesktopInputNotDispatchedError("The owner is still using the pointer; the task was paused without sending foreground input. Retry when the owner is idle.", "foreground-lease");
+}
 
 /**
  * Owner-cursor-isolation fix, owner-directed: before any real SendInput, capture the owner's
@@ -1211,7 +1241,8 @@ const OWNER_ACTIVITY_THRESHOLD_PX = 3;
  * Windows stage manager's get/restore, which is in closure scope here via `manager`.
  */
 async function driverInputAction(driver: CuaDriverLike, name: string, args: Record<string, unknown>, fallback: string,
-  options: { preferForeground?: boolean; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview" } = {}) {
+  options: { preferForeground?: boolean; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview";
+    dispatch?: (delivery: "background" | "foreground") => Promise<ActionResult | ToolResult> } = {}) {
   options.signal?.throwIfAborted();
   const asyncOptions = options.signal ? { signal: options.signal } : undefined;
   const ownerPointer = deps.ownerPointer ?? { get: () => manager.getOwnerCursorPosition(), restore: (x: number, y: number) => manager.restoreOwnerCursorPosition(x, y) };
@@ -1224,13 +1255,24 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       || typeof session !== "string" || session.length < 1) {
       throw new DesktopInputNotDispatchedError("The foreground action is missing the exact target window identity; no input was sent.", "target-identity");
     }
+    const targetPid = pid as number;
+    const targetWindowId = windowId as number;
     const saved = await ownerPointer.get().catch(() => undefined);
     if (!saved) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be preserved; no foreground input was sent.", "foreground-lease");
     if (saved) {
       await delay(OWNER_ACTIVITY_CHECK_MS);
       const after = await ownerPointer.get().catch(() => undefined);
       if (after && (Math.abs(after.x - saved.x) > OWNER_ACTIVITY_THRESHOLD_PX || Math.abs(after.y - saved.y) > OWNER_ACTIVITY_THRESHOLD_PX)) {
-        throw new DesktopInputNotDispatchedError("The owner is actively using the pointer; no foreground input was sent.", "foreground-lease");
+        // Do not cancel the provider turn just because the owner briefly
+        // touched the pointer. Wait for a bounded idle gap, then re-read the
+        // exact target before dispatching; a continuously active owner still
+        // fails closed without sending input.
+        await waitForOwnerIdle(ownerPointer, after, options.signal);
+        const refreshed = await driver.getWindowState({ pid: targetPid, windowId: BigInt(targetWindowId), session,
+          includeAccessibilityTree: false, includeScreenshot: false, timeoutMs: 750 }, asyncOptions);
+        if (refreshed && typeof refreshed === "object" && "pid" in refreshed && Number((refreshed as { pid?: unknown }).pid) !== targetPid) {
+          throw new DesktopInputNotDispatchedError("The selected window changed while the owner was interacting; no foreground input was sent.", "foreground-lease");
+        }
       }
     }
     // `delivery_mode: foreground` selects SendInput in the native driver, but
@@ -1244,7 +1286,9 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     let actionError: unknown;
     try {
       options.signal?.throwIfAborted();
-      outcome = actionOutcome(await driver.callTool(name, JSON.stringify({ ...args, delivery_mode: "foreground" }), asyncOptions), fallback);
+      outcome = actionOutcome(await (options.dispatch
+        ? options.dispatch("foreground")
+        : driver.callTool(name, JSON.stringify({ ...args, delivery_mode: "foreground" }), asyncOptions)), fallback);
     } catch (error) {
       actionError = error;
     }
@@ -1275,24 +1319,26 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
   if (options.preferForeground) return runForeground();
   const backgroundArgs = JSON.stringify({ ...args, delivery_mode: "background" });
   try {
-    const background = await timed("background-dispatch", () => driver.callTool(name, backgroundArgs, asyncOptions), {
+    const background = await timed("background-dispatch", () => options.dispatch
+      ? options.dispatch("background")
+      : driver.callTool(name, backgroundArgs, asyncOptions), {
       detail: `action=${name};delivery=background`,
     });
-    if (!isBackgroundInputRefusal(background) && background.isError !== true) {
+    if (!isBackgroundInputRefusal(background) && (background as ToolResult).isError !== true) {
       return actionOutcome(background, fallback);
     }
     if (!isBackgroundInputRefusal(background)) return actionOutcome(background, fallback);
     if (options.deliveryMode === "background") {
-      throw new DesktopInputNotDispatchedError("Background input is unavailable for the selected window; no foreground fallback was attempted and no input was sent.", "background-unavailable");
+      throw new DesktopInputNotDispatchedError(`${backgroundRefusalMessage(background)} Background input is unavailable.`, "background-unavailable");
     }
   } catch (error) {
     if (!isBackgroundInputRefusal(error)) throw error;
     if (options.deliveryMode === "background") {
-      throw new DesktopInputNotDispatchedError("Background input is unavailable for the selected window; no foreground fallback was attempted and no input was sent.", "background-unavailable");
+      throw new DesktopInputNotDispatchedError(`${backgroundRefusalMessage(error)} Background input is unavailable.`, "background-unavailable");
     }
   }
 
-  throw new DesktopInputNotDispatchedError("Background input is unavailable for the selected window. The owner's pointer was not used; foreground input requires an explicit foreground action.", "background-unavailable");
+  throw new DesktopInputNotDispatchedError("background input is unavailable; Background delivery is not available for the selected window. No text was sent; M9R will not activate the window as a fallback. The owner's pointer was not used; foreground input requires an explicit foreground action.", "background-unavailable");
 }
 
   async function deliverTextToExactWindow(input: {
@@ -1306,6 +1352,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     preferForeground?: boolean;
     deliveryMode?: "background" | "owner-preview";
     delayMs?: number;
+    dispatch?: (delivery: "background" | "foreground") => Promise<ActionResult | ToolResult>;
     signal?: AbortSignal;
   }): Promise<CuaStageActionOutcome> {
     const windowId = input.windowId.toString();
@@ -1326,6 +1373,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     }, "Cua Driver could not type into the selected window.", {
       preferForeground: input.preferForeground,
       deliveryMode: input.deliveryMode,
+      dispatch: input.dispatch,
       signal: input.signal,
     });
   }
@@ -2088,13 +2136,26 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         button: options.button === "right" ? "right" : options.button === "middle" ? "middle" : "left",
         count: options.count ?? 1,
         session: session.session,
-      }, "Cua Driver could not click the exact window under the agent cursor.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+      }, "Cua Driver could not click the exact window under the agent cursor.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        dispatch: (delivery) => runtime.driver.click({
+          target: new runtime.sdk.ActionTarget.Window(point.target),
+          position: semanticClick
+            ? new runtime.sdk.ClickPosition.Element!({ elementToken: point.element!.elementToken! })
+            : new runtime.sdk.ClickPosition.Coordinates({ x: point.localPoint.x, y: point.localPoint.y }),
+          deliveryMode: delivery === "foreground" ? runtime.sdk.InputDeliveryMode.Foreground : runtime.sdk.InputDeliveryMode.Background,
+          button: options.button === "right" ? runtime.sdk.ClickButton.Right : options.button === "middle" ? runtime.sdk.ClickButton.Middle : runtime.sdk.ClickButton.Left,
+          count: options.count ?? 1,
+          session: session.session,
+        }, options.signal ? { signal: options.signal } : undefined),
+      });
       // Only a driver-confirmed click can establish where later keyboard input
       // should go. Returning an unverified click is truthful; remembering its
       // HWND would let a follow-up type/hotkey act on an unconfirmed focus.
-      if (outcome.status === "confirmed" && point.element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(point.element.role ?? "")) {
-        // The click remains unverified. Subsequent typing addresses this exact
-        // field explicitly, so it never depends on an unconfirmed focus change.
+      if (point.element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(point.element.role ?? "")) {
+        // A click can be unverified while the accessibility field itself is
+        // still a valid exact target. Remember the field only; typing will
+        // re-inspect its token and never rely on click focus.
         rememberDesktopInputTarget(name, identity, { ...point.target, field: {
           ...point.screenPoint, label: point.element.label, role: point.element.role,
         } });
@@ -2160,7 +2221,14 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         }
         return await deliverTextToExactWindow({ runtime, session: session.session, pid: selected.pid,
           windowId: selected.windowId, selected, text, delayMs, preferForeground: options.confirmFocusForeground,
-          deliveryMode: options.deliveryMode, signal: options.signal });
+          deliveryMode: options.deliveryMode,
+          dispatch: () => runtime.driver.typeText({
+            target: new runtime.sdk.ActionTarget.Window({ pid: selected.pid, windowId: selected.windowId }),
+            text,
+            session: session.session,
+            ...(delayMs !== undefined ? { delayMs } : {}),
+          } as never, options.signal ? { signal: options.signal } : undefined),
+          signal: options.signal });
       } catch (error) {
         forgetDesktopInputTarget(name, identity);
         throw error;
@@ -2182,7 +2250,14 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       const outcome = await driverInputAction(runtime.driver, "scroll", {
         pid: point.target.pid, window_id: Number(point.target.windowId), x: point.localPoint.x, y: point.localPoint.y,
         direction, by: "line", amount: 3, session: session.session,
-      }, "Cua Driver could not scroll the exact window under the agent cursor.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+      }, "Cua Driver could not scroll the exact window under the agent cursor.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        dispatch: () => runtime.driver.scroll({
+          target: new runtime.sdk.ActionTarget.Window(point.target), x: point.localPoint.x, y: point.localPoint.y,
+          direction: direction === "up" ? runtime.sdk.ScrollDirection.Up : runtime.sdk.ScrollDirection.Down,
+          by: runtime.sdk.ScrollBy.Line, amount: BigInt(3), session: session.session,
+        }, options.signal ? { signal: options.signal } : undefined),
+      });
       return outcome;
     });
     invalidateDesktopCaptures();
@@ -2203,7 +2278,15 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       return driverInputAction(runtime.driver, "scroll", {
         pid: point.target.pid, window_id: Number(point.target.windowId), x: point.localPoint.x, y: point.localPoint.y,
         direction: scroll.direction, by: scroll.by, amount: scroll.amount, session: session.session,
-      }, "Cua Driver could not scroll the exact window under the agent cursor.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+      }, "Cua Driver could not scroll the exact window under the agent cursor.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        dispatch: () => runtime.driver.scroll({
+          target: new runtime.sdk.ActionTarget.Window(point.target), x: point.localPoint.x, y: point.localPoint.y,
+          direction: scroll.direction === "up" ? runtime.sdk.ScrollDirection.Up : runtime.sdk.ScrollDirection.Down,
+          by: scroll.by === "page" ? (runtime.sdk.ScrollBy.Page ?? runtime.sdk.ScrollBy.Line) : runtime.sdk.ScrollBy.Line,
+          amount: BigInt(scroll.amount), session: session.session,
+        }, options.signal ? { signal: options.signal } : undefined),
+      });
     });
     invalidateDesktopCaptures();
     return { capture: await captureOwnerDesktop(name, identity, true), outcome };
@@ -2227,7 +2310,14 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         from_x: start.localPoint.x, from_y: start.localPoint.y,
         to_x: end.localPoint.x, to_y: end.localPoint.y,
         duration_ms: options.durationMs ?? 500, steps: 10, session: session.session,
-      }, "Cua Driver could not drag on the owner's current desktop.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+      }, "Cua Driver could not drag on the owner's current desktop.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        dispatch: () => runtime.driver.drag({
+          target: new runtime.sdk.ActionTarget.Window(start.target),
+          fromX: start.localPoint.x, fromY: start.localPoint.y, toX: end.localPoint.x, toY: end.localPoint.y,
+          durationMs: BigInt(options.durationMs ?? 500), steps: BigInt(10), session: session.session,
+        }, options.signal ? { signal: options.signal } : undefined),
+      });
       await inspectOwnerDesktop(name, identity);
       await moveOwnerCursor(runtime, session, end);
       return outcome;
@@ -2243,7 +2333,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       try {
         return driverInputAction(runtime.driver, "press_key", {
           pid: selected.pid, window_id: Number(selected.windowId), key, session: session.session,
-        }, "Cua Driver could not press the requested key in the selected window.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+        }, "Cua Driver could not press the requested key in the selected window.", {
+          preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+          dispatch: () => runtime.driver.pressKey({ key, target: new runtime.sdk.ActionTarget.Window({ pid: selected.pid, windowId: selected.windowId }), session: session.session }, options.signal ? { signal: options.signal } : undefined),
+        });
       } catch (error) {
         forgetDesktopInputTarget(name, identity);
         throw error;
@@ -2260,7 +2353,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       try {
         return driverInputAction(runtime.driver, "hotkey", {
           pid: selected.pid, window_id: Number(selected.windowId), keys, session: session.session,
-        }, "Cua Driver could not send the key combination to the selected window.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+        }, "Cua Driver could not send the key combination to the selected window.", {
+          preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+          dispatch: () => runtime.driver.hotkey({ keys, target: new runtime.sdk.ActionTarget.Window({ pid: selected.pid, windowId: selected.windowId }), session: session.session }, options.signal ? { signal: options.signal } : undefined),
+        });
       } catch (error) {
         forgetDesktopInputTarget(name, identity);
         throw error;
@@ -2270,10 +2366,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     return { capture: await captureOwnerDesktop(name, identity, true), outcome };
   }
 
-  async function listWindowOptions(ownedPid?: number, onScreenOnly = ownedPid === undefined): Promise<CuaStageWindowOption[]> {
+  async function listWindowOptions(ownedPid?: number, onScreenOnly = ownedPid === undefined, sessionName?: string): Promise<CuaStageWindowOption[]> {
     if (ownedPid !== undefined && (!Number.isSafeInteger(ownedPid) || ownedPid < 1)) throw new Error("Invalid owned application process.");
     try {
-      return await listWindowOptionsOnce(ownedPid, onScreenOnly);
+      return await listWindowOptionsOnce(ownedPid, onScreenOnly, sessionName);
     } catch (error) {
       // This is the window-enumeration call launch()'s up-to-60-attempt polling
       // loop depends on. Before this fix, a connection that died mid-session kept
@@ -2283,20 +2379,25 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       // connection failure, never on an unrelated one.
       if (!isConnectionError(error)) throw error;
       await resetDeadRuntime();
-      return listWindowOptionsOnce(ownedPid, onScreenOnly);
+      return listWindowOptionsOnce(ownedPid, onScreenOnly, sessionName);
     }
   }
 
-  async function listWindowOptionsOnce(ownedPid: number | undefined, onScreenOnly: boolean): Promise<CuaStageWindowOption[]> {
+  async function listWindowOptionsOnce(ownedPid: number | undefined, onScreenOnly: boolean, sessionName?: string): Promise<CuaStageWindowOption[]> {
     const runtime = await agentRuntime();
     const { driver } = runtime;
-    // Window enumeration is read-only and uses the already-connected driver
+    // Window enumeration is read-only. A named stage gets a short explicit
+    // Cua session so the native host can apply the same lifecycle guard as
+    // other stage reads; global launch polling intentionally stays sessionless.
     // transport. Starting and ending a named session for every launch poll
     // repeatedly cold-started Cua and made ordinary app discovery needlessly
     // slow. Agent cursor sessions remain explicit and persistent in
     // ensureAgentSession; this path must not create a throwaway one.
-    const result = await driver.listWindows({ onScreenOnly });
-    return result.windows
+    const session = sessionName ? safeSessionName(sessionName) : undefined;
+    if (session) await driver.startSession({ session });
+    try {
+      const result = await driver.listWindows({ onScreenOnly });
+      return result.windows
       .filter((window) => Number.isSafeInteger(window.pid) && (window.pid ?? 0) > 0 && window.pid !== process.pid
         && typeof window.windowId === "bigint" && window.windowId > BigInt(0)
         && (ownedPid === undefined ? (!onScreenOnly || window.isOnScreen === true) : window.pid === ownedPid)
@@ -2315,6 +2416,9 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         width: Math.trunc(window.bounds.width),
         height: Math.trunc(window.bounds.height),
       }));
+    } finally {
+      if (session) await driver.endSession({ session }).catch(() => undefined);
+    }
   }
 
   async function listVisibleWindows(options: { onScreenOnly?: boolean } = {}): Promise<CuaStageWindowOption[]> {
@@ -2330,7 +2434,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     if (ownedPid !== undefined && (!Number.isSafeInteger(ownedPid) || ownedPid < 1)) throw new Error("Invalid owned application process.");
     // Inspecting the stage enforces the same interactive-owner and agent-context guard as stage changes.
     await manager.inspectStage(name);
-    return listWindowOptions(ownedPid);
+    return listWindowOptions(ownedPid, true, name);
   }
 
   async function click(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}): Promise<CuaStageActionProof> {
@@ -2352,9 +2456,20 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         ...(options.button ? { button: options.button === "right" ? "right" : options.button === "middle" ? "middle" : "left" } : {}),
         ...(options.count ? { count: options.count } : {}),
         session,
-      }, "Cua Driver could not click the registered stage window.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+      }, "Cua Driver could not click the registered stage window.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        dispatch: (delivery) => driver.click({
+          target: new sdk.ActionTarget.Window({ pid, windowId }),
+          position: token && sdk.ClickPosition.Element
+            ? new sdk.ClickPosition.Element({ elementToken: token })
+            : new sdk.ClickPosition.Coordinates({ x, y }),
+          deliveryMode: delivery === "foreground" ? sdk.InputDeliveryMode.Foreground : sdk.InputDeliveryMode.Background,
+          ...(options.button ? { button: options.button === "right" ? sdk.ClickButton.Right : options.button === "middle" ? sdk.ClickButton.Middle : sdk.ClickButton.Left } : {}),
+          ...(options.count ? { count: options.count } : {}), session,
+        }, options.signal ? { signal: options.signal } : undefined),
+      });
       if (cursorIdentity) {
-        if (outcome.status === "confirmed" && element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(element.role ?? "")) {
+        if (element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(element.role ?? "")) {
           const point = cursorScreenPoint(x, y, before);
           rememberDesktopInputTarget(name, cursorIdentity, { pid, windowId, field: { ...point, label: element.label, role: element.role } });
         }
@@ -2383,7 +2498,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       }
       const outcome = await driverInputAction(driver, "press_key", {
         pid, window_id: Number(windowId), key, session,
-      }, "Cua Driver could not press the requested key in the registered stage window.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+      }, "Cua Driver could not press the requested key in the registered stage window.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        dispatch: () => driver.pressKey({ key, target: new sdk.ActionTarget.Window({ pid, windowId }), session }, options.signal ? { signal: options.signal } : undefined),
+      });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -2400,7 +2518,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       }
       const outcome = await driverInputAction(driver, "hotkey", {
         pid, window_id: Number(windowId), keys, session,
-      }, "Cua Driver could not send the requested key combination to the registered stage window.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+      }, "Cua Driver could not send the requested key combination to the registered stage window.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        dispatch: () => driver.hotkey({ keys, target: new sdk.ActionTarget.Window({ pid, windowId }), session }, options.signal ? { signal: options.signal } : undefined),
+      });
       try { return { capture: stageCapture(await captureWindow(), now), outcome }; }
       catch (captureFailure) {
         let state: string | undefined;
@@ -2458,7 +2579,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       }
       const outcome = await deliverTextToExactWindow({ runtime: { sdk, driver }, session, pid, windowId,
         text, selected, nativeInput: () => nativeControl(name, "type", undefined, { text }),
-        delayMs, preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+        delayMs, preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode,
+        dispatch: () => driver.typeText({ target: new sdk.ActionTarget.Window({ pid, windowId }), text, session,
+          ...(delayMs !== undefined ? { delayMs } : {}), } as never, options.signal ? { signal: options.signal } : undefined),
+        signal: options.signal });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -2473,7 +2597,12 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       const outcome = await driverInputAction(driver, "scroll", {
         pid, window_id: Number(windowId), x, y,
         direction, by: "line", amount: 3, session,
-      }, "Cua Driver could not scroll the registered stage window.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+      }, "Cua Driver could not scroll the registered stage window.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        dispatch: () => driver.scroll({ target: new sdk.ActionTarget.Window({ pid, windowId }), x, y,
+          direction: direction === "up" ? sdk.ScrollDirection.Up : sdk.ScrollDirection.Down,
+          by: sdk.ScrollBy.Line, amount: BigInt(3), session }, options.signal ? { signal: options.signal } : undefined),
+      });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -2488,7 +2617,11 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       const outcome = await driverInputAction(driver, "drag", {
         pid, window_id: Number(windowId), from_x: fromX, from_y: fromY, to_x: toX, to_y: toY,
         duration_ms: options.durationMs ?? 500, steps: 10, session,
-      }, "Cua Driver could not drag in the registered stage window.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+      }, "Cua Driver could not drag in the registered stage window.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        dispatch: () => driver.drag({ target: new sdk.ActionTarget.Window({ pid, windowId }), fromX, fromY, toX, toY,
+          durationMs: BigInt(options.durationMs ?? 500), steps: BigInt(10), session }, options.signal ? { signal: options.signal } : undefined),
+      });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -2516,12 +2649,20 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       // to click/invoke/press alone rejected those real, legitimate click targets.
       if (selected.element.actions && !selected.element.actions.some((action) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(action))) throw new DesktopInputNotDispatchedError("The accessibility element does not advertise a click action; no click was sent.");
       const point = elementCursorPoint(selected.element, selected.frame);
+      const selectedElementToken = selected.element.elementToken;
+      if (!selectedElementToken) throw new DesktopInputNotDispatchedError("The accessibility element is missing its driver token; no click was sent.");
       if (cursorIdentity && point) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
       if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
       await clearNativeInputSelection(name);
       const outcome = await driverInputAction(driver, "click", {
-        pid, window_id: Number(windowId), element_token: selected.element.elementToken, button: "left", count: 1, session,
-      }, "Cua Driver could not click the selected accessibility element.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+        pid, window_id: Number(windowId), element_token: selectedElementToken, button: "left", count: 1, session,
+      }, "Cua Driver could not click the selected accessibility element.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        dispatch: (delivery) => driver.click({ target: new sdk.ActionTarget.Window({ pid, windowId }),
+          position: sdk.ClickPosition.Element ? new sdk.ClickPosition.Element({ elementToken: selectedElementToken }) : new sdk.ClickPosition.Coordinates({ x: point?.x ?? 0, y: point?.y ?? 0 }),
+          deliveryMode: delivery === "foreground" ? sdk.InputDeliveryMode.Foreground : sdk.InputDeliveryMode.Background,
+          button: sdk.ClickButton.Left, count: 1, session }, options.signal ? { signal: options.signal } : undefined),
+      });
       if (cursorIdentity && point && outcome.status === "confirmed" && selected.element.actions?.includes("set_value")
         && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(selected.element.role ?? "")) {
         rememberDesktopInputTarget(name, cursorIdentity, { pid, windowId,

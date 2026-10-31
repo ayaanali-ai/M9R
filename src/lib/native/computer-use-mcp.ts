@@ -4,8 +4,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   computerUseActionSchema,
+  computerUseIntentSchema,
   computerUseResultSchema,
-  computerUseTelemetrySchema,
   parseComputerUseAction,
   parseComputerUseTarget,
   type ComputerUseAction,
@@ -16,6 +16,8 @@ import {
   type ComputerUseTarget,
   type ComputerUseTelemetry,
 } from "./computer-use-contract";
+import { resolveUniversalIntent, type IntentObservationHint } from "./universal-intent-resolver";
+import type { WorkflowPreferenceLedger } from "./workflow-preferences";
 import { selectComputerUseRoute, type ComputerUseRouteDescriptor } from "./computer-use-router";
 import type { VerifiedIdentity } from "./identity-core";
 import type { ComputerOperationInput, LocalStore, StageOperationClaim } from "./local-store";
@@ -78,12 +80,21 @@ function normalizeComputerUseActionWire(value: unknown): unknown {
 function buildInputSchemas(authField: ComputerUseMcpDeps["authField"]) {
   const tokenField = authField ?? LEGACY_TOKEN_FIELD_FALLBACK;
   return {
+    intent: {
+      ...tokenField,
+      text: z.string().min(1).max(4_000),
+      targetKind: z.enum(["desktop", "app-window", "browser-tab"]).optional(),
+      title: z.string().max(512).optional(),
+      url: z.string().max(4_096).optional(),
+      controls: z.array(z.object({ label: z.string().max(160).optional(), role: z.string().max(80).optional(), enabled: z.boolean().optional(), actions: z.array(z.string().max(40)).max(16).optional() }).strict()).max(256).optional(),
+    },
     observe: {
       ...tokenField,
       target: z.enum(COMPUTER_USE_OBSERVE_TARGETS),
       taskId: z.string().regex(/^T[0-9]{1,12}$/).optional(),
       mode: z.enum(["owner-preview", "background"]).default("owner-preview"),
       representation: z.enum(["structured", "visual"]).optional().describe("App windows default to structured accessibility; desktop targets default to a bounded composite of visible windows and controls. Request visual when pixels are the intended route; incomplete structure carries the same-capture visual fallback."),
+      bindForeground: z.boolean().optional().describe("For app-window observations, bind the actual visible foreground window before reading it; this never activates or moves a window."),
       tab: z.string().min(1).max(40).optional(),
     },
     action: { ...tokenField, action: computerUseActionWireSchema },
@@ -182,6 +193,7 @@ interface ComputerUseMcpDeps {
    * constant only when unset, for any other caller that has not been updated to pass it.
    */
   authField?: { token?: z.ZodString | z.ZodOptional<z.ZodString> };
+  workflowPreferences?: WorkflowPreferenceLedger;
 }
 
 type TextBlock = { type: "text"; text: string };
@@ -199,6 +211,7 @@ type ComputerUseObserveArgs = {
   taskId?: string;
   mode?: "owner-preview" | "background";
   representation?: "structured" | "visual";
+  bindForeground?: boolean;
   tab?: string;
 };
 type ComputerUseActionArgs = { token?: unknown; action: ComputerUseAction | string };
@@ -412,21 +425,11 @@ function createTimingRecorder(monotonicNow: () => number): ComputerUseTimingReco
 }
 
 function attachComputerUseTelemetry(response: ToolResponse, telemetry: ComputerUseTelemetry): ToolResponse {
-  const textIndex = response.content.findIndex((block) => block.type === "text");
-  const textBlock = response.content[textIndex];
-  if (textIndex < 0 || textBlock?.type !== "text") return response;
-  let body: unknown;
-  try { body = JSON.parse(textBlock.text); } catch { return response; }
-  const object = recordOf(body);
-  if (!object) return response;
-  const validatedTelemetry = computerUseTelemetrySchema.parse(telemetry);
-  const content = response.content.map((block, index) => index === textIndex
-    ? { type: "text" as const, text: JSON.stringify({ ...object, telemetry: validatedTelemetry }) }
-    : block);
-  const structuredContent = response.structuredContent
-    ? { ...response.structuredContent, telemetry: validatedTelemetry }
-    : undefined;
-  return { ...response, content, ...(structuredContent ? { structuredContent } : {}) };
+  // Route, focus/rebind, accessibility-vs-visual, and latency evidence is
+  // internal engineering telemetry. It must never become provider-facing task
+  // content or an apparent proof of effect.
+  void telemetry;
+  return response;
 }
 
 function withComputerUseTelemetry<Args>(
@@ -679,6 +682,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     logicalKey?: string;
     captureOverride?: Record<string, unknown>;
     inputSelectionConfirmed?: boolean;
+    bindForeground?: boolean;
     mutationRevision?: number;
   }): Promise<{ record: TargetRecord; observation: Record<string, unknown>; image?: ImageBlock }> {
     if (!deps.web?.taskStageAction) throw new Error("The owner-launched desktop stage broker is unavailable.");
@@ -687,7 +691,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     let structure = recordOf(capture?.structure);
     if (!capture) {
       if (!deps.web.prepareTaskStage) throw new Error("The owner-launched desktop stage broker cannot prepare a target.");
-      const prepared = await deps.web.prepareTaskStage(input.token, input.taskId, input.mode);
+      const prepared = await deps.web.prepareTaskStage(input.token, input.taskId, input.mode, undefined, input.bindForeground ? { bindForeground: true } : undefined);
       if (!prepared.ok) throw new Error(prepared.error ?? "The desktop stage could not be prepared.");
       if (input.representation === "structured") {
         const response = await deps.web.taskStageAction(input.token, input.taskId, { kind: "read_structure", view: input.view }, input.mode);
@@ -1030,6 +1034,21 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   function actionPreflight(record: TargetRecord, action: ComputerUseAction): string | undefined {
+    const intent = action.intent;
+    if (intent && action.kind !== "observe") {
+      const controlText = action.kind === "click" && action.locator.kind === "element"
+        ? (record.context.kind === "desktop" ? record.context.controls.get(action.locator.ref)?.label : record.context.elements.get(action.locator.ref)?.name)
+        : undefined;
+      if (!intent.allowAdvance && controlText && /\b(?:next|continue|advance|go\s+on|finish\s+this\s+item)\b/i.test(controlText)) {
+        return "The current intent forbids advancing to another item; no click was sent.";
+      }
+      if (!intent.allowSubmit && controlText && /\b(?:submit|send|post|publish|finish|done)\b/i.test(controlText)) {
+        return "The current intent forbids submitting or sending; no click was sent.";
+      }
+      if (!intent.allowSubmit && action.kind === "key" && action.key.toLowerCase() === "enter") {
+        return "The current intent forbids submit-like Enter input; no key was sent.";
+      }
+    }
     if (action.kind === "focus") {
       return record.context.kind === "desktop" && record.context.view === "app"
         ? undefined
@@ -1461,10 +1480,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   server.registerTool("m9r_computer_observe", {
-    description: "Observe one M9R-managed target and return an opaque target ID, fresh revision, and only the capabilities that route currently advertises. Selected app windows default to a value-redacted UI Automation tree; desktop-wide targets default to a bounded composite of visible windows and controls with the same-capture visual fallback for taskbar, Start, and shell-owned controls. Request representation=visual when pixels are needed. Browser tabs return structured DOM controls; if that route cannot expose a needed capability, explicitly select/restore the browser and observe its exact app-window rather than silently switching routes. Use m9r_stage_app before app-window; this tool never launches an app. Re-observe after visible state changes; raw HWNDs and browser-process IDs are never exposed. Returns phase timing telemetry; timing is diagnostic, not proof of an effect.",
+    description: "Observe one M9R-managed target and return an opaque target ID, fresh revision, and only the capabilities that route currently advertises. Selected app windows default to a value-redacted UI Automation tree; desktop-wide targets default to a bounded composite of visible windows and controls with the same-capture visual fallback for taskbar, Start, and shell-owned controls. Request representation=visual when pixels are needed. Browser tabs return structured DOM controls; if that route cannot expose a needed capability, explicitly select/restore the browser and observe its exact app-window rather than silently switching routes. Use m9r_stage_app before app-window; this tool never launches an app. Re-observe after visible state changes; raw HWNDs and browser-process IDs are never exposed. Internal route and latency diagnostics stay local to M9R and are never returned as provider task content.",
     inputSchema: inputSchemas.observe,
     outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
-  }, withComputerUseTelemetry<ComputerUseObserveArgs>(async ({ token, target, taskId, mode, representation, tab }, timing) => {
+  }, withComputerUseTelemetry<ComputerUseObserveArgs>(async ({ token, target, taskId, mode, representation, tab, bindForeground }, timing) => {
     const identity = await deps.requireIdentity(token);
     const authToken = await deps.identityToken(identity, token);
     const at = now().getTime();
@@ -1484,7 +1503,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ? observeBrowser({ identity, tab })
         : resolvedTaskId
           ? observeDesktop({ token: authToken, identity, taskId: resolvedTaskId, mode: mode ?? "owner-preview", view: target === "app-window" ? "app" : "desktop",
-              representation: resolvedRepresentation })
+              representation: resolvedRepresentation, bindForeground: bindForeground === true })
           : undefined);
       if (!observed) throw new Error("Desktop and app-window observations require an active authenticated task; browser-tab observations do not.");
       return toolResponse({ target: observed.record.target, observation: observed.observation }, observed.image);
@@ -1493,8 +1512,29 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     }
   }, monotonicNow));
 
+  server.registerTool("m9r_computer_intent", {
+    description: "Normalize a vague computer request into a bounded provider-neutral intent contract. Planning only: it never launches, focuses, clicks, types, reads secrets, or changes the selected target. The contract binds the actual foreground surface, prefers an exact existing browser tab, reads accessibility/DOM structure before a bounded visual fallback, uses Start/Search before taskbar guessing, reobserves after mutations, and verifies postconditions. Include the returned intent on subsequent actions so no-submit/no-advance constraints are enforced.",
+    inputSchema: inputSchemas.intent,
+    outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
+  }, async ({ token, text, targetKind, title, url, controls }) => {
+    await deps.requireIdentity(token);
+    try {
+      const hint: IntentObservationHint = {
+        ...(targetKind ? { targetKind } : {}),
+        ...(title ? { title } : {}),
+        ...(url ? { url } : {}),
+        ...(controls ? { controls } : {}),
+      };
+      const intent = resolveUniversalIntent(text, hint);
+      deps.workflowPreferences?.recordIntent(intent);
+      return toolResponse({ intent });
+    } catch (error) {
+      return toolResponse({ error: error instanceof Error ? error.message : "Intent normalization failed." }, undefined, true);
+    }
+  });
+
   server.registerTool("m9r_computer_action", {
-    description: "Route one provider-neutral action to the observed target's compatible M9R broker capability. Use action.kind, targetId, targetRevision (from target.revision), and a stable operationId. For a structured element click use {kind:'click',targetId,targetRevision,operationId,locator:{kind:'element',ref,snapshotId}} with ref and snapshotId from that observation. Do not use type, revision, elementRef, or click_element in this API. For exact field replacement use kind:'text',mode:'replace',text and the same element locator. Keep the same operationId when reconciling a lost response. Ordinary actions use background delivery; never enable confirmFocusForeground merely because a reference or background action failed. Optional postconditions require fresh observable evidence. Route affinity, stale refs, broker claims/risk/owner approvals, and input-lease safety remain enforced. Returns phase timing and durable receipt evidence; transport success alone is not verification.",
+    description: "Route one provider-neutral action to the observed target's compatible M9R broker capability. Use action.kind, targetId, targetRevision (from target.revision), and a stable operationId. For a structured element click use {kind:'click',targetId,targetRevision,operationId,locator:{kind:'element',ref,snapshotId}} with ref and snapshotId from that observation. Do not use type, revision, elementRef, or click_element in this API. For exact field replacement use kind:'text',mode:'replace',text and the same element locator. Keep the same operationId when reconciling a lost response. Ordinary actions use background delivery; never enable confirmFocusForeground merely because a reference or background action failed. Optional postconditions require fresh observable evidence. Route affinity, stale refs, broker claims/risk/owner approvals, and input-lease safety remain enforced. Durable receipt evidence is returned; internal phase timing and routing diagnostics remain local and transport success alone is not verification.",
     inputSchema: inputSchemas.action,
     outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, withComputerUseTelemetry<ComputerUseActionArgs>(async ({ token, action: actionValue }, timing) => {

@@ -53,6 +53,7 @@
     "reconcile:counts": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-alias.mjs ./scripts/reconcile-real-counts.ts",
     "export:proof": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-alias.mjs ./scripts/export-proof-snapshot.ts",
     "build:cli": "node ./scripts/build-cli.mjs",
+    "test:implementation-order": "node ./scripts/implementation-order-gate.mjs",
     "build:engine": "node ./scripts/build-cli.mjs && node ./scripts/build-engine.mjs",
     "build:candidate": "node ./scripts/build-candidate.mjs",
     "build:runtime-core": "npm --prefix packages/runtime-core run build",
