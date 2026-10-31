@@ -698,13 +698,25 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return claims.length === 1 ? claims[0]!.ownerProcessId : undefined;
     },
 
-    /** Sessions that have a live M9R identity token. Delivery must never guess a provider session without one. */
+    /**
+     * Sessions that have a live M9R identity token. Delivery must never guess a provider session without one.
+     *
+     * An identity is only ever revoked on a clean shutdown (see `retiredSessionIds` above); a process that
+     * dies abruptly -- killed, crashed, the machine restarted -- leaves its token sitting un-revoked forever,
+     * so without a staleness check every Codex/Claude/OpenCode run ever started in a folder stays "live" and
+     * delivery is permanently stuck refusing to guess among them. PROVIDER_TURN_TTL_MS is the system's own
+     * existing bound for "still plausibly mid-turn" (see mcp-connection-core.ts); a session quieter than that
+     * is not a routing candidate, independent of the 7-day PROVIDER_SESSION_RECOVERY_TTL_MS, which governs
+     * whether old session data is still worth keeping around at all, not whether to route a task to it now.
+     */
     sessionsWithIdentity(handle: string, cwd?: string): SessionRecord[] {
       const folder = cwd === undefined ? undefined : normalizeSessionFolder(projectCwd(root, cwd));
       const state = readState();
       const live = new Set(state.identities.filter((identity) => !identity.revokedAt && normalizeHandle(identity.handle) === normalizeHandle(handle)).map((identity) => identity.sessionId));
+      const freshCutoff = now().getTime() - PROVIDER_TURN_TTL_MS;
       return state.sessions
-        .filter((session) => normalizeHandle(session.handle) === normalizeHandle(handle) && live.has(session.sessionId) && (folder === undefined || normalizeSessionFolder(session.cwd) === folder))
+        .filter((session) => normalizeHandle(session.handle) === normalizeHandle(handle) && live.has(session.sessionId)
+          && Date.parse(session.lastSeenAt) >= freshCutoff && (folder === undefined || normalizeSessionFolder(session.cwd) === folder))
         .sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
     },
 

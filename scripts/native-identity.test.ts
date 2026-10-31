@@ -37,6 +37,23 @@ test("verifyToken rejects a token presented with the wrong claimed session id", 
   assert.notEqual(verifyToken([issued], issued.token, "s1"), null);
 });
 
+test("sessionsWithIdentity drops an un-revoked identity once its session has gone quiet, so delivery stops guessing among ghosts", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-identity-"));
+  let clock = new Date("2026-01-01T00:00:00.000Z");
+  const store = createLocalStore(root, { now: () => clock });
+  store.registerEndpoint({ provider: "codex", sessionId: "s1", cwd: "C:/repo" });
+  store.issueIdentity("codex", "codex", "s1");
+  assert.deepEqual(store.sessionsWithIdentity("codex").map((s) => s.sessionId), ["s1"],
+    "a session just seen, with a live token, is a routing candidate");
+
+  // A process that dies abruptly never revokes its token (only a clean shutdown does), so the
+  // only thing that can retire it from routing is its session having gone quiet for a while.
+  clock = new Date(clock.getTime() + 3 * 60 * 60_000);
+  assert.deepEqual(store.sessionsWithIdentity("codex"), [],
+    "a token nobody revoked but whose session has been silent for hours is no longer a routing candidate");
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("store.issueIdentity revokes any earlier live token for the same session before issuing a new one", () => {
   const { store, done } = tempStore();
   const first = store.issueIdentity("claude", "claude-code", "s1");
