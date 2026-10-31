@@ -14,6 +14,14 @@ test("screen questions bind the live desktop and preserve no-submit/no-advance b
   assert.equal(intent.fallbackPolicy.screenshotFallback, true);
 });
 
+test("navigating to a URL grants the Enter keystroke that commits it, without opening submit elsewhere", () => {
+  const intent = resolveUniversalIntent("Go to blinn.edu");
+  assert.equal(intent.surface, "browser");
+  assert.equal(intent.action, "navigate");
+  assert.equal(intent.mode, "prepare");
+  assert.deepEqual(intent.constraints, { allowAdvance: false, allowSubmit: true });
+});
+
 test("browser requests select an exact existing tab before structure and visual fallback", () => {
   const intent = resolveUniversalIntent("Use the Google Search tab and choose the answer in the dropdown.", {
     targetKind: "browser-tab",

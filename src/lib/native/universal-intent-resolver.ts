@@ -52,6 +52,11 @@ export interface UniversalIntentContract {
 const BROWSER_WORDS = /\b(?:browser|chrome|edge|firefox|youtube|website|web\s*page|tab|url|site|google|github)\b/i;
 const APP_WORDS = /\b(?:app|application|program|desktop|notepad|calculator|terminal|powershell|word|excel|powerpoint|claude|codex|opencode|open\s+code|chrome|edge|firefox|discord|spotify)\b/i;
 const SYSTEM_WORDS = /\b(?:brightness|volume|audio|sound|speaker|microphone|mic|mute|unmute|media|play\s*pause|next\s+track|previous\s+track)\b/i;
+// A bare domain ("blinn.edu", "news.ycombinator.com") is just as much a browser/navigate
+// signal as a scheme or a word like "site" -- most real navigation requests name only the
+// domain. Requiring a real letter-led label before the dot keeps this from firing on plain
+// sentences that merely contain a period (e.g. "Open it. Then click Save.").
+const DOMAIN_LIKE = /\bhttps?:\/\/\S+|\bwww\.[a-z0-9-]+\.[a-z]{2,}\b|\b[a-z][a-z0-9-]{1,62}\.(?:com|org|net|edu|gov|io|co|app|dev|ai|us|uk|ca|info|biz)\b/i;
 
 function clean(value: string): string { return value.trim().replace(/\s+/g, " ").slice(0, 4_000); }
 function firstMatch(value: string, patterns: readonly RegExp[]): string | undefined {
@@ -60,7 +65,7 @@ function firstMatch(value: string, patterns: readonly RegExp[]): string | undefi
 }
 
 function inferSurface(text: string, hint?: IntentObservationHint): IntentSurface {
-  if (hint?.targetKind === "browser-tab" || hint?.url || BROWSER_WORDS.test(text)) return "browser";
+  if (hint?.targetKind === "browser-tab" || hint?.url || BROWSER_WORDS.test(text) || DOMAIN_LIKE.test(text)) return "browser";
   if (hint?.targetKind === "app-window" || APP_WORDS.test(text)) return "app";
   if (SYSTEM_WORDS.test(text) && !/\b(?:dictation|voice\s+typing)\b/i.test(text)) return "system";
   if (hint?.targetKind === "desktop" || /\b(?:screen|desktop|taskbar|start\s+menu|computer)\b/i.test(text)) return "desktop";
@@ -90,8 +95,8 @@ function inferAction(text: string, surface: IntentSurface, system: UniversalInte
   if (system.systemControl) return "system_control";
   if (/\b(?:dictation|voice\s+typing)\b/.test(lower)) return "click";
   if (/\b(?:look|show|inspect|see|observe)\s+(?:at\s+)?(?:my\s+)?(?:screen|desktop|current\s+window)|\bwhat(?:'s| is)\s+on\s+my\s+screen\b|\bwhat\s+is\s+open\b/.test(lower)) return "observe";
+  if (/\b(?:go to|navigate|visit|open)\b/.test(lower) && (DOMAIN_LIKE.test(lower) || /\b(?:https?:\/\/|www\.|site|website|page|youtube|github)\b/.test(lower))) return "navigate";
   if (/\b(?:open|launch|start)\b/.test(lower) && !/\b(?:page|site|url|tab|youtube|github)\b/.test(lower)) return "open_app";
-  if (/\b(?:go to|navigate|visit|open)\b.*\b(?:https?:\/\/|www\.|site|website|page|youtube|github)\b/.test(lower)) return "navigate";
   if (/\b(?:drag|move)\b/.test(lower)) return "drag";
   if (/\bscroll\b/.test(lower)) return "scroll";
   if (/\b(?:answer|respond to)\b/.test(lower)) return "answer_in_place";
@@ -113,7 +118,14 @@ function inferMode(text: string, action: IntentAction): UniversalIntentContract[
   const explain = /\b(?:explain|what(?:'s|\s+is)|why|how\s+does|tell\s+me|answer\s+in\s+(?:chat|m9r))\b/.test(lower);
   const prepare = /\b(?:prepare|draft|fill|type|write|answer|complete)\b/.test(lower);
   const mode: IntentMode = submit ? "submit" : advance ? "advance" : action === "observe" && !submit && !advance ? "explain" : explain && !prepare ? "explain" : "prepare";
-  return { mode, allowAdvance: advance || submit, allowSubmit: submit };
+  // Committing a URL-bar navigation with Enter is not a data submission -- it is the
+  // normal way a "navigate" action finishes, on every provider and every surface.
+  // The no-submit gate in computer-use-mcp.ts otherwise blocks that Enter keystroke
+  // for any task whose text never happened to contain a word like "submit"/"send",
+  // which is every plain "go to <url>" request. Grant it only for that one action,
+  // leaving the submit gate unchanged for every click/key on an actual form or message.
+  const allowSubmit = submit || action === "navigate";
+  return { mode, allowAdvance: advance || submit, allowSubmit };
 }
 
 function planFor(surface: IntentSurface, action: IntentAction): UniversalIntentStep[] {
