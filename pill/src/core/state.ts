@@ -196,7 +196,9 @@ class AppState {
     }
 
     this.collaboration = snapshot.collaboration ?? null;
-    this.models = snapshot.models ?? null;
+    // A tick that doesn't carry "models" at all is a gap in that message, not a real "no agents" report --
+    // keep whatever we last knew rather than flashing the picker empty. An explicit `{ agents: [] }` still clears it.
+    if (snapshot.models !== undefined) this.models = snapshot.models;
 
     for (const [id, resolvedAt] of this.resolvedApprovals) {
       if (now - resolvedAt >= APPROVAL_RECOVERY_MS) this.resolvedApprovals.delete(id);
