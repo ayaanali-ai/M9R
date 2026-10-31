@@ -298,10 +298,14 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
     this.options = options;
   }
 
-  /** Claude Code reports its account's own model list (what its /model picker shows) on initialize. */
-  private async loadModelCatalog(live: LiveSession): Promise<void> {
+  /**
+   * Claude Code reports its account's own model list (what its /model picker shows) on initialize.
+   * It answers only after connecting its MCP servers, measured at ~11 s with M9R's tools attached,
+   * so a short timeout silently left the catalog empty for the whole session.
+   */
+  private async loadModelCatalog(live: LiveSession, attempt = 1): Promise<void> {
     try {
-      const response = await live.control({ subtype: "initialize" });
+      const response = await live.control({ subtype: "initialize" }, 60_000);
       const raw = Array.isArray(response.models) ? response.models as Array<Record<string, unknown>> : [];
       this.availableModels = validateProviderModelCatalog(raw.map((model) => ({
         id: model.value,
@@ -315,6 +319,12 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
     } catch {
       // A CLI that cannot report its catalog stays "catalog unavailable"; nothing is guessed.
       this.availableModels = null;
+      if (attempt < 2 && this.live === live && live.state().status !== "exited") {
+        const retry = setTimeout(() => {
+          if (this.live === live && live.state().status !== "exited") void this.loadModelCatalog(live, attempt + 1);
+        }, 15_000);
+        (retry as { unref?: () => void }).unref?.();
+      }
     }
   }
 
