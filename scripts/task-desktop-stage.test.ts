@@ -28,6 +28,7 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
       desktopActions.push({ kind: "cursor", x, y });
       return { capture: previewCapture, outcome: { status: "confirmed" as const } };
     },
+    focusWindow: async () => ({ capture: previewCapture, outcome: { status: "confirmed" as const } }),
   } as unknown as ReturnType<typeof createCuaStageDriver>;
   const service = createTaskDesktopStageService({ store, readPolicy: () => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) }), driver,
     ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage: {
@@ -72,6 +73,9 @@ test("app names and renderer aliases are targeting references, not an app catalo
   for (const value of ["cmd && echo bad", "chrome\n--flag", "", "cmd;whoami"]) assert.equal(isStageAppReference(value), false);
   assert.equal(stageWindowMatchesApp({ pid: 1, windowId: "2", appName: "WindowsTerminal.exe", title: "Windows PowerShell" }, { executable: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", args: [] }), true);
   assert.equal(stageWindowMatchesApp({ pid: 1, windowId: "2", appName: "Other.exe", title: "Windows PowerShell" }, { executable: "powershell.exe", args: [] }), false);
+  assert.equal(stageWindowMatchesApp({ pid: 1, windowId: "2", appName: "ApplicationFrameHost.exe", title: "Claude" }, {
+    executable: "C:\\Windows\\explorer.exe", args: ["shell:AppsFolder\\Claude_pzs8sxrjxfjjc!Claude"], windowTitleHint: "Claude",
+  }), true, "packaged shell activation may expose a host process instead of the launcher executable");
 });
 
 test("common terminal and browser names search Windows' friendly installed-app registrations", () => {
