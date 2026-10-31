@@ -452,6 +452,19 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     });
   }
 
+  // A stop/pause means "I want to redirect, not resume what was already queued": any owner
+  // message that arrived and queued *before* this stop was typed for a task the owner no
+  // longer wants continued. Without this, the next message the owner sends finds that old
+  // queued text still sitting ahead of it and gets appended behind it, so the stale message
+  // runs first and the real redirect waits -- indistinguishable from "my message went back
+  // into the session" once it starts talking.
+  function dropQueuedOwnerPrompts(profile: ManagedProviderConnectionProfile): void {
+    const queue = queuedOwnerPrompts.get(profile.connectionId);
+    if (!queue?.length) return;
+    for (const queued of queue) deps.store.cancelTask?.(queued.taskId, "Owner paused this agent before the queued message started.");
+    queuedOwnerPrompts.delete(profile.connectionId);
+  }
+
   function startNextOwnerPrompt(profile: ManagedProviderConnectionProfile): void {
     if (active.has(profile.connectionId) || pausedConnections.has(profile.connectionId) || halted.value || closed) return;
     const queue = queuedOwnerPrompts.get(profile.connectionId);
@@ -872,6 +885,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       const profile = resolveProfile(handle);
       if (!profile) return false;
       pausedConnections.add(profile.connectionId);
+      dropQueuedOwnerPrompts(profile);
       const task = active.get(profile.connectionId);
       if (task) requestPause(profile, task);
       emitState(profile);
@@ -880,6 +894,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     pauseAll() {
       for (const profile of profiles) {
         pausedConnections.add(profile.connectionId);
+        dropQueuedOwnerPrompts(profile);
         const task = active.get(profile.connectionId);
         if (task) requestPause(profile, task);
         emitState(profile);
