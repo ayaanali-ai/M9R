@@ -278,6 +278,17 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
     initialSurfaceRevisions[receipt.surfaceId] = Math.max(initialSurfaceRevisions[receipt.surfaceId] ?? 0, receipt.surfaceRevision);
   }
   const inFlightSurfaceByOperation = new Map<string, string>();
+  // A lease expiring (heartbeat renew failure) marks a surface uncertain without releasing its
+  // in-flight guard, deliberately: the underlying OS dispatch call that the lease was tracking
+  // may still be running and could still land after the lease window closes, so a second action
+  // must not race it. But if that dispatch call never returns at all -- a genuinely hung driver,
+  // not just a slow one -- nothing else ever clears the guard, and every later refresh/observe on
+  // that surface (the owner's only recovery path) refuses forever with "unresolved prior action",
+  // even on a brand new window the agent only just opened. Bound it: once a lease-expiry mark has
+  // sat in-flight for comfortably longer than the lease itself could plausibly still be relevant,
+  // let a fresh observation through instead of refusing indefinitely.
+  const staleInFlightTimeoutMs = leaseTtlMs * 5;
+  const inFlightUncertainSince = new Map<string, number>();
 
   const targetRegistry = options.targetRegistry ?? createTargetIdentityRegistry();
   const scheduler: MultiplayerMutationScheduler = createMultiplayerMutationScheduler(
@@ -457,7 +468,7 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
       let terminal: MutationFenceReadback | undefined;
       let heartbeat: ReturnType<typeof setInterval> | undefined;
       const clearHeartbeat = (): void => { if (heartbeat) clearInterval(heartbeat); heartbeat = undefined; };
-      const releaseInFlight = (): void => { inFlightSurfaceByOperation.delete(schedulerOperationId); };
+      const releaseInFlight = (): void => { inFlightSurfaceByOperation.delete(schedulerOperationId); inFlightUncertainSince.delete(surfaceId); };
       const finish = (result: MutationFenceReadback): MutationFenceReadback => {
         terminal = result;
         clearHeartbeat();
@@ -473,6 +484,7 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
         targetRegistry.release(schedulerOperationId);
         unresolvedSurfaces.add(surfaceId);
         if (dispatchFinished) releaseInFlight();
+        else if (!inFlightUncertainSince.has(surfaceId)) inFlightUncertainSince.set(surfaceId, now());
         const revision = stopped.receipt?.resultingSurfaceRevision ?? stopped.receipt?.baseSurfaceRevision ?? surfaceRevision;
         const detail = reason.slice(0, 240);
         const durable = persist({
@@ -583,7 +595,16 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
     observeSurface(surfaceId) {
       const current = currentRevision(surfaceId);
       if (!unresolvedSurfaces.has(surfaceId)) return current;
-      if ([...inFlightSurfaceByOperation.values()].includes(surfaceId)) return current;
+      const stillInFlight = [...inFlightSurfaceByOperation.values()].includes(surfaceId);
+      if (stillInFlight) {
+        const uncertainSince = inFlightUncertainSince.get(surfaceId);
+        const stale = uncertainSince !== undefined && now() - uncertainSince >= staleInFlightTimeoutMs;
+        if (!stale) return current;
+        for (const [operationId, candidate] of inFlightSurfaceByOperation) {
+          if (candidate === surfaceId) inFlightSurfaceByOperation.delete(operationId);
+        }
+        inFlightUncertainSince.delete(surfaceId);
+      }
       const next = scheduler.advanceSurfaceRevision(surfaceId);
       if (next === undefined) return current;
       try {
