@@ -48,24 +48,7 @@ export default function ReferenceHome({ configured, authNext }: { configured: bo
   const drag = useRef({ active: false, startX: 0, startScroll: 0 });
   const [reduced, setReduced] = useState(false);
   const [waitlistOpen, setWaitlistOpen] = useState(false);
-  const [blinking, setBlinking] = useState(false);
   const closeWaitlist = () => setWaitlistOpen(false);
-
-  // The hero eye blinks on an irregular timer, never a fixed interval, so it reads as alive rather than a looping asset.
-  useEffect(() => {
-    if (reduced) return;
-    let hide: number;
-    const schedule = (first = false) => {
-      const delay = first ? 900 : 3200 + Math.random() * 3600;
-      hide = window.setTimeout(() => {
-        setBlinking(true);
-        window.setTimeout(() => setBlinking(false), 340);
-        schedule();
-      }, delay);
-    };
-    schedule(true);
-    return () => window.clearTimeout(hide);
-  }, [reduced]);
 
   useEffect(() => {
     const el = root.current;
@@ -117,7 +100,7 @@ export default function ReferenceHome({ configured, authNext }: { configured: bo
       <div className={s.marquee} aria-hidden="true">{Array.from({ length: 10 }, (_, i) => <div key={i}><span>{Array.from({ length: 3 }, () => "Removing humans from computers · Stay where you work · Your agents, together · The middle is closing · ").join("")}</span></div>)}</div>
       <section className={s.hero} aria-label="Introduction">
         <div className={s.heroText}><h1>Removing humans<br />from computers.</h1></div>
-        <div className={s.computer}><img fetchPriority="high" src={asset("m9r-computer-eye.png")} width="1200" height="1324" alt="Vintage beige computer displaying a surreal eye opening through clouds on its curved CRT screen" /><div className={`${s.eyelid} ${blinking ? s.blink : ""}`} aria-hidden="true" /></div>
+        <div className={s.computer}><img fetchPriority="high" src={asset("m9r-computer-eye.png")} width="1200" height="1324" alt="Vintage beige computer displaying a surreal eye opening through clouds on its curved CRT screen" /></div>
       </section>
 
       <section className={s.reviews} aria-labelledby="review-title"><div className={s.reviewTitle}><h2 id="review-title">Every one of these needed a hand.</h2><p>*A short history of machines that waited on you.</p></div>
