@@ -6,6 +6,7 @@ import { Sound } from "../core/sound";
 import { createDictation, type Dictation } from "../core/speech";
 import { State, type ChatMessage, type LinkOffer } from "../core/state";
 import type { SessionRow } from "../core/transport";
+import { buildModelPicker } from "./views";
 import type { ViewActions, ViewHost } from "./views";
 
 let nextId = 1;
@@ -160,10 +161,72 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     modelLabel.textContent = agent ? `@${agent.handle}${label ? ` · ${label}` : " · Choose model"}` : "Providers & models";
     model.dataset.handle = agent?.handle ?? "";
   }
+  const modelPicker = actions.selectModel ? buildModelPicker(actions) : null;
+  const modelPopover = modelPicker ? h("div", { class: "composer-model-popover" }, modelPicker.el) : null;
+  // The island clips its content through several nested overflow:hidden / clip-path ancestors
+  // (the chat card, the view-swap container, the island's own rounded-corner mask). A popover
+  // anchored inside that tree gets silently clipped no matter how it's positioned, so instead it's
+  // parented straight onto <body> and placed with position:fixed against the button's live screen
+  // rect -- fully outside that clipping chain -- and repositioned on every open in case the island
+  // itself moved or resized since the last time.
+  if (modelPopover) {
+    modelPopover.hidden = true;
+    modelPopover.style.position = "fixed";
+    document.body.append(modelPopover);
+  }
+  function closeModelPopover() {
+    if (!modelPopover || modelPopover.hidden) return;
+    modelPopover.hidden = true;
+    modelPicker?.el.classList.remove("on");
+    document.removeEventListener("pointerdown", onOutsidePointer, true);
+    document.removeEventListener("keydown", onPopoverKeydown, true);
+    window.removeEventListener("resize", positionModelPopover);
+  }
+  function onOutsidePointer(e: PointerEvent) {
+    if (modelPopover && !modelPopover.contains(e.target as Node) && e.target !== model && !model.contains(e.target as Node)) closeModelPopover();
+  }
+  function onPopoverKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") { e.stopPropagation(); closeModelPopover(); }
+  }
+  function positionModelPopover() {
+    if (!modelPopover) return;
+    const anchor = model.getBoundingClientRect();
+    const margin = 8;
+    const width = Math.min(460, window.innerWidth - 32);
+    const spaceAbove = anchor.top - margin;
+    const spaceBelow = window.innerHeight - anchor.bottom - margin;
+    const openDown = spaceBelow > spaceAbove;
+    const height = Math.max(140, Math.min(320, (openDown ? spaceBelow : spaceAbove) - margin));
+    modelPopover.style.width = `${width}px`;
+    modelPopover.style.height = `${height}px`;
+    modelPopover.style.left = `${Math.max(16, Math.min(anchor.left, window.innerWidth - width - 16))}px`;
+    if (openDown) {
+      modelPopover.style.top = `${anchor.bottom + margin}px`;
+      modelPopover.style.bottom = "auto";
+    } else {
+      modelPopover.style.top = "auto";
+      modelPopover.style.bottom = `${window.innerHeight - anchor.top + margin}px`;
+    }
+  }
   model.addEventListener("click", () => {
+    if (!modelPopover) return;
     const task = State.tasks.find((entry) => entry.name === model.dataset.handle);
     if (task) actions.setFocus(task.id);
-    actions.setView("models");
+    const opening = modelPopover.hidden;
+    if (opening) {
+      positionModelPopover();
+      modelPopover.hidden = false;
+      // buildModelPicker's root carries the island's generic `.view` class, which is opacity:0 /
+      // pointer-events:none until the island's own view-switcher adds `.on` -- this popover isn't
+      // driven by that switcher, so add it directly or the picker stays invisible and unclickable.
+      modelPicker!.el.classList.add("on");
+      modelPicker!.activate?.();
+      document.addEventListener("pointerdown", onOutsidePointer, true);
+      document.addEventListener("keydown", onPopoverKeydown, true);
+      window.addEventListener("resize", positionModelPopover);
+    } else {
+      closeModelPopover();
+    }
   });
 
   function renderSuggestions() {
@@ -293,9 +356,10 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
       input.disabled = sending;
       if (mic) mic.disabled = sending;
       send.disabled = sending || !input.value.trim() || !!dictation?.listening;
+      if (modelPopover && !modelPopover.hidden) modelPicker!.sync();
     },
     activate() { requestAnimationFrame(resizeDraft); },
-    deactivate() { dictation?.stop(); },
+    deactivate() { dictation?.stop(); closeModelPopover(); },
     get draftHeight() { return dictation?.listening ? 120 : draftHeight; },
     focus() {
       input.focus();

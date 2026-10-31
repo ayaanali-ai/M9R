@@ -369,7 +369,7 @@ function effortLabel(label: string): string {
   return label === label.toLowerCase() ? label.charAt(0).toUpperCase() + label.slice(1) : label;
 }
 
-function buildModelPicker(actions: ViewActions): ViewHost {
+export function buildModelPicker(actions: ViewActions): ViewHost {
   const tabs = h("div", { class: "mp-agents", role: "tablist", "aria-label": "Agent" });
   const search = h("input", { class: "mp-search-input", type: "text", placeholder: "Search models...", "aria-label": "Search models" }) as HTMLInputElement;
   const searchGroup = h("label", { class: "mp-search" }, search, svg(ICONS.search, 12, { stroke: 2 }));
