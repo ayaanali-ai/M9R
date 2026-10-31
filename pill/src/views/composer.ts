@@ -111,7 +111,7 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   const draft = h("div", { class: "composer-draft" }, input, measure);
   const send = h("button", { class: "send-btn", type: "button", title: "Send (Enter)", "aria-label": "Send message" }, svg(ICONS.arrowUp, 15));
   // Speech lands in the field as text and is never sent on its own. Only hosts with a speech service offer it.
-  const mic = actions.dictation ? h("button", { class: "mic-btn", type: "button", title: "Hold to talk (Ctrl+Alt+M)", "aria-label": "Hold to talk (Ctrl+Alt+M)" }, svg(ICONS.mic, 13)) : null;
+  const mic = actions.dictation ? h("button", { class: "mic-btn", type: "button", title: "Hold to talk (Ctrl+Alt)", "aria-label": "Hold to talk (Ctrl+Alt)" }, svg(ICONS.mic, 13)) : null;
   const live = h("div", { class: "live-line", role: "status", "aria-label": "Dictation" });
   live.hidden = true;
   const wave = h("span", { class: "wave", "aria-hidden": "true" });

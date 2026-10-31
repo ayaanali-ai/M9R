@@ -5,6 +5,8 @@
 
 #[cfg(windows)]
 mod native_dictation;
+#[cfg(windows)]
+mod ctrl_alt_hold;
 
 use std::{
     fs,
@@ -36,14 +38,13 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 const TOGGLE_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT).union(Modifiers::SHIFT);
 const TOGGLE_HOTKEY_CODE: Code = Code::KeyM;
 const TOGGLE_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+M";
-/// Hold Ctrl+Alt+M to open the message pill and dictate into its draft field.
+/// Hold Ctrl+Alt (no letter) to open the message pill and dictate into its draft field.
 ///
-/// The older Alt+M chord was too easy to trigger while using normal desktop
-/// shortcuts and also collided with keyboard-layout switching on some Windows
-/// installations. Keep the global shortcut explicit and provider-neutral.
-const HOLD_TO_TALK_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT);
-const HOLD_TO_TALK_HOTKEY_CODE: Code = Code::KeyM;
-const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Ctrl+Alt+M";
+/// Win32's RegisterHotKey -- which tauri-plugin-global-shortcut wraps -- cannot register a
+/// modifier-only combination; it requires a non-modifier virtual key. The older Ctrl+Alt+M chord
+/// worked around that, but a bare Ctrl+Alt is detected separately via ctrl_alt_hold.rs's
+/// low-level keyboard hook instead (see that module for why).
+const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Ctrl+Alt";
 /// Private single-instance handoff used by the installer to close the running pill cleanly.
 const UPDATE_SHUTDOWN_ARGUMENT: &str = "--m9r-update-shutdown";
 /// Passed to a second launch to open the app window on the already-running instance, the same
@@ -52,13 +53,13 @@ const UPDATE_SHUTDOWN_ARGUMENT: &str = "--m9r-update-shutdown";
 const OPEN_APP_ARGUMENT: &str = "--m9r-open-app";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HoldToTalkEvent {
+pub(crate) enum HoldToTalkEvent {
     Pressed,
     Released,
 }
 
 impl HoldToTalkEvent {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Pressed => "pressed",
             Self::Released => "released",
@@ -68,12 +69,12 @@ impl HoldToTalkEvent {
 
 /// Suppresses OS key-repeat notifications so the frontend sees one start and one end per hold.
 #[derive(Default)]
-struct HoldToTalkState {
+pub(crate) struct HoldToTalkState {
     pressed: bool,
 }
 
 impl HoldToTalkState {
-    fn transition(&mut self, pressed: bool) -> Option<HoldToTalkEvent> {
+    pub(crate) fn transition(&mut self, pressed: bool) -> Option<HoldToTalkEvent> {
         if self.pressed == pressed {
             return None;
         }
@@ -87,7 +88,7 @@ static ENGINE: Mutex<Option<Child>> = Mutex::new(None);
 static ENGINE_STOPPING: AtomicBool = AtomicBool::new(false);
 static BROKER_WATCHDOG_STOPPING: AtomicBool = AtomicBool::new(false);
 
-const PILL: &str = "pill";
+pub(crate) const PILL: &str = "pill";
 /// The full-window Clonk-style app, a real OS window (decorations, taskbar entry, resizable) --
 /// unlike the pill, closing it must never shut down the engine or the pill overlay.
 const APP_WINDOW: &str = "app";
@@ -197,6 +198,23 @@ fn heartbeat_json(at_ms: u128, visible: bool, pid: u32) -> String {
     format!("{{\"pid\":{pid},\"at\":{at_ms},\"visible\":{visible}}}")
 }
 
+/// Replace the heartbeat without leaving the previous generation in place.
+/// Windows' `rename` refuses to overwrite an existing destination, so a
+/// one-time successful write would otherwise age out after six seconds and
+/// make the broker hide the pill even though the process is still alive.
+fn replace_heartbeat(tmp: &Path, path: &Path) {
+    if fs::rename(tmp, path).is_ok() {
+        return;
+    }
+    // The destination is normally the existing heartbeat on Windows. Remove
+    // only that exact file, then retry the already-complete temp write. A
+    // failed retry leaves the old heartbeat untouched only when the remove
+    // itself was refused; the next loop will try again.
+    if fs::remove_file(path).is_ok() {
+        let _ = fs::rename(tmp, path);
+    }
+}
+
 fn spawn_heartbeat(app: AppHandle) {
     std::thread::spawn(move || loop {
         if let Some(_window) = app.get_webview_window(PILL) {
@@ -206,7 +224,7 @@ fn spawn_heartbeat(app: AppHandle) {
             // Write beside, then rename, so the broker never reads half a file.
             let tmp = path.with_extension("json.tmp");
             if fs::write(&tmp, heartbeat_json(at, visible, std::process::id())).is_ok() {
-                let _ = fs::rename(&tmp, &path);
+                replace_heartbeat(&tmp, &path);
             }
         }
         std::thread::sleep(HEARTBEAT_EVERY);
@@ -1255,11 +1273,22 @@ fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
     fs::metadata(path).ok().map(|meta| (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len()))
 }
 
+/// Shared by the hold-to-talk hotkey, however it was detected (currently only the raw Ctrl+Alt
+/// keyboard hook in ctrl_alt_hold.rs, but this stays decoupled from that detection mechanism).
+pub(crate) fn report_hold_to_talk(app: &AppHandle, state: &Mutex<HoldToTalkState>, pressed: bool) {
+    let transition = state.lock().unwrap().transition(pressed);
+    if let Some(transition) = transition {
+        if transition == HoldToTalkEvent::Pressed {
+            if let Some(window) = app.get_webview_window(PILL) {
+                let _ = window.show();
+            }
+        }
+        let _ = app.emit("hold-to-talk", transition.as_str());
+    }
+}
+
 fn main() {
     let toggle_shortcut = Shortcut::new(Some(TOGGLE_HOTKEY_MODS), TOGGLE_HOTKEY_CODE);
-    let hold_to_talk_shortcut = Shortcut::new(Some(HOLD_TO_TALK_HOTKEY_MODS), HOLD_TO_TALK_HOTKEY_CODE);
-    let hold_to_talk_state = std::sync::Arc::new(Mutex::new(HoldToTalkState::default()));
-    let handler_hold_to_talk_state = hold_to_talk_state.clone();
     tauri::Builder::default()
         // Register first: duplicate launches must exit before starting another
         // heartbeat writer, tray, hotkey handler, or engine supervisor.
@@ -1280,17 +1309,6 @@ fn main() {
                 .with_handler(move |app, shortcut, event| {
                     if shortcut == &toggle_shortcut && event.state() == ShortcutState::Pressed {
                         toggle_pill(app);
-                    } else if shortcut == &hold_to_talk_shortcut {
-                        let pressed = event.state() == ShortcutState::Pressed;
-                        let transition = handler_hold_to_talk_state.lock().unwrap().transition(pressed);
-                        if let Some(transition) = transition {
-                            if transition == HoldToTalkEvent::Pressed {
-                                if let Some(window) = app.get_webview_window(PILL) {
-                                    let _ = window.show();
-                                }
-                            }
-                            let _ = app.emit("hold-to-talk", transition.as_str());
-                        }
                     }
                 })
                 .build(),
@@ -1310,6 +1328,8 @@ fn main() {
             allow_microphone_permission(&window);
             #[cfg(windows)]
             native_dictation::init(app.handle().clone());
+            #[cfg(windows)]
+            ctrl_alt_hold::spawn(app.handle().clone());
             if next_mode() {
                 // The one-pill UI is the root of the single canonical frontend bundle.
                 let _ = window.set_size(LogicalSize::new(NEXT_W, NEXT_H));
@@ -1369,10 +1389,9 @@ fn main() {
                 Ok(()) => eprintln!("M9R: registered global hotkey {TOGGLE_HOTKEY_LABEL}"),
                 Err(e) => eprintln!("M9R: could not register global hotkey {TOGGLE_HOTKEY_LABEL} ({e}); use the tray menu's Show/hide instead"),
             }
-            match app.global_shortcut().register(hold_to_talk_shortcut) {
-                Ok(()) => eprintln!("M9R: registered dictation hotkey {HOLD_TO_TALK_HOTKEY_LABEL}"),
-                Err(e) => eprintln!("M9R: could not register dictation hotkey {HOLD_TO_TALK_HOTKEY_LABEL} ({e})"),
-            }
+            // The dictation hotkey (bare Ctrl+Alt, no letter) is registered by ctrl_alt_hold::spawn
+            // above instead -- Win32's RegisterHotKey cannot represent a modifier-only chord.
+            eprintln!("M9R: dictation hotkey is {HOLD_TO_TALK_HOTKEY_LABEL} (hold)");
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1469,14 +1488,13 @@ mod one_pill_window_tests {
 
 #[cfg(test)]
 mod hold_to_talk_tests {
-    use super::{parse_mentions, HoldToTalkEvent, HoldToTalkState, HOLD_TO_TALK_HOTKEY_CODE, HOLD_TO_TALK_HOTKEY_LABEL, HOLD_TO_TALK_HOTKEY_MODS};
-    use tauri_plugin_global_shortcut::{Code, Modifiers};
+    use super::{parse_mentions, HoldToTalkEvent, HoldToTalkState, HOLD_TO_TALK_HOTKEY_LABEL};
 
     #[test]
-    fn hold_to_talk_shortcut_is_ctrl_alt_m() {
-        assert_eq!(HOLD_TO_TALK_HOTKEY_LABEL, "Ctrl+Alt+M");
-        assert_eq!(HOLD_TO_TALK_HOTKEY_CODE, Code::KeyM);
-        assert_eq!(HOLD_TO_TALK_HOTKEY_MODS, Modifiers::CONTROL.union(Modifiers::ALT));
+    fn hold_to_talk_hotkey_is_bare_ctrl_alt() {
+        // No letter: Win32's RegisterHotKey cannot represent this, so it's detected via
+        // ctrl_alt_hold.rs's low-level keyboard hook instead of tauri-plugin-global-shortcut.
+        assert_eq!(HOLD_TO_TALK_HOTKEY_LABEL, "Ctrl+Alt");
     }
 
     #[test]
