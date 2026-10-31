@@ -1914,18 +1914,25 @@ async function stopAuthenticatedLocalBroker(
   options: { stopTaskBeforeShutdown?: boolean } = {},
 ): Promise<"stopped" | "already-stopped" | "not-owned-or-unavailable"> {
   const baseUrl = `http://127.0.0.1:${port}`;
-  const health = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(500) }).catch(() => null);
+  // These budgets used to be 500/700/1000ms. On a loaded machine (AV scanning
+  // a freshly built exe, a heavy test run, etc.) the local broker can take
+  // longer than that to answer even though it is healthy and will honor the
+  // request; a timeout here was observed to make a perfectly good shutdown
+  // look like "not-owned-or-unavailable" and abort the install with no files
+  // replaced. These are still short enough to fail fast on an actually-dead
+  // broker, just not so short they misread a slow-but-alive one.
+  const health = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(2_000) }).catch(() => null);
   if (!health?.ok) return "already-stopped";
   const keyBytes = await readOptional(brokerKeyPath(root));
   if (!keyBytes) return "not-owned-or-unavailable";
   const key = keyBytes.toString("utf8").trim();
-  const status = await fetch(`${baseUrl}/web/status`, { headers: { "x-m9r-key": key }, signal: AbortSignal.timeout(700) }).catch(() => null);
+  const status = await fetch(`${baseUrl}/web/status`, { headers: { "x-m9r-key": key }, signal: AbortSignal.timeout(3_000) }).catch(() => null);
   if (!status?.ok) return "not-owned-or-unavailable";
   const shutdown = await fetch(`${baseUrl}/web/shutdown`, {
     method: "POST",
     headers: { "x-m9r-key": key, "content-type": "application/json" },
     body: "{}",
-    signal: AbortSignal.timeout(1_000),
+    signal: AbortSignal.timeout(5_000),
   }).catch(() => null);
   if (!shutdown?.ok) return "not-owned-or-unavailable";
   // The broker schedules its owner drain immediately after sending the 200
