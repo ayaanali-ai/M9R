@@ -288,16 +288,28 @@ export function parseMentions(text: string): string[] {
   return out;
 }
 
+/** Words that mean the owner is naming the product/app/window, not addressing the agent ("open Claude desktop app"). */
+const PRODUCT_REFERENCE_WORDS = /^\s*(?:'s\s+)?(?:desktop|app|application|window|exe|icon|window'?s?|window titled)\b/i;
+
 /**
  * Who a message is for: every `@handle`, plus a known agent named in plain words ("take opencode with you"). Each agent appears
- * once however many times it is named, and a name inside a path, URL, email or longer word never counts.
+ * once however many times it is named, and a name inside a path, URL, email or longer word never counts -- nor does a name
+ * immediately followed by a product-ish word ("open Claude desktop app"), which names the app, not the agent.
  */
 export function findAddressed(text: string, known: readonly string[]): string[] {
   const out = parseMentions(text).filter((h) => known.includes(h));
   for (const handle of known) {
     if (out.includes(handle) || handle.length < 3) continue;
     const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (new RegExp(`(^|[^A-Za-z0-9_@./:-])${escaped}(?![A-Za-z0-9_@./:-])`, "i").test(text)) out.push(handle);
+    const pattern = new RegExp(`(^|[^A-Za-z0-9_@./:-])${escaped}(?![A-Za-z0-9_@./:-])`, "gi");
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text))) {
+      const rest = text.slice(match.index + match[0].length);
+      if (!PRODUCT_REFERENCE_WORDS.test(rest)) {
+        out.push(handle);
+        break;
+      }
+    }
   }
   return out;
 }

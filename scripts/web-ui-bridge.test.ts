@@ -102,6 +102,9 @@ test("addressing: names in plain words count, repeats do not duplicate, and path
   assert.deepEqual(findAddressed("codex, then Codex again, and @codex once more", known), ["codex"]);
   assert.deepEqual(findAddressed("read C:/work/codex/notes.md and https://claude.ai/x, see codexify", known), []);
   assert.deepEqual(findAddressed("ask OpenCode to verify", known), ["opencode"]);
+  assert.deepEqual(findAddressed("open Claude desktop app and click it", known), []);
+  assert.deepEqual(findAddressed("open the Codex app, then the Claude window", known), []);
+  assert.deepEqual(findAddressed("ask claude to open Codex desktop app", known), ["claude"]);
 });
 
 test("a message that names a teammate in prose wakes both; an unaddressed one goes to the last-talked-to or lead agent and tells it who else is in the room", () => {
