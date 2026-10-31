@@ -885,11 +885,31 @@ test("authenticated web status reports whether the extension completed its ready
   }
 });
 
+test("native owner brokers report the native route as ready without an extension handshake", async () => {
+  const key = randomBytes(32).toString("hex");
+  const broker = await startWebBroker({ key, port: 0, nativeDesktopRoute: true });
+  try {
+    const response = await ownerRequest(broker.port, key, "/web/status");
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, {
+      ok: true,
+      broker: "ready",
+      browserTransport: "native-desktop",
+      browserReady: true,
+      extensionConnected: false,
+      extensionReady: false,
+    });
+  } finally {
+    await broker.close();
+  }
+});
+
 test("authenticated owner shutdown closes the loopback broker", async () => {
   const t = await setup({ allowAnyExtension: true });
   try {
     const response = await ownerRequest(t.broker.port, t.key, "/web/shutdown", "POST", {});
     assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { ok: true, stopping: true, stopped: false });
     await new Promise((resolve) => setTimeout(resolve, 25));
     await assert.rejects(fetch(`http://127.0.0.1:${t.broker.port}/health`));
   } finally {
@@ -904,6 +924,7 @@ test("authenticated shutdown keeps health available until owned cleanup finishes
   try {
     const response = await ownerRequest(t.broker.port, t.key, "/web/shutdown", "POST", {});
     assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { ok: true, stopping: true, stopped: false });
     await new Promise((resolve) => setTimeout(resolve, 40));
     assert.equal((await fetch(`http://127.0.0.1:${t.broker.port}/health`)).status, 200,
       "a shutdown acknowledgement must not make the broker look stopped while its owner is still draining resources");
@@ -935,12 +956,14 @@ test("a failed shutdown drain leaves health available for an authenticated retry
   try {
     const first = await ownerRequest(t.broker.port, t.key, "/web/shutdown", "POST", {});
     assert.equal(first.status, 200);
+    assert.deepEqual(first.body, { ok: true, stopping: true, stopped: false });
     await new Promise((resolve) => setTimeout(resolve, 40));
     assert.equal((await fetch(`http://127.0.0.1:${t.broker.port}/health`)).status, 200,
       "a failed resource drain must not make a still-running broker look stopped");
 
     const second = await ownerRequest(t.broker.port, t.key, "/web/shutdown", "POST", {});
     assert.equal(second.status, 200);
+    assert.deepEqual(second.body, { ok: true, stopping: true, stopped: false });
     const deadline = Date.now() + 2_000;
     let closed = false;
     while (!closed && Date.now() < deadline) {

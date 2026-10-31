@@ -118,7 +118,7 @@ test("the desktop feed keeps provider activity separate from queued asks, approv
   assert.deepEqual(snap.agents[0].activity, ["Opened x.com"], "worker lines are not activity");
   assert.deepEqual(snap.agents[1].activity, ["@claude asked: review the diff"]);
   assert.deepEqual(snap.approvals, [{ id: "T6", agent: "opencode", title: "@claude asks @opencode", detail: "read secrets.txt" }]);
-  assert.deepEqual(snap.thread.map((m) => m.id), ["answer-T7", "failed-T8"]);
+  assert.deepEqual(snap.thread.map((m) => m.id), ["answer-T7"], "delivery failures stay in task history, not live chat");
 });
 
 test("extension transport sends the exact commands the service worker validates, and surfaces refusals", async () => {
@@ -194,26 +194,14 @@ test("desktop transport maps decisions and typed messages onto the overlay's com
   if (typeof stop === "function") stop();
 });
 
-test("an undeliverable message offers a session link only when the feed says it is linkable, and the desktop transport links through the overlay commands", async () => {
+test("undeliverable messages stay out of the live thread", () => {
   const snap = fromFeed({
     needsYou: [
       { kind: "push_failed", taskId: "T8", from: "claude", fromSession: "s-1", to: "codex", reason: "no live session", linkable: true },
       { kind: "push_failed", taskId: "T9", from: "claude", to: "codex", reason: "off" },
     ],
   });
-  assert.deepEqual(snap.thread[0].link, { taskId: "T8", from: "claude", fromSession: "s-1", to: "codex" });
-  assert.equal(snap.thread[1].link, undefined);
-
-  const calls: Array<[string, Record<string, unknown> | undefined]> = [];
-  const transport = createDesktopTransport(async (command, args) => {
-    calls.push([command, args]);
-    return command === "list_sessions" ? JSON.stringify([{ sessionId: "abc", cwd: "C:/x", lastSeenAt: "2026-10-02T19:00:00Z" }, { nope: 1 }]) : "";
-  });
-  assert.equal(transport.capabilities?.linkSessions, true);
-  assert.deepEqual(await transport.listSessions!("codex"), [{ sessionId: "abc", cwd: "C:/x", lastSeenAt: "2026-10-02T19:00:00Z" }]);
-  await transport.linkSession!({ taskId: "T8", from: "claude", fromSession: "s-1", to: "codex" }, "abc");
-  assert.deepEqual(calls.at(-1), ["link_sessions", { fromHandle: "claude", fromSession: "s-1", toHandle: "codex", toSession: "abc" }]);
-  await assert.rejects(transport.linkSession!({ taskId: "T9", from: "claude", to: "codex" }, "abc"), /no session to link/);
+  assert.deepEqual(snap.thread, [], "delivery diagnostics must not become composer bubbles");
 });
 
 test("the page frame answers the host's hello, then reports exactly the island's size and folds to the wake strip", () => {

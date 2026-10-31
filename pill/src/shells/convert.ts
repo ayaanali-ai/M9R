@@ -148,17 +148,14 @@ export function fromFeed(feed: Feed): PillSnapshot {
   const approvals = needs.flatMap((n) => n.kind === "approval"
     ? [{ id: n.taskId, agent: n.to, title: `@${n.from} asks @${n.to}`, detail: clip(n.goal, 300) }]
     : []);
-  const thread = [
-    ...needs.flatMap((n) => n.kind === "answer"
-      ? [{ id: `answer-${n.taskId}`, from: n.from, text: clip(n.summary, 600) }]
-      : n.kind === "push_failed"
-        ? [{
-          id: `failed-${n.taskId}`, from: n.to, text: clip(`Could not deliver ${n.taskId}: ${n.reason}`, 300),
-          ...(n.linkable === true ? { link: { taskId: n.taskId, from: n.from, ...(n.fromSession ? { fromSession: n.fromSession } : {}), to: n.to } } : {}),
-        }]
-        : n.kind === "delivery_uncertain"
-          ? [{ id: `uncertain-${n.taskId}`, from: "m9r", text: clip(`Could not confirm delivery of ${n.taskId} to @${n.to}; it will not be resent automatically. ${n.reason}`, 300), dismissTaskId: n.taskId }]
-        : []),
-  ];
+  // Delivery failures and uncertain deliveries are durable task-history
+  // records, not conversation messages.  Promoting them into `thread` makes
+  // old T23/T4/T37 notices reappear in the live composer whenever the native
+  // pill falls back to the compatibility feed.  Only provider answers are
+  // user-facing thread bubbles; approvals stay in `approvals` and delivery
+  // diagnostics remain in task history where they can be inspected/dismissed.
+  const thread = needs.flatMap((n) => n.kind === "answer"
+    ? [{ id: `answer-${n.taskId}`, from: n.from, text: clip(n.summary, 600) }]
+    : []);
   return { agents, collaboration: collaborationFromAgents(agents), approvals, thread };
 }

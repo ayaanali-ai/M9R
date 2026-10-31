@@ -171,6 +171,8 @@ export interface WebBrokerServerOptions {
   agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">;
   /** Dedicated browser transport. Extension connections are disabled on this broker. */
   browserTransport?: BrowserTransport;
+  /** Production owner broker has a native desktop/browser route; no extension handshake is required. */
+  nativeDesktopRoute?: boolean;
   key: string;
   port?: number;
   host?: string;
@@ -593,7 +595,11 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (request.path === "/web/shutdown") {
       if (request.method !== "POST") return ownerReply(false, { error: "shutdown requires POST" });
       scheduleShutdown();
-      return ownerReply(true, { stopped: true });
+      // The owner drain runs asynchronously.  A successful request means the
+      // broker accepted the stop request, not that its listener/process has
+      // already exited.  Reporting `stopped: true` here made callers race the
+      // provider/session cleanup and made a still-live broker look gone.
+      return ownerReply(true, { stopping: true, stopped: false });
     }
     if (!authority) return ownerReply(false, { error: "web authority is not configured" });
     if (request.method !== "POST" || typeof request.body !== "object" || request.body === null || Array.isArray(request.body)) return ownerReply(false, { error: "request body must be an object" });
@@ -749,7 +755,17 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         return reply(res, result.status, result.body);
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/status") {
-        return reply(res, 200, { ok: true, broker: "ready", browserTransport: options.browserTransport ? "agent-chrome" : "extension", browserReady: options.browserTransport?.ready() ?? (!!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN), extensionConnected: !!extension && extension.readyState === WebSocket.OPEN, extensionReady: !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN });
+        const nativeDesktopRoute = options.nativeDesktopRoute === true;
+        const extensionConnected = !!extension && extension.readyState === WebSocket.OPEN;
+        const extensionReady = !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN;
+        return reply(res, 200, {
+          ok: true,
+          broker: "ready",
+          browserTransport: options.browserTransport ? "agent-chrome" : nativeDesktopRoute ? "native-desktop" : "extension",
+          browserReady: options.browserTransport?.ready() ?? (nativeDesktopRoute || extensionReady),
+          extensionConnected,
+          extensionReady,
+        });
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/agents") {
         return reply(res, 200, { ok: true, agents: options.ui?.roster?.() ?? [] });
@@ -766,7 +782,9 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         }
       }
       if (req.method === "POST" && requestUrl.pathname === "/web/shutdown") {
-        reply(res, 200, { ok: true, stopped: true });
+        // Keep the acknowledgement truthful: scheduleShutdown closes the
+        // listener only after the owner has drained its resources.
+        reply(res, 200, { ok: true, stopping: true, stopped: false });
         scheduleShutdown();
         return;
       }

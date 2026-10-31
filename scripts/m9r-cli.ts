@@ -1943,8 +1943,11 @@ async function stopAuthenticatedLocalBroker(
   // rejected shutdown; the health/process-exit checks below are the stronger
   // proof that makes replacement safe. An explicit negative acknowledgement
   // still fails closed.
-  const acknowledgement = await shutdown.json().catch(() => null) as { ok?: unknown; stopped?: unknown } | null;
-  if (acknowledgement !== null && (acknowledgement.ok !== true || acknowledgement.stopped !== true)) {
+  const acknowledgement = await shutdown.json().catch(() => null) as { ok?: unknown; stopping?: unknown; stopped?: unknown } | null;
+  const accepted = acknowledgement !== null
+    && acknowledgement.ok === true
+    && (acknowledgement.stopping === true || acknowledgement.stopped === true);
+  if (acknowledgement !== null && !accepted) {
     return "not-owned-or-unavailable";
   }
   // Task Scheduler can immediately respawn the exact broker after its
@@ -3012,7 +3015,7 @@ async function runWebSetup(args: string[]): Promise<number> {
       await new Promise((resolveWait) => setTimeout(resolveWait, 250));
     }
     const statusResponse = brokerReady ? await fetch(statusUrl, { headers: { "x-m9r-key": key }, signal: AbortSignal.timeout(1_000) }).catch(() => null) : null;
-    const status = statusResponse?.ok ? await statusResponse.json() as { extensionReady?: boolean } : null;
+    const status = statusResponse?.ok ? await statusResponse.json() as { browserTransport?: string; browserReady?: boolean; extensionReady?: boolean } : null;
     await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
     process.stdout.write(`\n[${brokerReady ? "PASS" : "FAIL"}] local broker health check\n`);
     process.stdout.write(`[${status ? "PASS" : "FAIL"}] authenticated broker status check\n`);
@@ -3026,10 +3029,16 @@ async function runWebSetup(args: string[]): Promise<number> {
       }
       process.stdout.write(`[${configured ? "PASS" : "FAIL"}] ${item.agent} MCP configuration\n`);
     }
-    process.stdout.write(`[${status?.extensionReady ? "PASS" : "WAIT"}] extension ready handshake${status?.extensionReady ? "" : " (load unpacked once below)"}\n`);
+    if (status?.browserTransport === "native-desktop") {
+      process.stdout.write(`[${status.browserReady ? "PASS" : "FAIL"}] native desktop route (no browser extension or Developer Mode is required)\n`);
+    } else {
+      process.stdout.write(`[${status?.extensionReady ? "PASS" : "WAIT"}] extension ready handshake${status?.extensionReady ? "" : " (load unpacked once below)"}\n`);
+    }
     if (!brokerReady || !status) return 1;
 
-    if (openBrowserSetup) {
+    if (status?.browserTransport === "native-desktop") {
+      process.stdout.write("\nNative desktop route is active; no browser extension install or Developer Mode step is required.\n");
+    } else if (openBrowserSetup) {
       await copyWebExtensionPath(extensionPath);
       for (const browser of browsers) {
         const programFiles = [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter((v): v is string => !!v);
