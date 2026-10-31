@@ -987,10 +987,18 @@ fn load_settings(app: AppHandle) -> Result<serde_json::Value, String> {
     }))
 }
 
+#[tauri::command]
+fn log_debug(msg: String) {
+    if std::env::var("M9R_DEBUG").as_deref() == Ok("1") { eprintln!("M9R: [frontend] {msg}"); }
+}
+
 #[cfg(windows)]
 #[tauri::command]
 async fn start_dictation() -> Result<(), String> {
-    native_dictation::start()
+    if std::env::var("M9R_DEBUG").as_deref() == Ok("1") { eprintln!("M9R: start_dictation command received from the pill"); }
+    let result = native_dictation::start();
+    if std::env::var("M9R_DEBUG").as_deref() == Ok("1") { eprintln!("M9R: start_dictation result = {result:?}"); }
+    result
 }
 
 #[cfg(not(windows))]
@@ -1276,8 +1284,14 @@ fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
 /// Shared by the hold-to-talk hotkey, however it was detected (currently only the raw Ctrl+Alt
 /// keyboard hook in ctrl_alt_hold.rs, but this stays decoupled from that detection mechanism).
 pub(crate) fn report_hold_to_talk(app: &AppHandle, state: &Mutex<HoldToTalkState>, pressed: bool) {
+    if std::env::var("M9R_DEBUG").as_deref() == Ok("1") {
+        eprintln!("M9R: hold-to-talk raw key state pressed={pressed}");
+    }
     let transition = state.lock().unwrap().transition(pressed);
     if let Some(transition) = transition {
+        if std::env::var("M9R_DEBUG").as_deref() == Ok("1") {
+            eprintln!("M9R: hold-to-talk transition -> {}", transition.as_str());
+        }
         if transition == HoldToTalkEvent::Pressed {
             if let Some(window) = app.get_webview_window(PILL) {
                 let _ = window.show();
@@ -1313,7 +1327,7 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, select_model, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, start_dictation, stop_dictation, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, select_model, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.

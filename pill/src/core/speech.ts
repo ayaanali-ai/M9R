@@ -75,12 +75,16 @@ export function createDictation(env: SpeechEnv, events: DictationEvents, timers 
   const clearCap = () => { if (cap !== null) { timers.clearTimeout(cap); cap = null; } };
 
   async function start() {
+    const invoke = (globalThis as { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } }).__TAURI_INTERNALS__?.invoke;
+    const log = (msg: string) => { if (invoke) void invoke("log_debug", { msg: `speech.start: ${msg}` }).catch(() => {}); };
+    log(`entering, listening=${listening} want=${want} hasNative=${!!env.native} hasRecognition=${!!env.Recognition}`);
     if (listening || want) return;
     want = true;
     if (!env.native && !env.Recognition) { want = false; events.onNotice("Speech isn't available in this browser", true); return; }
     if (env.micIsOn && !(await env.micIsOn())) { want = false; events.onNotice("Turn on the microphone for M9R first (opening setup)", true); env.openMicSetup(); return; }
     if (!want) return; // released while the permission check ran
     if (env.native) {
+      log("calling env.native.start");
       nativeHeard = "";
       stopping = false;
       listening = true;

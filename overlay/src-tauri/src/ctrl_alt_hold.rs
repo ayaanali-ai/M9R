@@ -12,6 +12,7 @@
 // recognizer thread) running a plain GetMessageW loop after SetWindowsHookExW.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tauri::AppHandle;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -29,8 +30,20 @@ static ALT_DOWN: AtomicBool = AtomicBool::new(false);
 /// Count, not a flag: multiple non-modifier keys can be down at once (e.g. a fumbled chord), and
 /// "no other key held" must mean none of them, not just the last one released.
 static OTHER_KEYS_DOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The hook's own instantaneous reading of "Ctrl+Alt, nothing else" -- not what gets reported to
+/// the frontend. Live-tested 2026-10-31: on at least one real setup, the raw signal for a single
+/// physical hold flaps true/false several times a second for its entire duration (keyboard/driver
+/// chatter, or a remote-input path that resyncs modifier state periodically rather than holding it
+/// continuously) instead of staying steady. Reporting it straight through made every hold look like
+/// a rapid burst of presses and releases, so dictation start/stopped too fast to ever capture
+/// speech. The debounce poller below turns this raw signal into one clean press-and-hold.
+static RAW_PRESSED: AtomicBool = AtomicBool::new(false);
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static STATE: OnceLock<Mutex<HoldToTalkState>> = OnceLock::new();
+/// How long the raw signal must sit released before a hold is treated as actually let go. Must
+/// comfortably exceed the chatter gaps actually observed (up to ~200ms) without making a real
+/// release feel laggy.
+const DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// Starts the dedicated hook thread. Call once, at app setup.
 pub fn spawn(app: AppHandle) {
@@ -64,6 +77,33 @@ pub fn spawn(app: AppHandle) {
         // SAFETY: hook was installed by this same call above and never shared across threads.
         let _ = unsafe { UnhookWindowsHookEx(hook) };
     });
+    std::thread::spawn(debounce_loop);
+}
+
+/// Turns the hook's raw, possibly-chattering signal into one clean press-and-hold: committing
+/// Pressed the instant the raw signal goes true, but holding off on Released until it has stayed
+/// false for the full debounce window, so brief chatter mid-hold never reads as a release.
+fn debounce_loop() {
+    let mut stable = false;
+    let mut last_true_at = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(40));
+        let raw = RAW_PRESSED.load(Ordering::SeqCst);
+        if raw {
+            last_true_at = Instant::now();
+            if !stable {
+                stable = true;
+                if let (Some(app), Some(state)) = (APP.get(), STATE.get()) {
+                    report_hold_to_talk(app, state, true);
+                }
+            }
+        } else if stable && last_true_at.elapsed() >= DEBOUNCE {
+            stable = false;
+            if let (Some(app), Some(state)) = (APP.get(), STATE.get()) {
+                report_hold_to_talk(app, state, false);
+            }
+        }
+    }
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -98,9 +138,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             let pressed = CTRL_DOWN.load(Ordering::SeqCst)
                 && ALT_DOWN.load(Ordering::SeqCst)
                 && OTHER_KEYS_DOWN.load(Ordering::SeqCst) == 0;
-            if let (Some(app), Some(state)) = (APP.get(), STATE.get()) {
-                report_hold_to_talk(app, state, pressed);
-            }
+            RAW_PRESSED.store(pressed, Ordering::SeqCst);
         }
     }
     // Always pass the event on -- this hook only observes, it never consumes a keystroke.

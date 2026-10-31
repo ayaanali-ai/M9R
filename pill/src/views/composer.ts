@@ -11,6 +11,13 @@ import type { ViewActions, ViewHost } from "./views";
 
 let nextId = 1;
 
+/** Temporary diagnostic bridge for the dictation investigation; logs to the Rust process's stderr
+ * when M9R_DEBUG=1, since this webview's own DevTools console has been unreliable to read live. */
+function debugLog(msg: string): void {
+  const invoke = (globalThis as { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } }).__TAURI_INTERNALS__?.invoke;
+  if (invoke) void invoke("log_debug", { msg }).catch(() => {});
+}
+
 const hhmm = (iso: string) => {
   const t = Date.parse(iso);
   return Number.isNaN(t) ? "" : new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -365,6 +372,7 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
       input.focus();
     },
     talk(active) {
+      void debugLog(`composer.talk(${active}) dictation=${dictation ? "present" : "null"}`);
       if (!dictation) return;
       if (active) void dictation.start(); else dictation.stop();
     },

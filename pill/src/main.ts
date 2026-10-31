@@ -24,12 +24,18 @@ async function main() {
   if (invoke) {
     try {
       await listen<string>("hold-to-talk", ({ payload }) => {
+        void invoke("log_debug", { msg: `hold-to-talk listener received: ${payload}` }).catch(() => {});
         if (payload === "pressed") island.talk(true);
         else if (payload === "released") island.talk(false);
       });
+      void invoke("log_debug", { msg: "hold-to-talk listener registered" }).catch(() => {});
     } catch (error) {
       console.error("M9R could not register the desktop dictation hotkey listener", error);
+      void invoke("log_debug", { msg: `hold-to-talk listener registration FAILED: ${String(error)}` }).catch(() => {});
     }
+  } else {
+    // No Tauri invoke at this point means no way to log_debug either -- but this itself is
+    // the single most important fact if the desktop shell is somehow not being detected.
   }
   frame?.onHostCommand((kind, data) => {
     if (kind === "open-message") island.openMessage();
