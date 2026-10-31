@@ -35,6 +35,13 @@ const DEFAULT_PERMISSION_TIMEOUT_MS = 15 * 60 * 1_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 20 * 60 * 1_000;
 const CANCEL_FORCE_CLOSE_MS = 10_000;
 const MAX_PROMPT_CHARS = 32_000;
+// The very first request to a freshly spawned codex.exe can stall well past the normal request
+// timeout: on Windows, real-time antivirus commonly scans a large, recently-written/updated exe
+// the first time it runs, which blocks the process from getting to the point of answering stdio
+// at all (the same stall we hit and fixed for our own build artifacts -- see
+// scripts/engine-build-transaction.mjs's renameWithRetry). Only the handshake needs the grace
+// period; every later request keeps the normal timeout so a real hang still surfaces promptly.
+const COLD_START_INITIALIZE_TIMEOUT_MS = 3 * 60 * 1_000;
 
 type Outcome = "accept" | "decline" | "cancel";
 type ApprovalKind = "command" | "file" | "permissions" | "legacy-exec" | "legacy-patch";
@@ -365,7 +372,7 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
         // Bounded thread resume is an opt-in app-server capability. M9R does
         // not need Codex to inline every historical turn into one JSONL frame.
         capabilities: { experimentalApi: true },
-      }));
+      }, COLD_START_INITIALIZE_TIMEOUT_MS));
       state.client.notify("initialized");
       state.initialized = true;
       state.agentName = typeof response?.userAgent === "string" ? response.userAgent : "codex";
