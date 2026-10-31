@@ -68,14 +68,15 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
 };
 
 /** The message view grows with the conversation. */
-export function chatPromptHeight(messageCount: number): number {
-  return Math.min(300, 240 + messageCount * 40);
+export function chatPromptHeight(messageCount: number, draftHeight = 48): number {
+  return Math.min(300, 240 + messageCount * 40 + Math.max(0, Math.min(120, draftHeight) - 48));
 }
 
 export function islandSize(
   mode: IslandMode,
   view: IslandViewName,
   chatCount = 0,
+  draftHeight = 48,
 ): { w: number; h: number } {
   switch (mode) {
     case "hidden":
@@ -85,7 +86,7 @@ export function islandSize(
     case "compact":
       return { w: COMPACT_W, h: NOTCH_H };
     case "expanded": {
-      const h = view === "prompt" ? chatPromptHeight(chatCount) : VIEW_LAYOUTS[view].height;
+      const h = view === "prompt" ? chatPromptHeight(chatCount, draftHeight) : VIEW_LAYOUTS[view].height;
       return { w: EXPANDED_W, h };
     }
   }
@@ -111,7 +112,7 @@ export function botPosition(
       // Collapsed means solid black, nothing overlaid — no status mark, no provider logo.
       return { cx: 40, cy: 16, diameter: 20, opacity: 0 };
     case "expanded": {
-      if (view === "models") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
+      if (view === "models" || view === "prompt") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
       const layout = VIEW_LAYOUTS[view];
       if (layout.botY != null) {
         return { cx: layout.botX, cy: layout.botY, diameter: layout.botDiameter, opacity: 1 };

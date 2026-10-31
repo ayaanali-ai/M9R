@@ -48,6 +48,8 @@ export interface ViewHost {
   tick?(nowMs: number): void;
   /** True while `tick` still has motion to finish; keeps the frame loop alive until it does. */
   readonly animating?: boolean;
+  /** Measured, capped draft area used by the prompt island's existing geometry animation. */
+  readonly draftHeight?: number;
 }
 
 // ── Shared pieces ────────────────────────────────────────────────
@@ -567,7 +569,14 @@ function buildModelPicker(actions: ViewActions): ViewHost {
   }
 
   sync();
-  return { el, sync };
+  return { el, sync, activate() {
+    const focused = State.focusTask?.name;
+    if (focused && agents().some((agent) => agent.handle === focused)) activeHandle = focused;
+    previewId = "";
+    search.value = "";
+    key = "";
+    sync();
+  } };
 }
 
 // ── Registry ─────────────────────────────────────────────────────

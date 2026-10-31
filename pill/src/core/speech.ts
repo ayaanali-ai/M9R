@@ -246,7 +246,7 @@ export function browserSpeechEnv(openMicSetup: () => void): SpeechEnv {
   };
 }
 
-/** Desktop WebView speech asks through its normal microphone permission flow on the user's Alt+M press. */
+/** Desktop WebView speech asks through its normal microphone permission flow on the user's Ctrl+Alt+M press. */
 export function desktopSpeechEnv(openMicSetup: () => void): SpeechEnv {
   return browserSpeechEnvBase(openMicSetup);
 }

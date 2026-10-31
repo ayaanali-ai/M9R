@@ -66,16 +66,24 @@ export function createFrameHost(inner: PillTransport, win: Window = window): Fra
     }
   });
 
-  // Alt+M and Alt+N are handled by the page's content script. While focus is inside this frame the page never sees the
+  // Ctrl+Alt+M and Alt+N are handled by the page's content script. While focus is inside this frame the page never sees the
   // keys, so the frame forwards them (the same rule the older frames follow).
-  const hotkeyOf = (ev: KeyboardEvent) => (ev.altKey && !ev.ctrlKey && !ev.metaKey ? (ev.code === "KeyM" ? "m" : ev.code === "KeyN" ? "n" : "") : "");
+  const held = new Set<string>();
+  const hotkeyOf = (ev: KeyboardEvent) => (
+    ev.code === "KeyM" && ev.ctrlKey && ev.altKey && !ev.metaKey ? "m"
+      : ev.code === "KeyN" && ev.altKey && !ev.ctrlKey && !ev.metaKey ? "n" : ""
+  );
   win.addEventListener("keydown", (ev) => {
     const key = hotkeyOf(ev as KeyboardEvent);
-    if (key && !(ev as KeyboardEvent).repeat) toParent({ kind: "hotkey", key, down: true });
+    if (key && !(ev as KeyboardEvent).repeat && !held.has(key)) { held.add(key); toParent({ kind: "hotkey", key, down: true }); }
   }, true);
   win.addEventListener("keyup", (ev) => {
     const e = ev as KeyboardEvent;
-    if (e.key === "Alt" || hotkeyOf(e)) toParent({ kind: "hotkey", key: e.code === "KeyN" ? "n" : "m", down: false });
+    const key = hotkeyOf(e) || (e.code === "KeyM" && held.has("m") ? "m" : e.code === "KeyN" && held.has("n") ? "n" : "");
+    if (key) { held.delete(key); toParent({ kind: "hotkey", key, down: false }); }
+    else if (e.key === "Alt" || e.key === "Control") {
+      for (const heldKey of [...held]) { held.delete(heldKey); toParent({ kind: "hotkey", key: heldKey, down: false }); }
+    }
   }, true);
 
   return {

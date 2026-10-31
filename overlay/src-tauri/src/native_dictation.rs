@@ -3,7 +3,7 @@
 // time, regardless of microphone permission. This uses Windows' own on-device speech recognizer instead
 // (Windows.Media.SpeechRecognition), which runs locally and has no per-use cost. It owns a single background
 // thread for the lifetime of the app; the recognizer and its continuous session are created once and reused
-// across every Alt+M press, since recompiling the recognition grammar on every hold would add latency.
+// across every Ctrl+Alt+M press, since recompiling the recognition grammar on every hold would add latency.
 use std::sync::mpsc::{channel, Sender};
 use std::sync::OnceLock;
 use std::thread;

@@ -1129,7 +1129,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       }
       if (action.unit !== "pixel") return "The browser broker accepts scroll distances in pixels only.";
       if (action.deltaX !== 0) return "The browser route currently exposes vertical page scrolling only.";
-      if (action.at) return "The browser route exposes page-level pixel scrolling; element-scoped scrolling has different semantics and is not routed here.";
+      if (action.at) {
+        if (action.at.kind !== "element") return "Browser scrolling needs a fresh element reference when a scroll container is specified.";
+        return checkLocator(record, action.at);
+      }
       return undefined;
     }
     if (action.kind === "drag") {
@@ -1259,7 +1262,11 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       ...(webTargetLabel(record, action.locator) ? { targetLabel: webTargetLabel(record, action.locator) } : {}),
       args: { text: action.selection.kind === "text" ? action.selection.text : "" },
     };
-    if (action.kind === "scroll") return { action: "scroll", ...shared, args: { by: action.deltaY } };
+    if (action.kind === "scroll") return {
+      action: "scroll", ...shared,
+      ...(action.at ? { selector: `@m9r-ref:${locatorRef(record, action.at)}` } : {}),
+      args: { by: action.deltaY },
+    };
     if (action.kind === "drag") return {
       action: "drag", ...shared,
       selector: `@m9r-ref:${locatorRef(record, action.from)}`,

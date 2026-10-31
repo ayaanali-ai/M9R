@@ -36,10 +36,14 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 const TOGGLE_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT).union(Modifiers::SHIFT);
 const TOGGLE_HOTKEY_CODE: Code = Code::KeyM;
 const TOGGLE_HOTKEY_LABEL: &str = "Ctrl+Alt+Shift+M";
-/// Hold Alt+M to open the message pill and dictate into its draft field.
-const HOLD_TO_TALK_HOTKEY_MODS: Modifiers = Modifiers::ALT;
+/// Hold Ctrl+Alt+M to open the message pill and dictate into its draft field.
+///
+/// The older Alt+M chord was too easy to trigger while using normal desktop
+/// shortcuts and also collided with keyboard-layout switching on some Windows
+/// installations. Keep the global shortcut explicit and provider-neutral.
+const HOLD_TO_TALK_HOTKEY_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT);
 const HOLD_TO_TALK_HOTKEY_CODE: Code = Code::KeyM;
-const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Alt+M";
+const HOLD_TO_TALK_HOTKEY_LABEL: &str = "Ctrl+Alt+M";
 /// Private single-instance handoff used by the installer to close the running pill cleanly.
 const UPDATE_SHUTDOWN_ARGUMENT: &str = "--m9r-update-shutdown";
 /// Passed to a second launch to open the app window on the already-running instance, the same
@@ -114,7 +118,7 @@ fn next_mode() -> bool {
 /// WebView2 does not show its own permission prompt for an unhandled `getUserMedia` request from a window this
 /// small and chromeless (220x36, no decorations) -- there is nowhere for its default infobar to render, so the
 /// request is left pending and the page sees it as a silent, permanent "not-allowed". Confirmed live 2026-10-10:
-/// holding Alt+M opened the message view, but no Windows mic prompt ever appeared and the listening meter never
+/// holding Ctrl+Alt+M opened the message view, but no Windows mic prompt ever appeared and the listening meter never
 /// moved. Registering our own `PermissionRequested` handler and auto-approving the microphone (our own first-party
 /// pill content, never third-party pages) is the standard fix; everything else stays default-denied.
 #[cfg(windows)]
@@ -1469,10 +1473,10 @@ mod hold_to_talk_tests {
     use tauri_plugin_global_shortcut::{Code, Modifiers};
 
     #[test]
-    fn hold_to_talk_shortcut_is_alt_m() {
-        assert_eq!(HOLD_TO_TALK_HOTKEY_LABEL, "Alt+M");
+    fn hold_to_talk_shortcut_is_ctrl_alt_m() {
+        assert_eq!(HOLD_TO_TALK_HOTKEY_LABEL, "Ctrl+Alt+M");
         assert_eq!(HOLD_TO_TALK_HOTKEY_CODE, Code::KeyM);
-        assert_eq!(HOLD_TO_TALK_HOTKEY_MODS, Modifiers::ALT);
+        assert_eq!(HOLD_TO_TALK_HOTKEY_MODS, Modifiers::CONTROL.union(Modifiers::ALT));
     }
 
     #[test]

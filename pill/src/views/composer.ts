@@ -89,33 +89,82 @@ export function mentionAt(text: string, caret: number): { start: number; partial
   return m ? { start: before.length - m[2].length - 1, partial: m[2].toLowerCase() } : null;
 }
 
+/** Keep the draft readable without allowing a pasted document to consume the island. */
+export function cappedDraftHeight(scrollHeight: number): number {
+  return Math.max(48, Math.min(120, Number.isFinite(scrollHeight) ? scrollHeight : 48));
+}
+
 export function buildPrompt(actions: ViewActions, onHeightChange: () => void): ViewHost {
   const suggest = h("div", { class: "chip-row" });
-  const log = h("div", { class: "chat-log" });
-  const input = h("input", {
-    type: "text",
+  const log = h("div", { class: "chat-log", role: "log", "aria-label": "Conversation" });
+  const input = h("textarea", {
     class: "chat-input",
-    placeholder: "Message your agents, e.g. @claude check the pricing page…",
+    rows: 2,
+    placeholder: "Ask your agents anything…",
+    "aria-label": "Message your agents",
     spellcheck: "false",
     autocomplete: "off",
-  }) as HTMLInputElement;
-  const send = h("button", { class: "send-btn", title: "Send" }, svg(ICONS.arrowUp, 11));
+  });
+  // The invisible twin measures wrapping without temporarily collapsing the visible field.
+  const measure = h("textarea", { class: "chat-input composer-measure", rows: 1, tabindex: -1, "aria-hidden": "true" });
+  const draft = h("div", { class: "composer-draft" }, input, measure);
+  const send = h("button", { class: "send-btn", type: "button", title: "Send (Enter)", "aria-label": "Send message" }, svg(ICONS.arrowUp, 15));
   // Speech lands in the field as text and is never sent on its own. Only hosts with a speech service offer it.
-  const mic = actions.dictation ? h("button", { class: "mic-btn", type: "button", title: "Hold to talk (Alt+M)", "aria-label": "Hold to talk (Alt+M)" }, svg(ICONS.mic, 13)) : null;
-  const live = h("div", { class: "live-line" });
+  const mic = actions.dictation ? h("button", { class: "mic-btn", type: "button", title: "Hold to talk (Ctrl+Alt+M)", "aria-label": "Hold to talk (Ctrl+Alt+M)" }, svg(ICONS.mic, 13)) : null;
+  const live = h("div", { class: "live-line", role: "status", "aria-label": "Dictation" });
   live.hidden = true;
-  const wave = h("span", { class: "wave" });
-  for (let i = 0; i < 7; i += 1) wave.append(document.createElement("i"));
+  const wave = h("span", { class: "wave", "aria-hidden": "true" });
+  for (let i = 0; i < 24; i += 1) wave.append(document.createElement("i"));
   const said = h("span", { class: "said" });
-  live.append(wave, said);
-  const bar = h("div", { class: "chat-bar" }, input, live, mic, send);
+  live.append(h("span", { class: "dictation-label", text: "Listening" }), wave, said);
+  const modelLabel = h("span", { class: "composer-model-label" });
+  const model = h("button", {
+    class: "composer-model", type: "button", title: "Choose provider, model and reasoning", "aria-label": "Choose provider, model and reasoning",
+  }, svg(ICONS.layers, 12), modelLabel, h("span", { class: "composer-chevron", text: "⌄", "aria-hidden": "true" }));
+  model.hidden = !actions.selectModel;
+  const hint = h("span", { class: "composer-hint", text: "Shift + Enter for a new line" });
+  const footer = h("div", { class: "composer-footer" }, model, hint, mic, send);
+  const bar = h("div", { class: "chat-bar" }, draft, live, footer);
 
-  const el = h("div", { class: "view" }, h("div", { class: "card wash chat-card" }, h("div", { class: "chat-body" }, suggest, log, bar)));
+  const el = h("div", { class: "view prompt-view" }, h("div", { class: "card wash chat-card" }, h("div", { class: "chat-body" }, log, suggest, bar)));
   (el.querySelector(".card") as HTMLElement).style.setProperty("--wash", "rgba(99,102,241,0.5)");
 
   let sending = false;
   let renderedFingerprint = "";
   let suggestKey = "";
+  let draftHeight = 48;
+
+  function resizeDraft() {
+    measure.value = input.value;
+    const next = cappedDraftHeight(measure.scrollHeight);
+    draft.style.height = `${next}px`;
+    send.disabled = sending || !input.value.trim() || !!dictation?.listening;
+    if (next !== draftHeight) { draftHeight = next; onHeightChange(); }
+  }
+  if (typeof ResizeObserver !== "undefined") {
+    let width = 0;
+    new ResizeObserver(([entry]) => {
+      if (!entry || entry.contentRect.width === width) return;
+      width = entry.contentRect.width;
+      resizeDraft();
+    }).observe(draft);
+  }
+
+  function syncModel() {
+    const handle = /(?:^|\s)@([A-Za-z0-9-]{1,38})(?=\s|$)/.exec(input.value)?.[1]?.toLowerCase();
+    const agent = State.models?.agents.find((entry) => entry.handle === handle)
+      ?? State.models?.agents.find((entry) => entry.handle === State.focusTask?.name)
+      ?? State.models?.agents[0];
+    const chosen = agent?.selectedModel ?? agent?.currentModel;
+    const label = agent?.models.find((entry) => entry.id === chosen)?.label ?? chosen;
+    modelLabel.textContent = agent ? `@${agent.handle}${label ? ` · ${label}` : " · Choose model"}` : "Providers & models";
+    model.dataset.handle = agent?.handle ?? "";
+  }
+  model.addEventListener("click", () => {
+    const task = State.tasks.find((entry) => entry.name === model.dataset.handle);
+    if (task) actions.setFocus(task.id);
+    actions.setView("models");
+  });
 
   function renderSuggestions() {
     const at = mentionAt(input.value, input.selectionStart ?? input.value.length);
@@ -135,6 +184,8 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
         input.focus();
         suggestKey = "";
         renderSuggestions();
+        resizeDraft();
+        syncModel();
       });
       suggest.append(chip);
     }
@@ -142,9 +193,10 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
 
   async function submit() {
     const text = input.value.trim();
-    if (!text || sending) return;
+    if (!text || sending || dictation?.listening) return;
     input.value = "";
     sending = true;
+    resizeDraft();
     Sound.play("send");
     State.chatHistory.push({ id: nextId++, role: "user", content: text });
     State.notify();
@@ -159,6 +211,7 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
       Sound.play("error");
     } finally {
       sending = false;
+      resizeDraft();
       State.notify();
       onHeightChange();
       input.focus();
@@ -166,21 +219,23 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   }
 
   let dictation: Dictation | null = null;
-  const noticeTimer = 0;
   const showNotice = (text: string, bad: boolean) => {
     State.chatHistory.push({ id: nextId++, role: "assistant", content: bad ? text : `(${text})` });
     State.notify();
     onHeightChange();
-    window.clearTimeout(noticeTimer);
   };
   if (mic && actions.dictation) {
     const bars = [...wave.children] as HTMLElement[];
     dictation = createDictation(actions.dictation(), {
       onListening(on) {
         mic.classList.toggle("on", on);
+        mic.setAttribute("aria-pressed", String(on));
+        bar.classList.toggle("listening", on);
         live.hidden = !on;
-        input.style.display = on ? "none" : "";
+        input.readOnly = on;
+        send.disabled = on || sending || !input.value.trim();
         if (on) { said.textContent = "Listening…"; Sound.play("blip"); }
+        onHeightChange();
       },
       onLive(text) { said.textContent = text; },
       onLevel(level) {
@@ -192,6 +247,8 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
         const before = input.value;
         input.value = `${before && !/\s$/.test(before) ? `${before} ` : before}${words}`;
         renderSuggestions();
+        resizeDraft();
+        syncModel();
         input.focus();
       },
       onNotice: showNotice,
@@ -199,12 +256,21 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     // Hold to talk; letting go (or the pointer leaving) ends it.
     mic.addEventListener("pointerdown", (e) => { e.preventDefault(); try { mic.setPointerCapture(e.pointerId); } catch { /* no capture: pointerleave covers it */ } void dictation!.start(); });
     for (const type of ["pointerup", "pointercancel"] as const) mic.addEventListener(type, () => dictation!.stop());
+    mic.addEventListener("lostpointercapture", () => dictation!.stop());
+    mic.addEventListener("pointerleave", (e) => { if (!mic.hasPointerCapture(e.pointerId)) dictation!.stop(); });
+    mic.addEventListener("keydown", (e) => {
+      if ((e.key === " " || e.key === "Enter") && !e.repeat) { e.preventDefault(); void dictation!.start(); }
+    });
+    mic.addEventListener("keyup", (e) => {
+      if (e.key === " " || e.key === "Enter") { e.preventDefault(); dictation!.stop(); }
+    });
+    mic.addEventListener("blur", () => dictation!.stop());
   }
 
   send.addEventListener("click", () => void submit());
-  input.addEventListener("input", renderSuggestions);
+  input.addEventListener("input", () => { renderSuggestions(); resizeDraft(); syncModel(); });
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       void submit();
     }
@@ -223,8 +289,14 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
         if (nearBottom) log.scrollTop = log.scrollHeight;
       }
       renderSuggestions();
+      syncModel();
       input.disabled = sending;
+      if (mic) mic.disabled = sending;
+      send.disabled = sending || !input.value.trim() || !!dictation?.listening;
     },
+    activate() { requestAnimationFrame(resizeDraft); },
+    deactivate() { dictation?.stop(); },
+    get draftHeight() { return dictation?.listening ? 120 : draftHeight; },
     focus() {
       input.focus();
     },

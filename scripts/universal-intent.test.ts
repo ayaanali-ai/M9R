@@ -60,3 +60,17 @@ test("form preparation remains bounded when the user explicitly says not to adva
   assert.ok(intent.plan.some((step) => step.kind === "verify"));
 });
 
+test("scroll intents select a live surface and require a fresh post-scroll observation", () => {
+  const intent = resolveUniversalIntent("Scroll down until I can see the next section on the current page.", {
+    targetKind: "browser-tab",
+    title: "Current page",
+    url: "https://example.test/",
+  });
+  assert.equal(intent.surface, "browser");
+  assert.equal(intent.action, "scroll");
+  assert.equal(intent.preferredObservation, "browser-tab");
+  assert.deepEqual(intent.plan.map((step) => step.kind), [
+    "bind-foreground", "browser-tab-select", "observe-structure", "semantic-target", "reobserve", "coordinate-fallback", "verify",
+  ]);
+});
+

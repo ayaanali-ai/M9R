@@ -79,11 +79,16 @@ test("the owner's own message echoed by the thread is one owner bubble, never an
   assert.deepEqual(newReplies.map((message) => message.id), ["reply-1"], "only the agent's reply counts as new");
 });
 
-test("a malformed or absent model catalog clears State.models instead of leaving a stale picker", () => {
+test("an explicit empty model catalog clears State.models, but a gap that omits it does not", () => {
   State.apply({ agents: [], approvals: [], thread: [], models: { agents: [{ handle: "claude", provider: "claude", availability: "available", models: [], currentModel: null, currentEffort: null, status: "working" }] } });
   assert.ok(State.models);
+  // A tick that omits "models" entirely is a gap in that snapshot, not a real
+  // "no agents" report -- it must not flash the picker empty.
   State.apply({ agents: [], approvals: [], thread: [] });
-  assert.equal(State.models, null);
+  assert.ok(State.models);
+  // An explicit empty catalog is a real report and must still clear it.
+  State.apply({ agents: [], approvals: [], thread: [], models: { agents: [] } });
+  assert.deepEqual(State.models, { agents: [] });
 });
 
 test("malformed ui-state degrades to an empty snapshot instead of throwing", () => {
@@ -297,7 +302,7 @@ test("desktop dictation uses the WebView permission flow and opens Windows setti
     assert.equal(transport.capabilities?.dictation, true);
     const speech = transport.createDictationEnvironment!();
     assert.equal(speech.Recognition, recognizer);
-    assert.equal(speech.micIsOn, undefined, "the desktop lets the WebView request permission on the Alt+M press");
+    assert.equal(speech.micIsOn, undefined, "the desktop lets the WebView request permission on the Ctrl+Alt+M press");
     speech.openMicSetup();
     assert.deepEqual(calls, ["open_microphone_settings"]);
   } finally {
