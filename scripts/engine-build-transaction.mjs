@@ -17,6 +17,21 @@ function hashFile(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+/** Windows real-time antivirus can hold a brief scan lock on a freshly-written large exe,
+ * which turns a perfectly fine rename into an EPERM right after the SEA injection step.
+ * Retry a few times with backoff before treating it as a real failure. */
+function renameWithRetry(from, to, { attempts = 6, delayMs = 500 } = {}) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      renameSync(from, to);
+      return;
+    } catch (error) {
+      if (error?.code !== "EPERM" || attempt === attempts) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs * attempt);
+    }
+  }
+}
+
 function listFiles(root, current = root) {
   const results = [];
   for (const entry of readdirSync(current, { withFileTypes: true })) {
@@ -147,7 +162,7 @@ export function publishRuntimeBuild(stagedRoot, outputRoot) {
   const backup = join(dirname(output), `.m9r-engine-publish-backup-${process.pid}-${randomUUID()}`);
   if (hadPrevious) renameSync(output, backup);
   try {
-    renameSync(staged, output);
+    renameWithRetry(staged, output);
     const publishedManifest = verifyRuntimeDirectory(output);
     if (publishedManifest.buildId !== manifest.buildId) throw new Error("Published runtime build identity does not match the staged build.");
   } catch (error) {
@@ -225,7 +240,7 @@ export function publishGeneratedDirectory(stagedRoot, outputRoot) {
   const backup = join(dirname(output), `.m9r-generated-backup-${process.pid}-${randomUUID()}`);
   if (hadPrevious) renameSync(output, backup);
   try {
-    renameSync(staged, output);
+    renameWithRetry(staged, output);
     verifyGeneratedDirectory(output);
   } catch (error) {
     if (hadPrevious && existsSync(backup)) {
