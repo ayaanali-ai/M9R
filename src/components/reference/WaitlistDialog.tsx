@@ -6,6 +6,7 @@ import s from "./ReferenceHome.module.css";
 const AGENTS = [["claude", "Claude"], ["codex", "Codex"], ["opencode", "OpenCode"], ["other", "Other"]] as const;
 
 export default function WaitlistDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [agents, setAgents] = useState<string[]>([]);
   const [state, setState] = useState<"idle" | "sending" | "done" | "error">("idle");
@@ -28,7 +29,7 @@ export default function WaitlistDialog({ open, onClose }: { open: boolean; onClo
     setState("sending");
     setMessage("");
     try {
-      const response = await fetch("/api/waitlist", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, agents }) });
+      const response = await fetch("/api/waitlist", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, email, agents }) });
       const data = await response.json().catch(() => ({}));
       if (response.ok && data.ok) {
         setState("done");
@@ -55,8 +56,10 @@ export default function WaitlistDialog({ open, onClose }: { open: boolean; onClo
           <button className={s.waitlistSubmit} type="button" onClick={onClose}>Back to home</button>
         </> : <form onSubmit={submit} noValidate>
           <p className={s.waitlistLead}>Be first in when agents can share the web.</p>
+          <label htmlFor="waitlist-name">Name</label>
+          <input ref={input} id="waitlist-name" type="text" autoComplete="name" placeholder="Your name" value={name} onChange={(event) => setName(event.target.value)} required />
           <label htmlFor="waitlist-email">Email</label>
-          <input ref={input} id="waitlist-email" type="email" autoComplete="email" placeholder="you@example.com" value={email} onChange={(event) => setEmail(event.target.value)} required />
+          <input id="waitlist-email" type="email" autoComplete="email" placeholder="you@example.com" value={email} onChange={(event) => setEmail(event.target.value)} required />
           <fieldset><legend>Which agents do you use? (optional)</legend>
             {AGENTS.map(([id, label]) => <label key={id} className={s.waitlistCheck}><input type="checkbox" checked={agents.includes(id)} onChange={() => toggle(id)} />{label}</label>)}
           </fieldset>
