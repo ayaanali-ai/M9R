@@ -150,8 +150,8 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     State.notify();
     onHeightChange();
     try {
-      const confirmation = await actions.send(text);
-      if (typeof confirmation === "string" && confirmation) State.chatHistory.push({ id: nextId++, role: "assistant", content: confirmation });
+      // A successful send needs no receipt bubble; the agent's reply is the confirmation. Failures still show below.
+      await actions.send(text);
     } catch (err) {
       // Stay in the message view and say why: a wrong or missing @name should be fixable without losing the text.
       State.chatHistory.push({ id: nextId++, role: "assistant", content: `Not sent: ${String(err instanceof Error ? err.message : err).slice(0, 160)}` });

@@ -64,6 +64,21 @@ test("a live model catalog in ui-state reaches State.models through fromUiState,
   assert.equal(State.models?.agents[0]?.models[0]?.id, "opus");
 });
 
+test("the owner's own message echoed by the thread is one owner bubble, never an agent reply or a new-reply alert", () => {
+  State.apply({ agents: [], approvals: [], thread: [{ id: "seed-1", from: "codex", text: "ready" }] });
+  State.chatHistory.push({ id: 900_001, role: "user", content: "@codex play the video" });
+  const { newReplies } = State.apply({ agents: [], approvals: [], thread: [
+    { id: "seed-1", from: "codex", text: "ready" },
+    { id: "echo-1", from: "you", text: "@codex play the video" },
+    { id: "reply-1", from: "codex", text: "Opening YouTube" },
+  ] });
+  const mine = State.chatHistory.filter((entry) => entry.content.includes("play the video"));
+  assert.equal(mine.length, 1, "no second copy of the owner's message");
+  assert.equal(mine[0].role, "user");
+  assert.equal(mine[0].content, "@codex play the video", "no 'you:' prefix");
+  assert.deepEqual(newReplies.map((message) => message.id), ["reply-1"], "only the agent's reply counts as new");
+});
+
 test("a malformed or absent model catalog clears State.models instead of leaving a stale picker", () => {
   State.apply({ agents: [], approvals: [], thread: [], models: { agents: [{ handle: "claude", provider: "claude", availability: "available", models: [], currentModel: null, currentEffort: null, status: "working" }] } });
   assert.ok(State.models);

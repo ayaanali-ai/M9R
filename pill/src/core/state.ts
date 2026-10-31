@@ -245,12 +245,15 @@ class AppState {
     // A disconnect carries no authority to seed or replace conversation history.
     const ids = snapshot.thread.map((m) => m.id);
     let newReplies: PillSnapshot["thread"] = [];
+    // The owner's own messages come back through the shared thread; they are the owner's bubble, not an agent reply.
+    const own = (message: PillSnapshot["thread"][number]) => message.from === "you";
+    const content = (message: PillSnapshot["thread"][number]) => own(message) ? message.text : `${message.from}: ${message.text}`;
     if (!this.threadSeeded && snapshot.connection !== "disconnected") {
       this.chatHistory = snapshot.thread.map((message, index) => ({
         id: Date.now() + index,
         sourceId: message.id,
-        role: "assistant",
-        content: `${message.from}: ${message.text}`,
+        role: own(message) ? "user" : "assistant",
+        content: content(message),
         link: message.link,
         dismissTaskId: message.dismissTaskId,
       }));
@@ -264,21 +267,27 @@ class AppState {
       for (const message of snapshot.thread) {
         const existing = this.chatHistory.find((entry) => entry.sourceId === message.id);
         if (existing) {
-          existing.content = `${message.from}: ${message.text}`;
+          existing.content = content(message);
           existing.link = message.link;
           existing.dismissTaskId = message.dismissTaskId;
         }
       }
       for (const message of newReplies) {
+        // The bubble the owner just typed is already on screen; claim it instead of showing a second copy.
+        const typed = own(message)
+          ? this.chatHistory.find((entry) => entry.role === "user" && entry.sourceId === undefined && entry.content === message.text.trim())
+          : undefined;
+        if (typed) { typed.sourceId = message.id; continue; }
         this.chatHistory.push({
           id: Date.now() + this.chatHistory.length,
           sourceId: message.id,
-          role: "assistant",
-          content: `${message.from}: ${message.text}`,
+          role: own(message) ? "user" : "assistant",
+          content: content(message),
           link: message.link,
           dismissTaskId: message.dismissTaskId,
         });
       }
+      newReplies = newReplies.filter((message) => !own(message));
       this.lastThread = ids.at(-1) ?? this.lastThread;
     }
     this.notify();
