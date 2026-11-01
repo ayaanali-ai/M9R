@@ -67,6 +67,9 @@ const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua
 const heldLocalProvenancePatterns = [
   /^\.m9r-(?:live-activation|recovery-quarantine|runtime-package|coordinator-worker|web-broker|installer)-[^/]+(?:\/|$)/i,
   /^\.codex-stage-build-[^/]+(?:\/|$)/i,
+  // Codex may leave an empty local scratch root while reviewing or promoting
+  // a candidate. It is evidence/workspace state, never release source.
+  /^\.codex-temp(?:\/|$)/i,
   /^\.codex-verify-temp(?:\/|$)/i,
   /^\.opencode(?:\/|$)/i,
   /^\.test-tmp(?:-[^/]+)?(?:\/|$)/i,
