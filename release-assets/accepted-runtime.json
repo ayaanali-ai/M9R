@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildId": "dc885d87faa057aa7a0221226db9f6756c27f56e086671a9ad410d146238768c",
-  "builtAt": "2026-11-01T02:51:25.345Z",
+  "buildId": "bcfe369c1a3c1c8390ee61b04dcba96d07c1cf4da0196b8947ad38b98fa74363",
+  "builtAt": "2026-11-01T07:47:30.067Z",
   "artifacts": {
     "cua-driver-runtime/bin/cua-cursor-theme.exe": "bc289b8cc0a4b6a088019115880c260bda2fedc67047c9df6309a3774cd59e25",
     "cua-driver-runtime/bin/cua-driver-uia.exe": "1c737385f3cf008240ca8ff2a58ffc6810ebd382c14bd3dccb87ccbdc4ced556",
@@ -183,14 +183,14 @@
     "cua-driver-runtime/node_modules/@ubjs/node/readme.md": "11e5dbeb25331e10eb30b8af3a7e50275225e3806b6fe0f55db85db0ed21b8e7",
     "cua-driver-runtime/node_modules/@ubjs/node/typescript/dist/resolve-lib.d.ts": "32c737545ff3d885d004a276b8099bf3ebbb050ca124bf39c9c741ac39461515",
     "cua-driver-runtime/node_modules/@ubjs/node/typescript/dist/resolve-lib.js": "133624993961574f194a1bbdac8f3c2bccd49892de92d0359f711f4dbfc1a0da",
-    "m9r-engine.exe": "dd34d58d5104879568125a3f6b49909f73b30ea168744db8c80b22f6d548252b",
-    "m9r-hook.exe": "74b84da286ce6aa1c80113842ef0ec4f74f4f8b0b30e35a228f24a674856cfd2",
-    "m9r-native-input-host.exe": "dabef2c6d90a061906eea182d97709c543b10ff5d8156f09dda4d3e39e31df19",
+    "m9r-engine.exe": "d7518019ea1ea2da2f51d88f5b2d5ffef03504ce35e755293e437a178668f106",
+    "m9r-hook.exe": "929930f564cc32b972ae34b30870fa0833aeaf1513738e4706746569e9eab06a",
+    "m9r-native-input-host.exe": "5094e3d7b9d2431411501108ad6399735dc57cd51dc05a3ec9c50964c07a3c6b",
     "m9r-overlay.exe": "4db938e87141cbd4b3192d98a71dcf573c4dddcd1c581b7915c87d8631605b60",
-    "m9r-web-broker.exe": "a57a12602a7fa180ef89f187c7d6a1b3c50b23f89512238a74626c3447f32a46"
+    "m9r-web-broker.exe": "4c3958191340310c44cfb87ab17b3bc4a66489815ce157d6db592bcb9e3b9dec"
   },
   "source": {
-    "sourceCommit": "0bc5640e8e900910bd86809162e0a5bb7d821108",
-    "sourceDirty": true
+    "sourceCommit": "42247db7d35619a69fb30c37deade17095d75332",
+    "sourceDirty": false
   }
 }

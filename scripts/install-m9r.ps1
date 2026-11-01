@@ -533,6 +533,10 @@ function Invoke-ManagedBrokerUpdate([string]$EnginePath, [ValidateSet('stop', 's
 }
 
 function Suspend-ManagedBrokerAutoStart {
+    # Contract tests use an isolated M9R_HOME with no resident broker/task. Do
+    # not query the host scheduler in that mode; production installs still
+    # take the guarded task-disable path below.
+    if ($env:M9R_NO_DAEMON -eq '1') { return $null }
     # Stopping the broker process alone is not enough on Windows: the logon task
     # can respawn it between the engine's stop receipt and the first atomic file
     # replacement. Disable only M9R's own task for the copy window, and return
