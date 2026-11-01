@@ -20,14 +20,15 @@ function hashFile(path) {
 /** Windows real-time antivirus can hold a brief scan lock on a freshly-written large exe,
  * which turns a perfectly fine rename into an EPERM right after the SEA injection step.
  * Retry a few times with backoff before treating it as a real failure. */
-function renameWithRetry(from, to, { attempts = 6, delayMs = 500 } = {}) {
+function renameWithRetry(from, to, { attempts = 40, delayMs = 250, maxDelayMs = 1000 } = {}) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       renameSync(from, to);
       return;
     } catch (error) {
       if (error?.code !== "EPERM" || attempt === attempts) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs * attempt);
+      const waitMs = Math.min(maxDelayMs, delayMs * attempt);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
     }
   }
 }
