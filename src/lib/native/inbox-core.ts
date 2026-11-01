@@ -184,6 +184,19 @@ export function normalizeHandle(handle: string): string {
   return (handle.startsWith("@") ? handle.slice(1) : handle).toLowerCase();
 }
 
+/** M9R-owned handoff state. Contains no provider conversation or resume IDs. */
+export interface LogicalTaskContext {
+  workId: string;
+  planRevision: number;
+  state: "active" | "paused";
+  control: "new-task" | "continuation" | "redirect";
+  originalObjective: string;
+  latestInstruction: string;
+  priorOutcome?: string;
+  previousTaskId?: string;
+  supersededByTaskId?: string;
+}
+
 export interface Task {
   id: string;
   /** Monotonic per-inbox sequence; the cursor is the highest seq an agent has been shown. */
@@ -192,6 +205,7 @@ export interface Task {
   to: string;
   goal: string;
   goalTruncated: boolean;
+  logicalContext?: LogicalTaskContext;
   pointers: string[];
   origin: Origin;
   approval: Approval;

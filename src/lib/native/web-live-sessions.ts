@@ -1,15 +1,7 @@
 /**
- * The agents the owner talks to from the in-page pill: one persistent session per agent handle and project folder
- * (owner decisions 2026-09-24). Claude Code runs as a real, long-lived stream-json session (live-session-core.ts): it
- * starts on the first message, keeps its context, and a message sent while it works interrupts and redirects it. If the
- * process dies it is marked failed and the next message restarts it with `--resume`, so it keeps its memory.
- *
- * Codex resumes the same thread per message. OpenCode runs one long-lived ACP process and one provider session per
- * web-agent lifetime; the M9R room memory and identity are included in every turn. A replacement message cancels the
- * active OpenCode turn and is sent to the same session.
- *
- * Subscription logins only: nothing starts while ANTHROPIC_API_KEY or OPENAI_API_KEY is set. Each session gets its own
- * M9R identity (store.issueIdentity), revoked when the session ends. Config: `agents.json` in the M9R store root.
+ * Compatibility runtime for owner-managed provider turns. Production uses
+ * managed-provider-owner. Every provider turn starts cold; M9R owns durable
+ * logical task context and room memory. Provider conversation resume is retired.
  */
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -214,7 +206,9 @@ export function writeWebMcpConfig(dir: string, options: {
   const packaged = packagedMcpEntry();
   const spawnArgs = packaged ? [packaged] : ["--disable-warning=ExperimentalWarning", "--import", "./scripts/register-alias.mjs", "scripts/m9r-mcp.ts"];
   writeFileSync(launcher, `const { spawn } = require("node:child_process");
-const child = spawn(process.execPath, ${JSON.stringify(spawnArgs)}, { cwd: ${JSON.stringify(packaged ? dir : options.repoRoot)}, stdio: "inherit" });
+const env = { ...process.env };
+ delete env.M9R_PROVIDER_SESSION_ID;
+const child = spawn(process.execPath, ${JSON.stringify(spawnArgs)}, { cwd: ${JSON.stringify(packaged ? dir : options.repoRoot)}, stdio: "inherit", env });
 child.on("exit", (code) => process.exit(code ?? 0));
 `);
   const configPath = join(dir, "mcp.json");
@@ -228,7 +222,7 @@ child.on("exit", (code) => process.exit(code ?? 0));
           M9R_ROOM_STARTED_AT: String(options.roomStartedAt),
           ...(options.provider ? { M9R_PROVIDER: options.provider } : {}),
           ...(options.projectCwd ? { M9R_PROJECT_ROOT: options.projectCwd } : {}),
-          ...(options.sessionId ? { M9R_PROVIDER_SESSION_ID: options.sessionId } : {}),
+          ...(options.sessionId ? { M9R_SESSION_ID: options.sessionId } : {}),
         },
       },
     },
@@ -258,14 +252,15 @@ export function codexWorkerArgs(options: {
     `M9R_ROOM_STARTED_AT=${toml(String(options.roomStartedAt))}`,
     `M9R_PROVIDER="codex"`,
     ...(options.projectCwd ? [`M9R_PROJECT_ROOT=${toml(options.projectCwd)}`] : []),
-    ...(options.sessionId ? [`M9R_PROVIDER_SESSION_ID=${toml(options.sessionId)}`] : []),
+    ...(options.sessionId ? [`M9R_SESSION_ID=${toml(options.sessionId)}`] : []),
   ].join(",");
   const mcp = `mcp_servers={m9r={command=${toml(server.command)},args=[${server.args.map(toml).join(",")}],env={${mcpEnv}},default_tools_approval_mode="approve"}}`;
   // A browser worker must only ever touch the browser through M9R. Codex ships its own computer-use, browser, app and plugin
   // tools (on by default); a worker that reaches for them takes over the owner's real screen, so they are all switched off.
   const noOwnControl = ["computer_use", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser", "in_app_local_automation", "apps", "plugins", "remote_plugin", "multi_agent", "image_generation", "view_image", "tool_suggest", "skill_search"].flatMap((feature) => ["-c", `features.${feature}=false`]);
   const common = ["--skip-git-repo-check", "--ignore-user-config", "--json", "-c", mcp, "-c", 'web_search="disabled"', "-c", 'sandbox_mode="read-only"', ...noOwnControl, ...(options.model ? ["--model", options.model] : []), ...(options.effort ? ["-c", `model_reasoning_effort=${toml(options.effort)}`] : [])];
-  return options.threadId ? ["exec", "resume", options.threadId, options.prompt, ...common] : ["exec", options.prompt, "--cd", options.folder, ...common];
+  // A legacy caller may still supply threadId; it is never a resume selector.
+  return ["exec", options.prompt, "--cd", options.folder, ...common];
 }
 
 export const CODEX_WEB_PREFACE = "M9R tools may only be reachable as deferred tools through your exec/code gateway (the `tools` object, named like mcp__m9r__m9r_computer_observe or mcp__m9r__m9r_computer_action): use it only to call M9R tools. Do not run shell commands, read or write files, or reach the network any other way. Use m9r_stage_app to select or restore the exact owner-visible browser, then use the native observation/action tools on that window. The retired browser-extension route is not available. If the M9R tools are absent, report that blocker once and stop; do not claim to have acted, ask a teammate to wait, or keep probing for missing tools.";
@@ -328,6 +323,7 @@ export interface WebLiveSessionsDeps {
     cancelTask?(id: string, reason?: string): unknown;
     /** Pause only the active provider turn while retaining task and conversation history. */
     pauseTask?(id: string): unknown;
+    prepareLogicalTaskContext?(id: string, previousId?: string, continuation?: boolean): Task | undefined;
     /** Owner-pilled tasks use one atomic state-store claim before a resident worker receives the task text. */
     claimProviderDelivery?(id: string, token: string, expected: { handle: string; provider: string; cwd: string }): Task | undefined;
     setDelivery?(id: string, patch: { state: "deferred" | "queued" | "failed" | "uncertain"; attempts?: number; threadId?: string; queuedAt?: string; failedAt?: string; uncertainAt?: string; correlation?: "internal-context"; error?: string }): Task | undefined;
@@ -1201,7 +1197,7 @@ Continue your work with this. If you need more from them, ask again with m9r_sen
       || task.resultSummary || task.deliveredAt || task.deliveredSession || task.targetSession) {
       return { ok: false, error: "Only fresh, approved, untargeted owner tasks can start a resident provider session." };
     }
-    if (!isFreshInboxTask(task.createdAt, now().getTime(), inboxMaxAgeMs())) return { ok: false, error: "This owner task is stale and will not be replayed into a new provider session." };
+    if (task.retiredAt || !isFreshInboxTask(task.createdAt, now().getTime(), inboxMaxAgeMs())) return { ok: false, error: "This owner task is stale and will not be replayed into a new provider session." };
     const handle = normalizeHandle(task.to);
     const slot = slots.get(handle);
     if (!slot) return { ok: false, error: `No resident provider session is configured for @${handle}.` };

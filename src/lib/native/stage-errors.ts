@@ -1,3 +1,4 @@
+import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import type { CuaStageCapture } from "./cua-stage-driver";
 
 export type StageFailureKind = "authorization" | "validation" | "driver" | "runtime";
@@ -12,8 +13,8 @@ export class StageInputNotDispatchedError extends Error {
 
 export class StageCaptureRefreshError extends StageInputNotDispatchedError {
   readonly capture: CuaStageCapture;
-  constructor(capture: CuaStageCapture) {
-    super("The desktop changed since the last capture. Inspect the refreshed capture and choose the next action; no input was sent.");
+  constructor(capture: CuaStageCapture, reason?: string) {
+    super(reason ?? "The desktop changed since the last capture. Inspect the refreshed capture and choose the next action; no input was sent.");
     this.name = "StageCaptureRefreshError";
     this.capture = capture;
   }
@@ -159,7 +160,7 @@ export function serializeStageFailure(error: unknown, fallback: string): Seriali
     ...(code ? { code } : {}),
     ...(driverCause ? { driverError: { tool: driverCause.tool!, errorCode: driverCause.errorCode!, message: driverCause.message } } : {}),
     ...(causes.length > 1 ? { causes } : {}),
-    ...(error instanceof StageInputNotDispatchedError ? { dispatchState: error.dispatchState } : {}),
+    ...(error instanceof StageInputNotDispatchedError || error instanceof DesktopInputNotDispatchedError ? { dispatchState: error.dispatchState } : {}),
     ...(error instanceof StageCaptureRefreshError ? { recovery: { kind: "capture_refreshed" as const, capture: error.capture } } : {}),
     ...(error instanceof StageWindowSelectionError ? { recovery: { kind: "window_selection" as const,
       windowTitles: error.windowTitles.slice(0, 40).map((title) => safeText(title, 160) ?? "Untitled"),

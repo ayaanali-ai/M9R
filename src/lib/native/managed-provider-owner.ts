@@ -1,3 +1,4 @@
+import { isLogicalContinuation, logicalTaskHandoff } from "./logical-task-context";
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -172,14 +173,18 @@ function contextForProfile(
     projectCwd: profile.cwd,
     sessionId,
   });
+  const { M9R_PROVIDER_SESSION_ID: _providerSelector, M9R_SESSION_ID: _oldIdentity, ...baseEnvironment } = deps.env ?? process.env;
   const environment = {
-    ...(deps.env ?? process.env),
+    ...baseEnvironment,
+    M9R_SESSION_ID: sessionId,
     M9R_HOME: deps.storeRoot,
     M9R_WEB_BROKER_PORT: String(deps.brokerPort),
     M9R_ROOM_STARTED_AT: String(roomStartedAt),
     M9R_PROVIDER: profile.provider,
     M9R_PROJECT_ROOT: profile.cwd,
-    M9R_PROVIDER_SESSION_ID: sessionId,
+    // Deliberately do not export a provider-session selector. The managed
+    // provider process is M9R-owned; its continuity is the M9R task context,
+    // not a vendor conversation/session binding.
   };
   const prompt = `${webAgentPrompt(profile.handle, token, teammates, projectRoomId(deps.repoRoot))}\n\n${sharedProjectMemory(deps.storeRoot, projectRoomId(deps.repoRoot))}`;
   return { profile, sessionId, token, mcpConfigPath: configPath, launcher, prompt, environment };
@@ -201,7 +206,7 @@ function managedCodexAppServerArgs(context: ManagedProviderOwnerConnectionContex
   const server = webMcpServerCommand(context.launcher);
   const mcpEnvironmentKeys = new Set([
     "M9R_HOME", "M9R_WEB_BROKER_PORT", "M9R_ROOM_STARTED_AT", "M9R_PROVIDER",
-    "M9R_PROJECT_ROOT", "M9R_PROVIDER_SESSION_ID",
+    "M9R_PROJECT_ROOT", "M9R_SESSION_ID",
   ]);
   const mcpEnvironment = Object.entries(context.environment)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string" && mcpEnvironmentKeys.has(entry[0]))
@@ -235,7 +240,7 @@ function openCodeEnvironment(context: ManagedProviderOwnerConnectionContext): Re
           M9R_ROOM_STARTED_AT: context.environment.M9R_ROOM_STARTED_AT,
           M9R_PROVIDER: context.profile.provider,
           M9R_PROJECT_ROOT: context.profile.cwd,
-          M9R_PROVIDER_SESSION_ID: context.sessionId,
+          M9R_SESSION_ID: context.sessionId,
         },
         enabled: true,
       },
@@ -423,7 +428,24 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     return id;
   }
 
-  function startOwnerTask(profile: ManagedProviderConnectionProfile, taskId: string, text: string, redirected = false): boolean {
+  function pausedOwnerTask(profile: ManagedProviderConnectionProfile): Task | undefined {
+    return deps.store.tasksFor?.(profile.handle).filter((task) => task.origin === "human_typed"
+      && (!task.cwd || normCwd(task.cwd) === normCwd(profile.cwd)) && !task.retiredAt && task.receipt?.state === "paused"
+      && !task.logicalContext?.supersededByTaskId)
+      .sort((a, b) => b.seq - a.seq)[0];
+  }
+
+  function ownerTurnPrompt(profile: ManagedProviderConnectionProfile, taskId: string, text: string): string {
+    const previous = pausedOwnerTask(profile);
+    const task = deps.store.prepareLogicalTaskContext?.(taskId, previous?.id, isLogicalContinuation(text));
+    if (deps.store.prepareLogicalTaskContext && !task) throw new Error("M9R could not preserve the logical task handoff; no provider turn was started.");
+    const context = contextFor(profile);
+    return context.prompt + "\n\n" + (task ? logicalTaskHandoff(task) + "\n\n" : "")
+      + "The owner's latest instruction for M9R task " + taskId + ":\n" + text;
+  }
+
+  function startOwnerTask(profile: ManagedProviderConnectionProfile, taskId: string, text: string): boolean {
+    const prompt = ownerTurnPrompt(profile, taskId, text);
     const context = contextFor(profile);
     const claimed = deps.store.claimProviderDelivery?.(taskId, context.token, {
       handle: profile.handle,
@@ -437,10 +459,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       return false;
     }
     pausedConnections.delete(profile.connectionId);
-    const ownerText = redirected
-      ? `The owner paused or redirected the previous task. Keep the useful M9R task context, but follow this newest instruction instead of continuing the paused task unless the owner explicitly asks you to resume it:\n\n${text}`
-      : text;
-    void runTask(profile, taskId, `${context.prompt}\n\nThe owner says:\n${ownerText}`, "owner");
+    void runTask(profile, taskId, prompt, "owner");
     return true;
   }
 
@@ -477,7 +496,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       return;
     }
     if (queue?.length === 0) queuedOwnerPrompts.delete(profile.connectionId);
-    if (!startOwnerTask(profile, next.taskId, next.text, true)) startNextOwnerPrompt(profile);
+    if (!startOwnerTask(profile, next.taskId, next.text)) startNextOwnerPrompt(profile);
   }
 
   function markQueued(profile: ManagedProviderConnectionProfile, taskId: string, kind: ActiveTask["kind"], context: ManagedProviderOwnerConnectionContext): void {
@@ -771,7 +790,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       waiter.timer.unref?.();
       pendingAcceptance.set(taskId, waiter);
     });
-    const prompt = `The owner sent M9R task ${taskId}. Treat this as the active request. When finished, record the concise outcome with m9r_result for task ${taskId}.\n\n${task.goal}`;
+    const prompt = ownerTurnPrompt(profile, taskId, task.goal);
     void runTask(profile, taskId, prompt, "owner");
     return acceptance;
   }
@@ -902,11 +921,17 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       })() : profiles;
       let resumed = false;
       for (const profile of selected) {
-        if (!pausedConnections.delete(profile.connectionId)) continue;
-        resumed = true;
-        void supervisor.resume(profile.connectionId).catch((error) => {
-          emit({ kind: "system", handle: profile.handle, provider: profile.provider, text: `M9R could not resume @${profile.handle}'s control gate: ${errorText(error)}` });
-        });
+        const pausedTask = pausedOwnerTask(profile);
+        if (!pausedConnections.has(profile.connectionId) && !pausedTask) continue;
+        if (!pausedTask) {
+          pausedConnections.delete(profile.connectionId);
+          emitState(profile);
+          continue;
+        }
+        // Resume creates an explicit new cold turn. It never calls a provider
+        // session-resume API or replays any deferred/queued task.
+        const result = deliver(profile.handle, "Continue the paused M9R task.");
+        if (result.ok) resumed = true;
         emitState(profile);
       }
       return resumed;

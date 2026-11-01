@@ -1,3 +1,4 @@
+import { StageCaptureRefreshError, serializeStageFailure } from "../src/lib/native/stage-errors";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +21,8 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   let creations = 0;
   const desktopActions: Array<{ kind: string; x?: number; y?: number }> = [];
   const currentDesktopId = "33333333-3333-4333-8333-333333333333";
+  let anchorDesktopId = currentDesktopId;
+  const nativeOps: string[] = [];
   const previewCapture = { dataUrl: "data:image/png;base64,eA==", width: 1280, height: 720, capturedAt: new Date(0).toISOString() };
   const driver = {
     capture: async () => previewCapture,
@@ -33,18 +36,19 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   const service = createTaskDesktopStageService({ store, readPolicy: () => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) }), driver,
     ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage: {
     platform: "win32", env: {}, invokeNative: async (request) => {
+      nativeOps.push(String(request.op));
       if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentDesktopId, isCurrent: true } };
       if (request.op === "createDesktop") {
         creations++;
         return { ok: true, desktop: { desktopId: "11111111-1111-4111-8111-111111111111", isCurrent: false, returnDesktopId: "22222222-2222-4222-8222-222222222222" } };
       }
       if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: String(request.desktopId) === currentDesktopId } };
-      if (request.op === "presentOwnerWindow") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } };
-      if (request.op === "inspect") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } };
+      if (request.op === "presentOwnerWindow") { anchorDesktopId = currentDesktopId; return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } }; }
+      if (request.op === "inspect") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: anchorDesktopId, onCurrentDesktop: anchorDesktopId === currentDesktopId } };
       throw new Error("Unexpected native operation; preparation must not move or activate windows.");
     },
   } });
-  return { root, store, identity, task, service, driver, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, store, identity, task, service, driver, nativeOps, moveAnchor: () => { anchorDesktopId = "22222222-2222-4222-8222-222222222222"; }, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("state file replacement retries transient Windows sharing errors, but surfaces persistent failures", () => {
@@ -493,4 +497,32 @@ test("an enabled agent resolves any named or absolute app without per-app approv
     assert.equal("needsApproval" in direct, false);
     assert.throws(() => resolveLaunchTarget({ handles: [] }, "codex", exe), /not been granted task-stage access/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("owner-preview inspects durable anchors and refuses stale input after a rebind", async () => {
+  const f = fixture(true, (root) => ({ executable: join(root, "chrome.exe"), args: [] }));
+  try {
+    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Personal Chrome", width: 1280, height: 720 }];
+    await f.service.launch(f.identity.token, f.task.id, "chrome");
+    f.nativeOps.length = 0;
+    await f.service.prepare(f.identity.token, f.task.id);
+    assert.ok(f.nativeOps.includes("inspect"));
+    assert.equal(f.nativeOps.includes("currentDesktop"), false, "reuse must not clear a valid anchor");
+    f.nativeOps.length = 0;
+    const reused = await f.service.launch(f.identity.token, f.task.id, "chrome");
+    assert.equal(reused.reused, true);
+    assert.equal(f.nativeOps.includes("currentDesktop"), false, "repeat launch must inspect before adopting");
+    f.moveAnchor();
+    let actions = 0;
+    f.driver.clickElement = async () => { actions++; throw new Error("stale click must not dispatch"); };
+    await assert.rejects(f.service.act(f.identity.token, f.task.id,
+      { kind: "click_element", view: "app", ref: "old-reference" }), (error: unknown) => {
+        assert.ok(error instanceof StageCaptureRefreshError);
+        const failure = serializeStageFailure(error, "failed");
+        assert.equal(failure.dispatchState, "not-dispatched");
+        assert.equal(failure.recovery?.kind, "capture_refreshed");
+        return true;
+      });
+    assert.equal(actions, 0);
+  } finally { f.cleanup(); }
 });

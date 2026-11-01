@@ -840,6 +840,10 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     return inRoom(identity) && !plain.startsWith("web-") ? `web-${plain}` : plain;
   };
   const taskIsFreshForIdentity = (identity: { sessionId: string }, task: Task): boolean => {
+    // Retirement is a permanent live-delivery fence. History remains queryable,
+    // but a retired task must never reappear through recovery, pending-work, or
+    // result-target resolution after a broker/provider restart.
+    if (task.retiredAt) return false;
     const createdAt = Date.parse(task.createdAt);
     const now = (deps.now ?? (() => new Date()))().getTime();
     if (!Number.isFinite(createdAt) || now - createdAt < 0 || now - createdAt > inboxMaxAgeMs()) return false;

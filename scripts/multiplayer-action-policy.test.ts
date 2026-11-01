@@ -34,3 +34,11 @@ test("visible semantic work does not require a pointer move", () => {
   if (decision.ok) assert.equal(decision.mode, "visible-semantic");
 });
 
+
+test("advertising shared input does not make a semantic action physical", () => {
+  const target = { capabilities: [...semanticTarget.capabilities, "input.shared-os"] };
+  const semantic = selectActionDelivery({ target, targetBackgroundSafe: true });
+  assert.equal(semantic.ok && semantic.mode, "background-semantic");
+  const physical = selectActionDelivery({ target, targetBackgroundSafe: true, requiresPhysicalInput: true });
+  assert.equal(physical.ok, false);
+});

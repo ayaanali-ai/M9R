@@ -1,5 +1,7 @@
 import { createCuaStageDriver, type CuaAgentCursorIdentity, type CuaStageTargetDescription } from "./cua-stage-driver";
 import type { WindowsSystemControlRequest } from "./windows-desktop-stage";
+import { selectActionDelivery } from "./multiplayer-action-policy";
+import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { classifyWebActionRisk } from "./risk-core";
 
 type TaskStageActionBody =
@@ -25,11 +27,6 @@ type TaskStageActionBody =
   | { kind: "clipboard_write"; text?: string; imagePath?: string; filePath?: string; confirmSharedClipboard: true }
   | ({ kind: "system_control" } & WindowsSystemControlRequest);
 export type TaskStageAction = TaskStageActionBody & { view?: "desktop" | "app" };
-
-const OWNER_PREVIEW_FOREGROUND_ACTIONS = new Set<TaskStageAction["kind"]>([
-  "click", "double_click", "middle_click", "right_click", "type", "scroll", "drag",
-  "press_key", "hotkey", "click_element", "scroll_delta",
-]);
 
 const KEY_NAMES = new Set([
   "Ctrl", "Control", "Alt", "Shift", "Meta", "Win", "Enter", "Return", "Escape", "Esc", "Tab", "Space",
@@ -130,14 +127,20 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
 
 export async function runTaskStageAction(driver: ReturnType<typeof createCuaStageDriver>, name: string, action: TaskStageAction,
   identity: CuaAgentCursorIdentity, mode: "background" | "owner-preview" = "owner-preview", signal?: AbortSignal) {
-  // Launch/adoption is intentionally non-stealing, but an owner-visible app input must
-  // still be delivered to the selected window. Otherwise the native/background route can
-  // report success while the app remains behind another window and the next action lands
-  // nowhere useful. An explicit false remains an opt-out for callers that deliberately
-  // request background-capable delivery.
+  // Visibility is presentation state, not permission to use shared OS input.
+  // Use the same explicit foreground policy as the MCP action router.
   const requestedFocus = "confirmFocusForeground" in action ? action.confirmFocusForeground : undefined;
-  const confirmFocusForeground = requestedFocus
-    ?? (mode === "owner-preview" && action.view === "app" && OWNER_PREVIEW_FOREGROUND_ACTIONS.has(action.kind) ? true : undefined);
+  const delivery = selectActionDelivery({
+    target: { capabilities: ["observe.accessibility", "input.click.element", "input.shared-os"] },
+    requested: mode === "background" ? "background" : requestedFocus ? "exclusive" : "auto",
+    targetVisible: mode === "owner-preview",
+    targetBackgroundSafe: true,
+    requiresPhysicalInput: requestedFocus === true,
+    ownerLeaseValid: requestedFocus === true,
+  });
+  if (!delivery.ok) throw new DesktopInputNotDispatchedError(delivery.reason,
+    delivery.code === "foreground-lease-required" ? "foreground-lease" : "background-unavailable");
+  const confirmFocusForeground = delivery.mode === "exclusive-input" ? true : requestedFocus;
   const stageOptions = <T extends Record<string, unknown>>(options: T): T | undefined => {
     const normalized = { ...options, deliveryMode: mode, ...(signal ? { signal } : {}) } as Record<string, unknown>;
     for (const key of Object.keys(normalized)) if (normalized[key] === undefined) delete normalized[key];

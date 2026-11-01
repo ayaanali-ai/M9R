@@ -5,6 +5,7 @@
  *
  * Local first: nothing here needs the network or an account (design section 1, principle 7).
  */
+import { nextLogicalTaskContext } from "./logical-task-context";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
@@ -2415,11 +2416,32 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
-    /** Pause only the provider turn; leave its thread and provider connection available for a follow-up. */
+    /** Link only an explicit owner turn to a paused M9R task; never queue or replay it. */
+    prepareLogicalTaskContext(id: string, previousId?: string, continuation = false): Task | undefined {
+      return update((s) => {
+        const task = s.tasks.find((candidate) => candidate.id === id);
+        if (!task || task.retiredAt || task.origin !== "human_typed") return undefined;
+        if (task.logicalContext) return task;
+        const previous = previousId ? s.tasks.find((candidate) => candidate.id === previousId) : undefined;
+        if (previousId && (!previous || previous.id === id || previous.to !== task.to || normCwd(previous.cwd ?? "") !== normCwd(task.cwd ?? "")
+          || previous.retiredAt || previous.receipt?.state !== "paused" || previous.logicalContext?.supersededByTaskId)) return undefined;
+        task.logicalContext = nextLogicalTaskContext(task, previous, continuation);
+        if (previous) {
+          previous.logicalContext ??= nextLogicalTaskContext(previous);
+          previous.logicalContext.state = "paused";
+          previous.logicalContext.supersededByTaskId = id;
+        }
+        return task;
+      });
+    },
+
+    /** Pause the provider turn while preserving M9R logical context for a cold follow-up. */
     pauseTask(id: string): Task | undefined {
       return update((s) => {
         const task = s.tasks.find((candidate) => candidate.id === id);
         if (!task || task.resultSummary || task.receipt?.state === "completed" || task.receipt?.state === "canceled" || task.receipt?.state === "paused") return task;
+        task.logicalContext ??= nextLogicalTaskContext(task);
+        task.logicalContext.state = "paused";
         recordTaskReceipt(task, { state: "paused", at: now().toISOString(), source: "owner-broker" });
         return task;
       });

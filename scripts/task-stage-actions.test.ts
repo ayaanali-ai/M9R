@@ -37,8 +37,8 @@ test("owner-preview actions route through desktop-wide driver methods", async ()
   await runTaskStageAction(driver, "preview", { kind: "hotkey", keys: ["Control", "L"] }, identity, "owner-preview");
   await runTaskStageAction(driver, "preview", { kind: "cursor", x: 30, y: 45 }, identity);
   assert.deepEqual(calls.map((call) => call.method), ["clickDesktop", "typeTextDesktop", "hotkeyDesktop", "moveDesktopCursor"]);
-  assert.deepEqual(calls[0]?.args, ["preview", 12, 18, identity, { count: 2 }]);
-  assert.deepEqual(calls[1]?.args, ["preview", "echo M9R_TERM_OK", identity]);
+  assert.deepEqual(calls[0]?.args, ["preview", 12, 18, identity, { count: 2, deliveryMode: "owner-preview" }]);
+  assert.deepEqual(calls[1]?.args, ["preview", "echo M9R_TERM_OK", identity, { deliveryMode: "owner-preview" }]);
   assert.deepEqual(calls[3]?.args, ["preview", 30, 45, identity]);
 });
 
@@ -76,4 +76,16 @@ test("explicit app view targets the selected window while remaining in owner-pre
   }
   assert.deepEqual(calls, ["app capture", "app click", "app type"]);
   assert.throws(() => parseTaskStageAction({ kind: "capture", view: "other-user-window" }), /Invalid stage action view/);
+});
+
+test("owner-preview app actions preserve semantic delivery until foreground is explicit", async () => {
+  const options: Array<{ confirmFocusForeground?: boolean }> = [];
+  const driver = { clickElement: async (_name: string, _ref: string, _identity: unknown, value: { confirmFocusForeground?: boolean }) => { options.push(value); } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "session" };
+  await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app" }, identity);
+  await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app", confirmFocusForeground: true }, identity);
+  assert.equal(options[0].confirmFocusForeground, undefined);
+  assert.equal(options[1].confirmFocusForeground, true);
+  await assert.rejects(runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app", confirmFocusForeground: true }, identity, "background"), /safe background delivery/);
+  assert.equal(options.length, 2, "background refusal must happen before dispatch");
 });

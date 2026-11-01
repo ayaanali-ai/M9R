@@ -36,7 +36,7 @@ export function selectActionDelivery(request: ActionDeliveryRequest): ActionDeli
   const semantic = has(request.target, "observe.accessibility") || has(request.target, "observe.dom")
     || has(request.target, "input.click.element") || has(request.target, "input.text.insert")
     || has(request.target, "input.text.replace") || has(request.target, "input.key");
-  const physical = request.requiresPhysicalInput === true || has(request.target, "input.shared-os");
+  const physical = request.requiresPhysicalInput === true;
   const backgroundSafe = request.targetBackgroundSafe === true && semantic && !physical;
 
   if (requested === "background" || (requested === "auto" && backgroundSafe)) {

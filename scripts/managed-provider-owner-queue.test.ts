@@ -11,6 +11,7 @@ import type {
   ManagedProviderConnectionSnapshot,
   ManagedProviderEvent,
   ManagedProviderModelApply,
+  ManagedProviderTask,
 } from "@/lib/native/managed-provider-contract";
 
 /** A connection whose `send` blocks on a gate the test controls, so a turn can be held "active"
@@ -21,10 +22,12 @@ function gatedConnection(profile: ManagedProviderConnectionProfile) {
   let release = () => {};
   let gate: Promise<void> | undefined = new Promise<void>((resolve) => { release = resolve; });
   const modelApply: ManagedProviderModelApply = { ok: true, applies: "next-turn" };
+  const sent: ManagedProviderTask[] = [];
   const connection: ManagedProviderConnection = {
     profile,
     start: async () => { generation += 1; status = "ready"; return { connectionId: profile.connectionId, generation }; },
-    send: async function* (): AsyncIterable<ManagedProviderEvent> {
+    send: async function* (task: ManagedProviderTask): AsyncIterable<ManagedProviderEvent> {
+      sent.push(task);
       yield { kind: "accepted" };
       if (gate) await gate;
       yield { kind: "result", text: "done", isError: false };
@@ -43,6 +46,7 @@ function gatedConnection(profile: ManagedProviderConnectionProfile) {
   };
   return {
     connection,
+    sent,
     /** Hold the next/current turn's `send` open until `release()` is called. */
     holdOpen() { gate = new Promise<void>((resolve) => { release = resolve; }); },
     release() { release(); },
@@ -91,6 +95,9 @@ test("stopping an agent drops its queued follow-up, so the very next message run
 
     // Tasks are assigned sequential ids (T1=A, T2=B, T3=C) in a fresh store.
     const taskC = store.getTask?.("T3");
+    assert.equal(taskC?.logicalContext?.workId, "T1");
+    assert.equal(taskC?.logicalContext?.control, "redirect");
+    assert.equal(taskC?.logicalContext?.latestInstruction, "C: do the real next thing");
     assert.equal(taskC?.goal, "C: do the real next thing", "C must have been delivered as the third task");
     assert.ok(["queued", "done"].includes(taskC?.delivery?.state ?? ""), "sanity: C actually reached provider delivery");
 
@@ -103,4 +110,35 @@ test("stopping an agent drops its queued follow-up, so the very next message run
     await owner.shutdown();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("explicit resume starts a new turn with durable M9R context and no provider resume", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-resume-"));
+  const store = createLocalStore(root);
+  let gated: ReturnType<typeof gatedConnection> | undefined;
+  const owner = createManagedProviderOwner({
+    agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store,
+    createConnection: (profile) => (gated = gatedConnection(profile)).connection,
+  });
+  try {
+    assert.equal(owner.deliver("codex", "Inspect the report before changing anything.").ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    owner.stop("codex");
+    gated!.release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    gated!.holdOpen();
+    assert.equal(owner.resume?.("codex"), true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const resumed = store.getTask("T2");
+    assert.equal(resumed?.logicalContext?.workId, "T1");
+    assert.equal(resumed?.logicalContext?.control, "continuation");
+    assert.equal(resumed?.logicalContext?.latestInstruction, "Inspect the report before changing anything.");
+    assert.equal(store.getTask("T1")?.receipt?.state, "paused", "old transport receipt is never replayed");
+    assert.equal(gated!.sent.length, 2);
+    assert.match(gated!.sent[1].prompt, /M9R logical task context/);
+    assert.match(gated!.sent[1].prompt, /Reobserve the current surface/);
+    assert.doesNotMatch(gated!.sent[1].prompt, /--resume|providerSessionRef/);
+    gated!.release();
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });

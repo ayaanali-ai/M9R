@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { StageCaptureRefreshError } from "./stage-errors";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -533,15 +534,14 @@ export function createTaskDesktopStageService(input: {
         // Owner preview is desktop-wide, follows the desktop the user is
         // viewing now, and detaches only stale registry HWND metadata. It never
         // creates, activates, moves, or closes a desktop or user window.
-        const selected = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
+        recoverPersistedApp(name, taskId);
         let retainSelection = false;
         // `name` is one stage per authenticated identity/session (see authorize()), so
         // `ownedApps.get(name)` holds at most one entry regardless of which taskId that
         // session is currently using -- the real continuation boundary is "this stage
         // already has a selected app", not "the exact same taskId selected it". A real
         // session naturally issues a fresh taskId per request even mid-task.
-        if (selected && existing?.anchor?.pid === selected.pid
-          && existing.anchor.windowId === selected.windowId.toString()) {
+        if (existing?.anchor) {
           try {
             const inspected = await manager.inspectStage(name);
             retainSelection = inspected.desktop.isCurrent;
@@ -703,6 +703,14 @@ export function createTaskDesktopStageService(input: {
         if (!selected) throw new Error("The owner-visible preview stage is not on the owner's current desktop.");
         inspected = await rePresentLiveWindow(selected);
         recoveryNotice = "The exact application window was on another Windows desktop and was re-presented on the owner’s current desktop; its state was preserved.";
+      }
+      if (recoveryNotice && action.kind !== "capture" && action.kind !== "read_structure") {
+        // Rebinding invalidates the old observation. Ask the caller to re-plan
+        // against the refreshed state before delivering any target input.
+        const capture = effectiveAction.view === "app"
+          ? await driver.capture(name, identity) : await driver.captureDesktop(name, identity);
+        throw new StageCaptureRefreshError(capture,
+          recoveryNotice + " Inspect the refreshed capture and choose the next action; no input was sent.");
       }
       // Recheck after inspection and at dequeue time: queued work cannot survive revocation.
       authorize(token, taskId, mode);
@@ -973,12 +981,22 @@ export function createTaskDesktopStageService(input: {
       // window instead of reusing the one already open, regardless of mode.
       const priorOwned = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
       if (priorOwned && priorOwned.appId === appId) {
-        if (mode === "owner-preview") await manager.adoptCurrentDesktop(name);
         let sameWindowIsRunning = false;
         try {
           const inspected = await manager.inspectStage(name);
           sameWindowIsRunning = inspected.anchor?.pid === priorOwned.pid && inspected.anchor.windowId === priorOwned.windowId;
-        } catch { /* the window may have been closed; fall through to a fresh launch */ }
+          if (sameWindowIsRunning && mode === "owner-preview" && !inspected.desktop.isCurrent) await manager.adoptCurrentDesktop(name);
+        } catch (error) {
+          if (mode === "owner-preview" && isStageWindowMovedError(error)) {
+            // Verify the exact live identity before clearing registry metadata.
+            const live = await manager.inspectWindow(String(priorOwned.pid), priorOwned.windowId);
+            sameWindowIsRunning = live.pid === priorOwned.pid && live.windowId === priorOwned.windowId;
+            if (sameWindowIsRunning) await manager.adoptCurrentDesktop(name);
+          } else if (!isStageWindowGoneError(error)) {
+            // Timeouts and malformed inspection responses never imply closure.
+            throw error;
+          }
+        }
         if (sameWindowIsRunning) {
           if (mode === "owner-preview") {
             const capture = await presentAndFocusOwnerWindow(priorOwned.pid, priorOwned.windowId, coordinationKey);
