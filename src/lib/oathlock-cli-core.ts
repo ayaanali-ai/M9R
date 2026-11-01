@@ -3337,15 +3337,15 @@ Usage:
   m9r-cli bootstrap remove                  Remove only the M9R-managed block (user content preserved)
   m9r-cli connect [--agents claude-code,codex,opencode]
                                          Detect installed agents and start one human-approved connection
-  m9r-cli web setup [--agents claude-code,codex,opencode] [--yes]
-                                         Install the managed browser extension and local broker (Windows)
-  m9r-cli web uninstall                    Remove the managed browser extension, broker, and provider entries
+  m9r-cli web setup --broker-only [--project-root <path>]
+                                         Reconcile the M9R-owned broker login task (legacy web transport is retired)
+  m9r-cli web uninstall                    Remove legacy web-transport remnants; provider hooks are not installed
   m9r-cli opencode sessions               List local OpenCode sessions with their project folders
   m9r-cli opencode send --folder <path> --session <id> --text <message>
                                          Send only to that explicitly selected local session
-  m9r launch claude --resume <session-id> Resume an explicit Claude Code session
+  m9r launch claude --resume <session-id> Explicit provider-session resume is retired
   m9r-cli setup [--dry-run] [--yes] [--status]
-                                         Set up this machine locally (no account): hooks and a standing instruction, with backups
+                                         Set up the broker-owned runtime and remove retired provider integrations, with backups
   m9r-cli update check                    Check the signed M9R runtime manifest without applying an update
   m9r-cli uninstall [--yes] [--purge]       Remove everything setup added and restore your files exactly
   m9r-cli tasks                             List tasks and what is waiting for your approval
