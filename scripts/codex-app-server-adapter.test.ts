@@ -176,11 +176,11 @@ test("a turn that never finishes is abandoned at the prompt timeout", async () =
   } finally { await stop(); }
 });
 
-test("resumeSession reopens the same thread id", async () => {
+test("resumeSession compatibility calls start a fresh thread instead of resuming provider history", async () => {
   const { adapter, server, stop } = await start();
   try {
     const resumed = await adapter.resumeSession({ server, providerSessionRef: "thread-abc", assignment: assignment() });
-    assert.equal(resumed.providerSessionRef, "thread-abc");
+    assert.equal(resumed.providerSessionRef, "thread-2");
     assert.equal(replyText(await collect(adapter, resumed, "hello")), "ok");
   } finally { await stop(); }
 });

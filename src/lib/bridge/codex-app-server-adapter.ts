@@ -399,23 +399,15 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
   }
 
   async resumeSession(input: { server: AgentServerHandle; providerSessionRef: string; assignment: ProviderAssignment; executionId?: string }): Promise<AgentSessionHandle> {
-    const state = this.server(input.server);
-    const response = record(await state.client.request("thread/resume", {
-      threadId: input.providerSessionRef,
-      cwd: state.workingDirectory,
-      approvalPolicy: this.options.approvalPolicy ?? "on-request",
-      sandbox: this.options.sandbox ?? "workspace-write",
-      // The owner supervisor resumes Codex's stored thread directly. M9R only
-      // consumes the model metadata here; asking for all turns can inline large
-      // image/tool outputs into one JSONL response and exceed the bounded reader.
-      // This keeps the same thread and its provider-side history intact.
-      excludeTurns: true,
-      ...(input.assignment.model ? { model: input.assignment.model } : {}),
-    }));
-    const handle = this.registerSession(state, input.providerSessionRef, input.executionId ?? input.providerSessionRef, input.assignment.missionId);
-    this.session(handle).session.defaultModel = typeof response?.model === "string" ? response.model : null;
-    await this.configureSession({ session: handle, model: input.assignment.model ?? null, effort: input.assignment.effort ?? null });
-    return handle;
+    // Compatibility-shaped API only. Never call Codex thread/resume: a
+    // provider-owned thread is not M9R continuity. Start a new thread in the
+    // new M9R-owned app-server process instead.
+    void input.providerSessionRef;
+    return this.createSession({
+      server: input.server,
+      assignment: input.assignment,
+      ...(input.executionId ? { executionId: input.executionId } : {}),
+    });
   }
 
   async configureSession(input: { session: AgentSessionHandle; model: string | null; effort: string | null }): Promise<void> {

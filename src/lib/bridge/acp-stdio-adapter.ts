@@ -968,21 +968,15 @@ export class AcpStdioProviderAdapter implements InteractiveProviderAdapter {
   }
 
   async resumeSession(input: { server: AgentServerHandle; providerSessionRef: string; assignment: ProviderAssignment; executionId?: string }): Promise<AgentSessionHandle> {
-    const state = this.server(input.server);
-    const connection = this.connection(state);
-    // Same disallowedTools reasoning as createSession above -- a resumed
-    // session whose fingerprint (cwd/mcpServers/_meta) changed from what's
-    // cached gets torn down and recreated by the wrapper, in which case this
-    // _meta is what actually takes effect; an unchanged session returns the
-    // cached one, whose _meta was already set at its original creation.
-    const meta = input.server.adapterId === "claude-agent-acp"
-      ? { _meta: { claudeCode: { options: { disallowedTools: ["SendMessage"] } } } }
-      : {};
-    const resumed = await connection.resumeSession({ sessionId: input.providerSessionRef, cwd: state.workingDirectory, mcpServers: devMcpServerDescriptor(state.workingDirectory, input.assignment.missionId), ...meta });
-    await this.enforceGovernedPermissionMode(connection, input.providerSessionRef, resumed);
-    const handle = this.registerSession(state, input.providerSessionRef, input.executionId ?? input.providerSessionRef, input.assignment.missionId, this.discoveredModelOptions(resumed), resumed.configOptions ?? []);
-    await this.configureSession({ session: handle, model: input.assignment.model ?? null, effort: input.assignment.effort ?? null });
-    return handle;
+    // Compatibility-shaped API only. A dead provider process cannot be
+    // reattached to its vendor-owned conversation. M9R starts a fresh ACP
+    // session in the new child and carries continuity in its own task state.
+    void input.providerSessionRef;
+    return this.createSession({
+      server: input.server,
+      assignment: input.assignment,
+      ...(input.executionId ? { executionId: input.executionId } : {}),
+    });
   }
 
   async *prompt(input: { session: AgentSessionHandle; text: string }): AsyncIterable<InteractiveProviderEvent> {
