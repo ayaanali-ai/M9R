@@ -629,16 +629,9 @@ export function createTaskDesktopStageService(input: {
           // a duplicate app instance.
           await manager.inspectWindow(String(selected.pid), windowId);
         } catch (error) {
-          const candidates = await manager.listOwnedWindowsForProcess(selected.pid);
-          const normalizedTitle = selected.lastKnownWindowTitle?.trim().toLocaleLowerCase();
-          const titleMatches = normalizedTitle
-            ? candidates.filter((candidate) => candidate.title.trim().toLocaleLowerCase() === normalizedTitle)
-            : [];
-          const replacement = candidates.length === 1
-            ? candidates[0]
-            : titleMatches.length === 1 ? titleMatches[0] : undefined;
+          const replacement = await manager.resolveWindowReplacement(name);
           if (!replacement) {
-            throw new Error("The selected application window handle is stale and its process exposes multiple possible windows; refresh the exact window target before sending input.", { cause: error });
+            throw new Error("The selected window cannot be rebound to one verified process generation; refresh the exact window target before sending input.", { cause: error });
           }
           windowId = replacement.windowId;
           process.stderr.write(`[stage-recovery] ${taskId}: stale window handle ${selected.windowId}; rebinding same-process window ${windowId}\n`);
@@ -688,7 +681,13 @@ export function createTaskDesktopStageService(input: {
         // does or should have to do. authorize() above has already proven this
         // request belongs to the same identity/session that owns this stage;
         // that is the actual ownership boundary, not which taskId is attached.
-        if (ownedBeforeFailure?.appId) {
+        const replacement = ownedBeforeFailure && mode === "owner-preview" ? await manager.resolveWindowReplacement(name) : undefined;
+        if (replacement && ownedBeforeFailure) {
+          const rebound = { ...ownedBeforeFailure, windowId: replacement.windowId };
+          ownedApps.set(name, rebound);
+          inspected = await rePresentLiveWindow(rebound);
+          recoveryNotice = "The application's window was recreated in the same verified process generation. Inspect its fresh state before choosing the next action.";
+        } else if (ownedBeforeFailure?.appId) {
           const recoveryStartedAt = Date.now();
           process.stderr.write(`[stage-recovery] ${taskId}: inspectStage failed (${error instanceof Error ? error.message : String(error)}), relaunching ${ownedBeforeFailure.appId}\n`);
           await launch(token, taskId, ownedBeforeFailure.appId, mode, undefined, { skipQueue: true });

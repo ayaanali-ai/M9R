@@ -193,6 +193,16 @@ fn supports_internal_desktop_api(major: u32, minor: u32, build: u32) -> bool {
 pub fn handle_desktop_stage_request(value: &Value) -> Value {
     let request_id = value.get("requestId").and_then(Value::as_str).unwrap_or("");
     match value.get("op").and_then(Value::as_str) {
+        #[cfg(windows)]
+        Some("processGeneration") => {
+            let result = value.get("pid").and_then(Value::as_u64)
+                .filter(|pid| *pid > 0 && *pid <= u32::MAX as u64)
+                .ok_or("invalid process id").and_then(|pid| platform::process_generation(pid as u32));
+            match result {
+                Ok(generation) => json!({ "ok": true, "processGeneration": generation }),
+                Err(error) => json!({ "ok": false, "error": error }),
+            }
+        }
         Some("inspect") => {
             let result =
                 parse_window_identity(value).and_then(|(pid, handle)| inspect_window(pid, handle));
@@ -355,6 +365,7 @@ struct WindowDesktop {
     window_id: String,
     desktop_id: String,
     on_current_desktop: bool,
+    process_generation: String,
 }
 
 #[cfg(windows)]
@@ -383,6 +394,7 @@ fn to_json(window: WindowDesktop) -> Value {
         "windowId": window.window_id,
         "desktopId": window.desktop_id,
         "onCurrentDesktop": window.on_current_desktop,
+        "processGeneration": window.process_generation,
     })
 }
 
@@ -436,6 +448,30 @@ fn activate_desktop(_desktop: Guid) -> Result<DesktopInfo, &'static str> {
 
 #[cfg(windows)]
 mod platform {
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProcessFileTime { low: u32, high: u32 }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn GetProcessTimes(process: *mut std::ffi::c_void, created: *mut ProcessFileTime, exited: *mut ProcessFileTime,
+            kernel: *mut ProcessFileTime, user: *mut ProcessFileTime) -> i32;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    }
+
+    pub(super) fn process_generation(pid: u32) -> Result<String, &'static str> {
+        let handle = unsafe { OpenProcess(0x1000, 0, pid) }; // PROCESS_QUERY_LIMITED_INFORMATION
+        if handle.is_null() { return Err("process generation is unavailable"); }
+        let mut created = ProcessFileTime::default();
+        let mut exited = ProcessFileTime::default();
+        let mut kernel = ProcessFileTime::default();
+        let mut user = ProcessFileTime::default();
+        let ok = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
+        unsafe { CloseHandle(handle); }
+        if ok == 0 || (created.high == 0 && created.low == 0) { return Err("process generation is unavailable"); }
+        Ok(format!("{:08x}{:08x}", created.high, created.low))
+    }
     use super::{DesktopInfo, Guid, WindowDesktop};
     use std::ffi::c_void;
 
@@ -868,7 +904,7 @@ mod platform {
         if unsafe { IsWindowVisible(window) } == 0 || !manager.is_on_current_desktop(window)? {
             return Err("Windows did not show the requested application window".into());
         }
-        Ok(WindowDesktop { pid, window_id: handle.to_string(), desktop_id: desktop.as_string(), on_current_desktop: true })
+        Ok(WindowDesktop { pid, window_id: handle.to_string(), desktop_id: desktop.as_string(), on_current_desktop: true, process_generation: process_generation(pid)? })
     }
 
     pub(super) fn show_owned_window(value: &serde_json::Value) -> Result<WindowDesktop, String> {
@@ -884,7 +920,7 @@ mod platform {
         if manager.desktop_id(window)? != desktop || manager.is_on_current_desktop(window)? {
             return Err("owned app left its authorized background stage while showing".into());
         }
-        Ok(WindowDesktop { pid, window_id: handle.to_string(), desktop_id: desktop.as_string(), on_current_desktop: false })
+        Ok(WindowDesktop { pid, window_id: handle.to_string(), desktop_id: desktop.as_string(), on_current_desktop: false, process_generation: process_generation(pid)? })
     }
 
     /// A newly created hidden HWND may not yet have a shell application view,
@@ -1517,6 +1553,7 @@ mod platform {
             window_id,
             desktop_id,
             on_current_desktop: manager.is_on_current_desktop(window)?,
+            process_generation: process_generation(pid)?,
         })
     }
 
@@ -1557,6 +1594,16 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn process_generation_is_stable_for_the_same_live_process() {
+        let request = serde_json::json!({ "op": "processGeneration", "pid": std::process::id() });
+        let first = super::handle_desktop_stage_request(&request);
+        let second = super::handle_desktop_stage_request(&request);
+        assert_eq!(first["ok"], true);
+        assert_eq!(first["processGeneration"], second["processGeneration"]);
+        assert_eq!(first["processGeneration"].as_str().unwrap().len(), 16);
+    }
     #[test]
     fn popup_scope_requires_exact_root_owner_pid_and_visibility() {
         assert!(super::popup_candidate_is_owned(1, 2, 1, 100, 100, true));

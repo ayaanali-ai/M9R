@@ -29,7 +29,7 @@ export interface WindowsStageRecord {
   /** Desktop active before M9R created this stage; null for adopted stages. */
   returnToDesktopId: string | null;
   /** The stage is a real Windows desktop; an anchor is optional for a newly created stage. */
-  anchor: { pid: number; windowId: string } | null;
+  anchor: { pid: number; windowId: string; processGeneration?: string } | null;
   /** Random identity rotated whenever the registered anchor window changes. */
   roomWindowId: string | null;
   /** Local-only owner mapping; never included in room coordination events. */
@@ -47,6 +47,7 @@ interface NativeWindowStageInfo {
   windowId: string;
   desktopId: string;
   onCurrentDesktop: boolean;
+  processGeneration?: string;
 }
 
 interface NativeStageResponse {
@@ -64,6 +65,7 @@ interface NativeStageResponse {
   foregroundWindow?: { pid: number; windowId: string; desktopId?: string; onCurrentDesktop?: boolean; title?: string; className?: string; visible?: boolean; minimized?: boolean };
   result?: unknown;
   state?: "minimized" | "maximized" | "restored";
+  processGeneration?: string;
 }
 
 export interface NativePointControl {
@@ -190,7 +192,9 @@ function parseRegistry(raw: string): StageRegistry {
       if (!Number.isInteger(record.anchor.pid) || (record.anchor.pid ?? 0) < 1 || typeof record.anchor.windowId !== "string" || !WINDOW_ID_RE.test(record.anchor.windowId)) {
         throw new Error("The local Windows stage registry contains an invalid anchor window; it was left unchanged.");
       }
-      anchor = { pid: record.anchor.pid!, windowId: record.anchor.windowId };
+      if (record.anchor.processGeneration !== undefined && !/^[a-f0-9]{16}$/i.test(record.anchor.processGeneration)) throw new Error("The local Windows stage registry contains an invalid process generation.");
+      anchor = { pid: record.anchor.pid!, windowId: record.anchor.windowId,
+        ...(record.anchor.processGeneration ? { processGeneration: record.anchor.processGeneration } : {}) };
     } else if (version === 1) {
       throw new Error("The local Windows stage registry contains an invalid anchor window; it was left unchanged.");
     }
@@ -342,7 +346,9 @@ function normalizeWindowInfo(value: unknown): NativeWindowStageInfo {
       || !isNonzeroDesktopId(item.desktopId) || typeof item.onCurrentDesktop !== "boolean") {
     throw new Error("The native Windows stage helper returned an invalid window result.");
   }
-  return { pid: item.pid!, windowId: item.windowId, desktopId: item.desktopId.toLowerCase(), onCurrentDesktop: item.onCurrentDesktop };
+  if (item.processGeneration !== undefined && !/^[a-f0-9]{16}$/i.test(item.processGeneration)) throw new Error("The native helper returned an invalid process generation.");
+  return { pid: item.pid!, windowId: item.windowId, desktopId: item.desktopId.toLowerCase(), onCurrentDesktop: item.onCurrentDesktop,
+    ...(item.processGeneration ? { processGeneration: item.processGeneration } : {}) };
 }
 
 export function createWindowsDesktopStageManager(deps: WindowsStageDependencies = {}) {
@@ -357,6 +363,11 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   const invokeNative = deps.invokeNative ?? ((request) => invokeWindowsStageHelper(
     deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"), request,
   ));
+  function verifiedWindowInfo(value: unknown) {
+    const window = normalizeWindowInfo(value);
+    if (!deps.invokeNative && !window.processGeneration) throw new Error("The native runtime cannot verify process generations; stage input requires the current verified candidate.");
+    return window;
+  }
 
   function assertWindows(): void {
     if (platform !== "win32") throw new Error("The Windows virtual-desktop stage is available only on Windows.");
@@ -374,7 +385,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     const handle = parseWindowId(windowId);
     const result = await invokeNative({ op: "inspect", pid, windowId: handle });
     if (!result.ok) throw new Error(result.error ?? "Windows could not inspect that window.");
-    return normalizeWindowInfo(result.window);
+    const window = verifiedWindowInfo(result.window);
+    if (window.pid !== pid || window.windowId !== handle) throw new Error("Windows returned a different window identity; no retargeting is allowed.");
+    return window;
   }
 
   async function windowAtPoint(x: number, y: number): Promise<{ pid: number; windowId: bigint; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } }> {
@@ -482,7 +495,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
         desktopId: info.desktopId,
         roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
         returnToDesktopId: existing?.returnToDesktopId ?? null,
-        anchor: { pid: info.pid, windowId: info.windowId },
+        anchor: { pid: info.pid, windowId: info.windowId, ...(info.processGeneration ? { processGeneration: info.processGeneration } : {}) },
         roomWindowId: existing?.anchor?.pid === info.pid && existing.anchor.windowId === info.windowId
           ? existing.roomWindowId
           : randomUUID(),
@@ -618,7 +631,11 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (stage.anchor) {
       const result = await invokeNative({ op: "inspect", pid: stage.anchor.pid, windowId: stage.anchor.windowId });
       if (!result.ok) throw new Error(`Stage “${name}” anchor is unavailable: ${result.error ?? "unknown window error"}. The desktop mapping was kept.`);
-      const anchor = normalizeWindowInfo(result.window);
+      const anchor = verifiedWindowInfo(result.window);
+      if (anchor.pid !== stage.anchor.pid || anchor.windowId !== stage.anchor.windowId
+        || (stage.anchor.processGeneration !== undefined && anchor.processGeneration !== stage.anchor.processGeneration)) {
+        throw new Error("The selected window process generation changed; refresh the exact target before sending input.");
+      }
       if (anchor.desktopId !== stage.desktopId) throw new Error(`Stage “${name}” anchor moved to another desktop. The saved mapping was kept; re-register it only after owner review.`);
       return { stage, desktop: { desktopId: anchor.desktopId, isCurrent: anchor.onCurrentDesktop }, anchor };
     }
@@ -808,6 +825,23 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return result.windows;
   }
 
+  /** The only automatic replacement resolver. A PID or title alone never
+   * authorizes a rebind; creation time must match and exactly one HWND exists. */
+  async function resolveWindowReplacement(nameInput: string) {
+    assertWindows();
+    assertOwner();
+    const stage = readRegistry(root).stages.find((item) => item.name === normalizedName(nameInput));
+    const anchor = stage?.anchor;
+    if (!anchor?.processGeneration) return undefined;
+    const process = await invokeNative({ op: "processGeneration", pid: anchor.pid });
+    if (!process.ok || process.processGeneration !== anchor.processGeneration) return undefined;
+    const candidates = await listOwnedWindowsForProcess(anchor.pid);
+    if (candidates.length !== 1 || candidates[0]!.windowId === anchor.windowId) return undefined;
+    const replacement = await inspectWindow(String(anchor.pid), candidates[0]!.windowId);
+    if (replacement.processGeneration !== anchor.processGeneration) return undefined;
+    return replacement;
+  }
+
   async function presentOwnerWindow(name: string, pid: number, windowId: string, coordinationKey?: string) {
     const existing = readRegistry(root).stages.find((stage) => stage.name === normalizedName(name));
     assertWindowUnclaimed(name, pid, windowId, coordinationKey ?? existing?.coordinationKey);
@@ -961,7 +995,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups };
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups };
 }
 
 function parsePid(value: string): number {

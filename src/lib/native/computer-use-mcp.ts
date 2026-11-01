@@ -1643,26 +1643,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         preDispatchRetry(delivery.code));
     }
 
-    // Finding AE: the 30s observation-age check above only catches staleness by elapsed
-    // time, not by what actually happened to the window since it was observed. One bounded
-    // lifecycle probe (not a capture, not a retry loop) catches the window having been
-    // closed, moved, or minimized in the meantime, so a coordinate from a now-meaningless
-    // screenshot is never dispatched blind. It does not catch same-window content changes
-    // (e.g. in-place navigation) -- that still requires a fresh observation, same as today.
-    // A probe failure must not block a dispatch that might otherwise succeed.
-    if (record.context.kind === "desktop" && record.context.view === "app" && action.kind !== "observe" && deps.web?.taskStageAction) {
-      try {
-        const status = await deps.web!.taskStageAction!(
-          authToken, record.context.kind === "desktop" ? record.context.taskId : "", { kind: "window_status", view: "app" },
-          record.context.kind === "desktop" ? record.context.mode : undefined);
-        const windowState = status && typeof status === "object" && status.ok
-          ? (status.result as Record<string, unknown> | undefined)?.windowState : undefined;
-        if (typeof windowState === "string" && windowState !== "visible") {
-          return refreshStaleTarget(action, identity, record, authToken, timing,
-            `The target window is no longer visible (${windowState}); observe it again before acting.`);
-        }
-      } catch { /* the freshness probe is a bonus safety net, not a new point of failure */ }
-    }
+    // Exact identity is checked by the stage at dequeue and immediately before
+    // dispatch. A second fail-open lifecycle RPC here adds no safety guarantee.
 
     let browserRequest: WebRequest | undefined;
     if (record.context.kind === "browser" && action.kind !== "observe") {

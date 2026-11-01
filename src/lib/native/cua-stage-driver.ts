@@ -1670,28 +1670,9 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     elementByToken: (token: string, expected?: { role?: string; label?: string }) => Promise<{ element: CuaWindowElement; frame: CuaStageWindowFrame } | undefined>;
     captureTarget: (x: number, y: number) => Promise<CuaStageTargetDescription | undefined>;
   }) => Promise<T>, cursorIdentity?: CuaAgentCursorIdentity): Promise<T> {
-    // HWNDs are not stable identities on Windows: an app can recreate its top
-    // level window during a normal update, navigation, or renderer restart
-    // while keeping the same process alive. Resolve the registered anchor once
-    // immediately before opening a CUA session, and repair that anchor from the
-    // exact owned process when possible. This is a bounded same-process rebind,
-    // never a guess across unrelated windows and never an app relaunch.
-    let inspected: Awaited<ReturnType<typeof manager.inspectStage>>;
-    try {
-      inspected = await manager.inspectStage(nameInput);
-    } catch (error) {
-      const registered = manager.list().find((item) => item.name === nameInput);
-      const staleAnchor = registered?.anchor;
-      if (!staleAnchor) throw error;
-      const candidates = await manager.listOwnedWindowsForProcess(staleAnchor.pid);
-      const replacements = candidates.filter((candidate) => candidate.windowId !== staleAnchor.windowId);
-      const replacement = replacements.length === 1 ? replacements[0] : undefined;
-      if (!replacement) {
-        throw new Error("The selected application window handle is stale and its process exposes multiple possible windows; refresh the exact window target before sending input.", { cause: error });
-      }
-      await manager.attachWindow(nameInput, String(staleAnchor.pid), replacement.windowId, registered.appId, registered.coordinationKey);
-      inspected = await manager.inspectStage(nameInput);
-    }
+    // The task stage owns recovery and invalidates observations after a rebind.
+    // A driver must never change an HWND underneath a planned action.
+    const inspected = await manager.inspectStage(nameInput);
     const { stage, anchor } = inspected;
     if (!anchor) throw new Error(`Stage “${stage.name}” has no registered app window. Register an owned window before capturing or moving the Cua cursor.`);
     const pid = anchor.pid;

@@ -25,6 +25,35 @@ test("shell point inspection and invocation preserve exact control identity with
 }));
 const anchor = { pid: 4_321, windowId: "9223372036854775807", desktopId: stageDesktop, onCurrentDesktop: false };
 
+test("reused PIDs and HWNDs cannot satisfy a persisted process-generation binding", async () => withRoot(async (root) => {
+  let generation = "0000000000000001";
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async () => ({ ok: true, window: { ...anchor, processGeneration: generation } }) });
+  await manager.register("generation-test", String(anchor.pid), anchor.windowId);
+  assert.equal(manager.list()[0]?.anchor?.processGeneration, generation);
+  await manager.inspectStage("generation-test");
+  generation = "0000000000000002";
+  await assert.rejects(manager.inspectStage("generation-test"), /process generation changed/);
+}));
+
+test("one replacement resolver requires the same creation time and one exact candidate", async () => withRoot(async (root) => {
+  let generation = "0000000000000001";
+  let candidateIds = ["1234"];
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => {
+    if (request.op === "processGeneration") return { ok: true, processGeneration: generation };
+    if (request.op === "listOwnedWindows") return { ok: true, windows: candidateIds.map((windowId) => ({ pid: anchor.pid, windowId, title: "Same title", width: 800, height: 600 })) };
+    return { ok: true, window: { ...anchor, windowId: String(request.windowId), processGeneration: generation } };
+  } });
+  await manager.register("generation-test", String(anchor.pid), anchor.windowId);
+  assert.equal((await manager.resolveWindowReplacement("generation-test"))?.windowId, "1234");
+  assert.equal(manager.list()[0]?.anchor?.windowId, anchor.windowId, "resolution never silently changes the binding");
+  candidateIds = ["1234", "5678"];
+  assert.equal(await manager.resolveWindowReplacement("generation-test"), undefined, "titles cannot disambiguate identity");
+  candidateIds = ["1234"];
+  generation = "0000000000000002";
+  assert.equal(await manager.resolveWindowReplacement("generation-test"), undefined);
+}));
+
 test("owned launch discovery accepts hidden windows only from the exact child process", async () => withRoot(async (root) => {
   let wrongProcess = false;
   const requests: Record<string, unknown>[] = [];
