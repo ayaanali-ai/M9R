@@ -718,13 +718,14 @@ try {
         exit 0
     }
 
-    # Quiesce an owned broker before the engine setup replaces its companion files.
-    # The packaged engine validates the current-user task and authenticated shutdown;
-    # no process is killed by name and unrelated local services are left alone.
+    # Disable M9R's own logon task before asking the broker to stop.  The order
+    # is deliberate: stopping first leaves a race where Task Scheduler can
+    # respawn the broker between the stop receipt and the protected copy.
+    # Suspend only our task; unrelated services are never touched.
     $brokerResumeEngine = $engine
+    $brokerTaskState = Suspend-ManagedBrokerAutoStart
     $brokerStop = Invoke-ManagedBrokerUpdate $engine 'stop'
     $brokerNeedsResume = $brokerStop.managedTask
-    $brokerTaskState = Suspend-ManagedBrokerAutoStart
     Stop-InstalledM9rPill
     # Native setup registers the owned broker task; this installer starts it
     # only after the new broker image and its ownership record are installed.

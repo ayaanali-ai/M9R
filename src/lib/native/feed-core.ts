@@ -168,7 +168,7 @@ function inProgressFrom(input: FeedInput): InProgress[] {
   const nowMs = input.now.getTime();
   const out: InProgress[] = [];
   for (const t of input.tasks) {
-    if (t.dismissedAt || t.resultSummary || t.receipt?.state === "canceled" || t.receipt?.state === "paused" || t.approval === "pending" || t.approval === "denied" || t.approval === "expired") continue;
+    if (t.retiredAt || t.dismissedAt || t.resultSummary || t.receipt?.state === "canceled" || t.receipt?.state === "paused" || t.approval === "pending" || t.approval === "denied" || t.approval === "expired") continue;
     if (nowMs - Date.parse(t.createdAt) > PROGRESS_WINDOW_MS) continue;
     const goal = safe(t.goal, 120);
     const claimAt = Date.parse(t.delivery?.claimedAt ?? "");
@@ -190,7 +190,7 @@ function needsYouFrom(input: FeedInput): NeedsYou[] {
   const out: NeedsYou[] = [];
   const nowMs = input.now.getTime();
   for (const t of input.tasks) {
-    if (t.dismissedAt || t.receipt?.state === "canceled" || t.receipt?.state === "paused") continue;
+    if (t.retiredAt || t.dismissedAt || t.receipt?.state === "canceled" || t.receipt?.state === "paused") continue;
     if (t.approval === "pending" && input.pendingIds.has(t.id)) {
       out.push({ surface: "native", kind: "approval", taskId: t.id, from: t.from, to: t.to, goal: safe(t.goal, GOAL_CHARS), protected: isProtectedAction(t.goal) });
     } else if ((t.delivery?.state === "uncertain"
@@ -222,8 +222,10 @@ export function buildFeed(input: FeedInput, previous: Feed | null): Feed {
   // old T23/T4/T37-style notices from being replayed into the pill after a
   // broker restart; the underlying task and receipt remain available to the
   // history/diagnostic views.
+  const taskById = new Map(input.tasks.map((task) => [task.id, task] as const));
   const recent = input.events
     .filter((event) => event.kind !== "task.delivery_uncertain")
+    .filter((event) => !event.taskId || !taskById.get(event.taskId)?.retiredAt)
     .slice(-RECENT_ITEMS)
     .reverse()
     .map((e) => ({ surface: "native" as const, at: e.at, taskId: e.taskId, text: safe(e.text, 140) }));

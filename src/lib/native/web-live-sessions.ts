@@ -463,6 +463,13 @@ function managedStatusForWebStatus(status: SessionStatus): ManagedProviderStatus
   return status;
 }
 
+/**
+ * Compatibility/session-test implementation retained for migration fixtures.
+ * The production desktop broker does not call this factory; it uses
+ * createManagedProviderOwner instead. Keeping that boundary explicit prevents
+ * a future refactor from accidentally reintroducing the legacy provider-hook
+ * or provider-session path into the shipped runtime.
+ */
 export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   const bridgeStartedAt = Date.now();
   const now = deps.now ?? (() => new Date());

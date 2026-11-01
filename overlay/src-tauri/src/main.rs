@@ -1264,7 +1264,11 @@ fn main() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![resize_pill, read_feed, read_pill_state, decide, send_message, select_model, pill_decide, save_memory, list_sessions, desktop_stage_action, link_sessions, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings])
+        // The canonical pill is broker-state based. Do not expose the old
+        // merged-feed, provider-session linking, or compatibility decision
+        // commands to the production window; those paths could resurrect
+        // historical provider/session state after a restart.
+        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, pill_decide, save_memory, desktop_stage_action, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.

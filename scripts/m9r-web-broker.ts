@@ -146,8 +146,8 @@ async function main(): Promise<void> {
     process.stderr.write(`M9R managed provider startup failed: ${error instanceof Error ? error.message : String(error)}\n`);
   });
   // Keep the snapshot a live ownership signal. If the broker crashes, the
-  // overlay rejects the stale file and returns to its compatibility feed
-  // instead of displaying state whose owner pipe no longer exists.
+  // canonical overlay rejects the stale file and returns to its disconnected
+  // state instead of displaying state whose owner pipe no longer exists.
   const pillStateTimer = setInterval(() => {
     try { writeDesktopPillState(root, ui.snapshot()); } catch { /* the last state remains readable */ }
   }, 2_000);

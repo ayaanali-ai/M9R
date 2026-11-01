@@ -7,11 +7,11 @@
 // away (the window shrinks to a wake strip) and when the message field needs the keyboard. They apply when the overlay
 // runs in one-pill mode (M9R_PILL_NEXT=1); the Rust side validates every value.
 
-import type { Decision, DesktopStage, DesktopStageActionProof, DesktopStageCapture, DesktopStageCursorMove, DesktopStageWindowOption, PillTransport, SessionRow } from "../core/transport";
+import type { Decision, DesktopStage, DesktopStageActionProof, DesktopStageCapture, DesktopStageCursorMove, DesktopStageWindowOption, PillTransport } from "../core/transport";
 import { listen } from "@tauri-apps/api/event";
 import type { SpeechEnv } from "../core/speech";
 import type { Settings } from "../core/state";
-import { fromFeed, fromUiState, type Feed, type UiState } from "./convert";
+import { fromUiState, type UiState } from "./convert";
 
 type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -23,7 +23,6 @@ export function tauriInvoke(): Invoke | null {
 const POLL_MS = 1000;
 
 export function createDesktopTransport(invoke: Invoke): PillTransport {
-  let feed: Feed | null = null;
   type NativeSpeechHandlers = NonNullable<SpeechEnv["native"]> extends { start(handlers: infer T): Promise<void> } ? T : never;
   let nativeSpeechHandlers: NativeSpeechHandlers | null = null;
   let nativeSpeechListeners: Promise<void> | null = null;
@@ -121,7 +120,7 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
   return {
     // The desktop runtime owns long-lived provider processes. Session linking
     // belongs only to the legacy extension transport and must not surface here.
-    capabilities: { allowForADay: true, dictation: true, saveMemory: true, dismissTask: true },
+    capabilities: { allowForADay: false, dictation: true, saveMemory: true, dismissTask: true },
     createDictationEnvironment() { return desktopNativeSpeechEnv(() => { void invoke("open_microphone_settings").catch(() => {}); }); },
     desktopStages: /Windows/i.test(navigator.userAgent) ? {
       async setAgentPermission(handle, enabled, control = false) { await stageRequest(enabled ? (control ? "allow-control" : "allow-agent") : "revoke-agent", handle); },
@@ -138,36 +137,20 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
       async scroll(name, x, y, direction) { return (await stageRequest("scroll", name, { x, y, direction })).actionProof!; },
       async drag(name, fromX, fromY, toX, toY) { return (await stageRequest("drag", name, { fromX, fromY, toX, toY })).actionProof!; },
     } : undefined,
-    async listSessions(handle) {
-      const raw = await invoke("list_sessions", { handle });
-      const rows = typeof raw === "string" ? JSON.parse(raw) : [];
-      return (Array.isArray(rows) ? rows : []).flatMap((r: Partial<SessionRow>) => typeof r?.sessionId === "string" ? [{ sessionId: r.sessionId, cwd: typeof r.cwd === "string" ? r.cwd : undefined, lastSeenAt: String(r.lastSeenAt ?? "") }] : []);
-    },
-    async linkSession(offer, toSession) {
-      if (!offer.fromSession) throw new Error("This message has no session to link from.");
-      await invoke("link_sessions", { fromHandle: offer.from, fromSession: offer.fromSession, toHandle: offer.to, toSession });
-    },
     subscribe(listener) {
-      let last = "";
       let lastPillState = "";
       const tick = async () => {
         try {
-          // The resident owner broker publishes the authoritative state envelope.
-          // Keep the older feed as a compatibility fallback for a broker that is
-          // still starting; this does not change its existing delivery path.
+          // The resident owner broker publishes the only authoritative desktop
+          // state envelope. Do not fall back to the historical session/feed
+          // transport: that path can resurrect stale provider-session state and
+          // make the pill appear to regress after a restart.
           const pillState = (await invoke("read_pill_state")) as string | null;
           if (pillState) {
             if (pillState !== lastPillState) {
               lastPillState = pillState;
               listener({ ...fromUiState(JSON.parse(pillState) as UiState), connection: "connected" });
             }
-            return;
-          }
-          const raw = (await invoke("read_feed")) as string | null;
-          if (raw && raw !== last) {
-            last = raw;
-            feed = JSON.parse(raw) as Feed;
-            listener(fromFeed(feed));
           }
         } catch { /* feed missing or mid-write: keep the last good state and try again */ }
       };
@@ -210,10 +193,8 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
       void invoke("pill_set_focus", { focused }).catch(() => { /* typing falls back to clicking the field */ });
     },
     async decide(approvalId: string, decision: Decision) {
-      const need = feed?.needsYou?.find((n) => n.kind === "approval" && n.taskId === approvalId);
-      const from = need && "from" in need ? need.from : undefined;
-      const to = need && "to" in need ? need.to : undefined;
-      await invoke("decide", { taskId: approvalId, action: decision === "deny" ? "deny" : decision === "allow_day" ? "allow_day" : "approve", from, to });
+      if (decision === "allow_day") throw new Error("Allow-for-a-day is not available on the broker-owned desktop path.");
+      await invoke("pill_decide", { approvalId, decision });
     },
   };
 }

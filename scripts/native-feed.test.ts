@@ -307,3 +307,19 @@ test("delivery uncertainty stays in task state and is not replayed into the live
   assert.equal(f.recent.some((item) => item.taskId === "T23"), false);
   assert.equal(f.recent[0]?.taskId, "T24");
 });
+
+test("retired task history never re-enters the live feed", () => {
+  const f = buildFeed(input({
+    tasks: [task({
+      id: "T37",
+      retiredAt: "2026-09-20T11:59:00Z",
+      approval: "pending",
+      delivery: { state: "sending", attempts: 1, claimedAt: "2026-09-20T11:59:30Z" },
+    })],
+    pendingIds: new Set(["T37"]),
+    events: [{ kind: "task.created", taskId: "T37", handle: "codex", at: "2026-09-20T11:59:00Z", text: "old task" }],
+  }), null);
+  assert.equal(f.needsYou.some((item) => item.taskId === "T37"), false);
+  assert.equal(f.inProgress.some((item) => item.taskId === "T37"), false);
+  assert.equal(f.recent.some((item) => item.taskId === "T37"), false);
+});

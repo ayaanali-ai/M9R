@@ -17,6 +17,11 @@ const checks = [
   ["browser mutation fixtures", ["--test", "./scripts/web-press-page-change.test.ts"]],
   ["universal intent and bounded workflow memory", ["--test", "./scripts/universal-intent.test.ts", "./scripts/workflow-preferences.test.ts"]],
   ["task controls, progress, and delivery policy", ["--test", "./scripts/multiplayer-task-context.test.ts", "./scripts/multiplayer-action-policy.test.ts"]],
+  ["persistent provider lifecycle, multiplayer fencing, and stale-feed retirement", ["--test", "./scripts/managed-provider-adapters.test.ts", "./scripts/managed-provider-supervisor.test.ts", "./scripts/multiplayer-dispatch-fence.test.ts", "./scripts/multiplayer-target-identity.test.ts", "./scripts/multiplayer-mutation-scheduler.test.ts", "./scripts/native-feed.test.ts"]],
+  ["canonical desktop pill transport", ["--test", "./scripts/pill-shells.test.ts"]],
+  ["production boundary and retired-path isolation", ["--test", "./scripts/production-boundary.test.ts"]],
+  ["runtime transaction and artifact publication", ["--test", "./scripts/engine-build-transaction.test.mjs"]],
+  ["runtime install rollback and obsolete-file cleanup", ["--test", "./scripts/runtime-install-transaction.test.ts"]],
   ["TypeScript", ["node_modules/typescript/bin/tsc", "--noEmit", "-p", ".", "--pretty", "false"]],
 ];
 

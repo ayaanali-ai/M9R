@@ -377,6 +377,70 @@ Mid-conversation: "you know what we have the biggest opportunity at as
 well, that just reminded me, but yeah I'll get to that later" — never
 followed up. Still open as of this writing.
 
+### XIII. HeyClicky changelog audit (2026-11-01)
+
+Full changelog read end to end, v1.0 (Apr 6, 2026) through v1.1.2 (Oct 30,
+2026), every entry, not a summary. Correction and new findings below;
+full detail also kept in local memory (never committed), see the HeyClicky
+dictation inspiration note.
+
+**Correction to section XI:** "Suggestions" and "proactive agents" are not
+the same feature and must not be read as both walked back. Proactive
+agents (auto-acting on local activity tracking, zero consent) were killed
+for privacy at v1.0.46. Suggestions (research-based task cards from
+connected-app/web research, always ends in the owner saying "do it" /
+"skip" / "adjust") is a different, still-alive feature that kept shipping
+real improvements through v1.1.2. Don't treat it as a gap HeyClicky itself
+abandoned.
+
+**New reference material, not previously captured anywhere:**
+
+- **Persistent named sub-agents ("Clickys")** — each with its own name,
+  avatar, memory, conversation history, file folder, and routines. Not one
+  global assistant; a roster of personas built up over time. Worth a direct
+  comparison pass against M9R's own multi-provider room model.
+- **Routines** — recurring tasks set purely by talking ("every Tuesday and
+  Thursday at 5, check my inbox for invoices"), pause/resume/run-now/delete
+  from the agent's own profile. M9R has nothing equivalent.
+- **Spatial context / on-screen drawing** — HeyClicky draws back at the
+  owner, not just lets them circle things: hand-drawn (Excalidraw-style)
+  annotations, 2D/3D diagrams, interactive 3D models. Highlights auto-clear
+  2s after use; drawn explanations persist only while actively speaking,
+  then clear completely. A real capability gap, not a UI detail.
+- **Computer-use consent model**: "Allow once" / "Always allow" / "Not
+  now," explicitly scoped to one conversation only (they shipped a fix
+  after a yes leaked across every agent). Direct precedent for M9R's own
+  action-policy/dispatch-fence consent scoping.
+- **Token/message economics rules**, mapping directly onto section III's
+  cost framework: a job over 20 minutes keeps running and still costs one
+  message if within budget (shows "Keep going," not broken); a message to
+  an already-working agent joins the same job instead of double-charging;
+  stopping an agent within 10 seconds refunds the message; approving or
+  declining a permission ask is always free.
+- **Always-on realtime voice mode**, distinct from push-to-talk: triple-tap
+  the hotkey, headphones-only, real mid-sentence barge-in/interrupt. M9R
+  currently only has push-to-talk dictation — a deliberate scope call to
+  make, not necessarily a gap to chase.
+- **Dictation terminal-injection safety**: dictated text can never execute
+  as a terminal command; newlines are collapsed before insertion. Worth
+  explicitly confirming M9R's own dictation path has the same protection.
+- **Skills were two separate systems**, not one: per-app "teaching skills"
+  for 89 apps (contextual in-app guidance, never removed) vs. a general
+  community skill library (paused, not killed — "figuring out the right
+  way to make them useful"). Only the library was walked back.
+- **Onboarding**: pick a character style, answer 4 quick questions, meet
+  auto-generated named agents made for the owner, then a ~2-minute
+  hands-on tutorial where the owner *does* things (say hello, watch it
+  draw, circle something, draft a reply, try dictation) instead of reading
+  about them. Directly relevant to M9R's still-open character/mascot
+  thread.
+- **The notch UI went through four full redesigns** over the changelog's
+  lifetime. Read as "nobody gets this right on the first try," not as a
+  template to copy exactly.
+- **Naming precedent**: auto-generated two-word agent names ("PDF Desk,"
+  "Scout," "Lab," "Keeper") instead of generic "Agent 1/2/3" — relevant if
+  M9R ever personifies agents beyond their provider names.
+
 ## References
 
 - [Source of Truth 5.0](./M9R_SOURCE_OF_TRUTH_5.0_MAINTENANCE_CONTRACT.md)
@@ -387,4 +451,62 @@ followed up. Still open as of this writing.
 - [Cua Driver contract](https://github.com/trycua/cua/blob/main/libs/cua-driver/contract/README.md)
 - [A2A specification](https://github.com/a2aproject/A2A/blob/main/docs/specification.md)
 - [MCP architecture](https://github.com/modelcontextprotocol/docs/blob/main/docs/concepts/architecture.mdx)
+
+## XIV. Final Implementation Polish
+
+This is the final execution order for consolidating the existing M9R
+implementation. Existing capabilities must be improved in place; do not
+create parallel implementations when a current path already exists.
+
+1. **Canonical production path** — keep one broker daemon, one managed
+   provider owner, one source-to-build-to-install path, explicit source/build/
+   runtime/release boundaries, and exclude sandbox/worktree artifacts from
+   production inputs.
+2. **Legacy production cleanup** — remove or quarantine hook/session
+   compatibility paths from production entrypoints, remove provider-session
+   discovery/resume behavior, and ensure obsolete binaries and runtimes cannot
+   start or be packaged. Git history remains the recovery record.
+3. **Provider lifecycle** — reuse persistent M9R-owned provider connections for
+   normal messages; pause and redirect preserve the connection; real process or
+   broker restarts cold-start providers and restore bounded M9R context only.
+4. **Work and message semantics** — distinguish continuation, redirect, new
+   work, pause, resume, stop, and cancel; keep historical/retired tasks out of
+   the live composer and prevent stale delivery replay.
+5. **Surface identity** — separate provider, work, message, turn, window, tab,
+   and surface identity; validate process generations and HWND/tab references;
+   never silently retarget another surface; provide one safe rebind path.
+6. **Observation and action routing** — accessibility/structure first,
+   screenshot fallback, strict pre-dispatch ref validation, action-specific
+   delivery policy, bounded retry/re-observation, and post-condition checks.
+7. **Universal desktop interaction** — reliable click, type, keypress, scroll,
+   drag, drop, focus, minimize/maximize/close, app launch, Start/Search,
+   taskbar, browser tabs, and cross-window movement without per-app workflows.
+8. **Capability layer** — wire existing and missing display, audio/media,
+   microphone/dictation, files/apps, window/system, accessibility, security,
+   browser, model-picker, and flyout capabilities through the canonical action
+   registry. Diagnostics remain internal-only.
+9. **Pause/redirect/resume** — pause without destroying work or provider
+   connections; support continuation, redirection, selective reassignment, and
+   independent new work without provider-session reconnects or control-message
+   injection into provider conversations.
+10. **Multiplayer runtime** — use shared M9R work/surface context, natural
+    same-context coordination, dynamic division and handoffs, progress-based
+    loop prevention, independent input leases, and final coordinated results;
+    no child-worker architecture for now.
+11. **M9R memory and learning** — bounded continuation context, asynchronous
+    user/workflow preferences, and team/provider learning without provider-owned
+    conversation memory.
+12. **Canonical pill and app** — preserve the accepted visual design, make the
+    notch and desktop app each have one authoritative frontend source, remove
+    legacy rendering paths, and preview UI changes locally before release.
+13. **Release/update safety** — deterministic provenance and hashes, build once
+    and promote the exact candidate, prevent autostart lock races, replace files
+    atomically at stable paths, and keep only one active runtime installation.
+14. **Acceptance gates** — typecheck/lint, CUA/action, cross-app/window,
+    browser, pause/redirect, persistence/recovery, multiplayer, stale-task,
+    dictation, model-picker, system-control, and fresh-install tests must pass.
+15. **Controlled rollout** — commit verified phases, synchronize `main`, build
+    and accept one candidate, install only after all gates are green, verify the
+    process tree and live provider behavior, and keep homepage deployment
+    separate from desktop-runtime rollout.
 

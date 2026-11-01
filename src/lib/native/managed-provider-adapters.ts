@@ -809,7 +809,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     const capabilities = this.capabilities();
     const validation = validateProviderModelSelection(capabilities, selection);
     if (!validation.ok) return { ok: false, applies: "next-restart", error: validation.reason };
-    if (!adapter || !session) return { ok: false, applies: "next-restart", error: "Codex app-server session is not live" };
+    if (!adapter || !session) return { ok: false, applies: "next-restart", error: "Codex app-server connection is not live" };
     try {
       await adapter.configureSession({ session, model: validation.selection.model ?? null, effort: validation.selection.effort ?? null });
       return { ok: true, applies: "next-turn" };
@@ -849,7 +849,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     if (this.adapter && existingServer && this.session
       && this.adapter.getServerHealth(existingServer).state === "alive"
       && (this.statusValue === "ready" || this.statusValue === "working")) {
-      return this.ready("Ready (Codex app-server session)");
+      return this.ready("Ready (Codex app-server connection)");
     }
     if (this.startup) return this.startup;
     await this.closeRuntime();
@@ -951,7 +951,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
       return;
     }
     this.finishTask();
-    if (!this.draining) this.ready("Ready (Codex app-server session)");
+    if (!this.draining) this.ready("Ready (Codex app-server connection)");
     else {
       this.statusValue = "draining";
       this.doingValue = "Draining";
@@ -1144,13 +1144,13 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
       return;
     }
     this.finishTask();
-    if (!this.draining) this.ready("Ready (OpenCode ACP session)");
+    if (!this.draining) this.ready("Ready (OpenCode ACP connection)");
     else {
       this.statusValue = "draining";
       this.doingValue = "Draining";
     }
     yield { kind: "result", text: answer.trim(), isError: false };
-    yield { kind: "status", status: "ready", doing: "Ready (OpenCode ACP session)" };
+    yield { kind: "status", status: "ready", doing: "Ready (OpenCode ACP connection)" };
   }
 
   async interrupt(taskId: string): Promise<void> {

@@ -174,23 +174,22 @@ test("extension transport reports broker state and ignores stale snapshots while
 
 test("desktop transport maps decisions and typed messages onto the overlay's commands", async () => {
   const calls: Array<[string, Record<string, unknown> | undefined]> = [];
-  const feed = JSON.stringify({ agents: [], needsYou: [{ kind: "approval", taskId: "T6", from: "claude", to: "codex", goal: "g" }] });
-  const transport = createDesktopTransport(async (command, args) => { calls.push([command, args]); return command === "read_feed" ? feed : command === "send_message" ? "ok-reply" : ""; });
+  const uiState = JSON.stringify({ agents: [], thread: [], approvals: [{ id: "T6", agent: "codex", text: "g" }] });
+  const transport = createDesktopTransport(async (command, args) => { calls.push([command, args]); return command === "read_pill_state" ? uiState : command === "send_message" ? "ok-reply" : ""; });
   const stop = transport.subscribe(() => {});
   await new Promise((r) => setTimeout(r, 20));
-  await transport.decide("T6", "allow_day");
   await transport.decide("T6", "allow");
   await transport.decide("T6", "deny");
-  const decides = calls.filter(([c]) => c === "decide").map(([, a]) => a);
+  const decides = calls.filter(([c]) => c === "pill_decide").map(([, a]) => a);
   assert.deepEqual(decides, [
-    { taskId: "T6", action: "allow_day", from: "claude", to: "codex" },
-    { taskId: "T6", action: "approve", from: "claude", to: "codex" },
-    { taskId: "T6", action: "deny", from: "claude", to: "codex" },
+    { approvalId: "T6", decision: "allow" },
+    { approvalId: "T6", decision: "deny" },
   ]);
+  await assert.rejects(transport.decide("T6", "allow_day"), /not available/);
   assert.equal(await transport.send("@claude look at x"), "ok-reply");
   const sent = calls.find(([c]) => c === "send_message");
   assert.deepEqual(sent?.[1], { text: "@claude look at x" });
-  assert.equal(transport.capabilities?.allowForADay, true);
+  assert.equal(transport.capabilities?.allowForADay, false);
   if (typeof stop === "function") stop();
 });
 
@@ -278,19 +277,17 @@ test("the desktop transport's loadSettings leaves unset fields out instead of in
   assert.equal(await brokenHost.loadSettings!(), undefined, "a host that cannot read settings back must not throw into boot");
 });
 
-test("desktop dictation uses the WebView permission flow and opens Windows settings only after denial", () => {
+test("desktop dictation uses the native Ctrl+Alt speech path and keeps settings as an explicit fallback", () => {
   const oldWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
-  const recognizer = class {} as unknown as new () => import("../pill/src/core/speech").RecognitionLike;
   const calls: string[] = [];
   try {
-    Object.defineProperty(globalThis, "window", { configurable: true, value: { SpeechRecognition: recognizer } });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {} });
     Object.defineProperty(globalThis, "navigator", { configurable: true, value: { language: "en-US" } });
     const transport = createDesktopTransport(async (command) => { calls.push(command); return ""; });
     assert.equal(transport.capabilities?.dictation, true);
     const speech = transport.createDictationEnvironment!();
-    assert.equal(speech.Recognition, recognizer);
-    assert.equal(speech.micIsOn, undefined, "the desktop lets the WebView request permission on the Ctrl+Alt+M press");
+    assert.equal(speech.Recognition, null, "the desktop uses the native speech bridge instead of a browser recognition shim");
     speech.openMicSetup();
     assert.deepEqual(calls, ["open_microphone_settings"]);
   } finally {
