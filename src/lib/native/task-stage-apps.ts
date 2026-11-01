@@ -14,6 +14,13 @@ export interface BrowserWindowCandidate {
   windowId: string;
   appName: string;
   title: string;
+  /** Native window eligibility metadata. Older test/adaptor callers may omit it. */
+  isOnScreen?: boolean;
+  minimized?: boolean;
+  onCurrentSpace?: boolean;
+  zIndex?: string;
+  width?: number;
+  height?: number;
 }
 
 /**
@@ -74,6 +81,29 @@ function browserWindowMatches(candidate: BrowserWindowCandidate, kind: StageBrow
   return /(?:^|[\\/ ])(?:msedge|microsoft edge)(?:\.exe)?(?:$|[\\/ ])/.test(app.toLowerCase());
 }
 
+function eligibleBrowserWindow(candidate: BrowserWindowCandidate): boolean {
+  // listWindows({ onScreenOnly: false }) is intentionally used during launch
+  // polling so delegated browser processes can be discovered. Do not let that
+  // broad inventory turn hidden/minimized/wrong-desktop helper HWNDs into a
+  // false "multiple visible windows" refusal.
+  if (candidate.isOnScreen === false || candidate.minimized === true || candidate.onCurrentSpace === false) return false;
+  if (candidate.width !== undefined && candidate.width < 80) return false;
+  if (candidate.height !== undefined && candidate.height < 60) return false;
+  return true;
+}
+
+function rankBrowserWindows(candidates: readonly BrowserWindowCandidate[]): BrowserWindowCandidate[] {
+  return [...candidates].sort((left, right) => {
+    const leftZ = left.zIndex === undefined ? null : Number(left.zIndex);
+    const rightZ = right.zIndex === undefined ? null : Number(right.zIndex);
+    if (leftZ !== null && rightZ !== null && Number.isFinite(leftZ) && Number.isFinite(rightZ) && leftZ !== rightZ) return rightZ - leftZ;
+    const leftArea = (left.width ?? 0) * (left.height ?? 0);
+    const rightArea = (right.width ?? 0) * (right.height ?? 0);
+    if (leftArea !== rightArea) return rightArea - leftArea;
+    return `${left.pid}:${left.windowId}`.localeCompare(`${right.pid}:${right.windowId}`);
+  });
+}
+
 /**
  * Return only a newly-created personal browser window. A pre-existing window
  * is never guessed when more than one candidate exists; the caller can keep
@@ -84,10 +114,10 @@ export function selectPersonalBrowserWindow(
   windows: readonly BrowserWindowCandidate[],
   beforeKeys: ReadonlySet<string>,
 ): BrowserWindowCandidate | undefined {
-  const matches = windows.filter((candidate) => browserWindowMatches(candidate, kind));
+  const matches = rankBrowserWindows(windows.filter((candidate) => browserWindowMatches(candidate, kind) && eligibleBrowserWindow(candidate)));
   const fresh = matches.filter((candidate) => !beforeKeys.has(`${candidate.pid}:${candidate.windowId}`));
-  if (fresh.length > 1) throw new Error(`Personal ${kind === "chrome" ? "Chrome" : "Edge"} opened multiple new windows; owner selection is required.`);
   if (fresh.length === 1) return fresh[0];
+  if (fresh.length > 1) return fresh[0];
   // If the browser was not running before launch, one visible candidate is a
   // safe adoption even when the platform did not expose a stable before-list.
   if (beforeKeys.size === 0 && matches.length === 1) return matches[0];
@@ -103,8 +133,7 @@ export function selectExistingPersonalBrowserWindow(
   kind: StageBrowserKind,
   windows: readonly BrowserWindowCandidate[],
 ): BrowserWindowCandidate | undefined {
-  const matches = windows.filter((candidate) => browserWindowMatches(candidate, kind));
-  if (matches.length > 1) throw new Error(`Personal ${kind === "chrome" ? "Chrome" : "Edge"} has multiple visible windows; owner selection is required.`);
+  const matches = rankBrowserWindows(windows.filter((candidate) => browserWindowMatches(candidate, kind) && eligibleBrowserWindow(candidate)));
   return matches[0];
 }
 export function isStageAppReference(value: unknown): value is string {

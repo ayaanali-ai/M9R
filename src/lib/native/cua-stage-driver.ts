@@ -20,7 +20,10 @@ const MAX_IMAGE_DIMENSION = 1024;
 // Keep the base64 JSON response comfortably below the native pill's 4 MiB stdout cap.
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const MAX_TEXT_ACTION_LENGTH = 500;
-const DEFAULT_TYPE_DELAY_MS = 30;
+// Keep typing visibly human while avoiding the sluggish 30ms default that made
+// longer composer edits feel artificially slow. Callers may still choose a
+// bounded custom delay through the existing action contract.
+const DEFAULT_TYPE_DELAY_MS = 15;
 const MAX_TYPE_DELAY_MS = 200;
 const MAX_WINDOW_OPTIONS = 40;
 const MAX_DESKTOP_STRUCTURE_WINDOWS = 12;
@@ -153,6 +156,10 @@ export interface CuaStageWindowOption {
   title: string;
   width: number;
   height: number;
+  isOnScreen?: boolean;
+  minimized?: boolean;
+  onCurrentSpace?: boolean;
+  zIndex?: string;
 }
 
 export interface CuaStageActionOutcome {
@@ -1019,7 +1026,9 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
             timing: motionTiming,
             effects: { trail: true, glow: true },
             dwellAfterClickMs: 100,
-            idleHideMs: 60_000,
+            // Active work owns cursor visibility. Cua's 60s idle hide made a
+            // healthy long-running task look dead to the owner.
+            idleHideMs: 0,
           }), { stageName, cached: alreadyTracked });
           resultError(motion, "Cua Driver could not configure the optional agent cursor motion.");
         } catch {
@@ -1341,6 +1350,13 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     }
   }
 
+  if (options.deliveryMode === "owner-preview") {
+    // Owner-preview is already an owner-authorized visible task. If the
+    // semantic/background adapter cannot deliver this ordinary action, use the
+    // one bounded foreground path instead of making the provider rediscover
+    // and explicitly request the same escalation.
+    return runForeground();
+  }
   throw new DesktopInputNotDispatchedError("background input is unavailable; Background delivery is not available for the selected window. No text was sent; M9R will not activate the window as a fallback. The owner's pointer was not used; foreground input requires an explicit foreground action.", "background-unavailable");
 }
 
@@ -2418,6 +2434,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         title: window.title.replace(/[\r\n\t]+/g, " ").slice(0, 160),
         width: Math.trunc(window.bounds.width),
         height: Math.trunc(window.bounds.height),
+        ...(typeof window.isOnScreen === "boolean" ? { isOnScreen: window.isOnScreen } : {}),
+        ...(typeof window.minimized === "boolean" ? { minimized: window.minimized } : {}),
+        ...(typeof window.onCurrentSpace === "boolean" ? { onCurrentSpace: window.onCurrentSpace } : {}),
+        ...(typeof window.zIndex === "bigint" ? { zIndex: window.zIndex.toString() } : {}),
       }));
     } finally {
       if (session) await driver.endSession({ session }).catch(() => undefined);

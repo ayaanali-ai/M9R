@@ -1076,14 +1076,22 @@ export function createTaskDesktopStageService(input: {
             }
             // Windows packaged apps may delegate to another PID. Select the new
             // exact window of the resolved executable, never the launcher stub.
-            const matches = await matchesLaunchedWindows(windows.filter((window) => !beforeKeys.has(`${window.pid}:${window.windowId}`)));
-            if (matches.length > 1) throw new Error("The requested application opened multiple windows; select the intended window before continuing.");
-            if (matches.length === 1) {
-              ownedApps.set(name, { taskId, appId, pid: matches[0]!.pid, windowId: matches[0]!.windowId, ownsProcess: false });
+            const newWindows = windows.filter((window) => !beforeKeys.has(`${window.pid}:${window.windowId}`));
+            const matches = await matchesLaunchedWindows(newWindows);
+            // Chromium can briefly expose several delegated HWND records for
+            // one --new-window launch (renderer/helper/host). Use the same
+            // eligibility/ranking policy as existing-browser adoption instead
+            // of treating the broad launch inventory as user ambiguity.
+            const selected = kind
+              ? selectPersonalBrowserWindow(kind, matches, beforeKeys)
+              : matches.length === 1 ? matches[0] : undefined;
+            if (!selected && matches.length > 1 && !kind) throw new Error("The requested application opened multiple windows; select the intended window before continuing.");
+            if (selected) {
+              ownedApps.set(name, { taskId, appId, pid: selected.pid, windowId: selected.windowId, ownsProcess: false });
               // An explicit owner-preview app launch owns this focus transition:
               // activate the exact new HWND once, verify its PID/HWND natively, and
               // return that same capture. No taskbar hunt or extra observe round trip.
-              const capture = await presentAndFocusOwnerWindow(matches[0]!.pid, matches[0]!.windowId, coordinationKey);
+              const capture = await presentAndFocusOwnerWindow(selected.pid, selected.windowId, coordinationKey);
               return finishLaunch({ name, taskId, appId, running: true, reused: false, view: "app", foregroundConfirmed: true, capture });
             }
             await delay(100);

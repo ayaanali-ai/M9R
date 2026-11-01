@@ -1,13 +1,16 @@
-// Message view: type anything, address agents with @handle, send. Replies from agents appear below.
+// Message view: one line, your connected providers' logos inside it. Tap logos to choose who gets the message; with none
+// chosen it goes to whoever is centred on the drum. Replies from agents appear above.
 
 import { h, svg, clear } from "./dom";
 import { ICONS } from "./icons";
 import { Sound } from "../core/sound";
 import { createDictation, type Dictation } from "../core/speech";
-import { State, type ChatMessage, type LinkOffer } from "../core/state";
+import { State, type AgentTask, type ChatMessage, type DroppedFile, type LinkOffer } from "../core/state";
 import type { SessionRow } from "../core/transport";
-import { buildModelPicker } from "./views";
 import type { ViewActions, ViewHost } from "./views";
+import { providerLogo } from "./provider";
+import { displayName } from "../core/humanize";
+import { botGlowColor } from "../core/layout";
 
 let nextId = 1;
 
@@ -58,12 +61,39 @@ function linkPicker(offer: LinkOffer, linking: NonNullable<ViewActions["linking"
   return wrap;
 }
 
+/** The leading "@codex @claude " routing prefix of a sent message, split from what the owner actually wrote. */
+function splitRecipients(text: string): { to: AgentTask[]; body: string } {
+  const lead = /^(?:@[A-Za-z0-9-]+\s+)+/.exec(text)?.[0] ?? "";
+  const to = [...lead.matchAll(/@([A-Za-z0-9-]+)/g)]
+    .map((m) => State.tasks.find((t) => t.name.toLowerCase() === m[1].toLowerCase()))
+    .filter((t): t is AgentTask => !!t);
+  return to.length ? { to, body: text.slice(lead.length) } : { to: [], body: text };
+}
+
 function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () => void): HTMLElement {
   if (message.role === "user") {
-    return h("div", { class: "chat-row user" }, h("div", { class: "bubble", text: message.content }));
+    const { to, body } = splitRecipients(message.content);
+    const who = to.length
+      ? h("span", { class: "sent-to", title: `To ${to.map(displayName).join(", ")}` }, ...to.map((t) => providerLogo(t.provider, 11)))
+      : null;
+    // Attached paths travel in the text for the agent; the owner sees file chips, not a list of paths.
+    const cut = body.indexOf(ATTACHED);
+    const said = cut < 0 ? body : body.slice(0, cut);
+    const files = cut < 0 ? [] : body.slice(cut + ATTACHED.length).split("\n").filter(Boolean);
+    const bubbleEl = h("div", { class: "bubble", text: said });
+    if (files.length) {
+      bubbleEl.append(h("span", { class: "bubble-files" }, ...files.map((f) => h("span", { class: "file-chip sent", title: f },
+        svg(ICONS.doc, 11), h("span", { text: f.split(/[\\/]/).pop() ?? f })))));
+    }
+    return h("div", { class: "chat-row user" }, who, bubbleEl);
   }
-  // The agent's own reply gets the same bubble treatment as the user's message (light/white here, blue for "user").
-  const reply = h("div", { class: "bubble", text: message.content });
+  // Replies arrive as "codex: text"; the handle becomes the provider's logo, never raw text in the bubble.
+  const from = /^([A-Za-z0-9-]+):\s/.exec(message.content);
+  const sender = from ? State.tasks.find((t) => t.name.toLowerCase() === from[1].toLowerCase()) : undefined;
+  const reply = h("div", { class: "bubble", text: sender ? message.content.slice(from![0].length) : message.content });
+  if (sender) {
+    reply.prepend(h("span", { class: "reply-from", title: displayName(sender) }, providerLogo(sender.provider, 11)));
+  }
   const clearNotice = message.dismissTaskId && actions.dismissTask
     ? h("button", { class: "save-note", type: "button", text: "Clear notice", title: "Hide this notice; keep its task record" })
     : null;
@@ -90,29 +120,144 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
   return h("div", { class: "chat-row" }, reply, clearNotice);
 }
 
-/** The @handle being typed at the caret, if any: its start index and the partial text after the @. */
-export function mentionAt(text: string, caret: number): { start: number; partial: string } | null {
-  const before = text.slice(0, caret);
-  const m = /(^|\s)@([A-Za-z0-9-]{0,38})$/.exec(before);
-  return m ? { start: before.length - m[2].length - 1, partial: m[2].toLowerCase() } : null;
+/** One line by default; grows with the draft, but a pasted document never consumes the island. */
+export function cappedDraftHeight(scrollHeight: number): number {
+  return Math.max(20, Math.min(120, Number.isFinite(scrollHeight) ? scrollHeight : 20));
 }
 
-/** Keep the draft readable without allowing a pasted document to consume the island. */
-export function cappedDraftHeight(scrollHeight: number): number {
-  return Math.max(48, Math.min(120, Number.isFinite(scrollHeight) ? scrollHeight : 48));
+/** The @handle being typed at the caret, if any. Kept as a pure helper for the composer and its state tests. */
+export function mentionAt(text: string, caret: number): { start: number; partial: string } | null {
+  const before = text.slice(0, caret);
+  const match = /(^|\s)@([A-Za-z0-9-]{0,38})$/.exec(before);
+  return match
+    ? { start: before.length - match[2].length - 1, partial: match[2].toLowerCase() }
+    : null;
+}
+
+const ATTACHED = "\n\nAttached:\n";
+
+/** One-tap starts for a dropped file. Anything that leaves your machine asks to be shown first. */
+const FILE_ASKS = [
+  { label: "Summarize it", text: "Summarize this." },
+  { label: "Email it", text: "Draft an email with this attached. Show me the email before you send it." },
+  { label: "Fill it out and submit", text: "Fill this out and submit it. Show me before you submit." },
+];
+
+function fileWord(files: DroppedFile[]): string {
+  return files.length === 1 ? files[0].name : `these ${files.length} files`;
+}
+
+/** "Message Claude Code…", "Message Codex and Claude Code…", "Message 4 agents…". */
+function placeholderFor(to: AgentTask[], files: DroppedFile[] = []): string {
+  const names = to.map(displayName);
+  if (files.length) {
+    const who = names.length === 1 ? names[0] : names.length === 0 ? "your agents" : names.length === 2 ? `${names[0]} and ${names[1]}` : `${names.length} agents`;
+    return `What should ${who} do with ${fileWord(files)}?`;
+  }
+  if (names.length === 0) return "Message your agents…";
+  if (names.length > 3) return `Message ${names.length} agents…`;
+  if (names.length === 1) return `Message ${names[0]}…`;
+  if (names.length === 2) return `Message ${names[0]} and ${names[1]}…`;
+  return `Message ${names[0]}, ${names[1]}, and ${names[2]}…`;
 }
 
 export function buildPrompt(actions: ViewActions, onHeightChange: () => void): ViewHost {
-  const suggest = h("div", { class: "chip-row" });
   const log = h("div", { class: "chat-log", role: "log", "aria-label": "Conversation" });
   const input = h("textarea", {
     class: "chat-input",
-    rows: 2,
-    placeholder: "Ask your agents anything…",
+    rows: 1,
+    placeholder: "Message your agents…",
     "aria-label": "Message your agents",
     spellcheck: "false",
     autocomplete: "off",
   });
+  // Who gets the message. Empty means "whoever is centred on the drum", shown as that logo softly lit.
+  const armed = new Set<string>();
+  const agents = h("div", { class: "ag-group", role: "group", "aria-label": "Send to" });
+  let agentKey = "";
+
+  function recipients(): AgentTask[] {
+    const chosen = State.tasks.filter((t) => armed.has(t.id));
+    if (chosen.length) return chosen;
+    return State.focusTask ? [State.focusTask] : [];
+  }
+
+  // Dropped files wait here as chips, with a few one-tap starts while the field is still empty.
+  const tray = h("div", { class: "composer-tray" });
+  const asks = h("div", { class: "composer-asks" });
+  let trayKey = "";
+  tray.hidden = true;
+  asks.hidden = true;
+
+  function syncFiles() {
+    const files = State.pendingFiles;
+    const key = `${files.map((f) => f.path ?? f.name).join("|")}#${input.value.trim() ? 1 : 0}`;
+    if (key === trayKey) return;
+    trayKey = key;
+    tray.replaceChildren(...files.map((file, i) => {
+      const remove = h("button", { class: "file-x", type: "button", title: "Remove", "aria-label": `Remove ${file.name}` }, svg(ICONS.xmark, 9));
+      remove.addEventListener("mousedown", (e) => e.preventDefault());
+      remove.addEventListener("click", () => {
+        State.pendingFiles = State.pendingFiles.filter((_, j) => j !== i);
+        syncFiles();
+        syncAgents();
+        resizeDraft();
+        onHeightChange();
+      });
+      return h("span", { class: "file-chip", title: file.path ?? file.name }, svg(ICONS.doc, 12), h("span", { class: "file-name", text: file.name }), remove);
+    }));
+    asks.replaceChildren(...(files.length && !input.value.trim() ? FILE_ASKS : []).map((ask) => {
+      const b = h("button", { class: "ask-chip", type: "button", text: ask.label });
+      b.addEventListener("mousedown", (e) => e.preventDefault());
+      b.addEventListener("click", () => {
+        input.value = ask.text;
+        resizeDraft();
+        syncFiles();
+        input.focus();
+      });
+      return b;
+    }));
+    tray.hidden = files.length === 0;
+    asks.hidden = asks.childElementCount === 0;
+    onHeightChange();
+  }
+
+  function syncAgents() {
+    if (State.composeTo) {
+      armed.clear();
+      for (const id of State.composeTo) if (State.tasks.some((t) => t.id === id)) armed.add(id);
+      State.composeTo = null;
+      agentKey = "";
+    }
+    for (const id of armed) if (!State.tasks.some((t) => t.id === id)) armed.delete(id);
+    const focus = State.focusTask?.id;
+    const key = `${State.tasks.map((t) => `${t.id}:${t.state}`).join("|")}#${[...armed].join(",")}#${focus}`;
+    if (key !== agentKey) {
+      agentKey = key;
+      agents.replaceChildren(...State.tasks.map((task) => {
+        const on = armed.has(task.id);
+        const implied = armed.size === 0 && task.id === focus;
+        const b = h("button", {
+          class: "ag" + (on ? " on" : implied ? " implied" : ""),
+          type: "button",
+          title: on ? `${displayName(task)} · tap to remove` : implied ? `${displayName(task)} · gets this unless you pick others` : `Send to ${displayName(task)} too`,
+          "aria-label": displayName(task),
+          "aria-pressed": String(on || implied),
+        }, providerLogo(task.provider, 13));
+        b.style.setProperty("--tone", botGlowColor(task.state === "idle" || task.state === "sleeping" ? "working" : task.state));
+        b.addEventListener("mousedown", (e) => e.preventDefault()); // keep the caret in the field
+        b.addEventListener("click", () => {
+          if (armed.has(task.id)) armed.delete(task.id);
+          else armed.add(task.id);
+          actions.blip();
+          syncAgents();
+        });
+        return b;
+      }));
+      agents.hidden = State.tasks.length === 0;
+    }
+    input.placeholder = placeholderFor(recipients(), State.pendingFiles);
+  }
   // The invisible twin measures wrapping without temporarily collapsing the visible field.
   const measure = h("textarea", { class: "chat-input composer-measure", rows: 1, tabindex: -1, "aria-hidden": "true" });
   const draft = h("div", { class: "composer-draft" }, input, measure);
@@ -125,22 +270,14 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   for (let i = 0; i < 24; i += 1) wave.append(document.createElement("i"));
   const said = h("span", { class: "said" });
   live.append(h("span", { class: "dictation-label", text: "Listening" }), wave, said);
-  const modelLabel = h("span", { class: "composer-model-label" });
-  const model = h("button", {
-    class: "composer-model", type: "button", title: "Choose provider, model and reasoning", "aria-label": "Choose provider, model and reasoning",
-  }, svg(ICONS.layers, 12), modelLabel, h("span", { class: "composer-chevron", text: "⌄", "aria-hidden": "true" }));
-  model.hidden = !actions.selectModel;
-  const hint = h("span", { class: "composer-hint", text: "Shift + Enter for a new line" });
-  const footer = h("div", { class: "composer-footer" }, model, hint, mic, send);
-  const bar = h("div", { class: "chat-bar" }, draft, live, footer);
+  const line = h("div", { class: "composer-line" }, agents, h("span", { class: "composer-rule", "aria-hidden": "true" }), draft, mic, send);
+  const bar = h("div", { class: "chat-bar" }, live, tray, line);
 
-  const el = h("div", { class: "view prompt-view" }, h("div", { class: "card wash chat-card" }, h("div", { class: "chat-body" }, log, suggest, bar)));
-  (el.querySelector(".card") as HTMLElement).style.setProperty("--wash", "rgba(99,102,241,0.5)");
+  const el = h("div", { class: "view prompt-view" }, h("div", { class: "chat-body" }, log, asks, bar));
 
   let sending = false;
   let renderedFingerprint = "";
-  let suggestKey = "";
-  let draftHeight = 48;
+  let draftHeight = 20;
 
   function resizeDraft() {
     measure.value = input.value;
@@ -158,112 +295,17 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     }).observe(draft);
   }
 
-  function syncModel() {
-    const handle = /(?:^|\s)@([A-Za-z0-9-]{1,38})(?=\s|$)/.exec(input.value)?.[1]?.toLowerCase();
-    const agent = State.models?.agents.find((entry) => entry.handle === handle)
-      ?? State.models?.agents.find((entry) => entry.handle === State.focusTask?.name)
-      ?? State.models?.agents[0];
-    const chosen = agent?.selectedModel ?? agent?.currentModel;
-    const label = agent?.models.find((entry) => entry.id === chosen)?.label ?? chosen;
-    modelLabel.textContent = agent ? `@${agent.handle}${label ? ` · ${label}` : " · Choose model"}` : "Providers & models";
-    model.dataset.handle = agent?.handle ?? "";
-  }
-  const modelPicker = actions.selectModel ? buildModelPicker(actions) : null;
-  const modelPopover = modelPicker ? h("div", { class: "composer-model-popover" }, modelPicker.el) : null;
-  // The island clips its content through several nested overflow:hidden / clip-path ancestors
-  // (the chat card, the view-swap container, the island's own rounded-corner mask). A popover
-  // anchored inside that tree gets silently clipped no matter how it's positioned, so instead it's
-  // parented straight onto <body> and placed with position:fixed against the button's live screen
-  // rect -- fully outside that clipping chain -- and repositioned on every open in case the island
-  // itself moved or resized since the last time.
-  if (modelPopover) {
-    modelPopover.hidden = true;
-    modelPopover.style.position = "fixed";
-    document.body.append(modelPopover);
-  }
-  function closeModelPopover() {
-    if (!modelPopover || modelPopover.hidden) return;
-    modelPopover.hidden = true;
-    modelPicker?.el.classList.remove("on");
-    document.removeEventListener("pointerdown", onOutsidePointer, true);
-    document.removeEventListener("keydown", onPopoverKeydown, true);
-    window.removeEventListener("resize", positionModelPopover);
-  }
-  function onOutsidePointer(e: PointerEvent) {
-    if (modelPopover && !modelPopover.contains(e.target as Node) && e.target !== model && !model.contains(e.target as Node)) closeModelPopover();
-  }
-  function onPopoverKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") { e.stopPropagation(); closeModelPopover(); }
-  }
-  function positionModelPopover() {
-    if (!modelPopover) return;
-    const anchor = model.getBoundingClientRect();
-    const margin = 8;
-    const width = Math.min(460, window.innerWidth - 32);
-    const spaceAbove = anchor.top - margin;
-    const spaceBelow = window.innerHeight - anchor.bottom - margin;
-    const openDown = spaceBelow > spaceAbove;
-    const height = Math.max(140, Math.min(320, (openDown ? spaceBelow : spaceAbove) - margin));
-    modelPopover.style.width = `${width}px`;
-    modelPopover.style.height = `${height}px`;
-    modelPopover.style.left = `${Math.max(16, Math.min(anchor.left, window.innerWidth - width - 16))}px`;
-    if (openDown) {
-      modelPopover.style.top = `${anchor.bottom + margin}px`;
-      modelPopover.style.bottom = "auto";
-    } else {
-      modelPopover.style.top = "auto";
-      modelPopover.style.bottom = `${window.innerHeight - anchor.top + margin}px`;
-    }
-  }
-  model.addEventListener("click", () => {
-    if (!modelPopover) return;
-    const task = State.tasks.find((entry) => entry.name === model.dataset.handle);
-    if (task) actions.setFocus(task.id);
-    const opening = modelPopover.hidden;
-    if (opening) {
-      positionModelPopover();
-      modelPopover.hidden = false;
-      // buildModelPicker's root carries the island's generic `.view` class, which is opacity:0 /
-      // pointer-events:none until the island's own view-switcher adds `.on` -- this popover isn't
-      // driven by that switcher, so add it directly or the picker stays invisible and unclickable.
-      modelPicker!.el.classList.add("on");
-      modelPicker!.activate?.();
-      document.addEventListener("pointerdown", onOutsidePointer, true);
-      document.addEventListener("keydown", onPopoverKeydown, true);
-      window.addEventListener("resize", positionModelPopover);
-    } else {
-      closeModelPopover();
-    }
-  });
-
-  function renderSuggestions() {
-    const at = mentionAt(input.value, input.selectionStart ?? input.value.length);
-    const options = at ? State.tasks.filter((t) => t.name.toLowerCase().startsWith(at.partial)) : State.tasks.length > 0 && input.value.trim() === "" ? State.tasks : [];
-    const key = `${at?.start ?? -1}|${options.map((t) => t.id).join(",")}`;
-    if (key === suggestKey) return;
-    suggestKey = key;
-    clear(suggest);
-    for (const t of options.slice(0, 4)) {
-      const chip = h("button", { class: "chip settled", type: "button", text: `@${t.name}` });
-      chip.addEventListener("mousedown", (e) => e.preventDefault()); // keep focus in the field
-      chip.addEventListener("click", () => {
-        const where = mentionAt(input.value, input.selectionStart ?? input.value.length);
-        const head = where ? input.value.slice(0, where.start) : input.value;
-        const tail = where ? input.value.slice(input.selectionStart ?? input.value.length) : "";
-        input.value = `${head}@${t.name} ${tail}`.replace(/\s+$/, " ");
-        input.focus();
-        suggestKey = "";
-        renderSuggestions();
-        resizeDraft();
-        syncModel();
-      });
-      suggest.append(chip);
-    }
-  }
-
   async function submit() {
-    const text = input.value.trim();
-    if (!text || sending || dictation?.listening) return;
+    const typed = input.value.trim();
+    if (!typed || sending || dictation?.listening) return;
+    // The logos are the address. A message that already names agents with @ keeps the owner's own routing.
+    const to = recipients();
+    const addressed = /(^|\s)@[A-Za-z0-9-]/.test(typed) || to.length === 0 ? typed : `${to.map((t) => `@${t.name}`).join(" ")} ${typed}`;
+    // Agents run on this machine, so a path is all they need to open the file.
+    const files = State.pendingFiles;
+    const text = files.length ? `${addressed}${ATTACHED}${files.map((f) => f.path ?? f.name).join("\n")}` : addressed;
+    State.pendingFiles = [];
+    syncFiles();
     input.value = "";
     sending = true;
     resizeDraft();
@@ -277,7 +319,9 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     } catch (err) {
       // Stay in the message view and say why: a wrong or missing @name should be fixable without losing the text.
       State.chatHistory.push({ id: nextId++, role: "assistant", content: `Not sent: ${String(err instanceof Error ? err.message : err).slice(0, 160)}` });
-      input.value = text;
+      input.value = typed;
+      State.pendingFiles = files;
+      syncFiles();
       Sound.play("error");
     } finally {
       sending = false;
@@ -316,9 +360,7 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
       onText(words) {
         const before = input.value;
         input.value = `${before && !/\s$/.test(before) ? `${before} ` : before}${words}`;
-        renderSuggestions();
         resizeDraft();
-        syncModel();
         input.focus();
       },
       onNotice: showNotice,
@@ -338,7 +380,7 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   }
 
   send.addEventListener("click", () => void submit());
-  input.addEventListener("input", () => { renderSuggestions(); resizeDraft(); syncModel(); });
+  input.addEventListener("input", () => { resizeDraft(); syncFiles(); });
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -358,16 +400,16 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
         for (const m of State.chatHistory) log.append(bubble(m, actions, onHeightChange));
         if (nearBottom) log.scrollTop = log.scrollHeight;
       }
-      renderSuggestions();
-      syncModel();
+      syncAgents();
+      syncFiles();
       input.disabled = sending;
       if (mic) mic.disabled = sending;
       send.disabled = sending || !input.value.trim() || !!dictation?.listening;
-      if (modelPopover && !modelPopover.hidden) modelPicker!.sync();
     },
     activate() { requestAnimationFrame(resizeDraft); },
-    deactivate() { dictation?.stop(); closeModelPopover(); },
-    get draftHeight() { return dictation?.listening ? 120 : draftHeight; },
+    deactivate() { dictation?.stop(); },
+    // The tray and the one-tap starts sit above the line, so they count toward how tall the island needs to be.
+    get draftHeight() { return (dictation?.listening ? 64 : draftHeight) + (tray.hidden ? 0 : 34) + (asks.hidden ? 0 : 34); },
     focus() {
       input.focus();
     },

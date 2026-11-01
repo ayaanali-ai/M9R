@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { join } from "node:path";
-import { ownedBrowserLaunch, selectPersonalBrowserWindow } from "../src/lib/native/task-stage-apps";
+import { ownedBrowserLaunch, selectExistingPersonalBrowserWindow, selectPersonalBrowserWindow } from "../src/lib/native/task-stage-apps";
 
 test("personal browser launch uses the user's profile and asks Chrome for a new window", () => {
   const app = { executable: join("browser", "chrome.exe"), args: [] };
@@ -27,7 +27,16 @@ test("personal browser adoption chooses only a newly-created Chrome window", () 
   const candidate = { pid: 100, windowId: "0x11", appName: "chrome.exe", title: "New Tab" };
   assert.deepEqual(selectPersonalBrowserWindow("chrome", [candidate], before), candidate);
   assert.equal(selectPersonalBrowserWindow("chrome", [{ ...candidate, windowId: "0x10" }], before), undefined);
-  assert.throws(() => selectPersonalBrowserWindow("chrome", [candidate, { ...candidate, windowId: "0x12" }], before), /multiple new windows/);
+  assert.equal(selectPersonalBrowserWindow("chrome", [candidate, { ...candidate, windowId: "0x12" }], before)?.windowId, "0x11");
   assert.equal(selectPersonalBrowserWindow("chrome", [{ ...candidate, appName: "msedge.exe" }], new Set()), undefined);
   assert.deepEqual(selectPersonalBrowserWindow("chrome", [{ ...candidate, appName: "Chrome_WidgetWin_1" }], new Set()), { ...candidate, appName: "Chrome_WidgetWin_1" });
+});
+
+test("personal browser adoption ignores hidden, minimized, and wrong-desktop helper windows", () => {
+  const visible = { pid: 100, windowId: "0x11", appName: "chrome.exe", title: "New Tab", isOnScreen: true, minimized: false, onCurrentSpace: true, width: 1200, height: 800 };
+  const helper = { ...visible, windowId: "0x12", isOnScreen: false, title: "Chrome helper" };
+  const minimized = { ...visible, windowId: "0x13", minimized: true };
+  const otherDesktop = { ...visible, windowId: "0x14", onCurrentSpace: false };
+  assert.deepEqual(selectPersonalBrowserWindow("chrome", [helper, minimized, otherDesktop, visible], new Set()), visible);
+  assert.deepEqual(selectExistingPersonalBrowserWindow("chrome", [helper, minimized, otherDesktop, visible]), visible);
 });

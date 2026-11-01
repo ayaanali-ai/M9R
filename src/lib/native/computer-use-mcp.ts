@@ -1618,6 +1618,14 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     // browser routes stay background-safe, while a route that truly requires
     // shared input must already carry the explicit owner-visible confirmation.
     const requestedForeground = "confirmFocusForeground" in action && action.confirmFocusForeground === true;
+    // An owner-preview app-window is already an explicit owner-authorized
+    // visible surface. Ordinary actions may therefore escalate once from a
+    // semantic/background route to the bounded foreground lease when that
+    // route cannot deliver. The provider should not have to rediscover the
+    // same focus requirement after M9R itself selected the window.
+    const ownerPreviewForeground = record.context.kind === "desktop"
+      && record.context.mode === "owner-preview"
+      && record.context.view === "app";
     const delivery = selectActionDelivery({
       target: { capabilities: record.route.capabilities },
       requested: requestedForeground ? "exclusive" : "auto",
@@ -1625,8 +1633,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       targetBackgroundSafe: record.context.kind === "browser"
         || record.route.capabilities.some((capability) => capability === "observe.accessibility" || capability === "observe.dom"),
       requiresPhysicalInput: record.route.requiresOwnerInputLease,
-      ownerLeaseValid: requestedForeground,
-      allowForegroundEscalation: requestedForeground,
+      ownerLeaseValid: requestedForeground || ownerPreviewForeground,
+      allowForegroundEscalation: requestedForeground || ownerPreviewForeground,
     });
     if (!delivery.ok) {
       return refusal(action, action.targetId, `delivery-${delivery.code}`, delivery.reason,

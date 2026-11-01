@@ -729,7 +729,7 @@ test("shows a distinct agent label on each native cursor and configures adaptive
     timing: 1,
     effects: { trail: true, glow: true },
     dwellAfterClickMs: 100,
-    idleHideMs: 60_000,
+    idleHideMs: 0,
   })));
   assert.equal(calls.filter((call) => call.method === "moveCursor").length, 2);
   assert.equal(calls.some((call) => call.method === "callTool"), false);
@@ -889,8 +889,8 @@ test("lists only eligible visible app windows and keeps the result local and bou
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, windows }) as never });
   const options = await driver.listWindows("stage");
   assert.deepEqual(options, [
-    { pid: 4321, windowId: "101", appName: "notepad.exe", title: "C5 fixture", width: 800, height: 600 },
-    { pid: 7777, windowId: "106", appName: "browser.exe", title: "A private title", width: 900, height: 700 },
+    { pid: 4321, windowId: "101", appName: "notepad.exe", title: "C5 fixture", width: 800, height: 600, isOnScreen: true, minimized: false },
+    { pid: 7777, windowId: "106", appName: "browser.exe", title: "A private title", width: 900, height: 700, isOnScreen: true, minimized: false },
   ]);
   assert.deepEqual(calls.find((call) => call.method === "listWindows")?.value, { onScreenOnly: true });
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession"]);
