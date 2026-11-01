@@ -26,6 +26,10 @@ const cliOutput = resolve(process.env.M9R_CLI_OUTPUT_DIR || join(root, "cli", "d
 const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
 const out = join(buildRoot, "artifacts");
 const work = join(buildRoot, "work");
+// Node SEA records the absolute `main` path in its embedded metadata. Keep
+// that path stable across UUID-named staging directories so identical source
+// produces identical m9r-engine.exe bytes.
+const stableEngineBundle = join(engineDir, ".m9r-engine-bundle.cjs");
 // The accepted-ui artifact is the owner-confirmed live pill. Keep using that
 // exact binary until a new pill is reviewed and promoted with its runtime
 // identity; the mutable Cargo target is not a release input.
@@ -175,9 +179,19 @@ process.argv = [process.argv[0], process.argv[0], ...(isHook || isMcp || isDevMc
 (isHook ? import(${JSON.stringify(hookJs)}) : isMcp ? import(${JSON.stringify(mcpJs)}) : isDevMcp ? import(${JSON.stringify(devMcpJs)}) : import(${JSON.stringify(cliJs)})).catch((e) => { if (!isHook) console.error(e); process.exit(isHook ? 0 : 1); });
 `);
 
-await build({
-  entryPoints: [entry],
-  outfile: join(work, "bundle.cjs"),
+const bundleResult = await build({
+  // Feed the generated dispatcher through esbuild's virtual stdin instead of
+  // an absolute staging-path entry point. Esbuild preserves that entry path
+  // in a source marker inside the SEA bundle; the staging directory is UUID-
+  // named, so embedding it made byte-identical builds produce different
+  // m9r-engine.exe hashes and therefore different runtime build IDs.
+  stdin: {
+    contents: readFileSync(entry, "utf8"),
+    resolveDir: root,
+    sourcefile: "m9r-engine-entry.mjs",
+    loader: "js",
+  },
+  write: false,
   bundle: true,
   platform: "node",
   format: "cjs",
@@ -190,9 +204,12 @@ await build({
   // instead starts the separately packaged m9r-web-broker.exe beside the engine.
   external: ["./m9r-web-broker"],
 });
+if (bundleResult.outputFiles.length !== 1) throw new Error("The engine bundle did not produce exactly one output file.");
+rmSync(stableEngineBundle, { force: true });
+writeFileSync(stableEngineBundle, bundleResult.outputFiles[0].text);
 
 const exe = join(out, exeName);
-buildSeaExecutable(join(work, "bundle.cjs"), exe, "engine");
+buildSeaExecutable(stableEngineBundle, exe, "engine");
 const brokerExe = join(out, brokerExeName);
 buildSeaExecutable(brokerBundle, brokerExe, "web-broker");
 // The small native hook (hook/): agents run this, not the big engine, so a cold start can never hit their hook time limit.
@@ -289,4 +306,5 @@ console.log(`Runtime source ${provenance.sourceCommit} (${provenance.sourceDirty
 if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")} from the owner-accepted live pill artifact (${acceptedOverlayHash}).`);
 } finally {
   rmSync(buildRoot, { recursive: true, force: true });
+  rmSync(stableEngineBundle, { force: true });
 }
