@@ -2248,12 +2248,11 @@ async function stopManagedBrokerForUpdate(target: NonNullable<Awaited<ReturnType
     const imageBeforeFallback = await readManagedBrokerProcessState(target.brokerPath);
     if (imageBeforeFallback.processes.length === 0) {
       await powerShell(buildLocalBrokerScheduledTaskStopScript(WEB_TASK_NAME));
-    } else if (!target.canonicalTaskRecovery) {
-      throw new Error("The scheduled task is M9R-owned, but authenticated broker shutdown failed; a live broker process could not be safely stopped.");
     } else {
-      // The exact current-user M9R task contract was verified above, but the
-      // broker key/health endpoint is unavailable. Stop only that named task;
-      // never fall back to a process-name kill or a broad service shutdown.
+      // The exact current-user M9R task contract was verified above (either
+      // from its ownership proof or from canonical recovery). Stop only that
+      // named task, then terminate only the exact broker image observed at
+      // that path. Never fall back to a process-name kill or broad shutdown.
       await powerShell(buildLocalBrokerScheduledTaskStopScript(WEB_TASK_NAME));
       await stopExactManagedBrokerImage(target.brokerPath);
     }
