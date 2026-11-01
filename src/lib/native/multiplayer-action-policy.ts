@@ -41,7 +41,7 @@ export function selectActionDelivery(request: ActionDeliveryRequest): ActionDeli
 
   if (requested === "background" || (requested === "auto" && backgroundSafe)) {
     if (backgroundSafe) return { ok: true, mode: "background-semantic", escalated: false, reason: "The target exposes a semantic route that is safe without global focus." };
-    if (request.allowForegroundEscalation && request.ownerLeaseValid) return { ok: true, mode: "exclusive-input", escalated: true, reason: "Background delivery was unavailable; the caller explicitly authorized a bounded foreground escalation." };
+    if (requested !== "background" && request.allowForegroundEscalation && request.ownerLeaseValid) return { ok: true, mode: "exclusive-input", escalated: true, reason: "Background delivery was unavailable; the caller explicitly authorized a bounded foreground escalation." };
     return { ok: false, code: "background-unavailable", reason: "The target cannot accept safe background delivery and no explicit foreground escalation was granted." };
   }
 

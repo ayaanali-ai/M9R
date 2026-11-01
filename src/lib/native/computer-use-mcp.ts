@@ -17,6 +17,7 @@ import {
   type ComputerUseTelemetry,
 } from "./computer-use-contract";
 import { resolveUniversalIntent, type IntentObservationHint } from "./universal-intent-resolver";
+import { preDispatchRetry, type ComputerUseRetry } from "./computer-use-recovery";
 import type { WorkflowPreferenceLedger } from "./workflow-preferences";
 import { selectActionDelivery, selectComputerUseRoute, type ComputerUseRouteDescriptor } from "./computer-use-router";
 import type { VerifiedIdentity } from "./identity-core";
@@ -1350,7 +1351,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   function refusal(action: ComputerUseAction, targetId: string, code: string, message: string,
-    retry: "never" | "same-operation-id" | "refresh-target" | "new-operation-id" = "never", nextStep?: string) {
+    retry: ComputerUseRetry = preDispatchRetry(code), nextStep?: string) {
     const result = createComputerUseResult({
       operationId: action.operationId,
       targetId,
@@ -1362,7 +1363,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   function uncertain(action: ComputerUseAction, targetId: string, routeId: string, code: string, message: string,
-    retry: "never" | "same-operation-id" | "refresh-target" | "new-operation-id" = "never") {
+    retry: ComputerUseRetry = "same-operation-id") {
     const result = createComputerUseResult({
       operationId: action.operationId,
       targetId,
@@ -1610,7 +1611,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       const nextStep = browserWindowFallback
         ? "The browser click was not dispatched. Use m9r_stage_app to select or restore the existing browser, then call m9r_computer_observe for target 'app-window' and re-plan the click using its fresh exact-window observation. No automatic retry occurred."
         : undefined;
-      return refusal(action, action.targetId, selection.code, `${detail}${nextRoute}`, "never", nextStep);
+      return refusal(action, action.targetId, selection.code, `${detail}${nextRoute}`, preDispatchRetry(selection.code), nextStep);
     }
     record.pinnedRouteId = selection.routeId;
     // Apply the Source of Truth 6.0 delivery policy after adapter selection.
@@ -1628,7 +1629,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       && record.context.view === "app";
     const delivery = selectActionDelivery({
       target: { capabilities: record.route.capabilities },
-      requested: requestedForeground ? "exclusive" : "auto",
+      requested: record.context.kind === "desktop" && record.context.mode === "background" ? "background" : requestedForeground ? "exclusive" : "auto",
       targetVisible: record.context.kind === "desktop" && record.context.view === "app",
       targetBackgroundSafe: record.context.kind === "browser"
         || record.route.capabilities.some((capability) => capability === "observe.accessibility" || capability === "observe.dom"),
@@ -1638,7 +1639,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     });
     if (!delivery.ok) {
       return refusal(action, action.targetId, `delivery-${delivery.code}`, delivery.reason,
-        delivery.code === "foreground-lease-required" ? "never" : "refresh-target");
+        preDispatchRetry(delivery.code));
     }
 
     // Finding AE: the 30s observation-age check above only catches staleness by elapsed
@@ -1772,9 +1773,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ? "not-checked"
         : targetClosed && !action.postcondition ? "verified"
           : postconditionStatus ?? (dispatchStatus === "dispatched" && updated ? "observed" : "unknown");
-      const notDispatchedRetry: "never" | "same-operation-id" | "refresh-target" =
-        response.gateCode === "mutation-lease" ? "same-operation-id"
-          : response.gateCode === "mutation-revision" || response.gateCode === "target-identity" ? "refresh-target" : "never";
+      const notDispatchedRetry = preDispatchRetry(response.gateCode ?? response.code ?? "desktop-action-failed");
       const resultError = !response.ok
         ? { code: response.gateCode ?? response.code ?? "desktop-action-failed", message: (response.error ?? "The desktop broker refused the action.").slice(0, 2_000),
             retry: response.dispatchState === "not-dispatched" ? notDispatchedRetry : "same-operation-id" as const }
@@ -1840,9 +1839,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         if (receiptInput) {
           try { deps.store.releaseComputerOperation(receiptInput); } catch { /* the running receipt still blocks replay */ }
         }
-        const retry = fenceCode === "mutation-lease-unavailable" ? "same-operation-id" as const
-          : fenceCode === "mutation-stale-revision" || fenceCode === "mutation-already-claimed" || fenceCode === "mutation-surface-unresolved" ? "refresh-target" as const
-            : fenceCode === "mutation-operation-conflict" ? "new-operation-id" as const : "never" as const;
+        const retry = preDispatchRetry(fenceCode);
         return refusal(action, action.targetId, fenceCode, response.error ?? "The mutation fence refused this action before dispatch.", retry);
       }
       const receipt = receiptInput ? settleReceipt(receiptInput, "uncertain") : { state: "uncertain" as const };
