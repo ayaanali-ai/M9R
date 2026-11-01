@@ -37,7 +37,7 @@ test("a historically verified candidate cannot authorize itself over the current
     assert.ok(start >= 0 && end > start);
     writeFileSync(join(directory, "m9r-build-info.json"), JSON.stringify({ schemaVersion: 1, buildId: "b".repeat(64), artifacts: {} }));
     const script = join(directory, "check.ps1");
-    writeFileSync(script, `$ErrorActionPreference = 'Stop'\n$AllowLocalCandidate = $true\nfunction Assert-LocalCandidateReceipt { }\nfunction Get-AcceptedRuntimeIdentity { return @{ schemaVersion=1; buildId=('a' * 64); artifacts=@{} } }\n${source.slice(start, end)}\ntry { Assert-AcceptedRuntimePackage $PSScriptRoot; throw 'SELF_AUTHORIZED' } catch { if ($_.Exception.Message -notlike '*not the owner-accepted runtime*') { throw }; Write-Output 'REJECTED_BY_CURRENT_POLICY' }\n`);
+    writeFileSync(script, `$ErrorActionPreference = 'Stop'\n$AllowLocalCandidate = $true\nfunction Assert-LocalCandidateReceipt { }\nfunction Get-AcceptedRuntimeIdentity { return @{ schemaVersion=1; buildId=('a' * 64); artifacts=@{} } }\n${source.slice(start, end)}\ntry { Assert-AcceptedRuntimePackage $PSScriptRoot; throw 'SELF_AUTHORIZED' } catch { if ($_.Exception.Message -notlike '*owner-accepted live pill*') { throw }; Write-Output 'REJECTED_BY_CURRENT_POLICY' }\n`);
     const result = runPowerShell(script);
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.match(result.stdout, /REJECTED_BY_CURRENT_POLICY/);

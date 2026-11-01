@@ -80,10 +80,6 @@ function boundedWorkerDiagnostic(value: string): string {
     : clean;
 }
 
-function isMissingClaudeContinuationError(stderr: string): boolean {
-  return /(?:no conversation found|conversation.*(?:not found|does not exist)|session.*(?:not found|does not exist)|could not find.*(?:conversation|session)|unknown session)/i.test(stderr);
-}
-
 function providerDiagnostic(text: string): string {
   const compact = text.trim().replace(/\s+/g, " ");
   return compact ? `: ${compact.slice(-1_024)}` : "";
@@ -128,6 +124,9 @@ abstract class ManagedProviderConnectionBase implements ManagedProviderConnectio
   protected beginStart(): number {
     if (this.activeTaskId) throw new Error(`@${this.profile.handle} cannot start while task ${this.activeTaskId} is active`);
     this.generationValue += 1;
+    // A new provider process is always cold. M9R continuity lives in its
+    // durable task context, never in a provider-owned conversation/thread ID.
+    this.providerSessionRef = undefined;
     this.statusValue = "starting";
     this.doingValue = "Starting";
     this.paused = false;
@@ -168,7 +167,6 @@ abstract class ManagedProviderConnectionBase implements ManagedProviderConnectio
     return {
       connectionId: this.profile.connectionId,
       generation: this.generationValue,
-      ...(this.providerSessionRef ? { continuation: { providerSessionRef: this.providerSessionRef } } : {}),
     };
   }
 
@@ -251,7 +249,7 @@ abstract class ManagedProviderConnectionBase implements ManagedProviderConnectio
   }
 
   continuation(): ManagedProviderContinuation | undefined {
-    return this.providerSessionRef ? { providerSessionRef: this.providerSessionRef } : undefined;
+    return undefined;
   }
 
   abstract start(continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady>;
@@ -379,10 +377,9 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
     return { healthy: true };
   }
 
-  async start(continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
+  async start(_continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
     if (this.live && this.live.state().status !== "exited" && (this.statusValue === "ready" || this.statusValue === "working")) return this.ready();
     if (this.startup) return this.startup;
-    const expectedResumeId = continuation?.providerSessionRef ?? this.providerSessionRef;
     const generation = this.beginStart();
     let resolveReady!: (ready: ManagedProviderReady) => void;
     let rejectReady!: (error: Error) => void;
@@ -399,9 +396,7 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
       rejectReady = reject;
     });
     this.startup = promise;
-    let attemptResumeId = expectedResumeId;
     let stderrTail = "";
-    let freshFallbackUsed = false;
     const launch = (): void => {
       stderrTail = "";
       const live = startLiveSession({
@@ -410,7 +405,6 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
           profile: this.options.profileMode ?? "web-only",
           mcpConfigPath: this.options.mcpConfigPath,
           command: this.options.command,
-          resumeSessionId: attemptResumeId,
           model: this.selectedModel ?? this.options.model ?? this.profile.model,
           effort: this.selectedEffort ?? this.options.effort ?? this.profile.effort,
           allowedTools: this.options.allowedTools,
@@ -428,12 +422,6 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
           if (generation !== this.generationValue || this.stopping) return;
           if (event.kind === "init") {
             readyEstablished = true;
-            if (attemptResumeId && event.sessionId !== attemptResumeId) {
-              const error = new Error("Claude resumed a different provider conversation");
-              this.live?.stop();
-              fail(error);
-              return;
-            }
             this.providerSessionRef = event.sessionId;
             if (!settled) {
               settled = true;
@@ -450,14 +438,6 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
             // failure.
             if (!readyEstablished && !this.activeTaskId && event.isError) {
               const detail = event.text.trim() || stderrTail.trim() || "Claude reported a startup failure";
-              // Some CLI versions report a missing resumed conversation as a
-              // result rather than stderr. Let the same bounded exit recovery
-              // classify it; no user task has been dispatched at this point.
-              if (attemptResumeId && !freshFallbackUsed && isMissingClaudeContinuationError(detail)) {
-                stderrTail = `${stderrTail}\n${redactSecrets(detail)}`.slice(-4_096);
-                this.live?.stop();
-                return;
-              }
               const error = new Error(`Claude startup failed: ${detail.slice(0, 1_024)}`);
               if (!settled) fail(error);
               else this.fail(error.message);
@@ -480,25 +460,6 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
           if (generation !== this.generationValue) return;
           this.options.diagnostic?.("exit", { exitCode: code });
           this.live = undefined;
-          const missingContinuation = Boolean(
-            attemptResumeId
-            && !readyEstablished
-            && !freshFallbackUsed
-            && isMissingClaudeContinuationError(stderrTail),
-          );
-          if (missingContinuation && !this.stopping && !this.draining) {
-            // Claude owns its conversation store. If that store no longer has
-            // the persisted conversation, replace only that stale continuation
-            // once; the fresh init event becomes the new durable reference.
-            freshFallbackUsed = true;
-            attemptResumeId = undefined;
-            this.providerSessionRef = undefined;
-            queueMicrotask(() => {
-              if (generation !== this.generationValue || readyEstablished || this.activeTaskId || this.stopping || this.draining) return;
-              try { launch(); } catch (error) { fail(error); }
-            });
-            return;
-          }
           if (!readyEstablished && !this.activeTaskId) {
             fail(new Error(`Claude exited before readiness (exit ${code ?? "unknown"})${providerDiagnostic(stderrTail)}`));
           }
@@ -521,7 +482,7 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
       // eager boot can launch Claude without deadlocking every connection for
       // a fake initialization timeout. The first task supplies the turn that
       // completes provider initialization and authentication.
-      if (!attemptResumeId && !settled) {
+      if (!settled) {
         settled = true;
         resolveReady(this.ready("Ready (Claude managed process; first turn initializes provider)"));
       }
@@ -630,11 +591,10 @@ class CodexManagedProviderConnection extends ManagedProviderConnectionBase {
     this.options = options;
   }
 
-  async start(continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
+  async start(_continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
     if (this.statusValue === "ready" || this.statusValue === "working") return this.ready();
-    this.providerSessionRef = continuation?.providerSessionRef ?? this.providerSessionRef;
     this.beginStart();
-    return this.ready("Ready (Codex worker resumes its thread per turn)");
+    return this.ready("Ready (Codex worker starts cold per turn)");
   }
 
   async *send(task: ManagedProviderTask): AsyncIterable<ManagedProviderEvent> {
@@ -648,7 +608,7 @@ class CodexManagedProviderConnection extends ManagedProviderConnectionBase {
     let answer = "";
     let terminal = false;
     try {
-      const child = this.options.spawnWorker(this.options.command, this.options.buildArgs({ task, continuation: this.continuation() }), { cwd: this.profile.cwd, env: this.options.environment });
+      const child = this.options.spawnWorker(this.options.command, this.options.buildArgs({ task }), { cwd: this.profile.cwd, env: this.options.environment });
       this.worker = child;
       let buffer = "";
       let stderr = "";
@@ -691,7 +651,7 @@ class CodexManagedProviderConnection extends ManagedProviderConnectionBase {
         if (code === 0) {
           queue.push({ kind: "result", text: answer, isError: false });
           this.finishTask();
-          if (!this.draining) this.ready("Ready (Codex worker resumes its thread per turn)");
+          if (!this.draining) this.ready("Ready (Codex worker starts cold per turn)");
           queue.push({ kind: "status", status: this.statusValue, doing: this.doingValue });
         } else {
           const diagnostic = boundedWorkerDiagnostic(stderr);
@@ -875,7 +835,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     if (adapter && server) await adapter.shutdown(server).catch(() => undefined);
   }
 
-  async start(continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
+  async start(_continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
     const existingServer = this.server;
     if (this.adapter && existingServer && this.session
       && this.adapter.getServerHealth(existingServer).state === "alive"
@@ -895,16 +855,13 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
       try {
         await adapter.initialize(server);
         if (generation !== this.generationValue || this.stopping) throw new Error("Codex app-server connection was stopped while starting");
-        const providerSessionRef = continuation?.providerSessionRef ?? this.providerSessionRef;
-        const session = providerSessionRef
-          ? await adapter.resumeSession({ server, providerSessionRef, assignment })
-          : await adapter.createSession({ server, assignment, executionId: this.profile.connectionId });
+        const session = await adapter.createSession({ server, assignment, executionId: this.profile.connectionId });
         if (generation !== this.generationValue || this.stopping) throw new Error("Codex app-server connection was stopped while starting");
         this.adapter = adapter;
         this.server = server;
         this.session = session;
         this.providerSessionRef = session.providerSessionRef ?? undefined;
-        return this.ready("Ready (Codex app-server session)");
+        return this.ready("Ready (Codex app-server, cold process)");
       } catch (error) {
         await adapter.shutdown(server).catch(() => undefined);
         throw error;
@@ -1083,7 +1040,7 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
     }
   }
 
-  async start(continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
+  async start(_continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
     if (this.runtime && this.runtime.alive?.() !== false && (this.statusValue === "ready" || this.statusValue === "working")) return this.ready();
     if (this.startup) return this.startup;
     if (this.runtime && this.runtime.alive?.() === false) {
@@ -1101,11 +1058,6 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
         missionId: this.options.missionId,
         model: this.profile.model,
         effort: this.profile.effort,
-        // Continuation metadata is a hint, not a liveness guarantee. OpenCode
-        // can prune a session or reset its local store while M9R is stopped;
-        // let the ACP runtime fall back to a fresh owner session and persist
-        // the replacement instead of leaving this provider permanently red.
-        ...(continuation?.providerSessionRef ? { resumeId: continuation.providerSessionRef, strictResume: false } : {}),
       });
       this.runtime = runtime;
       const ready = await runtime.ready();
@@ -1115,7 +1067,7 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
       }
       this.providerSessionRef = ready.sessionId;
       this.availableModels = validateProviderModelCatalog(ready.availableModels ?? null);
-      return this.ready("Ready (OpenCode ACP session)");
+      return this.ready("Ready (OpenCode ACP, cold process)");
     })().catch((error: unknown) => {
       this.fail(error instanceof Error ? error.message : String(error));
       throw error instanceof Error ? error : new Error(String(error));

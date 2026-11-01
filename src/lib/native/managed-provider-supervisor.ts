@@ -37,6 +37,8 @@ export interface ManagedProviderContinuationStore {
 export interface ManagedProviderSupervisorOptions {
   createConnection(profile: ManagedProviderConnectionProfile): ManagedProviderConnection;
   continuationStore?: ManagedProviderContinuationStore;
+  /** Legacy provider-session continuation is opt-in for non-M9R compatibility tests only. */
+  allowProviderContinuation?: boolean;
   /** Optional Phase 9 proof cache. It never replaces the adapter health check on a cache miss. */
   readinessCache?: RuntimeReadinessCache;
   /** Build identity used to invalidate cached runtime proofs after an update. */
@@ -184,9 +186,10 @@ function generationFromReady(
 
 export function createManagedProviderSupervisor(options: ManagedProviderSupervisorOptions): ManagedProviderSupervisor {
   const entries = new Map<string, Entry>();
-  // Keep the latest private continuation in memory even when a durable store
-  // is not configured. A provider restart within this supervisor must resume
-  // the same logical session rather than silently starting a new one.
+  // The desktop M9R owner deliberately leaves this disabled. Provider-owned
+  // conversation/session references are not a continuity layer for M9R.
+  // Non-production callers may opt in explicitly for legacy compatibility.
+  const allowProviderContinuation = options.allowProviderContinuation === true;
   const continuations = new Map<string, ManagedProviderContinuation | undefined>();
   // A logical connection may be requested by startup reconciliation and a
   // delivery at the same time. Coalesce those requests before they reach the
@@ -211,12 +214,14 @@ export function createManagedProviderSupervisor(options: ManagedProviderSupervis
   };
 
   const persist = async (entry: Entry, returnedContinuation?: ManagedProviderContinuation): Promise<void> => {
+    if (!allowProviderContinuation) return;
     const continuation = normalizeContinuation(returnedContinuation ?? entry.connection.continuation());
     continuations.set(entry.profile.connectionId, continuation);
     if (store) await store.save(entry.profile.connectionId, entry.profile, continuation);
   };
 
   const load = async (profile: ManagedProviderConnectionProfile, explicit?: ManagedProviderContinuation): Promise<ManagedProviderContinuation | undefined> => {
+    if (!allowProviderContinuation) return undefined;
     if (explicit !== undefined) return normalizeContinuation(explicit);
     if (store) {
       const persisted = await store.load(profile.connectionId, profile);

@@ -298,3 +298,12 @@ test("an unconfirmed OpenCode delivery ages into an explicit uncertain state and
   assert.equal(uncertain?.kind, "delivery_uncertain");
   if (uncertain?.kind === "delivery_uncertain") assert.match(uncertain.reason, /will not resend/i);
 });
+
+test("delivery uncertainty stays in task state and is not replayed into the live recent feed", () => {
+  const f = buildFeed(input({ events: [
+    { kind: "task.delivery_uncertain", taskId: "T23", handle: "codex", at: "2026-09-20T11:59:00Z", text: "T23 delivery to @codex could not be confirmed; it will not be resent automatically" },
+    { kind: "task.created", taskId: "T24", handle: "codex", at: "2026-09-20T11:59:01Z", text: "T24 created" },
+  ] }), null);
+  assert.equal(f.recent.some((item) => item.taskId === "T23"), false);
+  assert.equal(f.recent[0]?.taskId, "T24");
+});

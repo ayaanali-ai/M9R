@@ -517,8 +517,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       .filter((task) => taskIsFreshForIdentity(identity, task)
         && !task.resultSummary
         // A paused or explicitly canceled turn must not claim tools from a
-        // later owner instruction. The provider conversation remains reusable,
-        // but only the fresh follow-up task is eligible for desktop work.
+        // later owner instruction. M9R task context remains durable, but only
+        // the fresh follow-up task is eligible for desktop work.
         && task.receipt?.state !== "canceled" && task.receipt?.state !== "paused"
         && task.approval !== "denied"
         && task.approval !== "expired"
@@ -934,7 +934,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
             && (!task.delivery?.threadId || task.delivery.threadId === identity.sessionId));
           if (uncertain.length > 0) {
             const lines = uncertain.slice(0, 10).map((task) => `- ${task.id}: ${task.receipt?.error ?? task.delivery?.error ?? "Provider acceptance was not confirmed."}`);
-            return { content: [{ type: "text" as const, text: `Delivery is unconfirmed for this session. These are status records, not new work; do not execute or resend them. The owner must inspect the provider conversation, then clear the notice or explicitly send a new message. M9R will not infer acceptance from matching message text.\n${lines.join("\n")}` }] };
+            return { content: [{ type: "text" as const, text: `Delivery is unconfirmed for this M9R task. These are status records, not new work; do not execute or resend them. The owner must inspect the current task state, then clear the notice or explicitly send a new message. M9R will not infer acceptance from matching message text.\n${lines.join("\n")}` }] };
           }
           // A cursor is only a presentation fence. Do not tell a provider that
           // it has no work when this exact session was already shown an open

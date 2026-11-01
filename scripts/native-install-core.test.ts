@@ -360,11 +360,13 @@ test("broker task inspection, start, and removal address only the named task", (
   assert.match(inspect, /ConvertTo-Json -Compress/);
   const start = buildLocalBrokerScheduledTaskStartScript(LOCAL_BROKER_AUTOSTART_TASK_NAME);
   assert.match(start, /State -notin @\('Running', 'Queued'\)/);
+  assert.match(start, /Enable-ScheduledTask -TaskName \$task\.TaskName -TaskPath \$task\.TaskPath/);
   assert.match(start, /Start-ScheduledTask/);
   const stop = buildLocalBrokerScheduledTaskStopScript(LOCAL_BROKER_AUTOSTART_TASK_NAME);
   assert.match(stop, /Get-ScheduledTask -TaskName 'M9R Web Broker' -TaskPath '\\'/);
   assert.match(stop, /State -in @\('Running', 'Queued'\)/);
   assert.match(stop, /Stop-ScheduledTask -TaskName \$task\.TaskName -TaskPath \$task\.TaskPath/);
+  assert.match(stop, /Disable-ScheduledTask -TaskName \$task\.TaskName -TaskPath \$task\.TaskPath/);
   assert.doesNotMatch(stop, /schtasks|Stop-Process|Unregister-ScheduledTask/i);
   const remove = buildLocalBrokerScheduledTaskRemoveScript(LOCAL_BROKER_AUTOSTART_TASK_NAME);
   assert.match(remove, /Stop-ScheduledTask/);

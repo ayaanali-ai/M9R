@@ -217,7 +217,16 @@ export function buildFeed(input: FeedInput, previous: Feed | null): Feed {
   const agents = handles.map((h) => ({ ...agentFor(h, input), surface: "native" as const, ...(input.colorFor ? { color: input.colorFor(h) } : {}) }));
   const needsYou = needsYouFrom(input);
   const inProgress = inProgressFrom(input);
-  const recent = input.events.slice(-RECENT_ITEMS).reverse().map((e) => ({ surface: "native" as const, at: e.at, taskId: e.taskId, text: safe(e.text, 140) }));
+  // Delivery uncertainty is durable task-history state, not a fresh
+  // conversational message. Keeping it out of the live recent feed prevents
+  // old T23/T4/T37-style notices from being replayed into the pill after a
+  // broker restart; the underlying task and receipt remain available to the
+  // history/diagnostic views.
+  const recent = input.events
+    .filter((event) => event.kind !== "task.delivery_uncertain")
+    .slice(-RECENT_ITEMS)
+    .reverse()
+    .map((e) => ({ surface: "native" as const, at: e.at, taskId: e.taskId, text: safe(e.text, 140) }));
 
   const body = { surface: "native" as const, agents, needsYou, inProgress, recent };
   const changed = !previous || JSON.stringify({ surface: previous.surface, agents: previous.agents, needsYou: previous.needsYou, inProgress: previous.inProgress ?? [], recent: previous.recent }) !== JSON.stringify(body);

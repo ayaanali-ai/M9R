@@ -15,7 +15,7 @@ import {
   type ManagedProviderModelApply,
   type ManagedProviderStatus,
 } from "./managed-provider-contract";
-import { createFileManagedProviderContinuationStore, createManagedProviderSupervisor } from "./managed-provider-supervisor";
+import { createManagedProviderSupervisor } from "./managed-provider-supervisor";
 import { createFileManagedProviderModelSelectionStore, type ManagedProviderModelSelectionStore } from "./provider-model-selection-store";
 import { validateProviderModelSelection, type ProviderModelSelection } from "./provider-model-core";
 import { normCwd } from "./codex-delivery-core";
@@ -373,9 +373,12 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     return owned;
   };
 
+  // Provider processes are intentionally cold-started after a stop, crash, or
+  // runtime replacement. M9R task context and durable memory are the only
+  // continuity layer; never persist or replay a provider-owned conversation
+  // reference from the desktop owner path.
   const supervisor = createManagedProviderSupervisor({
     createConnection,
-    continuationStore: createFileManagedProviderContinuationStore(join(deps.storeRoot, "managed-provider-continuations")),
     buildFingerprint: deps.runtimeBuildFingerprint ?? env.M9R_RUNTIME_BUILD_ID,
   });
 
@@ -428,14 +431,14 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       cwd: profile.cwd,
     });
     if (!claimed) {
-      const reason = "M9R could not bind this owner task to its managed provider conversation.";
+      const reason = "M9R could not bind this owner task to its managed provider connection.";
       deps.store.setDelivery?.(taskId, { state: "failed", error: reason });
       emit({ kind: "system", handle: profile.handle, provider: profile.provider, text: reason });
       return false;
     }
     pausedConnections.delete(profile.connectionId);
     const ownerText = redirected
-      ? `The owner paused or redirected the previous task. Keep this provider conversation and its useful context, but follow this newest instruction instead of continuing the paused task unless the owner explicitly asks you to resume it:\n\n${text}`
+      ? `The owner paused or redirected the previous task. Keep the useful M9R task context, but follow this newest instruction instead of continuing the paused task unless the owner explicitly asks you to resume it:\n\n${text}`
       : text;
     void runTask(profile, taskId, `${context.prompt}\n\nThe owner says:\n${ownerText}`, "owner");
     return true;
@@ -729,7 +732,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       try { ownerTaskId = makeOwnerTask(profile, text); }
       catch (error) { return { ok: false, error: errorText(error) }; }
       if (!ownerTaskId) return { ok: false, error: "M9R owner-task state is unavailable; the managed provider turn was not started." };
-      if (!startOwnerTask(profile, ownerTaskId, text)) return { ok: false, error: "M9R could not bind the owner task to its managed provider conversation." };
+      if (!startOwnerTask(profile, ownerTaskId, text)) return { ok: false, error: "M9R could not bind the owner task to its managed provider connection." };
     }
     const current = supervisor.snapshots().find((snapshot) => snapshot.connectionId === profile.connectionId);
     return { ok: true, mode: statusIsActive(current?.status) ? "sent" : "started" };
@@ -890,6 +893,23 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       if (task) requestPause(profile, task);
       emitState(profile);
       return true;
+    },
+    resume(handle) {
+      if (halted.value || closed) return false;
+      const selected = handle ? (() => {
+        const profile = resolveProfile(handle);
+        return profile ? [profile] : [];
+      })() : profiles;
+      let resumed = false;
+      for (const profile of selected) {
+        if (!pausedConnections.delete(profile.connectionId)) continue;
+        resumed = true;
+        void supervisor.resume(profile.connectionId).catch((error) => {
+          emit({ kind: "system", handle: profile.handle, provider: profile.provider, text: `M9R could not resume @${profile.handle}'s control gate: ${errorText(error)}` });
+        });
+        emitState(profile);
+      }
+      return resumed;
     },
     pauseAll() {
       for (const profile of profiles) {

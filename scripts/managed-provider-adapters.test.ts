@@ -143,7 +143,7 @@ test("the managed Codex app-server is one persistent process and one resumable s
   await managed.stop();
 });
 
-test("the managed Codex app-server restarts its process while resuming the same provider thread", async () => {
+test("the managed Codex app-server restarts cold without resuming a provider thread", async () => {
   let launches = 0;
   let creates = 0;
   let resumes = 0;
@@ -166,7 +166,8 @@ test("the managed Codex app-server restarts its process while resuming the same 
   await managed.stop();
   await managed.start({ providerSessionRef: "thread-1" });
   assert.equal(launches, 2);
-  assert.equal(resumes, 1);
+  assert.equal(creates, 2);
+  assert.equal(resumes, 0);
   await managed.stop();
 });
 
@@ -196,7 +197,7 @@ test("an idle Codex app-server exit becomes failed so the next dispatch can reco
   alive = true;
   await managed.start({ providerSessionRef: "thread-1" });
   assert.equal(launches, 2);
-  assert.equal(resumes, 1);
+  assert.equal(resumes, 0);
   await managed.stop();
 });
 

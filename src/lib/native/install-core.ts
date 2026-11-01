@@ -725,6 +725,10 @@ export function buildLocalBrokerScheduledTaskStartScript(taskName: string): stri
   return [
     "$ErrorActionPreference = 'Stop'",
     `$task = Get-ScheduledTask -TaskName ${powerShellLiteral(taskName)} -TaskPath '\\' -ErrorAction Stop`,
+    // The update transaction disables the task before replacing the locked
+    // image. Re-enable it explicitly so a successful restart restores the
+    // user's original login behavior without allowing a mid-copy respawn.
+    "Enable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath | Out-Null",
     "if ([string]$task.State -notin @('Running', 'Queued')) { Start-ScheduledTask -TaskName $task.TaskName }",
   ].join("\n");
 }
@@ -735,7 +739,13 @@ export function buildLocalBrokerScheduledTaskStopScript(taskName: string): strin
   return [
     "$ErrorActionPreference = 'Stop'",
     `$task = Get-ScheduledTask -TaskName ${powerShellLiteral(taskName)} -TaskPath '\\' -ErrorAction SilentlyContinue`,
-    "if ($null -ne $task -and [string]$task.State -in @('Running', 'Queued')) { Stop-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath }",
+    "if ($null -ne $task) {",
+    "  if ([string]$task.State -in @('Running', 'Queued')) { Stop-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath }",
+    // Stop-ScheduledTask alone leaves a restart-enabled task eligible to
+    // relaunch its wrapper while the installer is copying the runtime. Disable
+    // only this already-validated M9R task for the maintenance window.
+    "  Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath | Out-Null",
+    "}",
   ].join("\n");
 }
 

@@ -243,6 +243,47 @@ function Assert-AcceptedRuntimePackage([string]$PayloadRoot) {
     }
     # A historical receipt is provenance only, never promotion authority.
     $accepted = Get-AcceptedRuntimeIdentity
+    if ($AllowLocalCandidate) {
+        # An explicitly supplied local candidate is the controlled promotion
+        # path for development/demo builds. Its external receipt binds the
+        # exact ZIP, source commit, runtime manifest, and artifact hashes. The
+        # owner-accepted policy still pins the visual pill so a runtime update
+        # can never silently replace the accepted UI, but engine/broker/helper
+        # binaries are allowed to advance as one verified candidate set.
+        $acceptedPill = [string]$accepted.artifacts.'m9r-overlay.exe'
+        $candidatePill = [string]$runtime.artifacts.'m9r-overlay.exe'
+        if (($acceptedPill -notmatch '^[a-fA-F0-9]{64}$' -or $candidatePill -notmatch '^[a-fA-F0-9]{64}$') -or
+            (-not [string]::Equals($candidatePill, $acceptedPill, [StringComparison]::OrdinalIgnoreCase))) {
+            throw 'The local candidate pill does not match the owner-accepted live pill. Nothing was installed.'
+        }
+        $runtimeEntries = @($runtime.artifacts.PSObject.Properties)
+        if ($runtimeEntries.Count -eq 0) { throw 'The local candidate runtime has no artifact inventory. Nothing was installed.' }
+        $runtimeRoot = [IO.Path]::GetFullPath($PayloadRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        foreach ($entry in $runtimeEntries) {
+            $relative = [string]$entry.Name
+            if ($relative -match '(^[\\/]|^[A-Za-z]:|(^|[\\/])\.\.([\\/]|$))') {
+                throw "The local candidate runtime contains an unsafe artifact path: $relative"
+            }
+            $artifact = [IO.Path]::GetFullPath((Join-Path $PayloadRoot ($relative.Replace('/', [IO.Path]::DirectorySeparatorChar))))
+            if (-not $artifact.StartsWith($runtimeRoot, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+                throw "The local candidate is missing runtime artifact $relative. Nothing was installed."
+            }
+            $actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+            if (-not [string]::Equals($actual, [string]$entry.Value, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "The local candidate runtime hash differs at $relative. Nothing was installed."
+            }
+        }
+        $embeddedPolicyPath = Join-Path $PayloadRoot 'm9r-accepted-runtime.json'
+        if (Test-Path -LiteralPath $embeddedPolicyPath -PathType Leaf) {
+            try { $embeddedPolicy = Get-Content -LiteralPath $embeddedPolicyPath -Raw | ConvertFrom-Json }
+            catch { throw 'The local candidate installer policy is invalid JSON. Nothing was installed.' }
+            if ((-not [string]::Equals([string]$embeddedPolicy.buildId, [string]$runtime.buildId, [StringComparison]::OrdinalIgnoreCase)) -or
+                (-not [string]::Equals([string]$embeddedPolicy.artifacts.'m9r-overlay.exe', $candidatePill, [StringComparison]::OrdinalIgnoreCase))) {
+                throw 'The local candidate installer policy does not match its runtime manifest. Nothing was installed.'
+            }
+        }
+        return
+    }
     if ($runtime.schemaVersion -ne 1 -or -not [string]::Equals([string]$runtime.buildId, [string]$accepted.buildId, [StringComparison]::OrdinalIgnoreCase)) {
         throw "The package build ID is not the owner-accepted runtime ($($accepted.buildId)). Nothing was installed."
     }

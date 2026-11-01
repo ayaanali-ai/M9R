@@ -69,7 +69,7 @@ test("coalesces concurrent starts for one M9R-owned connection", async () => {
   assert.equal(starts, 1);
 });
 
-test("restarts a dead provider runtime once and preserves the logical connection", async () => {
+test("restarts a dead provider runtime once without replaying provider continuation", async () => {
   let starts = 0;
   let generation = 0;
   let state: ManagedProviderConnectionSnapshot["status"] = "stopped";
@@ -79,7 +79,7 @@ test("restarts a dead provider runtime once and preserves the logical connection
     generation += 1;
     state = "ready";
     healthy = true;
-    assert.equal(continuation?.providerSessionRef, starts === 1 ? undefined : "thread-1");
+    assert.equal(continuation, undefined);
     return { connectionId: profile.connectionId, generation, continuation: { providerSessionRef: "thread-1" } };
   }, () => ({ healthy }), () => ({ ...profile, status: state, generation }));
   const supervisor = createManagedProviderSupervisor({ createConnection: () => connection });
