@@ -70,6 +70,7 @@ const heldLocalProvenancePatterns = [
   /^\.codex-verify-temp(?:\/|$)/i,
   /^\.opencode(?:\/|$)/i,
   /^\.test-tmp(?:-[^/]+)?(?:\/|$)/i,
+  /^\.test-temp(?:-[^/]+)?(?:\/|$)/i,
   /^\.tmp(?:\/|$)/i,
   /^engine(?:\/|$)/i,
   /^docs\/research(?:\/|$)/i,
