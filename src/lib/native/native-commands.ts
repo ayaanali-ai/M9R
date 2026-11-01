@@ -257,16 +257,71 @@ function shimSource(env: Record<string, string | undefined>): string | null {
   return existsSync(path) ? path : null;
 }
 
+function powerShellLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+/**
+ * Stops only the installed M9R engine image when the pipe is unavailable.
+ *
+ * The installer runs from a temporary candidate path, so an exact executable
+ * path check keeps it separate from the resident engine that is being
+ * replaced. This is deliberately not a process-name kill: no unrelated
+ * node/provider process can be touched.
+ */
+function stopExactResidentEngineImage(enginePath: string): void {
+  if (process.platform !== "win32") return;
+  const target = resolve(enginePath);
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$target = [IO.Path]::GetFullPath(${powerShellLiteral(target)})`,
+    "$matches = @(Get-Process -Name 'm9r-engine' -ErrorAction SilentlyContinue | ForEach-Object {",
+    "  try {",
+    "    $path = [IO.Path]::GetFullPath($_.Path)",
+    "    if ([string]::Equals($path, $target, [StringComparison]::OrdinalIgnoreCase)) { $_ }",
+    "  } catch { }",
+    "})",
+    "foreach ($process in $matches) { $process | Stop-Process -Force }",
+    "Start-Sleep -Milliseconds 150",
+    "$remaining = @(Get-Process -Name 'm9r-engine' -ErrorAction SilentlyContinue | ForEach-Object {",
+    "  try {",
+    "    $path = [IO.Path]::GetFullPath($_.Path)",
+    "    if ([string]::Equals($path, $target, [StringComparison]::OrdinalIgnoreCase)) { $_ }",
+    "  } catch { }",
+    "})",
+    "if ($remaining.Count -gt 0) { throw 'The exact installed M9R engine image did not stop.' }",
+  ].join("\n");
+  const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`The exact installed M9R engine image did not stop: ${String(result.error ?? result.stderr ?? "unknown error")}`);
+  }
+}
+
 /** Stops a running resident engine so its file can be replaced or removed; harmless when none is running. */
 async function stopResidentEngine(io: NativeIo): Promise<void> {
   const pipe = hookPipePath(nativePaths(io).m9r);
+  let shutdownAcknowledged = false;
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    await requestShutdown(pipe, 1000);
+    shutdownAcknowledged ||= await requestShutdown(pipe, 1000);
     await new Promise((r) => setTimeout(r, 150));
     // A live listener means shutdown has not completed (or the pill's supervisor restarted it).
-    if (!await requestShutdown(pipe, 250)) return;
+    if (!await requestShutdown(pipe, 250)) {
+      if (shutdownAcknowledged) return;
+      break;
+    }
   }
-  throw new Error("The M9R resident engine did not stop. Close the M9R desktop pill before retrying setup.");
+  if (shutdownAcknowledged) {
+    throw new Error("The M9R resident engine did not stop. Close the M9R desktop pill before retrying setup.");
+  }
+  // A resident engine can outlive its pipe during a crash or startup race.
+  // Confirm and stop only the exact installed image before replacing it.
+  const installedEngine = engineTarget(io);
+  if (existsSync(installedEngine)) stopExactResidentEngineImage(installedEngine);
 }
 
 const sameFile = (a: string, b: string): boolean => {
