@@ -191,6 +191,192 @@ Before any live build or pill/app installation:
 - no live install or rebuild is performed from a worktree, recovery directory,
   or excluded artifact.
 
+## New idea
+
+Status: design lock, not yet implementation-ready. Nothing in this section may
+be built until the owner reviews and approves it in writing. This is Track B
+(design-first, planned before any code). Track A is the current pill's
+demo-readiness work (dictation hotkey, composer rebuild, human-sounding A2A
+messaging) and must not touch any surface described below.
+
+### I. The core pivot
+
+A redesign of how the owner interacts with agents — not a bolted-on feature,
+a replacement of the current click-into-composer-first flow.
+
+- **Ambient cursor outline** — a thin glowing outline always hugging the real
+  OS cursor. Pure visual/status layer, no interaction. States: idle (subtle),
+  listening (pulsing while picking up audio), dispatched/working (color
+  shifts), error (solid red, fast pulse, paired with section VII). Color
+  scheme undecided and not load-bearing (could be rainbow, provider colors,
+  user-set, or one fixed color).
+- **Wheel/pie selector** — hold the hotkey (no click required) to pop a
+  radial menu at the cursor. Tight radius, hugging close to the cursor,
+  provider logos only (no text labels). Clicking a logo toggle-selects it
+  (does not fire immediately); confirming in a center slot dispatches —
+  supports multi-select (one message to multiple agents). Grows/shrinks
+  automatically as providers connect/disconnect. Reference locked:
+  [Pie Menu](https://piemenu.jpmarqu.es/)
+  ([GitHub](https://github.com/jpmarques/pie-menu)) — a real shadcn
+  component; its `PieMenuCenter` slot becomes the confirm button; it exposes
+  `--pie-aim-x`/`--pie-aim-y` CSS vars for live cursor-following; it
+  auto-spaces up to 16 items and respaces live as items are added/removed.
+  No visible `@mentions` appear in the composer for a wheel-driven dispatch —
+  the mention is written under the hood only.
+- **Dictation hotkey** — Ctrl+Alt, confirmed correct (independently matches
+  the real open-source `rickkdev/clicky`). A gesture distinct from the wheel:
+  tap-only (no click) triggers dictation; hold + click triggers the wheel.
+  Designed so no accidental normal click or keypress during regular work can
+  trigger either one by accident.
+- **Per-agent cursors stay** — the redesign changes how the owner summons/
+  interacts with agents, not the fact that each actively-working agent still
+  shows its own colored cursor live on screen.
+- **Cursor reskinning** — Cua Driver already supports this: a pluggable
+  "dotLottie cursor contract," per-agent animation files with state variants
+  (thinking/clicking/blocked), authored through Cua's own SDK, not baked
+  into their binary. Everything currently still renders the `cua.default`
+  theme (confirmed by an Oct 7 internal audit) — the "people will recognize
+  that's Cua's cursor" risk is real right now. The fix is scoped, not built:
+  author M9R's own per-provider dotLottie skins.
+
+### II. The "always-on, 10x faster" mechanism
+
+- HeyClicky's speed is not always-processing. It is push-to-talk, made to
+  feel instant because their UI overlay is already rendered (full-screen,
+  transparent, always present) so there is zero boot lag, and screen/context
+  capture only happens at the instant of trigger.
+- M9R's answer: **pre-warmed context, not pre-warmed AI.** The pill keeps a
+  cheap, continuously-updated lightweight diff of "what's on screen right
+  now" — near-zero cost, no LLM call — so the instant the hotkey fires,
+  there is zero capture lag; the request starts with context already in
+  hand.
+- **Unresolved, explicitly flagged by the owner and never answered:** is
+  this "snapshot" a lightweight accessibility-tree/UIA structural read
+  (cheap, structured) rather than an actual pixel screenshot? The owner
+  pushed back on the word "snapshot" specifically and this was never
+  confirmed back to them.
+- Perceived latency, not actual latency, is the lever for the first ~2
+  seconds — the dictation audio-bar, the listening pulse, and the task card
+  appearing immediately in a "working" state before any result exists are
+  what make the real (unavoidable) transcription/model/tool latency feel
+  designed rather than slow.
+
+### III. Cost/token-economics framework
+
+The rule every piece of the redesign is checked against:
+
+| Layer | Cost | Lives here |
+| --- | --- | --- |
+| Local, always-on | Zero tokens, near-zero latency | Accessibility-tree context tracking, cursor-outline states, wheel reveal/fill animation, composer scroll/grow, task-card UI |
+| Trigger-only | Zero until fired | The Ctrl+Alt hotkey itself — nothing talks to a provider until the owner commits |
+| Templated/narrator | Near-zero (string formatting) | A2A status lines for the common case — built from event-to-sentence templates, not a model call |
+| Real model call | Full provider cost | Only actual task dispatch, and genuinely novel A2A handoffs the template table doesn't cover |
+
+The one invariant: **nothing idle should ever call a provider.** The failure
+mode to design against is any of the first three layers leaking into the
+fourth.
+
+**Fairness/equity principle:** do not gate real capability behind high
+*provider* plans. Everything should be as capable as possible even on a
+user's lowest provider tier; higher provider plans (e.g. a Claude or Codex
+max tier — not M9R's own pricing tiers) should buy a better experience, not
+access to features others lack.
+
+### IV. Floating task-result card
+
+Title, green "Done" badge, one-line summary, two direct action buttons, and
+a collapsible history of every prior step underneath. Lives in/near the
+pill's black notch area. Directly replaces the overview's "two gray boxes."
+
+### V. Composer redesign
+
+Full replacement, not a patch. One dominant full-width input. A dictation
+audio-bar renders inside it while recording. It grows to a capped max
+height then scrolls (no runaway pill growth) — properly animated, not a
+glitchy snap. The pill's own overall footprint/width when open may also
+shrink into a more compact box shape, separate from the composer-height
+cap. Three locked references for layout anatomy:
+[OpenAI model-selector feedback](https://dribbble.com/shots/26517785-OpenAI-Feedback-Better-Model-Selection-2025),
+[multi-model AI selector modal](https://dribbble.com/shots/26950650-Multi-Model-AI-Selector-Modal),
+[AI prompt input anatomy](https://dribbble.com/shots/27127909-AI-Prompt-Input-Anatomy).
+The separate "Models" tab/page likely goes away entirely once the wheel
+exists.
+
+### VI. Agent-to-agent visible chatter
+
+Fading task-card-style exchanges, visible to the owner only. Must render as
+provider-logo plus one short human-sounding line — never raw internal agent
+text, never a fake back-and-forth. Must be token-cheap (templated/
+milestone-based for the common case, per section III). **Not always
+pairwise** — can be two-agents-to-one or one-to-two, not just A-talks-to-B;
+the narrator/card UI must handle multi-party handoffs, not just a single
+sender/receiver pair. Agents must write in genuinely human, well-composed
+language — a hard requirement, not a nice-to-have, since agents are "good at
+everything but writing."
+
+### VII. Black-notch visual language
+
+Dictation audio pickup visualizes in the black center area when the pill is
+minimized. Error state: error text typed out character-by-character,
+old-terminal style, paired with the cursor outline going solid red and
+fast-pulsing (not the normal pulse).
+
+### VIII. Memory system
+
+Not built. Must research **Supermemory** (reportedly now open-source) as a
+concrete architecture reference, not design from abstract categories alone.
+Must explicitly avoid HeyClicky's actual mistake: two flat markdown files
+(`PROFILE.md`, `VOLATILE.md`) dumped wholesale into every call — doesn't
+scale, taxes every request regardless of relevance. Must stay genuinely
+efficient for agents to both read and write to consistently, and must not
+become unbounded context bloat. A starting shape (categories: preferences/
+facts/history/workflow-patterns, retrieval-not-injection, local-only by
+default) still stands as a draft, but needs to be pressure-tested against
+what Supermemory and similar real systems actually do.
+
+### IX. Network effect
+
+Not usage volume. Three real layers:
+
+1. Agents learn a user's, a team's, or a whole company's workflow and
+   architecture, top to bottom.
+2. Agents build trust/relationships among themselves over time — learning
+   which agent is actually better at what, and proactively pulling each
+   other in unprompted ("Claude, come help, this is design-related").
+3. Eventually multi-human/remote-control: agents able to operate on a
+   different connected person's machine across distance; the network of
+   agents comes to understand each connected person's distinct working
+   style individually.
+
+The compounding/lock-in effect: once agents deeply know a user's/team's
+architecture and have built real inter-agent trust, leaving M9R becomes
+genuinely costly — that is the actual moat, not raw usage numbers.
+
+### X. The reliability bar
+
+HeyClicky's own ads claim people use it for things they didn't anticipate.
+M9R is held to that same bar — cited as a concrete proof point: the owner's
+own homework/quiz test, where Codex originally struggled with quiz dropdown
+controls via desktop-stage targeting (reportedly since fixed). This needs to
+be verified and shipped as evidence the reliability bar is actually being
+hit, not just claimed.
+
+### XI. Are we copying HeyClicky?
+
+Resolved: no. Different core business model (bring-your-own-subscription
+across real providers vs. HeyClicky's own owned/capped backend model
+router). Shared vendor only at the Cua computer-use-driver layer — both
+products buy the same low-level driver, not copying each other's design.
+Several things HeyClicky has shipped and repeatedly walked back (skills,
+proactive local agents, cursor placement) validate choices already locked
+here rather than being gaps to chase.
+
+### XII. Open thread
+
+Mid-conversation: "you know what we have the biggest opportunity at as
+well, that just reminded me, but yeah I'll get to that later" — never
+followed up. Still open as of this writing.
+
 ## References
 
 - [Source of Truth 5.0](./M9R_SOURCE_OF_TRUTH_5.0_MAINTENANCE_CONTRACT.md)
