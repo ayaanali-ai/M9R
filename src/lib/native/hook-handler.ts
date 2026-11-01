@@ -275,8 +275,10 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       // A reconnecting provider must not need a manual `m9r_inbox` call just
       // to receive work that was already typed or approved by the owner. The
       // session-start hook is a trusted provider boundary, so claim at most
-      // the first eligible item for this exact session and inject only the
-      // compact task text. OpenCode has a stronger resident poller that
+      // the first eligible item for this exact session and inject one bounded
+      // task record. The short durable task id is required so the provider can
+      // report its result to the exact work item; it is not a provider session
+      // id and carries no resume authority. OpenCode has a stronger resident poller that
       // inserts a real prompt into its live session; leaving it on that path
       // avoids racing two delivery mechanisms.
       let sessionStartWork = "";
@@ -284,7 +286,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
         const cursor = ctx.store.cursorFor(self, input.session_id, projectCwd);
         const preview = renderInboxInjection(ctx.store.tasksForSession(self, input.session_id), cursor, {
           includePending: false,
-          includeTaskIds: false,
+          includeTaskIds: true,
           items: 1,
           now: now.getTime(),
         });
@@ -292,7 +294,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
           const claimed = ctx.store.claimInboxTasks(self, input.session_id, preview.includedIds, projectCwd);
           sessionStartWork = renderInboxInjection(claimed, -1, {
             includePending: false,
-            includeTaskIds: false,
+            includeTaskIds: true,
             items: 1,
             now: now.getTime(),
           }).text;
@@ -585,7 +587,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       const cursor = ctx.store.cursorFor(self, input.session_id, cwd);
       const candidates = self === "opencode"
         ? { text: "", includedIds: [] as string[], newCursor: cursor, omitted: 0 }
-        : renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { includePending: false, includeTaskIds: false, items: 1, now: now.getTime() });
+        : renderInboxInjection(input.session_id ? ctx.store.tasksForSession(self, input.session_id) : ctx.store.tasksFor(self), cursor, { includePending: false, includeTaskIds: true, items: 1, now: now.getTime() });
       if (candidates.text) {
         const sessionHasIdentity = Boolean(input.session_id && ctx.store.identityTokenFor(self, input.session_id));
         if (!sessionHasIdentity) {
@@ -593,7 +595,7 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
         } else {
           if (input.session_id) {
             const claimed = ctx.store.claimInboxTasks(self, input.session_id, candidates.includedIds, cwd);
-            const injection = renderInboxInjection(claimed, -1, { includePending: false, includeTaskIds: false, items: 1, now: now.getTime() });
+            const injection = renderInboxInjection(claimed, -1, { includePending: false, includeTaskIds: true, items: 1, now: now.getTime() });
             if (injection.text) parts.push(injection.text);
           } else {
             parts.push("M9R is holding incoming work because this provider did not include a session id. Reconnect the agent so M9R can deliver the task to the session that will report its result.");

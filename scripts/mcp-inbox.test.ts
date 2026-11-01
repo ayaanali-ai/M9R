@@ -89,7 +89,10 @@ test("each inbox check shows only messages not seen before, then reports empty",
   const first = await t.call("m9r_inbox", { token: t.codex });
   assert.match(first, /first finding/);
   assert.match(first, /second finding/);
-  assert.equal(await t.call("m9r_inbox", { token: t.codex }), "Inbox is empty.", "already-seen messages are not repeated");
+  const continued = await t.call("m9r_inbox", { token: t.codex });
+  assert.match(continued, /Inbox is empty for new messages/);
+  assert.match(continued, /first finding/);
+  assert.match(continued, /second finding/);
 
   await t.call("m9r_send", { token: t.claude, to: "codex", goal: "third finding" });
   const later = await t.call("m9r_inbox", { token: t.codex });

@@ -611,15 +611,41 @@ export function createTaskDesktopStageService(input: {
         return { windowState: await manager.windowStatus(selected.pid, selected.windowId) };
       }
       const rePresentLiveWindow = async (selected: OwnedStageApp): Promise<Awaited<ReturnType<typeof manager.inspectStage>>> => {
-        // Verify the exact saved window first. If this fails, the caller must
-        // take the closed-window recovery path instead of moving a guessed
-        // replacement onto the owner's desktop.
-        await manager.inspectWindow(String(selected.pid), selected.windowId);
         const previousStage = manager.list().find((stage) => stage.name === name);
         const coordinationKey = previousStage?.coordinationKey;
+        let windowId = selected.windowId;
+        try {
+          // Verify the exact saved window first. If it is still valid, never
+          // retarget it. HWNDs can, however, be recreated by a normal app
+          // restart/update while the owning PID survives; in that case the
+          // same-process discovery below repairs the anchor without launching
+          // a duplicate app instance.
+          await manager.inspectWindow(String(selected.pid), windowId);
+        } catch (error) {
+          const candidates = await manager.listOwnedWindowsForProcess(selected.pid);
+          const normalizedTitle = selected.lastKnownWindowTitle?.trim().toLocaleLowerCase();
+          const ranked = [...candidates].sort((left, right) => {
+            const leftTitle = left.title.trim().toLocaleLowerCase();
+            const rightTitle = right.title.trim().toLocaleLowerCase();
+            const leftTitleMatch = normalizedTitle && leftTitle === normalizedTitle ? 1 : 0;
+            const rightTitleMatch = normalizedTitle && rightTitle === normalizedTitle ? 1 : 0;
+            if (leftTitleMatch !== rightTitleMatch) return rightTitleMatch - leftTitleMatch;
+            const leftArea = left.width * left.height;
+            const rightArea = right.width * right.height;
+            if (leftArea !== rightArea) return rightArea - leftArea;
+            return left.windowId.localeCompare(right.windowId);
+          });
+          const replacement = ranked[0];
+          if (!replacement) throw error;
+          windowId = replacement.windowId;
+          process.stderr.write(`[stage-recovery] ${taskId}: stale window handle ${selected.windowId}; rebinding same-process window ${windowId}\n`);
+        }
         await manager.adoptCurrentDesktop(name);
-        await manager.presentOwnerWindow(name, selected.pid, selected.windowId, coordinationKey);
-        await manager.attachWindow(name, String(selected.pid), selected.windowId, selected.appId || undefined, coordinationKey);
+        await manager.presentOwnerWindow(name, selected.pid, windowId, coordinationKey);
+        await manager.attachWindow(name, String(selected.pid), windowId, selected.appId || undefined, coordinationKey);
+        if (windowId !== selected.windowId) {
+          ownedApps.set(name, { ...selected, windowId });
+        }
         return manager.inspectStage(name);
       };
       let inspected: Awaited<ReturnType<typeof manager.inspectStage>>;

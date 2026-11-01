@@ -783,7 +783,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         }).catch(() => false);
       }
       return { content: [{ type: "text", text: created
-        ? `M9R accepted one teammate message for @${to} as ${taskId}; recipient acknowledgement is tracked separately. ${replyDepth > 0 ? `Exchange depth ${replyDepth}/${MAX_AGENT_REPLY_DEPTH}.` : "Identical sends are suppressed within the active dedupe window."}`
+        ? `M9R accepted one teammate message for @${to} as ${taskId}. Sent to @${to} as task ${taskId}. Recipient acknowledgement is tracked separately. ${replyDepth > 0 ? `Exchange depth ${replyDepth}/${MAX_AGENT_REPLY_DEPTH}.` : "Identical sends are suppressed within the active dedupe window."}`
         : `M9R deduplicated this teammate message; it is already represented by task ${taskId}. Recipient acknowledgement remains tracked separately.` }] };
     },
   );
@@ -898,7 +898,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
               return authorized ? task : undefined;
             }))).filter((task): task is Task => task !== undefined)
           : queuedTasks;
-      const injection = renderInboxInjection(authorizedTasks, cursor, { items: 1, itemChars: 3000, includePending: false, includeTaskIds: false, now: (deps.now ?? (() => new Date()))().getTime() });
+      // An explicit inbox check is a recovery surface, not the automatic
+      // prompt-injection path. Show the bounded eligible delta instead of
+      // silently returning only the first item, and retain ids so a provider
+      // can report the exact work item. Freshness/retirement/delivery fences
+      // still prevent historical task records from leaking back in.
+      const injection = renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000, includePending: false, includeTaskIds: true, now: (deps.now ?? (() => new Date()))().getTime() });
         if (injection.text) {
           let delivered = injection;
           if (!inRoom(identity)) {
@@ -912,7 +917,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
             }
             const claimedSet = new Set(claimedIds);
             const claimedTasks = authorizedTasks.filter((task) => claimedSet.has(task.id));
-            delivered = renderInboxInjection(claimedTasks, -1, { items: 1, itemChars: 3000, includePending: false, includeTaskIds: false, now: (deps.now ?? (() => new Date()))().getTime() });
+            delivered = renderInboxInjection(claimedTasks, -1, { items: 10, itemChars: 3000, includePending: false, includeTaskIds: true, now: (deps.now ?? (() => new Date()))().getTime() });
             if (!delivered.text) {
               if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
               continue;
@@ -1008,7 +1013,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         const recorded = deps.store.recordTaskResult(authToken, taskId, summary);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
       }
-      return { content: [{ type: "text", text: `Result recorded and delivered to the sender's M9R conversation.` }] };
+      return { content: [{ type: "text", text: `Recorded result. Result recorded and delivered to the sender's M9R conversation.` }] };
     },
   );
 
