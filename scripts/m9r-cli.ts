@@ -2242,14 +2242,21 @@ async function stopManagedBrokerForUpdate(target: NonNullable<Awaited<ReturnType
     { stopTaskBeforeShutdown: true },
   );
   if (stopped === "not-owned-or-unavailable") {
-    if (!target.canonicalTaskRecovery) {
-      throw new Error("The scheduled task is M9R-owned, but authenticated broker shutdown failed; no installed files were replaced.");
+    // A stale owned task can survive a broker crash or an interrupted install
+    // with no broker image left to authenticate. Treat that exact no-process
+    // state as already stopped; never broaden this into a process-name kill.
+    const imageBeforeFallback = await readManagedBrokerProcessState(target.brokerPath);
+    if (imageBeforeFallback.processes.length === 0) {
+      await powerShell(buildLocalBrokerScheduledTaskStopScript(WEB_TASK_NAME));
+    } else if (!target.canonicalTaskRecovery) {
+      throw new Error("The scheduled task is M9R-owned, but authenticated broker shutdown failed; a live broker process could not be safely stopped.");
+    } else {
+      // The exact current-user M9R task contract was verified above, but the
+      // broker key/health endpoint is unavailable. Stop only that named task;
+      // never fall back to a process-name kill or a broad service shutdown.
+      await powerShell(buildLocalBrokerScheduledTaskStopScript(WEB_TASK_NAME));
+      await stopExactManagedBrokerImage(target.brokerPath);
     }
-    // The exact current-user M9R task contract was verified above, but the
-    // broker key/health endpoint is unavailable. Stop only that named task;
-    // never fall back to a process-name kill or a broad service shutdown.
-    await powerShell(buildLocalBrokerScheduledTaskStopScript(WEB_TASK_NAME));
-    await stopExactManagedBrokerImage(target.brokerPath);
   }
   // Health closes only after the broker's shutdown hook has drained its owned
   // resources. The verified task was stopped before the request, so Task
