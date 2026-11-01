@@ -1,5 +1,4 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono, Fraunces, Hanken_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono, Inter, Instrument_Serif, PT_Mono, Caveat } from "next/font/google";
 import localFont from "next/font/local";
 import "./globals.css";
 import AmbientBackground from "@/components/AmbientBackground";
@@ -19,81 +18,6 @@ const description =
 // metadata was current -- a URL it has never seen gets a genuinely fresh fetch instead of depending on it noticing
 // the old URL's bytes changed.
 const ogImage = `${siteUrl}/og-v3.png`;
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-// Marketing 4-role type system (locked after studying the closest direct
-// comp's own layered approach -- real distinct faces per role, not one
-// face wearing different weights). Fraunces for headlines: a characterful
-// serif with real personality, distinct from the rejected Instrument Serif
-// test. Hanken Grotesk for body prose. IBM Plex Sans for UI/nav chrome,
-// pairing naturally with the IBM Plex Mono already used for code.
-const fraunces = Fraunces({
-  variable: "--font-fraunces",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-  style: ["normal", "italic"],
-});
-
-const hankenGrotesk = Hanken_Grotesk({
-  variable: "--font-hanken-grotesk",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-});
-
-const ibmPlexSans = IBM_Plex_Sans({
-  variable: "--font-ibm-plex-sans",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-});
-
-// Mono for data/labels (ids, timestamps, token counts, CLI blocks) -- swapped
-// off Geist Mono specifically because Geist Sans + Geist Mono together is the
-// single most recognizable "shipped from a Next.js template" signature right
-// now. IBM Plex Mono keeps the same technical, legible register.
-const ibmPlexMono = IBM_Plex_Mono({
-  variable: "--font-ibm-plex-mono",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-});
-
-// Homepage type system: Inter carries nav/body/buttons (500+ only -- the tight
-// tracking needs the extra weight), Instrument Serif appears exactly once inside
-// the headline, PT Mono sets the 11px museum labels.
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-  weight: ["500", "600"],
-});
-
-const instrumentSerif = Instrument_Serif({
-  variable: "--font-instrument-serif",
-  subsets: ["latin"],
-  weight: ["400"],
-  style: ["normal", "italic"],
-});
-
-// The homepage "@useM9R" mark is a freehand signature, not set type; Caveat
-// keeps the double quotes legible at 15px where the looser script faces blur.
-const caveat = Caveat({
-  variable: "--font-caveat",
-  subsets: ["latin"],
-  weight: ["500", "600"],
-});
-
-const ptMono = PT_Mono({
-  variable: "--font-pt-mono",
-  subsets: ["latin"],
-  weight: ["400"],
-});
 
 // Stand-in for Agrandir (a licensed Pangram Pangram face -- no free/Google
 // distribution) on the homepage's bold headline. Unbounded is the closest
@@ -165,7 +89,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} ${fraunces.variable} ${hankenGrotesk.variable} ${ibmPlexSans.variable} ${ibmPlexMono.variable} ${inter.variable} ${instrumentSerif.variable} ${ptMono.variable} ${caveat.variable} ${headlineFont.variable} h-full antialiased`}
+      className={`${headlineFont.variable} h-full antialiased`}
       suppressHydrationWarning
     >
       <head>

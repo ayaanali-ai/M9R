@@ -19,7 +19,7 @@ const env = {
 };
 
 console.log("Building the Cloudflare Worker with the supported OpenNext build pipeline.");
-console.log("Next.js uses the package build script (Turbopack); relay URL comes from Wrangler public vars.");
+console.log("Next.js uses the package build script with the Cloudflare/Webpack path; relay URL comes from Wrangler public vars.");
 
 const result = spawnSync("npx", ["opennextjs-cloudflare", "build"], {
   stdio: "inherit",

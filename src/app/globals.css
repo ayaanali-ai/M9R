@@ -21,6 +21,21 @@
 }
 
 :root {
+  /* Keep the product's named type roles local and deterministic.  The prior
+     next/font/google imports made Cloudflare/OpenNext builds depend on a
+     live Google Fonts response and on Turbopack's generated resolver.  These
+     role stacks preserve the same visual hierarchy while making builds work
+     offline and identically on Windows and Workers. */
+  --font-geist-sans: ui-sans-serif;
+  --font-geist-mono: ui-monospace;
+  --font-fraunces: Georgia;
+  --font-hanken-grotesk: "Segoe UI";
+  --font-ibm-plex-sans: "Segoe UI";
+  --font-ibm-plex-mono: Consolas;
+  --font-inter: "Segoe UI";
+  --font-instrument-serif: Georgia;
+  --font-caveat: "Segoe Print";
+  --font-pt-mono: Consolas;
   /* Display face for h1/h2 and the marketing masthead only. Was aliased to
      Geist Sans (identical to body text at a bigger size), which was the
      single biggest reason the homepage read as a generic Next.js template --

@@ -12,7 +12,14 @@ const run = (command, args, env = process.env) => {
 };
 
 // Workers Builds sets WORKERS_CI, but its build image is also recognisable by /opt/buildhome, so either one is enough.
-const onCloudflare = process.env.WORKERS_CI === "1" || process.env.M9R_BUILD_TARGET === "cloudflare" || (process.platform === "linux" && existsSync("/opt/buildhome"));
+// OpenNext sets CLOUDFLARE_BUILD for its nested `npm run build` invocation.
+// Honor that explicit signal on Windows too; otherwise the inner build falls
+// back to Turbopack and fails while resolving next/font/google's generated
+// module before OpenNext can emit a Worker bundle.
+const onCloudflare = process.env.CLOUDFLARE_BUILD === "true"
+  || process.env.WORKERS_CI === "1"
+  || process.env.M9R_BUILD_TARGET === "cloudflare"
+  || (process.platform === "linux" && existsSync("/opt/buildhome"));
 const inner = process.env.M9R_OPENNEXT_INNER === "1";
 
 if (process.env.M9R_BUILD_DRY === "1") {
