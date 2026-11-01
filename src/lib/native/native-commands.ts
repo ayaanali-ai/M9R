@@ -315,19 +315,38 @@ function replaceRuntimeFile(from: string, to: string): string[] {
   const staged = `${to}.m9r-new-${process.pid}-${randomUUID()}`;
   try {
     copyFileSync(from, staged);
-    try {
-      // Replace at the stable path. Never rename a locked old executable aside:
-      // that created persistent retired generations in the user's install.
-      renameSync(staged, to);
-      return [];
-    } catch (replaceError) {
-      if (process.platform === "win32" && existsSync(to)) {
-        throw new Error(`M9R could not replace the locked runtime file at its stable path: ${to}. Close M9R-owned work and retry; no retired copy was created.`, { cause: replaceError });
+    // Windows Defender and the shell can briefly retain a just-stopped image
+    // handle. Retry the same stable-path replacement for a bounded window;
+    // never rename the old executable aside or create a retired sibling.
+    const attempts = process.platform === "win32" ? 24 : 1;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        renameSync(staged, to);
+        return [];
+      } catch (replaceError) {
+        lastError = replaceError;
+        const retryable = process.platform === "win32"
+          && (replaceError as NodeJS.ErrnoException)?.code === "EPERM";
+        if (!retryable || attempt === attempts) break;
+        awaitDelay(250 * Math.min(attempt, 8));
       }
-      throw replaceError;
     }
+    if (process.platform === "win32" && existsSync(to)) {
+      throw new Error(`M9R could not replace the locked runtime file at its stable path: ${to}. Close M9R-owned work and retry; no retired copy was created.`, { cause: lastError });
+    }
+    throw lastError;
   } finally {
     rmSync(staged, { force: true });
+  }
+}
+
+function awaitDelay(ms: number): void {
+  const wake = Date.now() + ms;
+  while (Date.now() < wake) {
+    // Atomics.wait provides a synchronous bounded sleep without opening a
+    // second event loop or allowing another installer transaction to overlap.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(1, wake - Date.now()));
   }
 }
 
