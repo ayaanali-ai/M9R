@@ -532,6 +532,32 @@ function Invoke-ManagedBrokerUpdate([string]$EnginePath, [ValidateSet('stop', 's
     return $result
 }
 
+function Suspend-ManagedBrokerAutoStart {
+    # Stopping the broker process alone is not enough on Windows: the logon task
+    # can respawn it between the engine's stop receipt and the first atomic file
+    # replacement. Disable only M9R's own task for the copy window, and return
+    # the prior state so a failed install restores it exactly.
+    $task = Get-ScheduledTask -TaskName 'M9R Web Broker' -ErrorAction SilentlyContinue
+    if (-not $task) { return $null }
+    $wasEnabled = $task.State -ne 'Disabled'
+    if ($wasEnabled) {
+        Disable-ScheduledTask -TaskName 'M9R Web Broker' -ErrorAction Stop | Out-Null
+        $after = Get-ScheduledTask -TaskName 'M9R Web Broker' -ErrorAction Stop
+        if ($after.State -ne 'Disabled') { throw 'M9R Web Broker could not be disabled for the protected runtime copy.' }
+    }
+    return [pscustomobject]@{ WasEnabled = $wasEnabled; Restored = $false }
+}
+
+function Restore-ManagedBrokerAutoStart($State) {
+    if ($null -eq $State -or $State.Restored) { return }
+    if ($State.WasEnabled) {
+        Enable-ScheduledTask -TaskName 'M9R Web Broker' -ErrorAction Stop | Out-Null
+        $after = Get-ScheduledTask -TaskName 'M9R Web Broker' -ErrorAction Stop
+        if ($after.State -eq 'Disabled') { throw 'M9R Web Broker remained disabled after the protected runtime copy.' }
+    }
+    $State.Restored = $true
+}
+
 function Remove-M9rTemporaryDirectory([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
@@ -601,6 +627,7 @@ function Invoke-InstalledUninstall {
 $temporaryRoot = $null
 $brokerNeedsResume = $false
 $brokerResumeEngine = $null
+$brokerTaskState = $null
 try {
     Assert-M9rWindows
     # Keep the standalone engine and this PowerShell wrapper on one store root,
@@ -683,6 +710,7 @@ try {
     $brokerResumeEngine = $engine
     $brokerStop = Invoke-ManagedBrokerUpdate $engine 'stop'
     $brokerNeedsResume = $brokerStop.managedTask
+    $brokerTaskState = Suspend-ManagedBrokerAutoStart
     Stop-InstalledM9rPill
     # Native setup registers the owned broker task; this installer starts it
     # only after the new broker image and its ownership record are installed.
@@ -709,6 +737,7 @@ try {
     $installedEngine = Join-Path $env:M9R_HOME 'bin\m9r-engine.exe'
     $brokerResumeEngine = $installedEngine
     Install-ManagedWebBroker $packageBroker
+    Restore-ManagedBrokerAutoStart $brokerTaskState
     Write-Host ''
     Write-Host 'M9R setup finished. Start a new supported agent session to activate its hooks.' -ForegroundColor Green
     Write-Host "To undo the managed setup later: `"$installedEngine`" uninstall"
@@ -745,6 +774,10 @@ try {
     Write-Host $_ -ForegroundColor Red
     exit 1
 } finally {
+    if ($brokerTaskState -and -not $brokerTaskState.Restored) {
+        try { Restore-ManagedBrokerAutoStart $brokerTaskState }
+        catch { Write-Warning "Could not restore the M9R Web Broker task state: $($_.Exception.Message)" }
+    }
     if ($brokerNeedsResume -and $brokerResumeEngine -and (Test-Path -LiteralPath $brokerResumeEngine -PathType Leaf)) {
         try {
             Write-Warning 'The install did not reach its broker restart step; restoring the previously managed broker service.'
