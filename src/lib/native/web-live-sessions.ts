@@ -322,6 +322,8 @@ export interface WebLiveSessionsDeps {
     recordTaskFailure?(id: string, error: string): unknown;
     /** Convert an abandoned sending claim to an explicit uncertain receipt on broker startup. */
     reconcileStaleDeliveries?(maxAgeMs?: number): number;
+    /** Permanently remove expired work from delivery while preserving history. */
+    retireStaleTasks?(maxAgeMs?: number): number;
     /** Fence an active task when the owner explicitly stops it. */
     cancelTask?(id: string, reason?: string): unknown;
     /** Pause only the active provider turn while retaining task and conversation history. */

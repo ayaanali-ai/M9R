@@ -207,6 +207,8 @@ export interface Task {
   resultShownAt?: string;
   /** Set when the user cleared it from the overlay's "needs you" list. Hides it there; changes nothing about delivery. */
   dismissedAt?: string;
+  /** Permanently removed from live delivery; history and transport evidence remain. */
+  retiredAt?: string;
   /** Native push (N2): how far pushing this task into the target session got. Absent for plain inbox tasks. */
   delivery?: TaskDelivery;
   /** Bounded transport transition evidence, independent of the final task result. */
@@ -451,10 +453,10 @@ export function renderInboxInjection(tasks: readonly Task[], cursor: number, opt
   const eligible = tasks
     // A task claimed or pushed by a direct transport must not race a second provider route through the inbox.
     // A task that already has a result is finished, and one older than the age limit is history, not work to hand a new session.
-    .filter((t) => t.seq > cursor && t.approval !== "denied" && t.approval !== "expired"
+    .filter((t) => !t.retiredAt && t.seq > cursor && t.approval !== "denied" && t.approval !== "expired"
       && t.receipt?.state !== "canceled" && t.receipt?.state !== "paused"
       && !["sending", "queued", "uncertain", "done"].includes(t.delivery?.state ?? "")
-      && !t.resultSummary && !(now - Date.parse(t.createdAt) > maxAge))
+      && !t.resultSummary && isFreshInboxTask(t.createdAt, now, maxAge))
     .sort((a, b) => a.seq - b.seq);
   // Provider delivery must preserve inbox order. If an unapproved task is at
   // the frontier, do not skip over it and advance the cursor past it: approval

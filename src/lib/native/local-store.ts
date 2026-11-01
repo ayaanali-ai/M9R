@@ -99,7 +99,7 @@ export interface SessionRecord {
 
 export interface EventRecord {
   at: string;
-  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.delivery_failed" | "task.delivery_uncertain" | "task.canceled" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked" | "mention.double";
+  kind: "agent.connected" | "session.started" | "task.created" | "task.delivered" | "task.delivery_failed" | "task.delivery_uncertain" | "task.canceled" | "task.retired" | "task.approved" | "task.denied" | "task.expired" | "task.result" | "rule.created" | "rule.revoked" | "mention.double";
   handle?: string;
   taskId?: string;
   text: string;
@@ -1077,7 +1077,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       update((s) => {
         for (const id of ids) {
           const t = s.tasks.find((x) => x.id === id);
-          if (!t) continue;
+          if (!t || t.retiredAt) continue;
           const targetSession = t.targetSession;
           if (targetSession && sessionId && targetSession !== sessionId) continue;
           const firstDelivery = !t.deliveredAt;
@@ -1967,7 +1967,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       const cutoff = now().getTime() - maxAge;
       return readState().tasks.filter((task) => normalizeHandle(task.to) === normalizedHandle
         && (!(task.targetSession ?? task.deliveredSession) || (task.targetSession ?? task.deliveredSession) === sessionId)
-        && !task.resultSummary
+        && !task.resultSummary && !task.retiredAt
         // Terminal delivery/lifecycle failures are history, not a reason to
         // block provider identity repair or make an incidental prompt look
         // like it is carrying live delegated work.
@@ -1990,7 +1990,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       const normalizedHandle = normalizeHandle(handle);
       const cutoff = now().getTime() - inboxMaxAgeMs();
       const candidates = readState().tasks.filter((task) => {
-        if (normalizeHandle(task.to) !== normalizedHandle || task.resultSummary) return false;
+        if (normalizeHandle(task.to) !== normalizedHandle || task.resultSummary || task.retiredAt) return false;
         if (task.approval !== "approved" && task.approval !== "not_needed") return false;
         if (task.lifecycle?.state === "failed" || task.lifecycle?.state === "completed") return false;
         const owner = task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId;
@@ -2026,14 +2026,14 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           .filter((task) => wanted.has(task.id) && normalizeHandle(task.to) === normalizedHandle)
           .sort((a, b) => a.seq - b.seq);
         for (const task of candidates) {
-          if (task.seq <= cursor) continue;
+          if (task.seq <= cursor || task.retiredAt) continue;
           // A push may already be executing. Inbox fallback must not race or replay it.
           if (task.delivery?.state === "sending" || task.delivery?.state === "uncertain") continue;
           const failedPush = task.delivery?.state === "failed";
           if (task.approval === "denied" || task.approval === "expired"
             || task.receipt?.state === "canceled" || task.receipt?.state === "paused"
             || task.delivery?.state === "queued" || task.delivery?.state === "done" || task.resultSummary
-            || at.getTime() - Date.parse(task.createdAt) > maxAge) {
+            || !isFreshInboxTask(task.createdAt, at.getTime(), maxAge)) {
             cursor = Math.max(cursor, task.seq);
             continue;
           }
@@ -2144,6 +2144,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const t = s.tasks.find((x) => x.id === id);
         if (!t) return undefined;
+        if (t.retiredAt) return t;
         if (t.delivery?.state === "done" || t.resultSummary || t.receipt?.state === "completed" || t.receipt?.state === "canceled" || t.receipt?.state === "paused") return t;
         // A failed receipt may only be reopened through an explicit retry
         // boundary (`sending`/`deferred` records `retryable` first). Do not let
@@ -2197,6 +2198,24 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           pushEvent(s, { kind: "task.delivered", taskId: id, handle: t.to, text: `${id} pushed into @${t.to}'s session` });
         }
         return t;
+      });
+    },
+
+    /** Permanently retire expired work without deleting history or changing transport evidence. */
+    retireStaleTasks(maxAgeMs = inboxMaxAgeMs()): number {
+      if (!Number.isFinite(maxAgeMs) || maxAgeMs < 1) throw new Error("Invalid stale-task age.");
+      return update((s) => {
+        const at = now();
+        let changed = 0;
+        for (const task of s.tasks) {
+          if (task.retiredAt || task.resultSummary || task.receipt?.state === "completed"
+            || isFreshInboxTask(task.createdAt, at.getTime(), maxAgeMs)) continue;
+          task.retiredAt = at.toISOString();
+          task.dismissedAt ??= task.retiredAt;
+          pushEvent(s, { kind: "task.retired", taskId: task.id, handle: task.to, text: task.id + " was retired from live delivery; its history is preserved" });
+          changed += 1;
+        }
+        return changed;
       });
     },
 

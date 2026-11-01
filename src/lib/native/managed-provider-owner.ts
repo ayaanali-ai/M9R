@@ -150,7 +150,7 @@ function timingStamp(value: number): string {
 
 function isFreshTask(task: Task, now: () => Date): boolean {
   const created = Date.parse(task.createdAt);
-  return Number.isFinite(created) && created <= now().getTime() && now().getTime() - created < inboxMaxAgeMs();
+  return !task.retiredAt && Number.isFinite(created) && created <= now().getTime() && now().getTime() - created < inboxMaxAgeMs();
 }
 
 function contextForProfile(
@@ -839,7 +839,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       // A prior broker may have died after claiming a task but before the
       // provider acknowledged it. Fence those claims before any new provider
       // connection is started; never replay them automatically.
-      try { deps.store.reconcileStaleDeliveries?.(); } catch (error) {
+      try { deps.store.retireStaleTasks?.(); deps.store.reconcileStaleDeliveries?.(); } catch (error) {
         emit({ kind: "system", handle: "m9r", provider: "m9r", text: `M9R could not reconcile stale provider deliveries: ${errorText(error)}` });
       }
       // Do not use supervisor.restore() here: its all-or-nothing contract is

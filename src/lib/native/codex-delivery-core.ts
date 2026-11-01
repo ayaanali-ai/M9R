@@ -11,7 +11,8 @@ import { isM9rWorkspaceEnvelope } from "./m9r-prompt-markers";
 import { taskCorrelationMarker, visibleTaskText } from "./task-execution-context";
 
 /** A task may be pushed only when a human typed it or approved it. Everything else stays in the inbox. */
-export function canQueue(task: Pick<Task, "origin" | "approval">): boolean {
+export function canQueue(task: Pick<Task, "origin" | "approval" | "retiredAt">): boolean {
+  if (task.retiredAt) return false;
   if (task.approval === "denied" || task.approval === "expired" || task.approval === "pending") return false;
   return task.approval === "approved" || task.approval === "not_needed";
 }
