@@ -108,7 +108,7 @@ export class Ticker {
     // First render: drop straight into place, no animation.
     if (this.displayIndex < 0) {
       this.displayIndex = idx;
-      setText(this.a, idx > 0 ? steps[idx - 1] : "…");
+      setText(this.a, idx > 0 ? steps[idx - 1] : "");
       setText(this.b, steps[Math.max(idx, 0)]);
       this.rest();
       return;
@@ -121,7 +121,7 @@ export class Ticker {
       this.queue = [];
       this.startMs = null;
       this.displayIndex = idx;
-      setText(this.a, idx > 0 ? steps[idx - 1] : "…");
+      setText(this.a, idx > 0 ? steps[idx - 1] : "");
       setText(this.b, steps[Math.max(idx, 0)]);
       this.rest();
       return;

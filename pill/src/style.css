@@ -388,20 +388,350 @@ body {
 /* ── Overview ───────────────────────────────────────────────────────────── */
 
 .overview {
-  display: flex;
-  gap: 10px;
   height: 100%;
 }
 
-.overview > .left {
-  flex: 0 0 322px;
-  width: 322px;
+/* ── The Drum ───────────────────────────────────────────────────────────────
+   A picker wheel of agents. View origin is island (10, 42); the island's big
+   glowing mark sits at view (58, 72) and is the centred row's mark. Every
+   row's name starts on one lane at x = 108 so the column reads as a list. */
+
+.drum {
+  position: absolute;
+  inset: 0;
+  perspective: 480px;
+  perspective-origin: 108px 50%;
+  outline: none;
+  touch-action: none;
+  cursor: grab;
+}
+.drum:active { cursor: grabbing; }
+
+/* The selection band: the attached capsule the centred agent lives in. */
+.drum-band {
+  position: absolute;
+  left: 2px;
+  right: 34px;
+  top: calc(50% - 39px);
+  height: 78px;
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.022));
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  pointer-events: none;
+  transition: opacity 0.3s ease-out;
 }
 
-.overview > .right {
-  flex: 1 1 auto;
-  /* A flex item may not shrink below its widest unbreakable content; without this, one long line pushed the card past the pill edge. */
+.drum-wheel {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 9%, #000 91%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 9%, #000 91%, transparent 100%);
+}
+
+.drum-row {
+  position: absolute;
+  left: 108px;
+  right: 44px;
+  top: 50%;
+  height: 20px;
+  margin-top: -10px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  transform-origin: 0 50%;
+  backface-visibility: hidden;
+  will-change: transform, opacity;
+  cursor: inherit;
+}
+.drum-row:focus-visible { outline: none; }
+.drum-row:not(.centre):hover .drum-name { color: #fff; }
+
+.drum-mark {
+  position: absolute;
+  left: -30px;
+  top: 0;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #0b0c0e;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
+}
+.drum-mark .logo { position: relative; z-index: 1; }
+
+/* The same light as the big mark: a blurred radial glow coloured by state. */
+.drum-glow {
+  position: absolute;
+  inset: -9px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--glow) 0%, transparent 62%);
+  filter: blur(5px);
+  opacity: var(--glow-o);
+  pointer-events: none;
+  transition: opacity 0.6s ease-in-out, background 0.6s ease-in-out;
+}
+
+.drum-name {
+  flex: 0 1 auto;
   min-width: 0;
+  font: 600 13px var(--font);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.15s ease-out;
+}
+.drum-row:not(.centre) .drum-name { font-weight: 500; color: #c9ccd2; }
+
+.drum-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  font: 500 10.5px var(--font);
+  color: var(--tone);
+  white-space: nowrap;
+}
+.drum-tag::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--tone);
+  box-shadow: 0 0 6px var(--tone);
+}
+.drum-tag.live::before { animation: pulse 1.6s ease-in-out infinite; }
+
+/* Arrival: an agent that just connected scales up out of the wheel instead of popping in. */
+.drum-row.entering > * { animation: drum-in 0.4s cubic-bezier(0.2, 0.9, 0.3, 1) both; }
+@keyframes drum-in {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: none; }
+}
+
+/* The centred agent's live activity, directly under its name. The ticker's
+   completed row sits behind the name and is masked out, so a finished step
+   slides up and dissolves into the name as the next one arrives. */
+.ticker.drum-lens {
+  position: absolute;
+  left: 108px;
+  right: 46px;
+  top: calc(50% - 22px);
+  margin: 0;
+  pointer-events: none;
+  will-change: opacity, transform;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, transparent 44%, #000 56%, #000 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, transparent 44%, #000 56%, #000 100%);
+}
+
+/* The rail: one pip per agent, coloured by state, so the whole team reads at a glance even past the wheel's arc. */
+.drum-rail {
+  position: absolute;
+  right: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 3px 0;
+}
+.drum-pip {
+  position: relative;
+  width: 5px;
+  height: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--tone);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--tone) 60%, transparent);
+  cursor: default;
+}
+.drum-pip::after { content: ""; position: absolute; inset: -4px; }
+.drum-rail-thumb {
+  position: absolute;
+  left: -2.5px;
+  top: calc(var(--p) * (var(--n) - 1) * 10px - 1px);
+  width: 10px;
+  height: 13px;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drum-tag.live::before, .drum-row.entering > * { animation: none; }
+}
+
+/* ── Approval: the drum's band, holding a decision ──────────────────────────
+   Same capsule and mark position as the drum's centred row. One plain
+   sentence, the exact action, two buttons; "a day" is a quiet link so it
+   never competes with Allow. */
+
+.approval-view { height: 100%; }
+
+.ask-band {
+  position: absolute;
+  inset: 0 0 0 2px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 16px 0 106px;
+  border-radius: 20px;
+  background:
+    radial-gradient(220px 140px at 56px 50%, rgba(245, 165, 36, 0.10), transparent 70%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.022));
+  box-shadow: inset 0 0 0 0.5px rgba(245, 165, 36, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+/* Arrival: one soft amber breath around the band, once. Never loops: urgency that never stops stops meaning anything. */
+.ask-band.arrive { animation: ask-arrive 1.1s cubic-bezier(0.2, 0.8, 0.3, 1) both; }
+@keyframes ask-arrive {
+  0% { box-shadow: inset 0 0 0 0.5px rgba(245, 165, 36, 0), 0 0 0 0 rgba(245, 165, 36, 0); }
+  35% { box-shadow: inset 0 0 0 1px rgba(245, 165, 36, 0.7), 0 0 22px 0 rgba(245, 165, 36, 0.22); }
+  100% { box-shadow: inset 0 0 0 0.5px rgba(245, 165, 36, 0.28), 0 0 0 0 rgba(245, 165, 36, 0); }
+}
+
+.ask-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.ask-head { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.ask-name { font: 600 13px var(--font); letter-spacing: -0.01em; color: var(--ink); white-space: nowrap; }
+.ask-tag { --tone: var(--amber); }
+.ask-tag::before { animation: pulse 1.6s ease-in-out infinite; }
+.ask-count { margin-left: auto; font: 500 10.5px var(--font); color: var(--dim-3); font-variant-numeric: tabular-nums; }
+
+.ask-sentence {
+  font: 500 14px var(--font);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ask-exact {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+  font: 400 11.5px var(--mono);
+  color: #d9dbe0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ask-side {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+}
+.ask-buttons { display: flex; gap: 8px; }
+.ask-buttons .btn { padding: 8px 15px; }
+.ask-buttons .btn.primary { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); transition: transform 0.08s ease-out, box-shadow 0.2s ease-out; }
+.ask-buttons .btn.primary:hover { box-shadow: 0 0 14px rgba(255, 255, 255, 0.18); }
+
+.ask-later:empty { display: none; }
+.ask-day {
+  padding: 0 4px;
+  color: var(--dim-2);
+  font: 500 10.5px var(--font);
+  transition: color 0.15s ease-out;
+}
+.ask-day:hover { color: var(--ink); }
+
+.ask-status { max-width: 180px; font: 500 10.5px var(--font); color: var(--amber); text-align: right; }
+.ask-status[data-state="error"] { color: var(--red-text); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ask-band.arrive, .ask-tag::before { animation: none; }
+}
+
+/* ── Task card: the band says what finished; the steps unfold below it ───── */
+
+.finished-view { height: 100%; }
+
+.done-band {
+  position: absolute;
+  left: 2px;
+  right: 0;
+  top: 0;
+  height: 74px;
+  display: flex;
+  align-items: center;
+  padding: 0 16px 0 106px;
+  border-radius: 20px;
+  background:
+    radial-gradient(220px 140px at 56px 50%, rgba(52, 211, 153, 0.10), transparent 70%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.022));
+  box-shadow: inset 0 0 0 0.5px rgba(52, 211, 153, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.done-tag { --tone: var(--green-2); }
+
+.done-steps {
+  position: absolute;
+  left: 108px;
+  right: 16px;
+  top: 86px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  list-style: none;
+}
+.done-step {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 18px;
+  font: 400 12px var(--font);
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: done-unfold 0.42s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+.done-step > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.done-check {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(52, 211, 153, 0.14);
+  color: var(--green-2);
+}
+@keyframes done-unfold {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.done-foot {
+  position: absolute;
+  right: 6px;
+  bottom: 2px;
+  display: flex;
+  gap: 8px;
+  animation: done-unfold 0.42s cubic-bezier(0.2, 0.9, 0.3, 1) 0.36s both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .done-step, .done-foot { animation: none; }
 }
 
 .card-body {
@@ -512,107 +842,6 @@ body {
   to {
     background-position: -130% 0;
   }
-}
-
-/* ── Agent pills ────────────────────────────────────────────────────────── */
-
-.pills {
-  position: relative;
-  z-index: 1;
-  height: 100%;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  grid-auto-rows: 28px;
-  gap: 4px;
-  align-content: center;
-  padding: 0 8px;
-}
-
-.presence-summary {
-  position: relative;
-  z-index: 1;
-  min-height: 16px;
-  padding: 8px 10px 0;
-  color: var(--dim-3);
-  font: 500 9px var(--font);
-  letter-spacing: .01em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.presence-more {
-  align-self: center;
-  justify-self: center;
-  color: var(--dim-3);
-  font: 600 9px var(--font);
-  white-space: nowrap;
-}
-
-.overview > .right .pills {
-  height: 100%;
-}
-
-.pill {
-  position: relative;
-  height: 28px;
-  border-radius: 999px;
-  background: var(--card-flat);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  display: flex;
-  align-items: center;
-  cursor: default;
-  transition: transform 0.2s cubic-bezier(0.3, 1.2, 0.4, 1), background 0.18s, border-color 0.18s,
-    box-shadow 0.18s, filter 0.18s;
-}
-
-.pill .logo {
-  margin-left: 7px;
-}
-
-.pill .lbl {
-  position: absolute;
-  left: 0;
-  right: 0;
-  text-align: center;
-  font: 600 10px var(--font);
-  color: var(--dim-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  padding: 0 6px;
-  pointer-events: none;
-}
-
-.pill:hover {
-  transform: scale(1.04);
-  filter: brightness(1.06);
-}
-
-.pill-badge {
-  position: absolute;
-  top: -3px;
-  right: 3px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #0b0c0e;
-  display: grid;
-  place-items: center;
-}
-
-.pill-badge i {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  color: #000;
-}
-
-.pill-badge svg {
-  width: 6px;
-  height: 6px;
 }
 
 /* ── Generic text blocks ────────────────────────────────────────────────── */
@@ -910,19 +1139,6 @@ input[type="range"]::-webkit-slider-thumb {
   position: relative;
 }
 
-.composer-model-popover {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 8px);
-  width: 460px;
-  max-width: calc(100vw - 32px);
-  height: 320px;
-  z-index: 20;
-  filter: drop-shadow(0 12px 32px rgba(0, 0, 0, 0.45));
-}
-.composer-model-popover .model-picker-view { height: 100%; }
-.composer-model-popover .model-picker-view .card { height: 100%; }
-
 .chat-input {
   flex: 1 1 auto;
   min-width: 0;
@@ -956,32 +1172,81 @@ input[type="range"]::-webkit-slider-thumb {
   transform: scale(0.94);
 }
 
-/* The draft owns the full width; controls stay on their own quiet footer. */
-.prompt-view .chat-body {
-  gap: 8px;
-  padding: 10px 16px 14px;
-}
+/* ── Composer: one line, the providers' logos are the address ──────────────
+   No card, no footer, no model picker. Logos sit inside the line on the left;
+   tap to choose who gets it. None chosen means the drum's centred agent,
+   shown softly lit, and the placeholder always says who you're messaging. */
 
-.prompt-view .chat-card.wash::after { display: none; }
-.prompt-view .chat-log { flex: 1 1 auto; min-height: 24px; }
-.prompt-view .chat-log:empty { min-height: 0; }
-.prompt-view .chip-row { flex: 0 0 auto; }
+.prompt-view .chat-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 4px 2px;
+}
+.prompt-view .chat-log { flex: 1 1 auto; min-height: 0; padding: 0 6px; }
+.prompt-view .chat-log:empty { display: none; }
+
 .prompt-view .chat-bar {
   flex: 0 0 auto;
+  margin-top: auto;
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
-  width: 100%;
-  padding: 14px 14px 10px;
-  border: 1px solid rgba(255,255,255,.12);
-  border-radius: 18px;
-  background: rgba(255,255,255,.055);
-  box-shadow: 0 4px 18px rgba(0,0,0,.08);
-  transition: border-color 160ms ease, background 160ms ease;
+  padding: 7px 7px 7px 8px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.09), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: background 180ms ease, box-shadow 180ms ease;
 }
-.prompt-view .chat-bar:focus-within { border-color: rgba(255,255,255,.25); background: rgba(255,255,255,.075); }
-.composer-draft { position: relative; width: 100%; height: 48px; transition: height 180ms cubic-bezier(.2,.8,.2,1); }
+.prompt-view .chat-bar:focus-within {
+  background: rgba(255, 255, 255, 0.075);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.composer-line { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+
+/* Logos overlap like a stack at rest and fan out when you reach for them. */
+.ag-group { flex: 0 0 auto; display: flex; align-items: center; height: 30px; padding-left: 1px; }
+.ag-group[hidden] { display: none; }
+.ag {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #0b0c0e;
+  box-shadow: 0 0 0 1.5px #151619, inset 0 0 0 0.5px rgba(255, 255, 255, 0.1);
+  opacity: 0.42;
+  filter: grayscale(1);
+  cursor: default;
+  transition: opacity 150ms ease, filter 150ms ease, box-shadow 150ms ease, margin 260ms cubic-bezier(0.3, 1.3, 0.4, 1), transform 120ms ease-out;
+}
+.ag + .ag { margin-left: -8px; }
+.ag-group:hover .ag + .ag, .ag-group:focus-within .ag + .ag { margin-left: 4px; }
+.ag:hover { opacity: 0.8; filter: none; z-index: 2; }
+.ag:active { transform: scale(0.92); }
+.ag.implied {
+  opacity: 1;
+  filter: none;
+  z-index: 1;
+  box-shadow: 0 0 0 1.5px #151619, inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+.ag.on {
+  opacity: 1;
+  filter: none;
+  z-index: 3;
+  box-shadow: 0 0 0 1.5px #151619, inset 0 0 0 1.5px rgba(255, 255, 255, 0.9), 0 0 12px -2px var(--tone);
+}
+.ag:focus-visible { outline: none; box-shadow: 0 0 0 1.5px #151619, 0 0 0 3px var(--blue); }
+
+.composer-rule { flex: 0 0 1px; align-self: center; width: 1px; height: 16px; background: rgba(255, 255, 255, 0.1); }
+
+.composer-draft { position: relative; flex: 1 1 auto; min-width: 0; height: 20px; margin-bottom: 5px; transition: height 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
 .prompt-view .chat-input {
   display: block;
   width: 100%;
@@ -990,51 +1255,173 @@ input[type="range"]::-webkit-slider-thumb {
   padding: 0;
   resize: none;
   line-height: 20px;
-  font-size: 13.5px;
+  font: 400 13.5px var(--font);
+  letter-spacing: -0.005em;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255,255,255,.18) transparent;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
+.prompt-view .chat-input::placeholder { color: var(--dim-3); }
 .prompt-view .composer-measure { position: absolute; top: 0; left: 0; width: 100%; height: 0; min-height: 0; visibility: hidden; pointer-events: none; overflow: hidden; }
-.composer-footer { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.composer-model {
+
+.prompt-view .mic-btn {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dim-2);
+  transition: background 150ms ease, color 150ms ease;
+}
+.prompt-view .mic-btn:hover { background: rgba(255, 255, 255, 0.07); color: var(--ink); }
+.prompt-view .mic-btn.on { background: rgba(122, 162, 247, 0.18); color: var(--blue); }
+
+/* Grey until there's something to send, then white: you can tell from across the room whether Enter will do anything. */
+.prompt-view .send-btn {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  background: var(--ink);
+  transition: background 120ms ease, color 120ms ease, transform 0.08s ease-out;
+}
+.prompt-view .send-btn:disabled { background: rgba(255, 255, 255, 0.1); color: var(--dim-3); }
+.prompt-view button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+.prompt-view .chat-bar.listening { box-shadow: inset 0 0 0 0.5px rgba(122, 162, 247, 0.5), 0 0 18px -6px rgba(122, 162, 247, 0.5); }
+.prompt-view .live-line { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 10px; border-radius: 14px; background: rgba(122, 162, 247, 0.09); }
+.prompt-view .live-line[hidden] { display: none; }
+.dictation-label { color: var(--blue); font: 500 10.5px var(--font); }
+.prompt-view .live-line .wave { gap: 3px; height: 18px; color: var(--blue); }
+.prompt-view .live-line .wave i { height: 16px; transition: transform 65ms linear; }
+.prompt-view .live-line .said { flex: 1 1 140px; font-size: 11.5px; }
+.prompt-view .chat-bar.listening .composer-draft { opacity: 0.5; }
+
+/* ── Files: dropped on the pill, waiting in the composer ───────────────── */
+
+.composer-tray { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 2px 0; }
+.composer-tray[hidden] { display: none; }
+.file-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 57%;
-  min-width: 0;
-  height: 28px;
-  padding: 0 8px;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 8px;
-  background: rgba(255,255,255,.04);
+  max-width: 240px;
+  height: 26px;
+  padding: 0 4px 0 9px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.1);
   color: var(--ink-2);
-  font: 500 11px var(--font);
+  font: 500 11.5px var(--font);
+  animation: chip-in 0.36s cubic-bezier(0.3, 1.3, 0.4, 1) both;
 }
-.composer-model:hover { background: rgba(255,255,255,.1); }
-.composer-model[hidden] { display: none; }
-.composer-model > svg, .composer-chevron { flex: none; }
-.composer-model-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.composer-chevron { color: var(--dim); }
-.composer-hint { flex: 1 1 auto; min-width: 0; text-align: right; color: var(--dim-3); font: 400 10px var(--font); white-space: nowrap; }
-.prompt-view .send-btn { flex: 0 0 30px; width: 30px; height: 30px; }
-.prompt-view .send-btn:disabled { opacity: .3; }
-.prompt-view button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
-.prompt-view .chat-bar.listening { border-color: rgba(122,162,247,.45); }
-.prompt-view .live-line { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px 10px; padding: 8px 10px; border-radius: 10px; background: rgba(122,162,247,.09); }
-.prompt-view .live-line[hidden] { display: none; }
-.dictation-label { color: var(--blue); font: 500 10.5px var(--font); }
-.prompt-view .live-line .wave { gap: 3px; height: 22px; color: var(--blue); }
-.prompt-view .live-line .wave i { height: 20px; transition: transform 65ms linear; }
-.prompt-view .live-line .said { flex: 1 1 140px; font-size: 11.5px; }
-.prompt-view .chat-bar.listening .composer-draft { max-height: 48px; opacity: .5; }
-.prompt-view .chat-bar.listening .composer-hint { visibility: hidden; }
+.file-chip > svg { flex: none; color: var(--dim); }
+.file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-x {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dim-2);
+  transition: background 120ms ease, color 120ms ease;
+}
+.file-x:hover { background: rgba(255, 255, 255, 0.1); color: var(--ink); }
+@keyframes chip-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.92); }
+  to { opacity: 1; transform: none; }
+}
+
+.composer-asks { flex: 0 0 auto; display: flex; gap: 6px; padding: 0 4px; }
+.composer-asks[hidden] { display: none; }
+.ask-chip {
+  height: 26px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 13px;
+  background: transparent;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.16);
+  color: var(--dim);
+  font: 500 11.5px var(--font);
+  animation: chip-in 0.36s cubic-bezier(0.3, 1.3, 0.4, 1) both;
+  transition: background 120ms ease, color 120ms ease;
+}
+.ask-chip:nth-child(2) { animation-delay: 50ms; }
+.ask-chip:nth-child(3) { animation-delay: 100ms; }
+.ask-chip:hover { background: rgba(255, 255, 255, 0.07); color: var(--ink); }
+
+.bubble-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.file-chip.sent { height: 22px; padding: 0 8px; background: rgba(255, 255, 255, 0.18); box-shadow: none; color: #fff; font-size: 11px; animation: none; }
+.file-chip.sent > svg { color: rgba(255, 255, 255, 0.8); }
+
+/* ── Drop target: the whole island, every provider a place to land ──────── */
+
+.drop-view { height: 100%; }
+.drop-zone {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.025);
+  transition: background 200ms ease;
+}
+.drop-zone .drop-frame { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.drop-zone .drop-frame rect { stroke: rgba(255, 255, 255, 0.22); animation: dash-march 1.1s linear infinite; }
+.drop-zone.aimed { background: rgba(255, 255, 255, 0.04); }
+.drop-zone.aimed .drop-frame rect { stroke: rgba(255, 255, 255, 0.45); }
+.drop-copy { text-align: center; pointer-events: none; }
+.drop-caption { font: 600 14px var(--font); letter-spacing: -0.01em; color: var(--ink); }
+.drop-sub { margin-top: 3px; font: 400 11.5px var(--font); color: var(--dim-3); }
+
+.drop-agents { display: flex; gap: 22px; }
+.drop-agent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px;
+  transition: transform 260ms cubic-bezier(0.3, 1.4, 0.4, 1);
+}
+.drop-mark {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #0b0c0e;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
+  opacity: 0.55;
+  transition: opacity 160ms ease, box-shadow 200ms ease;
+}
+.drop-name { font: 500 11px var(--font); color: var(--dim-3); white-space: nowrap; transition: color 160ms ease; }
+.drop-agent.implied .drop-mark { opacity: 1; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3); }
+.drop-agent.implied .drop-name { color: var(--dim); }
+.drop-agent.hot { transform: translateY(-3px) scale(1.12); }
+.drop-agent.hot .drop-mark { opacity: 1; box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.9), 0 0 22px -2px var(--tone); }
+.drop-agent.hot .drop-name { color: var(--ink); }
+
 @media (prefers-reduced-motion: reduce) {
-  .composer-draft, .prompt-view .live-line .wave i { transition: none; }
+  .file-chip, .ask-chip, .drop-zone .drop-frame rect { animation: none; }
 }
-@media (max-width: 480px) {
-  .composer-hint { font-size: 0; }
-  .composer-model { max-width: 75%; }
+
+.reply-from { display: inline-grid; place-items: center; width: 16px; height: 16px; margin: 0 6px -3px -2px; border-radius: 50%; background: #0b0c0e; }
+
+/* Who a sent message went to, as tiny logos beside the bubble. */
+.sent-to { display: inline-flex; align-items: center; gap: 3px; align-self: flex-end; margin-right: 6px; margin-bottom: 3px; opacity: 0.7; }
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-draft, .ag, .prompt-view .live-line .wave i { transition: none; }
 }
 
 /* ── Drop zone ──────────────────────────────────────────────────────────── */

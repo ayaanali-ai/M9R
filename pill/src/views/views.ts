@@ -8,7 +8,9 @@ import { buildPrompt } from "./composer";
 import { State, type AgentTask, type LinkOffer, type PillModelAgent } from "../core/state";
 import type { SessionRow } from "../core/transport";
 import type { SpeechEnv } from "../core/speech";
-import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
+import { washRGBA, botGlowColor, type IslandViewName, type Wash } from "../core/layout";
+import { plainStep, displayName } from "../core/humanize";
+import { buildDrum } from "./drum";
 
 export interface ViewActions {
   setView(v: IslandViewName): void;
@@ -88,7 +90,6 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 export function buildHeader(actions: ViewActions): ViewHost {
   const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
   const tabChat = h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
-  const tabModels = h("button", { class: "tab", title: "Models", onclick: () => go("models") }, svg(ICONS.layers, 13));
   const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
@@ -101,7 +102,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat, tabModels),
+    h("div", { class: "tabs" }, tabHome, tabChat),
     h("div", { class: "header-actions" }, brokerStatus, gearBtn, soundBtn),
   );
 
@@ -111,7 +112,6 @@ export function buildHeader(actions: ViewActions): ViewHost {
       const v = State.view;
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");
-      tabModels.classList.toggle("on", v === "models");
       gearBtn.classList.toggle("on", v === "settings");
       const connection = State.brokerConnection;
       brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";
@@ -128,19 +128,9 @@ export function buildHeader(actions: ViewActions): ViewHost {
 
 function buildOverview(actions: ViewActions): ViewHost {
   const ticker = new Ticker();
-  const who = h("div", { class: "who" });
-  const tickerBody = h("div", { class: "card-body" }, who, ticker.el);
-  const leftBody = h("div", { class: "left-body" }, tickerBody);
-  const left = card(null, leftBody);
-  const pills = h("div", { class: "pills" });
-  const right = card(null, pills);
-
-  const el = h("div", { class: "view overview" },
-    h("div", { class: "left" }, left),
-    h("div", { class: "right" }, right),
-  );
-
-  let pillKey = "";
+  // Focus changes come from the wheel itself, so they skip the setFocus action's own blip; the detent tick is the sound.
+  const drum = buildDrum(ticker.el, (id) => State.setFocus(id), () => actions.blip());
+  const el = h("div", { class: "view overview" }, drum.el);
 
   return {
     el,
@@ -152,64 +142,10 @@ function buildOverview(actions: ViewActions): ViewHost {
     },
     sync() {
       const task = State.focusTask;
-      clear(who);
-      if (task) {
-        who.append(
-          dot(task.color, 7),
-          h("span", { class: "name", text: `@${task.name}` }),
-          h("span", { class: "tool", text: task.provider }),
-        );
-        if (task.steps.length > 1) {
-          who.append(h("span", { class: "count", text: `${Math.min(task.stepIndex + 1, task.steps.length)}/${task.steps.length}` }));
-        }
-      }
-      ticker.sync(task);
-
-      const featured = State.collaboration?.featuredAgentIds ?? [];
-      const others = State.otherTasks
-        .slice()
-        .sort((a, b) => (featured.indexOf(a.id) < 0 ? 999 : featured.indexOf(a.id)) - (featured.indexOf(b.id) < 0 ? 999 : featured.indexOf(b.id)))
-        .slice(0, 4);
-      const overflow = State.collaboration?.overflowCount ?? Math.max(0, State.otherTasks.length - others.length);
-      const key = `${overflow}|${others.map((t) => `${t.id}:${t.state}:${t.pillBadge ?? ""}`).join("|")}`;
-      if (key !== pillKey) {
-        pillKey = key;
-        clear(pills);
-        for (const t of others) pills.append(buildPill(t, actions));
-        if (overflow > 0) pills.append(h("span", { class: "presence-more", text: `+${overflow} more` }));
-      }
+      ticker.sync(task ? { ...task, steps: task.steps.length ? task.steps.map((s) => plainStep(task, s)) : [plainStep(task, "")] } : null);
+      drum.sync();
     },
   };
-}
-
-function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
-  const pill = h(
-    "div",
-    { class: "pill", onclick: () => actions.setFocus(task.id) },
-    providerLogo(task.provider, 24, task.state),
-    h("span", { class: "lbl", text: `@${task.name}` }),
-  );
-  pill.style.borderColor = `${task.color}24`;
-  pill.addEventListener("mouseenter", () => {
-    pill.style.background = `${task.color}2e`;
-    pill.style.borderColor = `${task.color}8c`;
-    pill.style.boxShadow = `0 2px 10px ${task.color}59`;
-  });
-  pill.addEventListener("mouseleave", () => {
-    pill.style.background = "";
-    pill.style.borderColor = `${task.color}24`;
-    pill.style.boxShadow = "";
-  });
-
-  if (task.pillBadge) {
-    const colors = { approval: "#F5A524", finished: "#22C55E", error: "#F4505E" } as const;
-    const icons = { approval: ICONS.bang, finished: ICONS.check, error: ICONS.xmark } as const;
-    const inner = h("i", { style: `background:${colors[task.pillBadge]}` }, svg(icons[task.pillBadge], 6, { stroke: task.pillBadge === "finished" ? 3 : 0 }));
-    const badge = h("div", { class: "pill-badge" }, inner);
-    badge.style.boxShadow = `0 0 4px ${colors[task.pillBadge]}99`;
-    pill.append(badge);
-  }
-  return pill;
 }
 
 // ── Empty ────────────────────────────────────────────────────────
@@ -232,40 +168,71 @@ function buildEmpty(actions: ViewActions): ViewHost {
 
 // ── Approval ─────────────────────────────────────────────────────
 
+/** "Post to the page" → "Codex wants to post to the page." */
+function approvalSentence(name: string, title: string | undefined): string {
+  const t = (title ?? "").trim().replace(/[.!]+$/, "");
+  if (!t) return `${name} needs your OK.`;
+  return `${name} wants to ${t.charAt(0).toLowerCase()}${t.slice(1)}.`;
+}
+
+/** The drum's band, holding a decision: same mark, same place, so the wheel itself is what asks. */
 function buildApproval(actions: ViewActions): ViewHost {
-  const who = h("div");
-  const code = h("div", { class: "code" });
-  const status = h("div", { class: "detail approval-status", role: "status", "aria-live": "polite" });
-  const row = h("div", { class: "actions" });
-  const el = h("div", { class: "view" }, card("amber", stack(116, 16, who, code, status, row)));
+  const name = h("span", { class: "ask-name" });
+  const count = h("span", { class: "ask-count" });
+  const sentence = h("div", { class: "ask-sentence" });
+  // The line being authorised: the action, path or address, never just the name of the tool asking.
+  const exact = h("div", { class: "ask-exact" });
+  const status = h("div", { class: "ask-status", role: "status", "aria-live": "polite" });
+  const buttons = h("div", { class: "ask-buttons" });
+  const later = h("div", { class: "ask-later" });
+  const band = h("div", { class: "ask-band" },
+    h("div", { class: "ask-text" },
+      h("div", { class: "ask-head" }, name, h("span", { class: "drum-tag ask-tag", text: "Needs you" }), count),
+      sentence,
+      exact,
+    ),
+    h("div", { class: "ask-side" }, buttons, later, status),
+  );
+  const el = h("div", { class: "view approval-view" }, band);
   let built = false;
+  let shownId = "";
   return {
     el,
     sync() {
       const req = State.pendingApproval;
-      const agent = State.tasks.find((t) => t.id === req?.agent) ?? null;
-      clear(who);
-      const more = State.approvals.length > 1 ? ` · ${State.approvals.length - 1} more waiting` : "";
-      who.append(agentWho(agent ?? State.focusTask, `wants to: ${req?.title ?? "act"}${more}`));
-      // The line being authorised: the action, path or address, not just the name of the tool asking.
-      code.textContent = req?.detail || "…";
+      const agent = State.tasks.find((t) => t.id === req?.agent) ?? State.focusTask;
+      const label = agent ? displayName(agent) : "An agent";
+      name.textContent = label;
+      count.textContent = State.approvals.length > 1 ? `1 of ${State.approvals.length}` : "";
+      sentence.textContent = approvalSentence(label, req?.title);
+      exact.textContent = req?.detail || "";
+      exact.hidden = !req?.detail;
       const decisionError = req && State.decisionError?.approvalId === req.id ? State.decisionError.message : null;
       status.textContent = decisionError
-        ? `Decision not sent: ${decisionError}`
+        ? "That didn't go through. Try again."
         : req?.unconfirmed
-          ? "Approval status is unconfirmed. M9R will validate your choice before applying it."
+          ? "M9R will double-check this before it runs."
           : "";
+      status.title = decisionError ?? "";
       status.dataset.state = decisionError ? "error" : req?.unconfirmed ? "unconfirmed" : "";
       status.hidden = !decisionError && !req?.unconfirmed;
+      // A new request replays the arrival so a queued second approval doesn't slip in unnoticed.
+      if (req && req.id !== shownId) {
+        shownId = req.id;
+        band.classList.remove("arrive");
+        void band.offsetWidth;
+        band.classList.add("arrive");
+      }
       // Built once: rebuilding buttons between a mouse-down and a mouse-up would swallow the click.
       if (built) return;
       built = true;
-      clear(row);
-      row.append(
+      buttons.append(
         btn("Deny", "secondary", () => actions.decide("deny"), "N"),
-        actions.canAllowForADay() ? btn("Allow for a day", "secondary", () => actions.decide("allow_day")) : "",
         btn("Allow", "primary", () => actions.decide("allow"), "Y"),
       );
+      if (actions.canAllowForADay()) {
+        later.append(h("button", { class: "link-btn ask-day", text: "Allow for a day", onclick: () => actions.decide("allow_day") }));
+      }
     },
   };
 }
@@ -291,17 +258,95 @@ function buildError(actions: ViewActions): ViewHost {
 
 // ── Finished ─────────────────────────────────────────────────────
 
+/** The task card: the drum's band turns green and says what finished, then the island grows downward with how it got there. */
 function buildFinished(actions: ViewActions): ViewHost {
-  const who = h("div");
-  const title = h("div", { class: "title" });
-  const row = h("div", { class: "actions" }, btn("OK", "secondary", () => actions.collapse()));
-  const el = h("div", { class: "view" }, card("green", stack(116, 16, who, title, row)));
+  const name = h("span", { class: "ask-name" });
+  const headline = h("div", { class: "ask-sentence" });
+  const band = h("div", { class: "done-band" },
+    h("div", { class: "ask-text" },
+      h("div", { class: "ask-head" }, name, h("span", { class: "drum-tag done-tag", text: "Done" }), h("span", { class: "ask-count", text: "Just now" })),
+      headline,
+    ),
+  );
+  const steps = h("ol", { class: "done-steps" });
+  const foot = h("div", { class: "done-foot" },
+    btn("Reply", "secondary", () => actions.setView("prompt")),
+    btn("Done", "primary", () => actions.collapse()),
+  );
+  const el = h("div", { class: "view finished-view" }, band, steps, foot);
+  let key = "";
+  return {
+    el,
+    activate() {
+      State.stateOverride = "finished";
+      key = "";
+    },
+    deactivate() {
+      State.stateOverride = null;
+    },
+    sync() {
+      const task = State.focusTask;
+      if (!task) return;
+      const done = task.steps.map((s) => plainStep(task, s)).filter((s, i, all) => s && all.indexOf(s) === i);
+      const title = task.task ? plainStep(task, task.task) : done.at(-1) ?? "Finished what you asked.";
+      const trail = done.filter((s) => s !== title).slice(-3);
+      const next = `${task.id}|${title}|${trail.join("|")}`;
+      if (next === key) return;
+      key = next;
+      name.textContent = displayName(task);
+      headline.textContent = title;
+      steps.replaceChildren(...trail.map((text, i) => {
+        const li = h("li", { class: "done-step" }, h("span", { class: "done-check" }, svg(ICONS.check, 9, { stroke: 2.4 })), h("span", { text }));
+        li.style.animationDelay = `${180 + i * 70}ms`;
+        return li;
+      }));
+      steps.hidden = trail.length === 0;
+    },
+  };
+}
+
+// ── Drop ─────────────────────────────────────────────────────────
+
+/** A file is being dragged over the pill: every connected provider is a target, the one under the cursor lights up. */
+function buildDrop(): ViewHost {
+  const caption = h("div", { class: "drop-caption" });
+  const sub = h("div", { class: "drop-sub", text: "Then tell it what to do." });
+  const row = h("div", { class: "drop-agents" });
+  const frame = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  frame.setAttribute("class", "drop-frame");
+  frame.setAttribute("aria-hidden", "true");
+  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  for (const [k, v] of Object.entries({ x: "1", y: "1", rx: "20", ry: "20", fill: "none", "stroke-width": "1.5", "stroke-dasharray": "6 5" })) rect.setAttribute(k, v);
+  rect.style.width = "calc(100% - 2px)";
+  rect.style.height = "calc(100% - 2px)";
+  frame.append(rect);
+  const zone = h("div", { class: "drop-zone" }, frame, h("div", { class: "drop-copy" }, caption, sub), row);
+  const el = h("div", { class: "view drop-view" }, zone);
+  let key = "";
   return {
     el,
     sync() {
-      clear(who);
-      who.append(agentWho(State.focusTask, "finished"));
-      title.textContent = State.focusTask?.steps.at(-1) ?? "Finished";
+      const next = State.tasks.map((t) => `${t.id}:${t.state}`).join("|");
+      if (next !== key) {
+        key = next;
+        row.replaceChildren(...State.tasks.map((task) => {
+          const tile = h("div", { class: "drop-agent", "data-agent": task.id },
+            h("span", { class: "drop-mark" }, providerLogo(task.provider, 20)),
+            h("span", { class: "drop-name", text: displayName(task) }),
+          );
+          tile.style.setProperty("--tone", botGlowColor(task.state === "idle" || task.state === "sleeping" ? "working" : task.state));
+          return tile;
+        }));
+      }
+      const p = State.dragPoint;
+      const hit = p ? (document.elementFromPoint(p.x, p.y)?.closest("[data-agent]") as HTMLElement | null)?.dataset.agent : undefined;
+      const target = State.tasks.find((t) => t.id === hit) ?? State.focusTask;
+      for (const tile of row.children as HTMLCollectionOf<HTMLElement>) {
+        tile.classList.toggle("hot", tile.dataset.agent === hit);
+        tile.classList.toggle("implied", !hit && tile.dataset.agent === target?.id);
+      }
+      zone.classList.toggle("aimed", !!hit);
+      caption.textContent = target ? `Drop to hand it to ${displayName(target)}` : "Drop it here";
     },
   };
 }
@@ -588,6 +633,7 @@ export function buildViews(actions: ViewActions, onChatHeightChange: () => void)
   map.set("approval", buildApproval(actions));
   map.set("error", buildError(actions));
   map.set("finished", buildFinished(actions));
+  map.set("drop", buildDrop());
   map.set("note", buildNote());
   map.set("settings", buildSettings(actions));
   map.set("prompt", buildPrompt(actions, onChatHeightChange));

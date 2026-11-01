@@ -8,7 +8,7 @@
 // runs in one-pill mode (M9R_PILL_NEXT=1); the Rust side validates every value.
 
 import type { Decision, DesktopStage, DesktopStageActionProof, DesktopStageCapture, DesktopStageCursorMove, DesktopStageWindowOption, PillTransport } from "../core/transport";
-import { listen } from "@tauri-apps/api/event";
+import { listen, TauriEvent } from "@tauri-apps/api/event";
 import type { SpeechEnv } from "../core/speech";
 import type { Settings } from "../core/state";
 import { fromUiState, type UiState } from "./convert";
@@ -199,6 +199,21 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
     },
     async dismissTask(taskId) {
       await invoke("dismiss_task", { taskId });
+    },
+    // Tauri owns file drops on this window (the page never sees them), and it hands over real paths agents can open.
+    onFileDrop(handlers) {
+      type Pos = { position?: { x: number; y: number } };
+      const at = (p: Pos) => ({ x: (p.position?.x ?? 0) / devicePixelRatio, y: (p.position?.y ?? 0) / devicePixelRatio });
+      const name = (path: string) => path.split(/[\\/]/).pop() || path;
+      void listen<Pos>(TauriEvent.DRAG_ENTER, ({ payload }) => { const p = at(payload); handlers.over(p.x, p.y); });
+      void listen<Pos>(TauriEvent.DRAG_OVER, ({ payload }) => { const p = at(payload); handlers.over(p.x, p.y); });
+      void listen(TauriEvent.DRAG_LEAVE, () => handlers.leave());
+      void listen<Pos & { paths?: string[] }>(TauriEvent.DRAG_DROP, ({ payload }) => {
+        const p = at(payload);
+        const files = (payload.paths ?? []).slice(0, 10).map((path) => ({ name: name(path), path }));
+        if (files.length) handlers.drop(files, p.x, p.y);
+        else handlers.leave();
+      });
     },
     setIslandRect(x, y, width, height) {
       void invoke("pill_set_rect", { x, y, width, height }).catch(() => { /* a rejected rectangle keeps the last good one */ });

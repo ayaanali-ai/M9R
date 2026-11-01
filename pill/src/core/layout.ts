@@ -12,7 +12,8 @@ export type IslandViewName =
   | "prompt"
   | "models"
   | "note"
-  | "settings";
+  | "settings"
+  | "drop";
 
 export type BotStateName =
   | "idle"
@@ -56,27 +57,33 @@ export const WAKE_STRIP_W = 240;
 export const WAKE_STRIP_H = 6;
 
 export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
-  overview: { height: 160, botX: 68, botY: null, botDiameter: 58, agentMode: "pills" },
+  // Taller than the other views: the wheel needs room for two rows either side of the centred one.
+  overview: { height: 196, botX: 68, botY: 114, botDiameter: 58, agentMode: "pills" },
   empty: { height: 160, botX: 70, botY: null, botDiameter: 62, agentMode: "none" },
-  approval: { height: 160, botX: 62, botY: null, botDiameter: 56, agentMode: "column" },
+  // Same mark position as the drum so an approval reads as the wheel's centred agent asking, not a new screen.
+  approval: { height: 160, botX: 68, botY: 96, botDiameter: 58, agentMode: "column" },
   error: { height: 160, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
-  finished: { height: 160, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
+  // Grows downward: the band leads with what finished, the steps unfold beneath it.
+  finished: { height: 232, botX: 68, botY: 79, botDiameter: 52, agentMode: "column" },
   prompt: { height: 160, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
   models: { height: 300, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
   note: { height: 160, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
   settings: { height: 220, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
+  drop: { height: 200, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
 };
 
-/** The message view grows with the conversation. */
-export function chatPromptHeight(messageCount: number, draftHeight = 48): number {
-  return Math.min(300, 240 + messageCount * 40 + Math.max(0, Math.min(120, draftHeight) - 48));
+/** One line when there's nothing to read yet; grows with the conversation and the draft. */
+export function chatPromptHeight(messageCount: number, draftHeight = 20): number {
+  const extra = Math.max(0, Math.min(200, draftHeight) - 20);
+  if (messageCount === 0) return 108 + extra;
+  return Math.min(300, 132 + messageCount * 34 + extra);
 }
 
 export function islandSize(
   mode: IslandMode,
   view: IslandViewName,
   chatCount = 0,
-  draftHeight = 48,
+  draftHeight = 20,
 ): { w: number; h: number } {
   switch (mode) {
     case "hidden":
@@ -112,7 +119,7 @@ export function botPosition(
       // Collapsed means solid black, nothing overlaid — no status mark, no provider logo.
       return { cx: 40, cy: 16, diameter: 20, opacity: 0 };
     case "expanded": {
-      if (view === "models" || view === "prompt") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
+      if (view === "models" || view === "prompt" || view === "drop") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
       const layout = VIEW_LAYOUTS[view];
       if (layout.botY != null) {
         return { cx: layout.botX, cy: layout.botY, diameter: layout.botDiameter, opacity: 1 };

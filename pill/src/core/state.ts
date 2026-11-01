@@ -65,6 +65,12 @@ export interface AgentTask {
   presenceState?: PillPresenceState;
 }
 
+/** A file handed to the pill. `path` is the real location on disk (desktop); a browser can only give the name. */
+export interface DroppedFile {
+  name: string;
+  path?: string;
+}
+
 export interface ApprovalInfo {
   id: string;
   agent: string;
@@ -137,6 +143,12 @@ class AppState {
   paused = false;
 
   noteMessage: string | null = null;
+  /** Files dropped on the pill, waiting in the composer to go out with the next message. */
+  pendingFiles: DroppedFile[] = [];
+  /** Who a drop was aimed at; the composer takes this as its recipients once, then clears it. */
+  composeTo: string[] | null = null;
+  /** Where a file is being dragged over the island, in CSS pixels; null when nothing is being dragged. */
+  dragPoint: { x: number; y: number } | null = null;
   chatHistory: ChatMessage[] = [];
   approvals: ApprovalInfo[] = [];
   brokerConnection: "unknown" | "connecting" | "connected" | "disconnected" = "unknown";
@@ -188,11 +200,11 @@ class AppState {
   }
 
   /** Applies a snapshot from the shell. Returns what is new, so the island can open on a fresh approval or reply. */
-  apply(snapshot: PillSnapshot, now = Date.now()): { newApprovals: string[]; newReplies: PillSnapshot["thread"] } {
+  apply(snapshot: PillSnapshot, now = Date.now()): { newApprovals: string[]; newReplies: PillSnapshot["thread"]; newFinished: string[] } {
     if (snapshot.connection) this.brokerConnection = snapshot.connection;
     if (snapshot.connectionOnly) {
       this.notify();
-      return { newApprovals: [], newReplies: [] };
+      return { newApprovals: [], newReplies: [], newFinished: [] };
     }
 
     this.collaboration = snapshot.collaboration ?? null;
@@ -216,10 +228,12 @@ class AppState {
       this.decisionError = null;
     }
     const waiting = new Set(this.approvals.map((a) => a.agent));
+    const newFinished: string[] = [];
     this.tasks = snapshot.agents.map((a) => {
       const prev = this.tasks.find((t) => t.id === a.handle);
       const steps = a.activity.slice(-20);
       const finished = prev !== undefined && prev.state === "working" && a.state === "idle";
+      if (finished) newFinished.push(a.handle);
       return {
         id: a.handle,
         name: a.handle,
@@ -293,7 +307,7 @@ class AppState {
       this.lastThread = ids.at(-1) ?? this.lastThread;
     }
     this.notify();
-    return { newApprovals, newReplies };
+    return { newApprovals, newReplies, newFinished };
   }
 
   dismissChatMessage(id: number) {
@@ -304,7 +318,14 @@ class AppState {
   /** Remove an approval only after the transport accepted the owner's decision. */
   resolveApproval(id: string, now = Date.now()) {
     this.resolvedApprovals.set(id, now);
+    const agent = this.approvals.find((approval) => approval.id === id)?.agent;
     this.approvals = this.approvals.filter((approval) => approval.id !== id);
+    // Don't leave the agent saying "Needs you" until the next snapshot happens to arrive.
+    const task = agent && !this.approvals.some((approval) => approval.agent === agent) ? this.tasks.find((t) => t.id === agent) : undefined;
+    if (task?.state === "approval") {
+      task.state = RUN_TO_BOT[task.runState] ?? "idle";
+      if (task.pillBadge === "approval") task.pillBadge = null;
+    }
     if (this.decisionError?.approvalId === id) this.decisionError = null;
   }
 

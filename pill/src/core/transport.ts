@@ -1,7 +1,7 @@
 // The pill talks to its host only through this interface. The desktop shell and the browser shell each provide an adapter;
 // in a plain browser tab (npm run dev) the mock below stands in so the UI can be developed and inspected alone.
 
-import type { LinkOffer, PillSnapshot, Settings } from "./state";
+import type { DroppedFile, LinkOffer, PillSnapshot, Settings } from "./state";
 import type { SpeechEnv } from "./speech";
 
 export type Decision = "allow" | "deny" | "allow_day";
@@ -79,6 +79,13 @@ export interface DesktopStageTransport {
   drag(name: string, fromX: number, fromY: number, toX: number, toY: number): Promise<DesktopStageActionProof>;
 }
 
+/** Points are CSS pixels relative to the pill's window. */
+export interface FileDropHandlers {
+  over(x: number, y: number): void;
+  leave(): void;
+  drop(files: DroppedFile[], x: number, y: number): void;
+}
+
 export interface PillTransport {
   /** What this host can actually do; the UI hides controls a host cannot honour instead of faking them. */
   capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean; saveMemory?: boolean; dismissTask?: boolean };
@@ -104,6 +111,8 @@ export interface PillTransport {
   dismissTask?(taskId: string): Promise<void>;
   /** Selects a live provider-reported model; the owner broker validates it. */
   selectModel?(handle: string, model: string | null, effort: string | null): Promise<void>;
+  /** Native file drops with real paths (the desktop shell). Without it the pill falls back to the page's own drop events. */
+  onFileDrop?(handlers: FileDropHandlers): void;
   /** Window-level hooks; no-ops in the browser shell. */
   setIslandRect?(x: number, y: number, width: number, height: number): void;
   setCollapsed?(collapsed: boolean): void;
@@ -128,7 +137,7 @@ const SAMPLE: PillSnapshot = {
   agents: [
     { handle: "claude", provider: "claude", state: "working", activity: ["Opened the shared tab", "Reading the pricing table", "Comparing plans for the summary"] },
     { handle: "codex", provider: "codex", state: "idle", activity: ["Finished the broker fix"] },
-    { handle: "opencode", provider: "opencode", state: "waiting", activity: ["Waiting for @claude's answer"] },
+    { handle: "opencode", provider: "opencode", state: "waiting", activity: ["Waiting for Claude Code's answer"] },
   ],
   approvals: [],
   thread: [],
@@ -157,6 +166,18 @@ export function createMockTransport(): PillTransport {
   const snap: PillSnapshot = structuredClone(SAMPLE);
   const push = () => listener?.(structuredClone(snap));
   const params = new URLSearchParams(location.search);
+  if (params.has("failed")) {
+    const codex = snap.agents.find((a) => a.handle === "codex");
+    if (codex) { codex.state = "failed"; codex.activity.push("codex: initialize: no response within 180000ms"); }
+  }
+  // Claude Code finishes its task a moment after load, to show the task card.
+  if (params.has("finish")) {
+    setTimeout(() => {
+      const claude = snap.agents.find((a) => a.handle === "claude");
+      if (claude) { claude.state = "idle"; claude.task = "Compared the three pricing plans"; claude.activity.push("Wrote the summary to pricing.md"); }
+      push();
+    }, 2500);
+  }
   if (params.has("approval")) {
     snap.approvals.push({ id: "a1", agent: "codex", title: "Post to the page", detail: "Click “Post” on x.com/compose" });
   } else if (!params.has("calm")) {
@@ -170,7 +191,7 @@ export function createMockTransport(): PillTransport {
     subscribe(l) { listener = l; setTimeout(push, 0); },
     async send(text) {
       const target = /@(\w+)/.exec(text)?.[1] ?? "claude";
-      snap.thread.push({ id: `t${snap.thread.length + 1}`, from: target, text: `Got it: “${text.replace(/@\w+\s*/g, "").slice(0, 80)}”` });
+      snap.thread.push({ id: `t${snap.thread.length + 1}`, from: target, text: `Got it: “${text.replace(/\n\nAttached:[\s\S]*$/, "").replace(/@\w+\s*/g, "").slice(0, 80)}”` });
       const agent = snap.agents.find((a) => a.handle === target);
       if (agent) { agent.state = "working"; agent.activity.push("Working on your message"); }
       push();

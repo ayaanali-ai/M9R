@@ -9,7 +9,7 @@ import {
 import { Sound } from "../core/sound";
 import { browserSpeechEnv } from "../core/speech";
 import { State, type PillSnapshot } from "../core/state";
-import type { Decision, PillTransport } from "../core/transport";
+import type { Decision, FileDropHandlers, PillTransport } from "../core/transport";
 import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
 import { providerLogo } from "../views/provider";
 import { h, svg } from "../views/dom";
@@ -68,6 +68,7 @@ export class Island {
     this.build();
     this.wireFsm();
     this.wireInput();
+    this.wireDrops();
     State.subscribe(() => {
       this.dirty = true;
       this.ensureRunning();
@@ -175,7 +176,8 @@ export class Island {
       this.suppressed = suppressed;
       this.transport.setSuppressed?.(suppressed);
     }
-    const { newApprovals, newReplies } = State.apply(snapshot);
+    const { newApprovals, newReplies, newFinished } = State.apply(snapshot);
+    const typing = State.mode === "expanded" && State.view === "prompt";
     // Startup can select the empty view before the first provider snapshot arrives.
     // Once the authoritative snapshot contains agents, keep the home view in sync.
     if (State.view === "empty" && State.tasks.length > 0) State.view = State.defaultView();
@@ -188,6 +190,11 @@ export class Island {
       State.isPinned = false;
       this.dropPin();
       this.setView(State.defaultView());
+    } else if (newFinished.length > 0 && State.approvals.length === 0 && !typing) {
+      // A finished task opens its card out of the drum; it never interrupts an approval or a message being typed.
+      State.setFocus(newFinished[newFinished.length - 1]);
+      Sound.play("approve");
+      this.alert("finished");
     } else if (newReplies.length > 0 && this.fsm.state === "hidden") {
       this.reveal();
     } else if (State.mode === "hidden" && State.tasks.some((t) => t.state === "working")) {
@@ -234,7 +241,11 @@ export class Island {
   private setMode(mode: IslandMode) {
     const prev = State.mode;
     if (mode === prev) return;
-    if (prev === "expanded" && mode !== "expanded") this.views.get(State.view)?.deactivate?.();
+    if (prev === "expanded" && mode !== "expanded") {
+      this.views.get(State.view)?.deactivate?.();
+      // A task card is seen once; reopening the pill goes back to the drum.
+      if (State.view === "finished") State.view = State.defaultView();
+    }
     State.mode = mode;
     if (mode === "expanded") Sound.play("open");
     if (prev === "expanded") {
@@ -395,6 +406,69 @@ export class Island {
   }
 
   // ── Input ────────────────────────────────────────────────────────
+
+  // ── File drops ───────────────────────────────────────────────────
+
+  private beforeDrop: { view: IslandViewName; mode: IslandMode } | null = null;
+
+  /** Dragging a file over the pill opens it as a drop target; the logo under the cursor is who gets the file. */
+  private wireDrops() {
+    const handlers: FileDropHandlers = {
+      over: (x, y) => {
+        if (State.view !== "drop") {
+          this.beforeDrop = { view: State.view, mode: State.mode };
+          State.isPinned = true;
+          this.alert("drop");
+        }
+        State.dragPoint = { x, y };
+        State.notify();
+      },
+      leave: () => {
+        if (State.view !== "drop") return;
+        const before = this.beforeDrop;
+        this.beforeDrop = null;
+        State.dragPoint = null;
+        State.isPinned = false;
+        this.dropPin();
+        if (before?.mode !== "expanded") this.collapse();
+        else this.setView(before.view === "drop" ? State.defaultView() : before.view);
+      },
+      drop: (files, x, y) => {
+        const aimed = (document.elementFromPoint(x, y)?.closest("[data-agent]") as HTMLElement | null)?.dataset.agent;
+        State.pendingFiles = [...State.pendingFiles, ...files].slice(0, 10);
+        State.composeTo = aimed ? [aimed] : null;
+        State.dragPoint = null;
+        State.isPinned = false;
+        this.beforeDrop = null;
+        this.dropPin();
+        Sound.play("blip");
+        this.setView("prompt");
+      },
+    };
+    if (this.transport.onFileDrop) {
+      this.transport.onFileDrop(handlers);
+      return;
+    }
+    // A page (dev server, browser extension) only gets names, never paths; enough to build and try the flow.
+    let depth = 0;
+    const hasFiles = (e: DragEvent) => !!e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
+    window.addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth += 1; handlers.over(e.clientX, e.clientY); });
+    window.addEventListener("dragover", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      handlers.over(e.clientX, e.clientY);
+    });
+    window.addEventListener("dragleave", (e) => { if (!hasFiles(e)) return; depth = Math.max(0, depth - 1); if (depth === 0) handlers.leave(); });
+    window.addEventListener("drop", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      const files = Array.from(e.dataTransfer?.files ?? []).slice(0, 10).map((f) => ({ name: f.name }));
+      if (files.length) handlers.drop(files, e.clientX, e.clientY);
+      else handlers.leave();
+    });
+  }
 
   private wireInput() {
     // The wake strip is the only thing the OS can hit while the island is hidden.
