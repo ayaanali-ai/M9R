@@ -441,6 +441,92 @@ abandoned.
   "Scout," "Lab," "Keeper") instead of generic "Agent 1/2/3" — relevant if
   M9R ever personifies agents beyond their provider names.
 
+### XIV. Pill redesign spec — approved direction (2026-11-01)
+
+Status: design-locked, approved by owner, not yet built. Build order below
+is the implementation order once work starts.
+
+**Grounding references** (real, inspected directly — not invented):
+- [Agently](https://agently.dev) (`@omarships` X demo, 2026-10-31) — the
+  finished-task card's subtitle lists every provider that touched the job
+  inline ("ChatGPT + Claude · your own plans · 0 credits used") with both
+  provider logos, instead of a separate multi-agent picker. Also ships as a
+  Mac notch app ("Jarvis answers in the notch").
+- [Atoll](https://getatoll.app) — wide expanded-island layout: compact
+  media pill top-center, small stat/dial widgets docked under it, and a
+  desktop-wide ambient waveform glow tied to audio, not confined to the
+  pill shell.
+- [NotchNook](https://macgrove.app/apps/notchnook) — plain-text tab
+  switcher ("Nook" / "Tray") inside one shell; dashed-border drag-and-drop
+  zone that turns a dropped file into a tile.
+- [21st.dev "AI Input"](https://21st.dev/@edwinvakayil/components/ai-input)
+  (MIT, free) — the composer base: one line, `+` left, model/effort as
+  plain inline text right, no card.
+- HeyClicky (full changelog audit, see §XIII) — compact task-result card
+  pattern (title, status badge, one-line summary) and TTS narration read
+  aloud over the task, same mechanism as the voice-done idea below.
+- M9R's own existing `pill/` app — the agent-tile glow already ships:
+  [pill/src/island/island.ts:508-528](../pill/src/island/island.ts),
+  [pill/src/style.css:100-106](../pill/src/style.css), state/color table in
+  [pill/src/core/layout.ts:129-161](../pill/src/core/layout.ts) (9 states,
+  radial-gradient blur glow, not a ring). Keep as-is; extend the same two
+  switch statements if new states are ever needed.
+
+**Scope boundary**: the notch/pill ships. The web workspace window
+(separate app-window surface) is explicitly not shipping yet — not built,
+not built correctly, parked until its own pass.
+
+**Spec, surface by surface:**
+
+1. **Unified agent tile** — every agent (codex/claude/opencode) renders
+   through the same component; never an empty tile. Status is the existing
+   `pill/` glow only — no raw strings surfaced ("app-server timeout",
+   "ACP" wording out). Plain states instead: working, needs you, good to go.
+2. **Composer** — rebuilt on 21st.dev's AI Input (MIT). Single line, no
+   card. Agent identity moves out of the input line entirely into a
+   logo-only toggle row above the composer: small rounded-square tiles, one
+   per provider, lit ring = armed, dimmed = off, tap to arm/disarm any
+   combination — no typing, no @mention syntax. The composer line shows a
+   plain "N selected" count instead of names so nothing truncates. Send
+   button: gray when unarmed/empty, pops to solid white (120ms
+   opacity+scale(1.05), not an instant flip) once armed and text is present.
+3. **Drag-and-drop → agent action** — NotchNook's dashed-zone mechanic,
+   repurposed: drop a file, pick an armed agent, agent drafts the action
+   (send/email/etc.) and shows the draft before anything fires. Dashed
+   border only exists during an active drag (stroke-dashoffset draw-in,
+   ~200ms), never visible at rest.
+4. **Compact task card** — docked to the notch's own area, not a floating
+   card. Pops open downward from the pill's bottom edge on completion
+   (Atoll-style grow, never a fade-in from nothing), taller not wider,
+   closes back into the notch. Same density as HeyClicky's task card
+   (title, status, one-line summary).
+5. **Ambient glow (minimized/black area)** — bleeds past the pill's own
+   edge with radial falloff, not a hard bar. Color key: white = dictation,
+   source-matched color = music (Spotify green / Apple Music red / etc.),
+   M9R accent = agent actively working. Only renders when one of those
+   is actually true — never a static decoration.
+6. **Shape language** — every state change (idle→expand, home→composer→
+   stack) is a spring (~280ms, ~4% overshoot), matching Atoll/Dynamic
+   Island — never linear/ease-in-out. Tab switching between home/composer/
+   stack is a shared-element morph (the pill's own shape stretches and
+   settles, content crossfades inside it) — not three screens swapping.
+7. **Deferred, explicitly out of this build**:
+   - Animated "liquid" cursor outline (not a continuous ring — literally
+     traces the cursor's shape with a flowing animation, pulses only
+     during dictation) — ships alongside the wheel selector / next
+     interaction-model release, not this pass.
+   - Wheel selector (Pie Menu reference, already locked separately).
+   - Making agent responses read as genuinely human (iMessage-personal-
+     agent-style phrasing) — real, unscoped problem, needs its own research
+     pass before it can be designed, not blocking this build.
+   - Windows code-signing / SmartScreen-safe installer — infra gap
+     surfaced while comparing to HeyClicky's notarized Mac app; not a
+     design task, tracked separately.
+
+**Build order**: 1 (unified tile) → 2 (composer) → 3 (drag-and-drop) → 4
+(compact task card) → 5 (ambient glow) → 6 (shape language/motion, applied
+across all of the above as they're built, not a separate pass at the end).
+
 ## References
 
 - [Source of Truth 5.0](./M9R_SOURCE_OF_TRUTH_5.0_MAINTENANCE_CONTRACT.md)
