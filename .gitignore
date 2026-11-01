@@ -147,3 +147,6 @@ skills-lock.json
 # local tool scratch caches, never committed
 .workcache/
 .worktrees/
+
+# Overlay accept/rollback recovery binaries (never a build input, never a source file)
+release-assets/recovery/*.exe
