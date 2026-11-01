@@ -11,7 +11,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $dist = if ([string]::IsNullOrWhiteSpace($RuntimeDirectory)) { Join-Path $root 'engine\dist' } else { [IO.Path]::GetFullPath($RuntimeDirectory) }
-$assets = @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-build-info.json')
+$assets = @('m9r-engine.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-build-info.json')
 $overlay = Join-Path $dist 'm9r-overlay.exe'
 $canonicalRuntimePath = [IO.Path]::GetFullPath((Join-Path $root 'release-assets\accepted-runtime.json'))
 if (-not $Candidate -and -not [string]::IsNullOrWhiteSpace($AcceptedRuntimePath) -and

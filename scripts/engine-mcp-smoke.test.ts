@@ -11,10 +11,10 @@ import test from "node:test";
 
 const exe = join(process.cwd(), "engine", "dist", process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine");
 
-test("the configured native hook serves MCP beyond the short per-event hook timeout", { skip: !existsSync(exe) ? "engine runtime was not built" : false }, async () => {
-  const shim = join(process.cwd(), "engine", "dist", process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native");
-  assert.ok(existsSync(shim), "the engine package must include its configured MCP launcher");
-  const child = spawn(shim, ["mcp"], { stdio: ["pipe", "pipe", "pipe"] });
+test("the broker-owned engine serves MCP without a provider hook shim", { skip: !existsSync(exe) ? "engine runtime was not built" : false }, async () => {
+  const retiredShim = join(process.cwd(), "engine", "dist", process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native");
+  assert.equal(existsSync(retiredShim), false, "the retired provider hook shim must not be packaged");
+  const child = spawn(exe, ["mcp"], { stdio: ["pipe", "pipe", "pipe"] });
   let output = "";
   let stderr = "";
   child.stdout.on("data", chunk => { output += chunk.toString(); });

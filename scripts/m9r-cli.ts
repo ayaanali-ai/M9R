@@ -61,9 +61,6 @@ import { drainCaptureSpool } from "@/lib/cross-agent-capture-core";
 import { createInterface } from "node:readline/promises";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { agentCredentialPath, agentCredentialRoot, migrateLegacyAgentCredentials, protectAgentCredentialFile, readOrCreateTerminalBridgeToken } from "@/lib/native/agent-credential-store";
-import { startProviderUpdateMonitor } from "@/lib/native/provider-update-monitor";
-import { createProviderNeutralUpdateActions, type ProviderConfigRefreshInput } from "@/lib/native/provider-update-route-actions";
-import { reconcileProviderSessions } from "@/lib/native/provider-session-reconciliation";
 import { isAgentContext, isHumanContext } from "@/lib/native/approval-core";
 import { DEFAULT_BROKER_PORT, brokerKeyPath } from "@/lib/native/web-broker-paths";
 import { standaloneWebBrokerRuntime } from "@/lib/native/web-broker-runtime";
@@ -209,7 +206,6 @@ const deps: CliDeps = {
   listDirectory: (path) => readdir(path),
   installLocalBrokerAutostart: ensureLocalBrokerAutostart,
   removeLocalBrokerAutostart,
-  startProviderLifecycle: startNativeProviderLifecycle,
 };
 
 async function withAgentVersionProbeEnv<T>(binary: string, runProbe: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
@@ -253,34 +249,6 @@ async function probeVersion(binary: string): Promise<string | null> {
   } catch {
     return null;
   }
-}
-
-/**
- * Start provider update reconciliation from the watched feed's owner process.
- * The native command calls this only after acquiring the feed's single-writer
- * lock, so short-lived or duplicate feed invocations cannot race lifecycle work.
- */
-function startNativeProviderLifecycle(root: string) {
-  if (process.env.M9R_LOCAL_ONLY === "1" || process.env.M9R_TEST_DISABLE_PROVIDER_UPDATE_MONITOR === "1") return undefined;
-  return startProviderUpdateMonitor({
-    root,
-    probe: probeVersion,
-    actions: createProviderNeutralUpdateActions({
-      env: process.env,
-      execPath: process.execPath,
-      platform: process.platform,
-      refreshProviderConfig: refreshProviderConfigAfterUpdate,
-      reconcileProviderSession: ({ providerId }) => reconcileProviderSessions({
-        root,
-        providerId,
-        env: process.env,
-      }),
-    }),
-    reconcileOnStart: true,
-    onError: (error) => {
-      process.stderr.write(`[provider-update] compatibility cycle deferred: ${error instanceof Error ? error.message : String(error)}\n`);
-    },
-  });
 }
 
 async function probeWebAgentVersion(binary: string): Promise<string | null> {
@@ -1302,24 +1270,19 @@ const argv = process.argv.slice(2);
 async function runVendorLaunch(args: string[]): Promise<number> {
   const vendorValue = args[0];
   if (vendorValue !== "claude" && vendorValue !== "codex") {
-    process.stderr.write("Usage: m9r launch <claude|codex> [--profile web-only|hands] [--resume <claude-session-id>] [--allow-api-key]\n");
+    process.stderr.write("Usage: m9r launch <claude|codex> [--profile web-only|hands] [--allow-api-key]\n");
     return 2;
   }
   const vendor: M9rLaunchVendor = vendorValue;
   let profile: M9rLaunchProfile = "web-only";
   let allowApiKey = false;
-  let resumeSessionId: string | undefined;
   for (let i = 1; i < args.length; i += 1) {
     if (args[i] === "--allow-api-key") allowApiKey = true;
-    else if (args[i] === "--resume" && vendor === "claude" && args[i + 1]) {
-      resumeSessionId = args[i + 1];
-      i += 1;
-    }
     else if (args[i] === "--profile" && (args[i + 1] === "web-only" || args[i + 1] === "hands")) {
       profile = args[i + 1] as M9rLaunchProfile;
       i += 1;
     } else {
-      process.stderr.write("Usage: m9r launch <claude|codex> [--profile web-only|hands] [--resume <claude-session-id>] [--allow-api-key]\n");
+      process.stderr.write("Usage: m9r launch <claude|codex> [--profile web-only|hands] [--allow-api-key]\n");
       return 2;
     }
   }
@@ -1351,7 +1314,6 @@ async function runVendorLaunch(args: string[]): Promise<number> {
     const plan = buildVendorLaunchPlan({
       vendor, profile, cwd: process.cwd(), mcpConfigPath: join(tempDir, "mcp.json"), promptFile: join(tempDir, "m9r-system-prompt.txt"),
       mcpCommand: process.execPath, mcpArgs, mcpEnv, sessionToken: identity.token,
-      resumeSessionId,
     });
     if (plan.mcpConfigJson) await writeFile(join(tempDir, "mcp.json"), plan.mcpConfigJson, "utf8");
     if (plan.promptFileContent) await writeFile(join(tempDir, "m9r-system-prompt.txt"), plan.promptFileContent, "utf8");
@@ -1531,110 +1493,6 @@ function webOpenCodeHookInvocation(
     ...(awaitableExists(sourceHookPath) ? { sourceHookPath, sourceNodeArgs: process.execArgv } : {}),
     event,
   });
-}
-
-/**
- * Reconcile only M9R-owned OpenCode schema drift after a provider update.
- *
- * The provider-update layer remains provider-neutral: this callback is an
- * adapter behind that boundary. It never touches credentials, model state, or
- * unrelated user config. It only runs when the current config visibly contains
- * M9R's own route and identity plugin, then migrates those owned entries to
- * the config spelling required by the observed OpenCode version.
- */
-async function refreshProviderConfigAfterUpdate(input: ProviderConfigRefreshInput): Promise<void> {
-  if (input.providerId !== "opencode") return;
-  const home = homeDirectory();
-  const paths = resolveOpenCodeGlobalPaths({
-    home,
-    xdgConfigHome: process.env.XDG_CONFIG_HOME,
-    appData: process.env.APPDATA,
-    exists: awaitableExists,
-  });
-  const configPaths = paths.configPaths;
-  const pluginPath = join(paths.pluginDirectory, OPENCODE_IDENTITY_PLUGIN_FILENAME);
-  let hasIdentityPlugin = await canRead(pluginPath);
-  const runtime = webMcpRuntime();
-  let pluginReconciled = false;
-  for (const configPath of configPaths) {
-    const currentBytes = await readOptional(configPath);
-    if (!currentBytes) continue;
-    const before = currentBytes.toString("utf8");
-    // Do not adopt or rewrite an arbitrary OpenCode config. M9R must be
-    // visibly present in its own route plus either its home marker, a known
-    // M9R executable, or its identity plugin before this adapter may mutate
-    // the file. This also recognizes older M9R configs that predate the
-    // provider environment marker.
-    const hasM9rRoute = /["']m9r["']\s*:/iu.test(before);
-    const isM9rOwned = hasM9rRoute && (
-      /M9R_HOME/iu.test(before)
-      || /m9r-(?:engine|hook)(?:\.exe|\.js)?/iu.test(before)
-      || /m9r-identity\.js/iu.test(before)
-    );
-    if (!isM9rOwned) continue;
-
-    if (!pluginReconciled) {
-      const desiredPlugin = buildOpenCodeIdentityPluginSource(
-        webOpenCodeHookInvocation(runtime, "SessionStart"),
-        webOpenCodeHookInvocation(runtime, "UserPromptSubmit"),
-        webOpenCodeHookInvocation(runtime, "OpenCodePoll"),
-        webOpenCodeHookInvocation(runtime, "OpenCodeDelivered"),
-        webOpenCodeHookInvocation(runtime, "OpenCodeDeliveryFailed"),
-        webOpenCodeHookInvocation(runtime, "OpenCodeExecutionFailed"),
-        webOpenCodeHookInvocation(runtime, "ProviderTurnEnd"),
-      );
-      const storeRoot = defaultStoreRoot(home, process.env);
-      // The native install manifest is authoritative once it exists. The web
-      // manifest is a legacy fallback only for installations that predate the
-      // native manifest; consulting both when the native manifest is present
-      // would let stale ownership resurrect an old plugin hash.
-      const nativeManifestPath = join(storeRoot, "install-manifest.json");
-      const ownershipManifestPaths = await canRead(nativeManifestPath)
-        ? [nativeManifestPath]
-        : [join(storeRoot, WEB_SETUP_MANIFEST)];
-      let refreshedAction: string = "not-managed";
-      for (const manifestPath of ownershipManifestPaths) {
-        const refreshed = await refreshManagedOpenCodeIdentityPlugin({
-          manifestPath,
-          pluginPath,
-          desiredContent: desiredPlugin,
-        }, {
-          readFile: async (path) => await readOptional(path),
-          writeAtomic: writeManagedAtomic,
-          removeFile: async (path) => { await unlink(path).catch(() => undefined); },
-        });
-        refreshedAction = refreshed.action;
-        if (refreshed.action !== "not-managed") break;
-      }
-      if (refreshedAction === "preserve" || refreshedAction === "path-changed") {
-        throw new Error(`M9R OpenCode identity plugin changed outside its recorded ownership (${refreshedAction}); provider reconciliation stopped without overwriting it`);
-      }
-      pluginReconciled = true;
-      hasIdentityPlugin = await canRead(pluginPath);
-    }
-
-    const hasIdentityEntry = before.includes(OPENCODE_IDENTITY_PLUGIN_CONFIG_ENTRY);
-    if (hasIdentityEntry && !hasIdentityPlugin) {
-      throw new Error(`M9R OpenCode identity plugin is referenced but missing at ${pluginPath}`);
-    }
-
-    const merged = mergeOpenCodeWebMcp(before, webOpenCodeLayout(input.current.versionLine), {
-      command: runtime.command,
-      args: runtime.args,
-      m9rHome: defaultStoreRoot(home, process.env),
-      brokerPort: Number(process.env.M9R_WEB_BROKER_PORT) || DEFAULT_BROKER_PORT,
-    }, hasIdentityPlugin);
-    if (merged === before) continue;
-
-    // Re-read immediately before the atomic replacement. A user/provider
-    // setup change racing this repair is preserved and retried on the next
-    // cycle rather than being overwritten by M9R.
-    const latest = await readOptional(configPath);
-    if (!latest || latest.toString("utf8") !== before) {
-      throw new Error(`OpenCode config changed during provider reconciliation (${configPath}); no config was overwritten`);
-    }
-    await writeManagedAtomic(configPath, merged);
-  }
 }
 
 function awaitableExists(path: string): boolean {
@@ -2428,6 +2286,10 @@ async function copyWebExtensionPath(path: string): Promise<boolean> {
 }
 
 async function runWebExtensionUpdate(args: string[]): Promise<number> {
+  process.stderr.write("The legacy M9R browser-extension transport is retired. Desktop work is owned by the local M9R broker; no extension update is performed.\n");
+  return 2;
+  /* istanbul ignore next -- retained below only as historical migration code. */
+  /*
   if (platform() !== "win32") { process.stderr.write("M9R Web extension refresh currently supports Windows 10/11 only.\n"); return 2; }
   try {
     const home = homeDirectory();
@@ -2603,9 +2465,14 @@ async function runWebExtensionUpdate(args: string[]): Promise<number> {
     process.stderr.write(`M9R Web extension refresh failed: ${error instanceof Error ? error.message : "unknown error"}. No secret values were displayed.\n`);
     return 1;
   }
+  */
 }
 
 async function runWebSetup(args: string[]): Promise<number> {
+  if (!args.includes("--broker-only")) {
+    process.stderr.write("The legacy M9R Web/provider-hook setup is retired. Use the broker-owned desktop runtime; no provider hooks, session plugins, or browser extension transport will be installed.\n");
+    return 2;
+  }
   if (platform() !== "win32") { process.stderr.write("M9R Web setup currently supports Windows 10/11 only.\n"); return 2; }
   if (args.includes("--broker-only")) {
     // The standalone engine has no JavaScript CLI entry to persist. Reuse the

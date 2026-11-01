@@ -177,7 +177,7 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
         }
     } finally { $archive.Dispose() }
     [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
-    foreach ($name in @('m9r-engine.exe', 'm9r-hook.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt')) {
+    foreach ($name in @('m9r-engine.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Destination $name) -PathType Leaf)) {
             throw "The release package is incomplete; '$name' is missing."
         }
@@ -662,14 +662,13 @@ try {
     Write-Host ''
     Write-Host 'M9R FIRST-RUN CONSENT' -ForegroundColor Cyan
     Write-Host 'The verified package contains unsigned Windows executables. SHA-256 checks integrity, not publisher identity. No administrator access is requested.'
-    Write-Host 'If you continue, M9R will install its engine, desktop pill, hook helper, browser native-input helper, and standalone Web broker in your user profile, add managed M9R instructions/hooks to supported local agent configuration, and back up files before changing them.'
+    Write-Host 'If you continue, M9R will install its engine, desktop pill, browser native-input helper, and standalone Web broker in your user profile. M9R owns provider processes through the broker; no provider hooks or provider-session integrations are installed.'
     if ($NoAutostart) {
         Write-Host "M9R will not be added to this Windows user's sign-in startup list."
     } else {
         Write-Host 'M9R will start the desktop pill when this Windows user signs in. Pass -NoAutostart to skip this.'
     }
-    Write-Host 'The local engine watches supported local agent session files to detect session status and explicit @agent mentions. This local setup does not upload those files or require an M9R account. Cloud connections are separate.'
-    Write-Host 'Codex may show its own /hooks trust screen later; that provider-controlled trust step remains yours to accept or decline.'
+    Write-Host 'The broker starts and supervises the configured provider processes directly. Provider applications are not used as M9R lifecycle hooks, and no provider session is resumed or connected.'
     Write-Host ''
     Write-Host 'Exact setup plan from the engine:' -ForegroundColor Cyan
     $engine = Join-Path $payload 'm9r-engine.exe'
@@ -750,9 +749,8 @@ try {
     Install-ManagedWebBroker $packageBroker
     Restore-ManagedBrokerAutoStart $brokerTaskState
     Write-Host ''
-    Write-Host 'M9R setup finished. Start a new supported agent session to activate its hooks.' -ForegroundColor Green
+    Write-Host 'M9R setup finished. The broker-owned provider processes are ready.' -ForegroundColor Green
     Write-Host "To undo the managed setup later: `"$installedEngine`" uninstall"
-    Write-Host 'Codex hook trust remains optional and is handled by Codex itself.'
     if ($Web) {
         $extensionPackage = Join-Path $payload 'extension'
         if (-not (Test-Path -LiteralPath (Join-Path $extensionPackage 'manifest.json') -PathType Leaf)) {

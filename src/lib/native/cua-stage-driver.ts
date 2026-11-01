@@ -548,7 +548,10 @@ function agentCursorDetails(identity: CuaAgentCursorIdentity): AgentCursorSessio
     // Cua renders the session label on the native cursor. Keep the provider
     // name recognizable while adding a short stable identity suffix so two
     // concurrent cursors never collapse into one visible label.
-    session: `@${handle}-${sessionTag}`.slice(0, PUBLIC_CURSOR_LABEL_MAX_LENGTH),
+    // Cua's `session` field is the text rendered beside the visible cursor.
+    // Keep the authorization/session digest internal to M9R; exposing it made
+    // the UI look like a provider session and leaked an implementation ID.
+    session: publicCursorLabel(handle).slice(0, PUBLIC_CURSOR_LABEL_MAX_LENGTH),
     sessionTag,
   };
 }

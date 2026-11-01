@@ -1,7 +1,6 @@
-// Build the self-contained M9R engine: one executable that runs with no Node on the machine.
-//
-// Node's single-executable feature bakes a bundled program into a copy of the node binary. The one program serves both
-// jobs: `m9r-engine m9r-hook <Event> <provider>` is what agents run per prompt, anything else is the CLI (`feed --watch`, ...).
+// Build the self-contained M9R runtime: one executable for CLI/MCP and one
+// separately supervised broker executable. Provider lifecycle hooks are not
+// packaged; the broker owns provider processes directly.
 // Run `npm run build:cli` first; this bundles cli/dist. Output: engine/dist/m9r-engine.exe (or no extension off Windows).
 
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
@@ -100,7 +99,7 @@ function isHeldLocalProvenancePath(path) {
 
 if (!existsSync(join(cliOutput, "m9r.js")) || !existsSync(brokerBundle)) throw new Error(`CLI build output is missing: ${cliOutput}. Run npm run build:cli first or set M9R_CLI_OUTPUT_DIR to its completed output.`);
 rmSync(work, { recursive: true, force: true });
-for (const name of [exeName, brokerExeName, process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native", ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "m9r-overlay.exe"] : [])]) {
+for (const name of [exeName, brokerExeName, ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "m9r-overlay.exe"] : [])]) {
   rmSync(join(out, name), { force: true });
 }
 const postjectCli = join(root, "node_modules", "postject", "dist", "cli.js");
@@ -164,7 +163,6 @@ function sourceProvenance() {
 }
 
 // The dispatcher: SEA argv is [exe, exe, ...args]; shift so both programs see the argv they were written for.
-const hookJs = join(cliOutput, "m9r-hook.js").split(String.fromCharCode(92)).join("/");
 const mcpJs = join(cliOutput, "m9r-mcp.js").split(String.fromCharCode(92)).join("/");
 const devMcpJs = join(cliOutput, "dev-mcp-server.js").split(String.fromCharCode(92)).join("/");
 const cliJs = join(cliOutput, "m9r.js").split(String.fromCharCode(92)).join("/");
@@ -172,11 +170,15 @@ const entry = join(work, "entry.mjs");
 try {
 writeFileSync(entry, `
 const args = process.argv.slice(2);
-const isHook = args[0] === "m9r-hook" || args[0] === "hook";
-const isMcp = !isHook && args[0] === "mcp";
-const isDevMcp = !isHook && !isMcp && args[0] === "dev-mcp-server";
-process.argv = [process.argv[0], process.argv[0], ...(isHook || isMcp || isDevMcp ? args.slice(1) : args)];
-(isHook ? import(${JSON.stringify(hookJs)}) : isMcp ? import(${JSON.stringify(mcpJs)}) : isDevMcp ? import(${JSON.stringify(devMcpJs)}) : import(${JSON.stringify(cliJs)})).catch((e) => { if (!isHook) console.error(e); process.exit(isHook ? 0 : 1); });
+const isLegacyHook = args[0] === "m9r-hook" || args[0] === "hook";
+const isMcp = !isLegacyHook && args[0] === "mcp";
+const isDevMcp = !isLegacyHook && !isMcp && args[0] === "dev-mcp-server";
+if (isLegacyHook) {
+  console.error("The legacy provider hook path has been removed. Start the M9R-owned broker instead.");
+  process.exit(2);
+}
+process.argv = [process.argv[0], process.argv[0], ...(isMcp || isDevMcp ? args.slice(1) : args)];
+(isMcp ? import(${JSON.stringify(mcpJs)}) : isDevMcp ? import(${JSON.stringify(devMcpJs)}) : import(${JSON.stringify(cliJs)})).catch((e) => { console.error(e); process.exit(1); });
 `);
 
 const bundleResult = await build({
@@ -212,15 +214,10 @@ const exe = join(out, exeName);
 buildSeaExecutable(stableEngineBundle, exe, "engine");
 const brokerExe = join(out, brokerExeName);
 buildSeaExecutable(brokerBundle, brokerExe, "web-broker");
-// The small native hook (hook/): agents run this, not the big engine, so a cold start can never hit their hook time limit.
 const cargoEnv = { ...process.env, PATH: `${process.env.PATH}${process.platform === "win32" ? ";" : ":"}${join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".cargo", "bin")}` };
-let r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "hook"), env: cargoEnv, stdio: "inherit" });
-if (r.error || r.status !== 0) throw new Error("The native hook build failed.", { cause: r.error });
-const shimName = process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook-native";
-copyFileSync(join(root, "hook", "target", "release", process.platform === "win32" ? "m9r-hook.exe" : "m9r-hook"), join(out, shimName));
 // The visible-tab click path must use trusted OS input. Ship its Windows-only Native Messaging host beside the engine.
 if (process.platform === "win32") {
-  r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "native-input-host"), env: cargoEnv, stdio: "inherit" });
+  const r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "native-input-host"), env: cargoEnv, stdio: "inherit" });
   if (r.error || r.status !== 0) throw new Error("The native input host build failed.", { cause: r.error });
   copyFileSync(join(root, "native-input-host", "target", "release", "m9r-native-input-host.exe"), join(out, "m9r-native-input-host.exe"));
 

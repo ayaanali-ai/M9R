@@ -13,7 +13,7 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
@@ -84,8 +84,6 @@ impl HoldToTalkState {
 }
 
 /// The engine child the overlay started, so quitting the overlay stops it too.
-static ENGINE: Mutex<Option<Child>> = Mutex::new(None);
-static ENGINE_STOPPING: AtomicBool = AtomicBool::new(false);
 static BROKER_WATCHDOG_STOPPING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) const PILL: &str = "pill";
@@ -506,62 +504,6 @@ fn find_engine() -> Option<PathBuf> {
     }
     candidates.push(m9r_home().join("bin").join(name));
     candidates.into_iter().find(|p| p.is_file())
-}
-
-/// Keeps `m9r-engine feed --watch` running so the pill always has fresh data. The engine refuses to start when another
-/// writer already holds the feed lock, so a second copy exits at once; a fast exit therefore backs off instead of respawning.
-/// Off when `M9R_FEED` points somewhere else (the mock feed and tests own that file).
-fn spawn_engine_supervisor() {
-    if std::env::var("M9R_FEED").is_ok() || std::env::var("M9R_NO_ENGINE").is_ok() {
-        return;
-    }
-    ENGINE_STOPPING.store(false, Ordering::SeqCst);
-    std::thread::spawn(|| loop {
-        if ENGINE_STOPPING.load(Ordering::SeqCst) {
-            return;
-        }
-        let mut wait = Duration::from_secs(5);
-        if let Some(engine) = find_engine() {
-            let mut cmd = Command::new(engine);
-            cmd.args(["feed", "--watch", "--serve-hooks"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-            }
-            let started = Instant::now();
-            if let Ok(child) = cmd.spawn() {
-                *ENGINE.lock().unwrap() = Some(child);
-                loop {
-                    if ENGINE_STOPPING.load(Ordering::SeqCst) {
-                        if let Some(mut child) = ENGINE.lock().unwrap().take() {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                        }
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_secs(2));
-                    let mut guard = ENGINE.lock().unwrap();
-                    match guard.as_mut().map(|c| c.try_wait()) {
-                        Some(Ok(None)) => continue,
-                        _ => {
-                            *guard = None;
-                            break;
-                        }
-                    }
-                }
-                if started.elapsed() < Duration::from_secs(3) {
-                    wait = Duration::from_secs(30);
-                }
-            }
-        } else {
-            wait = Duration::from_secs(30);
-        }
-        if ENGINE_STOPPING.load(Ordering::SeqCst) {
-            return;
-        }
-        std::thread::sleep(wait);
-    });
 }
 
 /// Port the resident web broker listens on; must match `DEFAULT_BROKER_PORT` in
@@ -1215,11 +1157,6 @@ fn show_workspace(app: &AppHandle) {
 }
 
 fn stop_engine() {
-    ENGINE_STOPPING.store(true, Ordering::SeqCst);
-    if let Some(mut child) = ENGINE.lock().unwrap().take() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
     BROKER_WATCHDOG_STOPPING.store(true, Ordering::SeqCst);
 }
 
@@ -1394,7 +1331,6 @@ fn main() {
 
             spawn_heartbeat(app.handle().clone());
             spawn_feed_watcher(app.handle().clone());
-            spawn_engine_supervisor();
             spawn_broker_watchdog();
             spawn_fullscreen_watcher(app.handle().clone());
             // Best effort: if something else already holds this chord, the tray menu's "Show / hide" still works.

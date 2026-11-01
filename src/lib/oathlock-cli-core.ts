@@ -113,7 +113,6 @@ export interface CliDeps {
   /** Remove only the broker task owned by the native installation. */
   removeLocalBrokerAutostart?(): Promise<{ ok: boolean; message: string }>;
   /** Starts the existing provider lifecycle monitor when the native feed owns its writer lock. */
-  startProviderLifecycle?(root: string): { stop(): Promise<void> } | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -3442,7 +3441,6 @@ function nativeIo(deps: CliDeps): NativeIo {
     out: (l) => deps.out(l),
     err: (l) => deps.err(l),
     confirm: deps.confirm,
-    startProviderLifecycle: deps.startProviderLifecycle,
     installLocalBrokerAutostart: deps.installLocalBrokerAutostart,
     removeLocalBrokerAutostart: deps.removeLocalBrokerAutostart,
   };

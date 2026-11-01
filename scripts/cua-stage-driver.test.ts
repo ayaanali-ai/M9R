@@ -718,9 +718,8 @@ test("shows a distinct agent label on each native cursor and configures adaptive
 
   const sessions = calls.filter((call) => call.method === "startSession").map((call) => (call.value as { session: string }).session);
   assert.equal(new Set(sessions).size, 2, "each verified agent session gets a separate Cua overlay identity");
-  assert.match(sessions[0]!, /^@codex-[0-9a-f]{8}$/);
-  assert.match(sessions[1]!, /^@claude-code-[0-9a-f]{8}$/);
-  assert.ok(sessions.every((session) => session.length <= 28), "the complete identity and suffix fit Cua's visible badge limit");
+  assert.deepEqual(sessions, ["Codex", "Claude"], "the visible Cua label contains only the provider name; internal session identity stays private");
+  assert.ok(sessions.every((session) => session.length <= 28), "the provider label fits Cua's visible badge limit");
   const motion = calls.filter((call) => call.method === "setAgentCursorMotion").map((call) => call.value as Record<string, unknown>);
   assert.deepEqual(motion.map(({ session, style, timing, effects, dwellAfterClickMs, idleHideMs }) => ({
     session, style, timing, effects, dwellAfterClickMs, idleHideMs,

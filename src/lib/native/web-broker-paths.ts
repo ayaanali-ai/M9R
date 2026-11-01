@@ -1,8 +1,17 @@
 import { join } from "node:path";
 import { userInfo } from "node:os";
-import { rootTag } from "./hook-server";
 
 export const DEFAULT_BROKER_PORT = 47821;
+
+/** Stable per-M9R-home suffix for the owner named pipe. Kept here so the
+ * broker path has no dependency on the retired provider-hook server. */
+export function rootTag(root: string): string {
+  let norm = root.replaceAll("/", "\\").toLowerCase();
+  while (norm.endsWith("\\")) norm = norm.slice(0, -1);
+  let hash = 0x811c9dc5;
+  for (const byte of Buffer.from(norm, "utf8")) { hash ^= byte; hash = Math.imul(hash, 0x01000193) >>> 0; }
+  return hash.toString(16).padStart(8, "0");
+}
 
 export function brokerKeyPath(root: string): string {
   return join(root, "web-broker.key");

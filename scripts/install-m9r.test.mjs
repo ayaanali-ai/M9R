@@ -23,7 +23,7 @@ const releasePackager = resolve("scripts/package-engine-release.ps1");
 const engineBuilder = resolve("scripts/build-engine.mjs");
 const powershell = process.env.M9R_TEST_PWSH ?? "pwsh";
 const canRunNativeInstaller = process.platform === "win32"
-  && ["m9r-engine.exe", "m9r-hook.exe", "m9r-native-input-host.exe", "m9r-web-broker.exe"].every((name) => existsSync(join(engineDist, name)))
+  && ["m9r-engine.exe", "m9r-native-input-host.exe", "m9r-web-broker.exe"].every((name) => existsSync(join(engineDist, name)))
   && existsSync(join(engineDist, "m9r-overlay.exe"))
   && existsSync(join(engineDist, "m9r-build-info.json"));
 const skipNative = canRunNativeInstaller ? false : "Windows engine binaries are required (CI builds them first).";
@@ -262,7 +262,7 @@ test("standalone package consent, setup, integrity, and uninstall paths", { skip
     assert.match(installed.stdout, /Exact setup plan from the engine/);
     assert.match(installed.stdout, /m9r-engine uninstall/);
     assert.ok(existsSync(join(profile.m9rHome, "bin", "m9r-engine.exe")));
-    assert.ok(existsSync(join(profile.m9rHome, "bin", "m9r-hook.exe")));
+    assert.equal(existsSync(join(profile.m9rHome, "bin", "m9r-hook.exe")), false, "the retired provider hook binary must never be installed");
     assert.ok(existsSync(join(profile.m9rHome, "bin", "m9r-native-input-host.exe")));
     assert.ok(existsSync(join(profile.m9rHome, "bin", "m9r-build-info.json")));
     const installedOverlay = join(profile.m9rHome, "bin", "m9r-overlay.exe");
