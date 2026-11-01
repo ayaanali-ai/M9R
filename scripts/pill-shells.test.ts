@@ -59,7 +59,7 @@ test("a live model catalog in ui-state reaches State.models through fromUiState,
   assert.deepEqual(snap.models?.agents.map((a) => [a.handle, a.availability, a.models.length]), [["claude", "available", 1]]);
 
   const applied = State.apply({ agents: [], approvals: [], thread: [], models: snap.models });
-  assert.deepEqual(applied, { newApprovals: [], newReplies: [] });
+  assert.deepEqual(applied, { newApprovals: [], newReplies: [], newFinished: [] });
   assert.equal(State.models?.agents[0]?.handle, "claude", "State.models is what the settings view reads to build the picker rows");
   assert.equal(State.models?.agents[0]?.models[0]?.id, "opus");
 });
