@@ -717,7 +717,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       if (named) {
         for (const p of broker?.pendingApprovals() ?? []) if (p.actor === named) broker?.decideApproval(p.id, "deny");
         sessions?.stop(named);
-        system(`Paused @${named}. Its provider conversation is preserved; send the next instruction to continue or redirect it.`, named);
+        system(`Paused @${named}. M9R's task state is kept; send the next instruction to continue or redirect it.`, named);
         return;
       }
       // Stop pauses provider turns, and any action that was still waiting for
@@ -725,7 +725,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       for (const p of broker?.pendingApprovals() ?? []) broker?.decideApproval(p.id, "deny");
       if (sessions?.pauseAll) sessions.pauseAll();
       else sessions?.stopAll();
-      system(`Paused ${known.join(", ")} and withdrew anything waiting for approval. Their provider conversations are preserved; message any of them to continue or redirect.`);
+      system(`Paused ${known.join(", ")} and withdrew anything waiting for approval. M9R's task state is kept; message any of them to continue or redirect.`);
       return;
     }
     broker?.noteOwnerUrls?.(message.text);
@@ -790,7 +790,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
         sessions.stop(message.agent);
         doing.delete(message.agent);
         blocked.delete(message.agent);
-        system(`Paused @${message.agent}. Its provider conversation is preserved; send the next instruction to continue or redirect it.`, message.agent);
+        system(`Paused @${message.agent}. M9R's task state is kept; send the next instruction to continue or redirect it.`, message.agent);
         return true;
       case "ui-save-note": {
         const saved = options.saveNote ? options.saveNote(redactSecrets(message.text)) : { ok: false, error: "memory is not available here" };
@@ -813,7 +813,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
         else sessions?.stopAll();
         doing.clear();
         blocked.clear();
-        system("Paused all agents and withdrew anything waiting for approval. Their provider conversations are preserved.");
+        system("Paused all agents and withdrew anything waiting for approval. M9R's task state is kept.");
         return true;
     }
   }
