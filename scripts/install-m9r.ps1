@@ -554,11 +554,15 @@ function Suspend-ManagedBrokerAutoStart {
     # the prior state so a failed install restores it exactly.
     $task = Get-ScheduledTask -TaskName 'M9R Web Broker' -ErrorAction SilentlyContinue
     if (-not $task) { return $null }
-    $wasEnabled = $task.State -ne 'Disabled'
+    # Task Scheduler reports a task with a currently running instance as
+    # `Running` even after its trigger has been disabled. Use the persisted
+    # Settings.Enabled flag for the enablement contract; otherwise a running
+    # broker makes the protected-copy guard reject every legitimate update.
+    $wasEnabled = $task.Settings.Enabled -ne $false
     if ($wasEnabled) {
         Disable-ScheduledTask -TaskName 'M9R Web Broker' -ErrorAction Stop | Out-Null
         $after = Get-ScheduledTask -TaskName 'M9R Web Broker' -ErrorAction Stop
-        if ($after.State -ne 'Disabled') { throw 'M9R Web Broker could not be disabled for the protected runtime copy.' }
+        if ($after.Settings.Enabled -ne $false) { throw 'M9R Web Broker could not be disabled for the protected runtime copy.' }
     }
     return [pscustomobject]@{ WasEnabled = $wasEnabled; Restored = $false }
 }
@@ -568,7 +572,7 @@ function Restore-ManagedBrokerAutoStart($State) {
     if ($State.WasEnabled) {
         Enable-ScheduledTask -TaskName 'M9R Web Broker' -ErrorAction Stop | Out-Null
         $after = Get-ScheduledTask -TaskName 'M9R Web Broker' -ErrorAction Stop
-        if ($after.State -eq 'Disabled') { throw 'M9R Web Broker remained disabled after the protected runtime copy.' }
+        if ($after.Settings.Enabled -eq $false) { throw 'M9R Web Broker remained disabled after the protected runtime copy.' }
     }
     $State.Restored = $true
 }
