@@ -30,6 +30,7 @@ import { isUiMessage, type UiState, type WebUiBridge } from "./web-ui-bridge";
 import { canQueue } from "./codex-delivery-core";
 import { MAX_AGENT_REPLY_DEPTH } from "./inbox-core";
 import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, type ProtocolMessageType } from "../../../packages/web-protocol-placeholder/src/index";
+import type { MultiplayerA2ASendInput, MultiplayerRuntime } from "./multiplayer-runtime";
 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_EXTENSION_MESSAGE_BYTES = 256 * 1024;
@@ -210,6 +211,8 @@ export interface WebBrokerServerOptions {
   onAgentTaskCreated?: (token: string, taskId: string) => void | Promise<void>;
   /** Deliver an eligible owner-created native task through the resident provider-session owner. Owner-pipe only. */
   deliverOwnerTask?: (taskId: string) => unknown | Promise<unknown>;
+  /** Structured multiplayer runtime shared by the authenticated MCP and owner broker. */
+  multiplayerRuntime?: MultiplayerRuntime;
   /**
    * One owner-broker mutation fence shared by browser and desktop dispatch.
    * Optional so existing brokers/tests keep their current serialization.
@@ -217,7 +220,22 @@ export interface WebBrokerServerOptions {
   mutationFence?: MultiplayerDispatchFence;
 }
 
-type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string; taskId?: string; created?: boolean; taskIds?: string[]; alreadyRecorded?: boolean } };
+type AgentMcpStoreResult = {
+  status: number;
+  body: {
+    ok: boolean;
+    error?: string;
+    taskId?: string;
+    created?: boolean;
+    taskIds?: string[];
+    alreadyRecorded?: boolean;
+    /** Structured A2A response fields are returned intact to the provider MCP client. */
+    messageId?: string;
+    duplicate?: boolean;
+    message?: unknown;
+    recipientAgentIds?: string[];
+  };
+};
 
 /**
  * Apply only the narrowly scoped durable MCP mutations needed by agent messaging. The
@@ -228,6 +246,7 @@ type AgentMcpStoreResult = { status: number; body: { ok: boolean; error?: string
 export function applyAgentMcpStoreMutation(
   store: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">,
   input: unknown,
+  multiplayerRuntime?: MultiplayerRuntime,
 ): AgentMcpStoreResult {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { status: 400, body: { ok: false, error: "request body must be an object" } };
   const value = input as Record<string, unknown>;
@@ -241,6 +260,44 @@ export function applyAgentMcpStoreMutation(
   const inboxHandle = inRoom ? `web-${ownHandle}` : ownHandle;
 
   try {
+    if (value.action === "a2a") {
+      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "to", "summary", "kind", "priority", "taskId", "conversationId", "details", "idempotencyKey", "replyToMessageId", "supersedesMessageId", "progressFingerprint", "progressKind", "replyDepth"].includes(key))
+        || typeof value.to !== "string" || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 280
+        || (value.taskId !== undefined && (typeof value.taskId !== "string" || value.taskId.length > 128))
+        || (value.conversationId !== undefined && (typeof value.conversationId !== "string" || value.conversationId.length > 128))
+        || (value.kind !== undefined && typeof value.kind !== "string") || (value.priority !== undefined && typeof value.priority !== "string")
+        || (value.replyDepth !== undefined && (!Number.isSafeInteger(value.replyDepth) || (value.replyDepth as number) < 0 || (value.replyDepth as number) > MAX_AGENT_REPLY_DEPTH))) {
+        return { status: 400, body: { ok: false, error: "Invalid structured M9R teammate message." } };
+      }
+      const result = multiplayerRuntime.send(identity, {
+        to: value.to,
+        summary: value.summary,
+        ...(value.kind ? { kind: value.kind as MultiplayerA2ASendInput["kind"] } : {}),
+        ...(value.priority ? { priority: value.priority as MultiplayerA2ASendInput["priority"] } : {}),
+        ...(typeof value.taskId === "string" ? { taskId: value.taskId } : {}),
+        ...(typeof value.conversationId === "string" ? { conversationId: value.conversationId } : {}),
+        ...(value.details && typeof value.details === "object" && !Array.isArray(value.details) ? { details: value.details as MultiplayerA2ASendInput["details"] } : {}),
+        ...(typeof value.idempotencyKey === "string" ? { idempotencyKey: value.idempotencyKey } : {}),
+        ...(typeof value.replyToMessageId === "string" ? { replyToMessageId: value.replyToMessageId } : {}),
+        ...(typeof value.supersedesMessageId === "string" ? { supersedesMessageId: value.supersedesMessageId } : {}),
+        ...(typeof value.progressFingerprint === "string" ? { progressFingerprint: value.progressFingerprint } : {}),
+        ...(typeof value.progressKind === "string" ? { progressKind: value.progressKind as MultiplayerA2ASendInput["progressKind"] } : {}),
+        ...(value.replyDepth === undefined ? {} : { replyDepth: value.replyDepth as number }),
+      });
+      if (!result.ok) return { status: 409, body: { ok: false, error: result.error } };
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          taskId: result.message.messageId,
+          created: !result.duplicate,
+          messageId: result.message.messageId,
+          duplicate: result.duplicate,
+          message: result.message,
+          recipientAgentIds: [...result.recipientAgentIds],
+        },
+      };
+    }
     if (value.action === "send") {
       if (Object.keys(value).some((key) => !["action", "token", "to", "goal"].includes(key))
         || typeof value.to !== "string" || typeof value.goal !== "string" || value.goal.trim().length < 1 || value.goal.length > 4_000) {
@@ -718,7 +775,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       if (request.method === "POST" && ownerOnlyPaths.has(request.path)) return handleOwnerRequest(request);
       if (request.method === "POST" && request.path === "/web/mcp/store") {
         if (!options.agentMcpStore) return { ok: false, error: "Owner-brokered M9R task state writes are unavailable." };
-        const result = applyAgentMcpStoreMutation(options.agentMcpStore, request.body);
+        const result = applyAgentMcpStoreMutation(options.agentMcpStore, request.body, options.multiplayerRuntime);
         const body = request.body && typeof request.body === "object" ? request.body as Record<string, unknown> : undefined;
         if (result.body.ok && result.body.created === true && typeof result.body.taskId === "string"
           && body?.action === "send" && typeof body.token === "string") {
@@ -789,6 +846,9 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         return;
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/feed") return reply(res, 200, broker.feedSnapshot());
+      if (req.method === "GET" && requestUrl.pathname === "/web/multiplayer") {
+        return reply(res, 200, options.multiplayerRuntime?.snapshot() ?? { roster: { runId: "unavailable", agents: [] }, a2a: [], tasks: [], run: { runId: "unavailable", stopped: false, canceledAgentIds: [], canceledBranchIds: [], actions: [] } });
+      }
       if (req.method === "GET" && requestUrl.pathname === "/web/protocol") {
         return reply(res, 200, { protocol: "m9r-web/0", messages: protocolLedger.snapshot() });
       }

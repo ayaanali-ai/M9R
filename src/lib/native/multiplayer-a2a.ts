@@ -1,5 +1,6 @@
 import {
   parseA2AMessage,
+  type A2AProgressKind,
   type A2AMessage,
   type MultiplayerRoster,
 } from "./multiplayer-contract";
@@ -36,6 +37,17 @@ export interface MultiplayerA2ARouter {
   historyFor(agentId: string): readonly A2AMessage[];
   /** Read all recent accepted messages in delivery order. */
   history(): readonly A2AMessage[];
+  /** Read the latest progress-bearing sidecar events for a task room. */
+  progressFor(taskId: string, agentId?: string): readonly A2AProgressRecord[];
+}
+
+export interface A2AProgressRecord {
+  readonly taskId: string;
+  readonly agentId: string;
+  readonly messageId: string;
+  readonly progressFingerprint: string;
+  readonly progressKind?: A2AProgressKind;
+  readonly at: number;
 }
 
 type StoredMessage = {
@@ -49,6 +61,17 @@ function canonicalize(value: unknown): string {
     return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${canonicalize((value as Record<string, unknown>)[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+/**
+ * Retry identity is content identity, not transport-clock identity. A provider
+ * may recreate the same idempotent message a few milliseconds later after a
+ * lost owner-pipe response; the new `createdAt` must not turn that retry into
+ * a conflicting message while all actionable fields remain identical.
+ */
+function messageFingerprint(message: A2AMessage): string {
+  const { createdAt: _createdAt, ...retryStableMessage } = message;
+  return canonicalize(retryStableMessage);
 }
 
 function routeRecipients(message: A2AMessage): readonly string[] {
@@ -117,7 +140,7 @@ export function createMultiplayerA2ARouter(
         return resultError("A2A message has expired", true);
       }
 
-      const fingerprint = canonicalize(message);
+      const fingerprint = messageFingerprint(message);
       const existingById = messages.get(message.messageId);
       if (existingById) {
         if (existingById.fingerprint !== fingerprint) return resultError("A2A message ID is already bound to different content");
@@ -166,6 +189,24 @@ export function createMultiplayerA2ARouter(
         const message = messages.get(messageId)?.message;
         return message ? [message] : [];
       });
+    },
+
+    progressFor(taskId, agentId) {
+      if (!taskId.trim()) return [];
+      const latest = new Map<string, A2AProgressRecord>();
+      for (const messageId of order) {
+        const message = messages.get(messageId)?.message;
+        if (!message || message.taskId !== taskId || !message.progressFingerprint || (agentId && message.agentId !== agentId)) continue;
+        latest.set(message.agentId, {
+          taskId,
+          agentId: message.agentId,
+          messageId: message.messageId,
+          progressFingerprint: message.progressFingerprint,
+          ...(message.progressKind === undefined ? {} : { progressKind: message.progressKind }),
+          at: message.createdAt,
+        });
+      }
+      return [...latest.values()].sort((left, right) => left.agentId.localeCompare(right.agentId));
     },
   };
 

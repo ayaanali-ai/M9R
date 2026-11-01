@@ -63,3 +63,35 @@ test("rejects expired, cross-run, unknown-recipient, and dangling-reply messages
   assert.equal(router.send(message({ messageId: "unknown-recipient", idempotencyKey: "unknown-recipient", recipient: { kind: "agent", agentId: "agent-99" } })).ok, false);
   assert.equal(router.send(message({ messageId: "dangling-reply", idempotencyKey: "dangling-reply", replyToMessageId: "missing" })).ok, false);
 });
+
+test("task-room progress sidecars expose the latest witness without parsing prose", () => {
+  const router = createMultiplayerA2ARouter(roster, { now: () => 300 });
+  const first = router.send(message({
+    taskId: "task-1",
+    conversationId: "conversation-1",
+    messageId: "progress-1",
+    idempotencyKey: "progress-1",
+    progressFingerprint: "state-a",
+    progressKind: "observation",
+    summary: "Observed the assigned tab",
+  }));
+  assert.equal(first.ok, true);
+  const second = router.send(message({
+    taskId: "task-1",
+    conversationId: "conversation-1",
+    messageId: "progress-2",
+    idempotencyKey: "progress-2",
+    progressFingerprint: "state-b",
+    progressKind: "postcondition-verified",
+    summary: "Verified the result",
+  }));
+  assert.equal(second.ok, true);
+  assert.deepEqual(router.progressFor("task-1"), [{
+    taskId: "task-1",
+    agentId: "agent-1",
+    messageId: "progress-2",
+    progressFingerprint: "state-b",
+    progressKind: "postcondition-verified",
+    at: 100,
+  }]);
+});

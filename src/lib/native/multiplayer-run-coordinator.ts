@@ -18,17 +18,21 @@ import {
  * must re-check isCurrent before publishing any late result.
  */
 
-export type RunActionState = "queued" | "running" | "completed" | "canceled";
+export type RunActionState = "queued" | "running" | "paused" | "completed" | "canceled";
 
 export interface RunActionSnapshot extends MultiplayerOperation {
   readonly state: RunActionState;
   readonly canceledAt?: number;
   readonly cancellationId?: string;
+  readonly pausedAt?: number;
+  readonly pauseReason?: string;
 }
 
 export type RunCoordinatorEvent =
   | { readonly kind: "action-queued"; readonly action: RunActionSnapshot; readonly at: number }
   | { readonly kind: "action-started"; readonly action: RunActionSnapshot; readonly at: number }
+  | { readonly kind: "action-paused"; readonly action: RunActionSnapshot; readonly at: number; readonly reason: string }
+  | { readonly kind: "action-resumed"; readonly action: RunActionSnapshot; readonly at: number }
   | { readonly kind: "action-completed"; readonly action: RunActionSnapshot; readonly at: number }
   | { readonly kind: "action-canceled"; readonly action: RunActionSnapshot; readonly at: number; readonly cancellation: CancellationRequest }
   | {
@@ -76,6 +80,10 @@ export interface RunCoordinator {
   queue(operation: MultiplayerOperation): QueueResult;
   /** Start only a queued operation that has not been canceled by its scope. */
   start(operationId: string): boolean;
+  /** Pause without aborting the operation; the same operation may be resumed. */
+  pause(operationId: string, reason?: string): boolean;
+  /** Resume one paused operation without creating a replacement operation ID. */
+  resume(operationId: string): boolean;
   /** Complete an action only if it is still current; late completion after stop returns false. */
   complete(operationId: string): boolean;
   /** Apply one validated cancellation request and propagate it to affected agents. */
@@ -100,6 +108,8 @@ type ActionRecord = {
   controller: AbortController;
   canceledAt?: number;
   cancellationId?: string;
+  pausedAt?: number;
+  pauseReason?: string;
 };
 
 function safeReason(reason: string | undefined, fallback: string): string {
@@ -125,6 +135,8 @@ function actionSnapshot(record: ActionRecord): RunActionSnapshot {
     state: record.state,
     ...(record.canceledAt === undefined ? {} : { canceledAt: record.canceledAt }),
     ...(record.cancellationId === undefined ? {} : { cancellationId: record.cancellationId }),
+    ...(record.pausedAt === undefined ? {} : { pausedAt: record.pausedAt }),
+    ...(record.pauseReason === undefined ? {} : { pauseReason: record.pauseReason }),
   };
 }
 
@@ -227,9 +239,29 @@ export function createMultiplayerRunCoordinator(
       return true;
     },
 
+    pause(operationId, reason = "Paused by the owner for redirection.") {
+      const record = actions.get(operationId);
+      if (!record || (record.state !== "queued" && record.state !== "running") || stopped || canceledAgents.has(record.operation.agentId) || canceledBranches.has(record.operation.branchId)) return false;
+      record.state = "paused";
+      record.pausedAt = now();
+      record.pauseReason = safeReason(reason, "Paused by the owner.");
+      emit({ kind: "action-paused", action: actionSnapshot(record), at: record.pausedAt, reason: record.pauseReason });
+      return true;
+    },
+
+    resume(operationId) {
+      const record = actions.get(operationId);
+      if (!record || record.state !== "paused" || stopped || canceledAgents.has(record.operation.agentId) || canceledBranches.has(record.operation.branchId)) return false;
+      record.state = "running";
+      record.pausedAt = undefined;
+      record.pauseReason = undefined;
+      emit({ kind: "action-resumed", action: actionSnapshot(record), at: now() });
+      return true;
+    },
+
     complete(operationId) {
       const record = actions.get(operationId);
-      if (!record || record.state === "canceled") return false;
+      if (!record || record.state === "canceled" || record.state === "paused") return false;
       if (record.state === "completed") return true;
       if (stopped || canceledAgents.has(record.operation.agentId) || canceledBranches.has(record.operation.branchId)) return false;
       record.state = "completed";

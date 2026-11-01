@@ -6,6 +6,10 @@ Selected architecture: **single-install atomic release system**. M9R uses one us
 
 This document records the operating model that keeps M9R easy to maintain without reducing capabilities, action coverage, provider support, or runtime efficiency.
 
+Source of Truth 6.0 extends this release contract with the universal surface,
+task-control, action-routing, and multiplayer implementation order:
+[M9R Source of Truth 6.0](./M9R_SOURCE_OF_TRUTH_6.0_IMPLEMENTATION_ORDER.md).
+
 ## 1. Product boundary
 
 M9R is one product with one canonical user installation. The user should see one simple install, one simple update action, and one simple uninstall path. Internal source history, build staging, and recovery evidence are engineering concerns and must not become extra runtime installations.

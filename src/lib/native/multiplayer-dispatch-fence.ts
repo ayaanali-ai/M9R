@@ -46,6 +46,8 @@ export interface MutationFenceTarget {
   readonly revision: string;
   /** Stable identity key persisted with the receipt, without a revision. */
   readonly targetKey: string;
+  /** Optional semantic region inside the surface. Independent regions may run concurrently. */
+  readonly regionId?: string;
   readonly browserInstanceId?: string;
   readonly tabId?: string;
   readonly windowRef?: string;
@@ -62,6 +64,8 @@ export interface MutationFenceBeginInput {
   readonly target: MutationFenceTarget;
   /** Last fence epoch the caller observed. Omit only for a first observation. */
   readonly expectedMutationRevision?: number;
+  /** Independent semantic-region epoch, when this is a region-scoped mutation. */
+  readonly expectedRegionRevision?: number;
 }
 
 export type MutationFenceRejectionCode =
@@ -145,6 +149,10 @@ function validIdentifier(value: string): boolean {
   return value.length > 0 && value.length <= MAX_IDENTIFIER && /^[A-Za-z0-9][A-Za-z0-9._:%-]*$/.test(value);
 }
 
+function regionScopeKey(surfaceId: string, regionId: string): string {
+  return `region:${surfaceId}:${regionId}`;
+}
+
 /**
  * The broker's tab name is the canonical browser target inside the one owner
  * broker that actually dispatches input. It is explicit (never "the focused
@@ -154,18 +162,22 @@ export function browserMutationTarget(input: {
   ownerId?: string;
   tab: string;
   revision?: string;
+  regionId?: string;
 }): MutationFenceTarget {
   const owner = input.ownerId?.trim() || "local-machine";
   const tabKey = `${owner}\u0000${input.tab}`;
   const browserInstanceId = safeId("browser", owner);
   const tabId = safeId("tab", tabKey);
-  const targetKey = `browser-tab|instance=${browserInstanceId}|tab=${tabId}`;
+  const regionId = input.regionId?.trim().slice(0, 128) || undefined;
+  const surfaceKey = `browser-tab|instance=${browserInstanceId}|tab=${tabId}`;
+  const targetKey = `${surfaceKey}${regionId ? `|region=${regionId}` : ""}`;
   return {
     kind: "browser-tab",
-    surfaceId: safeId("surface", targetKey),
+    surfaceId: safeId("surface", surfaceKey),
     targetId: safeId("target", targetKey),
     revision: input.revision?.trim().slice(0, 128) || "broker-observed",
     targetKey,
+    ...(regionId ? { regionId } : {}),
     browserInstanceId,
     tabId,
   };
@@ -394,12 +406,17 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
       const schedulerOperationId = safeId("mut", `${agentId}\u0000${surfaceId}\u0000${input.operationId}`);
       const target = targetForBinding(input.target, now());
       const binding: MultiplayerTargetBinding = { runId, branchId, agentId, surfaceId, target };
+      const regionId = input.target.regionId;
+      const expectedRegionRevision = regionId === undefined
+        ? undefined
+        : (input.expectedRegionRevision ?? scheduler.snapshot().regionRevisions[regionScopeKey(surfaceId, regionId)] ?? 0);
       const operation: MultiplayerOperation = {
         runId,
         branchId,
         agentId,
         operationId: schedulerOperationId,
         surfaceId,
+        ...(regionId === undefined ? {} : { regionId }),
         revision: expected,
         kind: "mutate",
         createdAt: now(),
@@ -411,7 +428,9 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
           operation,
           targetBinding: binding,
           expectedSurfaceRevision: expected,
-          expectedSurfaceMutationRevision: expected,
+          ...(regionId === undefined
+            ? { expectedSurfaceMutationRevision: scheduler.snapshot().surfaceMutationRevisions[surfaceId] ?? 0 }
+            : { expectedRegionRevision }),
         });
       } catch (error) {
         return refusal("invalid", error instanceof Error ? error.message : "The mutation fence refused the operation.", "never", surfaceRevision);

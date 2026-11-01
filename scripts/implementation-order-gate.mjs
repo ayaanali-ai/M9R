@@ -16,6 +16,7 @@ const checks = [
   ["web lifecycle and redirectable pause", ["--test", "./scripts/web-live-sessions.test.ts"]],
   ["browser mutation fixtures", ["--test", "./scripts/web-press-page-change.test.ts"]],
   ["universal intent and bounded workflow memory", ["--test", "./scripts/universal-intent.test.ts", "./scripts/workflow-preferences.test.ts"]],
+  ["task controls, progress, and delivery policy", ["--test", "./scripts/multiplayer-task-context.test.ts", "./scripts/multiplayer-action-policy.test.ts"]],
   ["TypeScript", ["node_modules/typescript/bin/tsc", "--noEmit", "-p", ".", "--pretty", "false"]],
 ];
 
@@ -40,7 +41,7 @@ if (process.exitCode !== 1) {
     process.stderr.write(`\n[FAIL] isolated CLI bundle\n${build.stdout ?? ""}${build.stderr ?? ""}`);
     process.exitCode = 1;
   } else {
-    const expected = ["universal-intent-resolver.js", "workflow-preferences.js", "computer-use-mcp.js"];
+    const expected = ["universal-intent-resolver.js", "workflow-preferences.js", "multiplayer-runtime.js", "computer-use-mcp.js"];
     for (const file of expected) {
       const path = resolve(cliOut, file);
       try { readFileSync(path); } catch { process.stderr.write(`[FAIL] isolated CLI bundle missing ${file}\n`); process.exitCode = 1; }

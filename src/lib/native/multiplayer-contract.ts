@@ -128,6 +128,14 @@ export const a2aMessageKindSchema = z.enum([
   "supersede",
 ]);
 
+const a2aProgressKindSchema = z.enum([
+  "observation",
+  "operation-completed",
+  "artifact-changed",
+  "postcondition-verified",
+  "blocker",
+]);
+
 const a2aRecipientSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("agent"), agentId: identifier }).strict(),
   z.object({
@@ -149,6 +157,9 @@ const structuredDetailsSchema = z.record(identifier, structuredValueSchema).supe
 /** A bounded, idempotent, structured agent-to-agent message. */
 export const a2aMessageSchema = multiplayerCorrelationSchema.extend({
   schemaVersion: z.literal(MULTIPLAYER_CONTRACT_VERSION),
+  /** Optional task-room correlation; absent keeps the legacy run-level room. */
+  taskId: identifier.optional(),
+  conversationId: identifier.optional(),
   messageId: identifier,
   recipient: a2aRecipientSchema,
   kind: a2aMessageKindSchema,
@@ -161,6 +172,9 @@ export const a2aMessageSchema = multiplayerCorrelationSchema.extend({
   operationId: identifier.optional(),
   replyToMessageId: identifier.optional(),
   supersedesMessageId: identifier.optional(),
+  /** A progress witness lets the router expose state change without parsing prose. */
+  progressFingerprint: identifier.optional(),
+  progressKind: a2aProgressKindSchema.optional(),
   replyDepth: z.number().int().min(0).max(MAX_A2A_REPLY_DEPTH),
 }).strict().superRefine((message, context) => {
   if (message.expiresAt !== undefined && message.expiresAt <= message.createdAt) {
@@ -171,6 +185,9 @@ export const a2aMessageSchema = multiplayerCorrelationSchema.extend({
   }
   if (message.recipient.kind === "group" && message.recipient.agentIds.includes(message.agentId)) {
     context.addIssue({ code: "custom", path: ["recipient", "agentIds"], message: "A2A group recipients cannot include the sending agent." });
+  }
+  if ((message.progressFingerprint === undefined) !== (message.progressKind === undefined)) {
+    context.addIssue({ code: "custom", path: ["progressFingerprint"], message: "Progress sidecars must include both a fingerprint and a progress kind." });
   }
 });
 
@@ -223,6 +240,7 @@ export type MultiplayerOperation = z.infer<typeof multiplayerOperationSchema>;
 export type MultiplayerLease = z.infer<typeof multiplayerLeaseSchema>;
 export type A2ARecipient = z.infer<typeof a2aRecipientSchema>;
 export type A2AMessageKind = z.infer<typeof a2aMessageKindSchema>;
+export type A2AProgressKind = z.infer<typeof a2aProgressKindSchema>;
 export type A2AMessage = z.infer<typeof a2aMessageSchema>;
 export type PresenceState = z.infer<typeof presenceStateSchema>;
 export type PresenceEvent = z.infer<typeof presenceEventSchema>;

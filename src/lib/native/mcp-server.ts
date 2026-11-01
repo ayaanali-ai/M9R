@@ -36,6 +36,7 @@ import { gitRead, readGovernedFile } from "../bridge/governed-agent-tools";
 import { prepareTaskStageNotice } from "./task-stage-notice";
 import { registerComputerUseTools } from "./computer-use-mcp";
 import { createWorkflowPreferenceLedger } from "./workflow-preferences";
+import type { MultiplayerA2ASendInput } from "./multiplayer-runtime";
 
 export interface McpServerDeps {
   store: LocalStore;
@@ -784,6 +785,48 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       return { content: [{ type: "text", text: created
         ? `M9R accepted one teammate message for @${to} as ${taskId}; recipient acknowledgement is tracked separately. ${replyDepth > 0 ? `Exchange depth ${replyDepth}/${MAX_AGENT_REPLY_DEPTH}.` : "Identical sends are suppressed within the active dedupe window."}`
         : `M9R deduplicated this teammate message; it is already represented by task ${taskId}. Recipient acknowledgement remains tracked separately.` }] };
+    },
+  );
+
+  server.registerTool(
+    "m9r_team_message",
+    {
+      description: "Send one structured teammate message inside the current M9R multiplayer run. This records a concise human-readable message plus machine-readable task/progress sidecar; it does not replace or cancel an active task.",
+      inputSchema: {
+        ...AUTH_FIELD,
+        to: z.string().min(1).max(80).describe("Recipient handle without @."),
+        summary: z.string().min(1).max(280).describe("The concise teammate message."),
+        kind: z.enum(["help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request", "stop", "supersede"]).default("delegate"),
+        priority: z.enum(["low", "normal", "high", "urgent"]).default("normal"),
+        taskId: z.string().min(1).max(128).optional(),
+        conversationId: z.string().min(1).max(128).optional(),
+        details: z.record(z.string(), z.union([z.string().max(2_000), z.number(), z.boolean(), z.null()])).optional(),
+        idempotencyKey: z.string().min(1).max(256).optional(),
+        replyToMessageId: z.string().min(1).max(128).optional(),
+        supersedesMessageId: z.string().min(1).max(128).optional(),
+        progressFingerprint: z.string().min(1).max(128).optional(),
+        progressKind: z.enum(["observation", "operation-completed", "artifact-changed", "postcondition-verified", "blocker"]).optional(),
+        replyDepth: z.number().int().min(0).max(MAX_AGENT_REPLY_DEPTH).default(0),
+      },
+    },
+    async ({ token, to, summary, kind, priority, taskId, conversationId, details, idempotencyKey, replyToMessageId, supersedesMessageId, progressFingerprint, progressKind, replyDepth }) => {
+      const { identity, token: authToken } = await authenticate(token);
+      if (!deps.web?.sendA2A) throw new Error("The owner broker's structured multiplayer runtime is unavailable.");
+      const normalizedDetails = details
+        ? Object.fromEntries(Object.entries(details).map(([key, value]) => [key, value])) as Record<string, string | number | boolean | null>
+        : undefined;
+      const input: MultiplayerA2ASendInput = {
+        to, summary, kind, priority, ...(taskId ? { taskId } : {}), ...(conversationId ? { conversationId } : {}),
+        ...(normalizedDetails ? { details: normalizedDetails } : {}), ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(replyToMessageId ? { replyToMessageId } : {}), ...(supersedesMessageId ? { supersedesMessageId } : {}),
+        ...(progressFingerprint && progressKind ? { progressFingerprint, progressKind } : {}), replyDepth,
+      };
+      const result = await deps.web.sendA2A(authToken, input);
+      if (!result.ok) throw new Error(result.error);
+      const recipients = result.recipientAgentIds.map((agentId) => `@${agentId}`).join(", ");
+      return { content: [{ type: "text", text: result.duplicate
+        ? `M9R deduplicated the structured teammate message for ${recipients || `@${to}`}.`
+        : `M9R accepted the structured teammate message for ${recipients || `@${to}`}; it remains in the task room and will not cancel unrelated work.` }] };
     },
   );
 

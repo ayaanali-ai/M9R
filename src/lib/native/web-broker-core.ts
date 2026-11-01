@@ -6,6 +6,7 @@
  * command that really ran rather than reported by the agent.
  */
 
+import { createHash } from "node:crypto";
 import { originOf, pathOf, type WebAuthority } from "./web-authority-core";
 import { redactSecrets } from "./inbox-core";
 import { classifyWebActionRisk } from "./risk-core";
@@ -57,6 +58,8 @@ export interface WebRequest {
   targetRevision?: string;
   /** Last broker mutation epoch the caller observed. Omit only on a first observation. */
   expectedMutationRevision?: number;
+  /** Independent semantic-region epoch for field/form mutations. */
+  expectedRegionRevision?: number;
 }
 
 export interface WebResponse {
@@ -400,6 +403,8 @@ export function validateRequest(request: WebRequest): string | null {
   if (request.targetRevision !== undefined && (typeof request.targetRevision !== "string" || request.targetRevision.length < 1 || request.targetRevision.length > 128)) return "target revision is invalid";
   if (request.expectedMutationRevision !== undefined
     && (!Number.isSafeInteger(request.expectedMutationRevision) || request.expectedMutationRevision < 0)) return "expected mutation revision is invalid";
+  if (request.expectedRegionRevision !== undefined
+    && (!Number.isSafeInteger(request.expectedRegionRevision) || request.expectedRegionRevision < 0)) return "expected region revision is invalid";
   return null;
 }
 
@@ -999,7 +1004,10 @@ export function createWebBroker(deps: WebBrokerDeps) {
     let mutationRevision: number | undefined;
     let mutationSurfaceId: string | undefined;
     if (deps.mutationFence) {
-      const fenceTarget = browserMutationTarget({ ownerId: request.owner ?? deps.ownerId, tab, revision: request.targetRevision });
+      const regionId = requestedScope && requestedScope.kind !== "tab"
+        ? `region-${createHash("sha256").update(`${requestedScope.kind}:${requestedScope.key}`).digest("hex").slice(0, 24)}`
+        : undefined;
+      const fenceTarget = browserMutationTarget({ ownerId: request.owner ?? deps.ownerId, tab, revision: request.targetRevision, ...(regionId ? { regionId } : {}) });
       mutationSurfaceId = fenceTarget.surfaceId;
       if (isMutatingWebAction(request.action)) {
         const begun = deps.mutationFence.begin({
@@ -1009,6 +1017,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
           operationId: request.operationId ?? `web-${newId()}`,
           target: fenceTarget,
           ...(request.expectedMutationRevision === undefined ? {} : { expectedMutationRevision: request.expectedMutationRevision }),
+          ...(request.expectedRegionRevision === undefined ? {} : { expectedRegionRevision: request.expectedRegionRevision }),
         });
         if (!begun.ok) return Promise.resolve(fail(begun.error, `mutation-${begun.code}`));
         if (begun.duplicate) {

@@ -80,3 +80,20 @@ test("branch cancellation propagates as one idempotent event and does not cancel
   assert.equal(duplicate.ok, true);
   if (duplicate.ok) assert.equal(duplicate.value.duplicate, true);
 });
+
+test("pausing an operation preserves its identity and resumes without cancellation", () => {
+  const coordinator = createMultiplayerRunCoordinator(roster, { now: () => 500, idFactory: () => "pause-id" });
+  const queued = coordinator.queue(operation("op-pause", "agent-1", "branch-1"));
+  assert.equal(queued.ok, true);
+  assert.equal(coordinator.start("op-pause"), true);
+  const action = queued.ok ? queued.value : undefined;
+  assert.ok(action);
+  assert.equal(coordinator.pause("op-pause", "Owner is redirecting this task."), true);
+  assert.equal(action.signal.aborted, false);
+  assert.equal(action.isCurrent(), false);
+  assert.equal(coordinator.snapshot().actions.find((item) => item.operationId === "op-pause")?.state, "paused");
+  assert.equal(coordinator.resume("op-pause"), true);
+  assert.equal(action.signal.aborted, false);
+  assert.equal(action.isCurrent(), true);
+  assert.equal(coordinator.complete("op-pause"), true);
+});

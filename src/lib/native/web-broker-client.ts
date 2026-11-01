@@ -4,6 +4,8 @@ import type { WebAgentMessage } from "./web-broker-core";
 import { requestOwnerPipe } from "./owner-pipe";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import type { TaskStageMode } from "./task-desktop-stage";
+import type { MultiplayerA2ASendInput, MultiplayerSendResult } from "./multiplayer-runtime";
+import { parseA2AMessage, type A2AMessage } from "./multiplayer-contract";
 
 const MAX_STAGE_REQUEST_TIMEOUT_MS = 70_000;
 const CURSOR_PRIME_TIMEOUT_MS = 5_000;
@@ -27,6 +29,8 @@ export interface StageClientResult {
 export interface WebBrokerClient {
   /** Durable task/inbox mutations performed by the owner broker under its own M9R-home ACL. */
   submitAgentTask?(token: string, to: string, goal: string): Promise<{ ok: boolean; taskId?: string; created?: boolean; error?: string }>;
+  /** Structured provider-neutral teammate message. Kept separate from legacy task delivery. */
+  sendA2A?(token: string, input: MultiplayerA2ASendInput): Promise<MultiplayerSendResult>;
   claimAgentInbox?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; taskIds?: string[]; error?: string }>;
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
   recordAgentTaskResult?(token: string, taskId: string, summary: string): Promise<{ ok: boolean; error?: string }>;
@@ -53,6 +57,14 @@ export interface WebBrokerClientOptions {
   ownerPipePath?: string;
   fetchImpl?: typeof fetch;
 }
+
+type StructuredA2AStoreResponse = {
+  ok: boolean;
+  error?: string;
+  duplicate?: boolean;
+  message?: unknown;
+  recipientAgentIds?: unknown;
+};
 
 function stageTransportFailure(error: unknown): string {
   if (error && typeof error === "object") {
@@ -157,6 +169,29 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
   return {
     async submitAgentTask(token, to, goal) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "send", token, to, goal } });
+    },
+    async sendA2A(token, input) {
+      const result = await agentStoreRequest<StructuredA2AStoreResponse>({
+        ownerPipePath: options.ownerPipePath,
+        body: { action: "a2a", token, ...input },
+      });
+      if (!result.ok) return { ok: false, error: result.error ?? "The owner broker rejected the structured teammate message." };
+      if (!result.message || !Array.isArray(result.recipientAgentIds)
+        || result.recipientAgentIds.some((agentId) => typeof agentId !== "string")) {
+        return { ok: false, error: "The owner broker returned an incomplete structured teammate response." };
+      }
+      let message: A2AMessage;
+      try {
+        message = parseA2AMessage(result.message);
+      } catch {
+        return { ok: false, error: "The owner broker returned an invalid structured teammate message." };
+      }
+      return {
+        ok: true,
+        duplicate: result.duplicate === true,
+        message,
+        recipientAgentIds: result.recipientAgentIds as string[],
+      };
     },
     async claimAgentInbox(token, taskIds) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "claim_inbox", token, taskIds } });

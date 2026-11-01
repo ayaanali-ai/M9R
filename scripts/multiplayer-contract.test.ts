@@ -74,3 +74,23 @@ test("cancellation scopes stay hierarchical and explicit", () => {
     scope: { scope: "operation", runId: "run-1", branchId: "branch-1", agentId: "agent-1" },
   }));
 });
+
+test("progress sidecars require a fingerprint and kind together", () => {
+  const base = {
+    schemaVersion: 1,
+    messageId: "message-progress",
+    runId: "run-1",
+    branchId: "branch-1",
+    agentId: "agent-1",
+    recipient: { kind: "agent", agentId: "agent-2" },
+    kind: "help-result",
+    priority: "normal",
+    idempotencyKey: "message-progress",
+    createdAt: 100,
+    summary: "Progress update",
+    replyDepth: 0,
+  } as const;
+  assert.throws(() => parseA2AMessage({ ...base, progressFingerprint: "state-a" }));
+  assert.throws(() => parseA2AMessage({ ...base, progressKind: "observation" }));
+  assert.equal(parseA2AMessage({ ...base, progressFingerprint: "state-a", progressKind: "observation" }).progressFingerprint, "state-a");
+});

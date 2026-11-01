@@ -18,7 +18,7 @@ import {
 } from "./computer-use-contract";
 import { resolveUniversalIntent, type IntentObservationHint } from "./universal-intent-resolver";
 import type { WorkflowPreferenceLedger } from "./workflow-preferences";
-import { selectComputerUseRoute, type ComputerUseRouteDescriptor } from "./computer-use-router";
+import { selectActionDelivery, selectComputerUseRoute, type ComputerUseRouteDescriptor } from "./computer-use-router";
 import type { VerifiedIdentity } from "./identity-core";
 import type { ComputerOperationInput, LocalStore, StageOperationClaim } from "./local-store";
 import type { StageClientResult, WebBrokerClient } from "./web-broker-client";
@@ -1613,6 +1613,25 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       return refusal(action, action.targetId, selection.code, `${detail}${nextRoute}`, "never", nextStep);
     }
     record.pinnedRouteId = selection.routeId;
+    // Apply the Source of Truth 6.0 delivery policy after adapter selection.
+    // This is intentionally a small gate, not a second resolver: semantic/UIA/
+    // browser routes stay background-safe, while a route that truly requires
+    // shared input must already carry the explicit owner-visible confirmation.
+    const requestedForeground = "confirmFocusForeground" in action && action.confirmFocusForeground === true;
+    const delivery = selectActionDelivery({
+      target: { capabilities: record.route.capabilities },
+      requested: requestedForeground ? "exclusive" : "auto",
+      targetVisible: record.context.kind === "desktop" && record.context.view === "app",
+      targetBackgroundSafe: record.context.kind === "browser"
+        || record.route.capabilities.some((capability) => capability === "observe.accessibility" || capability === "observe.dom"),
+      requiresPhysicalInput: record.route.requiresOwnerInputLease,
+      ownerLeaseValid: requestedForeground,
+      allowForegroundEscalation: requestedForeground,
+    });
+    if (!delivery.ok) {
+      return refusal(action, action.targetId, `delivery-${delivery.code}`, delivery.reason,
+        delivery.code === "foreground-lease-required" ? "never" : "refresh-target");
+    }
 
     // Finding AE: the 30s observation-age check above only catches staleness by elapsed
     // time, not by what actually happened to the window since it was observed. One bounded

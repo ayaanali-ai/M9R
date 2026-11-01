@@ -873,8 +873,12 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const existing = s.mutationReceipts.find((record) => record.key === key);
         if (existing) return { claimed: false, reason: "operation-exists", record: { ...existing } };
+        const regionScoped = targetKey.includes("|region=");
         const unresolved = s.mutationReceipts.find((record) => record.surfaceId === surfaceId
-          && (record.status === "claimed" || record.status === "uncertain"));
+          && (record.status === "claimed" || record.status === "uncertain")
+          // Independent semantic regions may proceed concurrently. A whole-
+          // surface receipt (or the same region) still fences every overlap.
+          && (!regionScoped || !record.targetKey.includes("|region=") || record.targetKey === targetKey));
         if (unresolved) return { claimed: false, reason: "surface-unresolved", record: { ...unresolved } };
         if (s.mutationReceipts.length >= MAX_MUTATION_RECEIPTS) {
           throw new Error(`The multiplayer mutation receipt store is at capacity (${MAX_MUTATION_RECEIPTS}); the mutation was refused.`);

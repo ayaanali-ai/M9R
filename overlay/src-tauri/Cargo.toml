@@ -29,12 +29,17 @@ serde_json = "1"
 # hold-to-talk; see allow_microphone_permission in main.rs for why this is needed. Versions match what tauri/wry
 # already resolve (see Cargo.lock) so this does not pull in a second copy.
 webview2-com = "0.38"
-# "Media_SpeechRecognition" is Windows' own on-device dictation (native_dictation.rs) -- WebView2 cannot run the
-# Web Speech API's cloud recognizer, confirmed live 2026-10-10 (onerror "network" on every attempt). On-device
-# recognition has no per-use cost. "Globalization" is required by SpeechRecognizer's language APIs;
-# "Win32_System_WinRT" is RoInitialize, needed once on the thread that owns the recognizer.
+# Native dictation (native_dictation.rs) used WinRT's Windows.Media.SpeechRecognition at first, but that API
+# requires MSIX package identity -- confirmed live 2026-10-31: this app ships unpackaged (NSIS only, see
+# tauri.conf.json's bundle.targets), so CompileConstraintsAsync() silently hung forever instead of erroring,
+# and the mic was never actually touched (zero entries ever appeared in the Windows mic-consent registry for
+# this exe across an entire investigation). Classic SAPI5 (Win32_Media_Speech, the COM ISpRecognizer/
+# ISpRecoContext/ISpRecoGrammar interfaces, not the Automation-friendly ISpeech* ones) has always supported
+# unpackaged Win32 processes, so native_dictation.rs now drives that instead. "Win32_System_Com" is needed for
+# CoCreateInstance/CoInitializeEx; "Win32_System_WinRT" is no longer needed for speech but Win32_System_WinRT's
+# RoInitialize is still harmless to keep off the thread (removed, SAPI uses plain COM apartment init instead).
 windows = { version = "0.61", features = [
-    "Media_SpeechRecognition", "Globalization", "Win32_System_WinRT",
+    "Win32_Media_Speech", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Threading",
     # A bare Ctrl+Alt (no letter) hold-to-talk hotkey cannot be registered through Win32's
     # RegisterHotKey (which tauri-plugin-global-shortcut wraps) -- it requires a non-modifier
     # virtual key. ctrl_alt_hold.rs instead tracks raw key state through a WH_KEYBOARD_LL hook.

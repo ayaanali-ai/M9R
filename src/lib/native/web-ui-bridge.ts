@@ -319,14 +319,14 @@ export function composeAgentMessage(text: string, context: UiPageContext, recipi
   const others = recipients.filter((h) => h !== self);
   const lines = [text];
   const quiet = roster.filter((h) => h !== self && !recipients.includes(h));
-  if (quiet.length) lines.push("", `Also in this room, not addressed by this message: ${quiet.map((h) => `@${h}`).join(", ")}. They are listening and can be woken any time with m9r_send; bring one in when the task can be split or checked by a second pair of eyes. If the owner named you and a teammate in the same sentence, each of you does the part written for you.`);
+  if (quiet.length) lines.push("", `Also in this room, not addressed by this message: ${quiet.map((h) => `@${h}`).join(", ")}. They are listening and can be woken any time with m9r_send; bring one in when the task can be split or checked by a second pair of eyes. Use m9r_team_message for a concise structured handoff/progress sidecar without replacing the current task. If the owner named you and a teammate in the same sentence, each of you does the part written for you.`);
   if (others.length) {
     lines.push(
       "",
       `Shared task: the owner sent this to ${others.map((h) => `@${h}`).join(" and ")} too. Work together without collisions, cheaply:`,
-      "1. First, send each teammate ONE line with the part you are taking (m9r_send). Do not repeat a teammate's part.",
+      "1. First, send each teammate ONE line with the part you are taking (m9r_send for a new work item, or m9r_team_message for a structured handoff/progress note). Do not repeat a teammate's part.",
       "2. Read only what you need. Use the same owner-visible browser window and desktop surface a teammate is using through M9R's native observation/action tools; do not create a second profile or silently switch surfaces. Work on the same page a teammate is on unless you truly need a second page at the same time. Typing into a field is claimed for you; if a field is refused, work on another part and come back.",
-      "3. Post short findings to teammates (one or two lines) with m9r_send. Never poll and never sit waiting: after you send something you need an answer to, END YOUR TURN with one line saying what you are waiting for. The teammate's reply is delivered to you automatically as your next message.",
+      "3. Post short findings with m9r_team_message when the current task should stay intact; use m9r_send only when you are creating a distinct teammate work item. Never poll and never sit waiting: after you send something you need an answer to, END YOUR TURN with one line saying what you are waiting for. The teammate's reply is delivered to you automatically as your next message.",
       "4. At a hand-off point send 'ready: <one line>' to teammates, then end your turn; carry on when their reply arrives.",
       "5. Never repeat an action that already worked. Stop as soon as the task is done and give a two-sentence summary.",
     );

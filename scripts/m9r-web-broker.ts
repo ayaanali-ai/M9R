@@ -21,6 +21,7 @@ import type { StageApprovalRequest } from "@/lib/native/web-broker-core";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { createMultiplayerDispatchFence } from "@/lib/native/multiplayer-dispatch-fence";
+import { createMultiplayerRuntime } from "@/lib/native/multiplayer-runtime";
 import { clearDesktopPillState, writeDesktopPillState } from "@/lib/native/desktop-pill-state";
 
 async function main(): Promise<void> {
@@ -78,12 +79,41 @@ async function main(): Promise<void> {
   // Restricted MCP child processes use the broker's narrow token-checked write endpoint instead of taking the
   // state.lock directory themselves; the owner-only store ACL stays intact.
   const store = createLocalStore(root);
+  const config = loadAgentsConfig(root, { cwd: projectRoot });
+  const multiplayerRoster = {
+    runId: "m9r-owner",
+    agents: config.agents.map((agent) => ({
+      agentId: `agent-${agent.handle}`,
+      branchId: `branch-${agent.handle}`,
+      provider: agent.provider,
+      handle: agent.handle,
+    })),
+  } as const;
+  const multiplayer = createMultiplayerRuntime({ roster: multiplayerRoster });
+  multiplayer.setDelivery(async (message) => {
+    const recipient = config.agents.find((agent) => `agent-${agent.handle}` === (message.recipient.kind === "agent" ? message.recipient.agentId : ""));
+    if (!recipient) return { ok: false, error: "The structured teammate recipient is not configured." };
+    const sender = config.agents.find((agent) => `agent-${agent.handle}` === message.agentId);
+    const detail = message.details ? `\nStructured details: ${JSON.stringify(message.details)}` : "";
+    const goal = `[M9R team room ${message.taskId ?? "run"}] @${sender?.handle ?? message.agentId}: ${message.summary}${detail}`.slice(0, 4_000);
+    const result = store.addTask({
+      to: recipient.handle,
+      from: sender?.handle ?? message.agentId,
+      goal,
+      origin: "agent_initiated",
+      idempotencyKey: `a2a:${message.messageId}`,
+      replyDepth: message.replyDepth,
+      ...(sender && sessionOwner.current?.sessionIdOf(sender.handle) ? { fromSession: sessionOwner.current.sessionIdOf(sender.handle) } : {}),
+    });
+    if (result.created) store.setDelivery(result.task.id, { state: "deferred" });
+    return { ok: true, taskId: result.task.id };
+  });
   // One broker-owned mutation fence is shared by the browser route and the
   // desktop stage service. Both dispatch real input from this process, so this
   // is the only place a shared lease can arbitrate same-target contention.
   const mutationFence = createMultiplayerDispatchFence({ store });
   const taskStages = createTaskDesktopStageService({ store, mutationFence, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
-  const broker = await startWebBroker({ key, port, taskStages, nativeDesktopRoute: true, agentMcpStore: store, mutationFence,
+  const broker = await startWebBroker({ key, port, taskStages, nativeDesktopRoute: true, agentMcpStore: store, mutationFence, multiplayerRuntime: multiplayer,
     onAgentTaskCreated: (token, taskId) => { void taskStages.primeCursor(token, taskId); },
     deliverOwnerTask: (taskId) => sessionOwner.current
       ? sessionOwner.current.deliverOwnerTask(taskId)
@@ -93,7 +123,6 @@ async function main(): Promise<void> {
   // The broker already autostarts at login; piggyback the desktop pill's launch onto that same moment
   // with canonical-path checks, durable launch diagnostics and bounded startup retries.
   const stopPillStartup = startDesktopOverlay(root);
-  const config = loadAgentsConfig(root, { cwd: projectRoot });
   const providerSessions = createManagedProviderOwner({
     agents: config.agents, storeRoot: root, repoRoot: projectRoot, brokerPort: broker.port,
     store, env: managedEnvironment, onEvent: (event) => ui.onSessionEvent(event),
