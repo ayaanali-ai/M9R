@@ -60,6 +60,8 @@ export interface WebRequest {
   expectedMutationRevision?: number;
   /** Independent semantic-region epoch for field/form mutations. */
   expectedRegionRevision?: number;
+  expectedBrowserInstanceId?: string;
+  expectedTabId?: string;
 }
 
 export interface WebResponse {
@@ -1071,6 +1073,8 @@ export function createWebBroker(deps: WebBrokerDeps) {
       url: request.url,
       selector: request.selector,
       text: request.text,
+      ...(request.expectedBrowserInstanceId ? { expectedBrowserInstanceId: request.expectedBrowserInstanceId } : {}),
+      ...(request.expectedTabId ? { expectedTabId: request.expectedTabId } : {}),
       ...(request.endSelector ? { endSelector: request.endSelector } : {}),
       ...(request.args ? { args: request.args } : {}),
       ...powerFields,

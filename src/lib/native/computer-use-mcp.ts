@@ -135,7 +135,7 @@ interface DesktopControl {
 type TargetContext =
   | { kind: "desktop"; taskId: string; mode: "owner-preview" | "background"; view: "desktop" | "app"; representation: "structured" | "visual";
       structureStatus?: string; width: number; height: number; controls: Map<string, DesktopControl>; inputSelectionConfirmed: boolean }
-  | { kind: "browser"; tab?: string; url?: string; title?: string; text?: string; elements: Map<string, BrowserElement> };
+  | { kind: "browser"; tab?: string; browserInstanceId?: string; tabId?: string; url?: string; title?: string; text?: string; elements: Map<string, BrowserElement> };
 
 interface TargetRecord {
   target: ComputerUseTarget;
@@ -951,9 +951,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     const resolvedTab = typeof snapshot.tab === "string" && snapshot.tab.length > 0
       ? snapshot.tab.slice(0, 40)
       : input.tab;
-    const browserInstanceId = opaqueBrowserIdentity(identityKey(input.identity));
+    const browserInstanceId = typeof snapshot.browserInstanceId === "string" && snapshot.browserInstanceId
+      ? opaqueBrowserIdentity(snapshot.browserInstanceId) : opaqueBrowserIdentity(identityKey(input.identity));
     const tabName = resolvedTab ?? "default";
-    const tabId = opaqueBrowserIdentity(`${browserInstanceId}\0${tabName}`);
+    const tabId = opaqueBrowserIdentity(`${browserInstanceId}\0${typeof snapshot.tabId === "string" ? snapshot.tabId : tabName}`);
     const rawElementRecords = snapshot.elements.map(recordOf).filter((value): value is Record<string, unknown> => Boolean(value));
     const browserCompleteness: FingerprintCompleteness = rawElementRecords.length > 150 ? "partial" : "complete";
     const rawElements = rawElementRecords.slice(0, 150);
@@ -997,6 +998,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       observedAt: observationStartedAt,
       capabilities: capabilitiesForBrowser(elements, snapshot.nativeClickAvailable === true),
       context: { kind: "browser", ...(resolvedTab ? { tab: resolvedTab } : {}), ...(url ? { url } : {}), ...(title ? { title } : {}),
+        ...(typeof snapshot.browserInstanceId === "string" ? { browserInstanceId: snapshot.browserInstanceId } : {}),
+        ...(typeof snapshot.tabId === "string" ? { tabId: snapshot.tabId } : {}),
         ...(typeof snapshot.text === "string" ? { text: snapshot.text.slice(0, 4_000) } : {}), elements: elementMap },
       extra: { browserInstanceId, tabId, ...(url ? { url } : {}) },
       fingerprint,
@@ -1225,6 +1228,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       provider: identity.provider,
       sessionId: identity.sessionId,
       ...(record.context.tab ? { tab: record.context.tab } : {}),
+      ...(record.context.browserInstanceId ? { expectedBrowserInstanceId: record.context.browserInstanceId } : {}),
+      ...(record.context.tabId ? { expectedTabId: record.context.tabId } : {}),
       ...(action.operationId ? { operationId: action.operationId } : {}),
       targetRevision: record.target.revision,
       ...(record.mutationRevision === undefined ? {} : { expectedMutationRevision: record.mutationRevision }),

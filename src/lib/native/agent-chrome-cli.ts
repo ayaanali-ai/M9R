@@ -7,8 +7,10 @@ import { defaultStoreRoot } from "./local-store";
 import { launchAgentChrome, launchAgentChromeOwnerSetup } from "./agent-chrome";
 import { loadOrCreateBrokerKey, startWebBroker } from "./web-broker-server";
 import { brokerKeyPath } from "./web-broker-paths";
+declare const __M9R_BROWSER_PAGE_SOURCE__: string;
 
 export function agentChromePageSource(): string {
+  if (typeof __M9R_BROWSER_PAGE_SOURCE__ !== "undefined") return __M9R_BROWSER_PAGE_SOURCE__;
   const here = dirname(fileURLToPath(import.meta.url));
   const source = [join(here, "extension/src/page-actions.js"), join(here, "../../../extensions/browser/src/page-actions.js")].find(existsSync);
   if (!source) throw new Error("The M9R browser action engine is missing; reinstall M9R.");

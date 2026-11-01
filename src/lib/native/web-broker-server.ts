@@ -489,7 +489,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   }
 
   function waitForExtensionReady(timeoutMs: number): Promise<boolean> {
-    if (options.browserTransport) return Promise.resolve(options.browserTransport.ready());
+    if (options.browserTransport) return options.browserTransport.ensureReady?.() ?? Promise.resolve(options.browserTransport.ready());
     if (extension && extension === readyExtension && extension.readyState === WebSocket.OPEN) return Promise.resolve(true);
     ensureBrowserLaunchedForExtension();
     return new Promise((resolve) => {

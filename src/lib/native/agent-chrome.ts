@@ -4,10 +4,12 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, w
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocket } from "ws";
+import { randomUUID } from "node:crypto";
 import { dragChrome } from "./agent-chrome-input";
 
 export interface BrowserTransport {
   ready(): boolean;
+  ensureReady?(): Promise<boolean>;
   send(message: unknown): boolean;
   subscribe(receive: (message: unknown) => void, disconnected: () => void): () => void;
   close(): Promise<void>;
@@ -200,7 +202,7 @@ class CdpConnection {
   }
 }
 
-interface Command { type: string; id?: string; action?: string; tab?: string; url?: string; selector?: string; endSelector?: string; args?: { destination?: string }; text?: string; expectOrigin?: string; expectPathPrefix?: string }
+interface Command { type: string; id?: string; action?: string; tab?: string; url?: string; selector?: string; endSelector?: string; args?: { destination?: string }; text?: string; expectOrigin?: string; expectPathPrefix?: string; expectedBrowserInstanceId?: string; expectedTabId?: string }
 interface Tab { targetId: string; sessionId: string }
 interface PageResult { ok: boolean; error?: string; data?: unknown }
 
@@ -249,6 +251,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
     cdp = await CdpConnection.connect(endpoint);
     const connection = cdp;
     const tabs = new Map<string, Tab>();
+    const browserInstanceId = randomUUID();
     const queues = new Map<string, Promise<void>>();
     connection.onClose(() => { closed = true; for (const listener of listeners) listener.disconnected(); });
 
@@ -279,7 +282,9 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
       let result: PageResult;
       try {
         if (closed || stopped) throw new Error("Agent Chrome work was stopped.");
-        if (!["open", "read", "snapshot", "click", "type", "drag"].includes(command.action ?? "")) throw new Error("This Chrome channel supports open, read, snapshot, click, type and drag only.");
+        if ((command.expectedBrowserInstanceId && command.expectedBrowserInstanceId !== browserInstanceId)
+          || (command.expectedTabId && command.expectedTabId !== tab?.targetId)) throw new Error("The exact browser generation or tab changed; observe it again before dispatch.");
+        if (!["open", "read", "snapshot", "click", "type", "drag", "press", "scroll", "select_text", "paste", "close", "switch", "click_at", "double_click", "right_click"].includes(command.action ?? "")) throw new Error("This browser action is not supported by the dedicated CDP channel.");
         if (command.action === "open") {
           allowed(command.url ?? "", command);
           if (!tab) {
@@ -314,7 +319,18 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
           if (command.action === "read") {
             result = await pageAction(tab, `m9rPageRead(${JSON.stringify(command.selector ?? null)}, ${JSON.stringify(origin)}, ${JSON.stringify(command.expectPathPrefix ?? null)})`);
           } else if (command.action === "snapshot") {
-            result = await pageAction(tab, "m9rPageSnapshot(null,80)");
+            result = await pageAction(tab, "m9rPageSnapshot(null,150)");
+            if (result.ok) result.data = { ...(result.data as Record<string, unknown>), tab: tabName, browserInstanceId, tabId: tab.targetId, nativeClickAvailable: true };
+          } else if (command.action === "close") {
+            const closedTarget = await connection.send("Target.closeTarget", { targetId: tab.targetId });
+            if (closedTarget.success !== true) throw new Error("Chrome did not confirm the exact tab close.");
+            tabs.delete(tabName);
+            result = { ok: true, data: { closed: true, tab: tabName } };
+          } else if (command.action === "switch") {
+            // Logical selection only; never activate a physical browser window.
+            result = { ok: true, data: { tab: tabName } };
+          } else if (["press", "scroll", "select_text", "paste", "click_at", "double_click", "right_click"].includes(command.action ?? "")) {
+            result = await pageAction(tab, `m9rPagePower(${JSON.stringify(command.action)}, ${JSON.stringify(command.selector ?? null)}, ${JSON.stringify(command.args ?? {})}, ${JSON.stringify(origin)}, ${JSON.stringify(command.expectPathPrefix ?? null)}, null, ${JSON.stringify(command.text ?? null)}, null)`);
           } else if (command.action === "drag") {
             const destination = command.endSelector ?? command.args?.destination;
             if (!command.selector || !destination) throw new Error("Drag needs source and destination selectors or refs.");
@@ -387,7 +403,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
             }
             result = { ok: true, data: { route: "agent-chrome", delivery: "cdp", label: point.name } };
           }
-          const current = await location(tab); allowed(current, command); url = current;
+          if (command.action !== "close") { const current = await location(tab); allowed(current, command); url = current; }
         }
       } catch (error) { result = { ok: false, error: error instanceof Error ? error.message : "Agent Chrome action failed." }; }
       finally {

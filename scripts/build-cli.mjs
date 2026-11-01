@@ -303,6 +303,10 @@ function build() {
       .replace(/["']\.\.\/agent-detection-core["']/g, '"./agent-detection-core.js"');
     writeFileSync(resolve(outDir, `${name}.js`), js);
   }
+  for (const name of ["browser-daemon", "computer-use-recovery", "computer-use-latency"]) {
+    const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
+    writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"'));
+  }
   const localPresenceHeartbeatTs = readFileSync(resolve(repoRoot, "src/lib/native/local-presence-heartbeat.ts"), "utf8");
   writeFileSync(resolve(outDir, "local-presence-heartbeat.js"), transpile(localPresenceHeartbeatTs));
   const mcpEntryTs = readFileSync(resolve(repoRoot, "scripts/m9r-mcp.ts"), "utf8");
@@ -316,7 +320,7 @@ function build() {
     platform: "node",
     format: "cjs",
     target: "node22",
-  define: { "import.meta.url": "__m9rBrokerUrl" },
+  define: { "import.meta.url": "__m9rBrokerUrl", "__M9R_BROWSER_PAGE_SOURCE__": JSON.stringify(readFileSync(resolve(repoRoot, "extensions/browser/src/page-actions.js"), "utf8")) },
   banner: { js: 'const __m9rBrokerUrl = require("node:url").pathToFileURL(__filename).href;' },
     tsconfig: resolve(repoRoot, "tsconfig.json"),
     logLevel: "silent",
