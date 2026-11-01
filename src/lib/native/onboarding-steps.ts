@@ -14,11 +14,7 @@ export interface OnboardingStep {
 
 export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
   { id: "install", who: "you", title: "Install M9R", detail: "Node must be installed. Then install the CLI.", fix: "npm i -g m9r-cli" },
-  { id: "setup", who: "m9r", title: "Set up this machine", detail: "One command shows exactly what it will change in your agent settings, asks first, and backs everything up.", fix: "m9r-cli setup" },
-  { id: "claude-hooks", who: "m9r", title: "Claude Code hooks", detail: "Small hooks in your Claude settings let a mention like @codex become a task, and bring replies back at your next prompt." },
-  { id: "standing-instruction", who: "m9r", title: "Standing instruction", detail: "A short block in your own CLAUDE.md tells Claude to handle approved inbox tasks and never act on unapproved ones." },
-  { id: "new-session", who: "you", title: "Start a new Claude Code session", detail: "Hooks load when a session starts. Sessions that were already open before setup do not have them yet.", fix: "Open a new Claude Code session, or restart Claude Desktop." },
-  { id: "codex-trust", who: "you", title: "Trust the Codex hooks", detail: "Codex requires you to review and trust non-managed hooks once. M9R will not bypass that.", fix: "In Codex, type /hooks and choose to trust the M9R hooks." },
+  { id: "setup", who: "m9r", title: "Set up this machine", detail: "M9R configures its broker-owned runtime and removes retired provider hooks, global MCP entries, and other legacy integrations.", fix: "m9r-cli setup" },
   { id: "logins", who: "you", title: "Stay logged in to your agents", detail: "M9R never handles your Claude, Codex or OpenCode logins. Each agent keeps running in its own app." },
   { id: "undo", who: "m9r", title: "Undo anytime", detail: "Removes everything M9R added and restores the backups. It never touches your own content.", fix: "m9r-cli uninstall" },
 ];

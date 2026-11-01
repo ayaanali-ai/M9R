@@ -713,8 +713,7 @@ export async function runSetup(io: NativeIo, flags: { yes?: boolean; dryRun?: bo
 
 function printOpenSteps(io: NativeIo): void {
   io.out("Still yours to do:");
-  const hasKnownEndpoint = createLocalStore(nativePaths(io).m9r).listEndpoints().length > 0;
-  for (const s of USER_STEPS.filter((x) => x.id !== "install" && (x.id !== "new-session" || !hasKnownEndpoint))) io.out(`  - ${s.title}${s.fix ? `: ${s.fix}` : ""}`);
+  for (const s of USER_STEPS.filter((x) => x.id !== "install")) io.out(`  - ${s.title}${s.fix ? `: ${s.fix}` : ""}`);
 }
 
 export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?: boolean }): Promise<number> {
@@ -951,7 +950,7 @@ export function nativeStatus(io: NativeIo): StatusRow[] {
   rows.push({ id: "legacy-provider-path", state: "ok", label: "Legacy provider hook/session path is not installed" });
   const store = createLocalStore(p.m9r);
   const endpoints = store.listEndpoints();
-  rows.push({ id: "endpoints", state: "info", label: endpoints.length ? `Agents seen on this machine: ${endpoints.map((e) => `@${e.handle}`).join(", ")}` : "No agent sessions seen yet. Start a new Claude Code session." });
+  rows.push({ id: "endpoints", state: "info", label: endpoints.length ? `Agents seen on this machine: ${endpoints.map((e) => `@${e.handle}`).join(", ")}` : "No broker-owned provider activity recorded yet; configured connections start with the M9R broker." });
   const statusNow = Date.now();
   rows.push({ id: "target-identities", state: "info", label: "Provider-owned session identities are not used; broker connections are created and supervised directly" });
   const inboxCutoff = statusNow - inboxMaxAgeMs();
@@ -973,8 +972,6 @@ export function printNativeStatus(io: NativeIo): void {
   io.out("Native front door (local mode)");
   const rows = nativeStatus(io);
   for (const r of rows) io.out(`[${r.state === "ok" ? "PASS" : r.state === "todo" ? "TODO" : "INFO"}] ${r.label}${r.fix ? `  ->  ${r.fix}` : ""}`);
-  const hasKnownEndpoint = rows.some((row) => row.id === "endpoints" && row.label.startsWith("Agents seen on this machine:"));
-  for (const s of USER_STEPS.filter((x) => (x.id === "new-session" && !hasKnownEndpoint) || x.id === "codex-trust")) io.out(`[YOU ] ${s.title}${s.fix ? `  ->  ${s.fix}` : ""}`);
 }
 
 /**
