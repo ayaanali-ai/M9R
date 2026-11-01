@@ -150,7 +150,7 @@ test("ACP prompt events are not held behind a slow runtime sink", async () => {
   assert.equal(firstEvent?.type, "provider.progress");
 });
 
-test("ACP controller restarts a dead provider server before the next turn and preserves the bridge session identity", async () => {
+test("ACP controller restarts a dead provider server with a fresh cold provider session", async () => {
   let health: "alive" | "dead" = "alive";
   let launches = 0;
   let resumes = 0;
@@ -185,8 +185,8 @@ test("ACP controller restarts a dead provider server before the next turn and pr
   for await (const event of controller.prompt("session-1", "continue")) events.push(event);
   assert.equal(events[0]?.type, "provider.progress");
   assert.equal(launches, 2);
-  assert.equal(resumes, 1);
-  assert.equal(registry.get("session-1")?.providerSessionRef, "provider-ref-resumed");
+  assert.equal(resumes, 0);
+  assert.equal(registry.get("session-1")?.providerSessionRef, "provider-ref-new");
   assert.equal(registry.get("session-1")?.state, "ready");
   await controller.close("session-1");
 });

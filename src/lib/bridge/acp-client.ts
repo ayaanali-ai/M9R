@@ -280,15 +280,19 @@ export class AcpSessionController {
       try {
         const initialized = await controller.adapter.initialize(server);
         if (initialized.capabilities.interactive_session !== true) throw new Error("Provider restart does not support interactive sessions.");
-        let providerSession: AgentSessionHandle;
-        try {
-          providerSession = controller.providerSession.providerSessionRef
-            ? await controller.adapter.resumeSession({ server, providerSessionRef: controller.providerSession.providerSessionRef, assignment: controller.assignment })
-            : await controller.adapter.createSession({ server, assignment: controller.assignment, executionId: controller.executionId });
-        } catch (resumeError) {
-          providerSession = await controller.adapter.createSession({ server, assignment: controller.assignment, executionId: controller.executionId });
-          console.warn("Provider session resume failed; created a fresh session after bounded recovery.", resumeError instanceof Error ? resumeError.message : resumeError);
-        }
+        // Recovery is deliberately a cold start.  A provider-reported thread
+        // or session id is an ACP transport handle for the old child only; it
+        // is never a reconnect selector for a new M9R-owned process.  The
+        // previous implementation attempted resumeSession() first, which
+        // silently re-attached Codex/Claude/OpenCode to their own history and
+        // recreated the second session architecture that M9R explicitly
+        // retired.  Durable continuity comes from M9R task context and room
+        // memory, not from a vendor conversation resume.
+        const providerSession = await controller.adapter.createSession({
+          server,
+          assignment: controller.assignment,
+          executionId: controller.executionId,
+        });
         const nextController: ActiveAcpSession = {
           ...controller,
           server,
