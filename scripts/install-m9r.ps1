@@ -462,6 +462,13 @@ function Remove-ManagedWebBroker {
 }
 
 function Read-Consent([string]$Prompt) {
+    # Read-Host only reads an interactive console. Release tests and scripted
+    # maintenance use redirected stdin, so consume one line directly there
+    # instead of hanging after printing the consent plan.
+    if ([Console]::IsInputRedirected) {
+        $answer = [Console]::In.ReadLine()
+        return ([string]$answer) -match '^(?i:y|yes)$'
+    }
     return (Read-Host "$Prompt [y/N]") -match '^(?i:y|yes)$'
 }
 
