@@ -3,6 +3,7 @@ import type { WebBatchRequest, WebBatchResponse, WebRequest, WebResponse } from 
 import type { WebAgentMessage } from "./web-broker-core";
 import { requestOwnerPipe } from "./owner-pipe";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
+import type { TaskCompletionReport } from "./task-completion-contract";
 import type { TaskStageMode } from "./task-desktop-stage";
 import type { MultiplayerA2ASendInput, MultiplayerSendResult } from "./multiplayer-runtime";
 import { parseA2AMessage, type A2AMessage } from "./multiplayer-contract";
@@ -33,7 +34,7 @@ export interface WebBrokerClient {
   sendA2A?(token: string, input: MultiplayerA2ASendInput): Promise<MultiplayerSendResult>;
   claimAgentInbox?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; taskIds?: string[]; error?: string }>;
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
-  recordAgentTaskResult?(token: string, taskId: string, summary: string): Promise<{ ok: boolean; error?: string }>;
+  recordAgentTaskResult?(token: string, taskId: string, summary: string, completion?: TaskCompletionReport): Promise<{ ok: boolean; error?: string }>;
   taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
   taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string, expectedMutationRevision?: number): Promise<StageClientResult>;
   prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number, options?: { bindForeground?: boolean }): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
@@ -199,8 +200,8 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
     async advanceAgentInboxCursor(token, seq) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "cursor", token, seq } });
     },
-    async recordAgentTaskResult(token, taskId, summary) {
-      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary } });
+    async recordAgentTaskResult(token, taskId, summary, completion) {
+      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary, ...(completion ? { completion } : {}) } });
     },
     async taskStageApp(token, taskId, appId, mode = "owner-preview", operationId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,

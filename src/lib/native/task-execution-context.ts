@@ -29,7 +29,7 @@ export function renderTaskExecutionContext(task: Pick<Task, "id">, handle: strin
   void task;
   void handle;
   void identityToken;
-  return "M9R assigned one approved work item to this turn. Work only on the message above. When finished or blocked, call m9r_result with the concrete outcome; the connected M9R session supplies internal correlation automatically. Keep routing metadata and credentials out of your reply.";
+  return "M9R assigned one approved work item to this turn. Work only on the message above. When finished or blocked, call m9r_result with the concrete outcome and completion={status:'completed',remainingWork:[]} only when all requested work is complete; otherwise use status:'incomplete' and the actual remaining requirements. Ending this provider turn does not complete the task. The connected M9R session supplies internal correlation automatically. Keep routing metadata and credentials out of your reply.";
 }
 
 /**

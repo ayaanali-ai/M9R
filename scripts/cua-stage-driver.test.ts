@@ -69,6 +69,22 @@ test("foreground input waits through a brief owner pointer interaction and reche
   await driver.shutdown();
 }));
 
+test("owner-idle waiting happens outside the pointer lease and restores the latest owner position", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  let leased = false;
+  let unleasedReads = 0;
+  let restored: { x: number; y: number } | undefined;
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never,
+    foregroundLease: { async run(_owner, _signal, operation) { leased = true; try { return await operation(); } finally { leased = false; } } },
+    ownerPointer: { get: async () => { if (!leased) unleasedReads++; return unleasedReads <= 1 ? { x: 10, y: 10 } : { x: 30, y: 30 }; },
+      restore: async (x, y) => { assert.equal(leased, true); restored = { x, y }; } } });
+  await driver.click("stage", 42, 24, undefined, { confirmFocusForeground: true });
+  assert.ok(unleasedReads >= 4, "the idle interval cannot reserve the global device");
+  assert.deepEqual(restored, { x: 30, y: 30 }, "never restore to a position preceding the owner's movement");
+  await driver.shutdown();
+}));
+
 function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   let connected: Awaited<ReturnType<NonNullable<CuaStageDriverDependencies["connectRuntime"]>>>;
   return createCuaStageDriverCore({

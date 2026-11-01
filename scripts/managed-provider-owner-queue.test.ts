@@ -53,6 +53,25 @@ function gatedConnection(profile: ManagedProviderConnectionProfile) {
   };
 }
 
+test("a provider turn ending without a completion report preserves unfinished M9R work", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-incomplete-"));
+  const store = createLocalStore(root);
+  let gated: ReturnType<typeof gatedConnection> | undefined;
+  const owner = createManagedProviderOwner({ agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store, env: {}, createConnection: (profile) => (gated = gatedConnection(profile)).connection });
+  try {
+    assert.equal(owner.deliver("codex", "Verify both documents.").ok, true);
+    for (let attempt = 0; attempt < 100 && !gated?.sent.length; attempt++) await new Promise((done) => setTimeout(done, 10));
+    gated!.release();
+    for (let attempt = 0; attempt < 100 && store.getTask("T1")?.receipt?.state !== "paused"; attempt++) await new Promise((done) => setTimeout(done, 10));
+    const task = store.getTask("T1")!;
+    assert.equal(task.receipt?.state, "paused");
+    assert.equal(task.resultSummary, undefined);
+    assert.deepEqual(task.completion?.remainingWork, ["Verify both documents."]);
+    assert.match(gated!.sent[0]!.prompt, /Ending the provider turn alone never completes/);
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("stopping an agent drops its queued follow-up, so the very next message runs instead of a stale one", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-owner-queue-"));
   const store = createLocalStore(root);

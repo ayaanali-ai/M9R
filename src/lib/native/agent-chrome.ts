@@ -204,7 +204,7 @@ class CdpConnection {
 
 interface Command { type: string; id?: string; action?: string; tab?: string; url?: string; selector?: string; endSelector?: string; args?: { destination?: string }; text?: string; expectOrigin?: string; expectPathPrefix?: string; expectedBrowserInstanceId?: string; expectedTabId?: string }
 interface Tab { targetId: string; sessionId: string }
-interface PageResult { ok: boolean; error?: string; data?: unknown }
+interface PageResult { ok: boolean; error?: string; data?: unknown; dispatchState?: "not-dispatched" | "dispatched" | "unknown" }
 
 export async function launchAgentChrome(options: { root: string; pageActionsSource: string; chromeExecutable?: string }): Promise<BrowserTransport & { profile: string; pid: number }> {
   const paths = agentChromePaths(options.root);
@@ -280,6 +280,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
       let tab = tabs.get(tabName);
       let url: string | undefined;
       let result: PageResult;
+      let inputAttempted = false;
       try {
         if (closed || stopped) throw new Error("Agent Chrome work was stopped.");
         if ((command.expectedBrowserInstanceId && command.expectedBrowserInstanceId !== browserInstanceId)
@@ -294,6 +295,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
             tabs.set(tabName, tab);
           }
           await connection.send("Page.enable", {}, tab.sessionId);
+          inputAttempted = true;
           const navigation = await connection.send("Page.navigate", { url: command.url }, tab.sessionId);
           if (navigation.errorText) throw new Error("Chrome could not navigate to the approved page.");
           let loaded = false;
@@ -322,6 +324,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
             result = await pageAction(tab, "m9rPageSnapshot(null,150)");
             if (result.ok) result.data = { ...(result.data as Record<string, unknown>), tab: tabName, browserInstanceId, tabId: tab.targetId, nativeClickAvailable: true };
           } else if (command.action === "close") {
+            inputAttempted = true;
             const closedTarget = await connection.send("Target.closeTarget", { targetId: tab.targetId });
             if (closedTarget.success !== true) throw new Error("Chrome did not confirm the exact tab close.");
             tabs.delete(tabName);
@@ -330,6 +333,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
             // Logical selection only; never activate a physical browser window.
             result = { ok: true, data: { tab: tabName } };
           } else if (["press", "scroll", "select_text", "paste", "click_at", "double_click", "right_click"].includes(command.action ?? "")) {
+            inputAttempted = true;
             result = await pageAction(tab, `m9rPagePower(${JSON.stringify(command.action)}, ${JSON.stringify(command.selector ?? null)}, ${JSON.stringify(command.args ?? {})}, ${JSON.stringify(origin)}, ${JSON.stringify(command.expectPathPrefix ?? null)}, null, ${JSON.stringify(command.text ?? null)}, null)`);
           } else if (command.action === "drag") {
             const destination = command.endSelector ?? command.args?.destination;
@@ -351,6 +355,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
             if (!await hit(command.selector, from) || !await hit(destination, to)) throw new Error("Both drag targets must be visible in the same viewport.");
             // Keep background rendering active without Target.activateTarget or Page.bringToFront.
             await connection.send("Emulation.setFocusEmulationEnabled", { enabled: true }, tab.sessionId);
+            inputAttempted = true;
             await dragChrome({
               send: (method, params) => connection.send(method, params, tab!.sessionId),
               onDrag: (listener) => connection.onEvent((event) => {
@@ -384,6 +389,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
               const current = await location(tab); allowed(current, command);
               if (current !== url) throw new Error("The page changed before typing.");
               if (!await evaluate(tab, "document.activeElement === window.__m9rTypingTarget && window.__m9rTypingTarget?.isConnected")) throw new Error("Typing focus changed before input.");
+              inputAttempted = true;
               await connection.send("Input.insertText", { text: command.text ?? "" }, tab.sessionId);
             } else {
               // Replan against the hit target after scroll/layout settles and recheck the site immediately before input.
@@ -396,6 +402,7 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
                 return !!el && el.isConnected && !el.disabled && (el === hit || el.contains(hit));
               })()`);
               if (!validation) throw new Error("The click target changed before input.");
+              inputAttempted = true;
               await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y }, tab.sessionId);
               if (stopped || closed) throw new Error("Agent Chrome work was stopped.");
               await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 }, tab.sessionId);
@@ -405,11 +412,11 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
           }
           if (command.action !== "close") { const current = await location(tab); allowed(current, command); url = current; }
         }
-      } catch (error) { result = { ok: false, error: error instanceof Error ? error.message : "Agent Chrome action failed." }; }
+      } catch (error) { result = { ok: false, error: error instanceof Error ? error.message : "Agent Chrome action failed.", dispatchState: inputAttempted ? "unknown" : "not-dispatched" }; }
       finally {
         if (tab && command.action === "drag") await connection.send("Emulation.setFocusEmulationEnabled", { enabled: false }, tab.sessionId).catch(() => undefined);
       }
-      for (const listener of listeners) listener.receive({ type: "result", id: command.id, ...result!, ...(url ? { origin: new URL(url).origin, url } : {}) });
+      for (const listener of listeners) listener.receive({ type: "result", id: command.id, ...result!, ...(result!.ok && inputAttempted ? { dispatchState: "dispatched" } : {}), ...(url ? { origin: new URL(url).origin, url } : {}) });
     }
     const transport = {
       profile: paths.profile, pid: child.pid!,

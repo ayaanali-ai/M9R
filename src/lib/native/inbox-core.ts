@@ -195,6 +195,7 @@ export interface LogicalTaskContext {
   priorOutcome?: string;
   previousTaskId?: string;
   supersededByTaskId?: string;
+  remainingWork?: string[];
 }
 
 export interface Task {
@@ -206,6 +207,7 @@ export interface Task {
   goal: string;
   goalTruncated: boolean;
   logicalContext?: LogicalTaskContext;
+  completion?: { status: "completed" | "incomplete"; remainingWork: string[]; summary: string; updatedAt: string };
   pointers: string[];
   origin: Origin;
   approval: Approval;

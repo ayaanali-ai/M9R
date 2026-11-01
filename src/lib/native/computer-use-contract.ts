@@ -273,6 +273,11 @@ export const computerUseResultSchema = z.object({
   routeId: opaqueRef.optional(),
   dispatchStatus: z.enum(["not-dispatched", "dispatched", "unknown"]),
   effectStatus: z.enum(["not-checked", "observed", "verified", "mismatch", "unknown"]),
+  deliveryReceipt: z.object({
+    delivery: z.enum(["delivered", "not-delivered", "uncertain"]),
+    verification: z.enum(["verified", "unverified"]),
+    retry: z.enum(["never", "same-operation-id", "refresh-target", "new-operation-id"]),
+  }).strict().optional(),
   operationReceipt: z.object({
     status: z.enum(["in_progress", "applied", "uncertain"]),
     updatedAt: z.string().datetime().optional(),

@@ -1319,6 +1319,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
   options.signal?.throwIfAborted();
   const asyncOptions = options.signal ? { signal: options.signal } : undefined;
   const ownerPointer = deps.ownerPointer ?? { get: () => manager.getOwnerCursorPosition(), restore: (x: number, y: number) => manager.restoreOwnerCursorPosition(x, y) };
+  let foregroundPointer: { x: number; y: number } | undefined;
   const deliverForeground = async (): Promise<CuaStageActionOutcome> => {
     const pid = args.pid;
     const windowId = args.window_id;
@@ -1330,23 +1331,11 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     }
     const targetPid = pid as number;
     const targetWindowId = windowId as number;
-    const saved = await ownerPointer.get().catch(() => undefined);
+    const saved = foregroundPointer;
     if (!saved) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be preserved; no foreground input was sent.", "foreground-lease");
-    if (saved) {
-      await delay(OWNER_ACTIVITY_CHECK_MS);
-      const after = await ownerPointer.get().catch(() => undefined);
-      if (after && (Math.abs(after.x - saved.x) > OWNER_ACTIVITY_THRESHOLD_PX || Math.abs(after.y - saved.y) > OWNER_ACTIVITY_THRESHOLD_PX)) {
-        // Do not cancel the provider turn just because the owner briefly
-        // touched the pointer. Wait for a bounded idle gap, then re-read the
-        // exact target before dispatching; a continuously active owner still
-        // fails closed without sending input.
-        await waitForOwnerIdle(ownerPointer, after, options.signal);
-        const refreshed = await driver.getWindowState({ pid: targetPid, windowId: BigInt(targetWindowId), session,
-          includeAccessibilityTree: false, includeScreenshot: false, timeoutMs: 750 }, asyncOptions);
-        if (refreshed && typeof refreshed === "object" && "pid" in refreshed && Number((refreshed as { pid?: unknown }).pid) !== targetPid) {
-          throw new DesktopInputNotDispatchedError("The selected window changed while the owner was interacting; no foreground input was sent.", "foreground-lease");
-        }
-      }
+    const currentPointer = await ownerPointer.get().catch(() => undefined);
+    if (!currentPointer || Math.abs(currentPointer.x - saved.x) > OWNER_ACTIVITY_THRESHOLD_PX || Math.abs(currentPointer.y - saved.y) > OWNER_ACTIVITY_THRESHOLD_PX) {
+      throw new DesktopInputNotDispatchedError("The owner moved the pointer before dispatch; reobserve and continue when idle. No input was sent.", "foreground-lease");
     }
     // `delivery_mode: foreground` selects SendInput in the native driver, but
     // it does not itself activate a registered background window. Make the
@@ -1378,14 +1367,32 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     if (actionError !== undefined) throw actionError;
     return { ...outcome!, foregroundConfirmed: true };
   };
-  const runForeground = () => timed("foreground-lease", () => foregroundLease.run(name, options.signal, deliverForeground), {
+  const runForeground = async () => {
+    // Wait for the owner outside the global device lease. Other surfaces and
+    // independent agents remain runnable while this action is paused.
+    let saved = await ownerPointer.get().catch(() => undefined);
+    if (!saved) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be preserved; no foreground input was sent.", "foreground-lease");
+    await delay(OWNER_ACTIVITY_CHECK_MS);
+    const after = await ownerPointer.get().catch(() => undefined);
+    if (!after) throw new DesktopInputNotDispatchedError("The owner's pointer could not be verified; no foreground input was sent.", "foreground-lease");
+    if (Math.abs(after.x - saved.x) > OWNER_ACTIVITY_THRESHOLD_PX || Math.abs(after.y - saved.y) > OWNER_ACTIVITY_THRESHOLD_PX) {
+      saved = await waitForOwnerIdle(ownerPointer, after, options.signal);
+      const refreshed = await driver.getWindowState({ pid: Number(args.pid), windowId: BigInt(Number(args.window_id)), session: String(args.session),
+        includeAccessibilityTree: false, includeScreenshot: false, timeoutMs: 750 }, asyncOptions);
+      if (refreshed && "pid" in refreshed && Number(refreshed.pid) !== Number(args.pid)) {
+        throw new DesktopInputNotDispatchedError("The selected window changed while the owner was interacting; no input was sent.", "target-identity");
+      }
+    }
+    foregroundPointer = saved;
+    return timed("foreground-lease", () => foregroundLease.run(name, options.signal, deliverForeground), {
     detail: `action=${name};delivery=foreground`,
   }).catch((error) => {
     if (error instanceof ForegroundInputLeaseError) {
       throw new DesktopInputNotDispatchedError(error.message, "foreground-lease");
     }
     throw error;
-  });
+    });
+  };
   if (options.deliveryMode === "background" && options.preferForeground) {
     throw new DesktopInputNotDispatchedError("A background stage cannot request foreground input; no input was sent. Use an owner-preview stage for an explicitly visible action.", "background-unavailable");
   }

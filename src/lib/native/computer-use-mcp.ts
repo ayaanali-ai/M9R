@@ -382,7 +382,7 @@ function toolResponse(value: unknown, image?: ImageBlock, isError = false) {
   // MCP field from becoming a second path for raw screenshots or popup data.
   const serialized = JSON.stringify(body, (key, item) => key === "dataUrl" ? undefined : item);
   const structuredContent = (() => {
-    if (isError || !serialized) return undefined;
+    if (!serialized) return undefined;
     try {
       const parsed: unknown = JSON.parse(serialized);
       return recordOf(parsed);
@@ -565,7 +565,11 @@ function browserSnapshotData(response: WebResponse): Record<string, unknown> | u
 }
 
 function createComputerUseResult(input: ComputerUseResult) {
-  return computerUseResultSchema.parse(input);
+  return computerUseResultSchema.parse({ ...input, deliveryReceipt: {
+    delivery: input.dispatchStatus === "dispatched" ? "delivered" : input.dispatchStatus === "not-dispatched" ? "not-delivered" : "uncertain",
+    verification: input.effectStatus === "verified" ? "verified" : "unverified",
+    retry: input.error?.retry ?? (input.dispatchStatus === "unknown" ? "same-operation-id" : input.dispatchStatus === "not-dispatched" ? "refresh-target" : "new-operation-id"),
+  } });
 }
 
 function publicStageCapture(capture: Record<string, unknown>) {
@@ -1823,12 +1827,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       // page. Treat it as a clean pre-dispatch refusal, not an ambiguous outcome,
       // so the provider gets an explicit reason instead of a stuck operation.
       const fenceCode = response.code && FENCE_REFUSAL_CODES.has(response.code) ? response.code : undefined;
-      if (fenceCode) {
+      if (fenceCode || response.dispatchState === "not-dispatched") {
         if (receiptInput) {
           try { deps.store.releaseComputerOperation(receiptInput); } catch { /* the running receipt still blocks replay */ }
         }
-        const retry = preDispatchRetry(fenceCode);
-        return refusal(action, action.targetId, fenceCode, response.error ?? "The mutation fence refused this action before dispatch.", retry);
+        const code = fenceCode ?? response.code ?? "browser-pre-dispatch-refusal";
+        return refusal(action, action.targetId, code, response.error ?? "The browser refused this action before dispatch.", preDispatchRetry(code));
       }
       const receipt = receiptInput ? settleReceipt(receiptInput, "uncertain") : { state: "uncertain" as const };
       return reconcileOperation({ action, identity, receipt, record, token: authToken, timing,

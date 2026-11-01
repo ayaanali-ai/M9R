@@ -303,7 +303,7 @@ function build() {
       .replace(/["']\.\.\/agent-detection-core["']/g, '"./agent-detection-core.js"');
     writeFileSync(resolve(outDir, `${name}.js`), js);
   }
-  for (const name of ["browser-daemon", "computer-use-recovery", "computer-use-latency"]) {
+  for (const name of ["browser-daemon", "computer-use-recovery", "computer-use-latency", "task-completion-contract"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"'));
   }

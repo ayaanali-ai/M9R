@@ -364,7 +364,7 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
     begin(input) {
       if (storeError) {
         return refusal("receipt-store-unavailable",
-          `The owner broker cannot read its durable mutation receipts; no input was sent. ${storeError}`.slice(0, 240), "never");
+          `The owner broker cannot read its durable mutation receipts; no input was sent. ${storeError}`.slice(0, 240), "inspect-receipt");
       }
       if (!validIdentifier(input.operationId) || !input.target.surfaceId.trim() || !input.sessionId.trim()) {
         return refusal("invalid", "The mutation operation identity is invalid.", "never");
@@ -390,7 +390,7 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
         priorReceipt = store.inspectMutationReceipt(receiptKey);
       } catch (error) {
         storeError = error instanceof Error ? error.message : "The multiplayer mutation receipt could not be read.";
-        return refusal("receipt-store-unavailable", "The owner broker cannot verify the action receipt; no input was sent.", "never", surfaceRevision);
+        return refusal("receipt-store-unavailable", "The owner broker cannot verify the action receipt; no input was sent.", "inspect-receipt", surfaceRevision);
       }
       if (priorReceipt) {
         if (priorReceipt.status === "claimed" || priorReceipt.status === "uncertain") {
@@ -468,7 +468,7 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
         storeError = error instanceof Error ? error.message : "The multiplayer mutation receipt could not be persisted.";
         scheduler.release(schedulerOperationId);
         targetRegistry.forget(binding);
-        return refusal("receipt-store-unavailable", "The owner broker could not reserve the action receipt; no input was sent.", "never", surfaceRevision);
+        return refusal("receipt-store-unavailable", "The owner broker could not reserve the action receipt; no input was sent.", "inspect-receipt", surfaceRevision);
       }
       if (!durableClaim.claimed) {
         scheduler.release(schedulerOperationId);

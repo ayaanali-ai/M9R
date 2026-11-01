@@ -19,6 +19,7 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerNotification, ServerRequest, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { taskCompletionReport, taskCompletionReportSchema } from "./task-completion-contract";
 import { readRuntimeBuildIdentity } from "./runtime-build-identity";
 import { handleForProvider, type LocalStore } from "./local-store";
 import { inboxMaxAgeMs, MAX_AGENT_REPLY_DEPTH, normalizeHandle, renderInboxInjection, type Task } from "./inbox-core";
@@ -994,27 +995,31 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_result",
     {
-      description: "Report the result of a task you were sent, so it gets recorded and (if the sender is a live Codex session) pushed back to them.",
+      description: "Report the concrete outcome of the assigned task. Include completion.status='incomplete' and a dynamic remainingWork list when any requested requirement remains; M9R preserves that work for continuation instead of marking the task completed. A provider turn ending is not proof of task completion.",
       inputSchema: {
         ...AUTH_FIELD,
         taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Optional legacy correlation field. Omit it for normal provider-bound delivery; M9R resolves the one current delivered work item automatically."),
         summary: z.string().min(1).max(20_000).describe("What you actually did and found -- concrete, not a vague completion claim. Real structured evidence (an observation payload, a diff, a long error) is fine; prefer a focused excerpt over the entire raw object when it is this large."),
+        completion: taskCompletionReportSchema,
       },
     },
-    async ({ token, taskId: requestedTaskId, summary }) => {
+    async ({ token, taskId: requestedTaskId, summary, completion }) => {
+      const report = taskCompletionReport(summary, completion);
       const { identity, token: authToken } = await authenticate(token);
       const taskId = resolveResultTaskId(identity, requestedTaskId);
       const existing = deps.store.getTask?.(taskId);
       if (!existing) throw new Error(`No task ${taskId} found.`);
       if (existing.to !== identity.handle && existing.to !== roomHandle(identity, identity.handle)) throw new Error(`Task ${taskId} was not sent to you (@${identity.handle}), refusing to report a result for it.`);
       if (deps.web?.recordAgentTaskResult) {
-        const recorded = await deps.web.recordAgentTaskResult(authToken, taskId, summary);
+        const recorded = await deps.web.recordAgentTaskResult(authToken, taskId, summary, report);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
       } else {
-        const recorded = deps.store.recordTaskResult(authToken, taskId, summary);
+        const recorded = deps.store.recordTaskResult(authToken, taskId, summary, report);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
       }
-      return { content: [{ type: "text", text: `Recorded result. Result recorded and delivered to the sender's M9R conversation.` }] };
+      return { content: [{ type: "text", text: report.status === "incomplete"
+        ? "Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed."
+        : "Recorded result. Result recorded and delivered to the sender's M9R conversation." }] };
     },
   );
 

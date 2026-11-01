@@ -6,6 +6,7 @@
  * Local first: nothing here needs the network or an account (design section 1, principle 7).
  */
 import { nextLogicalTaskContext } from "./logical-task-context";
+import { taskCompletionReport, type TaskCompletionReport } from "./task-completion-contract";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
@@ -2454,6 +2455,16 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (t.receipt?.state === "completed" || t.receipt?.state === "canceled" || t.receipt?.state === "paused" || t.receipt?.state === "failed" || t.delivery?.state === "failed" || t.lifecycle?.state === "failed") return t;
         const clean = redactSecrets(summary.trim());
         const at = now().toISOString();
+        const report = taskCompletionReport(clean);
+        t.completion = { ...report, summary: clean.slice(0, MAX_RESULT_SUMMARY_CHARS), updatedAt: at };
+        if (report.status === "incomplete") {
+          t.logicalContext ??= nextLogicalTaskContext(t);
+          t.logicalContext.state = "paused";
+          t.logicalContext.remainingWork = report.remainingWork;
+          t.logicalContext.priorOutcome = clean.slice(0, 2_000);
+          recordTaskReceipt(t, { state: "paused", at, source: "provider-session" });
+          return t;
+        }
         rememberDelivery(t);
         if (t.delivery) t.delivery = { ...t.delivery, state: "done" };
         setCoordinationCompletion(t, "completed");
@@ -2505,8 +2516,11 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /** Record an authenticated result once, in the same transaction that checks its session ownership. */
-    recordTaskResult(token: string, id: string, summary: string): { ok: boolean; error?: string; alreadyRecorded?: boolean } {
+    recordTaskResult(token: string, id: string, summary: string, completion?: TaskCompletionReport): { ok: boolean; error?: string; alreadyRecorded?: boolean } {
       const clean = redactSecrets(summary.trim());
+      let report: TaskCompletionReport;
+      try { report = taskCompletionReport(clean, completion); }
+      catch { return { ok: false, error: "The completion report is invalid; completed tasks cannot have remaining work." }; }
       if (!clean) return { ok: false, error: "A task result needs a summary." };
       const bounded = clean.length > MAX_RESULT_SUMMARY_CHARS
         ? clean.slice(0, MAX_RESULT_SUMMARY_CHARS - TRUNCATION_MARKER.length) + TRUNCATION_MARKER
@@ -2542,6 +2556,15 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         }
         if (task.targetSession && task.targetSession === identity.sessionId) task.deliveredSession = identity.sessionId;
         const at = now().toISOString();
+        task.completion = { ...report, summary: bounded, updatedAt: at };
+        if (report.status === "incomplete") {
+          task.logicalContext ??= nextLogicalTaskContext(task);
+          task.logicalContext.state = "paused";
+          task.logicalContext.remainingWork = report.remainingWork;
+          task.logicalContext.priorOutcome = bounded.slice(0, 2_000);
+          recordTaskReceipt(task, { state: "paused", at, source: "provider-session", sessionId: identity.sessionId });
+          return { ok: true };
+        }
         rememberDelivery(task);
         if (task.delivery) task.delivery = { ...task.delivery, state: "done" };
         setCoordinationCompletion(task, "completed");

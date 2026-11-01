@@ -70,6 +70,7 @@ export interface WebResponse {
   error?: string;
   /** Stable refusal category for a mutation-fence or transport gate. */
   code?: string;
+  dispatchState?: "not-dispatched" | "dispatched" | "unknown";
   /** Current broker mutation epoch for this tab after the action. */
   mutationRevision?: number;
   /** Accessible name or nearest visible text of the target (the page title for page-level actions), max 80 chars. */
@@ -172,6 +173,7 @@ export interface WebBrokerDeps {
   send(message: unknown): boolean;
   /** CDP input owns one pointer/focus per tab: serialize every writer through a tab lane. */
   oneWriterPerTab?: boolean;
+  trustDeliveryReceipts?: boolean;
   /** Current room mode; absent means every risky action asks (the original behavior). */
   roomMode?(): RoomMode;
   ownerId?: string;
@@ -1337,7 +1339,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
   function onExtensionMessage(raw: unknown): void {
     if (!raw || typeof raw !== "object") return;
     const message = raw as {
-      type?: string; id?: string; ok?: boolean; data?: unknown; error?: string; origin?: string; url?: string;
+      type?: string; id?: string; ok?: boolean; data?: unknown; error?: string; origin?: string; url?: string; dispatchState?: string;
       noticeId?: unknown; tab?: unknown; agent?: unknown; provider?: unknown; sessionId?: unknown; rendered?: unknown;
     };
     if (message.type === "notice-ack") {
@@ -1443,7 +1445,13 @@ export function createWebBroker(deps: WebBrokerDeps) {
         if (room) (response as WebResponse).room = room;
       }
     }
-    if (entry.mutation) {
+    if (deps.trustDeliveryReceipts && message.dispatchState === "not-dispatched" && !response.ok) {
+      response.dispatchState = "not-dispatched";
+      if (entry.mutation && !entry.mutation.release(response.error ?? "The browser refused before dispatch.")) {
+        response.dispatchState = "unknown";
+        response.code = "mutation-outcome-uncertain";
+      }
+    } else if (entry.mutation) {
       const readback = response.ok
         ? entry.mutation.commit({ status: "applied", ...(response.label ? { detail: response.label } : {}) })
         : entry.mutation.abort(response.error ?? "the browser reported a failure", { status: "uncertain" });

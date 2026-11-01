@@ -15,6 +15,8 @@ export function nextLogicalTaskContext(task: Task, previous?: Task, continuation
     originalObjective: bounded(prior?.originalObjective ?? previous?.goal ?? task.goal, 2000),
     latestInstruction: bounded(continuation && previous ? prior?.latestInstruction ?? previous.goal : task.goal, 4000),
     ...(previous ? { previousTaskId: previous.id } : {}),
+    ...(continuation && (previous?.completion?.remainingWork ?? prior?.remainingWork)
+      ? { remainingWork: [...(previous?.completion?.remainingWork ?? prior!.remainingWork!)].slice(0, 32) } : {}),
     ...(previous?.resultSummary || prior?.priorOutcome
       ? { priorOutcome: bounded(previous?.resultSummary ?? prior!.priorOutcome!, 2000) } : {}),
   };
@@ -30,6 +32,7 @@ export function logicalTaskHandoff(task: Task): string {
     control: context.control,
     originalObjective: bounded(context.originalObjective, 2000),
     latestInstruction: bounded(context.latestInstruction, 4000),
+    remainingWork: (context.remainingWork ?? [context.latestInstruction]).slice(0, 32).map((item) => bounded(item, 1_000)),
     ...(context.priorOutcome ? { priorOutcome: bounded(context.priorOutcome, 2000) } : {}),
     pointers: task.pointers.slice(0, 8).map((pointer) => bounded(pointer, 200)),
   }) + "\nA pause is not evidence of completion. Reobserve the current surface before acting. Follow the latest instruction; do not replay earlier tasks.";

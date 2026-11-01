@@ -52,9 +52,9 @@ test("task stage app/action routes require loopback key, reject origins and extr
   } });
   try {
     for (const [path, body] of [["action", { token: "session-token", taskId: "T1", action: { kind: "capture" } }],
-      ["launch", { token: "session-token", taskId: "T1", appId: "fixture" }],
-      ["launch", { token: "session-token", taskId: "T1", appId: "MSI Center" }],
-      ["launch", { token: "session-token", taskId: "T1", appId: "C:\\Windows\\System32\\cmd.exe" }],
+      ["launch", { token: "session-token", taskId: "T1", appId: "fixture", operationId: "launch-fixture" }],
+      ["launch", { token: "session-token", taskId: "T1", appId: "MSI Center", operationId: "launch-friendly" }],
+      ["launch", { token: "session-token", taskId: "T1", appId: "C:\\Windows\\System32\\cmd.exe", operationId: "launch-path" }],
       ["close", { token: "session-token", taskId: "T1" }]] as const) {
       const request = (headers: Record<string, string>, payload: unknown = body) => fetch(`http://127.0.0.1:${broker.port}/web/stage/${path}`, {
         method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(payload),
@@ -206,6 +206,7 @@ test("owner broker atomically claims a native inbox task for one session", async
     });
     const sent = await web.submitAgentTask!(sender.token, "claude", "continue the T37 diagnosis");
     assert.equal(sent.ok, true);
+    ctx.store.setApproval(sent.taskId!, "approved");
 
     const claimedA = await web.claimAgentInbox!(first.token, [sent.taskId!]);
     assert.deepEqual(claimedA, { ok: true, taskIds: [sent.taskId!] });
@@ -303,7 +304,21 @@ async function setup(options: { allowedExtensionIds?: string[]; allowAnyExtensio
   let broker = await startBroker();
   let web = createWebBrokerClient({ keyPath: brokerKeyPath(root), ownerPipePath: ownerPipePath(root), port: broker.port });
   let server = createM9rMcpServer({ store, web });
-  const call = (name: string, args: unknown) => (server as unknown as ToolServer)._registeredTools[name].handler(args);
+  // These are transport fixtures for the quarantined extension endpoint. The
+  // retired browser MCP tools must remain absent from the production tool list.
+  const call = async (name: string, args: unknown): Promise<ToolResult> => {
+    if (!name.startsWith("m9r_web_")) return (server as unknown as ToolServer)._registeredTools[name].handler(args);
+    const input = args as { token: string; tab?: string; selector?: string; text?: string; url?: string; targetLabel?: string };
+    const identity = store.verifyIdentity(input.token);
+    if (!identity) throw new Error("The M9R token is malformed or revoked.");
+    const response = await web.run({ agent: identity.handle, provider: identity.provider, sessionId: identity.sessionId,
+      action: name.slice("m9r_web_".length) as "open" | "read" | "click" | "type",
+      ...(input.tab ? { tab: input.tab } : {}), ...(input.selector ? { selector: input.selector } : {}),
+      ...(input.targetLabel ? { targetLabel: input.targetLabel } : {}),
+      ...(input.text ? { text: input.text } : {}), ...(input.url ? { url: input.url } : {}) });
+    return { content: [{ type: "text", text: response.ok ? typeof response.data === "string" ? response.data : JSON.stringify(response.data ?? {}) : response.error ?? "Browser transport failed" }],
+      ...(!response.ok ? { isError: true } : {}) };
+  };
   const sockets: WebSocket[] = [];
   return {
     root,

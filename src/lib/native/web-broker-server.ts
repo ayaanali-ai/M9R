@@ -11,6 +11,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
+import { taskCompletionReportSchema } from "./task-completion-contract";
 import { StageInputNotDispatchedError, serializeStageFailure } from "./stage-errors";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -356,12 +357,14 @@ export function applyAgentMcpStoreMutation(
     }
 
     if (value.action === "result") {
-      if (Object.keys(value).some((key) => !["action", "token", "taskId", "summary"].includes(key))
+      if (Object.keys(value).some((key) => !["action", "token", "taskId", "summary", "completion"].includes(key))
         || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
-        || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 4_000) {
+        || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 20_000
+        || (value.completion !== undefined && !taskCompletionReportSchema.safeParse(value.completion).success)) {
         return { status: 400, body: { ok: false, error: "Invalid M9R task result." } };
       }
-      const recorded = store.recordTaskResult(value.token, value.taskId, value.summary);
+      const recorded = store.recordTaskResult(value.token, value.taskId, value.summary,
+        value.completion === undefined ? undefined : taskCompletionReportSchema.parse(value.completion));
       if (!recorded.ok) {
         const status = /No task/.test(recorded.error ?? "") ? 404
           : /belongs to another session|not sent to you|not been delivered/.test(recorded.error ?? "") ? 403
@@ -514,6 +517,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   try { if (options.modeFile) { const saved = readFileSync(options.modeFile, "utf8").trim() as RoomMode; if (ROOM_MODES.includes(saved)) roomMode = saved; } } catch { /* no saved mode yet */ }
   const broker = createWebBroker({
     oneWriterPerTab: !!options.browserTransport,
+    trustDeliveryReceipts: !!options.browserTransport,
     roomMode: () => roomMode,
     send: (message) => {
       if (options.browserTransport) return options.browserTransport.send(message);

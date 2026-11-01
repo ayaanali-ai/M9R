@@ -441,6 +441,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     if (deps.store.prepareLogicalTaskContext && !task) throw new Error("M9R could not preserve the logical task handoff; no provider turn was started.");
     const context = contextFor(profile);
     return context.prompt + "\n\n" + (task ? logicalTaskHandoff(task) + "\n\n" : "")
+      + "Report the actual outcome with m9r_result and an explicit completion status. Use completed with no remaining work only when every requested requirement is done; otherwise use incomplete and list the remaining requirements. Ending the provider turn alone never completes M9R work.\n\n"
       + "The owner's latest instruction for M9R task " + taskId + ":\n" + text;
   }
 
@@ -656,8 +657,16 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           emit({ kind: "result", handle: profile.handle, provider: profile.provider, text: event.text, isError: event.isError, runId });
           recordCompletion(event.isError ? "error" : "ok", event.isError ? "provider returned an error result" : undefined);
           if (kind === "owner" && !event.isError) {
-            const result = deps.store.recordTaskResult?.(context.token, taskId, event.text);
-            if (!result?.ok && !result?.alreadyRecorded) emit({ kind: "system", handle: profile.handle, provider: profile.provider, text: `M9R could not record ${taskId}: ${result?.error ?? "result storage is unavailable"}` });
+            const current = deps.store.getTask?.(taskId);
+            // A provider terminal event proves only that its turn ended. The
+            // explicit m9r_result report owns completion. Preserve remaining
+            // work when the provider returns without that report.
+            if (current?.receipt?.state !== "completed" && current?.receipt?.state !== "paused") {
+              const result = deps.store.recordTaskResult?.(context.token, taskId, event.text, { status: "incomplete",
+                remainingWork: current?.logicalContext?.remainingWork?.length ? current.logicalContext.remainingWork
+                  : [current?.logicalContext?.latestInstruction ?? current?.goal ?? "Verify the assigned work and report its completion."] });
+              if (!result?.ok && !result?.alreadyRecorded) emit({ kind: "system", handle: profile.handle, provider: profile.provider, text: `M9R could not record ${taskId}: ${result?.error ?? "result storage is unavailable"}` });
+            }
           }
         } else if (event.kind === "error") {
           terminalObserved = true;
