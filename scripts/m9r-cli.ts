@@ -2126,7 +2126,16 @@ async function stopManagedBrokerForUpdate(target: NonNullable<Awaited<ReturnType
     image = await readManagedBrokerProcessState(target.brokerPath);
   }
   if (image.processes.length > 0) {
-    throw new Error("The broker health endpoint closed, but its exact installed process did not exit; no installed files were replaced.");
+    // A broker can close its listener while a provider drain or detached
+    // native child keeps the exact image alive. Ownership was proven before
+    // this function was entered and the task was stopped, so use the narrow
+    // PID/path/start-time guard rather than leaving the runtime locked or
+    // ever falling back to a process-name kill.
+    await stopExactManagedBrokerImage(target.brokerPath);
+    const afterExactStop = await readManagedBrokerProcessState(target.brokerPath);
+    if (afterExactStop.processes.length > 0) {
+      throw new Error("The broker health endpoint closed, but its exact installed process did not exit after the verified owned-image stop; no installed files were replaced.");
+    }
   }
 
   let task = await inspectLocalBrokerTask(WEB_TASK_NAME);
