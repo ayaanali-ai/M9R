@@ -624,19 +624,15 @@ export function createTaskDesktopStageService(input: {
         } catch (error) {
           const candidates = await manager.listOwnedWindowsForProcess(selected.pid);
           const normalizedTitle = selected.lastKnownWindowTitle?.trim().toLocaleLowerCase();
-          const ranked = [...candidates].sort((left, right) => {
-            const leftTitle = left.title.trim().toLocaleLowerCase();
-            const rightTitle = right.title.trim().toLocaleLowerCase();
-            const leftTitleMatch = normalizedTitle && leftTitle === normalizedTitle ? 1 : 0;
-            const rightTitleMatch = normalizedTitle && rightTitle === normalizedTitle ? 1 : 0;
-            if (leftTitleMatch !== rightTitleMatch) return rightTitleMatch - leftTitleMatch;
-            const leftArea = left.width * left.height;
-            const rightArea = right.width * right.height;
-            if (leftArea !== rightArea) return rightArea - leftArea;
-            return left.windowId.localeCompare(right.windowId);
-          });
-          const replacement = ranked[0];
-          if (!replacement) throw error;
+          const titleMatches = normalizedTitle
+            ? candidates.filter((candidate) => candidate.title.trim().toLocaleLowerCase() === normalizedTitle)
+            : [];
+          const replacement = candidates.length === 1
+            ? candidates[0]
+            : titleMatches.length === 1 ? titleMatches[0] : undefined;
+          if (!replacement) {
+            throw new Error("The selected application window handle is stale and its process exposes multiple possible windows; refresh the exact window target before sending input.", { cause: error });
+          }
           windowId = replacement.windowId;
           process.stderr.write(`[stage-recovery] ${taskId}: stale window handle ${selected.windowId}; rebinding same-process window ${windowId}\n`);
         }

@@ -117,7 +117,10 @@ export function selectPersonalBrowserWindow(
   const matches = rankBrowserWindows(windows.filter((candidate) => browserWindowMatches(candidate, kind) && eligibleBrowserWindow(candidate)));
   const fresh = matches.filter((candidate) => !beforeKeys.has(`${candidate.pid}:${candidate.windowId}`));
   if (fresh.length === 1) return fresh[0];
-  if (fresh.length > 1) return fresh[0];
+  // A launch must never silently choose between two newly-created windows.
+  // The caller can keep polling for a single stable candidate or surface an
+  // explicit selection request; deterministic z-order is not user intent.
+  if (fresh.length > 1) return undefined;
   // If the browser was not running before launch, one visible candidate is a
   // safe adoption even when the platform did not expose a stable before-list.
   if (beforeKeys.size === 0 && matches.length === 1) return matches[0];
@@ -134,7 +137,10 @@ export function selectExistingPersonalBrowserWindow(
   windows: readonly BrowserWindowCandidate[],
 ): BrowserWindowCandidate | undefined {
   const matches = rankBrowserWindows(windows.filter((candidate) => browserWindowMatches(candidate, kind) && eligibleBrowserWindow(candidate)));
-  return matches[0];
+  // Existing personal windows are user-owned. Without an explicit window/tab
+  // identity, adopting one of several eligible matches would silently retarget
+  // the user's work. Return only an unambiguous candidate.
+  return matches.length === 1 ? matches[0] : undefined;
 }
 export function isStageAppReference(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 1024

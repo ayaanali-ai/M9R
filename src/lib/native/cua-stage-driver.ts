@@ -1594,15 +1594,11 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       const staleAnchor = registered?.anchor;
       if (!staleAnchor) throw error;
       const candidates = await manager.listOwnedWindowsForProcess(staleAnchor.pid);
-      const replacement = candidates
-        .filter((candidate) => candidate.windowId !== staleAnchor.windowId)
-        .sort((left, right) => {
-          const leftArea = left.width * left.height;
-          const rightArea = right.width * right.height;
-          if (leftArea !== rightArea) return rightArea - leftArea;
-          return left.windowId.localeCompare(right.windowId);
-        })[0];
-      if (!replacement) throw error;
+      const replacements = candidates.filter((candidate) => candidate.windowId !== staleAnchor.windowId);
+      const replacement = replacements.length === 1 ? replacements[0] : undefined;
+      if (!replacement) {
+        throw new Error("The selected application window handle is stale and its process exposes multiple possible windows; refresh the exact window target before sending input.", { cause: error });
+      }
       await manager.attachWindow(nameInput, String(staleAnchor.pid), replacement.windowId, registered.appId, registered.coordinationKey);
       inspected = await manager.inspectStage(nameInput);
     }

@@ -27,7 +27,8 @@ test("personal browser adoption chooses only a newly-created Chrome window", () 
   const candidate = { pid: 100, windowId: "0x11", appName: "chrome.exe", title: "New Tab" };
   assert.deepEqual(selectPersonalBrowserWindow("chrome", [candidate], before), candidate);
   assert.equal(selectPersonalBrowserWindow("chrome", [{ ...candidate, windowId: "0x10" }], before), undefined);
-  assert.equal(selectPersonalBrowserWindow("chrome", [candidate, { ...candidate, windowId: "0x12" }], before)?.windowId, "0x11");
+  assert.equal(selectPersonalBrowserWindow("chrome", [candidate, { ...candidate, windowId: "0x12" }], before), undefined,
+    "two fresh windows are ambiguous and must not be silently retargeted");
   assert.equal(selectPersonalBrowserWindow("chrome", [{ ...candidate, appName: "msedge.exe" }], new Set()), undefined);
   assert.deepEqual(selectPersonalBrowserWindow("chrome", [{ ...candidate, appName: "Chrome_WidgetWin_1" }], new Set()), { ...candidate, appName: "Chrome_WidgetWin_1" });
 });
@@ -39,4 +40,6 @@ test("personal browser adoption ignores hidden, minimized, and wrong-desktop hel
   const otherDesktop = { ...visible, windowId: "0x14", onCurrentSpace: false };
   assert.deepEqual(selectPersonalBrowserWindow("chrome", [helper, minimized, otherDesktop, visible], new Set()), visible);
   assert.deepEqual(selectExistingPersonalBrowserWindow("chrome", [helper, minimized, otherDesktop, visible]), visible);
+  assert.equal(selectExistingPersonalBrowserWindow("chrome", [visible, { ...visible, windowId: "0x15", title: "Second tab window" }]), undefined,
+    "multiple eligible personal windows require an explicit selection");
 });
