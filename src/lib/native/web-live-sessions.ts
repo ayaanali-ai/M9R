@@ -350,7 +350,7 @@ export interface WebLiveSessionsDeps {
   codexCli?: () => string | null;
   opencodeExe?: () => string | null;
   /** Injected in tests; production keeps one OpenCode ACP process/session per web agent. */
-  openCodeRuntime?: (input: { exe: string; cwd: string; env: Record<string, string | undefined>; handle: string; missionId: string; model?: string; effort?: string; resumeId?: string; strictResume?: boolean }) => OpenCodeLiveRuntime;
+  openCodeRuntime?: (input: { exe: string; cwd: string; env: Record<string, string | undefined>; handle: string; missionId: string; model?: string; effort?: string }) => OpenCodeLiveRuntime;
 }
 
 interface Slot {

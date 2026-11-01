@@ -483,6 +483,7 @@ export function createMultiplayerMutationScheduler(
       if (!hasConflict(scope)) return Promise.resolve();
       return new Promise<void>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
+        // eslint-disable-next-line prefer-const -- must stay `let`: cleanup() can run via the early abort path below before this is first assigned.
         let unsubscribe: (() => void) | undefined;
         const cleanup = (): void => {
           if (timer) clearTimeout(timer);

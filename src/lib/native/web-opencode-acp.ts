@@ -22,21 +22,18 @@ export interface OpenCodeLiveRuntimeOptions {
   missionId: string;
   model?: string;
   effort?: string;
-  resumeId?: string;
-  /** Refuse a new session if the exact saved provider conversation cannot be resumed. */
-  strictResume?: boolean;
   /** Test seam for exercising the ACP lifecycle without spawning a provider binary. */
   adapterFactory?: (options: Parameters<typeof createOpenCodeAcpAdapter>[0]) => Pick<AcpStdioProviderAdapter,
-    "launchServer" | "initialize" | "createSession" | "resumeSession" | "prompt" | "cancelTurn" | "shutdown"> & Partial<Pick<AcpStdioProviderAdapter, "getServerHealth" | "configureSession">>;
+    "launchServer" | "initialize" | "createSession" | "prompt" | "cancelTurn" | "shutdown"> & Partial<Pick<AcpStdioProviderAdapter, "getServerHealth" | "configureSession">>;
 }
 
 const PROVIDER_SESSION_ID = /^ses[_-][A-Za-z0-9_-]{1,100}$/;
 
 /**
- * One provider process and one ACP session per web-agent lifetime. OpenCode
- * owns its conversation history; M9R persists only the provider session id so
- * a broker restart can resume that same conversation without another CLI run
- * process for each message.
+ * M9R owns this OpenCode process directly and starts it cold every time. The
+ * provider session id returned by createSession is used only for M9R's own
+ * routing within this one process lifetime; M9R never resumes a provider's
+ * saved conversation (see SoT 5.0 §2).
  */
 export function createOpenCodeAcpRuntime(options: OpenCodeLiveRuntimeOptions): OpenCodeLiveRuntime {
   const adapterOptions = {
@@ -73,26 +70,12 @@ export function createOpenCodeAcpRuntime(options: OpenCodeLiveRuntimeOptions): O
     try {
       await adapter.initialize(activeServer);
       if (closed) throw new Error("OpenCode session was closed while it started.");
-      let restored: boolean | undefined;
-      if (options.resumeId && PROVIDER_SESSION_ID.test(options.resumeId)) {
-        // A saved session that can no longer be resumed (deleted, or its store was reset) must not leave the agent permanently
-        // unable to start: continue on a fresh session and say so, instead of failing every message.
-        try { session = await adapter.resumeSession({ server: activeServer, providerSessionRef: options.resumeId, assignment }); }
-        catch (error) {
-          if (options.strictResume) throw error;
-          session = await adapter.createSession({ server: activeServer, assignment });
-          restored = false;
-        }
-      } else {
-        session = await adapter.createSession({ server: activeServer, assignment });
-      }
+      session = await adapter.createSession({ server: activeServer, assignment });
       const sessionId = session.providerSessionRef;
-      if (!sessionId || !PROVIDER_SESSION_ID.test(sessionId)) throw new Error("OpenCode ACP did not return a resumable session id.");
+      if (!sessionId || !PROVIDER_SESSION_ID.test(sessionId)) throw new Error("OpenCode ACP did not return a usable session id.");
       if (closed) throw new Error("OpenCode session was closed while it started.");
       const availableModels = session.availableModels;
-      return restored === false
-        ? { sessionId, restored, ...(availableModels !== undefined ? { availableModels } : {}) }
-        : { sessionId, ...(availableModels !== undefined ? { availableModels } : {}) };
+      return { sessionId, ...(availableModels !== undefined ? { availableModels } : {}) };
     } catch (error) {
       await adapter.shutdown(activeServer).catch(() => undefined);
       if (server === activeServer) server = undefined;
