@@ -122,7 +122,7 @@ test("a message while working interrupts and redirects; the completed answer str
   } finally { t.done(); }
 });
 
-test("a crash is reported and the next message restarts the session with --resume; stop is not a crash", () => {
+test("a crash is reported and the next message starts a cold provider; stop is not a crash", () => {
   const t = setup();
   try {
     t.sessions.deliver("claude", "go");
@@ -133,7 +133,7 @@ test("a crash is reported and the next message restarts the session with --resum
     assert.equal(t.revoked.length, 1, "the dead session's identity is revoked");
     assert.deepEqual(t.sessions.deliver("claude", "again"), { ok: true, mode: "started" });
     const args = t.claude.spawned[1].args;
-    assert.equal(args[args.indexOf("--resume") + 1], "cs-9");
+    assert.equal(args.includes("--resume"), false, "provider restarts are cold; M9R task state owns continuity");
     assert.equal(t.identities.length, 2, "each session gets a distinct identity");
     assert.notEqual(t.identities[0].sessionId, t.identities[1].sessionId);
     t.sessions.stop("claude");
@@ -153,7 +153,7 @@ test("nothing starts while an API key is set", () => {
   } finally { t.done(); }
 });
 
-test("codex is a per-message worker that resumes its thread; a new message mid-run restarts the worker", () => {
+test("codex is a per-message worker; a new message mid-run starts a fresh worker", () => {
   const workers: Array<{ args: string[]; out: (t: string) => void; exit: (c: number) => void; killed: boolean }> = [];
   const spawnWorker = (_c: string, args: string[]): WorkerProcess => {
     const emitter = new EventEmitter();
@@ -169,7 +169,8 @@ test("codex is a per-message worker that resumes its thread; a new message mid-r
     workers[0].out(line({ type: "thread.started", thread_id: "th-1" }));
     workers[0].out(line({ type: "item.completed", item: { type: "agent_message", text: "Looking at the repo." } }));
     assert.deepEqual(t.sessions.deliver("codex", "only the stars"), { ok: true, mode: "restarted-worker" });
-    assert.deepEqual(workers[1].args.slice(1, 4), ["exec", "resume", "th-1"]);
+    assert.equal(workers[1].args[1], "exec");
+    assert.equal(workers[1].args.includes("resume"), false, "Codex workers are cold-started; M9R task state owns continuity");
     workers[0].exit(1);
     assert.equal(t.sessions.snapshot()[1].status, "working", "the killed worker's exit does not touch the new one");
     workers[1].out(line({ type: "item.completed", item: { type: "agent_message", text: "12k stars." } }));
@@ -424,7 +425,7 @@ test("the broker bridge does not replay tasks from before startup, including the
   }
 });
 
-test("helpers: codex JSONL parsing, resume args, and the agent prompt", () => {
+test("helpers: codex JSONL parsing, cold-start args, and the agent prompt", () => {
   assert.deepEqual(parseCodexLine(JSON.stringify({ type: "thread.started", thread_id: "a" })), [{ kind: "thread", id: "a" }]);
   assert.deepEqual(parseCodexLine("nope"), []);
   const fresh = codexWorkerArgs({ prompt: "p", folder: "C:/f", launcher: "L", storeRoot: "R", brokerPort: 1, roomStartedAt: 1 });
@@ -434,8 +435,8 @@ test("helpers: codex JSONL parsing, resume args, and the agent prompt", () => {
   assert.match(webAgentPrompt("claude", "T", ["codex"]), /@codex/);
   const prompt = webAgentPrompt("claude", "T", ["codex"], "project-test");
   assert.match(prompt, /m9r_note list[\s\S]*project-test/);
-  assert.match(prompt, /session continuity is provider-dependent/i);
-  assert.match(prompt, /do not assume each message starts a fresh paid run/i);
+  assert.match(prompt, /starts it cold every time/i);
+  assert.match(prompt, /continuity across pause\/stop\/restart comes only from M9R's own task state/i);
   assert.match(prompt, /both you and the recipient must be active room members/i);
   assert.doesNotMatch(prompt, /fresh paid run each turn/i);
 });
@@ -460,7 +461,7 @@ test("web agent prompt closes the loop on announced checks instead of leaving th
   assert.match(prompt, /if you mention a check, complete it in the same turn or explain the blocker/i);
 });
 
-test("OpenCode replaces a provider process that died while idle and resumes the same session", async () => {
+test("OpenCode replaces a provider process that died while idle with a cold session", async () => {
   const root = makeFixture("m9r-opencode-dead-");
   const made: Array<{ resumeId?: string; dead: boolean; closed: boolean }> = [];
   const openCodeRuntime = ({ resumeId }: { resumeId?: string }) => {
@@ -490,14 +491,14 @@ test("OpenCode replaces a provider process that died while idle and resumes the 
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(made.length, 2, "a new runtime replaces the dead one");
     assert.equal(made[0].closed, true, "the dead runtime is released");
-    assert.equal(made[1].resumeId, "ses_alive_1", "the replacement resumes the same provider session");
+    assert.equal(made[1].resumeId, undefined, "the replacement starts a cold provider session");
   } finally {
     sessions.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("OpenCode resumes its durable provider session after the broker session manager restarts", async () => {
+test("OpenCode starts a cold provider session after the broker session manager restarts", async () => {
   const root = makeFixture("m9r-opencode-resume-");
   const resumed: Array<string | undefined> = [];
   const openCodeRuntime = ({ resumeId }: { resumeId?: string }) => {
@@ -527,7 +528,7 @@ test("OpenCode resumes its durable provider session after the broker session man
     second = makeSessions();
     assert.equal(second.deliver("opencode", "second task").ok, true);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.deepEqual(resumed, [undefined, "ses_persisted_1"]);
+    assert.deepEqual(resumed, [undefined, undefined]);
   } finally {
     second?.close();
     first.close();
@@ -535,7 +536,7 @@ test("OpenCode resumes its durable provider session after the broker session man
   }
 });
 
-test("the live OpenCode harness reuses one ACP launch per active session and restores its saved provider session after restart", async (t) => {
+test("the live OpenCode harness reuses one ACP launch while active and cold-starts after restart", async (t) => {
   const root = makeFixture("m9r-opencode-live-acp-");
   const providerSessionId = "ses_opencode_persistent_1";
   // Model OpenCode's persisted transcript separately from each simulated ACP process.
@@ -615,7 +616,7 @@ test("the live OpenCode harness reuses one ACP launch per active session and res
     const secondTurnElapsedMs = Number(process.hrtime.bigint() - secondTurnStartedAt) / 1_000_000;
 
     assert.equal(launches.length, 1, "two consecutive live messages launch one ACP process, not one process per message");
-    assert.deepEqual(created, [providerSessionId], "the process creates one provider conversation");
+    assert.deepEqual(created, [providerSessionId], "the active process creates one provider conversation");
     assert.deepEqual(prompts.map(({ sessionId, historyDepth }) => [sessionId, historyDepth]), [
       [providerSessionId, 1],
       [providerSessionId, 2],
@@ -626,8 +627,9 @@ test("the live OpenCode harness reuses one ACP launch per active session and res
     assert.deepEqual(manager.deliver("opencode", "third task after broker restart"), { ok: true, mode: "started" });
     await awaitTurn(3);
     assert.equal(launches.length, 2, "a broker restart starts one replacement ACP process for the next message");
-    assert.deepEqual(resumed, [providerSessionId], "the replacement process resumes the exact persisted provider session");
-    assert.deepEqual(prompts.map(({ historyDepth }) => historyDepth), [1, 2, 3], "the resumed reference reconnects to the same transcript fixture");
+    assert.deepEqual(created, [providerSessionId, providerSessionId], "the replacement creates a fresh provider conversation");
+    assert.deepEqual(resumed, [], "the replacement never resumes a provider-owned session");
+    assert.deepEqual(prompts.map(({ historyDepth }) => historyDepth), [1, 2, 1], "M9R task context continues while the provider starts cold");
 
     t.diagnostic(JSON.stringify({
       measured: "test-harness only; adapter/provider and provider-side persistence are simulated",
