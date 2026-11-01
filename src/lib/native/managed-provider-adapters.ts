@@ -380,7 +380,12 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
   async start(_continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
     if (this.live && this.live.state().status !== "exited" && (this.statusValue === "ready" || this.statusValue === "working")) return this.ready();
     if (this.startup) return this.startup;
+    const previous = this.live;
+    this.live = undefined;
     const generation = this.beginStart();
+    // Fence the previous generation before its exit callback can run. A
+    // failed-but-live transport must be reaped before a replacement starts.
+    previous?.stop();
     let resolveReady!: (ready: ManagedProviderReady) => void;
     let rejectReady!: (error: Error) => void;
     let settled = false;
@@ -501,21 +506,9 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
     }
   }
 
-  private async restartColdTurn(): Promise<void> {
-    this.interruptedTask = undefined;
-    const live = this.live;
-    this.live = undefined;
-    this.providerSessionRef = undefined;
-    live?.stop();
-    this.stopped("Starting a fresh M9R turn");
-    await this.start();
-  }
-
   async *send(task: ManagedProviderTask): AsyncIterable<ManagedProviderEvent> {
     this.requireTask(task);
-    await this.restartColdTurn();
     if (!this.live || this.live.state().status === "exited") throw new Error("Claude provider connection is not ready");
-    const liveForTurn = this.live;
     const queue = createAsyncEventQueue<ManagedProviderEvent>();
     this.queue = queue;
     this.beginTask(task.taskId);
@@ -531,11 +524,6 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
       queue.end();
     }
     yield* queue;
-    if (this.live === liveForTurn) {
-      this.live = undefined;
-      liveForTurn.stop();
-      this.providerSessionRef = undefined;
-    }
     if (this.queue === queue) this.queue = undefined;
   }
 
@@ -737,14 +725,12 @@ export function createCodexManagedProviderConnection(options: CodexManagedProvid
   return new CodexManagedProviderConnection(options);
 }
 
-  /**
-   * M9R-owned Codex app-server adapter.
-   *
-   * The app-server transport is retained for Codex's native tool protocol, but
-   * it is deliberately cold per M9R turn. A provider-owned thread/session is
-   * never reused across owner messages; M9R's durable task context is the only
-   * continuity layer.
-   */
+/**
+ * Persistent M9R-owned Codex app-server connection. The live transport and its
+ * conversation stay together across turns. A replacement process creates a
+ * new conversation and receives M9R context; saved vendor sessions are never
+ * discovered or resumed.
+ */
 export interface CodexAppServerManagedProviderConnectionOptions {
   profile: ManagedProviderConnectionProfile;
   command: string;
@@ -858,15 +844,6 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     if (adapter && server) await adapter.shutdown(server).catch(() => undefined);
   }
 
-  private async restartColdTurn(): Promise<void> {
-    this.interruptedTask = undefined;
-    this.cancelledTask = undefined;
-    await this.closeRuntime();
-    this.providerSessionRef = undefined;
-    this.stopped("Starting a fresh M9R turn");
-    await this.start();
-  }
-
   async start(_continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
     const existingServer = this.server;
     if (this.adapter && existingServer && this.session
@@ -912,7 +889,6 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
 
   async *send(task: ManagedProviderTask): AsyncIterable<ManagedProviderEvent> {
     this.requireTask(task);
-    await this.restartColdTurn();
     const adapter = this.adapter;
     const session = this.session;
     const health = adapter && this.server ? adapter.getServerHealth(this.server) : undefined;
@@ -961,8 +937,6 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     if (this.interruptedTask === task.taskId) {
       this.interruptedTask = undefined;
       this.cancelledTask = undefined;
-      await this.closeRuntime();
-      this.providerSessionRef = undefined;
       this.finishTask();
       this.ready("Paused; waiting for the owner's next instruction");
       yield { kind: "status", status: this.statusValue, doing: this.doingValue };
@@ -977,8 +951,6 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
       return;
     }
     this.finishTask();
-    await this.closeRuntime();
-    this.providerSessionRef = undefined;
     if (!this.draining) this.ready("Ready (Codex app-server session)");
     else {
       this.statusValue = "draining";
@@ -1080,11 +1052,10 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
   async start(_continuation?: ManagedProviderContinuation): Promise<ManagedProviderReady> {
     if (this.runtime && this.runtime.alive?.() !== false && (this.statusValue === "ready" || this.statusValue === "working")) return this.ready();
     if (this.startup) return this.startup;
-    if (this.runtime && this.runtime.alive?.() === false) {
-      this.runtime.close();
-      this.runtime = undefined;
-    }
+    const previous = this.runtime;
+    this.runtime = undefined;
     const generation = this.beginStart();
+    previous?.close();
     const runtimeFactory = this.options.runtimeFactory ?? createOpenCodeAcpRuntime;
     const promise = (async () => {
       const runtime = runtimeFactory({
@@ -1117,21 +1088,8 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
     }
   }
 
-  private async restartColdTurn(): Promise<void> {
-    this.interruptedTask = undefined;
-    this.cancelledTask = undefined;
-    const runtime = this.runtime;
-    this.runtime = undefined;
-    runtime?.close();
-    this.providerSessionRef = undefined;
-    this.availableModels = null;
-    this.stopped("Starting a fresh M9R turn");
-    await this.start();
-  }
-
   async *send(task: ManagedProviderTask): AsyncIterable<ManagedProviderEvent> {
     this.requireTask(task);
-    await this.restartColdTurn();
     if (!this.runtime || this.runtime.alive?.() === false) throw new Error("OpenCode provider connection is not ready");
     const runtime = this.runtime;
     this.beginTask(task.taskId);
@@ -1173,10 +1131,6 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
     if (this.interruptedTask === task.taskId) {
       this.interruptedTask = undefined;
       this.cancelledTask = undefined;
-      const interruptedRuntime = this.runtime;
-      this.runtime = undefined;
-      interruptedRuntime?.close();
-      this.providerSessionRef = undefined;
       this.finishTask();
       this.ready("Paused; waiting for the owner's next instruction");
       yield { kind: "status", status: this.statusValue, doing: this.doingValue };
@@ -1190,10 +1144,6 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
       return;
     }
     this.finishTask();
-    const finishedRuntime = this.runtime;
-    this.runtime = undefined;
-    finishedRuntime?.close();
-    this.providerSessionRef = undefined;
     if (!this.draining) this.ready("Ready (OpenCode ACP session)");
     else {
       this.statusValue = "draining";

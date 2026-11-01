@@ -64,6 +64,7 @@ test("stopping an agent drops its queued follow-up, so the very next message run
     repoRoot: root,
     brokerPort: 0,
     store,
+    env: {},
     createConnection: (profile) => (gated = gatedConnection(profile)).connection,
     onEvent: (event) => { if (process.env.M9R_TEST_DEBUG) console.log("EVENT", JSON.stringify(event)); },
   });
@@ -71,7 +72,7 @@ test("stopping an agent drops its queued follow-up, so the very next message run
   try {
     // Turn A starts; the fake connection is held ("working") until released.
     const first = owner.deliver("codex", "A: do the first thing");
-    assert.equal((await first).ok, true);
+    assert.equal((await first).ok, true, JSON.stringify(first));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     // B arrives while A is still active -> queued behind A, and A's turn is interrupted.
@@ -118,7 +119,7 @@ test("explicit resume starts a new turn with durable M9R context and no provider
   let gated: ReturnType<typeof gatedConnection> | undefined;
   const owner = createManagedProviderOwner({
     agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
-    repoRoot: root, brokerPort: 0, store,
+    repoRoot: root, brokerPort: 0, store, env: {},
     createConnection: (profile) => (gated = gatedConnection(profile)).connection,
   });
   try {

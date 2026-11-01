@@ -351,9 +351,9 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
         shell: appServer.shell,
         environment: {
           ...context.environment,
-          // The app-server is launched and owned by M9R for an individual turn.
-          // It may inherit the user's authenticated Codex home, but no provider
-          // thread/session is used as continuity; the adapter starts cold per turn.
+          // M9R owns this persistent app-server connection. Its live
+          // conversation continues across messages; a replacement process
+          // starts cold and receives M9R context, never a saved session ID.
           M9R_PROVIDER: "codex",
         },
         missionId: projectRoomId(profile.cwd),

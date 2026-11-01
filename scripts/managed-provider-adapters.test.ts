@@ -5,6 +5,7 @@ import {
   createClaudeManagedProviderConnection,
   createCodexAppServerManagedProviderConnection,
   createCodexManagedProviderConnection,
+  createOpenCodeManagedProviderConnection,
   type CodexWorkerProcess,
 } from "../src/lib/native/managed-provider-adapters";
 
@@ -67,6 +68,33 @@ test("Claude reports its own live model catalog and switches models on the runni
   await connection.stop();
 });
 
+test("Claude keeps its owned process alive after completed messages", async () => {
+  const fake = fakeClaude(["default"]);
+  let launches = 0;
+  const originalWrite = fake.child.stdin.write;
+  fake.child.stdin.write = (chunk: string) => {
+    originalWrite(chunk);
+    if (JSON.parse(chunk).type === "user") {
+      setImmediate(() => fake.child.stdout.emit("data", `${JSON.stringify({ type: "result", result: "ok", is_error: false, session_id: "owned-live-conversation" })}\n`));
+    }
+    return true;
+  };
+  const connection = createClaudeManagedProviderConnection({
+    profile: { connectionId: "m9r:claude:test", handle: "claude", provider: "claude-code", cwd: "C:/RunLeak/runleak" },
+    mcpConfigPath: "C:/RunLeak/runleak/.mcp.json", environment: {},
+    spawn: () => { launches += 1; return fake.child as never; },
+  });
+  await connection.start();
+  const generation = connection.status().generation;
+  for (const taskId of ["T-one", "T-two"]) {
+    for await (const _event of connection.send({ taskId, ...connection.profile, generation, prompt: "hello" })) { /* complete */ }
+  }
+  assert.equal(launches, 1);
+  assert.equal(connection.readiness().healthy, true);
+  assert.equal(connection.status().generation, generation);
+  await connection.stop();
+});
+
 function profile() {
   return { connectionId: "m9r:codex:test", handle: "codex", provider: "codex", cwd: "C:/RunLeak/runleak" } as const;
 }
@@ -114,7 +142,7 @@ test("Codex worker failure retains bounded redacted stderr in the provider error
   assert.match(failure?.error ?? "", /thread\/start: the Codex app-server is not running/);
 });
 
-test("the managed Codex app-server starts a fresh process and session for every M9R turn", async () => {
+test("the managed Codex app-server preserves its live connection across turns", async () => {
   let launches = 0;
   let sessions = 0;
   let prompts = 0;
@@ -137,10 +165,88 @@ test("the managed Codex app-server starts a fresh process and session for every 
   const collect = async (id: string) => { const events = []; for await (const event of managed.send(task(id))) events.push(event); return events; };
   assert.equal((await collect("T-app-1")).at(-1)?.kind, "status");
   assert.equal((await collect("T-app-2")).at(-1)?.kind, "status");
-  assert.equal(launches, 3);
-  assert.equal(sessions, 3);
+  assert.equal(launches, 1);
+  assert.equal(sessions, 1);
   assert.equal(prompts, 2);
   await managed.stop();
+});
+
+test("Codex pause interrupts a turn and continues on the same live connection", async () => {
+  let launches = 0;
+  let shutdowns = 0;
+  let release!: () => void;
+  const fake = {
+    async launchServer() { launches += 1; return { serverId: "server-1", adapterId: "codex-app-server" }; },
+    getServerHealth() { return { state: "alive" as const }; },
+    async initialize() { return {}; },
+    async createSession() { return { sessionId: "session-1", providerSessionRef: "thread-1" }; },
+    async *prompt() {
+      await new Promise<void>((resolve) => { release = resolve; });
+      yield { type: "provider.completed", sessionId: "session-1", payload: {} };
+    },
+    async cancelTurn() { release(); },
+    async shutdown() { shutdowns += 1; },
+  };
+  const managed = createCodexAppServerManagedProviderConnection({
+    profile: profile(), command: "codex", environment: {}, missionId: "room-1", promptPrefix: "M9R",
+    adapterFactory: () => fake as never,
+  });
+  await managed.start();
+  const generation = managed.status().generation;
+  const iterator = managed.send({ taskId: "T-pause", ...profile(), generation, prompt: "work" })[Symbol.asyncIterator]();
+  await iterator.next();
+  await iterator.next();
+  assert.ok(managed.interrupt);
+  await managed.interrupt("T-pause");
+  while (!(await iterator.next()).done) { /* drain the interrupted turn */ }
+  await managed.pause();
+  await managed.resume();
+  assert.equal(managed.readiness().healthy, true);
+  assert.equal(managed.status().generation, generation);
+  assert.equal(launches, 1);
+  assert.equal(shutdowns, 0);
+  await managed.stop();
+});
+
+test("OpenCode retains one runtime through messages and interruption", async () => {
+  let launches = 0;
+  let closes = 0;
+  let release: (() => void) | undefined;
+  const managed = createOpenCodeManagedProviderConnection({
+    profile: { connectionId: "m9r:opencode:test", handle: "opencode", provider: "opencode", cwd: "C:/RunLeak/runleak" },
+    exe: "opencode", environment: {}, missionId: "room-1",
+    runtimeFactory: () => {
+      launches += 1;
+      return {
+        async ready() { return { sessionId: "session-1" }; },
+        alive() { return true; },
+        async *prompt(text: string, options: { onRequestSubmitted?: () => void }) {
+          options.onRequestSubmitted?.();
+          if (text === "pause me") await new Promise<void>((resolve) => { release = resolve; });
+          yield { type: "provider.completed", sessionId: "session-1", occurredAt: new Date().toISOString(), payload: {} };
+        },
+        async cancelTurn() { release?.(); },
+        close() { closes += 1; },
+      } as never;
+    },
+  });
+  await managed.start();
+  const generation = managed.status().generation;
+  const task = (id: string, prompt: string) => ({ taskId: id, ...managed.profile, generation, prompt });
+  for await (const _event of managed.send(task("T-one", "hello"))) { /* complete */ }
+  const iterator = managed.send(task("T-two", "pause me"))[Symbol.asyncIterator]();
+  await iterator.next();
+  const pending = iterator.next();
+  assert.ok(managed.interrupt);
+  await managed.interrupt("T-two");
+  await pending;
+  while (!(await iterator.next()).done) { /* drain */ }
+  for await (const _event of managed.send(task("T-three", "continue"))) { /* complete */ }
+  assert.equal(launches, 1);
+  assert.equal(closes, 0);
+  assert.equal(managed.readiness().healthy, true);
+  await managed.stop();
+  assert.equal(closes, 1);
 });
 
 test("the managed Codex app-server restarts cold without resuming a provider thread", async () => {
@@ -196,7 +302,7 @@ test("an idle Codex app-server exit becomes failed so the next dispatch can reco
   assert.equal(managed.status().status, "failed");
   alive = true;
   await managed.start({ providerSessionRef: "thread-1" });
-  assert.equal(launches, 3);
+  assert.equal(launches, 2);
   assert.equal(resumes, 0);
   await managed.stop();
 });
