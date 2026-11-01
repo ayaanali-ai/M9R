@@ -114,7 +114,7 @@ test("Codex worker failure retains bounded redacted stderr in the provider error
   assert.match(failure?.error ?? "", /thread\/start: the Codex app-server is not running/);
 });
 
-test("the managed Codex app-server is one persistent process and one resumable session across turns", async () => {
+test("the managed Codex app-server starts a fresh process and session for every M9R turn", async () => {
   let launches = 0;
   let sessions = 0;
   let prompts = 0;
@@ -137,8 +137,8 @@ test("the managed Codex app-server is one persistent process and one resumable s
   const collect = async (id: string) => { const events = []; for await (const event of managed.send(task(id))) events.push(event); return events; };
   assert.equal((await collect("T-app-1")).at(-1)?.kind, "status");
   assert.equal((await collect("T-app-2")).at(-1)?.kind, "status");
-  assert.equal(launches, 1);
-  assert.equal(sessions, 1);
+  assert.equal(launches, 3);
+  assert.equal(sessions, 3);
   assert.equal(prompts, 2);
   await managed.stop();
 });
@@ -196,7 +196,7 @@ test("an idle Codex app-server exit becomes failed so the next dispatch can reco
   assert.equal(managed.status().status, "failed");
   alive = true;
   await managed.start({ providerSessionRef: "thread-1" });
-  assert.equal(launches, 2);
+  assert.equal(launches, 3);
   assert.equal(resumes, 0);
   await managed.stop();
 });
