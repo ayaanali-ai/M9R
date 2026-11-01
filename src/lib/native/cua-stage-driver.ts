@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ActionResult, ActionTarget, ClickPosition as CuaClickPosition, CuaDriverLike, ToolResult } from "@trycua/cua-driver";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
+import { StageCaptureRefreshError } from "./stage-errors";
 import { startCuaDriverHost, type CuaDriverHostConnection } from "./cua-driver-host";
 import { createWindowsDesktopStageManager, type WindowsStageDependencies, type NativePointControl, type WindowsSystemControlRequest } from "./windows-desktop-stage";
 import type { VerifiedIdentity } from "./identity-core";
@@ -428,7 +429,17 @@ function elementAtScreenPoint(elements: readonly CuaWindowElement[], x: number, 
   return undefined;
 }
 
-async function typeIntoExactField(driver: CuaDriverLike, selected: DesktopInputTarget, session: string, text: string, signal?: AbortSignal) {
+async function typeIntoExactField(input: {
+  driver: CuaDriverLike;
+  selected: DesktopInputTarget;
+  session: string;
+  text: string;
+  deliveryMode?: "background" | "owner-preview";
+  delayMs?: number;
+  fallback?: () => Promise<CuaStageActionOutcome>;
+  signal?: AbortSignal;
+}) {
+  const { driver, selected, session, text, signal } = input;
   signal?.throwIfAborted();
   if (!selected.field || !Number.isSafeInteger(Number(selected.windowId))) throw new Error("The selected text field has no representable exact window identity.");
   const state = await driver.getWindowState({ pid: selected.pid, windowId: selected.windowId, session,
@@ -453,10 +464,20 @@ async function typeIntoExactField(driver: CuaDriverLike, selected: DesktopInputT
   // Background insertion therefore appends to the freshly read value; never
   // replace existing content or invent an empty value when it is unavailable.
   const nextValue = typeof element.value === "string" ? element.value + text : text;
-  return actionOutcome(await driver.callTool("set_value", JSON.stringify({
-    pid: selected.pid, window_id: Number(selected.windowId), element_token: element.elementToken,
-    value: nextValue, session,
-  }), signal ? { signal } : undefined), "Cua Driver could not type into the exact accessibility field.");
+  try {
+    return actionOutcome(await driver.callTool("set_value", JSON.stringify({
+      pid: selected.pid, window_id: Number(selected.windowId), element_token: element.elementToken,
+      value: nextValue, session,
+    }), signal ? { signal } : undefined), "Cua Driver could not type into the exact accessibility field.");
+  } catch (error) {
+    // Chromium's UIA ValuePattern is observable but not writable through the
+    // background route. An owner-preview task already has an explicit visible
+    // surface, so recover once through the exact-window foreground path. Keep
+    // isolated background stages fail-closed: they must never steal focus.
+    if (!backgroundInputRefused(error) || input.deliveryMode !== "owner-preview") throw error;
+    if (!input.fallback) throw error;
+    return input.fallback();
+  }
 }
 
 function normalizeTypeDelayMs(value: number | undefined): number {
@@ -653,6 +674,22 @@ function actionOutcome(result: ActionResult | ToolResult, fallback: string): Cua
     ...(typeof parts.route === "number" ? { route: parts.route } : {}),
     ...(typeof parts.summary === "string" ? { summary: parts.summary.replace(/[\r\n\t]+/g, " ").slice(0, 180).trim() } : {}),
   };
+}
+
+function inputToolTextForRefusal(result: ToolResult): string {
+  const parts = [result.text, result.rawJson, result.structuredJson,
+    typeof (result as ToolResult & { errorCode?: unknown }).errorCode === "string"
+      ? (result as ToolResult & { errorCode: string }).errorCode : undefined];
+  if (result.action) parts.push(JSON.stringify(result.action));
+  return parts.filter((value): value is string => typeof value === "string")
+    .join(" ").replace(/[\r\n\t]+/g, " ").slice(0, 800);
+}
+
+function backgroundInputRefused(value: unknown): boolean {
+  const message = value instanceof Error ? value.message
+    : value && typeof value === "object" ? inputToolTextForRefusal(value as ToolResult)
+      : String(value);
+  return /background[_ ](?:delivery|route).*?(?:unavailable|unsupported|refus|not available)|background_unavailable|target window class.*(?:background|input)|(?:background|posted) input.*(?:ignored|dropped)/i.test(message);
 }
 
 function validPoint(x: number, y: number, capture: { width: number; height: number }): boolean {
@@ -1175,7 +1212,20 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     const { runtime, session } = await ensureAgentSession(identity, name);
     try {
       await inspectOwnerDesktop(name, identity);
-      const capture = currentDesktopCapture(name, identity);
+      let capture: CachedDesktopCapture;
+      try {
+        capture = currentDesktopCapture(name, identity);
+      } catch (error) {
+        // Coordinate actions must never be replayed against an expired image.
+        // Refresh the exact owner desktop once and return that fresh image as a
+        // typed, non-dispatched recovery result so the provider can re-plan
+        // against current coordinates instead of receiving an opaque "uncertain"
+        // failure and abandoning the rest of its task.
+        if (!(error instanceof Error) || !/desktop view is missing or expired/i.test(error.message)) throw error;
+        const refreshed = await captureOwnerDesktop(name, identity, true);
+        throw new StageCaptureRefreshError(refreshed,
+          "The desktop observation was missing or expired. A fresh owner-desktop capture is attached; no input was sent. Inspect it and retry the intended action.");
+      }
       if (capture.stageName !== name || capture.identityKey !== session.key) throw new Error("The captured desktop does not belong to this agent's current stage session.");
       return await run({ runtime, session, capture });
     } catch (error) {
@@ -1375,8 +1425,17 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     signal?: AbortSignal;
   }): Promise<CuaStageActionOutcome> {
     const windowId = input.windowId.toString();
-    if (input.selected?.field && !input.preferForeground) {
-      return typeIntoExactField(input.runtime.driver, input.selected, input.session, input.text, input.signal);
+    const selected = input.selected;
+    if (selected?.field && !input.preferForeground) {
+      return typeIntoExactField({ driver: input.runtime.driver, selected, session: input.session,
+        text: input.text, deliveryMode: input.deliveryMode, delayMs: input.delayMs, signal: input.signal,
+        fallback: () => driverInputAction(input.runtime.driver, "type_text", {
+          pid: selected.pid, window_id: Number(selected.windowId), text: input.text,
+          delay_ms: input.delayMs ?? DEFAULT_TYPE_DELAY_MS, session: input.session,
+        }, "Cua Driver could not type into the selected window.", {
+          deliveryMode: input.deliveryMode, dispatch: input.dispatch, signal: input.signal,
+        }),
+      });
     }
 
     if (!input.signal && !input.preferForeground && input.nativeInput && await input.nativeInput()) {

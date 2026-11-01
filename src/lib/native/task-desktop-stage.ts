@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { StageCaptureRefreshError } from "./stage-errors";
+import { StageCaptureRefreshError, StageInputNotDispatchedError } from "./stage-errors";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -842,7 +842,7 @@ export function createTaskDesktopStageService(input: {
           if (current) ownedApps.set(name, { ...current, lastKnownWindowTitle: observedTitle });
         }
       } catch (error) {
-        if (error instanceof DesktopInputNotDispatchedError) {
+        if (error instanceof StageInputNotDispatchedError || error instanceof DesktopInputNotDispatchedError) {
           // This typed gate proves the OS input driver was never called. Remove
           // the claim so the exact same operation ID can retry after the gate is fixed.
           fenceTransaction?.release(error.message);

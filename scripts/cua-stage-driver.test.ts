@@ -242,7 +242,9 @@ function makeSdk(options: {
   windowStateError?: Error;
   accessibilityError?: Error;
   typeTextError?: Error;
+  typeTextErrors?: Error[];
   callToolResult?: Record<string, unknown>;
+  callToolErrors?: Record<string, Error>;
   calls: Array<{ method: string; value?: unknown }>;
 }) {
   const actionResult = options.actionResult ?? { effect: 0, route: 1, summary: "action confirmed" };
@@ -293,6 +295,7 @@ function makeSdk(options: {
     async moveCursor(input: unknown) { options.calls.push({ method: "moveCursor", value: input }); return { isError: false }; },
     async callTool(name: string, argumentsJson: string) {
       options.calls.push({ method: "callTool", value: { name, args: JSON.parse(argumentsJson) } });
+      if (options.callToolErrors?.[name]) throw options.callToolErrors[name];
       return options.callToolResult ?? { isError: false };
     },
     async getAgentCursorState() {
@@ -328,7 +331,12 @@ function makeSdk(options: {
     },
     async pressKey(input: unknown) { options.calls.push({ method: "pressKey", value: input }); return toolResult; },
     async hotkey(input: unknown) { options.calls.push({ method: "hotkey", value: input }); return toolResult; },
-    async typeText(input: unknown) { options.calls.push({ method: "typeText", value: input }); if (options.typeTextError) throw options.typeTextError; return (options.callToolResult ?? toolResult) as never; },
+    async typeText(input: unknown) {
+      options.calls.push({ method: "typeText", value: input });
+      const error = options.typeTextErrors?.shift() ?? options.typeTextError;
+      if (error) throw error;
+      return (options.callToolResult ?? toolResult) as never;
+    },
     async scroll(input: unknown) { options.calls.push({ method: "scroll", value: input }); return toolResult; },
     async drag(input: unknown) { options.calls.push({ method: "drag", value: input }); return toolResult; },
     async endSession(input: unknown) { options.calls.push({ method: "endSession", value: input }); },
@@ -658,6 +666,34 @@ test("owner-preview types to a reinspected accessibility field without relying o
   field.label = "Different editor";
   await assert.rejects(driver.typeTextDesktop("preview", "must not write", identity), /text field changed/);
   assert.equal(calls.filter((call) => call.method === "callTool" && (call.value as { name: string }).name === "set_value").length, 1);
+  await driver.shutdown();
+}));
+
+test("owner-preview falls back to exact-window foreground typing when Chrome rejects background ValuePattern input", async () => withRoot(async (root) => {
+  await registerOwnerPreview(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const field = { elementToken: "snapshot:search", label: "Search", role: "Edit", enabled: true,
+    actions: ["set_value"], frame: { x: 0, y: 0, w: 1920, h: 1080 } };
+  const backgroundError = new Error("Background delivery is not available for target window class 'Chrome_WidgetWin_1' on this event kind (text_input).");
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), ownerPointer: {
+    get: async () => ({ x: 100, y: 100 }), restore: async () => undefined,
+  }, loadSdk: async () => makeSdk({ calls,
+    callToolErrors: { set_value: backgroundError },
+    typeTextErrors: [backgroundError],
+    windows: [{ pid: 4321, windowId: BigInt(12345), appName: "chrome.exe", title: "New tab",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 }, isOnScreen: true, minimized: false }],
+    state: { pid: 4321, windowId: BigInt(12345), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+      windowBounds: { x: 0, y: 0, width: 1920, height: 1080 }, elements: [field],
+      images: [{ mimeType: "image/png", dataBase64: imageData }] },
+  }) as never });
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await driver.captureDesktop("preview", identity);
+  await driver.clickDesktop("preview", 0, 0, identity);
+  const proof = await driver.typeTextDesktop("preview", "Strawberry Park latest video", identity, { deliveryMode: "owner-preview" });
+  assert.equal(proof.outcome.status, "confirmed");
+  assert.ok(calls.some((call) => call.method === "callTool" && (call.value as { name: string }).name === "set_value"));
+  assert.ok(calls.some((call) => call.method === "callTool" && (call.value as { name: string }).name === "bring_to_front"), "owner-preview must re-present the exact window before fallback typing");
+  assert.ok(calls.some((call) => call.method === "typeText"), "owner-preview must dispatch one exact-window foreground type action");
   await driver.shutdown();
 }));
 

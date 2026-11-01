@@ -11,6 +11,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
+import { StageInputNotDispatchedError, serializeStageFailure } from "./stage-errors";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { VerifiedIdentity } from "./identity-core";
@@ -116,6 +117,15 @@ function stageFailure(error: unknown, fallback: string): Record<string, unknown>
     dispatchState: "not-dispatched",
     error: error.message,
   };
+  if (error instanceof StageInputNotDispatchedError) {
+    // Preserve the typed, non-dispatched recovery payload (especially a fresh
+    // desktop capture) instead of collapsing it into the generic uncertain
+    // error that made providers abandon the remainder of a task.
+    return {
+      ...serializeStageFailure(error, fallback),
+      code: "desktop-input-not-dispatched",
+    };
+  }
   if (typeof error === "object" && error !== null && "inner" in error) {
     const inner = (error as { inner?: unknown }).inner;
     if (typeof inner === "object" && inner !== null) {
