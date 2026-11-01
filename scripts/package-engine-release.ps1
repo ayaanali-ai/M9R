@@ -23,7 +23,6 @@ if ($Candidate -and [string]::IsNullOrWhiteSpace($AcceptedRuntimePath)) {
 }
 $acceptedRuntimePath = if ([string]::IsNullOrWhiteSpace($AcceptedRuntimePath)) { $canonicalRuntimePath } else { [IO.Path]::GetFullPath($AcceptedRuntimePath) }
 $cliDist = if ([string]::IsNullOrWhiteSpace($CliDistDirectory)) { Join-Path $root 'cli\dist' } else { [IO.Path]::GetFullPath($CliDistDirectory) }
-$extension = Join-Path $cliDist 'extension'
 $cuaRuntime = Join-Path $dist 'cua-driver-runtime'
 $destination = [IO.Path]::GetFullPath($OutputDirectory)
 
@@ -87,7 +86,6 @@ $acceptedRuntime = Read-RuntimeIdentity $acceptedRuntimePath 'Accepted'
 $runtimeIdentity = Read-RuntimeIdentity (Join-Path $dist 'm9r-build-info.json') 'Built'
 Assert-RuntimeIdentityMatches $runtimeIdentity $acceptedRuntime 'Built runtime'
 Assert-RuntimeArtifactFiles $runtimeIdentity $dist 'Built runtime'
-if (-not (Test-Path -LiteralPath (Join-Path $extension 'manifest.json') -PathType Leaf)) { throw 'cli/dist/extension is missing. Run npm run build:cli first.' }
 foreach ($runtimeFile in @(
     (Join-Path $cuaRuntime 'node_modules\@trycua\cua-driver\dist\index.js'),
     (Join-Path $cuaRuntime 'node_modules\@trycua\cua-driver-win32-x64-msvc\cua_driver_sdk.dll'),
@@ -118,7 +116,6 @@ try {
     Copy-Item -LiteralPath $overlay -Destination (Join-Path $stage 'm9r-overlay.exe')
     Copy-Item -LiteralPath $acceptedRuntimePath -Destination (Join-Path $stage 'm9r-accepted-runtime.json')
     Copy-Item -LiteralPath $cuaRuntime -Destination (Join-Path $stage 'cua-driver-runtime') -Recurse
-    Copy-Item -LiteralPath $extension -Destination (Join-Path $stage 'extension') -Recurse
     Copy-Item -LiteralPath (Join-Path $root 'cli\THIRD_PARTY_NOTICES.md') -Destination (Join-Path $stage 'THIRD_PARTY_NOTICES.md')
     Copy-Item -LiteralPath (Join-Path $root 'cli\licenses') -Destination (Join-Path $stage 'licenses') -Recurse
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-m9r.ps1') -Destination (Join-Path $stage 'install-m9r.ps1')
@@ -135,8 +132,6 @@ The executables and the M9R desktop pill are currently unsigned; a matching SHA-
   .\install-m9r.ps1 -PackagePath ..\m9r-engine-windows-x64.zip
 
 The installer shows the engine's exact local setup plan and asks before editing agent configuration. It adds the M9R desktop pill to this Windows user's sign-in startup by default; pass -NoAutostart to opt out. The pill supervises the local engine. The installer honors M9R_HOME consistently for the engine, broker, setup, and uninstall.
-
-To also configure M9R Web, pass -Web to the installer. It previews agent MCP changes, installs the fixed-ID extension files, and asks you to load the folder once in Chrome/Edge (the browser confirmation remains manual).
 
 Uninstall the managed setup (review the plan before confirming):
   .\install-m9r.ps1 -Uninstall

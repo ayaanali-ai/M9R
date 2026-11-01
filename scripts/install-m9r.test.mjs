@@ -220,6 +220,8 @@ test("release ZIP contains the built standalone broker", { skip: skipNative }, (
   assert.match(listed.stdout, /^m9r-web-broker\.exe\s*$/m);
   assert.match(listed.stdout, /^m9r-overlay\.exe\s*$/m);
   assert.match(listed.stdout, /^m9r-build-info\.json\s*$/m);
+  assert.doesNotMatch(listed.stdout, /(?:^|\\)m9r-hook\.exe\s*$/m, "the retired provider hook must not ship");
+  assert.doesNotMatch(listed.stdout, /^extension\\/m, "the retired browser-extension transport must not ship");
 });
 
 test("standalone package consent, setup, integrity, and uninstall paths", { skip: skipNative }, async (t) => {

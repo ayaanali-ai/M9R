@@ -28,7 +28,7 @@ Run the installed engine's reversible uninstall. It runs from a temporary copy
 because Windows does not allow a process to delete its own executable.
 
 .PARAMETER Web
-After the native setup, also run the consent-driven M9R browser/MCP setup.
+Retired. The desktop broker owns provider processes directly; the legacy browser-extension/provider-hook transport is not installed.
 
 .PARAMETER NoAutostart
 Do not add the M9R desktop pill to this Windows user's sign-in startup list.
@@ -60,6 +60,10 @@ $script:CandidateReceipt = $null
 $script:VerifiedCandidateReceiptPath = $null
 $script:PackageSha256 = $null
 $script:VerifiedZipPath = $null
+
+if ($Web) {
+    throw 'The legacy browser-extension/provider-hook transport is retired. Omit -Web; M9R now uses the broker-owned desktop runtime.'
+}
 
 function Assert-M9rWindows {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -751,24 +755,6 @@ try {
     Write-Host ''
     Write-Host 'M9R setup finished. The broker-owned provider processes are ready.' -ForegroundColor Green
     Write-Host "To undo the managed setup later: `"$installedEngine`" uninstall"
-    if ($Web) {
-        $extensionPackage = Join-Path $payload 'extension'
-        if (-not (Test-Path -LiteralPath (Join-Path $extensionPackage 'manifest.json') -PathType Leaf)) {
-            throw 'The verified engine package does not contain the browser extension. Native setup is installed; rerun with a package built by npm run build:cli.'
-        }
-        $env:M9R_EXTENSION_SOURCE = $extensionPackage
-        Write-Host ''
-        Write-Host 'Starting the separate M9R Web setup. It previews its agent/browser changes and asks before applying them.' -ForegroundColor Cyan
-        $previousErrorActionPreference = $ErrorActionPreference
-        try {
-            $ErrorActionPreference = 'Continue'
-            & $installedEngine web setup
-            $webExit = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $previousErrorActionPreference
-        }
-        if ($webExit -ne 0) { throw "M9R Web setup exited with code $webExit. Native setup remains installed and can be removed with -Uninstall." }
-    }
     $brokerStart = Invoke-ManagedBrokerUpdate $installedEngine 'start'
     $brokerNeedsResume = $false
     if ($brokerStart.managedTask) { Write-Host 'Verified the M9R Web broker is running from the installed package.' -ForegroundColor Green }
