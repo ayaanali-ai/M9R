@@ -316,7 +316,14 @@ async function stopResidentEngine(io: NativeIo): Promise<void> {
     }
   }
   if (shutdownAcknowledged) {
-    throw new Error("The M9R resident engine did not stop. Close the M9R desktop pill before retrying setup.");
+    // The resident feed can acknowledge shutdown while provider MCP workers
+    // are still running from the same exact executable image. They do not
+    // own the hook pipe, but Windows still keeps the image locked. Reconcile
+    // every process whose verified path is this managed engine before a
+    // replacement; unrelated Node/provider binaries remain untouched.
+    const installedEngine = engineTarget(io);
+    if (existsSync(installedEngine)) stopExactResidentEngineImage(installedEngine);
+    return;
   }
   // A resident engine can outlive its pipe during a crash or startup race.
   // Confirm and stop only the exact installed image before replacing it.

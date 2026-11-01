@@ -230,7 +230,11 @@ test("status flags provider sessions that cannot receive targeted delivery witho
   assert.match(missing?.label ?? "", /lack a live M9R identity/);
   store.issueIdentity("codex", "codex", "codex-no-token");
   const healthy = nativeStatus(s.io).find((row) => row.id === "target-identities");
-  assert.equal(healthy?.state, "ok");
+  // A stored identity removes the actionable gap, but native status must not
+  // claim that the current provider turn is live/bound until that binding is
+  // observed.  `info` is the deliberate, truthful state here.
+  assert.equal(healthy?.state, "info");
+  assert.match(healthy?.label ?? "", /current-turn binding is not verified/);
   s.done();
 });
 
