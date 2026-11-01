@@ -796,6 +796,27 @@ test("owner desktop capture does not use legacy capture-scope session escalation
   await driver.shutdown();
 }));
 
+test("warm actions reuse the broker runtime and session without compositor probes", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  let at = Date.now();
+  let loads = 0;
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), now: () => new Date(at),
+    loadSdk: async () => { loads++; return makeSdk({ calls, cursorVisible: false }) as never; } });
+  const identity = { handle: "codex", sessionId: "warm-runtime" };
+  await driver.click("stage", 42, 24, identity);
+  await driver.click("stage", 42, 24, identity);
+  assert.equal(loads, 1);
+  assert.equal(calls.filter((c) => c.method === "startSession").length, 1);
+  assert.equal(calls.filter((c) => c.method === "setAgentCursorMotion").length, 1);
+  assert.equal(calls.filter((c) => c.method === "getSession" || c.method === "getAgentCursorState").length, 0);
+  assert.equal(calls.filter((c) => c.method === "click").length, 2, "an absent overlay cannot block target input");
+  at += 60_001;
+  await driver.capture("stage", identity);
+  assert.equal(calls.filter((c) => c.method === "startSession").length, 2, "refresh before the native idle TTL");
+  await driver.shutdown();
+}));
+
 test("refuses out-of-bounds cursor input before enabling or moving the ghost cursor", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
@@ -866,7 +887,7 @@ test("records compositor visibility as a separate privacy-safe timing phase", as
   await driver.shutdown();
 }));
 
-test("a driver whose overlay stopped drawing is replaced once instead of failing every later action", async () => withRoot(async (root) => {
+test("a missing overlay never replaces the shared input runtime", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   let loads = 0;
@@ -878,9 +899,8 @@ test("a driver whose overlay stopped drawing is replaced once instead of failing
       return makeSdk({ calls, cursorVisible: loads > 1 }) as never;
     },
   });
-  const shown = await driver.showAgentCursor!("stage", { handle: "codex", sessionId: "overlay-recovered" });
-  assert.equal(shown.visible, true);
-  assert.equal(loads, 2, "exactly one fresh driver, no retry loop");
+  await assert.rejects(() => driver.showAgentCursor!("stage", { handle: "codex", sessionId: "overlay-recovered" }), /bounded confirmation window/);
+  assert.equal(loads, 1, "presentation cannot dispose another action's connection");
   await driver.shutdown();
 }));
 

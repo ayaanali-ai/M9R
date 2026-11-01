@@ -51,6 +51,16 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   return { root, store, identity, task, service, driver, nativeOps, moveAnchor: () => { anchorDesktopId = "22222222-2222-4222-8222-222222222222"; }, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
+test("a stalled cursor compositor cannot delay stage preparation or dispatch", async () => {
+  const f = fixture(true);
+  try {
+    f.driver.showAgentCursor = async () => new Promise<never>(() => {});
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 12, y: 15 }, "owner-preview");
+    assert.equal(f.desktopActions.filter((action) => action.kind === "cursor").length, 1);
+  } finally { f.cleanup(); }
+});
+
 test("state file replacement retries transient Windows sharing errors, but surfaces persistent failures", () => {
   let calls = 0;
   const waits: number[] = [];

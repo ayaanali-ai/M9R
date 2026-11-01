@@ -18,6 +18,7 @@ import {
 } from "./computer-use-contract";
 import { resolveUniversalIntent, type IntentObservationHint } from "./universal-intent-resolver";
 import { preDispatchRetry, type ComputerUseRetry } from "./computer-use-recovery";
+import { recordComputerUseLatency } from "./computer-use-latency";
 import type { WorkflowPreferenceLedger } from "./workflow-preferences";
 import { selectActionDelivery, selectComputerUseRoute, type ComputerUseRouteDescriptor } from "./computer-use-router";
 import type { VerifiedIdentity } from "./identity-core";
@@ -429,7 +430,7 @@ function attachComputerUseTelemetry(response: ToolResponse, telemetry: ComputerU
   // Route, focus/rebind, accessibility-vs-visual, and latency evidence is
   // internal engineering telemetry. It must never become provider-facing task
   // content or an apparent proof of effect.
-  void telemetry;
+  recordComputerUseLatency(telemetry);
   return response;
 }
 

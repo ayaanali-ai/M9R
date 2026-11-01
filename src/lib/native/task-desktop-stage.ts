@@ -452,6 +452,7 @@ export function createTaskDesktopStageService(input: {
     }
   }
 
+  const cursorPresentationPending = new Set<string>();
   async function ensureCursorPrimed(stageName: string, identity: CuaAgentCursorIdentity): Promise<void> {
     const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
       showAgentCursor?: (stageName: string, cursorIdentity: CuaAgentCursorIdentity) => Promise<unknown>;
@@ -460,7 +461,13 @@ export function createTaskDesktopStageService(input: {
     // always implements it, so absence here preserves the provider-neutral
     // stage contract without inventing a fake cursor result in tests.
     if (typeof showAgentCursor !== "function") return;
-    await showAgentCursor(stageName, identity);
+    const key = cursorIdentityKey(identity);
+    if (cursorPresentationPending.has(key)) return;
+    cursorPresentationPending.add(key);
+    // The compositor is presentation only. Its latency or failure must not
+    // delay an observation, launch, mutation fence, or target dispatch.
+    void Promise.resolve().then(() => showAgentCursor(stageName, identity)).catch(() => undefined)
+      .finally(() => cursorPresentationPending.delete(key));
   }
 
   function authorize(token: string, taskId: string, mode: TaskStageMode) {
