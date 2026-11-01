@@ -139,6 +139,7 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
     } : undefined,
     subscribe(listener) {
       let lastPillState = "";
+      let connection: "connected" | "disconnected" = "disconnected";
       const tick = async () => {
         try {
           // The resident owner broker publishes the only authoritative desktop
@@ -146,13 +147,29 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
           // transport: that path can resurrect stale provider-session state and
           // make the pill appear to regress after a restart.
           const pillState = (await invoke("read_pill_state")) as string | null;
-          if (pillState) {
-            if (pillState !== lastPillState) {
-              lastPillState = pillState;
-              listener({ ...fromUiState(JSON.parse(pillState) as UiState), connection: "connected" });
+          if (!pillState) {
+            // A stale/missing envelope means the broker is no longer the
+            // authoritative owner. Emit a connection-only transition so the
+            // renderer cannot keep showing the last connected state forever.
+            if (connection !== "disconnected") {
+              connection = "disconnected";
+              lastPillState = "";
+              listener({ agents: [], approvals: [], thread: [], connection, connectionOnly: true });
             }
+            return;
           }
-        } catch { /* feed missing or mid-write: keep the last good state and try again */ }
+          if (pillState !== lastPillState || connection !== "connected") {
+            lastPillState = pillState;
+            connection = "connected";
+            listener({ ...fromUiState(JSON.parse(pillState) as UiState), connection });
+          }
+        } catch {
+          if (connection !== "disconnected") {
+            connection = "disconnected";
+            lastPillState = "";
+            listener({ agents: [], approvals: [], thread: [], connection, connectionOnly: true });
+          }
+        }
       };
       void tick();
       const timer = setInterval(() => void tick(), POLL_MS);

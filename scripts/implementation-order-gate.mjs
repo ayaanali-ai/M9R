@@ -9,7 +9,10 @@ const cliOut = resolve(tempRoot, "implementation-order-cli-dist");
 mkdirSync(tempRoot, { recursive: true });
 
 const env = { ...process.env, TEMP: tempRoot, TMP: tempRoot, M9R_CLI_OUTPUT_DIR: cliOut };
-const nodeArgs = ["--disable-warning=ExperimentalWarning", "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", "--import", "./scripts/register-alias.mjs"];
+// Keep provider adapter fixtures serial: they intentionally exercise one
+// process/port lifecycle and parallel file workers can race their fake ACP
+// catalogs even when the implementation is correct.
+const nodeArgs = ["--test-concurrency=1", "--disable-warning=ExperimentalWarning", "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", "--import", "./scripts/register-alias.mjs"];
 const checks = [
   ["CUA driver (44 tests)", ["--test", "./scripts/cua-stage-driver.test.ts"]],
   ["desktop stage and task lifecycle", ["--test", "./scripts/task-desktop-stage.test.ts", "./scripts/windows-desktop-stage.test.ts"]],
@@ -17,8 +20,8 @@ const checks = [
   ["browser mutation fixtures", ["--test", "./scripts/web-press-page-change.test.ts"]],
   ["universal intent and bounded workflow memory", ["--test", "./scripts/universal-intent.test.ts", "./scripts/workflow-preferences.test.ts"]],
   ["task controls, progress, and delivery policy", ["--test", "./scripts/multiplayer-task-context.test.ts", "./scripts/multiplayer-action-policy.test.ts"]],
-  ["persistent provider lifecycle, multiplayer fencing, and stale-feed retirement", ["--test", "./scripts/managed-provider-adapters.test.ts", "./scripts/managed-provider-supervisor.test.ts", "./scripts/multiplayer-dispatch-fence.test.ts", "./scripts/multiplayer-target-identity.test.ts", "./scripts/multiplayer-mutation-scheduler.test.ts", "./scripts/native-feed.test.ts"]],
-  ["canonical desktop pill transport", ["--test", "./scripts/pill-shells.test.ts"]],
+  ["persistent provider lifecycle, owner queue, multiplayer, and stale-feed retirement", ["--test", "./scripts/managed-provider-adapters.test.ts", "./scripts/managed-provider-supervisor.test.ts", "./scripts/managed-provider-owner-queue.test.ts", "./scripts/multiplayer-dispatch-fence.test.ts", "./scripts/multiplayer-target-identity.test.ts", "./scripts/multiplayer-mutation-scheduler.test.ts", "./scripts/multiplayer-runtime.test.ts", "./scripts/multiplayer-a2a.test.ts", "./scripts/multiplayer-contract.test.ts", "./scripts/multiplayer-run-coordinator.test.ts", "./scripts/native-feed.test.ts", "./scripts/stale-task-retirement.test.ts"]],
+  ["canonical desktop pill transport, dictation, and model picker", ["--test", "./scripts/pill-shells.test.ts", "./scripts/pill-speech.test.ts", "./scripts/provider-model-picker.test.ts"]],
   ["production boundary and retired-path isolation", ["--test", "./scripts/production-boundary.test.ts"]],
   ["runtime transaction and artifact publication", ["--test", "./scripts/engine-build-transaction.test.mjs"]],
   ["runtime install rollback and obsolete-file cleanup", ["--test", "./scripts/runtime-install-transaction.test.ts"]],

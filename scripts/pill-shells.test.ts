@@ -193,6 +193,25 @@ test("desktop transport maps decisions and typed messages onto the overlay's com
   if (typeof stop === "function") stop();
 });
 
+test("desktop transport reports broker loss and rehydrates after a stale state", async () => {
+  const snapshots: Array<{ connection?: string; connectionOnly?: boolean }> = [];
+  let reads = 0;
+  const state = JSON.stringify({ agents: [], thread: [], approvals: [] });
+  const transport = createDesktopTransport(async (command) => {
+    if (command !== "read_pill_state") return "";
+    reads += 1;
+    return reads === 1 || reads >= 3 ? state : null;
+  });
+  const stop = transport.subscribe((snapshot) => snapshots.push(snapshot));
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  stop?.();
+  assert.equal(snapshots[0]?.connection, "connected");
+  assert.equal(snapshots.some((snapshot) => snapshot.connection === "disconnected" && snapshot.connectionOnly === true), true);
+  assert.equal(snapshots.at(-1)?.connection, "connected");
+});
+
 test("undeliverable messages stay out of the live thread", () => {
   const snap = fromFeed({
     needsYou: [
