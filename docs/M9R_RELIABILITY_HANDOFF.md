@@ -13,8 +13,9 @@ instead of working around it.
 
 - **Installed on the owner's machine (2026-11-02, verified live):** `4908faaf`, runtime build
   `c1fb5e999b33f81b17e8144d6c7032105f8fc65a21a96c9c4b3c0628f99a8afc`. Phases 1–3 are live and proven on the owner's
-  real machine, not just by tests. Phase 4 (speed) and Phase 5 (acceptance) have not started.
-- **Branch:** `main`, local only, not pushed. Working tree clean except the untracked `.test-tmp/`.
+  real machine, not just by tests. Phase 4 source changes are implemented and committed locally; their verified
+  candidate is not installed. Phase 4's live non-browser scrolling check and all Phase 5 acceptance runs remain pending.
+- **Branch:** `main`, local only, not pushed. Working tree clean except the pre-existing untracked `.test-tmp/`.
 
 ### Already done and committed
 
@@ -193,6 +194,37 @@ steps is an *owner* product decision, not something to change unilaterally.
    a general capability (can the agent see what's on screen completely and accurately, can it scroll/dismiss/act on
    anything when the observation tells it to) — never a rule keyed to one app or one website. If a fix only works
    for the one case it was observed in, it is the wrong fix.
+
+#### Phase 4 implementation record (2026-11-02)
+
+Phase 4 items 1–8 have source implementations committed locally. Items 4–7 changed runtime/source code; item 8 is
+this general-capability policy and completion record. No app/site-specific action rules were added. The live
+non-browser scroll test is intentionally still pending for Claude/owner verification; do not call the behavior live
+or install the candidate before that review.
+
+- **Items 1–3 (already committed):** `5fdcb6fc` summarizes action changes without routine screenshots;
+  `2945f6c2` expires refs on surface revisions; `288c36ad` reuses observed labels in the money gate.
+- **Item 4:** `b187f608` upgrades the JS Cua package to stable 0.37.0; `4deba118` aligns the standalone Windows host,
+  runtime guard, and build archive pin/checksum with that package. The candidate build verified the official Windows
+  daemon archive SHA-256. Cua 0.37.0 release notes include faster batched steps and window reads.
+- **Item 5:** `0f2ffeb0` adds one bounded app-window text-then-Enter operation. It refuses before input for no-submit
+  intent and records a partial result if text was sent but Enter was not, so the text is not replayed.
+- **Item 6:** `d58c3afb` resolves app launch aliases to registered installed apps rather than package-manager shims and
+  uses the exact foreground browser HWND when several eligible Chrome/Edge windows are present; it refuses ambiguous
+  stacking rather than guessing.
+- **Item 7:** `0b282916` adds a privacy-safe coverage signal to window and desktop structure observations. A complete
+  UIA tree is not presented as proof that there is no offscreen content. Generic scrollbar/scroll-action evidence
+  reports that more content is possible; missing evidence remains `unknown`. Raw range values are not exposed.
+- **Item 8:** no app-specific rules are introduced; the non-browser example is a fixture validating the generic
+  coverage contract, not a File Explorer-specific code path.
+- **Expanded gate:** baseline before Phase 4 was 187 tests, 186 passed, 0 failed, 1 skipped. After Phase 4 it is 194
+  tests, 193 passed, 0 failed, 1 skipped. Typecheck passed with `npx tsc --noEmit --allowImportingTsExtensions`.
+- **Candidate (built, not installed):** `2026-11-02T07-35-49-897Z-4deba118`, source commit
+  `4deba118d5a94c092d890a221a843338741aa99e`, clean source (`sourceDirty: false`), runtime build ID
+  `f99c8aa994c7bfc959b002b0a50db5d897cfa4063af5ddbae22187ad9b6bb8ae`, package SHA-256
+  `6c8f51b22469606004816667dae443f1013095bd8e423f8234a8df60e55904ff`. It retained the accepted live pill hash
+  `4db938e87141cbd4b3192d98a71dcf573c4dddcd1c581b7915c87d8631605b60`. Candidate receipt verifies the exact runtime
+  manifest, artifact set, accepted pill, and package checksum.
 
 ### Phase 5 — prove it
 Acceptance runs against real apps: Chrome/YouTube, Spotify, Notepad, File Explorer, a canvas, plus owner pointer
