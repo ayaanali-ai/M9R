@@ -714,6 +714,28 @@ test("owner-preview falls back to exact-window foreground typing when Chrome rej
   await driver.shutdown();
 }));
 
+test("an ordinary background task recovers typing through the exact-window foreground path when Chrome refuses background ValuePattern input", async () => withRoot(async (root) => {
+  await registerStage(root, "12345");
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const field = { elementToken: "snapshot:search", label: "Search", role: "Edit", enabled: true,
+    actions: ["set_value"], frame: { x: 0, y: 0, w: 1920, h: 1080 } };
+  const backgroundError = new Error("Background delivery is not available for target window class 'Chrome_WidgetWin_1' on this event kind (text_input).");
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), ownerPointer: {
+    get: async () => ({ x: 100, y: 100 }), restore: async () => undefined,
+  }, loadSdk: async () => makeSdk({ calls,
+    callToolErrors: { set_value: backgroundError },
+    typeTextErrors: [backgroundError],
+    state: { pid: 4321, windowId: BigInt(12345), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+      windowBounds: { x: 0, y: 0, width: 1920, height: 1080 }, elements: [field],
+      images: [{ mimeType: "image/png", dataBase64: imageData }] },
+  }) as never });
+  const proof = await driver.typeText("stage", "Strawberry Park latest video", undefined, { deliveryMode: "background" });
+  assert.equal(proof.outcome.status, "confirmed");
+  assert.ok(calls.some((call) => call.method === "callTool" && (call.value as { name: string }).name === "bring_to_front"), "a refused background type must re-present the exact window before the one bounded foreground recovery");
+  assert.ok(calls.some((call) => call.method === "typeText"), "a refused background type must dispatch one exact-window foreground type action, not fail closed");
+  await driver.shutdown();
+}));
+
 test("owner-preview scroll and drag use the exact window under the cursor", async () => withRoot(async (root) => {
   await registerOwnerPreview(root);
   const calls: Array<{ method: string; value?: unknown }> = [];

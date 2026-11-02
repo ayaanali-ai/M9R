@@ -473,10 +473,11 @@ async function typeIntoExactField(input: {
     }), signal ? { signal } : undefined), "Cua Driver could not type into the exact accessibility field.");
   } catch (error) {
     // Chromium's UIA ValuePattern is observable but not writable through the
-    // background route. An owner-preview task already has an explicit visible
-    // surface, so recover once through the exact-window foreground path. Keep
-    // isolated background stages fail-closed: they must never steal focus.
-    if (!backgroundInputRefused(error) || input.deliveryMode !== "owner-preview") throw error;
+    // background route for either an owner-preview task or an ordinary
+    // background one. The fallback is driverInputAction's own bounded,
+    // owner-idle-respecting foreground recovery (see its comment); it is not
+    // available for every deliveryMode, just these two explicit ones.
+    if (!backgroundInputRefused(error) || (input.deliveryMode !== "owner-preview" && input.deliveryMode !== "background")) throw error;
     if (!input.fallback) throw error;
     return input.fallback();
   }
@@ -1447,21 +1448,21 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       return actionOutcome(background, fallback);
     }
     if (!isBackgroundInputRefusal(background)) return actionOutcome(background, fallback);
-    if (options.deliveryMode === "background") {
-      throw new DesktopInputNotDispatchedError(`${backgroundRefusalMessage(background)} Background input is unavailable.`, "background-unavailable");
-    }
   } catch (error) {
     if (!isBackgroundInputRefusal(error)) throw error;
-    if (options.deliveryMode === "background") {
-      throw new DesktopInputNotDispatchedError(`${backgroundRefusalMessage(error)} Background input is unavailable.`, "background-unavailable");
-    }
   }
 
-  if (options.deliveryMode === "owner-preview") {
-    // Owner-preview is already an owner-authorized visible task. If the
-    // semantic/background adapter cannot deliver this ordinary action, use the
-    // one bounded foreground path instead of making the provider rediscover
-    // and explicitly request the same escalation.
+  if (options.deliveryMode === "owner-preview" || options.deliveryMode === "background") {
+    // Some window classes (Chrome foremost among them) refuse background
+    // SendInput outright -- no amount of retrying the background route ever
+    // delivers it. The only real alternatives are an isolated CDP-connected
+    // profile or a browser extension; the owner has explicitly ruled both
+    // out and wants their one real, already-signed-in window used as-is. The
+    // one remaining honest option is the same brief, visible pass a human
+    // would make: wait for the owner to be idle (waitForOwnerIdle), bring the
+    // exact target window forward, deliver the input, confirm and restore the
+    // owner's pointer (deliverForeground). This is bounded, logged, and never
+    // silent -- it is not the same as a stage that steals focus on a whim.
     return runForeground();
   }
   throw new DesktopInputNotDispatchedError("background input is unavailable; Background delivery is not available for the selected window. No text was sent; M9R will not activate the window as a fallback. The owner's pointer was not used; foreground input requires an explicit foreground action.", "background-unavailable");
