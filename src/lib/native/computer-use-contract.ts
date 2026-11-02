@@ -375,9 +375,11 @@ export function computerUseActionRequirements(action: ComputerUseAction): Comput
 }
 
 /** Caller supplies the route's freshness budget; future observations fail closed. */
-export function isComputerUseTargetFresh(target: ComputerUseTarget, nowMs: number, maxAgeMs: number): boolean {
-  if (!Number.isSafeInteger(nowMs) || nowMs < 0 || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 0) return false;
-  return target.observedAt <= nowMs && nowMs - target.observedAt <= maxAgeMs;
+export function isComputerUseTargetFresh(target: ComputerUseTarget, nowMs: number, maxAgeMs?: number): boolean {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0 || !Number.isSafeInteger(target.observedAt) || target.observedAt > nowMs) return false;
+  if (maxAgeMs === undefined) return true;
+  if (!Number.isSafeInteger(maxAgeMs) || maxAgeMs < 0) return false;
+  return nowMs - target.observedAt <= maxAgeMs;
 }
 
 export type ComputerUseActionCheck =

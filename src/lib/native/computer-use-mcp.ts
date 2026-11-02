@@ -26,11 +26,9 @@ import type { ComputerOperationInput, LocalStore, StageOperationClaim } from "./
 import type { StageClientResult, WebBrokerClient } from "./web-broker-client";
 import type { WebRequest, WebResponse } from "./web-broker-core";
 
-const MAX_OBSERVATION_AGE_MS = 30_000;
 const MAX_TARGETS = 256;
-const TARGET_TTL_MS = MAX_OBSERVATION_AGE_MS * 4;
 const MAX_CHANGE_BASELINES = 256;
-const CHANGE_BASELINE_TTL_MS = TARGET_TTL_MS;
+const CHANGE_BASELINE_TTL_MS = 120_000;
 /**
  * A structured observation should stay cheap even when the native driver returns a
  * noisy partial tree or several owned popups. Images are still available when they
@@ -678,9 +676,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   function pruneTargets(nowMs: number) {
-    for (const [targetId, record] of records) {
-      if (nowMs - record.target.observedAt > TARGET_TTL_MS) removeTarget(targetId);
-    }
+    // Refs remain usable until this surface receives a newer revision. The map
+    // is still strictly bounded, so idle targets cannot grow memory unboundedly.
     while (records.size > MAX_TARGETS) removeTarget(records.keys().next().value as string);
     for (const [key, baseline] of changeBaselines) {
       if (nowMs - baseline.observedAt > CHANGE_BASELINE_TTL_MS) changeBaselines.delete(key);
@@ -1673,9 +1670,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     if (!records.has(action.targetId) || record.target.revision !== action.targetRevision) {
       return refreshStaleTarget(action, identity, record, authToken, timing, "The action does not match the latest target revision.");
     }
-    if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(record.target.observedAt)
-      || nowMs < record.target.observedAt || nowMs - record.target.observedAt > MAX_OBSERVATION_AGE_MS) {
-      return refreshStaleTarget(action, identity, record, authToken, timing, "The target observation is too old to use.");
+    if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(record.target.observedAt) || nowMs < record.target.observedAt) {
+      return refreshStaleTarget(action, identity, record, authToken, timing, "The target observation timestamp is invalid or from the future.");
     }
     const preflightError = actionPreflight(record, action);
     if (preflightError) {
@@ -1690,7 +1686,6 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       action,
       routes: [record.route],
       nowMs,
-      maxObservationAgeMs: MAX_OBSERVATION_AGE_MS,
       ...(record.pinnedRouteId ? { pinnedRouteId: record.pinnedRouteId } : {}),
     }));
     if (!selection.ok) {
@@ -2034,8 +2029,9 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }, async ({ token, targetId, targetRevision, rootRef, query, limit }) => {
     const identity = await deps.requireIdentity(token);
     const record = records.get(targetId);
+    const nowMs = now().getTime();
     if (!record || record.identityKey !== identityKey(identity) || record.target.revision !== targetRevision
-      || now().getTime() < record.target.observedAt || now().getTime() - record.target.observedAt > MAX_OBSERVATION_AGE_MS) {
+      || !Number.isSafeInteger(nowMs) || nowMs < record.target.observedAt) {
       return toolResponse({ error: "stale-observation", nextStep: "Observe the same explicit target again before inspection or input." }, undefined, true);
     }
     const controls = record.context.kind === "browser" ? [...record.context.elements.values()].map(({ ref, parentRef, role, name, rect }) => ({ ref, parentRef, role, label: name, rect }))

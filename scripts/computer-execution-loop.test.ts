@@ -23,6 +23,7 @@ function fixture() {
   let url = "https://fixture.test/";
   let unlabeled = false;
   let activeTaskId = "T1";
+  let clockMs: number | undefined;
   const workRequests: unknown[] = [];
   const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString(),
     structure: { status: "complete", capturedAt: new Date().toISOString(), elements: [{ ref: "uia:post-action", role: "Button", label: "Action", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }] } });
@@ -51,8 +52,10 @@ function fixture() {
   };
   registerComputerUseTools({ registerTool(name: string, _descriptor: unknown, handler: Handler) { handlers.set(name, handler); } } as never,
     { store, web: web as WebBrokerClient, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => activeTaskId,
-      resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }), enableIsolatedBrowser: true });
+      resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }), enableIsolatedBrowser: true,
+      now: () => new Date(clockMs ?? Date.now()) });
   return { calls, workRequests, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
+    setNow: (value: number) => { clockMs = value; },
     call: async (name: string, input: Record<string, unknown>) => (await handlers.get(name)!(input)).structuredContent,
     callRaw: async (name: string, input: Record<string, unknown>) => handlers.get(name)!(input),
     close: () => rmSync(root, { recursive: true, force: true }) };
@@ -195,5 +198,15 @@ test("desktop actions return a semantic change summary and only attach pixels wh
     visualAction.includeScreenshot = true;
     const visual = await f.callRaw("m9r_computer_action", { action: visualAction });
     assert.equal(visual.content?.some((item) => item.type === "image"), true, "the caller can request a screenshot explicitly");
+  } finally { f.close(); }
+});
+
+test("observation refs expire on a new revision, not on wall-clock age", async () => {
+  const f = fixture(); try {
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    f.setNow(observed.target.observedAt + 180_000);
+    const result = await f.call("m9r_computer_action", { action: click(observed.target, "aged-but-current-ref", observed.observation.controls[0]!.ref) });
+    assert.equal(result.result.dispatchStatus, "dispatched");
+    assert.equal(f.calls.filter((call) => call.kind === "click_element").length, 1, "the still-current ref is dispatched instead of rejected and refreshed");
   } finally { f.close(); }
 });
