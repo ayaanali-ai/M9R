@@ -645,6 +645,29 @@ function resultError(result: { isError: boolean; text?: string }, fallback: stri
   throw new Error(detail || fallback);
 }
 
+/**
+ * The ghost-cursor overlay is presentation, never a real OS mutation -- but
+ * `resultError` previously threw a plain Error for its own background
+ * refusal, which the stage layer then recorded as "uncertain" and used to
+ * lock the surface, even though no dispatch to the real application window
+ * was ever attempted. A window class that refuses background mouse-move
+ * presentation (Chrome foremost) is therefore a clean pre-dispatch refusal,
+ * not an ambiguous one.
+ */
+function resultErrorTyped(result: { isError: boolean; text?: string }, fallback: string): void {
+  try {
+    resultError(result, fallback);
+  } catch (error) {
+    if (backgroundInputRefused(error)) {
+      throw new DesktopInputNotDispatchedError(
+        `${error instanceof Error ? error.message : fallback} The agent cursor overlay could not be positioned; no real input was sent.`,
+        "background-unavailable",
+      );
+    }
+    throw error;
+  }
+}
+
 function actionError(result: ActionResult | ToolResult, fallback: string): string | null {
   const wrapped = result as ToolResult;
   if (wrapped.isError === true) {
@@ -1644,8 +1667,8 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       return { x, y, screenX: x, screenY: y, enabled: false, visible: false };
     }
     const point = cursorScreenPoint(x, y, frame);
-    resultError(await input.driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cua Driver could not enable the agent cursor.");
-    resultError(await input.driver.moveCursor({ x, y, target: new input.sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId }), session: input.session }), "Cua Driver could not move the agent cursor.");
+    resultErrorTyped(await input.driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cua Driver could not enable the agent cursor.");
+    resultErrorTyped(await input.driver.moveCursor({ x, y, target: new input.sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId }), session: input.session }), "Cua Driver could not move the agent cursor.");
     const state = cursorStateFromResult(await input.driver.getAgentCursorState({ session: input.session }));
     await timed("cursor-position", async () => {
       if (!state.enabled || state.x === undefined || state.y === undefined || Math.abs(state.x - x) > 1 || Math.abs(state.y - y) > 1) {

@@ -262,6 +262,7 @@ function makeSdk(options: {
   typeTextErrors?: Error[];
   callToolResult?: Record<string, unknown>;
   callToolErrors?: Record<string, Error>;
+  moveCursorError?: Error;
   calls: Array<{ method: string; value?: unknown }>;
 }) {
   const actionResult = options.actionResult ?? { effect: 0, route: 1, summary: "action confirmed" };
@@ -309,7 +310,11 @@ function makeSdk(options: {
         structuredJson: JSON.stringify({ regions: [{ label: "Chrome", bounds: { x: 0, y: 0, width: 1, height: 1 } }] }) };
     },
     async setAgentCursorEnabled(input: unknown) { options.calls.push({ method: "setAgentCursorEnabled", value: input }); return { isError: false }; },
-    async moveCursor(input: unknown) { options.calls.push({ method: "moveCursor", value: input }); return { isError: false }; },
+    async moveCursor(input: unknown) {
+      options.calls.push({ method: "moveCursor", value: input });
+      if (options.moveCursorError) return { isError: true, text: options.moveCursorError.message };
+      return { isError: false };
+    },
     async callTool(name: string, argumentsJson: string) {
       options.calls.push({ method: "callTool", value: { name, args: JSON.parse(argumentsJson) } });
       if (options.callToolErrors?.[name]) throw options.callToolErrors[name];
@@ -441,6 +446,16 @@ test("moves and verifies Cua's ghost cursor through the typed exact-window API",
   assert.equal(typeof move.session, "string");
   assert.equal(calls.some((call) => call.method === "callTool"), false, "cursor motion uses the public typed driver method");
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession", "shutdown"].includes(method)), ["startSession", "endSession", "shutdown"]);
+}));
+
+test("a background refusal of the ghost-cursor overlay is a clean typed refusal, never an uncertain plain error", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const moveCursorError = new Error("Background delivery is not available for target window class 'Chrome_WidgetWin_1' on this event kind (mouse_move).");
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, moveCursorError }) as never });
+  await assert.rejects(driver.moveCursor("stage", 42, 24), (error: unknown) =>
+    error instanceof DesktopInputNotDispatchedError && error.code === "background-unavailable");
+  await driver.shutdown();
 }));
 
 test("owner preview captures the whole current desktop and binds visible cursor clicks to that capture", async () => withRoot(async (root) => {
