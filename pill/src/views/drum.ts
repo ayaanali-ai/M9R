@@ -82,10 +82,9 @@ export interface Drum {
 }
 
 /** `lens` is the centred agent's live activity; it shows only while the wheel is at rest on a row. */
-export function buildDrum(lens: HTMLElement, onFocus: (id: string) => void, onDetent: () => void, onOpen: (id: string) => void): Drum {
+export function buildDrum(lens: HTMLElement, onFocus: (id: string) => void, onDetent: () => void): Drum {
   const wheel = h("div", { class: "drum-wheel" });
-  // The band is also the way in: tap the centred agent to message it.
-  const band = h("button", { class: "drum-band", type: "button", tabindex: "-1", "aria-label": "Message this agent" }, h("span", { class: "drum-band-hint", text: "Message" }));
+  const band = h("div", { class: "drum-band" });
   const rail = h("div", { class: "drum-rail", role: "tablist", "aria-label": "Agents" });
   lens.classList.add("drum-lens");
   const el = h("div", { class: "drum", tabindex: "0", "aria-roledescription": "agent wheel" }, band, wheel, lens, rail);
@@ -182,7 +181,6 @@ export function buildDrum(lens: HTMLElement, onFocus: (id: string) => void, onDe
       if (moved) return;
       const i = order.findIndex((t) => t.id === task.id);
       if (i < 0) return;
-      if (i === Math.round(pos.target)) return onOpen(task.id);
       hold();
       snapTo(i);
     });
@@ -223,10 +221,6 @@ export function buildDrum(lens: HTMLElement, onFocus: (id: string) => void, onDe
   // ── Input: drag, wheel, keys ──────────────────────────────────────
 
   let moved = false;
-  band.addEventListener("click", () => {
-    const t = order[Math.round(pos.target)];
-    if (!moved && t) onOpen(t.id);
-  });
   el.addEventListener("pointerdown", (e) => {
     if ((e.target as HTMLElement).closest(".drum-pip")) return;
     dragging = { startY: e.clientY, startPos: pos.value, lastY: e.clientY, lastT: e.timeStamp, v: 0 };
@@ -270,11 +264,6 @@ export function buildDrum(lens: HTMLElement, onFocus: (id: string) => void, onDe
     wheelTimer = window.setTimeout(() => snapTo(pos.value), 90);
   }, { passive: false });
   el.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      const t = order[Math.round(pos.target)];
-      if (t) onOpen(t.id);
-      return;
-    }
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     e.preventDefault();
     hold();

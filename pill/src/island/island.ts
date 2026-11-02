@@ -498,27 +498,21 @@ export class Island {
       if (State.mode === "hidden") this.fsm.mouseEntered();
     });
 
-    this.islandEl.addEventListener("mousedown", () => {
+    this.islandEl.addEventListener("mousedown", (e) => {
       Sound.resume();
       State.lastActivity = performance.now();
       if (State.mode !== "expanded") {
         this.fsm.click();
         return;
       }
-    });
-    // Right-click anywhere on the island opens settings, the one control that used to live in the tab bar.
-    this.islandEl.addEventListener("contextmenu", (e) => {
-      if (State.mode !== "expanded") return;
-      e.preventDefault();
-      this.setView("settings");
+      // Clicking the empty part of the header folds the island away, even while an approval waits (it stays pending and
+      // its badge stays on the agent). Buttons, tabs and fields keep their own clicks.
+      const target = e.target as HTMLElement;
+      if (target.closest("#header") && !target.closest("button")) this.collapse();
     });
 
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && State.mode === "expanded" && !State.isPinned) {
-        // One step back at a time: settings and the like return home; home folds the island away.
-        if (State.view === "settings" || State.view === "models" || State.view === "note") this.setView(State.defaultView());
-        else this.collapse();
-      }
+      if (e.key === "Escape" && State.mode === "expanded" && !State.isPinned) this.collapse();
       State.lastActivity = performance.now();
     });
 

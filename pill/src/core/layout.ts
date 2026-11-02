@@ -56,30 +56,27 @@ export const EXPANDED_CORNER = 22;
 export const WAKE_STRIP_W = 240;
 export const WAKE_STRIP_H = 6;
 
-/** Views start right under the island's top inset; there is no tab bar above them. */
-export const CONTENT_TOP = 8;
-
 export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   // Taller than the other views: the wheel needs room for two rows either side of the centred one.
-  overview: { height: 162, botX: 68, botY: 80, botDiameter: 58, agentMode: "pills" },
-  empty: { height: 126, botX: 70, botY: null, botDiameter: 62, agentMode: "none" },
+  overview: { height: 196, botX: 68, botY: 114, botDiameter: 58, agentMode: "pills" },
+  empty: { height: 160, botX: 70, botY: null, botDiameter: 62, agentMode: "none" },
   // Same mark position as the drum so an approval reads as the wheel's centred agent asking, not a new screen.
-  approval: { height: 126, botX: 68, botY: 62, botDiameter: 58, agentMode: "column" },
-  error: { height: 126, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
+  approval: { height: 160, botX: 68, botY: 96, botDiameter: 58, agentMode: "column" },
+  error: { height: 160, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
   // Grows downward: the band leads with what finished, the steps unfold beneath it.
-  finished: { height: 198, botX: 68, botY: 45, botDiameter: 52, agentMode: "column" },
-  prompt: { height: 126, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
-  models: { height: 266, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
-  note: { height: 126, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
-  settings: { height: 186, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
-  drop: { height: 166, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
+  finished: { height: 232, botX: 68, botY: 79, botDiameter: 52, agentMode: "column" },
+  prompt: { height: 160, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
+  models: { height: 300, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
+  note: { height: 160, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
+  settings: { height: 220, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
+  drop: { height: 200, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
 };
 
 /** One line when there's nothing to read yet; grows with the conversation and the draft. */
 export function chatPromptHeight(messageCount: number, draftHeight = 20): number {
   const extra = Math.max(0, Math.min(200, draftHeight) - 20);
-  if (messageCount === 0) return 74 + extra;
-  return Math.min(300, 98 + messageCount * 34 + extra);
+  if (messageCount === 0) return 108 + extra;
+  return Math.min(300, 132 + messageCount * 34 + extra);
 }
 
 export function islandSize(
@@ -127,8 +124,8 @@ export function botPosition(
       if (layout.botY != null) {
         return { cx: layout.botX, cy: layout.botY, diameter: layout.botDiameter, opacity: 1 };
       }
-      // Centre of the fixed 84 pt card, below the island's top inset.
-      const headerBottom = CONTENT_TOP;
+      // Centre of the fixed 84 pt card (8 pt top inset + 34 pt header → content at y = 42)
+      const headerBottom = 42;
       const cardH = 84;
       const cy = headerBottom + (islandH - headerBottom - cardH) / 2 + cardH / 2;
       return { cx: layout.botX, cy, diameter: layout.botDiameter, opacity: 1 };

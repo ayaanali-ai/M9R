@@ -88,33 +88,39 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 
 // ── Header ───────────────────────────────────────────────────────
 
-/** No tab bar: the island is all content. Two quiet controls show only while you hover it (settings at home, a way back
- * everywhere else), and the connection chip appears only when something is wrong. */
 export function buildHeader(actions: ViewActions): ViewHost {
+  const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
+  const tabChat = h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
   const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
-  const gearBtn = h("button", { class: "hover-ctl", title: "Settings", "aria-label": "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 13, { stroke: 1.7 }));
-  const backBtn = h("button", { class: "hover-ctl", title: "Back (Esc)", "aria-label": "Back", onclick: () => go(State.defaultView()) }, svg(ICONS.chevronLeft, 12, { stroke: 2.2 }));
+  const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
+  const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
 
   function go(v: IslandViewName) {
     actions.blip();
     actions.setView(v);
   }
 
-  const el = h("div", { id: "header" }, backBtn, gearBtn, brokerStatus);
+  const el = h(
+    "div",
+    { id: "header" },
+    h("div", { class: "tabs" }, tabHome, tabChat),
+    h("div", { class: "header-actions" }, brokerStatus, gearBtn, soundBtn),
+  );
 
   return {
     el,
     sync() {
       const v = State.view;
-      const home = v === "overview" || v === "empty";
-      // Approvals, task cards and drops carry their own way out; a back arrow there would compete with it.
-      gearBtn.hidden = !home;
-      backBtn.hidden = home || v === "approval" || v === "finished" || v === "drop" || v === "prompt";
+      tabHome.classList.toggle("on", v === "overview" || v === "empty");
+      tabChat.classList.toggle("on", v === "prompt");
+      gearBtn.classList.toggle("on", v === "settings");
       const connection = State.brokerConnection;
       brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";
       brokerStatus.dataset.state = connection;
       brokerStatus.title = connection === "disconnected" ? "The M9R browser broker is disconnected" : "Connecting to the M9R browser broker";
       brokerStatus.style.display = connection === "connecting" || connection === "disconnected" ? "inline-flex" : "none";
+      clear(soundBtn);
+      soundBtn.append(svg(State.settings.soundEnabled ? ICONS.speakerOn : ICONS.speakerOff, 14));
     },
   };
 }
@@ -124,11 +130,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
 function buildOverview(actions: ViewActions): ViewHost {
   const ticker = new Ticker();
   // Focus changes come from the wheel itself, so they skip the setFocus action's own blip; the detent tick is the sound.
-  const drum = buildDrum(ticker.el, (id) => State.setFocus(id), () => actions.blip(), (id) => {
-    State.composeTo = [id];
-    actions.blip();
-    actions.setView("prompt");
-  });
+  const drum = buildDrum(ticker.el, (id) => State.setFocus(id), () => actions.blip());
   const widgets = buildWidgets();
   const el = h("div", { class: "view overview" }, drum.el, widgets.el);
 
