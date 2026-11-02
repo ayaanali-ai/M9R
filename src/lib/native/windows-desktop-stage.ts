@@ -509,7 +509,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       const registry = readRegistry(root);
       const existing = registry.stages.find((stage) => stage.name === name);
       const savedCoordinationKey = coordinationKey ?? existing?.coordinationKey;
-      const claimed = registry.stages.find((stage) => stage.name !== name
+      // Same staleness tolerance as assertWindowUnclaimed(): a dead preview stage's
+      // leftover anchor must not permanently lock its window away from every later task.
+      const claimed = withoutStaleOwnerPreviewStages(registry.stages, processAlive).find((stage) => stage.name !== name
         && stage.anchor?.pid === info.pid && stage.anchor.windowId === info.windowId
         && !(savedCoordinationKey && stage.coordinationKey === savedCoordinationKey));
       if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
@@ -908,7 +910,13 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   }
 
   function assertWindowUnclaimed(name: string, pid: number, windowId: string, coordinationKey?: string) {
-    const claimed = readRegistry(root).stages.find((stage) => stage.name !== name
+    // A claim from a stage whose process has already exited is leftover registry
+    // state, not a live hold -- the same staleness rule register() already uses to
+    // prune dead preview stages. Checking it here too, not only at registration
+    // time, stops a finished or crashed earlier session from permanently locking
+    // a window out of every later task that happens to reuse the same app.
+    const claimants = withoutStaleOwnerPreviewStages(readRegistry(root).stages, processAlive);
+    const claimed = claimants.find((stage) => stage.name !== name
       && stage.anchor?.pid === pid && stage.anchor.windowId === windowId
       && !(coordinationKey && stage.coordinationKey === coordinationKey));
     if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
