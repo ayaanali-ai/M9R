@@ -367,6 +367,8 @@ export class Island {
     this.edgeGlow.style.width = `${w}px`;
     this.edgeGlow.style.height = `${hh}px`;
     this.edgeGlow.style.borderRadius = `0 0 ${r}px ${r}px`;
+    // Start the halo below the ears: alongside them it leaked through the hairline seam as a bright vertical line.
+    this.edgeGlow.style.clipPath = `inset(${r}px -60px -60px -60px)`;
     this.applyArches(w, r);
     this.miniGrid.style.left = `${w - 40 - 14.5}px`;
     this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
