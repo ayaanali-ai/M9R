@@ -339,16 +339,34 @@ function writeRegistryWhileLocked(root: string, registry: StageRegistry): void {
   }
 }
 
-function normalizeWindowInfo(value: unknown): NativeWindowStageInfo {
+function isEmptyDesktopId(value: unknown): value is string {
+  return typeof value === "string" && EMPTY_DESKTOP_ID_RE.test(value);
+}
+
+/**
+ * `currentDesktopId` is an optional fallback for a window with no specific virtual-desktop
+ * affinity (the native helper reports the all-zero GUID). Windows reports that for some
+ * shell-hosted surfaces -- File Explorer windows foremost among them, since they run inside
+ * the same long-lived process as the desktop and taskbar -- not only for windows that are
+ * actually missing. Such a window is effectively visible on every desktop, including
+ * whichever one the owner is currently viewing, so it resolves to the current desktop
+ * instead of being refused outright.
+ */
+function normalizeWindowInfo(value: unknown, currentDesktopId?: string): NativeWindowStageInfo {
   if (!value || typeof value !== "object") throw new Error("The native Windows stage helper returned no window result.");
   const item = value as Partial<NativeWindowStageInfo>;
+  const unaffinitized = currentDesktopId !== undefined && isEmptyDesktopId(item.desktopId);
   if (!Number.isInteger(item.pid) || (item.pid ?? 0) < 1 || typeof item.windowId !== "string" || !WINDOW_ID_RE.test(item.windowId)
-      || !isNonzeroDesktopId(item.desktopId) || typeof item.onCurrentDesktop !== "boolean") {
+      || (!unaffinitized && !isNonzeroDesktopId(item.desktopId)) || (!unaffinitized && typeof item.onCurrentDesktop !== "boolean")) {
     throw new Error("The native Windows stage helper returned an invalid window result.");
   }
   if (item.processGeneration !== undefined && !/^[a-f0-9]{16}$/i.test(item.processGeneration)) throw new Error("The native helper returned an invalid process generation.");
-  return { pid: item.pid!, windowId: item.windowId, desktopId: item.desktopId.toLowerCase(), onCurrentDesktop: item.onCurrentDesktop,
-    ...(item.processGeneration ? { processGeneration: item.processGeneration } : {}) };
+  return {
+    pid: item.pid!, windowId: item.windowId,
+    desktopId: unaffinitized ? currentDesktopId! : item.desktopId!.toLowerCase(),
+    onCurrentDesktop: unaffinitized ? true : item.onCurrentDesktop!,
+    ...(item.processGeneration ? { processGeneration: item.processGeneration } : {}),
+  };
 }
 
 export function createWindowsDesktopStageManager(deps: WindowsStageDependencies = {}) {
@@ -363,8 +381,8 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   const invokeNative = deps.invokeNative ?? ((request) => invokeWindowsStageHelper(
     deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"), request,
   ));
-  function verifiedWindowInfo(value: unknown) {
-    const window = normalizeWindowInfo(value);
+  function verifiedWindowInfo(value: unknown, currentDesktopId?: string) {
+    const window = normalizeWindowInfo(value, currentDesktopId);
     if (!deps.invokeNative && !window.processGeneration) throw new Error("The native runtime cannot verify process generations; stage input requires the current verified candidate.");
     return window;
   }
@@ -385,7 +403,18 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     const handle = parseWindowId(windowId);
     const result = await invokeNative({ op: "inspect", pid, windowId: handle });
     if (!result.ok) throw new Error(result.error ?? "Windows could not inspect that window.");
-    const window = verifiedWindowInfo(result.window);
+    // A window's desktop ID can legitimately come back empty for a shell-hosted surface
+    // (File Explorer foremost). Resolve the owner's current desktop first so such a
+    // window is treated as present wherever the owner is looking, not refused outright.
+    let currentDesktopId: string | undefined;
+    if (isEmptyDesktopId((result.window as Partial<NativeWindowStageInfo> | undefined)?.desktopId)) {
+      const current = await invokeNative({ op: "currentDesktop" });
+      if (current.ok) {
+        const desktop = normalizeDesktopInfo(current.desktop);
+        currentDesktopId = desktop.desktopId;
+      }
+    }
+    const window = verifiedWindowInfo(result.window, currentDesktopId);
     if (window.pid !== pid || window.windowId !== handle) throw new Error("Windows returned a different window identity; no retargeting is allowed.");
     return window;
   }

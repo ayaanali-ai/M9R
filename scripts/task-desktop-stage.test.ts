@@ -160,8 +160,42 @@ test("owner-preview repairs a saved zero desktop ID and refuses zero IDs from th
 
     reportedDesktopId = emptyId;
     await assert.rejects(manager.adoptCurrentDesktop(stageName), /invalid desktop result/);
-    await assert.rejects(manager.inspectWindow("123", "456"), /invalid window result/);
+    // An empty window desktop ID now falls back to the owner's current desktop (a shell-hosted
+    // window, e.g. File Explorer, can legitimately report no specific desktop affinity) -- but
+    // when the current-desktop lookup is *also* empty, there is nothing left to fall back to,
+    // and the failure correctly surfaces as the desktop lookup that actually failed.
+    await assert.rejects(manager.inspectWindow("123", "456"), /invalid desktop result/);
     assert.equal(manager.list()[0]?.desktopId, currentId, "invalid native data must not overwrite the repaired mapping");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a window with no specific desktop affinity resolves to the owner's current desktop instead of being refused", async () => {
+  const testTemp = join(process.cwd(), ".test-tmp");
+  mkdirSync(testTemp, { recursive: true });
+  const root = mkdtempSync(join(testTemp, "m9r-unaffinitized-window-"));
+  const emptyId = "00000000-0000-0000-0000-000000000000";
+  const currentId = "55555555-5555-4555-8555-555555555555";
+  const manager = createWindowsDesktopStageManager({
+    platform: "win32",
+    root,
+    env: {},
+    terminal: true,
+    invokeNative: async (request) => {
+      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentId, isCurrent: true } };
+      // A shell-hosted window (e.g. a new File Explorer window) can legitimately
+      // report no specific virtual-desktop affinity.
+      if (request.op === "inspect") return { ok: true, window: {
+        pid: Number(request.pid), windowId: String(request.windowId), desktopId: emptyId, onCurrentDesktop: false,
+      } };
+      throw new Error("Unexpected native operation.");
+    },
+  });
+  try {
+    const window = await manager.inspectWindow("777", "888");
+    assert.equal(window.desktopId, currentId, "an unaffinitized window resolves to the owner's current desktop");
+    assert.equal(window.onCurrentDesktop, true, "an unaffinitized window is treated as present on the current desktop");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
