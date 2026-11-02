@@ -1443,7 +1443,11 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       stageAction = { kind: "type_then_enter", text: action.text, view: "app",
         ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
     } else if (action.kind === "text" && action.mode === "replace" && action.locator?.kind === "element") {
-      const control = record.context.controls.get(action.locator.ref)!;
+      // Same staleness contract desktopPoint() enforces for every other locator-based
+      // action: a non-null assertion here instead threw a raw, unlabeled TypeError on a
+      // stale or unknown ref rather than desktopPoint()'s clean "reference is stale" error.
+      const control = record.context.controls.get(action.locator.ref);
+      if (!control || action.locator.snapshotId !== record.target.revision) throw new Error("The desktop control reference is stale.");
       if (control.stageRef) {
         stageAction = { kind: "replace_element", ref: control.stageRef, text: action.text, view: "app" };
       } else {
