@@ -381,6 +381,8 @@ function buildSettings(actions: ViewActions): ViewHost {
   const rateButtons = RATES.map((r) => h("button", { onclick: () => actions.updateSettings({ voiceRate: r.rate }) }, r.label));
   const preview = h("button", { class: "link-btn voice-preview", text: "Preview", onclick: () => speak("Codex is done. Found three deals on monitors.", { force: true }) });
   const voiceNote = h("span", { class: "voice-note" });
+  const GLOWS = [{ label: "Status", style: "status" }, { label: "Rainbow", style: "rainbow" }, { label: "Off", style: "off" }] as const;
+  const glowButtons = GLOWS.map((g) => h("button", { onclick: () => actions.updateSettings({ glowStyle: g.style }) }, g.label));
 
   const rows = h(
     "div",
@@ -388,6 +390,7 @@ function buildSettings(actions: ViewActions): ViewHost {
     h("div", { class: "settings-row" }, soundSwitch, h("span", { text: "Sound" })),
     h("div", { class: "settings-row" }, voiceSwitch, h("span", { text: "Spoken updates" }), preview, h("div", { class: "seg" }, ...rateButtons)),
     h("div", { class: "settings-row" }, svg(ICONS.timer, 12), autoLabel, h("div", { class: "seg" }, ...segButtons)),
+    h("div", { class: "settings-row" }, h("span", { class: "glow-swatch", "aria-hidden": "true" }), h("span", { text: "Edge glow" }), h("div", { class: "seg" }, ...glowButtons)),
     voiceNote,
   );
 
@@ -400,6 +403,7 @@ function buildSettings(actions: ViewActions): ViewHost {
       soundSwitch.classList.toggle("on", s.soundEnabled);
       voiceSwitch.classList.toggle("on", s.voiceEnabled);
       rateButtons.forEach((b, i) => b.classList.toggle("on", s.voiceRate === RATES[i].rate));
+      glowButtons.forEach((b, i) => b.classList.toggle("on", s.glowStyle === GLOWS[i].style));
       const name = voiceName();
       voiceNote.textContent = name ? `Voice: ${name.replace(/^Microsoft\s+/, "").replace(/\s+-.*$/, "")}` : "No voice available on this device.";
       autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;

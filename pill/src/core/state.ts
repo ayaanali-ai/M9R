@@ -123,6 +123,8 @@ export interface Settings {
   voiceEnabled: boolean;
   /** Speaking speed, 0.5–1.5. */
   voiceRate: number;
+  /** How the notch's edge lights up: by what's happening, an always-on living rainbow, or never. */
+  glowStyle: "status" | "rainbow" | "off";
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -131,6 +133,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoCloseInterval: 15,
   voiceEnabled: true,
   voiceRate: 1,
+  glowStyle: "status",
 };
 
 export const PROVIDER_COLORS: Record<Provider, string> = {

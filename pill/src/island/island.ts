@@ -26,11 +26,11 @@ const modeOrder = (m: IslandMode) => (m === "hidden" ? 0 : m === "compact" ? 1 :
 const GLOW_PAD = 40;
 
 /** Your voice first, then your music, then an agent that needs you, then one that's working; otherwise no glow. */
-function edgeTone(): { color: string; live: boolean } | null {
-  if (State.listening || State.speaking) return { color: "#FFFFFF", live: true };
-  if (State.media?.playing) return { color: MEDIA_TONE[State.media.source], live: false };
-  if (State.tasks.some((t) => t.state === "approval")) return { color: botGlowColor("approval"), live: true };
-  if (State.tasks.some((t) => t.runState === "working")) return { color: botGlowColor("working"), live: true };
+function edgeTone(): { color: string; live: boolean; ambient: boolean } | null {
+  if (State.listening || State.speaking) return { color: "#FFFFFF", live: true, ambient: false };
+  if (State.media?.playing) return { color: MEDIA_TONE[State.media.source], live: false, ambient: false };
+  if (State.tasks.some((t) => t.state === "approval")) return { color: botGlowColor("approval"), live: true, ambient: false };
+  if (State.tasks.some((t) => t.runState === "working")) return { color: botGlowColor("working"), live: true, ambient: true };
   return null;
 }
 
@@ -172,7 +172,22 @@ export class Island {
     this.glowEarLeft.setAttribute("d", "M 0 0 L 24 0 L 24 24 L 23 24 C 23 10 13.5 0 0 0 Z");
     this.glowEarRight.setAttribute("d", "M 24 0 L 0 0 L 0 24 L 1 24 C 1 10 10.5 0 24 0 Z");
     this.glowShape.append(this.glowIsland, this.glowEarLeft, this.glowEarRight);
-    this.edgeGlow.append(this.glowShape);
+    // The rainbow paint: a full spectrum across the silhouette, set flowing by a hue sweep in CSS.
+    const defs = document.createElementNS(ns, "defs");
+    const grad = document.createElementNS(ns, "linearGradient");
+    grad.id = "edge-rainbow";
+    grad.setAttribute("x1", "0");
+    grad.setAttribute("y1", "0");
+    grad.setAttribute("x2", "1");
+    grad.setAttribute("y2", "0");
+    ["#FF5F6D", "#FFB347", "#F9F871", "#47E891", "#4FC3FF", "#8B6CFF", "#FF5FD2", "#FF5F6D"].forEach((color, i, all) => {
+      const stop = document.createElementNS(ns, "stop");
+      stop.setAttribute("offset", `${(i / (all.length - 1)) * 100}%`);
+      stop.setAttribute("stop-color", color);
+      grad.append(stop);
+    });
+    defs.append(grad);
+    this.edgeGlow.append(defs, this.glowShape);
     this.root.append(this.wakeStrip, this.edgeGlow, this.islandEl, this.archLeft, this.archRight);
     this.applyGeometry();
   }
@@ -714,10 +729,14 @@ export class Island {
     }
 
     // The notch's own edge: one colour at a time, the most immediate thing wins.
-    const edge = State.mode === "hidden" ? null : edgeTone();
-    this.edgeGlow.classList.toggle("on", !!edge);
-    this.edgeGlow.classList.toggle("live", !!edge?.live);
-    if (edge) this.edgeGlow.style.setProperty("--edge", edge.color);
+    // Rainbow is always on, but anything that's about you (your voice, your music, an agent needing you) still takes over.
+    const style = State.settings.glowStyle;
+    const edge = State.mode === "hidden" || style === "off" ? null : edgeTone();
+    const rainbow = State.mode !== "hidden" && style === "rainbow" && (!edge || edge.ambient);
+    this.edgeGlow.classList.toggle("on", !!edge || rainbow);
+    this.edgeGlow.classList.toggle("rainbow", rainbow);
+    this.edgeGlow.classList.toggle("live", !rainbow && !!edge?.live);
+    if (edge && !rainbow) this.edgeGlow.style.setProperty("--edge", edge.color);
 
     // The focused agent's mark; rebuilt only when it changes.
     const focus = State.focusTask;

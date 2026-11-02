@@ -122,6 +122,17 @@ body {
   fill: color-mix(in srgb, var(--edge, #fff) 70%, transparent);
   transition: fill 2s ease;
 }
+/* Rainbow: the spectrum drifts around the notch and the light swells and settles, so it reads as alive, not a line. */
+#edge-glow.rainbow path { fill: url(#edge-rainbow); }
+#edge-glow.rainbow { animation: rainbow-flow 7s linear infinite, rainbow-breathe 4.2s ease-in-out infinite; }
+@keyframes rainbow-flow {
+  from { filter: blur(10px) hue-rotate(0deg) saturate(1.25); }
+  to { filter: blur(10px) hue-rotate(360deg) saturate(1.25); }
+}
+@keyframes rainbow-breathe {
+  0%, 100% { opacity: 0.62; }
+  50% { opacity: 0.95; }
+}
 #edge-glow.on { opacity: 0.8; }
 #edge-glow.live { animation: edge-breathe 3.6s ease-in-out infinite; }
 @keyframes edge-breathe {
@@ -129,7 +140,7 @@ body {
   50% { opacity: 0.95; }
 }
 @media (prefers-reduced-motion: reduce) {
-  #edge-glow.live { animation: none; }
+  #edge-glow.live, #edge-glow.rainbow { animation: none; }
 }
 
 #countdown {
@@ -600,6 +611,12 @@ body {
 .voice-preview { color: var(--blue); padding: 0 2px; }
 .voice-preview:hover { text-decoration: underline; }
 .voice-note { font: 400 10px var(--font); color: var(--dim-3); }
+.glow-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: conic-gradient(#ff5f6d, #ffb347, #f9f871, #47e891, #4fc3ff, #8b6cff, #ff5fd2, #ff5f6d);
+}
 
 /* ── Widgets: right of the drum, only while they have something real ─────── */
 
