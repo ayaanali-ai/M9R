@@ -11,8 +11,9 @@ instead of working around it.
 
 ## Where things stand
 
-- **Installed on the owner's machine:** an engine built from `84a4399a` (2026-11-01 16:11). **Nothing listed below is
-  live yet.** Every failure in the owner's run history (`~/.m9r/state.json`) came from that older build.
+- **Installed on the owner's machine (2026-11-02, verified live):** `4908faaf`, runtime build
+  `c1fb5e999b33f81b17e8144d6c7032105f8fc65a21a96c9c4b3c0628f99a8afc`. Phases 1–3 are live and proven on the owner's
+  real machine, not just by tests. Phase 4 (speed) and Phase 5 (acceptance) have not started.
 - **Branch:** `main`, local only, not pushed. Working tree clean except the untracked `.test-tmp/`.
 
 ### Already done and committed
@@ -27,6 +28,11 @@ instead of working around it.
 | `7cc8e207` | Codex (saved by Claude) | Codex's unfinished integration pass, saved exactly as left: typed pre-dispatch refusals, work identity on receipts, `m9r_browser_open` / `m9r_browser_tabs` / `m9r_computer_inspect`, browser tab select/close, cursor label ordinals. Reviewed: typechecks, focused tests pass. |
 | `5e85e321` | Claude | Pill test builds full settings (the pill gained voice/glow settings) |
 | `85d876fa` | Claude | **Phase 1** — see below |
+| `a298df56`, `2de35f6a`, `1509828b`, `7ff62348` | Codex | **Phase 2**, reviewed and confirmed correct — structured-only completion, orphaned-task reconciliation preserving uncertain evidence, installed/verified |
+| `ea225178` | Claude | **Phase 3.1** — Chrome background-typing recovery via bounded foreground escalation |
+| `fce10e17` | Claude | **Phase 3.2** — ghost-cursor background refusal no longer a plain-Error surface lock |
+| `e4375dcf` | Claude | **Phase 3.3a** — `m9r_browser_open`/`m9r_browser_tabs` gated off by default (necessary but not sufficient, see next row) |
+| `4908faaf` | Claude | **Phase 3.3b, the real fix** — `scripts/m9r-web-broker.ts` no longer builds the isolated CDP browser transport unconditionally; installed and live-verified via `/web/status` |
 
 Pill redesign (all committed, intentional, keep it): `97062da5`, `62ecda3d`, `26039b7d`, `5d73a758`, `9e06bad1`,
 `f8aac6fc`, `e6863d57`. `036ec923` was reverted by `66d4f265` at the owner's request — do not re-apply it.
@@ -71,7 +77,11 @@ CLI shim `ENOENT` (5×), multi-window Chrome launch refused (5×). One desktop a
 
 ## Remaining work, in order
 
-Phase 2 closure: correction 2de35f6a installed from its clean candidate, runtime build 3b133bcf3a7663d556c34b4179467b84f1da7006fc6932b19790f797834c1a76. All 184 installed artifacts match. Broker health and runtime identity verified; one broker and one pill. T23/T84 now have canceled work receipts, incomplete remaining work, and preserved uncertain delivery evidence. Pill remains 4db938e8. Expanded gate passed 205 tests with zero failures and one explicitly skipped live-browser test; typecheck passed. These are automated contract checks and live installation/state checks, not a provider-driven desktop acceptance run. Phase 3 is next; its isolated-browser versus personal-Chrome shipping decision remains with the owner.
+Phase 2 closure: correction 2de35f6a installed from its clean candidate, runtime build 3b133bcf3a7663d556c34b4179467b84f1da7006fc6932b19790f797834c1a76. All 184 installed artifacts match. Broker health and runtime identity verified; one broker and one pill. T23/T84 now have canceled work receipts, incomplete remaining work, and preserved uncertain delivery evidence. Pill remains 4db938e8.
+
+**Phase 3 decision, made by the owner and closed: no isolated browser, no extension, ever, as a default route, for any user.** The owner tested the native-desktop route directly (it opened their real signed-in Chrome, searched YouTube, played a video) and explicitly rejected both alternatives Codex proposed (a browser extension, an isolated CDP-connected Chrome profile). See `ea225178`, `fce10e17`, `4908faaf` below for what this took; do not revisit this decision or re-enable either route by default without the owner asking first.
+
+**Installed and live-tested (2026-11-02):** commit `4908faaf`, runtime build `c1fb5e999b33f81b17e8144d6c7032105f8fc65a21a96c9c4b3c0628f99a8afc`. Confirmed via the broker's own `/web/status`: `{"browserTransport":"native-desktop","extensionConnected":false}`. Live task "Open Chrome, search YouTube for Strawberry Park, play the latest video" (T121) completed end-to-end: opened the owner's real signed-in Chrome, searched, **sorted by "Recently uploaded" and verified the correct newest video before playing it** (self-corrected a bad run two attempts earlier where it played a 5-day-old video without checking). 14/15 actions confirmed; 1 still logged "uncertain" (a keyboard-event background refusal, cause not yet isolated — see Phase 3.4 below).
 
 ### Phase 2 — honest results
 Phase 2 implementation: only structured completion can produce success; plain provider output remains incomplete. Broker startup settles orphaned queued/acknowledged work for configured providers once, preserving remaining work and terminal reasons. Abandoned work with uncertain input is canceled while its delivery evidence remains uncertain; startup also repairs inconsistent records created by the first Phase 2 installer. New human goals strip the historical room footer; teammate context remains in the provider prompt. All 82 historical result summaries were checked: none can produce success without a structured completion report, covering the reported 17 false successes. Runtime a298df56 was installed and accepted in 1509828b; the follow-up correction must be installed and verified before Phase 2 is closed. The opening installed-state description is the original handoff baseline, not current runtime state. Updated compatibility tests to report structured completion and made the Notepad lookup assertion case-insensitive (Windows search semantics).
@@ -85,16 +95,72 @@ Phase 2 implementation: only structured completion can produce success; plain pr
 3. Stop appending the "Also in this room, not addressed by this message…" footer to the owner's goal text (82 of 115
    goals carry it). Put room context in the prompt, not in the goal.
 
-### Phase 3 — browser route (infrastructure exists, routing does not)
-1. `bc58522b` built the CDP daemon and the route reports `nativeClickAvailable`, but the agent prompt in
-   `web-live-sessions.ts` (line ~115) still says *"Use M9R's native desktop tools for every web and app action"*.
-   Change it so web work uses `m9r_browser_open` / browser-tab targets first, and the desktop route is the fallback.
-2. **Decide with the owner before shipping:** the daemon is M9R's *isolated* browser. It does not have the owner's
-   logged-in Chrome sessions. Tasks like "log in to blinn.edu" may need the owner's Chrome. Do not silently switch.
-3. Browser observations should return only what changed after an action (agent-browser's snapshot delta), not a
-   full tree each time.
+### Phase 3 — browser route — CLOSED, do not reopen without the owner
+The owner decided: native desktop/UIA only, against their real signed-in Chrome, never the CDP daemon or the
+extension, by default, for any user. What shipped (read before touching browser code again):
+
+1. `ea225178` — Chrome refuses *background* `set_value`/`type_text` outright; Cua's `TypeTextInput` has no
+   `deliveryMode` field at all (unlike `ClickInput`), so there was no way to retry it foreground. Fix: when
+   `deliveryMode === "background"` and the driver cleanly refuses (not just `"owner-preview"`, which already had
+   this), `driverInputAction` now falls through to the same bounded `runForeground()` recovery — wait for the owner
+   to be idle, bring the exact window forward, dispatch, confirm, restore the owner's pointer. **This changes the
+   hard rule below** ("background-mode stages must never take the owner's pointer") to: *may, only as a one-shot
+   last resort after background delivery is confirmed refused, never as a first attempt.* Covers `typeIntoExactField`
+   too (same `deliveryMode` gate).
+2. `fce10e17` — the ghost-cursor overlay move (`moveAndVerifyCursor`, `requireProof: true` branch, used by the
+   explicit `cursor` MCP action) called the bare `resultError()` helper, which throws a **plain** `Error` for any
+   driver refusal, including a background-input refusal — violating the typed-error hard rule even though no real
+   window was ever touched (the overlay is presentation only). That plain error got recorded *uncertain* and locked
+   the surface for the *next* real action, even though nothing real had failed. Fix: new `resultErrorTyped()`
+   reclassifies a background refusal here as `DesktopInputNotDispatchedError("background-unavailable")`. It
+   deliberately does **not** escalate to foreground — stealing focus to show a cosmetic cursor is not justified.
+3. `4908faaf` — **the actual root cause of the isolated-browser pop-up the owner kept seeing.** `m9r_browser_open`
+   (gated off in `e4375dcf`, see below) was never the only way to reach the isolated browser. The real production
+   entry point, `scripts/m9r-web-broker.ts` (compiled into the installed `m9r-web-broker.exe`), **unconditionally**
+   built `browserTransport = createBrowserDaemon(() => launchAgentChrome(...))` at startup and passed it to
+   `startWebBroker`, alongside `nativeDesktopRoute: true`. Read `web-broker-server.ts`: `nativeDesktopRoute` only
+   feeds a status string (`/web/status`'s `browserTransport` field) — **nothing in the actual dispatch path reads
+   it.** Every real place that sends a browser-tab-kind action checks `options.browserTransport` first; if it's set,
+   that's what runs, full stop. `m9r_browser_tabs` alone (a read-only "list tabs" call, still registered after the
+   first gate) was enough to trigger `ensureReady()` on the isolated daemon. Fixed by building `browserTransport`
+   only when `M9R_ENABLE_ISOLATED_BROWSER=1` is set (it is not, by default); `m9r_browser_tabs` is now gated the
+   same way `m9r_browser_open` already was (`e4375dcf`), since it has nothing to report without a transport.
+   **Verify this is still true before any future change to `m9r-web-broker.ts` or `web-broker-server.ts`:** run
+   the installed broker and `curl`/`Invoke-RestMethod` its `/web/status` with the broker key from
+   `~/.m9r/web-broker.key`; it must read `"browserTransport":"native-desktop"`, never `"agent-chrome"`.
+4. **Not yet closed:** T121's live run still logged one `background-unavailable` refusal on a **keyboard** event
+   (not the cursor overlay, not `typeIntoExactField` — those are now fixed and tested) that still surfaced as
+   *uncertain* rather than a clean typed refusal or a foreground recovery. The task completed anyway (the agent
+   retried), so this is not blocking, but it is a real, unisolated gap. Candidates to check, in order: (a) `pressKey()`'s
+   own call into `driverInputAction("press_key", ...)` — confirm it's actually reaching that function and not a
+   different, earlier-return path; (b) `nativeControl()`'s `move_cursor`/`click`/`type` child-input path (a DIFFERENT
+   mechanism from the Cua driver, used when a native Win32 child control is found — check whether it has its own
+   unclassified-refusal problem); (c) any other `resultError(` call site in `cua-stage-driver.ts` not yet converted
+   to `resultErrorTyped` (grep `resultError\(` — several remain, e.g. lines handling `setAgentCursorMotion`,
+   `setAgentCursorEnabled` before the first desktop action, and the standalone `move_cursor` prepare step). Do not
+   guess which one it is from this description alone — reproduce it (the same "search YouTube, play a video" task,
+   a few runs if needed), capture the exact `detail` text and which MCP action/phase it occurred on from
+   `~/.m9r/state.json`, and trace that specific call site before changing code.
+5. Browser observations should return only what changed after an action (agent-browser's snapshot delta), not a
+   full tree each time. Still open; see Phase 4.4 below, it's the same underlying cost.
 
 ### Phase 4 — desktop speed
+
+**Latency finding, from T121's own timing data (2026-11-02), do not re-derive this from scratch — reread
+`~/.m9r/state.json`'s `stageTiming` for any task and sum `durationMs` grouped by `phase` to reproduce it:**
+engine-side work (`action`, `launch`, `prepare`, `session-start`, `runtime-acquire`, `queue_wait`, `sdk-load`,
+`host-connect`, `cursor-visible`, `provider-acceptance`, `cursor-motion` — everything that is actually M9R/Cua
+dispatch) summed to **~69 s out of a 261 s task.** The remaining ~190 s (73%) is not in any engine phase at all —
+it is the time the provider (the LLM) itself spends thinking between tool calls: reading the returned
+screenshot/structure, deciding the next action, writing it out. **This is not an M9R engine bottleneck; it is
+inference time on the provider side, and no amount of driver/session optimization touches it.** Do not "fix" this
+by further speeding up `runtime-acquire`/`session-start` — they are already cheap (runtime-acquire averaged 39 ms,
+session-start 342 ms over this run; Codex's original claim that session reuse was the bottleneck was already
+checked and rejected, see "Where Codex's list needed correcting" below). The only real levers on the LLM-thinking
+side: (a) return a smaller, more targeted observation (see item 1 below) so there's less for the model to read each
+turn; (b) let obviously-independent steps batch into one tool call (item 5); (c) a faster/smaller model for routine
+steps is an *owner* product decision, not something to change unilaterally.
+
 1. After an action, return a "what changed" summary; include a screenshot only when asked or when no structure exists.
    Today almost every action returns an image (up to 512 KB, up to 4 per observation), which also slows the model.
 2. Expire references when the surface changes (revision), not 30 s of wall time (`MAX_OBSERVATION_AGE_MS`).
@@ -104,10 +170,27 @@ Phase 2 implementation: only structured completion can produce success; plain pr
 5. Allow a short action batch in one call (type, then Enter).
 6. Launch: resolve installed apps instead of npm shims (`codex` → the Codex app, not `%APPDATA%\npm\codex`); with
    several Chrome windows, use the active one instead of refusing.
+7. **Scrolling/reasoning gap, observed live (2026-11-02), not yet root-caused — do not hardcode a fix.** On a YouTube
+   search results page, the agent did not scroll down or check more than what was immediately on-screen before
+   picking a video; a later run self-corrected by explicitly sorting "Recently uploaded" and checking the upload
+   date before playing, so this is inconsistent, not a hard failure every time. The owner was explicit: **do not
+   hardcode "always scroll" or any other YouTube-specific behavior** — that's a band-aid, not a fix. The real
+   question to investigate is whether `read_structure`'s result tells the agent when content is cut off below the
+   visible viewport (a true "there is more below, not yet observed" signal) versus silently returning only what's
+   currently rendered as if it were the whole page. If the model isn't told something is truncated, it has no way
+   to know to scroll — that's an observation-completeness bug, not a prompting problem, and the fix (if confirmed)
+   belongs in the structure/observation contract, not in a system prompt telling the agent to "remember to scroll."
 
 ### Phase 5 — prove it
 Acceptance runs against real apps: Chrome/YouTube, Spotify, Notepad, File Explorer, a canvas, plus owner pointer
 movement mid-action, a new owner message mid-task, and parallel agents on separate windows.
+
+### Out of scope for this work, explicitly deferred by the owner (2026-11-02)
+- **Conversation/task memory surviving reboots.** The owner asked whether M9R has anything like persistent
+  conversation state across a laptop restart. It does not, as far as this work looked — `~/.m9r/state.json` persists
+  tasks/events durably across restarts already (that's how this whole investigation reads prior runs), but there is
+  no mechanism for a provider's mid-conversation *context* to resume after a reboot. The owner said this is
+  important but explicitly **not** part of this phase — do not build it as a side effect of anything above.
 
 ## Where Codex's 18-item list needed correcting
 
@@ -131,7 +214,17 @@ movement mid-action, a new owner message mid-task, and parallel agents on separa
 - Never infer "not sent" from message text when a typed signal exists. Read the driver's typed result.
 - Do not add a gate that refuses on missing evidence when the action itself would be safe (unlabeled control, legacy
   binding, cosmetic cursor). Unknown is not dangerous.
-- Background-mode stages must never take the owner's pointer. Only owner-preview may escalate to foreground.
+- Background-mode stages may take the owner's pointer **only as a one-shot last resort**, after background delivery
+  is confirmed refused by the driver (never as a first attempt, never speculatively). This was changed in `ea225178`
+  — the earlier wording ("must never") is superseded; see Phase 3.1 for why and the exact gate that still protects it
+  (`driverInputAction`'s `options.deliveryMode === "background" && options.preferForeground` throws immediately —
+  only the post-refusal recovery path is new).
+- **The isolated CDP browser profile and the browser extension are never a default route, for any user, under any
+  circumstance, without the owner explicitly asking first.** This was tested live and explicitly rejected twice
+  (2026-11-02). `M9R_ENABLE_ISOLATED_BROWSER=1` is the only way to turn the isolated daemon back on; it is not set
+  in the installed runtime. Do not add a fallback that silently switches to it, do not re-register `m9r_browser_open`
+  / `m9r_browser_tabs` without the same gate, and do not build a new code path that constructs
+  `createBrowserDaemon(() => launchAgentChrome(...))` anywhere else without the same env-var gate.
 - Keep money holds. Canceled tasks stay canceled.
 - Do not change the pill's visual design. Do not edit the "New idea" section of the Source of Truth without the owner.
 
