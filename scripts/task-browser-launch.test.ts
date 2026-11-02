@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { join } from "node:path";
-import { ownedBrowserLaunch, selectExistingPersonalBrowserWindow, selectPersonalBrowserWindow } from "../src/lib/native/task-stage-apps";
+import { hasAmbiguousExistingPersonalBrowserWindow, isPackageManagerShimPath, ownedBrowserLaunch,
+  resolveStageLaunchApp, selectExistingPersonalBrowserWindow, selectPersonalBrowserWindow } from "../src/lib/native/task-stage-apps";
 
 test("personal browser launch uses the user's profile and asks Chrome for a new window", () => {
   const app = { executable: join("browser", "chrome.exe"), args: [] };
@@ -41,5 +42,58 @@ test("personal browser adoption ignores hidden, minimized, and wrong-desktop hel
   assert.deepEqual(selectPersonalBrowserWindow("chrome", [helper, minimized, otherDesktop, visible], new Set()), visible);
   assert.deepEqual(selectExistingPersonalBrowserWindow("chrome", [helper, minimized, otherDesktop, visible]), visible);
   assert.equal(selectExistingPersonalBrowserWindow("chrome", [visible, { ...visible, windowId: "0x15", title: "Second tab window" }]), undefined,
-    "multiple eligible personal windows require an explicit selection");
+    "multiple eligible personal windows require the actual foreground identity");
+});
+
+test("multiple personal browser windows bind to the exact active HWND and never to a title, size, or stale desktop guess", () => {
+  const first = { pid: 100, windowId: "0x11", appName: "chrome.exe", title: "Work", isOnScreen: true, minimized: false, onCurrentSpace: true, width: 1400, height: 900, zIndex: "2" };
+  const active = { ...first, pid: 200, windowId: "0x22", title: "Personal", width: 800, height: 600, zIndex: "1" };
+  const windows = [first, active];
+  assert.equal(hasAmbiguousExistingPersonalBrowserWindow("chrome", windows), true);
+  assert.deepEqual(selectExistingPersonalBrowserWindow("chrome", windows,
+    { pid: 200, windowId: "0x22", onCurrentDesktop: true, visible: true, minimized: false }), active);
+  assert.deepEqual(selectExistingPersonalBrowserWindow("chrome", windows,
+    { pid: 999, windowId: "0x99", onCurrentDesktop: true, visible: true, minimized: false }), first,
+    "an unrelated foreground app may fall back to the uniquely topmost eligible Chrome window");
+  const noZOrder = windows.map(({ zIndex: _zIndex, ...window }) => window);
+  assert.equal(selectExistingPersonalBrowserWindow("chrome", noZOrder,
+    { pid: 200, windowId: "0x22", onCurrentDesktop: false, visible: true, minimized: false }), undefined);
+  assert.equal(selectExistingPersonalBrowserWindow("chrome", noZOrder,
+    { pid: 200, windowId: "0x22", onCurrentDesktop: true, visible: false, minimized: false }), undefined);
+  assert.deepEqual(selectExistingPersonalBrowserWindow("chrome", windows), first,
+    "when foreground identity does not identify a browser window, use a unique topmost window, never size or enumeration order");
+  assert.equal(selectExistingPersonalBrowserWindow("chrome", [first, { ...active, zIndex: "2" }]), undefined,
+    "tied or missing z-order is still ambiguous");
+  assert.equal(selectExistingPersonalBrowserWindow("chrome", [{ ...first, zIndex: undefined }, { ...active, zIndex: undefined }]), undefined);
+});
+
+test("desktop app launch resolution prefers Windows-installed apps over package-manager shims", async () => {
+  const env = { APPDATA: "C:\\Users\\owner\\AppData\\Roaming", PNPM_HOME: "C:\\Users\\owner\\.local\\share\\pnpm" };
+  const npmShim = join(env.APPDATA, "npm", "codex.exe");
+  const pnpmShim = join(env.PNPM_HOME, "codex.exe");
+  assert.equal(isPackageManagerShimPath(npmShim, env), true);
+  assert.equal(isPackageManagerShimPath(pnpmShim, env), true);
+  assert.equal(isPackageManagerShimPath(join("C:\\Program Files", "Codex", "Codex.exe"), env), false);
+
+  const installed = { executable: "C:\\Program Files\\WindowsApps\\Codex.exe", args: ["--registered-app"] };
+  let discoveryCount = 0;
+  assert.deepEqual(await resolveStageLaunchApp("codex", {
+    env,
+    resolveDirect: () => ({ executable: npmShim, args: [] }),
+    discoverInstalledApp: async (name) => { assert.equal(name, "codex"); discoveryCount++; return installed; },
+  }), installed);
+  assert.equal(discoveryCount, 1);
+  await assert.rejects(resolveStageLaunchApp("codex", {
+    env,
+    resolveDirect: () => ({ executable: npmShim, args: [] }),
+    discoverInstalledApp: async () => undefined,
+  }), /package-manager command shim.*was not launched/);
+
+  const direct = { executable: "C:\\Program Files\\Notepad\\notepad.exe", args: [] };
+  assert.deepEqual(await resolveStageLaunchApp("notepad", {
+    env, resolveDirect: () => direct, discoverInstalledApp: async () => assert.fail("a resolved native app should not require discovery"),
+  }), direct);
+  assert.deepEqual(await resolveStageLaunchApp("notepad", {
+    env, resolveDirect: () => { throw new Error("No direct executable on PATH"); }, discoverInstalledApp: async () => installed,
+  }), installed, "Windows app discovery also resolves names that have no direct executable");
 });

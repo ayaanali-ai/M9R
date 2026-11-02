@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface StageAppLaunchSpec { executable: string; args: string[]; windowExecutable?: string }
 export type BrowserLaunchMode = "personal" | "isolated";
@@ -21,6 +21,14 @@ export interface BrowserWindowCandidate {
   zIndex?: string;
   width?: number;
   height?: number;
+}
+
+export interface ForegroundBrowserWindowIdentity {
+  pid: number;
+  windowId: string;
+  onCurrentDesktop: boolean;
+  visible: boolean;
+  minimized: boolean;
 }
 
 /**
@@ -135,12 +143,76 @@ export function selectPersonalBrowserWindow(
 export function selectExistingPersonalBrowserWindow(
   kind: StageBrowserKind,
   windows: readonly BrowserWindowCandidate[],
+  foreground?: ForegroundBrowserWindowIdentity,
 ): BrowserWindowCandidate | undefined {
   const matches = rankBrowserWindows(windows.filter((candidate) => browserWindowMatches(candidate, kind) && eligibleBrowserWindow(candidate)));
-  // Existing personal windows are user-owned. Without an explicit window/tab
-  // identity, adopting one of several eligible matches would silently retarget
-  // the user's work. Return only an unambiguous candidate.
-  return matches.length === 1 ? matches[0] : undefined;
+  if (matches.length === 1) return matches[0];
+  // When several personal windows exist, the actual foreground HWND is the
+  // user's current selection. Match its process and window identity exactly;
+  // z-order, size, title, or enumeration order are not substitutes for that.
+  if (matches.length > 1 && foreground && foreground.onCurrentDesktop && foreground.visible && !foreground.minimized) {
+    const active = matches.filter((candidate) => candidate.pid === foreground.pid
+      && candidate.windowId.toLowerCase() === foreground.windowId.toLowerCase());
+    if (active.length === 1) return active[0];
+  }
+  // If another app is foreground, a unique topmost eligible browser HWND is
+  // still a stable active-window choice. Never fall back to area or list order.
+  if (matches.length > 1 && matches.every((candidate) => candidate.zIndex !== undefined && Number.isFinite(Number(candidate.zIndex)))) {
+    const highest = Math.max(...matches.map((candidate) => Number(candidate.zIndex)));
+    const frontmost = matches.filter((candidate) => Number(candidate.zIndex) === highest);
+    if (frontmost.length === 1) return frontmost[0];
+  }
+  return undefined;
+}
+
+export function hasAmbiguousExistingPersonalBrowserWindow(kind: StageBrowserKind, windows: readonly BrowserWindowCandidate[]): boolean {
+  return windows.filter((candidate) => browserWindowMatches(candidate, kind) && eligibleBrowserWindow(candidate)).length > 1;
+}
+
+function isWithinDirectory(directory: string, candidate: string): boolean {
+  const path = relative(resolve(directory), resolve(candidate));
+  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+
+/** Detect well-known global package-manager command shim directories. */
+export function isPackageManagerShimPath(executable: string, env: Record<string, string | undefined> = process.env): boolean {
+  const roots = [
+    env.APPDATA ? join(env.APPDATA, "npm") : undefined,
+    env.PNPM_HOME,
+    env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "pnpm") : undefined,
+    env.BUN_INSTALL ? join(env.BUN_INSTALL, "bin") : undefined,
+    env.YARN_BIN,
+    env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "Yarn", "bin") : undefined,
+  ].filter((path): path is string => Boolean(path));
+  if (roots.some((root) => isWithinDirectory(root, executable))) return true;
+  const parts = resolve(executable).toLowerCase().split(/[\\/]+/);
+  return parts.some((part, index) => part === "node_modules" && parts[index + 1] === ".bin");
+}
+
+/**
+ * Resolve a GUI app from Windows' installed-app inventory when the short name
+ * finds no direct executable or only finds a global package-manager shim.
+ * A detected shim is never launched as if it were the requested desktop app.
+ */
+export async function resolveStageLaunchApp(appId: string, input: {
+  env?: Record<string, string | undefined>;
+  resolveDirect: () => StageAppLaunchSpec;
+  discoverInstalledApp: (name: string) => Promise<StageAppLaunchSpec | undefined>;
+}): Promise<StageAppLaunchSpec> {
+  const env = input.env ?? process.env;
+  let direct: StageAppLaunchSpec | undefined;
+  let directError: unknown;
+  try { direct = input.resolveDirect(); } catch (error) { directError = error; }
+  const packageShim = direct !== undefined && isPackageManagerShimPath(direct.executable, env);
+  if (direct && !packageShim) return direct;
+
+  const installed = await input.discoverInstalledApp(appId);
+  if (installed) return installed;
+  if (packageShim) {
+    throw new Error(`The app name "${appId}" resolved to a package-manager command shim, but Windows did not find a registered installed desktop app; the command shim was not launched.`);
+  }
+  if (directError) throw directError;
+  throw new Error(`The app "${appId}" could not be resolved to an installed desktop application.`);
 }
 export function isStageAppReference(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 1024

@@ -23,7 +23,9 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   const desktopActions: Array<{ kind: string; x?: number; y?: number }> = [];
   const currentDesktopId = "33333333-3333-4333-8333-333333333333";
   let anchorDesktopId = currentDesktopId;
+  let foregroundWindow = { pid: 123, windowId: "456" };
   const nativeOps: string[] = [];
+  const presentedWindows: Array<{ pid: number; windowId: string }> = [];
   const previewCapture = { dataUrl: "data:image/png;base64,eA==", width: 1280, height: 720, capturedAt: new Date(0).toISOString() };
   const driver = {
     capture: async () => previewCapture,
@@ -39,17 +41,22 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     platform: "win32", env: {}, invokeNative: async (request) => {
       nativeOps.push(String(request.op));
       if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentDesktopId, isCurrent: true } };
+      if (request.op === "currentForegroundWindow") return { ok: true, foregroundWindow: { ...foregroundWindow, desktopId: currentDesktopId,
+        onCurrentDesktop: true, title: "Active window", className: "Chrome_WidgetWin_1", visible: true, minimized: false } };
       if (request.op === "createDesktop") {
         creations++;
         return { ok: true, desktop: { desktopId: "11111111-1111-4111-8111-111111111111", isCurrent: false, returnDesktopId: "22222222-2222-4222-8222-222222222222" } };
       }
       if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: String(request.desktopId) === currentDesktopId } };
-      if (request.op === "presentOwnerWindow") { anchorDesktopId = currentDesktopId; return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } }; }
+      if (request.op === "presentOwnerWindow") { anchorDesktopId = currentDesktopId; presentedWindows.push({ pid: Number(request.pid), windowId: String(request.windowId) });
+        return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } }; }
       if (request.op === "inspect") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: anchorDesktopId, onCurrentDesktop: anchorDesktopId === currentDesktopId } };
       throw new Error("Unexpected native operation; preparation must not move or activate windows.");
     },
   } });
-  return { root, store, identity, task, service, driver, nativeOps, moveAnchor: () => { anchorDesktopId = "22222222-2222-4222-8222-222222222222"; }, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, store, identity, task, service, driver, nativeOps, presentedWindows,
+    setForegroundWindow: (pid: number, windowId: string) => { foregroundWindow = { pid, windowId }; },
+    moveAnchor: () => { anchorDesktopId = "22222222-2222-4222-8222-222222222222"; }, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("a stalled cursor compositor cannot delay stage preparation or dispatch", async () => {
@@ -245,9 +252,15 @@ test("an owner desktop app request reuses personal Chrome without creating anoth
     return { executable: join(root, "chrome.exe"), args: [] };
   });
   try {
-    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Personal Chrome", width: 1280, height: 720 }];
+    f.driver.listVisibleWindows = async () => [
+      { pid: 123, windowId: "456", appName: "chrome.exe", title: "Work Chrome", width: 1280, height: 720 },
+      { pid: 321, windowId: "789", appName: "chrome.exe", title: "Active Personal Chrome", width: 960, height: 640 },
+    ];
+    f.setForegroundWindow(321, "789");
     const opened = await f.service.launch(f.identity.token, f.task.id, "chrome");
     assert.equal(opened.reused, true);
+    assert.deepEqual(f.presentedWindows.at(-1), { pid: 321, windowId: "789" }, "the exact foreground HWND wins over other eligible Chrome windows");
+    assert.ok(f.nativeOps.includes("currentForegroundWindow"));
     const prepared = await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
     assert.equal(prepared.hasAnchor, true, "repeat preparation must retain the same live task's selected app");
     await f.service.act(f.identity.token, f.task.id, { kind: "capture" }, "owner-preview");

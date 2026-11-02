@@ -21,8 +21,10 @@ import {
   launchStageApp,
   ownedBrowserLaunch,
   resolveUnlistedStageApp,
+  resolveStageLaunchApp,
   selectPersonalBrowserWindow,
   selectExistingPersonalBrowserWindow,
+  hasAmbiguousExistingPersonalBrowserWindow,
   stageAppLaunchCwd,
   stageBrowserKind,
   stageWindowMatchesApp,
@@ -991,13 +993,14 @@ export function createTaskDesktopStageService(input: {
       if (input.resolveStageAppForTest) {
         target = { app: input.resolveStageAppForTest(appId) };
       } else {
-        try { target = resolveLaunchTarget(readPolicy(), identity.handle, appId); }
-        catch (error) {
-          if (stageAccessMode(readPolicy(), identity.handle) !== "full") throw error;
-          const installed = await discoverInstalledWindowsApp(appId);
-          if (!installed) throw error;
-          target = { app: installed };
+        if (stageAccessMode(readPolicy(), identity.handle) !== "full") {
+          throw new Error("This agent has not been granted task-stage access.");
         }
+        target = { app: await resolveStageLaunchApp(appId, {
+          env: input.stage?.env ?? process.env,
+          resolveDirect: () => resolveLaunchTarget(readPolicy(), identity.handle, appId, { env: input.stage?.env ?? process.env }).app,
+          discoverInstalledApp: (name) => discoverInstalledWindowsApp(name),
+        }) };
       }
       let approved = target.app;
       let rendererLookupAttempted = Boolean(approved.windowExecutable);
@@ -1081,7 +1084,12 @@ export function createTaskDesktopStageService(input: {
         }
         const existingMatches = kind ? undefined : await matchesLaunchedWindows(before);
         if (existingMatches && existingMatches.length > 1) throw new Error("The requested application has multiple visible windows; owner selection is required before joining one.");
-        const existing = kind ? selectExistingPersonalBrowserWindow(kind, before) : existingMatches?.[0];
+        let existing = kind ? selectExistingPersonalBrowserWindow(kind, before) : existingMatches?.[0];
+        if (kind && !existing && hasAmbiguousExistingPersonalBrowserWindow(kind, before)) {
+          try {
+            existing = selectExistingPersonalBrowserWindow(kind, before, await manager.currentForegroundWindow());
+          } catch { /* If the OS cannot identify its active HWND, do not guess among user-owned windows. */ }
+        }
         if (existing) {
           authorize(token, taskId, mode);
           if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
