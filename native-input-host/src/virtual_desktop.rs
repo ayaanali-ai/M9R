@@ -1565,7 +1565,10 @@ mod platform {
             .desktop_id(window)
             .map(Guid::as_string)
             .unwrap_or_else(|_| Guid { data1: 0, data2: 0, data3: 0, data4: [0; 8] }.as_string());
-        let on_current_desktop = manager.is_on_current_desktop(window).unwrap_or(false);
+        // An unreadable result is not evidence the window is on some other desktop --
+        // default to true (the same "unproven, so trust it" stance as desktop_id above)
+        // rather than quietly asserting the opposite of what couldn't be checked.
+        let on_current_desktop = manager.is_on_current_desktop(window).unwrap_or(true);
         let window_id = format!("{}", window as usize);
         Ok(WindowDesktop {
             pid,
@@ -1601,8 +1604,17 @@ mod platform {
         if internal.current_id()? != original {
             return Err("Windows changed the active desktop while moving the app window");
         }
-        let result = read_window(&manager, pid, window)?;
-        if result.desktop_id != target.as_string() {
+        let mut result = read_window(&manager, pid, window)?;
+        // read_window() reports the zero GUID when a window's desktop id is unreadable
+        // (the same shell-hosted-window limitation fixed there). That is not evidence the
+        // move failed -- move_exact_window() already succeeded and the active desktop did
+        // not change -- so trust the move and report the requested target. A real,
+        // different GUID is still a genuine mismatch and still fails below.
+        let unreadable = result.desktop_id == Guid { data1: 0, data2: 0, data3: 0, data4: [0; 8] }.as_string();
+        if unreadable {
+            result.desktop_id = target.as_string();
+            result.on_current_desktop = false;
+        } else if result.desktop_id != target.as_string() {
             return Err(
                 "Windows accepted the move request but the window is not on the requested desktop",
             );

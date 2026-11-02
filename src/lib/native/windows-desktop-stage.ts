@@ -660,7 +660,10 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (stage.anchor) {
       const result = await invokeNative({ op: "inspect", pid: stage.anchor.pid, windowId: stage.anchor.windowId });
       if (!result.ok) throw new Error(`Stage “${name}” anchor is unavailable: ${result.error ?? "unknown window error"}. The desktop mapping was kept.`);
-      const anchor = verifiedWindowInfo(result.window);
+      // Same unaffinitized-window fallback as inspectWindow(): trust the window is still
+      // on the stage it was last registered to rather than refusing it when its own
+      // desktop affinity can't be read.
+      const anchor = verifiedWindowInfo(result.window, stage.desktopId);
       if (!stage.anchor.processGeneration && anchor.processGeneration
         && anchor.pid === stage.anchor.pid && anchor.windowId === stage.anchor.windowId) {
         // A window saved before generations were recorded: the live window still has the same process and
@@ -740,7 +743,11 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (current.desktopId === stage.desktopId) return { fromDesktopId: current.desktopId, window: current, stage };
     const result = await invokeNative({ op: "move", pid: current.pid, windowId: current.windowId, desktopId: stage.desktopId });
     if (!result.ok) throw new Error(result.error ?? "Windows could not move the window.");
-    const moved = normalizeWindowInfo(result.window);
+    // Same unaffinitized-window fallback as inspectWindow()/inspectStage(): an unreadable
+    // post-move desktop id is not evidence the move failed, so trust it landed on the
+    // requested stage rather than refusing the window. A genuinely different real GUID
+    // still fails below -- this only forgives "unreadable," never a real mismatch.
+    const moved = normalizeWindowInfo(result.window, stage.desktopId);
     if (moved.desktopId !== stage.desktopId) throw new Error("Windows did not confirm that the window reached the registered stage.");
     return { fromDesktopId: current.desktopId, window: moved, stage };
   }
