@@ -198,6 +198,15 @@ interface ComputerUseMcpDeps {
    */
   authField?: { token?: z.ZodString | z.ZodOptional<z.ZodString> };
   workflowPreferences?: WorkflowPreferenceLedger;
+  /**
+   * m9r_browser_open always launches M9R's own isolated Chrome profile, never
+   * the owner's real signed-in browser -- there is no "personal" option for
+   * this tool, unlike the desktop stage's ownedBrowserLaunch(). The owner has
+   * explicitly refused the isolated browser as a default for any user, so
+   * this tool is not registered (the agent cannot see or call it) unless the
+   * owner opts in here.
+   */
+  enableIsolatedBrowser?: boolean;
 }
 
 type TextBlock = { type: "text"; text: string };
@@ -1919,7 +1928,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     inputSchema: inputSchemas.action, outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, withComputerUseTelemetry(executeComputerAction, monotonicNow));
 
-  server.registerTool("m9r_browser_open", {
+  if (deps.enableIsolatedBrowser) server.registerTool("m9r_browser_open", {
     description: "Open or navigate one explicit named tab in M9R's isolated browser and return its fresh target for m9r_computer_action. No browser extension or developer mode is required. Use a stable operationId for reconciliation; existing named tabs are selected explicitly and other tabs are preserved.",
     inputSchema: { ...(deps.authField ?? LEGACY_TOKEN_FIELD_FALLBACK), tab: z.string().regex(/^[A-Za-z0-9._-]{1,40}$/),
       url: z.string().max(4096).url().refine((value) => ["http:", "https:"].includes(new URL(value).protocol)), operationId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) },

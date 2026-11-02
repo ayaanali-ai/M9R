@@ -50,11 +50,26 @@ function fixture() {
   };
   registerComputerUseTools({ registerTool(name: string, _descriptor: unknown, handler: Handler) { handlers.set(name, handler); } } as never,
     { store, web: web as WebBrokerClient, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => activeTaskId,
-      resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }) });
+      resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }), enableIsolatedBrowser: true });
   return { calls, workRequests, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
     call: async (name: string, input: Record<string, unknown>) => (await handlers.get(name)!(input)).structuredContent,
     close: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test("m9r_browser_open is not registered unless the owner explicitly opts into the isolated browser", () => {
+  const temp = resolve(".test-tmp"); mkdirSync(temp, { recursive: true });
+  const root = mkdtempSync(join(temp, "execution-loop-default-"));
+  const store = createLocalStore(root);
+  const token = store.issueIdentity("codex", "codex", "execution-loop-default").token;
+  const identity = store.verifyIdentity(token)!;
+  const handlers = new Map<string, Handler>();
+  try {
+    registerComputerUseTools({ registerTool(name: string, _descriptor: unknown, handler: Handler) { handlers.set(name, handler); } } as never,
+      { store, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => "T1" });
+    assert.equal(handlers.has("m9r_browser_open"), false, "the agent must not be able to see or call the isolated-browser tool by default");
+    assert.equal(handlers.has("m9r_browser_tabs"), true, "the read-only tab listing stays available regardless");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 function click(target: ComputerUseTarget, operationId = "click-one", elementRef = ref) {
   return { kind: "click", operationId, targetId: target.targetId, targetRevision: target.revision,
