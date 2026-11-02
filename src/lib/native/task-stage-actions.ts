@@ -206,12 +206,12 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
 /**
  * Money carve-out for stage clicks. The owner pre-approves everything else an agent may do on its
  * registered window, but a click that looks like it moves or commits money always waits for the owner.
- * Same label patterns as the web broker's click gate; fail-closed when the target has no readable label,
- * because an unidentified control must never be assumed harmless.
+ * Same label patterns as the web broker's click gate. The label is the money signal; a control without
+ * one (an icon, thumbnail or canvas) carries none, so it is not held.
  */
 export function stageClickNeedsApproval(target: CuaStageTargetDescription | undefined): { hold: boolean; label?: string } {
   const label = target?.label?.trim() || undefined;
-  if (!label) return { hold: true };
+  if (!label) return { hold: false };
   const risk = classifyWebActionRisk({ action: "click", targetLabel: label });
   return { hold: risk.risky && risk.category === "money", label };
 }

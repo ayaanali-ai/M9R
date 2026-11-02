@@ -905,7 +905,8 @@ export function createTaskDesktopStageService(input: {
   /**
    * Money carve-out: a click whose target looks like it moves or commits money always waits for the
    * owner, no matter what standing approvals exist. Anything else proceeds to the normal action path.
-   * Fail-closed when the target cannot be described: an unidentified control is never assumed harmless.
+   * The signal is the control's readable label. A control with no label (icons, thumbnails, canvases)
+   * carries no money signal, so it is not held; holding every one stalled ordinary media and app work.
    */
   async function moneyGate(name: string, identity: { handle: string; sessionId: string; provider: string },
     clickTarget: { x: number; y: number } | { ref: string; expectedRole?: string; expectedLabel?: string }, mode: TaskStageMode): Promise<void> {
@@ -916,10 +917,9 @@ export function createTaskDesktopStageService(input: {
       : mode === "owner-preview"
         ? await driver.describeDesktopTarget(name, clickTarget.x, clickTarget.y, identity)
         : await driver.describeTarget(name, clickTarget.x, clickTarget.y, identity);
-    // A failed driver inspection is not an unknown but successfully inspected
-    // control. Preserve the failure immediately rather than hiding it behind a
-    // 55-second approval wait that the owner cannot use to repair the driver.
-    if (!described) throw new DesktopInputNotDispatchedError(
+    // An element reference that no longer resolves is stale: the click itself would miss, so refuse
+    // and let the provider look again. A point that cannot be described is simply unlabeled.
+    if (!described && "ref" in clickTarget) throw new DesktopInputNotDispatchedError(
       "The stage click target could not be resolved from the current observation; refresh the exact app structure or capture and try again. No input was sent.",
     );
     const gate = stageClickNeedsApproval(described);

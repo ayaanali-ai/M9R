@@ -632,6 +632,19 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       const result = await invokeNative({ op: "inspect", pid: stage.anchor.pid, windowId: stage.anchor.windowId });
       if (!result.ok) throw new Error(`Stage “${name}” anchor is unavailable: ${result.error ?? "unknown window error"}. The desktop mapping was kept.`);
       const anchor = verifiedWindowInfo(result.window);
+      if (!stage.anchor.processGeneration && anchor.processGeneration
+        && anchor.pid === stage.anchor.pid && anchor.windowId === stage.anchor.windowId) {
+        // A window saved before generations were recorded: the live window still has the same process and
+        // handle, so bind its generation now. Refusing here stranded every stage saved by an older build.
+        stage.anchor = { ...stage.anchor, processGeneration: anchor.processGeneration };
+        const release = acquireRegistryLock(root);
+        try {
+          const registry = readRegistry(root);
+          writeRegistryWhileLocked(root, { ...registry,
+            stages: registry.stages.map((item) => item.name === name && item.anchor?.pid === anchor.pid && item.anchor.windowId === anchor.windowId
+              ? { ...item, anchor: { ...item.anchor, processGeneration: anchor.processGeneration! } } : item) });
+        } finally { release(); }
+      }
       if (!deps.invokeNative && !stage.anchor.processGeneration) {
         throw new Error("This saved window has no process-generation binding. Explicitly select or bind the intended current window before input; M9R will not silently trust a legacy PID/HWND.");
       }

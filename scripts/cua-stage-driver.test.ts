@@ -6,6 +6,7 @@ import test from "node:test";
 import { createCuaStageDriver as createCuaStageDriverCore, topmostWindowAtScreenPoint, type CuaStageDriverDependencies } from "../src/lib/native/cua-stage-driver";
 import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
 import { parseTaskStageAction } from "../src/lib/native/task-stage-actions";
+import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
 
 const desktopId = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
 const windowId = "9223372036854775807";
@@ -180,7 +181,7 @@ test("owner-preview clears its remembered app target after background text is re
   await driver.captureDesktop("preview", identity);
   await driver.clickDesktop("preview", 0, 0, identity);
   await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No text was sent.*will not activate the window as a fallback/);
-  await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No agent input window is selected yet/);
+  await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /desktop-wide view has no input window/);
   assert.equal(calls.some((call) => call.method === "callTool"), false, "no foreground or generic-input retry is attempted");
 }));
 
@@ -213,7 +214,7 @@ test("untitled taskbar controls use exact accessibility invocation and the overl
   assert.equal(typeof cursorCall.args.session, "string");
   assert.equal(calls.some((c) => c.method === "desktopTarget"), false, "a desktop target would move the owner's physical pointer");
   assert.equal(calls.some((c) => c.method === "moveCursor"), false, "the shell uses the overlay-only route because Cua omits shell HWNDs");
-  await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /No agent input window/);
+  await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /desktop-wide view has no input window/);
 }));
 
 function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies["stage"]> {
@@ -582,7 +583,7 @@ test("owner-preview discards a stale HWND before sending keyboard input", async 
   windows.splice(0, windows.length);
   await assert.rejects(() => driver.typeTextDesktop("preview", "hello", identity), /selected background window could not be verified/);
   assert.equal(calls.some((call) => call.method === "typeText"), false, "stale window identity is never sent to CUA input");
-  await assert.rejects(() => driver.hotkeyDesktop("preview", ["Enter"], identity), /No agent input window is selected yet/);
+  await assert.rejects(() => driver.hotkeyDesktop("preview", ["Enter"], identity), /desktop-wide view has no input window/);
   await driver.shutdown();
 }));
 
@@ -619,7 +620,7 @@ test("owner-preview clears the keyboard target when an agent cursor session clos
   await driver.captureDesktop("preview", identity);
   await driver.clickDesktop("preview", 0, 0, identity);
   await driver.closeAgentCursor(identity);
-  await assert.rejects(() => driver.typeTextDesktop("preview", "hello", identity), /No agent input window is selected yet/);
+  await assert.rejects(() => driver.typeTextDesktop("preview", "hello", identity), /desktop-wide view has no input window/);
   assert.equal(calls.some((call) => call.method === "typeText"), false, "a recreated cursor session must click a window again before typing");
   await driver.shutdown();
 }));
@@ -632,7 +633,7 @@ test("owner-preview refuses ambiguous or missing window targets without sending 
   await driver.captureDesktop("preview", identity);
   await assert.rejects(() => driver.clickDesktop("preview", 0, 0, identity), /No visible application window is under that desktop point/);
   assert.equal(calls.some((call) => call.method === "click"), false);
-  await assert.rejects(() => driver.typeTextDesktop("preview", "hello", identity), /No agent input window is selected yet/);
+  await assert.rejects(() => driver.typeTextDesktop("preview", "hello", identity), /desktop-wide view has no input window/);
   assert.equal(calls.some((call) => call.method === "typeText"), false);
   await driver.shutdown();
 }));
@@ -652,7 +653,7 @@ test("owner-preview does not retain a keyboard target after an unconfirmed backg
   await driver.captureDesktop("preview", identity);
   const click = await driver.clickDesktop("preview", 0, 0, identity);
   assert.equal(click.outcome.status, "suspected-noop");
-  await assert.rejects(() => driver.typeTextDesktop("preview", "hello", identity), /No agent input window is selected yet/);
+  await assert.rejects(() => driver.typeTextDesktop("preview", "hello", identity), /desktop-wide view has no input window/);
   assert.equal(calls.some((call) => call.method === "typeText"), false, "unconfirmed click cannot authorize later typing");
   await driver.shutdown();
 }));
@@ -1081,6 +1082,28 @@ test("surfaces a Cua Driver background refusal instead of retrying with foregrou
   await assert.rejects(() => driver.typeText("stage", "sample"), /background input is unavailable/);
   assert.equal(calls.some((call) => call.method === "click"), false);
   assert.ok(calls.some((call) => call.method === "shutdown"));
+}));
+
+test("a typed driver refusal that names the foreground route is recognised as background-unavailable, not uncertain", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  // The shape the real Cua SDK returns from click(): the refusal lives in `error`/`escalation`, not in text fields.
+  const actionResult = { effect: 4, route: 0, error: { code: "background_unavailable", hint: "Chrome_WidgetWin_1 ignores posted input" }, escalation: { target: 1, reason: 0 } };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, actionResult }) as never });
+  await assert.rejects(driver.click("stage", 42, 24), (error: unknown) =>
+    error instanceof DesktopInputNotDispatchedError && error.code === "background-unavailable");
+  assert.equal(calls.filter((call) => call.method === "click").length, 1, "a background stage never retries with the owner's pointer");
+  await driver.shutdown();
+}));
+
+test("any other typed driver refusal is a clean not-dispatched outcome, never a plain error", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const actionResult = { effect: 4, route: 0, error: { code: "element_not_actionable", hint: "The element exposes no invoke pattern." } };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls, actionResult }) as never });
+  await assert.rejects(driver.click("stage", 42, 24), (error: unknown) =>
+    error instanceof DesktopInputNotDispatchedError && error.code === "driver-refused" && /element_not_actionable.*No input was sent/.test(error.message));
+  await driver.shutdown();
 }));
 
 test("describeTarget reports the smallest enabled control label for the money gate", async () => withRoot(async (root) => {

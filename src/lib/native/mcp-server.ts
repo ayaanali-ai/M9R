@@ -513,8 +513,30 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   // than one candidate existed used to block every ordinary follow-up prompt behind the first
   // task in a session that ever failed to self-close, which is the common case, not an edge one.
   function resolveTaskId(identity: VerifiedIdentity, taskId?: string): string {
-    if (taskId) return taskId;
-    const pending = deps.store.tasksForSession(identity.handle, identity.sessionId)
+    if (taskId) {
+      // A new owner message pauses the running turn and carries its context into a fresh task. An agent that
+      // still names the paused task is continuing the same work, so it acts under the owner's latest task;
+      // honouring the stale id refused every action with "this task is paused". Canceled stays canceled.
+      const named = deps.store.getTask(taskId);
+      if (named?.receipt?.state !== "paused") return taskId;
+      const current = pendingTasksFor(identity);
+      return current.length ? (deps.store.mostRecentlyActiveTaskId(identity.handle, identity.sessionId, current.map((task) => task.id)) ?? current[0].id) : taskId;
+    }
+    const pending = pendingTasksFor(identity);
+    if (pending.length === 0) {
+      throw new Error("A taskId is required: this session has no currently pending task. Pass the exact taskId you were given.");
+    }
+    // Prefer whichever pending task this session most recently dispatched a real stage
+    // operation against, if any -- that is the turn actually in progress. A newer task that
+    // arrived mid-turn but has had no action taken against it yet must not silently steal an
+    // in-progress multi-call operation away from the task it started on; only once nothing has
+    // been acted on yet does "newest created" decide.
+    const active = deps.store.mostRecentlyActiveTaskId(identity.handle, identity.sessionId, pending.map((task) => task.id));
+    return active ?? pending[0].id;
+  }
+
+  function pendingTasksFor(identity: VerifiedIdentity) {
+    return deps.store.tasksForSession(identity.handle, identity.sessionId)
       .filter((task) => taskIsFreshForIdentity(identity, task)
         && !task.resultSummary
         // A paused or explicitly canceled turn must not claim tools from a
@@ -527,16 +549,6 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         && task.delivery?.state !== "uncertain"
         && task.deliveredSession === identity.sessionId)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
-    if (pending.length === 0) {
-      throw new Error("A taskId is required: this session has no currently pending task. Pass the exact taskId you were given.");
-    }
-    // Prefer whichever pending task this session most recently dispatched a real stage
-    // operation against, if any -- that is the turn actually in progress. A newer task that
-    // arrived mid-turn but has had no action taken against it yet must not silently steal an
-    // in-progress multi-call operation away from the task it started on; only once nothing has
-    // been acted on yet does "newest created" decide.
-    const active = deps.store.mostRecentlyActiveTaskId(identity.handle, identity.sessionId, pending.map((task) => task.id));
-    return active ?? pending[0].id;
   }
 
   /** Resolve the current result target from trusted delivery state, not provider-visible metadata. */

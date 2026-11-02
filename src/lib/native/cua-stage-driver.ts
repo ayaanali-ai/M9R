@@ -148,6 +148,7 @@ interface DriverActionParts {
   route?: unknown;
   summary?: unknown;
   error?: { code?: unknown; hint?: unknown };
+  escalation?: { target?: unknown; reason?: unknown };
 }
 
 export interface CuaStageWindowOption {
@@ -658,7 +659,29 @@ function actionError(result: ActionResult | ToolResult, fallback: string): strin
   return null;
 }
 
+const backgroundRefusalPattern = /background[_ ](?:delivery|route).*?(?:unavailable|unsupported|refus|not available)|background_unavailable|target window class.*(?:background|input)|(?:background|posted) input.*(?:ignored|dropped)/i;
+
+/**
+ * The driver's own contract: `effect: refused` means it sent no input, and
+ * `escalation` names the route that can deliver instead. A refusal is therefore
+ * a clean pre-dispatch outcome, never an uncertain one.
+ */
+function driverRefusal(result: ActionResult | ToolResult): { message: string; foreground: boolean } | undefined {
+  const parts = actionParts(result);
+  if (!parts || !(parts.effect === 4 || parts.effect === "refused")) return undefined;
+  const code = typeof parts.error?.code === "string" ? parts.error.code : "action_refused";
+  const hint = typeof parts.error?.hint === "string" ? parts.error.hint : "";
+  const escalation = parts.escalation?.target;
+  const foreground = escalation === 1 || escalation === "foreground" || backgroundRefusalPattern.test(`${code} ${hint}`);
+  return { message: `${code}: ${hint || "the driver refused the action"}`.replace(/[\r\n\t]+/g, " ").slice(0, 300), foreground };
+}
+
 function actionOutcome(result: ActionResult | ToolResult, fallback: string): CuaStageActionOutcome {
+  const refusal = driverRefusal(result);
+  if (refusal) {
+    throw new DesktopInputNotDispatchedError(`${refusal.message} No input was sent.`,
+      refusal.foreground ? "background-unavailable" : "driver-refused");
+  }
   const error = actionError(result, fallback);
   if (error) throw new Error(error);
   const parts = actionParts(result);
@@ -1163,10 +1186,12 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   async function inspectOwnerDesktop(name: string, identity: CuaAgentCursorIdentity) {
     const { stage, desktop, anchor } = await manager.inspectStage(name);
     const details = agentCursorDetails(identity);
-    if (anchor) throw new Error("The owner-preview stage is not a desktop-wide mapping. Prepare it again to detach any stale app-window anchor.");
-    if (!desktop.isCurrent) throw new Error("The owner-preview desktop is no longer the desktop shown to the owner. No desktop switch was made.");
+    // These checks run inside the stage's dispatch window, so they must say plainly that nothing was sent;
+    // a plain error there is recorded as an uncertain outcome and locks the surface.
+    if (anchor) throw new DesktopInputNotDispatchedError("The owner-preview stage is not a desktop-wide mapping. Prepare it again to detach any stale app-window anchor. No input was sent.", "target-identity");
+    if (!desktop.isCurrent) throw new DesktopInputNotDispatchedError("The owner-preview desktop is no longer the desktop shown to the owner. No desktop switch was made and no input was sent.", "target-identity");
     if (stage.agentAssignment?.handle !== details.handle || stage.agentAssignment.sessionTag !== details.sessionTag) {
-      throw new Error("This Windows desktop is not assigned to the requesting M9R agent session.");
+      throw new DesktopInputNotDispatchedError("This Windows desktop is not assigned to the requesting M9R agent session. No input was sent.", "target-identity");
     }
     return { stage, desktop };
   }
@@ -1180,7 +1205,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     const capture = desktopCaptures.get(key);
     if (!capture || now().getTime() - capture.capturedAtMs > 30_000) {
       desktopCaptures.delete(key);
-      throw new Error("The desktop view is missing or expired. Capture the current desktop again before acting on it.");
+      throw new DesktopInputNotDispatchedError("The desktop view is missing or expired. Capture the current desktop again before acting on it. No input was sent.", "target-identity");
     }
     return capture;
   }
@@ -1269,10 +1294,13 @@ function inputToolText(result: ToolResult): string {
 }
 
 function isBackgroundInputRefusal(value: unknown): boolean {
+  if (value instanceof DesktopInputNotDispatchedError) return value.code === "background-unavailable";
+  // A typed driver result keeps its refusal in `error`/`escalation`, not in the text fields read below.
+  if (value && typeof value === "object" && !(value instanceof Error) && driverRefusal(value as ToolResult)?.foreground) return true;
   const message = value instanceof Error ? value.message
     : value && typeof value === "object" ? inputToolText(value as ToolResult)
       : String(value);
-  return /background[_ ](?:delivery|route).*?(?:unavailable|unsupported|refus|not available)|background_unavailable|target window class.*(?:background|input)|(?:background|posted) input.*(?:ignored|dropped)/i.test(message);
+  return backgroundRefusalPattern.test(message);
 }
 
 function backgroundRefusalMessage(value: unknown): string {
@@ -1285,8 +1313,9 @@ function backgroundRefusalMessage(value: unknown): string {
 const OWNER_ACTIVITY_CHECK_MS = 150;
 /** How far the real pointer has to move between two reads to count as the owner, not noise. */
 const OWNER_ACTIVITY_THRESHOLD_PX = 3;
-/** A moving owner gets a short bounded hand-back window, never an unbounded wait. */
-const OWNER_IDLE_DEADLINE_MS = 1_200;
+/** A moving owner gets a bounded hand-back window, never an unbounded wait. Long enough that a
+ * normal pause in mouse use lets the action through instead of costing the agent a whole retry. */
+const OWNER_IDLE_DEADLINE_MS = 5_000;
 const OWNER_IDLE_STABLE_SAMPLES = 2;
 
 async function waitForOwnerIdle(
@@ -1523,7 +1552,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
 
   async function resolveOwnerDesktopPoint(runtime: CuaRuntime, session: AgentCursorSession, x: number, y: number,
     capture: CachedDesktopCapture, screen?: DesktopScreenSize, includeAccessibilityTree = false): Promise<ResolvedDesktopPoint> {
-    if (!validPoint(x, y, capture)) throw new Error("Desktop coordinates must fall inside the latest desktop screenshot.");
+    if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Desktop coordinates must fall inside the latest desktop screenshot. No input was sent.", "target-identity");
     const screenSize = screen ?? screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
     const screenPoint = desktopPointOnScreen(x, y, capture, screenSize);
     const resolved = await resolveOwnerWindowPoint(runtime, session, screenPoint, includeAccessibilityTree);
@@ -1539,7 +1568,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
 
   function activeDesktopInputTarget(name: string, identity: CuaAgentCursorIdentity): DesktopInputTarget {
     const target = desktopInputTargets.get(desktopInputKey(name, identity));
-    if (!target) throw new DesktopInputNotDispatchedError("No agent input window is selected yet. Click the target on the captured desktop first; no keyboard input was sent.");
+    if (!target) throw new DesktopInputNotDispatchedError("The desktop-wide view has no input window, so no keyboard input was sent. To type, observe target 'app-window' (bindForeground for the visible window) and act on that target, or click the intended window on this desktop first.", "target-identity");
     return target;
   }
 
@@ -1555,7 +1584,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     } catch (error) {
       forgetDesktopInputTarget(name, identity);
       const reason = error instanceof Error ? error.message.replace(/[\r\n\t]+/g, " ").slice(0, 180) : "window verification failed";
-      throw new Error(`The selected background window could not be verified (${reason}); no keyboard input was sent.`);
+      throw new DesktopInputNotDispatchedError(`The selected background window could not be verified (${reason}); no keyboard input was sent.`, "target-identity");
     }
   }
 

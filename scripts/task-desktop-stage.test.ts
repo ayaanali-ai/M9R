@@ -406,14 +406,13 @@ test("a money-like stage click waits for the owner and never executes on deny", 
   } finally { f.cleanup(); }
 });
 
-test("an unlabeled visual control can continue after one exact-target owner review", async () => {
-  const f = moneyFixture("", true);
+test("an unlabeled visual control carries no money signal, so it is clicked without an owner hold", async () => {
+  const f = moneyFixture("", false);
   try {
     await f.service.prepare(f.identity.token, f.task.id, "background");
     await f.service.act(f.identity.token, f.task.id, { kind: "click", x: 2, y: 3 }, "background", "unlabeled-control");
-    assert.equal(f.seen.length, 1);
-    assert.match(f.seen[0]!.step, /unlabeled control/);
-    assert.equal(f.clicks.length, 1);
+    assert.equal(f.seen.length, 0, "icons, thumbnails and canvases are ordinary controls, not purchases");
+    assert.deepEqual(f.clicks, [{ x: 2, y: 3 }]);
   } finally { f.cleanup(); }
 });
 
@@ -438,13 +437,13 @@ test("a benign stage click never bothers the owner", async () => {
   } finally { f.cleanup(); }
 });
 
-test("an unresolved click target sends no input and requires a fresh observation", async () => {
+test("a point the driver cannot describe is treated as unlabeled and clicked without an owner hold", async () => {
   const f = moneyFixture(undefined, false);
   try {
     await f.service.prepare(f.identity.token, f.task.id, "background");
-    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background"), /target could not be resolved.*No input was sent/);
-    assert.equal(f.seen.length, 0, "an unresolved target is refused before asking to approve an unknown action");
-    assert.equal(f.clicks.length, 0);
+    await f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background");
+    assert.equal(f.seen.length, 0, "a missing description is not a money signal");
+    assert.deepEqual(f.clicks, [{ x: 10, y: 10 }]);
   } finally { f.cleanup(); }
 });
 

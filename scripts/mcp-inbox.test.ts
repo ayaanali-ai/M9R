@@ -65,6 +65,26 @@ test("desktop stage input derives a private one-shot receipt ID from the MCP req
   } finally { t.done(); }
 });
 
+test("an agent naming a task the owner's new message paused acts under the owner's latest task", async () => {
+  let receivedTaskId = "";
+  const web: WebBrokerClient = {
+    taskStageAction: async (_token, taskId) => { receivedTaskId = taskId; return { ok: true, result: { actionExecuted: true } }; },
+    run: async () => ({ ok: false, error: "unused" }),
+  };
+  const t = setup({ web });
+  try {
+    const first = t.store.addTask({ from: "you", to: "codex", goal: "Click Send", origin: "human_typed", idempotencyKey: "paused-a" }).task;
+    t.store.markDelivered([first.id], "x1");
+    t.store.pauseTask(first.id);
+    const next = t.store.addTask({ from: "you", to: "codex", goal: "Do the send task now", origin: "human_typed", idempotencyKey: "paused-b" }).task;
+    t.store.markDelivered([next.id], "x1");
+    const handler = (t.server as unknown as ToolServer)._registeredTools["m9r_stage_action"]!.handler as (
+      args: unknown, extra: { requestId: string | number }) => Promise<unknown>;
+    await handler({ token: t.codex, taskId: first.id, action: { kind: "cursor", x: 2, y: 3 } }, { requestId: 1 });
+    assert.equal(receivedTaskId, next.id, "the stale paused id would be refused with 'this task is paused'");
+  } finally { t.done(); }
+});
+
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

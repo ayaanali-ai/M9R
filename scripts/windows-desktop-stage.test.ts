@@ -36,6 +36,19 @@ test("reused PIDs and HWNDs cannot satisfy a persisted process-generation bindin
   await assert.rejects(manager.inspectStage("generation-test"), /process generation changed/);
 }));
 
+test("a window saved before generations existed is bound on its next inspection, then protected like any other", async () => withRoot(async (root) => {
+  let generation: string | undefined;
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async () => ({ ok: true, window: { ...anchor, ...(generation ? { processGeneration: generation } : {}) } }) });
+  await manager.register("legacy-test", String(anchor.pid), anchor.windowId);
+  assert.equal(manager.list()[0]?.anchor?.processGeneration, undefined, "an older build saved no generation");
+  generation = "0000000000000001";
+  await manager.inspectStage("legacy-test");
+  assert.equal(manager.list()[0]?.anchor?.processGeneration, generation, "the same live process and handle bind the generation");
+  generation = "0000000000000002";
+  await assert.rejects(manager.inspectStage("legacy-test"), /process generation changed/);
+}));
+
 test("one replacement resolver requires the same creation time and one exact candidate", async () => withRoot(async (root) => {
   let generation = "0000000000000001";
   let candidateIds = ["1234"];

@@ -1731,6 +1731,14 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
           timing,
           reason: error instanceof Error ? error.message : "The desktop route outcome is unknown." });
       }
+      // A surface whose prior outcome is unresolved, or that changed since it was observed, clears on a
+      // fresh look at it. Take that look now and return it, instead of spending a provider turn asking.
+      if (!response.ok && response.dispatchState === "not-dispatched" && response.gateCode === "mutation-revision") {
+        if (receiptInput) {
+          try { deps.store.releaseComputerOperation(receiptInput); } catch { /* the running receipt still blocks replay */ }
+        }
+        return refreshStaleTarget(action, identity, record, authToken, timing, response.error ?? "The target changed since it was observed.");
+      }
       const capture = stageCapture(response);
       const resultObject = recordOf(response.result);
       const responseMutationRevision = mutationRevisionOf(resultObject?.mutationRevision);
