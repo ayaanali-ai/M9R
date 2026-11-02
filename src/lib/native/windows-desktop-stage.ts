@@ -496,7 +496,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
         roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
         returnToDesktopId: existing?.returnToDesktopId ?? null,
         anchor: { pid: info.pid, windowId: info.windowId, ...(info.processGeneration ? { processGeneration: info.processGeneration } : {}) },
-        roomWindowId: existing?.anchor?.pid === info.pid && existing.anchor.windowId === info.windowId
+        roomWindowId: existing?.anchor?.pid === info.pid && existing.anchor.windowId === info.windowId && existing.anchor.processGeneration === info.processGeneration
           ? existing.roomWindowId
           : randomUUID(),
         ...(existing?.agentAssignment ? { agentAssignment: existing.agentAssignment } : {}),
@@ -632,6 +632,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       const result = await invokeNative({ op: "inspect", pid: stage.anchor.pid, windowId: stage.anchor.windowId });
       if (!result.ok) throw new Error(`Stage “${name}” anchor is unavailable: ${result.error ?? "unknown window error"}. The desktop mapping was kept.`);
       const anchor = verifiedWindowInfo(result.window);
+      if (!deps.invokeNative && !stage.anchor.processGeneration) {
+        throw new Error("This saved window has no process-generation binding. Explicitly select or bind the intended current window before input; M9R will not silently trust a legacy PID/HWND.");
+      }
       if (anchor.pid !== stage.anchor.pid || anchor.windowId !== stage.anchor.windowId
         || (stage.anchor.processGeneration !== undefined && anchor.processGeneration !== stage.anchor.processGeneration)) {
         throw new Error("The selected window process generation changed; refresh the exact target before sending input.");

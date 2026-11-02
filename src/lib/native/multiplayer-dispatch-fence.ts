@@ -188,8 +188,9 @@ export function desktopWindowMutationTarget(input: {
   pid: number;
   windowId: string;
   revision?: string;
+  processGeneration?: string;
 }): MutationFenceTarget {
-  const targetKey = `desktop-window|pid=${input.pid}|window=${input.windowId}`;
+  const targetKey = `desktop-window|pid=${input.pid}|window=${input.windowId}${input.processGeneration ? `|generation=${input.processGeneration}` : ""}`;
   return {
     kind: "desktop-window",
     surfaceId: safeId("surface", targetKey),

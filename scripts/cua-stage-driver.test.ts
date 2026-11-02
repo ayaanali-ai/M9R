@@ -833,6 +833,19 @@ test("warm actions reuse the broker runtime and session without compositor probe
   await driver.shutdown();
 }));
 
+test("parallel identities from the same provider get distinct native sessions without exposing identity digests", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never });
+  const identities = [{ handle: "codex", sessionId: "one" }, { handle: "codex", sessionId: "two" }];
+  await Promise.all(identities.map((identity) => driver.capture("stage", identity)));
+  const labels = calls.filter((call) => call.method === "startSession").map((call) => (call.value as { session: string }).session);
+  assert.deepEqual(labels, ["Codex", "Codex 2"]);
+  await driver.closeAgentCursor(identities[1]!);
+  assert.equal((calls.filter((call) => call.method === "endSession").at(-1)?.value as { session: string }).session, "Codex 2");
+  await driver.shutdown();
+}));
+
 test("refuses out-of-bounds cursor input before enabling or moving the ghost cursor", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];

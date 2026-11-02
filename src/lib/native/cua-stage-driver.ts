@@ -216,6 +216,7 @@ export interface CuaStageStructure {
     selected?: boolean;
     actions?: string[];
     canReplaceValue?: boolean;
+    rect?: { x: number; y: number; width: number; height: number };
   }>;
   /** Same-call visual fallback when the accessibility tree is incomplete. */
   fallbackCapture?: CuaStageCapture;
@@ -573,12 +574,8 @@ function agentCursorDetails(identity: CuaAgentCursorIdentity): AgentCursorSessio
     key: `${handle}\0${identity.sessionId}`,
     handle,
     sessionId: identity.sessionId,
-    // Cua renders the session label on the native cursor. Keep the provider
-    // name recognizable while adding a short stable identity suffix so two
-    // concurrent cursors never collapse into one visible label.
-    // Cua's `session` field is the text rendered beside the visible cursor.
-    // Keep the authorization/session digest internal to M9R; exposing it made
-    // the UI look like a provider session and leaked an implementation ID.
+    // Cua renders this field beside the cursor. The broker allocates a public
+    // ordinal when two identities share this name; credentials stay private.
     session: publicCursorLabel(handle).slice(0, PUBLIC_CURSOR_LABEL_MAX_LENGTH),
     sessionTag,
   };
@@ -901,6 +898,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   // Calculator, or any other target cannot be focused by two workers at once.
   const foregroundLease = deps.foregroundLease ?? createForegroundInputLease({ lockPath: join(root, "foreground-input-lease") });
   const agentSessions = new Map<string, AgentCursorSession>();
+  const cursorSessionNames = new Map<string, string>();
   const sessionRefreshedAt = new Map<string, number>();
   const sessionRefreshes = new Map<string, Promise<void>>();
   const cursorStartSlots = new Map<string, number>();
@@ -1034,9 +1032,21 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     const details = agentCursorDetails(identity);
     const runtime = await agentRuntime(stageName);
     const alreadyTracked = agentSessions.has(details.key);
-    if (!alreadyTracked && agentSessions.size >= 16) {
+    if (!cursorSessionNames.has(details.key) && cursorSessionNames.size >= 16) {
       throw new Error("This machine already has 16 active M9R agent cursor identities; close or revoke one before adding another.");
     }
+    let label = cursorSessionNames.get(details.key);
+    if (!label) {
+      const occupied = new Set(cursorSessionNames.values());
+      const base = details.session;
+      label = base;
+      for (let ordinal = 2; occupied.has(label); ordinal++) {
+        const suffix = ` ${ordinal}`;
+        label = `${base.slice(0, PUBLIC_CURSOR_LABEL_MAX_LENGTH - suffix.length)}${suffix}`;
+      }
+      cursorSessionNames.set(details.key, label);
+    }
+    details.session = label;
     const refreshedAt = sessionRefreshedAt.get(details.key);
     const at = now().getTime();
     if (alreadyTracked && refreshedAt !== undefined && at >= refreshedAt && at - refreshedAt < 60_000) {
@@ -1689,7 +1699,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     const sdk = runtime.sdk;
     const driver = runtime.driver;
     const session = persistent?.session.session ?? safeSessionName(stage.name);
-    const observationKey = `${stage.name}\0${session}\0${pid}\0${windowId}`;
+    const observationKey = `${stage.name}\0${session}\0${pid}\0${windowId}\0${anchor.processGeneration ?? ""}`;
     let started = false;
     try {
       if (!persistent) {
@@ -1781,25 +1791,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         let state: Awaited<ReturnType<CuaDriverLike["getWindowState"]>>;
         let accessibilityAvailable = true;
         try {
-          // A window queried immediately after launch may not have finished exposing its
-          // accessibility surface yet -- this is a timing race, not an app-specific limitation,
-          // and it affects any freshly-opened app the same way. A couple of short, bounded
-          // retries lets that race resolve itself before falling back to a plain screenshot;
-          // an already-ready window (the normal case) succeeds on the first attempt as before,
-          // with no added latency.
-          let lastError: unknown;
-          state = undefined as unknown as Awaited<ReturnType<CuaDriverLike["getWindowState"]>>;
-          for (let attempt = 0; attempt < 3; attempt++) {
-            try {
-              state = await driver.getWindowState(request);
-              lastError = undefined;
-              break;
-            } catch (error) {
-              lastError = error;
-              if (attempt < 2) await delay(250);
-            }
-          }
-          if (lastError) throw lastError;
+          state = await driver.getWindowState(request);
         } catch {
           accessibilityAvailable = false;
           // A tree failure must not turn into an unbounded retry loop. One
@@ -1825,6 +1817,12 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
                 .slice(0, 16).map((action) => action.slice(0, 40))
             : [];
           const parent = element.parentIndex === undefined ? undefined : byIndex.get(element.parentIndex.toString());
+          const bounds = state.windowBounds;
+          const frame = element.frame;
+          const left = bounds && frame ? Math.max(0, (frame.x - bounds.x) * fallback.width / bounds.width) : 0;
+          const top = bounds && frame ? Math.max(0, (frame.y - bounds.y) * fallback.height / bounds.height) : 0;
+          const right = bounds && frame ? Math.min(fallback.width, (frame.x + frame.w - bounds.x) * fallback.width / bounds.width) : 0;
+          const bottom = bounds && frame ? Math.min(fallback.height, (frame.y + frame.h - bounds.y) * fallback.height / bounds.height) : 0;
           return [{
             ref: element.elementToken,
             ...(parent?.elementToken ? { parentRef: parent.elementToken } : {}),
@@ -1835,6 +1833,8 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
             ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
             ...(actions.length ? { actions } : {}),
             ...(actions.includes("set_value") ? { canReplaceValue: true } : {}),
+            ...(right > left && bottom > top && [left, top, right, bottom].every(Number.isFinite)
+              ? { rect: { x: left, y: top, width: right - left, height: bottom - top } } : {}),
           }];
         });
         const hasTree = Array.isArray(state.elements);
@@ -1845,7 +1845,9 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           ...(typeof state.appName === "string" ? { appName: state.appName.slice(0, 120) } : {}),
           ...(typeof state.windowTitle === "string" ? { windowTitle: state.windowTitle.slice(0, 240) } : {}),
           elements,
-          ...(status !== "complete" ? { fallbackCapture: stageCapture({ ...fallback, capturedAt: now().toISOString() }, now) } : {}),
+          // Keep this same-call frame internal even for a complete tree: an
+          // unlabeled/custom control may still need pixels at the MCP boundary.
+          fallbackCapture: stageCapture({ ...fallback, capturedAt: now().toISOString() }, now),
         };
       };
       const hitTarget = async (x: number, y: number, action?: "click" | "set_value") => {
@@ -2813,7 +2815,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
   }
 
   function scrollDeltaAmount(deltaX: number, deltaY: number, unit: "pixel" | "line" | "page"): { direction: "up" | "down" | "left" | "right"; amount: number; by: "line" | "page" } {
-    if (unit === "pixel") throw new Error("The installed Cua Driver exposes line/page scrolling, not pixel scrolling, for native windows; no scroll was sent.");
+    if (unit === "pixel") throw new DesktopInputNotDispatchedError("The installed Cua Driver exposes line/page scrolling, not pixel scrolling, for native windows; no scroll was sent.", "background-unavailable");
     const delta = deltaX !== 0 ? deltaX : deltaY;
     return { direction: deltaX !== 0 ? (deltaX < 0 ? "left" : "right") : (delta < 0 ? "up" : "down"), amount: Math.abs(delta), by: unit };
   }
@@ -2912,6 +2914,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
   async function closeAgentCursor(cursorIdentity: CuaAgentCursorIdentity): Promise<void> {
     const details = agentCursorDetails(cursorIdentity);
     if (!agentRuntimePromise || !agentSessions.has(details.key)) return;
+    details.session = agentSessions.get(details.key)!.session;
     const runtime = await agentRuntimePromise;
     try {
       resultError(await runtime.driver.setAgentCursorEnabled({ session: details.session, enabled: false }), "Cua Driver could not hide the revoked agent cursor.");
@@ -2920,6 +2923,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       finally {
         agentSessions.delete(details.key);
         sessionRefreshedAt.delete(details.key);
+        cursorSessionNames.delete(details.key);
         cursorStartSlots.delete(details.key);
         forgetAgentDesktopInputTargets(cursorIdentity);
       }
@@ -2931,6 +2935,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     agentRuntimePromise = undefined;
     const sessions = [...agentSessions.values()];
     agentSessions.clear();
+    cursorSessionNames.clear();
     sessionRefreshedAt.clear();
     cursorStartSlots.clear();
     desktopInputTargets.clear();

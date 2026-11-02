@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dragChrome } from "../src/lib/native/agent-chrome-input";
+import { dragChrome, chromeKeyEvent } from "../src/lib/native/agent-chrome-input";
 import { createWebBroker } from "../src/lib/native/web-broker-core";
+
+test("CDP hotkeys carry bounded native key identity and modifiers", () => {
+  assert.deepEqual(chromeKeyEvent("Ctrl+Enter"), { key: "Enter", modifiers: 2, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+  assert.equal(chromeKeyEvent("a").text, "a");
+  assert.equal(chromeKeyEvent("Alt+F4").windowsVirtualKeyCode, 115);
+  assert.throws(() => chromeKeyEvent("unsupported+Enter"), /Unsupported/);
+});
 
 test("broker forwards drag destination and queues typing until drag completes", async () => {
   const sent: Array<Record<string, unknown>> = [];

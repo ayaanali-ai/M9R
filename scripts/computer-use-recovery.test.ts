@@ -4,6 +4,7 @@ import { preDispatchRetry } from "../src/lib/native/computer-use-recovery";
 import { selectActionDelivery } from "../src/lib/native/multiplayer-action-policy";
 import { recordComputerUseLatency, computerUseLatencySnapshot } from "../src/lib/native/computer-use-latency";
 import { createWebBroker } from "../src/lib/native/web-broker-core";
+import { desktopWindowMutationTarget } from "../src/lib/native/multiplayer-dispatch-fence";
 
 test("pre-dispatch refusals preserve a safe way to continue work", () => {
   for (const code of ["foreground-lease", "background-unavailable", "target-identity", "stale-observation", "overlay-not-visible", "unsupported-target-action", "unknown-gate"]) {
@@ -44,4 +45,11 @@ test("only trusted browser delivery receipts can certify a pre-dispatch refusal"
     const response = await pending;
     assert.equal(response.dispatchState, trusted ? "not-dispatched" : undefined);
   }
+});
+
+test("recycled process/window numbers create a distinct mutation surface", () => {
+  const first = desktopWindowMutationTarget({ pid: 42, windowId: "100", processGeneration: "0000000000000001" });
+  const second = desktopWindowMutationTarget({ pid: 42, windowId: "100", processGeneration: "0000000000000002" });
+  assert.notEqual(first.surfaceId, second.surfaceId);
+  assert.notEqual(first.windowRef, second.windowRef);
 });

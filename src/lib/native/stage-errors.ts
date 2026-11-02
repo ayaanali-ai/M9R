@@ -31,7 +31,7 @@ export class StageWindowSelectionError extends StageInputNotDispatchedError {
   }
 }
 
-export class StageAuthorizationError extends Error {
+export class StageAuthorizationError extends StageInputNotDispatchedError {
   readonly failureKind = "authorization" as const;
 
   constructor(message: string, options?: ErrorOptions) {
@@ -40,7 +40,7 @@ export class StageAuthorizationError extends Error {
   }
 }
 
-export class StageValidationError extends Error {
+export class StageValidationError extends StageInputNotDispatchedError {
   readonly failureKind = "validation" as const;
 
   constructor(message: string, options?: ErrorOptions) {

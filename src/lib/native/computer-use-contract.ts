@@ -35,6 +35,7 @@ export const computerUseCapabilitySchema = z.enum([
   "input.focus",
   "input.shared-os",
   "browser.navigate",
+  "browser.tabs",
   "window.frame",
   "window.state",
   "menu.invoke",
@@ -158,6 +159,7 @@ const actionEnvelope = {
 export const computerUseActionSchema = z.discriminatedUnion("kind", [
   z.object({ ...actionEnvelope, kind: z.literal("observe") }).strict(),
   z.object({ ...actionEnvelope, kind: z.literal("focus") }).strict(),
+  z.object({ ...actionEnvelope, kind: z.literal("browser_tab"), operation: z.enum(["select", "close"]) }).strict(),
   z.object({
     ...actionEnvelope,
     kind: z.literal("system_control"),
@@ -364,6 +366,7 @@ export function computerUseActionRequirements(action: ComputerUseAction): Comput
     case "navigate": return { capabilities: ["browser.navigate"], match: "all" };
     case "window_frame": return { capabilities: ["window.frame"], match: "all" };
     case "window_state": return { capabilities: ["window.state"], match: "all" };
+    case "browser_tab": return { capabilities: ["browser.tabs"], match: "all" };
     case "invoke_menu": return { capabilities: ["menu.invoke"], match: "all" };
     case "clipboard": return { capabilities: [action.mode === "read" ? "clipboard.read" : "clipboard.write"], match: "all" };
   }

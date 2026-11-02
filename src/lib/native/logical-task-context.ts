@@ -2,7 +2,11 @@ import { redactSecrets, type LogicalTaskContext, type Task } from "./inbox-core"
 
 const bounded = (value: string, limit: number) => redactSecrets(value).slice(0, limit);
 export function isLogicalContinuation(text: string): boolean {
-  return /^(?:continue|resume|continue the paused M9R task)(?:[.!])?$/i.test(text.trim());
+  return /^(?:continue|resume)(?:\s+(?:(?:the|my)\s+)?(?:(?:paused|previous)\s+)?(?:M9R\s+)?(?:task|work))?(?:[.!])?$/i.test(text.trim());
+}
+
+export function isExplicitNewWork(text: string): boolean {
+  return /^(?:new\s+(?:task|work)|(?:start|begin)\s+(?:a\s+)?new\s+(?:task|work)|separate\s+task)\b/i.test(text.trim());
 }
 
 export function nextLogicalTaskContext(task: Task, previous?: Task, continuation = false): LogicalTaskContext {

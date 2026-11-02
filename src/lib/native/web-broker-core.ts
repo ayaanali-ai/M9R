@@ -62,6 +62,7 @@ export interface WebRequest {
   expectedRegionRevision?: number;
   expectedBrowserInstanceId?: string;
   expectedTabId?: string;
+  work?: { taskId: string; workId: string; planRevision: number };
 }
 
 export interface WebResponse {
@@ -1075,6 +1076,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
       url: request.url,
       selector: request.selector,
       text: request.text,
+      ...(request.work ? { work: request.work } : {}),
       ...(request.expectedBrowserInstanceId ? { expectedBrowserInstanceId: request.expectedBrowserInstanceId } : {}),
       ...(request.expectedTabId ? { expectedTabId: request.expectedTabId } : {}),
       ...(request.endSelector ? { endSelector: request.endSelector } : {}),

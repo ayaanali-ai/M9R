@@ -12,7 +12,7 @@ test("live isolated CDP tabs preserve identity, input, scrolling and close witho
   const root = mkdtempSync(join(temp, "browser-acceptance-"));
   const server = createServer((_req, res) => {
     res.writeHead(200, { "content-type": "text/html" });
-    res.end('<!doctype html><title>M9R browser acceptance</title><button id="click" onclick="this.textContent=\'Clicked\'">Click fixture</button><input id="text" aria-label="Fixture text"><div style="height:3000px">Scroll fixture</div>');
+    res.end('<!doctype html><title>M9R browser acceptance</title><button id="click" onclick="this.textContent=\'Clicked\'">Click fixture</button><input id="text" aria-label="Fixture text"><input id="sensitive" autocomplete="section-foo cc-number" aria-label="Sensitive fixture"><output id="keyboard"></output><script>onkeydown=e=>document.querySelector("#keyboard").textContent=String(e.isTrusted)</script><div style="height:3000px">Scroll fixture</div>');
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
@@ -40,7 +40,11 @@ test("live isolated CDP tabs preserve identity, input, scrolling and close witho
     assert.equal((await command("click", "one", { selector: "#click", expectedBrowserInstanceId: identity.browserInstanceId, expectedTabId: second.tabId })).ok, false);
     assert.equal((await command("click", "one", { selector: "#click", expectedBrowserInstanceId: identity.browserInstanceId, expectedTabId: identity.tabId })).ok, true);
     assert.equal((await command("type", "one", { selector: "#text", text: "M9R acceptance" })).ok, true);
-    assert.equal((await command("scroll", "one", { args: { by: 200 } })).ok, true);
+    assert.equal((await command("press", "one", { args: { key: "End" } })).ok, true);
+    assert.equal((await command("read", "one", { selector: "#keyboard" })).data, "true");
+    assert.equal((await command("type", "one", { selector: "#sensitive", text: "synthetic" })).ok, false);
+    const scrolled = await command("scroll", "one", { args: { by: 200 } });
+    assert.equal(scrolled.ok, true, JSON.stringify(scrolled));
     assert.equal((await command("close", "two")).ok, true);
     assert.equal((await command("snapshot", "two")).ok, false);
     assert.equal((await command("snapshot", "one")).ok, true);

@@ -603,7 +603,9 @@ async function m9rPagePower(action, selector, args, expectOrigin, expectPathPref
       if (!allowedPage()) return { ok: false, error: "page origin or path does not match the grant" };
       const amount = Number(args.by || 0);
       if (target) {
-        target.scrollIntoView({ behavior: args.smooth ? "smooth" : "instant", block: "center" });
+        if (typeof target.scrollBy === "function" && target.scrollHeight > target.clientHeight) {
+          target.scrollBy({ top: amount, behavior: args.smooth ? "smooth" : "instant" });
+        } else target.scrollIntoView({ behavior: args.smooth ? "smooth" : "instant", block: "center" });
       } else if (args.to === "top" || args.to === "bottom") {
         window.scrollTo({ top: args.to === "top" ? 0 : document.documentElement.scrollHeight, behavior: args.smooth ? "smooth" : "instant" });
       } else window.scrollBy({ top: amount, behavior: args.smooth ? "smooth" : "instant" });

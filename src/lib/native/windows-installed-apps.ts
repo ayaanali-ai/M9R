@@ -171,7 +171,7 @@ export async function discoverInstalledWindowsApp(
   // Windows ships compatibility stubs beside the registered packaged app
   // (Notepad is one example). These are two launch routes for the same app.
   if (packaged.length === 1 && unique.every((app) => app === packaged[0]
-    || app.executable.split(/[\\/]/).at(-1)?.toLowerCase() === packaged[0].windowExecutable!.toLowerCase())) return packaged[0];
+    || (typeof packaged[0].windowExecutable === "string" && app.executable.split(/[\\/]/).at(-1)?.toLowerCase() === packaged[0].windowExecutable.toLowerCase()))) return packaged[0];
   if (unique.length > 1) throw new Error(`Windows found multiple installed apps named "${name}"; select the intended app.`);
   return unique[0];
 }

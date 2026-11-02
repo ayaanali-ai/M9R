@@ -7,7 +7,7 @@
  * no-submit/no-advance boundaries.
  */
 export type IntentSurface = "browser" | "app" | "desktop" | "system" | "unknown";
-export type IntentAction = "observe" | "open_app" | "navigate" | "click" | "type" | "select" | "scroll" | "drag" | "system_control" | "answer_in_place" | "unknown";
+export type IntentAction = "observe" | "open_app" | "navigate" | "click" | "type" | "select" | "scroll" | "drag" | "system_control" | "answer_in_place" | "focus" | "window_control" | "browser_tab" | "file" | "menu" | "search" | "unknown";
 export type IntentMode = "explain" | "prepare" | "advance" | "submit";
 
 export interface IntentObservationHint {
@@ -36,6 +36,7 @@ export interface UniversalIntentContract {
     app?: string; query?: string; field?: string; value?: string; control?: string;
     systemControl?: "display_brightness" | "output_audio" | "media" | "microphone";
     systemAction?: "get" | "set" | "increase" | "decrease" | "mute" | "unmute" | "play_pause" | "next" | "previous";
+    windowOperation?: "minimize" | "maximize" | "restore" | "resize" | "move" | "close";
   };
   preferredObservation: "desktop" | "app-window" | "browser-tab";
   plan: readonly UniversalIntentStep[];
@@ -66,7 +67,7 @@ function firstMatch(value: string, patterns: readonly RegExp[]): string | undefi
 
 function inferSurface(text: string, hint?: IntentObservationHint): IntentSurface {
   if (hint?.targetKind === "browser-tab" || hint?.url || BROWSER_WORDS.test(text) || DOMAIN_LIKE.test(text)) return "browser";
-  if (hint?.targetKind === "app-window" || APP_WORDS.test(text)) return "app";
+  if (hint?.targetKind === "app-window" || APP_WORDS.test(text) || /\bwindow\b/i.test(text)) return "app";
   if (SYSTEM_WORDS.test(text) && !/\b(?:dictation|voice\s+typing)\b/i.test(text)) return "system";
   if (hint?.targetKind === "desktop" || /\b(?:screen|desktop|taskbar|start\s+menu|computer)\b/i.test(text)) return "desktop";
   if (/\b(?:dictation|voice\s+typing)\b/i.test(text)) return "app";
@@ -93,6 +94,11 @@ function inferSystem(text: string): UniversalIntentContract["entities"] {
 function inferAction(text: string, surface: IntentSurface, system: UniversalIntentContract["entities"]): IntentAction {
   const lower = text.toLowerCase();
   if (system.systemControl) return "system_control";
+  if (/\b(?:close|switch|select|create|new|open)\b[^.!?]{0,40}\btab\b/.test(lower)) return "browser_tab";
+  if (/\b(?:focus|bring to (?:the )?front)\b/.test(lower)) return "focus";
+  if (/\b(?:minimize|maximize|restore|resize)\b|\b(?:move|close)\b[^.!?]{0,40}\bwindow\b/.test(lower)) return "window_control";
+  if (/[a-z]:[\\/]|\b(?:file|folder|directory)\b/i.test(text)) return "file";
+  if (/\bmenu\b/.test(lower) && /\b(?:open|choose|select|invoke)\b/.test(lower)) return "menu";
   if (/\b(?:dictation|voice\s+typing)\b/.test(lower)) return "click";
   if (/\b(?:look|show|inspect|see|observe)\s+(?:at\s+)?(?:my\s+)?(?:screen|desktop|current\s+window)|\bwhat(?:'s| is)\s+on\s+my\s+screen\b|\bwhat\s+is\s+open\b/.test(lower)) return "observe";
   if (/\b(?:go to|navigate|visit|open)\b/.test(lower) && (DOMAIN_LIKE.test(lower) || /\b(?:https?:\/\/|www\.|site|website|page|youtube|github)\b/.test(lower))) return "navigate";
@@ -103,6 +109,7 @@ function inferAction(text: string, surface: IntentSurface, system: UniversalInte
   if (/\b(?:choose|select)\b/.test(lower)) return "select";
   if (/\b(?:type|enter|write|fill|input)\b/.test(lower)) return "type";
   if (/\b(?:click|press|toggle|expand|collapse|submit|check|uncheck)\b/.test(lower)) return "click";
+  if (/\b(?:search|find|look up)\b/.test(lower)) return "search";
   return surface === "unknown" ? "unknown" : "observe";
 }
 
@@ -132,8 +139,8 @@ function planFor(surface: IntentSurface, action: IntentAction): UniversalIntentS
   const plan: UniversalIntentStep[] = [{ kind: "bind-foreground", reason: "Bind the actual current foreground surface; never reuse a remembered app target silently." }];
   if (surface === "browser") plan.push({ kind: "browser-tab-select", reason: "Select the exact existing tab by title or URL before navigating or interacting." });
   plan.push({ kind: "observe-structure", reason: "Read UI Automation or DOM structure before pixels." });
-  if (action === "open_app") plan.push({ kind: "launch-search", reason: "Use Start/Search when direct launch cannot resolve the app; taskbar is a bounded fallback." });
-  if (["click", "select", "type", "scroll", "drag", "answer_in_place"].includes(action)) {
+  if (action === "open_app" || action === "search") plan.push({ kind: "launch-search", reason: "Resolve installed metadata or Start/Search before any bounded taskbar fallback." });
+  if (["click", "select", "type", "scroll", "drag", "answer_in_place", "focus", "window_control", "browser_tab", "file", "menu", "search"].includes(action)) {
     plan.push({ kind: "semantic-target", reason: "Rank enabled controls by role, label, state, and location." });
     plan.push({ kind: "reobserve", reason: "Reobserve after dropdown, popup, navigation, or virtualized-content mutation." });
     plan.push({ kind: "coordinate-fallback", reason: "Use bounded window-local pixels only when structure cannot answer." });
@@ -148,6 +155,8 @@ export function resolveUniversalIntent(rawText: string, hint?: IntentObservation
   const normalizedText = clean(rawText);
   const surface = inferSurface(normalizedText, hint);
   const entities = { ...inferSystem(normalizedText),
+    ...((normalizedText.match(/\b(minimize|maximize|restore|resize|move|close)\b/i)?.[1])
+      ? { windowOperation: normalizedText.match(/\b(minimize|maximize|restore|resize|move|close)\b/i)![1].toLowerCase() as "minimize" | "maximize" | "restore" | "resize" | "move" | "close" } : {}),
     ...(firstMatch(normalizedText, [/\b(?:open|launch|start)\s+(.+?)(?:\s+(?:app|application|program))?(?:\s+and\b|\s+then\b|$)/i]) && surface === "app" ? { app: firstMatch(normalizedText, [/\b(?:open|launch|start)\s+(.+?)(?:\s+(?:app|application|program))?(?:\s+and\b|\s+then\b|$)/i]) } : {}),
     ...(firstMatch(normalizedText, [/\b(?:search|look\s+up|find)\s+(?:for\s+)?["“]?(.+?)["”]?(?:\s+on\s+|\s+in\s+|$)/i]) ? { query: firstMatch(normalizedText, [/\b(?:search|look\s+up|find)\s+(?:for\s+)?["“]?(.+?)["”]?(?:\s+on\s+|\s+in\s+|$)/i]) } : {}),
     ...(hint?.controls?.find((control) => control.enabled !== false && control.label && normalizedText.toLowerCase().includes(control.label.toLowerCase()))?.label ? { control: hint.controls.find((control) => control.enabled !== false && control.label && normalizedText.toLowerCase().includes(control.label.toLowerCase()))?.label } : {}),

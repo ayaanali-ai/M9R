@@ -72,6 +72,27 @@ test("a provider turn ending without a completion report preserves unfinished M9
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("explicit new work gets its own context and leaves the prior paused work intact", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-new-work-"));
+  const store = createLocalStore(root);
+  let gated: ReturnType<typeof gatedConnection> | undefined;
+  const owner = createManagedProviderOwner({ agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store, env: {}, createConnection: (profile) => (gated = gatedConnection(profile)).connection });
+  try {
+    owner.deliver("codex", "Inspect the report.");
+    for (let attempt = 0; attempt < 100 && !gated?.sent.length; attempt++) await new Promise((done) => setTimeout(done, 10));
+    owner.stop("codex"); gated!.release();
+    for (let attempt = 0; attempt < 100 && owner.snapshot()[0]?.status === "working"; attempt++) await new Promise((done) => setTimeout(done, 10));
+    gated!.holdOpen();
+    owner.deliver("codex", "New task: inspect another document.");
+    for (let attempt = 0; attempt < 100 && gated!.sent.length < 2; attempt++) await new Promise((done) => setTimeout(done, 10));
+    assert.equal(store.getTask("T2")?.logicalContext?.workId, "T2");
+    assert.equal(store.getTask("T2")?.logicalContext?.control, "new-task");
+    assert.equal(store.getTask("T1")?.receipt?.state, "paused");
+    gated!.release();
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("stopping an agent drops its queued follow-up, so the very next message runs instead of a stale one", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-owner-queue-"));
   const store = createLocalStore(root);

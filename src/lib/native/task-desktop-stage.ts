@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { StageCaptureRefreshError, StageInputNotDispatchedError } from "./stage-errors";
+import { StageCaptureRefreshError, StageInputNotDispatchedError, StageAuthorizationError, StageValidationError } from "./stage-errors";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -453,6 +453,7 @@ export function createTaskDesktopStageService(input: {
   }
 
   const cursorPresentationPending = new Set<string>();
+  const cursorPresentationAt = new Map<string, number>();
   async function ensureCursorPrimed(stageName: string, identity: CuaAgentCursorIdentity): Promise<void> {
     const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
       showAgentCursor?: (stageName: string, cursorIdentity: CuaAgentCursorIdentity) => Promise<unknown>;
@@ -463,6 +464,9 @@ export function createTaskDesktopStageService(input: {
     if (typeof showAgentCursor !== "function") return;
     const key = cursorIdentityKey(identity);
     if (cursorPresentationPending.has(key)) return;
+    const last = cursorPresentationAt.get(key);
+    if (last !== undefined && Date.now() >= last && Date.now() - last < 60_000) return;
+    cursorPresentationAt.set(key, Date.now());
     cursorPresentationPending.add(key);
     // The compositor is presentation only. Its latency or failure must not
     // delay an observation, launch, mutation fence, or target dispatch.
@@ -472,30 +476,30 @@ export function createTaskDesktopStageService(input: {
 
   function authorize(token: string, taskId: string, mode: TaskStageMode) {
     if (isAgentContext(stageDeps.env ?? process.env)) {
-      throw new Error("Task stages require the owner-launched M9R broker; an agent process cannot host this service.");
+      throw new StageAuthorizationError("Task stages require the owner-launched M9R broker; an agent process cannot host this service.");
     }
     const identity = input.store.verifyIdentity(token);
     if (!identity) {
-      throw new Error("The owner-launched stage broker cannot verify this session identity in its configured M9R store. The agent MCP server and broker may have different M9R_HOME values, or the token was revoked. Run M9R setup to synchronize their M9R_HOME settings, then restart the broker and reconnect the agent.");
+      throw new StageAuthorizationError("The owner-launched stage broker cannot verify this session identity in its configured M9R store. The agent MCP server and broker may have different M9R_HOME values, or the token was revoked. Run M9R setup to synchronize their M9R_HOME settings, then restart the broker and reconnect the agent.");
     }
-    if (!readPolicy().handles.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled task stages for this agent.");
+    if (!readPolicy().handles.includes(normalizeHandle(identity.handle))) throw new StageAuthorizationError("The owner has not enabled task stages for this agent.");
     const task = input.store.getTask(taskId);
     const handle = normalizeHandle(identity.handle);
     const addressedHandle = identity.sessionId.startsWith("web-") && !handle.startsWith("web-") ? `web-${handle}` : handle;
     if (!task || normalizeHandle(task.to) !== addressedHandle
       || ((task.targetSession ?? task.deliveredSession) && (task.targetSession ?? task.deliveredSession) !== identity.sessionId)
       || (task.delivery?.threadId && task.delivery.threadId !== identity.sessionId)) {
-      throw new Error("This task does not belong to the requesting agent session.");
+      throw new StageAuthorizationError("This task does not belong to the requesting agent session.");
     }
     if (!(["approved", "not_needed"] as string[]).includes(task.approval)
       || task.resultSummary !== undefined || task.delivery?.state === "done") {
-      throw new Error("Only an unfinished owner-authorized or approved task can use an agent stage.");
+      throw new StageAuthorizationError("Only an unfinished owner-authorized or approved task can use an agent stage.");
     }
     if (task.receipt?.state === "canceled") {
-      throw new Error("This task was canceled; no desktop work is allowed.");
+      throw new StageAuthorizationError("This task was canceled; no desktop work is allowed.");
     }
     if (task.receipt?.state === "paused") {
-      throw new Error("This task is paused; no desktop work is allowed for that turn.");
+      throw new StageAuthorizationError("This task is paused; no desktop work is allowed for that turn.");
     }
     activeAgentCursors.set(cursorIdentityKey(identity), { handle, sessionId: identity.sessionId });
     // Session-scoped reuse bounds desktop creation; task text never becomes a desktop name.
@@ -581,7 +585,9 @@ export function createTaskDesktopStageService(input: {
 
   async function act(token: string, taskId: string, value: unknown, requestedMode?: TaskStageMode, operationId?: string, expectedMutationRevision?: number) {
     const mode = stageMode(requestedMode);
-    const action = parseTaskStageAction(value);
+    let action: ReturnType<typeof parseTaskStageAction>;
+    try { action = parseTaskStageAction(value); }
+    catch (error) { throw new StageValidationError(error instanceof Error ? error.message : "Invalid stage action.", { cause: error }); }
     if (operationId !== undefined && !/^[a-zA-Z0-9._:-]{1,128}$/.test(operationId)) throw new Error("Invalid desktop-stage operation ID.");
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
@@ -603,6 +609,7 @@ export function createTaskDesktopStageService(input: {
       return { stopped: active?.taskId === taskId, paused: true, cancellationRequested: false };
     }
     let recoveryNotice: string | undefined;
+    let dispatchStarted = false;
     const run = async () => {
       const { name, identity } = authorize(token, taskId, mode);
       if (stoppedTaskInputs.has(`${name}\0${taskId}`)) throw new DesktopInputNotDispatchedError("This task was explicitly stopped; no input was sent.");
@@ -773,7 +780,7 @@ export function createTaskDesktopStageService(input: {
       let fenceTransaction: MutationFenceTransaction | undefined;
       if (input.mutationFence) {
         const fenceTarget = action.kind !== "system_control" && effectiveAction.view === "app" && selected
-          ? desktopWindowMutationTarget({ pid: selected.pid, windowId: selected.windowId })
+          ? desktopWindowMutationTarget({ pid: selected.pid, windowId: selected.windowId, processGeneration: inspected.anchor?.processGeneration })
           : desktopMutationTarget();
         mutationSurfaceId = fenceTarget.surfaceId;
         if (mutating) {
@@ -825,6 +832,7 @@ export function createTaskDesktopStageService(input: {
       }, 50);
       cancellationPoll.unref();
       try {
+        dispatchStarted = mutating;
         result = await runTaskStageAction(driver, name, effectiveAction, identity, mode, controller.signal);
         if (fenceTransaction) {
           const committed = fenceTransaction.commit({ status: "applied" });
@@ -880,7 +888,16 @@ export function createTaskDesktopStageService(input: {
           nextStep: "The input was sent; capture and inspect before issuing another action." };
       }
     };
-    const outcome = await enqueueTimedStage(queueName, taskId, "action", operationId, run, stageName);
+    const guardedRun = async () => {
+      try { return await run(); }
+      catch (error) {
+        if (!dispatchStarted && !(error instanceof StageInputNotDispatchedError) && !(error instanceof DesktopInputNotDispatchedError)) {
+          throw new StageInputNotDispatchedError(error instanceof Error ? error.message : "The stage refused before dispatch.", { cause: error });
+        }
+        throw error;
+      }
+    };
+    const outcome = await enqueueTimedStage(queueName, taskId, "action", operationId, guardedRun, stageName);
     if (!recoveryNotice) return outcome;
     return { ...(outcome && typeof outcome === "object" ? outcome : { result: outcome }), recoveryNotice };
   }
@@ -907,12 +924,9 @@ export function createTaskDesktopStageService(input: {
     );
     const gate = stageClickNeedsApproval(described);
     if (!gate.hold) return;
-    if (!gate.label) throw new DesktopInputNotDispatchedError(
-      "The stage click target has no readable label, so it cannot be classified safely; no input was sent.",
-    );
     const approvals = input.approvals?.();
-    const target = `“${gate.label}”`;
-    if (!approvals) throw new Error(`This click targets ${target}, which looks like it moves or commits money, and this broker has no owner approval route attached; the action was refused.`);
+    const target = gate.label ? `“${gate.label}”` : "the unlabeled control in the exact current visual observation";
+    if (!approvals) throw new DesktopInputNotDispatchedError(`This click targets ${target}, which requires owner review, and this broker has no owner approval route attached; no input was sent.`);
     const approved = await approvals.requestApproval({
       agent: normalizeHandle(identity.handle),
       provider: identity.provider,

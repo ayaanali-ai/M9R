@@ -564,6 +564,10 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     requireIdentity,
     identityToken: async (_identity, presented) => (await authenticate(presented as string | undefined)).token,
     resolveTaskId,
+    resolveWorkIdentity: (taskId) => {
+      const context = deps.store.getTask(taskId)?.logicalContext;
+      return { workId: context?.workId ?? taskId, planRevision: context?.planRevision ?? 0 };
+    },
     now: deps.now,
     monotonicNow: deps.monotonicNow,
     authField: AUTH_FIELD,

@@ -20,30 +20,38 @@ function fixture() {
   const handlers = new Map<string, Handler>();
   const calls: { kind: string; operationId?: string }[] = [];
   let failure: "none" | "before" | "uncertain" = "none";
+  let url = "https://fixture.test/";
+  let unlabeled = false;
+  let activeTaskId = "T1";
+  const workRequests: unknown[] = [];
   const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString() });
   const web: Pick<WebBrokerClient, "run" | "prepareTaskStage" | "taskStageAction"> = {
     prepareTaskStage: async () => ({ ok: true }),
     async run(request) {
       calls.push({ kind: request.action, operationId: request.operationId });
-      if (request.action === "snapshot") return { ok: true, data: { tab: request.tab ?? "one", browserInstanceId: "daemon-one", tabId: request.tab ?? "target-one", url: "https://fixture.test/", text: "Verified state", nativeClickAvailable: true,
+      if (request.work) workRequests.push(request.work);
+      if (request.action === "snapshot") return { ok: true, data: { tab: request.tab ?? "one", browserInstanceId: "daemon-one", tabId: request.tab ?? "target-one", url, text: "Verified state", nativeClickAvailable: true,
         elements: [{ ref, role: "button", name: "Action", actions: ["click"], rect: { x: 1, y: 2, width: 50, height: 20 } }] } };
       if (failure === "before") return { ok: false, error: "Owner pointer is active", dispatchState: "not-dispatched" };
       if (failure === "uncertain") throw new Error("Response lost after input");
+      if (request.action === "open" && request.url) url = request.url;
+      if (request.action === "close") return { ok: true, data: { closed: true } };
       return { ok: true };
     },
     async taskStageAction(_token, _taskId, input, _mode, operationId) {
       const action = input as { kind: string };
       calls.push({ kind: action.kind, operationId });
-      if (action.kind === "read_structure") return { ok: true, result: { status: "partial", capturedAt: new Date().toISOString(),
-        elements: [{ ref: "uia:1", label: "Action", role: "Button", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }], fallbackCapture: capture() } };
+      if (action.kind === "read_structure") return { ok: true, result: { status: unlabeled ? "complete" : "partial", capturedAt: new Date().toISOString(),
+        elements: [{ ref: "uia:1", label: unlabeled ? "" : "Action", role: "Button", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }], fallbackCapture: capture() } };
       if (failure === "before") return { ok: false, error: "Owner pointer is active", dispatchState: "not-dispatched", gateCode: "foreground-lease" };
       if (failure === "uncertain") throw new Error("Response lost after input");
       return { ok: true, result: { capture: capture(), outcome: { status: "confirmed" }, operationReceipt: { status: "applied" }, actionExecuted: true } };
     },
   };
   registerComputerUseTools({ registerTool(name: string, _descriptor: unknown, handler: Handler) { handlers.set(name, handler); } } as never,
-    { store, web: web as WebBrokerClient, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => "T1" });
-  return { calls, setFailure: (value: typeof failure) => { failure = value; },
+    { store, web: web as WebBrokerClient, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => activeTaskId,
+      resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }) });
+  return { calls, workRequests, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
     call: async (name: string, input: Record<string, unknown>) => (await handlers.get(name)!(input)).structuredContent,
     close: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -64,6 +72,57 @@ test("canonical browser loop dispatches once, verifies, and reconciles the same 
     assert.equal(replay.result.dispatchStatus, "dispatched");
     assert.equal(f.calls.filter((call) => call.kind === "click").length, 1);
     assert.equal("telemetry" in first, false);
+  } finally { f.close(); }
+});
+
+test("first-tab bootstrap uses the canonical loop and exact tab close returns verified evidence", async () => {
+  const f = fixture(); try {
+    const input = { tab: "new-tab", url: "https://fixture.test/new", operationId: "browser-bootstrap" };
+    const opened = await f.call("m9r_browser_open", input);
+    assert.equal(opened.result.deliveryReceipt?.verification, "verified");
+    assert.equal(opened.target.kind, "browser-tab");
+    await f.call("m9r_browser_open", input);
+    assert.equal(f.calls.filter((call) => call.kind === "open").length, 1);
+    const fresh = await f.call("m9r_computer_observe", { target: "browser-tab", tab: "new-tab" });
+    const closed = await f.call("m9r_computer_action", { action: { kind: "browser_tab", operation: "close", operationId: "close-tab",
+      targetId: fresh.target.targetId, targetRevision: fresh.target.revision } });
+    assert.equal(closed.result.effectStatus, "verified");
+    assert.equal(f.calls.filter((call) => call.kind === "close").length, 1);
+  } finally { f.close(); }
+});
+
+test("subtree inspection remains revision-qualified and missing partial evidence stays unknown", async () => {
+  const f = fixture(); try {
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    const before = f.calls.length;
+    const inspected = await f.call("m9r_computer_inspect", { targetId: observed.target.targetId, targetRevision: observed.target.revision,
+      rootRef: observed.observation.controls[0]!.ref, query: "Action", limit: 1 });
+    assert.equal(inspected.observation.controls.length, 1);
+    assert.equal(f.calls.length, before, "inspection adds no redundant native runtime probe");
+    assert.equal((inspected.observation as unknown as { absenceEvidence: string }).absenceEvidence, "unknown");
+  } finally { f.close(); }
+});
+
+test("unlabeled controls qualify for the same-capture visual fallback even when the tree is complete", async () => {
+  const f = fixture(); try {
+    f.setUnlabeled();
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    assert.equal(observed.target.capabilities.includes("input.click.point"), true);
+    assert.ok((observed.observation as unknown as { capture: unknown }).capture);
+    assert.equal(f.calls.length, 1, "the accessibility capture already contained the needed frame");
+  } finally { f.close(); }
+});
+
+test("redirected work fences the old observation and carries the new task revision to browser dispatch", async () => {
+  const f = fixture(); try {
+    const observed = await f.call("m9r_computer_observe", { target: "browser-tab", tab: "one" });
+    f.setTask("T2");
+    const stale = await f.call("m9r_computer_action", { action: click(observed.target) });
+    assert.equal(stale.result.error?.code, "task-context-changed");
+    assert.equal(f.calls.filter((call) => call.kind === "click").length, 0);
+    const current = await f.call("m9r_computer_observe", { target: "browser-tab", tab: "one" });
+    await f.call("m9r_computer_action", { action: click(current.target, "redirected-click") });
+    assert.deepEqual(f.workRequests.at(-1), { taskId: "T2", workId: "work-original", planRevision: 1 });
   } finally { f.close(); }
 });
 

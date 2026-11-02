@@ -9,7 +9,7 @@ import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
 import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
 import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageWindowMatchesApp, type StageAppLaunchSpec } from "../src/lib/native/task-stage-apps";
-import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT } from "../src/lib/native/windows-installed-apps";
+import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT, discoverInstalledWindowsApp } from "../src/lib/native/windows-installed-apps";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
 
@@ -101,6 +101,13 @@ test("Windows app discovery searches pinned taskbar shortcuts", () => {
   assert.ok(WINDOWS_APP_DISCOVERY_SCRIPT.includes("User Pinned\\TaskBar"));
 });
 
+test("incomplete packaged renderer metadata stays ambiguous instead of crashing or guessing an executable", async () => {
+  await assert.rejects(discoverInstalledWindowsApp("Editor", async () => JSON.stringify([
+    { executable: "C:\\Windows\\explorer.exe", args: ["shell:AppsFolder\\Family!App"] },
+    { executable: "C:\\Windows\\System32\\editor.exe", args: [] },
+  ])), /multiple installed apps/);
+});
+
 test("owner-preview repairs a saved zero desktop ID and refuses zero IDs from the native helper", async () => {
   const testTemp = join(process.cwd(), ".test-tmp");
   mkdirSync(testTemp, { recursive: true });
@@ -169,7 +176,7 @@ test("a native target inspection failure is returned immediately instead of beco
   try {
     await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
     await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "owner-preview"),
-      (error) => error === failure);
+      (error) => error instanceof Error && error.cause === failure && serializeStageFailure(error, "failed").dispatchState === "not-dispatched");
     assert.equal(f.desktopActions.some((action) => action.kind === "click"), false);
   } finally { f.cleanup(); }
 });
@@ -396,6 +403,17 @@ test("a money-like stage click waits for the owner and never executes on deny", 
     assert.equal(f.seen[0].targetLabel, "Pay $49 now");
     assert.match(f.seen[0].step, /Pay \$49 now/);
     assert.equal(f.clicks.length, 0, "a denied purchase click must not reach the driver");
+  } finally { f.cleanup(); }
+});
+
+test("an unlabeled visual control can continue after one exact-target owner review", async () => {
+  const f = moneyFixture("", true);
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "background");
+    await f.service.act(f.identity.token, f.task.id, { kind: "click", x: 2, y: 3 }, "background", "unlabeled-control");
+    assert.equal(f.seen.length, 1);
+    assert.match(f.seen[0]!.step, /unlabeled control/);
+    assert.equal(f.clicks.length, 1);
   } finally { f.cleanup(); }
 });
 

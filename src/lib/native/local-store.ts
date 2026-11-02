@@ -169,6 +169,8 @@ export interface ComputerOperationInput {
   targetId: string;
   operationId: string;
   fingerprint: string;
+  taskId?: string;
+  workId?: string;
 }
 
 /** Durable terminal/claimed evidence for one broker-owned multiplayer mutation lease. */
@@ -745,7 +747,9 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       const handle = normalizeHandle(input.handle);
       if (!handle || !input.sessionId || input.sessionId.length > 512
         || !input.targetId || input.targetId.length > 512
-        || !/^[a-zA-Z0-9._:-]{1,128}$/.test(input.operationId) || !/^[a-f0-9]{64}$/.test(input.fingerprint)) {
+        || !/^[a-zA-Z0-9._:-]{1,128}$/.test(input.operationId) || !/^[a-f0-9]{64}$/.test(input.fingerprint)
+        || (input.taskId !== undefined && !/^T[0-9]{1,12}$/.test(input.taskId))
+        || (input.workId !== undefined && (!input.workId || input.workId.length > 128 || /[\u0000-\u001f]/.test(input.workId)))) {
         throw new Error("Invalid generic computer-use operation receipt identity.");
       }
       const key = computerOperationKey({ ...input, handle });
@@ -760,7 +764,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         }
         const updatedAt = now().toISOString();
         s.computerOperations.push({ key, handle, sessionId: input.sessionId, targetId: input.targetId,
-          operationId: input.operationId, fingerprint: input.fingerprint, state: "running", updatedAt });
+          operationId: input.operationId, fingerprint: input.fingerprint,
+          ...(input.taskId ? { taskId: input.taskId } : {}), ...(input.workId ? { workId: input.workId } : {}), state: "running", updatedAt });
         return { state: "claimed", updatedAt };
       });
     },
@@ -2553,6 +2558,9 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         const inFlightStage = s.stageOperations.find((operation) => operation.taskId === id && operation.state === "running");
         if (inFlightStage) {
           return { ok: false, error: `Task ${id} still has an in-flight desktop-stage operation; wait for operation ${inFlightStage.key} to settle before recording the result.` };
+        }
+        if (s.computerOperations.some((operation) => operation.taskId === id && operation.state === "running")) {
+          return { ok: false, error: `Task ${id} still has an in-flight computer action; reconcile its receipt before completion.` };
         }
         if (task.targetSession && task.targetSession === identity.sessionId) task.deliveredSession = identity.sessionId;
         const at = now().toISOString();

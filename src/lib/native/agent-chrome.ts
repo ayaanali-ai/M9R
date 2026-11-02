@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
-import { dragChrome } from "./agent-chrome-input";
+import { dragChrome, chromeKeyEvent } from "./agent-chrome-input";
 
 export interface BrowserTransport {
   ready(): boolean;
@@ -202,7 +202,7 @@ class CdpConnection {
   }
 }
 
-interface Command { type: string; id?: string; action?: string; tab?: string; url?: string; selector?: string; endSelector?: string; args?: { destination?: string }; text?: string; expectOrigin?: string; expectPathPrefix?: string; expectedBrowserInstanceId?: string; expectedTabId?: string }
+interface Command { type: string; id?: string; action?: string; tab?: string; url?: string; selector?: string; endSelector?: string; args?: { destination?: string; x?: number; y?: number; button?: string; key?: string; by?: number; valueText?: string }; text?: string; expectOrigin?: string; expectPathPrefix?: string; expectedBrowserInstanceId?: string; expectedTabId?: string }
 interface Tab { targetId: string; sessionId: string }
 interface PageResult { ok: boolean; error?: string; data?: unknown; dispatchState?: "not-dispatched" | "dispatched" | "unknown" }
 
@@ -332,7 +332,18 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
           } else if (command.action === "switch") {
             // Logical selection only; never activate a physical browser window.
             result = { ok: true, data: { tab: tabName } };
-          } else if (["press", "scroll", "select_text", "paste", "click_at", "double_click", "right_click"].includes(command.action ?? "")) {
+          } else if (command.action === "press") {
+            const event = chromeKeyEvent(command.args?.key ?? "");
+            inputAttempted = true;
+            await connection.send("Input.dispatchKeyEvent", { type: "keyDown", ...event }, tab.sessionId);
+            await connection.send("Input.dispatchKeyEvent", { type: "keyUp", ...event, text: undefined }, tab.sessionId);
+            result = { ok: true, data: { pressed: true } };
+          } else if (command.action === "scroll") {
+            // Headful Chrome can withhold wheel acknowledgements for an
+            // occluded tab. Semantic scrolling stays exact and background-safe.
+            inputAttempted = true;
+            result = await pageAction(tab, `m9rPagePower('scroll', ${JSON.stringify(command.selector ?? null)}, ${JSON.stringify(command.args ?? {})}, ${JSON.stringify(origin)}, ${JSON.stringify(command.expectPathPrefix ?? null)}, null, null, null)`);
+          } else if (command.action === "select_text") {
             inputAttempted = true;
             result = await pageAction(tab, `m9rPagePower(${JSON.stringify(command.action)}, ${JSON.stringify(command.selector ?? null)}, ${JSON.stringify(command.args ?? {})}, ${JSON.stringify(origin)}, ${JSON.stringify(command.expectPathPrefix ?? null)}, null, ${JSON.stringify(command.text ?? null)}, null)`);
           } else if (command.action === "drag") {
@@ -365,10 +376,12 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
             }, from, to);
             result = { ok: true, data: { route: "agent-chrome", delivery: "cdp", dragged: true } };
           } else {
-            const plan = await pageAction(tab, `m9rPageClickPlan(${JSON.stringify(command.selector)}, ${JSON.stringify(origin)}, ${JSON.stringify(command.expectPathPrefix ?? null)}, null, null, 'left', 1, 'click')`);
+            const button = command.action === "right_click" ? "right" : command.args?.button ?? "left";
+            const count = command.action === "double_click" ? 2 : 1;
+            const plan = await pageAction(tab, `m9rPageClickPlan(${JSON.stringify(command.selector ?? null)}, ${JSON.stringify(origin)}, ${JSON.stringify(command.expectPathPrefix ?? null)}, ${JSON.stringify(command.args?.x ?? null)}, ${JSON.stringify(command.args?.y ?? null)}, ${JSON.stringify(button)}, ${count}, 'click')`);
             if (!plan.ok) throw new Error(plan.error ?? "Target is unavailable.");
             const point = plan.data as { x: number; y: number; name: string };
-            if (command.action === "type") {
+            if (command.action === "type" || command.action === "paste") {
               // Resolve only a selector/ref; never evaluate an agent's JavaScript. Password/card/OTP fields stay off limits.
               const prepared = await evaluate(tab, `(() => {
                 const selector = ${JSON.stringify(command.selector)};
@@ -376,11 +389,12 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
                 const el = ref ? window.__m9rPageActionRefMap?.get(ref) : document.querySelector(selector);
                 if (!el || !el.isConnected || el.disabled || el.readOnly) return false;
                 const type = String(el.type || '').toLowerCase();
-                const autocomplete = String(el.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/);
+                const autocomplete = String(el.getAttribute('autocomplete') || '').toLowerCase().match(/[a-z0-9_-]+/g) || [];
                 if (type === 'password' || type === 'hidden' || autocomplete.some(v => v.startsWith('cc-') || ['one-time-code','current-password','new-password'].includes(v))) return false;
                 if (!['INPUT','TEXTAREA'].includes(el.tagName) && !el.isContentEditable) return false;
                 el.focus();
                 window.__m9rTypingTarget = el;
+                if (${JSON.stringify(command.action === "paste")}) return document.activeElement === el;
                 if (el.isContentEditable) { const range = document.createRange(); range.selectNodeContents(el); const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); }
                 else el.select();
                 return document.activeElement === el;
@@ -390,14 +404,14 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
               if (current !== url) throw new Error("The page changed before typing.");
               if (!await evaluate(tab, "document.activeElement === window.__m9rTypingTarget && window.__m9rTypingTarget?.isConnected")) throw new Error("Typing focus changed before input.");
               inputAttempted = true;
-              await connection.send("Input.insertText", { text: command.text ?? "" }, tab.sessionId);
+              await connection.send("Input.insertText", { text: command.action === "paste" ? command.args?.valueText ?? "" : command.text ?? "" }, tab.sessionId);
             } else {
               // Replan against the hit target after scroll/layout settles and recheck the site immediately before input.
               const current = await location(tab); allowed(current, command);
               if (current !== url) throw new Error("The page changed before clicking.");
               const validation = await evaluate(tab, `(() => {
                 const selector = ${JSON.stringify(command.selector)};
-                const el = selector?.startsWith('@m9r-ref:') ? window.__m9rPageActionRefMap?.get(selector.slice(9)) : document.querySelector(selector);
+                const el = selector?.startsWith('@m9r-ref:') ? window.__m9rPageActionRefMap?.get(selector.slice(9)) : selector ? document.querySelector(selector) : document.elementFromPoint(${point.x}, ${point.y});
                 const hit = document.elementFromPoint(${point.x}, ${point.y});
                 return !!el && el.isConnected && !el.disabled && (el === hit || el.contains(hit));
               })()`);
@@ -405,8 +419,10 @@ export async function launchAgentChrome(options: { root: string; pageActionsSour
               inputAttempted = true;
               await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y }, tab.sessionId);
               if (stopped || closed) throw new Error("Agent Chrome work was stopped.");
-              await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 }, tab.sessionId);
-              await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 }, tab.sessionId);
+              for (let clickCount = 1; clickCount <= count; clickCount++) {
+                await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button, clickCount }, tab.sessionId);
+                await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button, clickCount }, tab.sessionId);
+              }
             }
             result = { ok: true, data: { route: "agent-chrome", delivery: "cdp", label: point.name } };
           }

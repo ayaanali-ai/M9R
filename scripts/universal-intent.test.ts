@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { resolveUniversalIntent } from "../src/lib/native/universal-intent-resolver";
 
+test("universal intent resolves window, tab, file, menu and search operations without app scripts", () => {
+  for (const [text, action] of [["Minimize this window", "window_control"], ["Resize the window", "window_control"],
+    ["Move this window left", "window_control"], ["Close the browser tab", "browser_tab"], ["Focus the current window", "focus"],
+    ["Open C:\\Documents\\report.txt", "file"], ["Choose Export in the menu", "menu"], ["Search for the app", "search"]]) {
+    assert.equal(resolveUniversalIntent(text).action, action, text);
+  }
+});
+
 test("screen questions bind the live desktop and preserve no-submit/no-advance boundaries", () => {
   const intent = resolveUniversalIntent("Look at my screen, answer the question, but do not submit or advance.");
   assert.equal(intent.surface, "desktop");
