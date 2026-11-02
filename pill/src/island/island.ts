@@ -20,6 +20,8 @@ import { IslandStateMachine } from "./fsm";
 const HIT_MARGIN = 14;
 
 const modeOrder = (m: IslandMode) => (m === "hidden" ? 0 : m === "compact" ? 1 : 2);
+/** Room around the island for the edge glow's halo. */
+const GLOW_PAD = 40;
 
 /** Your voice first, then your music, then an agent that needs you, then one that's working; otherwise no glow. */
 function edgeTone(): { color: string; live: boolean } | null {
@@ -364,11 +366,13 @@ export class Island {
     this.islandEl.style.borderRadius = `0 0 ${r}px ${r}px`;
     this.islandEl.style.clipPath = `path('${squirclePath(w, hh, { br: r, bl: r })}')`;
     this.islandEl.style.transform = `translateX(-50%)`;
-    this.edgeGlow.style.width = `${w}px`;
-    this.edgeGlow.style.height = `${hh}px`;
-    this.edgeGlow.style.borderRadius = `0 0 ${r}px ${r}px`;
-    // Start the halo below the ears: alongside them it leaked through the hairline seam as a bright vertical line.
-    this.edgeGlow.style.clipPath = `inset(${r}px -60px -60px -60px)`;
+    // The glow box is the island plus room for the halo; its mask fades the halo in below the ears, where a
+    // full-strength glow leaked through the hairline seam and a hard cut left a visible edge.
+    this.edgeGlow.style.width = `${w + GLOW_PAD * 2}px`;
+    this.edgeGlow.style.height = `${hh + GLOW_PAD}px`;
+    this.edgeGlow.style.setProperty("--r", `${r}px`);
+    this.edgeGlow.style.setProperty("--fade-from", `${r * 0.6}px`);
+    this.edgeGlow.style.setProperty("--fade-to", `${r * 2.2}px`);
     this.applyArches(w, r);
     this.miniGrid.style.left = `${w - 40 - 14.5}px`;
     this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
