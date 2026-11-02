@@ -54,3 +54,31 @@ test("legacy provider admissions of incomplete work cannot become success", () =
   assert.equal(taskCompletionReport("I couldn't switch to the Codex desktop app.").status, "incomplete");
   assert.throws(() => taskCompletionReport("done", { status: "completed", remainingWork: ["Required check"] }));
 });
+
+test("orphan recovery closes uncertain work while retaining uncertain delivery evidence", () => {
+  const root = mkdtempSync(join(resolve(".test-tmp"), "uncertain-orphan-"));
+  try {
+    const store = createLocalStore(root);
+    const identity = store.issueIdentity("codex", "codex", "orphan-uncertain");
+    const make = (key: string) => store.addTask({ from: "you", to: "codex", goal: key, origin: "human_typed", idempotencyKey: key, targetSession: identity.sessionId }).task;
+    const uncertain = make("uncertain");
+    store.markDelivered([uncertain.id], identity.sessionId);
+    store.setDelivery(uncertain.id, { state: "queued", threadId: identity.sessionId });
+    store.setDelivery(uncertain.id, { state: "uncertain", error: "Input outcome unknown" });
+    const canceled = make("canceled");
+    store.cancelTask(canceled.id, "Owner canceled");
+    const completed = make("completed");
+    store.markDelivered([completed.id], identity.sessionId);
+    assert.equal(store.recordTaskResult(identity.token, completed.id, "Finished", { status: "completed", remainingWork: [] }).ok, true);
+    assert.equal(store.reconcileOrphanedOwnerTasks(["codex"]), 1);
+    const saved = store.getTask(uncertain.id)!;
+    assert.equal(saved.receipt?.state, "canceled");
+    assert.equal(saved.delivery?.state, "uncertain");
+    assert.equal(saved.lifecycle?.state, "failed");
+    assert.equal(saved.completion?.status, "incomplete");
+    assert.ok(saved.receipt?.history.some((event) => event.state === "uncertain"));
+    assert.equal(store.getTask(canceled.id)?.receipt?.state, "canceled");
+    assert.equal(store.getTask(completed.id)?.receipt?.state, "completed");
+    assert.equal(store.reconcileOrphanedOwnerTasks(["codex"]), 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

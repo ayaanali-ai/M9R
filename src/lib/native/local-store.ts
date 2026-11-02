@@ -2209,7 +2209,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
-    /** Permanently retire expired work without deleting history or changing transport evidence. */
+    /** Called once before this broker starts providers. Close abandoned work without replaying input. */
     reconcileOrphanedOwnerTasks(handles: string[]): number {
       const recipients = new Set(handles.map(normalizeHandle));
       return update((s) => {
@@ -2218,15 +2218,22 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         for (const task of s.tasks) {
           if (!recipients.has(normalizeHandle(task.to)) || task.resultSummary
             || ["completed", "canceled", "paused", "failed"].includes(task.receipt?.state ?? "")
-            || !["queued", "acknowledged"].includes(task.lifecycle?.state ?? "")) continue;
+            || (!["queued", "acknowledged"].includes(task.lifecycle?.state ?? "")
+              && !(task.receipt?.state === "uncertain" && task.completion?.summary.startsWith("The broker restarted with no live provider turn")))) continue;
           const reason = "The broker restarted with no live provider turn for this work. Continue explicitly; it was not replayed.";
-          task.completion = { status: "incomplete", remainingWork: [task.goal], summary: reason, updatedAt: at };
+          const remainingWork = task.logicalContext?.remainingWork?.length ? task.logicalContext.remainingWork : [task.goal];
+          task.completion = { status: "incomplete", remainingWork, summary: reason, updatedAt: at };
           task.logicalContext ??= nextLogicalTaskContext(task);
           task.logicalContext.state = "paused";
-          task.logicalContext.remainingWork = [task.goal];
+          task.logicalContext.remainingWork = remainingWork;
           task.logicalContext.priorOutcome = reason;
-          if (task.delivery) task.delivery = { ...task.delivery, state: "failed", failedAt: at, error: reason };
-          recordTaskReceipt(task, { state: "failed", at, source: "owner-broker", error: reason });
+          const uncertain = task.receipt?.state === "uncertain" || task.delivery?.state === "uncertain";
+          if (task.delivery) task.delivery = uncertain
+            ? { ...task.delivery, state: "uncertain", uncertainAt: task.delivery.uncertainAt ?? at, error: reason }
+            : { ...task.delivery, state: "failed", failedAt: at, error: reason };
+          // Cancel the abandoned work, not its historical input evidence. An
+          // uncertain send must never be rewritten as proof that nothing ran.
+          recordTaskReceipt(task, { state: uncertain ? "canceled" : "failed", at, source: "owner-broker", error: reason });
           applyTaskLifecycle(task, { state: "failed", source: "push" });
           changed++;
         }
