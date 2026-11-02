@@ -8,7 +8,7 @@ import type { WebBrokerClient } from "../src/lib/native/web-broker-client";
 import type { ComputerUseTarget, ComputerUseResult } from "../src/lib/native/computer-use-contract";
 
 type Payload = { target: ComputerUseTarget; result: ComputerUseResult; observation: { elements: { ref: string }[]; controls: { ref: string }[] }; content?: unknown };
-type Handler = (input: Record<string, unknown>) => Promise<{ structuredContent: Payload }>;
+type Handler = (input: Record<string, unknown>) => Promise<{ structuredContent: Payload; content?: { type: string }[] }>;
 const ref = `e${"a".repeat(24)}_1`;
 
 function fixture() {
@@ -24,7 +24,8 @@ function fixture() {
   let unlabeled = false;
   let activeTaskId = "T1";
   const workRequests: unknown[] = [];
-  const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString() });
+  const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString(),
+    structure: { status: "complete", capturedAt: new Date().toISOString(), elements: [{ ref: "uia:post-action", role: "Button", label: "Action", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }] } });
   const web: Pick<WebBrokerClient, "run" | "prepareTaskStage" | "taskStageAction"> = {
     prepareTaskStage: async () => ({ ok: true }),
     async run(request) {
@@ -53,6 +54,7 @@ function fixture() {
       resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }), enableIsolatedBrowser: true });
   return { calls, workRequests, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
     call: async (name: string, input: Record<string, unknown>) => (await handlers.get(name)!(input)).structuredContent,
+    callRaw: async (name: string, input: Record<string, unknown>) => handlers.get(name)!(input),
     close: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -74,7 +76,7 @@ test("m9r_browser_open is not registered unless the owner explicitly opts into t
 function click(target: ComputerUseTarget, operationId = "click-one", elementRef = ref) {
   return { kind: "click", operationId, targetId: target.targetId, targetRevision: target.revision,
     locator: { kind: "element", ref: elementRef, snapshotId: target.revision },
-    postcondition: { kind: "accessible-control-present", label: "Action" } };
+    postcondition: { kind: "accessible-control-present", label: "Action" }, includeScreenshot: undefined as boolean | undefined };
 }
 
 test("canonical browser loop dispatches once, verifies, and reconciles the same operation without replay", async () => {
@@ -174,5 +176,24 @@ test("partial desktop evidence uses its same-capture fallback and recoverable po
     assert.equal(success.result.dispatchStatus, "dispatched");
     assert.equal(f.calls.some((call) => call.kind === "window_status" || call.kind === "capture"), false, "no duplicate lifecycle/screenshot probe");
     assert.equal(f.calls.filter((call) => call.kind === "click_element").length, 2, "the first attempt was a proven pre-dispatch refusal");
+  } finally { f.close(); }
+});
+
+test("desktop actions return a semantic change summary and only attach pixels when requested or structure is absent", async () => {
+  const f = fixture(); try {
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    const action = click(observed.target, "desktop-click-summary", observed.observation.controls[0]!.ref);
+    const normal = await f.callRaw("m9r_computer_action", { action });
+    const normalBody = normal.structuredContent as unknown as { observation?: { structure?: unknown; change?: { summary?: string } } };
+    assert.equal(typeof normalBody.observation?.change?.summary, "string");
+    assert.match(normalBody.observation!.change!.summary!, /structure|controls|changed|unchanged/i);
+    assert.equal(normal.content?.some((item) => item.type === "image"), false,
+      `structured actions should not repeat a screenshot by default (structure=${Boolean(normalBody.observation?.structure)}, content=${JSON.stringify(normal.content?.map((item) => item.type))})`);
+
+    const nextTarget = normal.structuredContent.target;
+    const visualAction = click(nextTarget, "desktop-click-explicit-image", normal.structuredContent.observation.controls[0]!.ref);
+    visualAction.includeScreenshot = true;
+    const visual = await f.callRaw("m9r_computer_action", { action: visualAction });
+    assert.equal(visual.content?.some((item) => item.type === "image"), true, "the caller can request a screenshot explicitly");
   } finally { f.close(); }
 });

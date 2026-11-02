@@ -177,6 +177,8 @@ interface ObservationChange {
   fingerprintSchemaVersion: number;
   comparisonScope: "full-target" | "observed-subtree" | "none";
   counts: { added: number; removed: number; updated: number };
+  summary: string;
+  details: { added: string[]; removed: string[]; updated: string[] };
   geometry: { status: "initial" | "unchanged" | "changed" | "unknown" };
   comparedToRevision?: string;
 }
@@ -341,10 +343,64 @@ function compareFingerprintEntries(previous: readonly NormalizedFingerprintEntry
   };
 }
 
+function fingerprintEntryLabel(base: string): string {
+  try {
+    const parsed = JSON.parse(base) as { role?: unknown; label?: unknown };
+    const role = typeof parsed.role === "string" && parsed.role ? parsed.role : "control";
+    const label = typeof parsed.label === "string" ? parsed.label.trim() : "";
+    return label ? `${role} “${label.slice(0, 100)}”` : role;
+  } catch { return "control"; }
+}
+
+function fingerprintChangeDetails(previous: readonly NormalizedFingerprintEntry[], current: readonly NormalizedFingerprintEntry[]) {
+  const oldByBase = new Map<string, string[]>();
+  const newByBase = new Map<string, string[]>();
+  for (const entry of previous) oldByBase.set(entry.base, [...(oldByBase.get(entry.base) ?? []), entry.state]);
+  for (const entry of current) newByBase.set(entry.base, [...(newByBase.get(entry.base) ?? []), entry.state]);
+  const details = { added: [] as string[], removed: [] as string[], updated: [] as string[] };
+  for (const base of new Set([...oldByBase.keys(), ...newByBase.keys()])) {
+    const oldStates = oldByBase.get(base) ?? [];
+    const newStates = newByBase.get(base) ?? [];
+    const oldCounts = multisetCounts(oldStates);
+    const newCounts = multisetCounts(newStates);
+    let unchanged = 0;
+    for (const [state, count] of oldCounts) unchanged += Math.min(count, newCounts.get(state) ?? 0);
+    const oldUnmatched = oldStates.length - unchanged;
+    const newUnmatched = newStates.length - unchanged;
+    const paired = Math.min(oldUnmatched, newUnmatched);
+    for (let index = 0; index < paired && details.updated.length < 8; index++) details.updated.push(fingerprintEntryLabel(base));
+    for (let index = paired; index < newUnmatched && details.added.length < 8; index++) details.added.push(fingerprintEntryLabel(base));
+    for (let index = paired; index < oldUnmatched && details.removed.length < 8; index++) details.removed.push(fingerprintEntryLabel(base));
+  }
+  return details;
+}
+
+function changeSummary(status: ChangeStatus, completeness: FingerprintCompleteness,
+  counts: { added: number; removed: number; updated: number }, details: { added: string[]; removed: string[]; updated: string[] }): string {
+  if (status === "initial") return `Initial observation: ${counts.added} controls observed.`;
+  if (status === "unknown") return `The ${completeness} structure does not support a complete before-and-after comparison.`;
+  if (status === "unchanged") return "No semantic control changes detected.";
+  const parts: string[] = [];
+  for (const [kind, items, count] of [
+    ["added", details.added, counts.added],
+    ["removed", details.removed, counts.removed],
+    ["changed", details.updated, counts.updated],
+  ] as const) {
+    if (count === 0) continue;
+    const named = items.length ? ` ${items.join(", ")}${count > items.length ? `, and ${count - items.length} more` : ""}` : ` ${count} control${count === 1 ? "" : "s"}`;
+    parts.push(`${kind}${named}`);
+  }
+  return `UI changed: ${parts.join("; ")}.`;
+}
+
 function compareObservationFingerprint(previous: StoredObservationFingerprint | undefined, current: ObservationFingerprint, revision: string): ObservationChange {
   if (!previous) {
-    return { status: current.completeness === "complete" ? "initial" : "unknown", fingerprintSchemaVersion: FINGERPRINT_SCHEMA_VERSION,
-      comparisonScope: current.completeness === "complete" ? "full-target" : "observed-subtree", counts: { added: 0, removed: 0, updated: 0 },
+    const status = current.completeness === "complete" ? "initial" : "unknown";
+    const counts = { added: current.entries.length, removed: 0, updated: 0 };
+    const details = { added: current.entries.slice(0, 8).map((entry) => fingerprintEntryLabel(entry.base)), removed: [], updated: [] };
+    return { status, fingerprintSchemaVersion: FINGERPRINT_SCHEMA_VERSION,
+      comparisonScope: current.completeness === "complete" ? "full-target" : "observed-subtree", counts,
+      summary: changeSummary(status, current.completeness, counts, details), details,
       geometry: { status: "initial" } };
   }
   const comparedToRevision = previous.revision;
@@ -352,13 +408,19 @@ function compareObservationFingerprint(previous: StoredObservationFingerprint | 
     ? "unknown"
     : JSON.stringify(previous.geometry) === JSON.stringify(current.geometry) ? "unchanged" : "changed";
   if (previous.completeness !== "complete" || current.completeness !== "complete") {
+    const counts = { added: 0, removed: 0, updated: 0 };
+    const details = { added: [], removed: [], updated: [] };
     return { status: "unknown", fingerprintSchemaVersion: FINGERPRINT_SCHEMA_VERSION, comparisonScope: "observed-subtree",
-      counts: { added: 0, removed: 0, updated: 0 }, geometry: { status: geometryStatus }, comparedToRevision };
+      counts, summary: changeSummary("unknown", current.completeness, counts, details), details,
+      geometry: { status: geometryStatus }, comparedToRevision };
   }
   const counts = compareFingerprintEntries(previous.entries, current.entries);
   const changed = counts.added > 0 || counts.removed > 0 || counts.updated > 0;
-  return { status: changed ? "changed" : "unchanged", fingerprintSchemaVersion: FINGERPRINT_SCHEMA_VERSION,
-    comparisonScope: "full-target", counts, geometry: { status: geometryStatus }, comparedToRevision };
+  const status = changed ? "changed" : "unchanged";
+  const details = fingerprintChangeDetails(previous.entries, current.entries);
+  return { status, fingerprintSchemaVersion: FINGERPRINT_SCHEMA_VERSION,
+    comparisonScope: "full-target", counts, summary: changeSummary(status, current.completeness, counts, details), details,
+    geometry: { status: geometryStatus }, comparedToRevision };
 }
 
 function dataUrlImage(value: unknown): ImageBlock | undefined {
@@ -366,7 +428,7 @@ function dataUrlImage(value: unknown): ImageBlock | undefined {
   return { type: "image", data: value.slice("data:image/png;base64,".length), mimeType: "image/png" };
 }
 
-function toolResponse(value: unknown, image?: ImageBlock, isError = false) {
+function toolResponse(value: unknown, image?: ImageBlock, isError = false, includePopupImages = true) {
   const images: ImageBlock[] = [];
   let omittedImages = 0;
   const appendImage = (candidate: ImageBlock | undefined) => {
@@ -382,7 +444,7 @@ function toolResponse(value: unknown, image?: ImageBlock, isError = false) {
   appendImage(image);
   const observation = recordOf(recordOf(value)?.observation);
   const popups = recordOf(observation?.capture)?.ownedPopups;
-  if (Array.isArray(popups)) for (const popup of popups.slice(0, 8)) {
+  if (includePopupImages && Array.isArray(popups)) for (const popup of popups.slice(0, 8)) {
     appendImage(dataUrlImage(recordOf(popup)?.dataUrl));
   }
   const body = omittedImages > 0 && recordOf(value)
@@ -1825,7 +1887,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
           : targetClosed ? { observation: { revision: nativePostcondition!.evidenceRef as string, observedAt: Date.parse(nativePostcondition!.observedAt as string), evidenceRef: nativePostcondition!.evidenceRef as string } } : {}),
         ...(resultError ? { error: resultError } : {}),
       });
-      const image = updated?.image ?? dataUrlImage(capture?.dataUrl);
+      const updatedStructure = updated ? recordOf(updated.observation.structure) : undefined;
+      const image = action.includeScreenshot === true || !updatedStructure
+        ? updated?.image ?? dataUrlImage(capture?.dataUrl)
+        : undefined;
       if (targetClosed) removeTarget(record.target.targetId);
       const nextStep = response.nextStep ?? (targetClosed ? "The exact window is verified closed; observe a new target before further input." : dispatchStatus === "unknown"
         ? "Reconcile with the same operation ID; do not send a second input."
@@ -1840,7 +1905,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         } } : {}),
         ...(action.kind === "clipboard" && resultObject?.clipboard ? { clipboard: resultObject.clipboard, sharedClipboard: true } : {}),
         ...(updated ? { target: updated.record.target, observation: updated.observation } : {}), ...(nextStep ? { nextStep } : {}) },
-        image, Boolean(resultError));
+        image, Boolean(resultError), action.includeScreenshot === true || !updatedStructure);
     }
 
     if (!deps.web || !browserRequest) {
@@ -1945,7 +2010,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     records.set(targetId, { target, identityKey: identityKey(identity), logicalKey: `${identityKey(identity)}\0browser-open:${tab}`,
       scopeKey: `browser:${tab}`, route: { routeId: "m9r-browser-broker", targetKinds: ["browser-tab"], capabilities: ["browser.navigate"] },
       context: { kind: "browser", taskId, tab, elements: new Map() }, work: { taskId, ...(deps.resolveWorkIdentity?.(taskId) ?? { workId: taskId, planRevision: 0 }) }, change: { status: "unknown", fingerprintSchemaVersion: 1,
-        comparisonScope: "none", counts: { added: 0, removed: 0, updated: 0 }, geometry: { status: "unknown" } } });
+        comparisonScope: "none", counts: { added: 0, removed: 0, updated: 0 }, summary: "No page observation is available yet.",
+        details: { added: [], removed: [], updated: [] }, geometry: { status: "unknown" } } });
     return executeComputerAction({ token, action: parseComputerUseAction({ kind: "navigate", targetId, targetRevision: revision, operationId, url,
       postcondition: { kind: "url-equals", url } }) }, timing);
   }, monotonicNow));

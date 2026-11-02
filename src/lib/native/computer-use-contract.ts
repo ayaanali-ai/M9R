@@ -150,6 +150,8 @@ const actionEnvelope = {
   targetId: opaqueRef,
   /** Binds the request to the exact observation used to plan it. */
   targetRevision: observationRevision,
+  /** Attach pixels to the action response when visual confirmation is useful. */
+  includeScreenshot: z.boolean().optional(),
   /** Optional generic postcondition. Only a fresh observable match can produce a verified result. */
   postcondition: computerUsePostconditionSchema.optional(),
   /** Optional durable intent boundary from m9r_computer_intent. */
