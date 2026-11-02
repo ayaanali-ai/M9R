@@ -326,7 +326,8 @@ test("pending and finished tasks cannot provision stages", async () => {
   try {
     const { task: pending } = f.store.addTask({ from: "claude", to: "codex", goal: "Pending", origin: "agent_initiated", idempotencyKey: "pending" });
     await assert.rejects(f.service.prepare(f.identity.token, pending.id), /unfinished owner-authorized or approved/);
-    f.store.setResult(f.task.id, "Done");
+    f.store.markDelivered([f.task.id], f.identity.sessionId);
+    assert.equal(f.store.recordTaskResult(f.identity.token, f.task.id, "Done", { status: "completed", remainingWork: [] }).ok, true);
     await assert.rejects(f.service.prepare(f.identity.token, f.task.id), /unfinished owner-authorized or approved/);
     assert.equal(f.creations(), 0);
   } finally { f.cleanup(); }

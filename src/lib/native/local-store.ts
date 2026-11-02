@@ -1035,6 +1035,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       const { cwd: _ignoredInstallCwd, ...inputWithoutCwd } = input;
       const normalizedInput = {
         ...inputWithoutCwd,
+        ...(input.origin === "human_typed" ? { goal: input.goal.replace(/\n\s*Also in this room, not addressed by this message:[\s\S]*$/, "").trimEnd() } : {}),
         ...(scopedCwd ? { cwd: scopedCwd } : {}),
         from: normalizeHandle(input.from),
         to: normalizeHandle(input.to),
@@ -2209,6 +2210,30 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /** Permanently retire expired work without deleting history or changing transport evidence. */
+    reconcileOrphanedOwnerTasks(handles: string[]): number {
+      const recipients = new Set(handles.map(normalizeHandle));
+      return update((s) => {
+        let changed = 0;
+        const at = now().toISOString();
+        for (const task of s.tasks) {
+          if (!recipients.has(normalizeHandle(task.to)) || task.resultSummary
+            || ["completed", "canceled", "paused", "failed"].includes(task.receipt?.state ?? "")
+            || !["queued", "acknowledged"].includes(task.lifecycle?.state ?? "")) continue;
+          const reason = "The broker restarted with no live provider turn for this work. Continue explicitly; it was not replayed.";
+          task.completion = { status: "incomplete", remainingWork: [task.goal], summary: reason, updatedAt: at };
+          task.logicalContext ??= nextLogicalTaskContext(task);
+          task.logicalContext.state = "paused";
+          task.logicalContext.remainingWork = [task.goal];
+          task.logicalContext.priorOutcome = reason;
+          if (task.delivery) task.delivery = { ...task.delivery, state: "failed", failedAt: at, error: reason };
+          recordTaskReceipt(task, { state: "failed", at, source: "owner-broker", error: reason });
+          applyTaskLifecycle(task, { state: "failed", source: "push" });
+          changed++;
+        }
+        return changed;
+      });
+    },
+
     retireStaleTasks(maxAgeMs = inboxMaxAgeMs()): number {
       if (!Number.isFinite(maxAgeMs) || maxAgeMs < 1) throw new Error("Invalid stale-task age.");
       return update((s) => {

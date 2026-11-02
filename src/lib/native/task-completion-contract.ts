@@ -11,10 +11,14 @@ export type TaskCompletionReport = z.infer<typeof taskCompletionReportSchema>;
  * must never become a completed task just because the provider turn ended. */
 export function taskCompletionReport(summary: string, report?: TaskCompletionReport): TaskCompletionReport {
   const parsed = report ? taskCompletionReportSchema.parse(report) : undefined;
+  if (parsed) return parsed;
   const incomplete = /\b(?:task (?:is |remains )?(?:incomplete|unfinished)|not (?:yet )?completed|could(?:n't| not) (?:finish|complete|verify|access)|(?:unable|not able) to (?:finish|complete|verify|access)|blocked (?:by|on|because)|still (?:need|needs|have) to)\b/i.test(summary)
     || /(?:^|\n)\s*remaining work:/i.test(summary);
-  if (parsed?.status === "incomplete" || incomplete) return {
-    status: "incomplete", remainingWork: parsed?.remainingWork.length ? parsed.remainingWork : [summary.slice(0, 1_000)],
+  if (incomplete) return {
+    status: "incomplete", remainingWork: [summary.slice(0, 1_000)],
   };
-  return parsed ?? { status: "completed", remainingWork: [] };
+  return {
+    status: "incomplete",
+    remainingWork: ["No structured completion report was received. Verify the remaining requirements and report through m9r_result."],
+  };
 }

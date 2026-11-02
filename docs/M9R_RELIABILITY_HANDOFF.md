@@ -72,6 +72,8 @@ CLI shim `ENOENT` (5×), multi-window Chrome launch refused (5×). One desktop a
 ## Remaining work, in order
 
 ### Phase 2 — honest results
+Source implementation completed: only structured completion can produce success; plain provider output remains incomplete. Broker startup settles orphaned queued/acknowledged work for configured providers once, preserving remaining work and terminal reasons. New human goals strip the historical room footer; teammate context remains in the provider prompt. No live state migration or installation has been performed. Focused gate: 182 passed, 1 explicitly skipped live-browser test; typecheck passed. Updated compatibility tests to report structured completion and made the Notepad lookup assertion case-insensitive (Windows search semantics).
+
 1. A task is `completed` only when the agent reports completion through `m9r_result` with a completed status. When a
    provider turn ends without that, mark it incomplete/blocked and keep the reason and remaining work. `9a906d88`
    started this (`task-completion-contract.ts`), but its plain-text detector only matches "couldn't

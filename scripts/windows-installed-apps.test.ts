@@ -26,7 +26,7 @@ test("still resolves a packaged app when no legacy App Paths stub exists for it"
 });
 
 test("queries both modern Notepad registration names before falling back to the legacy executable", () => {
-  assert.deepEqual(windowsAppSearchNames("notepad"), ["notepad", "Windows Notepad"]);
+  assert.deepEqual(windowsAppSearchNames("notepad").map((name) => name.toLowerCase()), ["notepad", "windows notepad"]);
 });
 
 test("the discovery script collects App Paths matches without exiting before the packaged-app lookup runs", () => {

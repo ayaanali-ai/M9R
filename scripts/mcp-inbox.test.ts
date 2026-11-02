@@ -161,7 +161,7 @@ test("one task is claimed by one provider session and another session cannot tak
   assert.match(await t.call("m9r_inbox", { token: t.codex }), /shared finding/);
   assert.equal(await t.call("m9r_inbox", { token: second }), "Inbox is empty.");
   await assert.rejects(t.call("m9r_result", { token: second, taskId: "T1", summary: "wrong session" }), /belongs to another session/);
-  assert.match(await t.call("m9r_result", { token: t.codex, taskId: "T1", summary: "right session" }), /Recorded result/);
+  assert.match(await t.call("m9r_result", { token: t.codex, taskId: "T1", summary: "right session", completion: { status: "completed", remainingWork: [] } }), /Recorded result/);
   assert.equal(t.store.getTask("T1")?.resultSummary, "right session");
   t.done();
 });
@@ -283,6 +283,7 @@ test("plain inbox task reaches Codex with its SessionStart identity, scoped git_
     assert.match(await t.call("m9r_git_read", { token, operation: "status", limit: 10 }), /task\.txt/);
     assert.match(await t.call("m9r_read_file", { token, path: "task.txt" }), /plain inbox task evidence/);
 
+    await t.call("m9r_result", { token, taskId: task.id, summary: "I read task.txt; it contains plain inbox task evidence.", completion: { status: "completed", remainingWork: [] } });
     hook("codex", { hook_event_name: "Stop", session_id: codexSession, cwd: project }, "I read task.txt; it contains plain inbox task evidence.");
     assert.equal(t.store.getTask(task.id)?.resultSummary, "I read task.txt; it contains plain inbox task evidence.");
     const returned = hook("claude-code", { hook_event_name: "UserPromptSubmit", session_id: "c1", cwd: project, prompt: "Any update from Codex?" });

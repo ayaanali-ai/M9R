@@ -861,9 +861,14 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     }
   }
 
+  let startupReconciled = false;
   const owner: ManagedProviderOwner = {
     async start() {
       const failures: Array<{ handle: string; error: string }> = [];
+      if (!startupReconciled) {
+        deps.store.reconcileOrphanedOwnerTasks?.(profiles.map((profile) => profile.handle));
+        startupReconciled = true;
+      }
       // A prior broker may have died after claiming a task but before the
       // provider acknowledged it. Fence those claims before any new provider
       // connection is started; never replay them automatically.
