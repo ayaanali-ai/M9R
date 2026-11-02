@@ -236,7 +236,16 @@ export function createTaskDesktopStageService(input: {
 }) {
   const root = input.store.root;
   const bundledHost = join(dirname(process.execPath), "m9r-native-input-host.exe");
-  const stageDeps = { nativeHostPath: existsSync(bundledHost) ? bundledHost : undefined, ...input.stage, root, terminal: true };
+  // A window host like explorer.exe or chrome.exe outlives any one task, so a dead-process
+  // check alone never frees a finished task's claim on it (see assertWindowUnclaimed()).
+  // This mirrors the exact same "is this task still unfinished" check resolveCursorTarget()
+  // already uses to decide whether a task may still receive a delivered agent cursor.
+  const taskActive = (taskId: string): boolean => {
+    const task = input.store.getTask(taskId);
+    return Boolean(task) && task!.resultSummary === undefined && task!.receipt?.state !== "canceled"
+      && task!.lifecycle?.state !== "completed" && task!.lifecycle?.state !== "failed";
+  };
+  const stageDeps = { nativeHostPath: existsSync(bundledHost) ? bundledHost : undefined, taskActive, ...input.stage, root, terminal: true };
   const manager = createWindowsDesktopStageManager(stageDeps);
   const activeTimingTasks = new Map<string, string>();
   const driver = input.driver ?? createCuaStageDriver({
@@ -522,7 +531,7 @@ export function createTaskDesktopStageService(input: {
       if (mode === "background") {
         if (existing) await manager.inspectStage(name);
         else await manager.create(name);
-        assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
+        assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag, taskId });
       } else {
         if (options.bindForeground) {
           if (typeof manager.currentForegroundWindow !== "function") throw new Error("The native stage helper cannot bind the current foreground window.");
@@ -538,7 +547,7 @@ export function createTaskDesktopStageService(input: {
           }
           await manager.adoptCurrentDesktop(name);
           const attached = await manager.attachWindow(name, String(foreground.pid), foreground.windowId);
-          assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
+          assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag, taskId });
           ownedApps.set(name, { taskId, appId: "", pid: foreground.pid, windowId: foreground.windowId, ownsProcess: false });
           if (!attached.window || attached.window.pid !== foreground.pid || attached.window.windowId !== foreground.windowId) {
             throw new Error("Windows did not confirm the current foreground window binding.");
@@ -569,7 +578,7 @@ export function createTaskDesktopStageService(input: {
         // distinguishes gone windows (recover once) from moved/unknown windows
         // (refuse without spawning). Clearing it here destroys that evidence,
         // including for a fresh broker that must recover from disk.
-        assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag });
+        assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag, taskId });
         }
       }
       // Publish the agent's labeled overlay before launch or the first input

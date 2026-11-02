@@ -268,9 +268,15 @@ export function isStopCommand(text: string): boolean {
     .split(/\s+/)
     .filter(Boolean);
   if (words.length === 0) return false;
-  const filler = new Set(["all", "everyone", "everything", "agents", "now", "please", "pls", "ok", "okay", "right", "immediately", "asap", "it", "them"]);
+  const filler = new Set(["all", "everyone", "everything", "agents", "now", "please", "pls", "ok", "okay", "right", "immediately", "asap", "it", "them",
+    // Connective/intensifier words a dictated stop command carries without naming a
+    // different target ("just stop", "I need you to stop", "seriously, stop now").
+    // Safe to treat as filler: they can only help a match when every other word in
+    // the message is "stop"/"halt" already, so a real instruction with any actual
+    // content word ("stop the video") still correctly fails below.
+    "just", "literally", "seriously", "really", "actually", "i", "ive", "need", "want", "you", "to", "said", "told", "gotta", "have", "yeah"]);
   const remaining = words.filter((w) => !filler.has(w));
-  return remaining.length > 0 && remaining.every((w) => w === "stop" || w === "halt" || (w === "kill" && words.includes("all")));
+  return remaining.length > 0 && remaining.every((w) => w === "stop" || w === "stopping" || w === "halt" || (w === "kill" && words.includes("all")));
 }
 
 export type OwnerControl = { kind: "pause" | "resume"; handle?: string };

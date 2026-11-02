@@ -1451,8 +1451,15 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         stageAction = { kind: "type", mode: "replace", ...point, expectedRole: control.role, ...(control.label !== undefined ? { expectedLabel: control.label } : {}),
           text: action.text, view: record.context.view };
       }
-    } else if (action.kind === "scroll" && action.at) {
-      const at = desktopPoint(record, action.at);
+    } else if (action.kind === "scroll" && record.context.kind === "desktop") {
+      // `at` is optional in the public contract, but this route previously required it
+      // anyway and simply refused the action when it was omitted -- the natural first
+      // attempt for "scroll the window" with no specific point in mind. That silent
+      // refusal is what was pushing agents toward manually clicking scrollbar arrows
+      // one at a time instead. Default to the window's center, the same target a human
+      // scrolling "the page" would use, rather than requiring the agent to supply one.
+      const at = action.at ? desktopPoint(record, action.at)
+        : { x: Math.floor(record.context.width / 2), y: Math.floor(record.context.height / 2) };
       stageAction = { kind: "scroll_delta", x: at.x, y: at.y,
         deltaX: action.deltaX, deltaY: action.deltaY, unit: action.unit, view: record.context.view,
         ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };

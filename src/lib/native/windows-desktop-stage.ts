@@ -32,8 +32,11 @@ export interface WindowsStageRecord {
   anchor: { pid: number; windowId: string; processGeneration?: string } | null;
   /** Random identity rotated whenever the registered anchor window changes. */
   roomWindowId: string | null;
-  /** Local-only owner mapping; never included in room coordination events. */
-  agentAssignment?: { handle: string; sessionTag: string };
+  /** Local-only owner mapping; never included in room coordination events.
+   * `taskId` is the task that most recently used this session's stage -- stages are
+   * one per authenticated session (see cursorStageName() in task-desktop-stage.ts), so
+   * this is overwritten on every prepare() call and never scopes identity, only staleness. */
+  agentAssignment?: { handle: string; sessionTag: string; taskId?: string };
   registeredAt: string;
 }
 
@@ -121,6 +124,12 @@ export interface WindowsStageDependencies {
   invokeNative?: (request: Record<string, unknown>) => Promise<NativeStageResponse>;
   /** Whether a process id still exists; injectable for tests. */
   processAlive?: (pid: number) => boolean;
+  /** Whether the task that most recently used a stage is still unfinished. Used only to
+   * decide whether another session may take over an already-claimed window: a window
+   * process like explorer.exe or chrome.exe outlives any one task, so processAlive() alone
+   * never frees a finished task's claim on it. Defaults to always-active (preserves prior
+   * behavior) when the caller has no task store to check against, e.g. in tests. */
+  taskActive?: (taskId: string) => boolean;
 }
 
 function defaultProcessAlive(pid: number): boolean {
@@ -208,14 +217,18 @@ function parseRegistry(raw: string): StageRegistry {
     }
     let agentAssignment: WindowsStageRecord["agentAssignment"];
     if (record.agentAssignment !== undefined) {
-      const value = record.agentAssignment as { handle?: unknown; sessionTag?: unknown } | null;
+      const value = record.agentAssignment as { handle?: unknown; sessionTag?: unknown; taskId?: unknown } | null;
       if (value !== null && (!value || typeof value !== "object" || Array.isArray(value)
-        || Object.keys(value).some((key) => key !== "handle" && key !== "sessionTag")
+        || Object.keys(value).some((key) => key !== "handle" && key !== "sessionTag" && key !== "taskId")
         || typeof value.handle !== "string" || !/^[a-z0-9_-]{1,40}$/.test(value.handle)
-        || typeof value.sessionTag !== "string" || !/^[a-f0-9]{8}$/.test(value.sessionTag))) {
+        || typeof value.sessionTag !== "string" || !/^[a-f0-9]{8}$/.test(value.sessionTag)
+        || (value.taskId !== undefined && (typeof value.taskId !== "string" || value.taskId.length < 1 || value.taskId.length > 100)))) {
         throw new Error("The local Windows stage registry contains an invalid agent assignment; it was left unchanged.");
       }
-      if (value) agentAssignment = { handle: value.handle as string, sessionTag: value.sessionTag as string };
+      if (value) {
+        agentAssignment = { handle: value.handle as string, sessionTag: value.sessionTag as string };
+        if (value.taskId !== undefined) agentAssignment.taskId = value.taskId as string;
+      }
     }
     return {
       name,
@@ -374,6 +387,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   const root = deps.root ?? defaultStoreRoot(homedir(), deps.env ?? process.env);
   const now = deps.now ?? (() => new Date());
   const processAlive = deps.processAlive ?? defaultProcessAlive;
+  const taskActive = deps.taskActive ?? (() => true);
   /** Prune dead owner-preview stages only when the registry is full. */
   function roomFor(registry: { stages: WindowsStageRecord[] }): WindowsStageRecord[] {
     return registry.stages.length >= MAX_STAGES ? withoutStaleOwnerPreviewStages(registry.stages, processAlive) : registry.stages;
@@ -513,7 +527,8 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       // leftover anchor must not permanently lock its window away from every later task.
       const claimed = withoutStaleOwnerPreviewStages(registry.stages, processAlive).find((stage) => stage.name !== name
         && stage.anchor?.pid === info.pid && stage.anchor.windowId === info.windowId
-        && !(savedCoordinationKey && stage.coordinationKey === savedCoordinationKey));
+        && !(savedCoordinationKey && stage.coordinationKey === savedCoordinationKey)
+        && !(stage.agentAssignment?.taskId && !taskActive(stage.agentAssignment.taskId)));
       if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
       if (existing && existing.desktopId !== info.desktopId) {
         throw new Error(`Stage “${name}” already names a different desktop. Forget it first, then register the new desktop.`);
@@ -803,11 +818,12 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return readRegistry(root).stages;
   }
 
-  function assignAgent(nameInput: string, assignment: { handle: string; sessionTag: string } | null): WindowsStageRecord {
+  function assignAgent(nameInput: string, assignment: { handle: string; sessionTag: string; taskId?: string } | null): WindowsStageRecord {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
-    if (assignment && (!/^[a-z0-9_-]{1,40}$/.test(assignment.handle) || !/^[a-f0-9]{8}$/.test(assignment.sessionTag))) {
+    if (assignment && (!/^[a-z0-9_-]{1,40}$/.test(assignment.handle) || !/^[a-f0-9]{8}$/.test(assignment.sessionTag)
+      || (assignment.taskId !== undefined && (assignment.taskId.length < 1 || assignment.taskId.length > 100)))) {
       throw new Error("Invalid local agent-to-stage assignment.");
     }
     const release = acquireRegistryLock(root);
@@ -918,7 +934,14 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     const claimants = withoutStaleOwnerPreviewStages(readRegistry(root).stages, processAlive);
     const claimed = claimants.find((stage) => stage.name !== name
       && stage.anchor?.pid === pid && stage.anchor.windowId === windowId
-      && !(coordinationKey && stage.coordinationKey === coordinationKey));
+      && !(coordinationKey && stage.coordinationKey === coordinationKey)
+      // A window host like explorer.exe or chrome.exe outlives any one task, so the
+      // process never exits between tasks and the staleness check above never fires.
+      // The real signal for "is this still a live hold" is whether the claimant's own
+      // most recent task is still unfinished -- once it finished, the claim is stale
+      // bookkeeping the same way a dead process's claim is, and must not block a
+      // different, later task (even from a different session) from using the window.
+      && !(stage.agentAssignment?.taskId && !taskActive(stage.agentAssignment.taskId)));
     if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
   }
 
