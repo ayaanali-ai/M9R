@@ -244,6 +244,25 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function publicContentCoverage(value: unknown): {
+  scope: "window" | "desktop";
+  visibleViewport: "observed";
+  scrollability: "indicated" | "unknown";
+  offscreenContent: "possible" | "unknown";
+} | undefined {
+  const coverage = recordOf(value);
+  if (!coverage || (coverage.scope !== "window" && coverage.scope !== "desktop")
+    || coverage.visibleViewport !== "observed"
+    || (coverage.scrollability !== "indicated" && coverage.scrollability !== "unknown")
+    || (coverage.offscreenContent !== "possible" && coverage.offscreenContent !== "unknown")) return undefined;
+  return {
+    scope: coverage.scope,
+    visibleViewport: "observed",
+    scrollability: coverage.scrollability,
+    offscreenContent: coverage.offscreenContent,
+  };
+}
+
 function validRect(value: unknown): value is { x: number; y: number; width: number; height: number } {
   const rect = recordOf(value);
   return !!rect && [rect.x, rect.y, rect.width, rect.height].every((part) => typeof part === "number" && Number.isFinite(part))
@@ -958,6 +977,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ...(typeof window.minimized === "boolean" ? { minimized: window.minimized } : {}),
         ...(typeof window.onCurrentSpace === "boolean" ? { onCurrentSpace: window.onCurrentSpace } : {}),
         ...(window.status === "complete" || window.status === "partial" || window.status === "unavailable" ? { status: window.status } : {}),
+        ...(publicContentCoverage(window.coverage) ? { coverage: publicContentCoverage(window.coverage) } : {}),
         elements: windowElements,
       };
     }).filter((value) => value !== undefined) : undefined;
@@ -967,6 +987,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       capturedAt: typeof structure.capturedAt === "string" ? structure.capturedAt : new Date(observedAt).toISOString(),
       ...(typeof structure.appName === "string" ? { appName: structure.appName.slice(0, 120) } : {}),
       ...(typeof structure.windowTitle === "string" ? { windowTitle: structure.windowTitle.slice(0, 240) } : {}),
+      ...(publicContentCoverage(structure.coverage) ? { coverage: publicContentCoverage(structure.coverage) } : {}),
       elements: publicElements,
       ...(publicWindows ? { windows: publicWindows } : {}),
       ...(publicShell?.status === "visual-fallback" ? {
@@ -1599,7 +1620,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   server.registerTool("m9r_computer_observe", {
-    description: "Observe one M9R-managed target and return an opaque target ID, fresh revision, and only the capabilities that route currently advertises. Selected app windows default to a value-redacted UI Automation tree; desktop-wide targets default to a bounded composite of visible windows and controls with the same-capture visual fallback for taskbar, Start, and shell-owned controls. Request representation=visual when pixels are needed. Browser tabs return structured DOM controls; if that route cannot expose a needed capability, explicitly select/restore the browser and observe its exact app-window rather than silently switching routes. Use m9r_stage_app before app-window; this tool never launches an app. Re-observe after visible state changes; raw HWNDs and browser-process IDs are never exposed. Internal route and latency diagnostics stay local to M9R and are never returned as provider task content.",
+    description: "Observe one M9R-managed target and return an opaque target ID, fresh revision, and only the capabilities that route currently advertises. Selected app windows default to a value-redacted UI Automation tree; desktop-wide targets default to a bounded composite of visible windows and controls with the same-capture visual fallback for taskbar, Start, and shell-owned controls. For desktop structure, status reports UIA tree completeness only; it does not prove offscreen page or document content is absent. The structure coverage field reports the observed viewport and generic scrollability evidence; unknown is not a claim that no more content exists. Re-observe and scroll when the task requires content beyond the observed viewport. Request representation=visual when pixels are needed. Browser tabs return structured DOM controls; if that route cannot expose a needed capability, explicitly select/restore the browser and observe its exact app-window rather than silently switching routes. Use m9r_stage_app before app-window; this tool never launches an app. Re-observe after visible state changes; raw HWNDs and browser-process IDs are never exposed. Internal route and latency diagnostics stay local to M9R and are never returned as provider task content.",
     inputSchema: inputSchemas.observe,
     outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, withComputerUseTelemetry<ComputerUseObserveArgs>(async ({ token, target, taskId, mode, representation, tab, bindForeground }, timing) => {

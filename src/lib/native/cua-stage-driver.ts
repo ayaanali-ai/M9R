@@ -204,6 +204,8 @@ export interface CuaStageCapture {
  */
 export interface CuaStageStructure {
   status: "complete" | "partial" | "unavailable";
+  /** Current viewport was observed; a complete UIA walk does not prove there is no offscreen content. */
+  coverage: CuaContentCoverage;
   capturedAt: string;
   appName?: string;
   windowTitle?: string;
@@ -253,12 +255,22 @@ export interface CuaDesktopStructureWindow {
   minimized?: boolean;
   onCurrentSpace?: boolean;
   status: "complete" | "partial" | "unavailable";
+  coverage: CuaContentCoverage;
   elements: CuaDesktopStructureElement[];
+}
+
+/** Privacy-safe signal about visible and potentially scrollable content. */
+export interface CuaContentCoverage {
+  scope: "window" | "desktop";
+  visibleViewport: "observed";
+  scrollability: "indicated" | "unknown";
+  offscreenContent: "possible" | "unknown";
 }
 
 export interface CuaDesktopStructure {
   scope: "desktop";
   status: "complete" | "partial" | "unavailable";
+  coverage: CuaContentCoverage;
   capturedAt: string;
   windows: CuaDesktopStructureWindow[];
   elements: CuaDesktopStructureElement[];
@@ -408,6 +420,31 @@ interface DesktopInputTarget {
 
 type CuaWindowInfo = Awaited<ReturnType<CuaDriverLike["listWindows"]>>["windows"][number];
 type CuaWindowElement = NonNullable<Awaited<ReturnType<CuaDriverLike["getWindowState"]>>["elements"]>[number];
+
+function contentCoverage(scope: CuaContentCoverage["scope"], elements?: readonly CuaWindowElement[]): CuaContentCoverage {
+  const scrollabilityIndicated = elements?.some((element) => {
+    const role = typeof element.role === "string" ? element.role.toLowerCase().replace(/[\s_-]+/g, "") : "";
+    const roleIndicatesScrolling = /^(?:scrollbar|scrollarea|scrollview|scrollcontainer)$/.test(role);
+    const actionsIndicateScrolling = element.actions?.some((action) => /^(?:scroll|scrollby|scrollto|scrollintoview)$/i.test(action)) === true;
+    return roleIndicatesScrolling || actionsIndicateScrolling;
+  }) === true;
+  return {
+    scope,
+    visibleViewport: "observed",
+    scrollability: scrollabilityIndicated ? "indicated" : "unknown",
+    offscreenContent: scrollabilityIndicated ? "possible" : "unknown",
+  };
+}
+
+function aggregateDesktopCoverage(windows: readonly CuaDesktopStructureWindow[]): CuaContentCoverage {
+  const indicated = windows.some((window) => window.coverage.scrollability === "indicated");
+  return {
+    scope: "desktop",
+    visibleViewport: "observed",
+    scrollability: indicated ? "indicated" : "unknown",
+    offscreenContent: indicated ? "possible" : "unknown",
+  };
+}
 
 function elementAtScreenPoint(elements: readonly CuaWindowElement[], x: number, y: number,
   supports?: (element: CuaWindowElement) => boolean) {
@@ -1895,6 +1932,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         const status = !accessibilityAvailable ? "unavailable" : !hasTree || state.truncated === true || state.elementsComplete === false || state.degraded === true || fallback.ownedPopups.length > 0 ? "partial" : "complete";
         return {
           status,
+          coverage: contentCoverage("window", accessibilityAvailable ? state.elements : undefined),
           capturedAt: now().toISOString(),
           ...(typeof state.appName === "string" ? { appName: state.appName.slice(0, 120) } : {}),
           ...(typeof state.windowTitle === "string" ? { windowTitle: state.windowTitle.slice(0, 240) } : {}),
@@ -2095,6 +2133,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         return {
           scope: "desktop" as const,
           status: "unavailable" as const,
+          coverage: aggregateDesktopCoverage([]),
           capturedAt: capture.capturedAt,
           windows: [],
           elements: [],
@@ -2230,9 +2269,9 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           }
           const complete = Array.isArray(state.elements) && state.truncated !== true && state.elementsComplete !== false
             && state.degraded !== true;
-          windows.push({ ...baseWindow, status: complete ? "complete" : "partial", elements: windowElements });
+          windows.push({ ...baseWindow, status: complete ? "complete" : "partial", coverage: contentCoverage("window", state.elements), elements: windowElements });
         } catch {
-          windows.push({ ...baseWindow, status: "unavailable", elements: [] });
+          windows.push({ ...baseWindow, status: "unavailable", coverage: contentCoverage("window"), elements: [] });
         }
         if (elements.length >= MAX_DESKTOP_STRUCTURE_ELEMENTS) break;
       }
@@ -2247,6 +2286,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         scope: "desktop" as const,
         status: shell.status === "complete" && windows.every((window) => window.status === "complete") && !capped
           ? "complete" as const : "partial" as const,
+        coverage: aggregateDesktopCoverage(windows),
         capturedAt: capture.capturedAt,
         windows,
         elements,

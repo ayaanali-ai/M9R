@@ -137,6 +137,61 @@ test("app captures expose bounded accessibility targets in screenshot coordinate
   assert.deepEqual((await driver.capture("stage")).controls, [{ label: "Search field", role: "Edit", rect: { x: 10, y: 10, width: 100, height: 20 } }]);
 }));
 
+test("structure completeness does not imply offscreen content is absent", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const state = { pid: 4321, windowId: BigInt(windowId), appName: "File Explorer", windowTitle: "Documents",
+    screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }],
+    elementsComplete: true,
+    elements: [
+      { elementIndex: BigInt(0), elementToken: "snapshot:scrollbar", role: "ScrollBar", depth: 1, enabled: true,
+        min: 0, max: 100, frame: { x: 480, y: 55, w: 12, h: 180 } },
+      { elementIndex: BigInt(1), elementToken: "snapshot:slider", role: "Slider", depth: 1, enabled: true,
+        min: 0, max: 100, frame: { x: 200, y: 80, w: 100, h: 20 } },
+    ],
+  };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ state, calls: [] }) as never });
+  const structure = await driver.readStructure("stage");
+  assert.equal(structure.status, "complete", "the accessibility walk itself is complete");
+  assert.deepEqual(structure.coverage, { scope: "window", visibleViewport: "observed", scrollability: "indicated", offscreenContent: "possible" });
+  assert.equal(JSON.stringify(structure).includes("\"max\""), false, "raw range values are not exposed to the provider");
+  await driver.shutdown();
+}));
+
+test("a complete structure without scroll evidence reports unknown, not no offscreen content", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true,
+    screenshotWidth: 200, screenshotHeight: 100, windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }], elementsComplete: true,
+    elements: [{ elementIndex: BigInt(0), elementToken: "snapshot:button", role: "Button", depth: 1, enabled: true, actions: ["invoke"] }],
+  };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ state, calls: [] }) as never });
+  const structure = await driver.readStructure("stage");
+  assert.equal(structure.status, "complete");
+  assert.deepEqual(structure.coverage, { scope: "window", visibleViewport: "observed", scrollability: "unknown", offscreenContent: "unknown" });
+  await driver.shutdown();
+}));
+
+test("desktop coverage aggregates generic scroll evidence per visible window", async () => withRoot(async (root) => {
+  await registerOwnerPreview(root);
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls: [],
+    windows: [{ pid: 4321, windowId: BigInt(windowId), appName: "File Explorer", title: "Documents",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 }, isOnScreen: true, minimized: false, onCurrentSpace: true, zIndex: BigInt(1) }],
+    state: { pid: 4321, windowId: BigInt(windowId), appName: "File Explorer", windowTitle: "Documents",
+      screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+      windowBounds: { x: 0, y: 0, width: 1920, height: 1080 }, elementsComplete: true,
+      elements: [{ elementIndex: BigInt(0), elementToken: "snapshot:scrollbar", role: "ScrollBar", depth: 1, enabled: true,
+        min: 0, max: 100, frame: { x: 1900, y: 0, w: 20, h: 100 } }],
+      images: [{ mimeType: "image/png", dataBase64: imageData }] },
+  }) as never });
+  const structure = await driver.readDesktopStructure("preview", identity);
+  assert.deepEqual(structure.coverage, { scope: "desktop", visibleViewport: "observed", scrollability: "indicated", offscreenContent: "possible" });
+  assert.deepEqual(structure.windows[0]?.coverage, { scope: "window", visibleViewport: "observed", scrollability: "indicated", offscreenContent: "possible" });
+  await driver.shutdown();
+}));
+
 test("accessibility failure retains the same exact-window screenshot route", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];

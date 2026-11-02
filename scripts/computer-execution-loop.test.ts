@@ -23,6 +23,7 @@ function fixture() {
   let batchFailure: "none" | "partial" = "none";
   let url = "https://fixture.test/";
   let unlabeled = false;
+  let structureCoverage: Record<string, unknown> | undefined;
   let activeTaskId = "T1";
   let clockMs: number | undefined;
   const workRequests: unknown[] = [];
@@ -45,6 +46,7 @@ function fixture() {
       const action = input as { kind: string };
       calls.push({ kind: action.kind, operationId });
       if (action.kind === "read_structure") return { ok: true, result: { status: unlabeled ? "complete" : "partial", capturedAt: new Date().toISOString(),
+        ...(structureCoverage ? { coverage: structureCoverage } : {}),
         elements: [{ ref: "uia:1", label: unlabeled ? "" : "Action", role: "Button", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }], fallbackCapture: capture() } };
       if (failure === "before") return { ok: false, error: "Owner pointer is active", dispatchState: "not-dispatched", gateCode: "foreground-lease" };
       if (failure === "uncertain") throw new Error("Response lost after input");
@@ -61,6 +63,7 @@ function fixture() {
       resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }), enableIsolatedBrowser: true,
       now: () => new Date(clockMs ?? Date.now()) });
   return { calls, workRequests, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
+    setCoverage: (value: Record<string, unknown>) => { structureCoverage = value; },
     setBatchFailure: (value: typeof batchFailure) => { batchFailure = value; },
     setNow: (value: number) => { clockMs = value; },
     call: async (name: string, input: Record<string, unknown>) => (await handlers.get(name)!(input)).structuredContent,
@@ -137,6 +140,18 @@ test("unlabeled controls qualify for the same-capture visual fallback even when 
     assert.equal(observed.target.capabilities.includes("input.click.point"), true);
     assert.ok((observed.observation as unknown as { capture: unknown }).capture);
     assert.equal(f.calls.length, 1, "the accessibility capture already contained the needed frame");
+  } finally { f.close(); }
+});
+
+test("desktop observation exposes only the bounded scroll-coverage contract", async () => {
+  const f = fixture(); try {
+    f.setCoverage({ scope: "window", visibleViewport: "observed", scrollability: "indicated", offscreenContent: "possible",
+      min: 0, max: 99, currentValue: "must-not-leak" });
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    assert.deepEqual((observed.observation as unknown as { structure: { coverage: unknown } }).structure.coverage,
+      { scope: "window", visibleViewport: "observed", scrollability: "indicated", offscreenContent: "possible" });
+    assert.equal(JSON.stringify(observed.observation).includes("must-not-leak"), false);
+    assert.equal(JSON.stringify(observed.observation).includes("\"max\""), false);
   } finally { f.close(); }
 });
 
