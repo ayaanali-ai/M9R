@@ -8,6 +8,7 @@ import { renameStateFile } from "../src/lib/native/atomic-file";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
 import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
+import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
 import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageWindowMatchesApp, type StageAppLaunchSpec } from "../src/lib/native/task-stage-apps";
 import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT, discoverInstalledWindowsApp } from "../src/lib/native/windows-installed-apps";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
@@ -398,7 +399,8 @@ test("a money-like stage click waits for the owner and never executes on deny", 
   const f = moneyFixture("Pay $49 now", false);
   try {
     await f.service.prepare(f.identity.token, f.task.id, "background");
-    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background"), /did not approve/);
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background"),
+      (error: unknown) => error instanceof DesktopInputNotDispatchedError && /did not approve/.test(error.message));
     assert.equal(f.seen.length, 1);
     assert.equal(f.seen[0].agent, "codex");
     assert.equal(f.seen[0].targetLabel, "Pay $49 now");

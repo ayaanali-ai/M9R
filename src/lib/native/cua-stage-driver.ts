@@ -1737,6 +1737,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     readStructure: () => Promise<CuaStageStructure>;
     elementAt: (x: number, y: number) => Promise<string | undefined>;
     elementAtPoint: (x: number, y: number, action?: "click" | "set_value") => Promise<CuaWindowElement | undefined>;
+    observedElementByToken: (token: string, expected?: { role?: string; label?: string }) => CuaWindowElement | undefined;
     elementByToken: (token: string, expected?: { role?: string; label?: string }) => Promise<{ element: CuaWindowElement; frame: CuaStageWindowFrame } | undefined>;
     captureTarget: (x: number, y: number) => Promise<CuaStageTargetDescription | undefined>;
   }) => Promise<T>, cursorIdentity?: CuaAgentCursorIdentity): Promise<T> {
@@ -1964,6 +1965,12 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         return { element, frame: { ...image, ...(state.windowBounds ? { windowBounds: { x: state.windowBounds.x, y: state.windowBounds.y, width: state.windowBounds.width, height: state.windowBounds.height } } : {}) } };
       };
       const elementAt = async (x: number, y: number) => (await hitTarget(x, y))?.elementToken;
+      const observedElementByToken = (token: string, expected?: { role?: string; label?: string }) => {
+        const observed = observedElements.get(observationKey)?.get(token);
+        if (!observed || (expected?.role !== undefined && observed.role !== expected.role)
+          || (expected?.label !== undefined && observed.label?.replace(/[\r\n\t]+/g, " ").slice(0, 160) !== expected.label)) return undefined;
+        return observed;
+      };
       const describeAt = async (x: number, y: number): Promise<CuaStageTargetDescription | undefined> => {
         const hit = await hitTarget(x, y);
         if (!hit) return undefined;
@@ -1974,7 +1981,8 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         if (frame && frame.w > 0 && frame.h > 0) description.rect = { x: frame.x, y: frame.y, width: frame.w, height: frame.h };
         return description;
       };
-      return await run({ driver, sdk, session, pid, windowId, capture, readStructure, captureTarget: describeAt, elementAt, elementAtPoint: hitTarget, elementByToken });
+      return await run({ driver, sdk, session, pid, windowId, capture, readStructure, captureTarget: describeAt, elementAt, elementAtPoint: hitTarget,
+        observedElementByToken, elementByToken });
     } catch (error) {
       if (cursorIdentity) await hideAgentCursor(driver, session);
       // A genuine connection failure here means the cached connection (shared by
@@ -2045,13 +2053,17 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
    * a payment-shaped control went through with no owner approval whatsoever.
    */
   async function describeElementTarget(name: string, ref: string, expected: { role?: string; label?: string }, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageTargetDescription | undefined> {
-    return withRegisteredWindow(name, async ({ elementByToken }) => {
-      const selected = await elementByToken(ref, expected);
-      if (!selected) return undefined;
+    return withRegisteredWindow(name, async ({ observedElementByToken }) => {
+      // The money gate is deciding whether this previously observed control
+      // needs owner review. Its semantic label is already in the ref's
+      // observation cache; rereading UIA here duplicated the live resolution
+      // the click path performs immediately before dispatch.
+      const element = observedElementByToken(ref, expected);
+      if (!element) return undefined;
       const description: CuaStageTargetDescription = {};
-      if (typeof selected.element.label === "string" && selected.element.label.trim()) description.label = selected.element.label.replace(/[\r\n\t]+/g, " ").slice(0, 160);
-      if (typeof selected.element.role === "string" && selected.element.role.trim()) description.role = selected.element.role.slice(0, 40);
-      const rect = selected.element.frame;
+      if (typeof element.label === "string" && element.label.trim()) description.label = element.label.replace(/[\r\n\t]+/g, " ").slice(0, 160);
+      if (typeof element.role === "string" && element.role.trim()) description.role = element.role.slice(0, 40);
+      const rect = element.frame;
       if (rect && rect.w > 0 && rect.h > 0) description.rect = { x: rect.x, y: rect.y, width: rect.w, height: rect.h };
       return description;
     }, cursorIdentity);

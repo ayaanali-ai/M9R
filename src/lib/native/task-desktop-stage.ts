@@ -937,7 +937,7 @@ export function createTaskDesktopStageService(input: {
       // instead of a proof that is lost in flight. Denial is retryable: it simply asks again.
       timeoutMs: 55_000,
     });
-    if (!approved) throw new Error(`The owner did not approve clicking ${target}; the action was not sent. Ask them to approve it in the pill, then try again.`);
+    if (!approved) throw new DesktopInputNotDispatchedError(`The owner did not approve clicking ${target}; the action was not sent. Ask them to approve it in the pill, then try again.`);
   }
 
   async function launch(token: string, taskId: string, appId: string, requestedMode?: TaskStageMode, operationId?: string, options?: { skipQueue?: boolean }): Promise<StageLaunchResult> {

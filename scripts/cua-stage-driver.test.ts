@@ -21,12 +21,22 @@ test("raw observed refs survive token-prefix rotation but refuse changed control
     windowBounds: { x: 100, y: 50, width: 400, height: 200 }, elements: [element], images: [{mimeType:"image/png", dataBase64:imageData}] };
   const driver = createCuaStageDriver({stage:stageDependencies(root),loadSdk:async()=>makeSdk({calls,state}) as never});
   const snapshot = await driver.readStructure("stage");
+  const readsAfterObservation = calls.filter(call => call.method === "getWindowState").length;
   element.elementToken = "walk2:0";
   assert.equal((await driver.describeElementTarget("stage", snapshot.elements[0]!.ref, {}))?.label, "Search");
+  assert.equal(calls.filter(call => call.method === "getWindowState").length, readsAfterObservation,
+    "the money gate reuses the label from the observation instead of rereading UIA");
   element.label = "Pay now";
-  assert.equal(await driver.describeElementTarget("stage", snapshot.elements[0]!.ref, {}), undefined);
+  assert.equal((await driver.describeElementTarget("stage", snapshot.elements[0]!.ref, {}))?.label, "Search",
+    "the money gate describes the exact last-observed control, not an unrequested newer screen read");
+  await assert.rejects(() => driver.clickElement("stage", snapshot.elements[0]!.ref, undefined,
+    { expectedRole: "Button", expectedLabel: "Search" }), (error: unknown) => error instanceof DesktopInputNotDispatchedError,
+    "the actual click still revalidates the live control before dispatch");
   element.label = "Search"; element.frame.x += 100;
-  assert.equal(await driver.describeElementTarget("stage", snapshot.elements[0]!.ref, {}), undefined);
+  assert.equal((await driver.describeElementTarget("stage", snapshot.elements[0]!.ref, {}))?.label, "Search");
+  await assert.rejects(() => driver.clickElement("stage", snapshot.elements[0]!.ref, undefined,
+    { expectedRole: "Button", expectedLabel: "Search" }), (error: unknown) => error instanceof DesktopInputNotDispatchedError,
+    "a changed control frame is refused before dispatch");
   assert.equal(calls.some(call=>call.method==="callTool"),false,"resolution does not dispatch input");
   await driver.shutdown();
 }));
