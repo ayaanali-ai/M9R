@@ -4,7 +4,7 @@ import { fromFeed, fromUiState, providerOf } from "../pill/src/shells/convert";
 import { createExtensionTransport } from "../pill/src/shells/extension";
 import { createDesktopTransport } from "../pill/src/shells/desktop";
 import { createFrameHost } from "../pill/src/shells/frame-host";
-import { State } from "../pill/src/core/state";
+import { DEFAULT_SETTINGS, State } from "../pill/src/core/state";
 
 test("provider detection covers handles, provider ids and unknown agents", () => {
   assert.equal(providerOf("claude"), "claude");
@@ -282,7 +282,7 @@ test("the desktop transport persists settings through the overlay commands and r
     if (command === "load_settings") return { soundEnabled: stored.soundEnabled ?? null, soundVolume: stored.soundVolume ?? null, autoCloseInterval: stored.autoCloseInterval ?? null };
     return "";
   });
-  transport.saveSettings!({ soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 });
+  transport.saveSettings!({ ...DEFAULT_SETTINGS, soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 });
   await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual(calls, [["save_settings", { soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 }]]);
   const loaded = await transport.loadSettings!();
