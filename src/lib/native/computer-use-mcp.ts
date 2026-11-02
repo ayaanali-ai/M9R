@@ -1950,7 +1950,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       postcondition: { kind: "url-equals", url } }) }, timing);
   }, monotonicNow));
 
-  server.registerTool("m9r_browser_tabs", {
+  if (deps.enableIsolatedBrowser) server.registerTool("m9r_browser_tabs", {
     description: "List M9R's managed browser tabs without changing tab selection or taking foreground focus.",
     inputSchema: { ...(deps.authField ?? LEGACY_TOKEN_FIELD_FALLBACK) }, outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, async ({ token }) => {

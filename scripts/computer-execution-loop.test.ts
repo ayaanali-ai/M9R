@@ -67,7 +67,7 @@ test("m9r_browser_open is not registered unless the owner explicitly opts into t
     registerComputerUseTools({ registerTool(name: string, _descriptor: unknown, handler: Handler) { handlers.set(name, handler); } } as never,
       { store, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => "T1" });
     assert.equal(handlers.has("m9r_browser_open"), false, "the agent must not be able to see or call the isolated-browser tool by default");
-    assert.equal(handlers.has("m9r_browser_tabs"), true, "the read-only tab listing stays available regardless");
+    assert.equal(handlers.has("m9r_browser_tabs"), false, "listing isolated-browser tabs has nothing to report when the isolated browser is off, so it is gated the same way");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

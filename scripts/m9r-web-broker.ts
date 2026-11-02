@@ -2,6 +2,12 @@
  * Starts the local M9R owner broker. The desktop runtime uses the authenticated
  * owner pipe and native desktop/browser routes; the legacy browser-extension
  * transport is intentionally not enabled by this production entry point.
+ *
+ * The isolated agent-chrome CDP daemon follows the same rule: the owner has
+ * explicitly refused it as a default route for any user, so it is built only
+ * when M9R_ENABLE_ISOLATED_BROWSER is set. Without it, Chrome automation goes
+ * through the native desktop/UIA route (nativeDesktopRoute) against the
+ * owner's own signed-in window, never a separate profile.
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -116,7 +122,9 @@ async function main(): Promise<void> {
   // is the only place a shared lease can arbitrate same-target contention.
   const mutationFence = createMultiplayerDispatchFence({ store });
   const taskStages = createTaskDesktopStageService({ store, mutationFence, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
-  const browserTransport = createBrowserDaemon(() => launchAgentChrome({ root: join(root, "agent-chrome"), pageActionsSource: agentChromePageSource() }));
+  const browserTransport = process.env.M9R_ENABLE_ISOLATED_BROWSER === "1"
+    ? createBrowserDaemon(() => launchAgentChrome({ root: join(root, "agent-chrome"), pageActionsSource: agentChromePageSource() }))
+    : undefined;
   const broker = await startWebBroker({ key, port, taskStages, nativeDesktopRoute: true, browserTransport, agentMcpStore: store, mutationFence, multiplayerRuntime: multiplayer,
     onAgentTaskCreated: (token, taskId) => { void taskStages.primeCursor(token, taskId); },
     deliverOwnerTask: (taskId) => sessionOwner.current
