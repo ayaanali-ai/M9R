@@ -20,6 +20,7 @@ function fixture() {
   const handlers = new Map<string, Handler>();
   const calls: { kind: string; operationId?: string }[] = [];
   let failure: "none" | "before" | "uncertain" = "none";
+  let batchFailure: "none" | "partial" = "none";
   let url = "https://fixture.test/";
   let unlabeled = false;
   let activeTaskId = "T1";
@@ -47,6 +48,11 @@ function fixture() {
         elements: [{ ref: "uia:1", label: unlabeled ? "" : "Action", role: "Button", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }], fallbackCapture: capture() } };
       if (failure === "before") return { ok: false, error: "Owner pointer is active", dispatchState: "not-dispatched", gateCode: "foreground-lease" };
       if (failure === "uncertain") throw new Error("Response lost after input");
+      if (action.kind === "type_then_enter") return { ok: true, result: { capture: capture(), outcome: { status: "confirmed" },
+        batchOutcome: batchFailure === "partial"
+          ? { status: "partial", completedSteps: 1, totalSteps: 2, stoppedAt: "enter", message: "Owner interaction paused before Enter; no key was sent." }
+          : { status: "complete", completedSteps: 2, totalSteps: 2 },
+        operationReceipt: { status: "applied" }, actionExecuted: true } };
       return { ok: true, result: { capture: capture(), outcome: { status: "confirmed" }, operationReceipt: { status: "applied" }, actionExecuted: true } };
     },
   };
@@ -55,6 +61,7 @@ function fixture() {
       resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }), enableIsolatedBrowser: true,
       now: () => new Date(clockMs ?? Date.now()) });
   return { calls, workRequests, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
+    setBatchFailure: (value: typeof batchFailure) => { batchFailure = value; },
     setNow: (value: number) => { clockMs = value; },
     call: async (name: string, input: Record<string, unknown>) => (await handlers.get(name)!(input)).structuredContent,
     callRaw: async (name: string, input: Record<string, unknown>) => handlers.get(name)!(input),
@@ -208,5 +215,40 @@ test("observation refs expire on a new revision, not on wall-clock age", async (
     const result = await f.call("m9r_computer_action", { action: click(observed.target, "aged-but-current-ref", observed.observation.controls[0]!.ref) });
     assert.equal(result.result.dispatchStatus, "dispatched");
     assert.equal(f.calls.filter((call) => call.kind === "click_element").length, 1, "the still-current ref is dispatched instead of rejected and refreshed");
+  } finally { f.close(); }
+});
+
+test("desktop text-then-Enter batches require a selected exact app target and never replay or bypass no-submit intent", async () => {
+  const f = fixture(); try {
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    const selected = await f.call("m9r_computer_action", { action: click(observed.target, "batch-select", observed.observation.controls[0]!.ref) });
+    const target = selected.target;
+    const action = { kind: "text_then_enter", operationId: "text-enter-once", targetId: target.targetId, targetRevision: target.revision, text: "bounded query" };
+    const completed = await f.call("m9r_computer_action", { action });
+    assert.equal(completed.result.dispatchStatus, "dispatched");
+    assert.deepEqual(completed.result.batchOutcome, { status: "complete", completedSteps: 2, totalSteps: 2 });
+    await f.call("m9r_computer_action", { action });
+    assert.equal(f.calls.filter((call) => call.kind === "type_then_enter").length, 1, "same operation receipt prevents replay");
+
+    const after = await f.call("m9r_computer_observe", { target: "app-window" });
+    const selectedAgain = await f.call("m9r_computer_action", { action: click(after.target, "batch-select-no-submit", after.observation.controls[0]!.ref) });
+    const noSubmitAction = { kind: "text_then_enter", operationId: "text-enter-forbidden", targetId: selectedAgain.target.targetId,
+      targetRevision: selectedAgain.target.revision, text: "must stay local", intent: { mode: "prepare", allowAdvance: false, allowSubmit: false } };
+    const beforeForbidden = f.calls.filter((call) => call.kind === "type_then_enter").length;
+    const refused = await f.call("m9r_computer_action", { action: noSubmitAction });
+    assert.equal(refused.result.dispatchStatus, "not-dispatched");
+    assert.match(refused.result.error?.message ?? "", /forbids submit-like Enter/);
+    assert.equal(f.calls.filter((call) => call.kind === "type_then_enter").length, beforeForbidden, "no-submit blocks both batch steps before text dispatch");
+
+    const fresh = await f.call("m9r_computer_observe", { target: "app-window" });
+    const selectedPartial = await f.call("m9r_computer_action", { action: click(fresh.target, "batch-select-partial", fresh.observation.controls[0]!.ref) });
+    const partialAction = { kind: "text_then_enter", operationId: "text-enter-partial", targetId: selectedPartial.target.targetId,
+      targetRevision: selectedPartial.target.revision, text: "already inserted" };
+    f.setBatchFailure("partial");
+    const partial = await f.call("m9r_computer_action", { action: partialAction });
+    assert.equal(partial.result.dispatchStatus, "dispatched", "the text step was delivered");
+    assert.deepEqual(partial.result.batchOutcome, { status: "partial", completedSteps: 1, totalSteps: 2,
+      stoppedAt: "enter", message: "Owner interaction paused before Enter; no key was sent." });
+    assert.equal(partial.result.error?.retry, "never", "the completed text step must not be replayed");
   } finally { f.close(); }
 });

@@ -211,6 +211,14 @@ export const computerUseActionSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     ...actionEnvelope,
+    kind: z.literal("text_then_enter"),
+    /** A bounded two-step desktop batch: insert into the confirmed caret, then press Enter. */
+    text: z.string().min(1).max(500)
+      .regex(/^[^\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+$/, "Text contains unsupported control characters."),
+    confirmFocusForeground: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    ...actionEnvelope,
     kind: z.literal("key"),
     key: z.string().min(1).max(32).regex(/^[\w-]+$/),
     modifiers: z.array(z.enum(["Control", "Alt", "Shift", "Meta"])).max(3)
@@ -296,6 +304,20 @@ export const computerUseResultSchema = z.object({
     message: z.string().min(1).max(2_000),
     retry: z.enum(["never", "same-operation-id", "refresh-target", "new-operation-id"]),
   }).strict().optional(),
+  batchOutcome: z.object({
+    status: z.enum(["complete", "partial"]),
+    completedSteps: z.number().int().min(0).max(2),
+    totalSteps: z.literal(2),
+    stoppedAt: z.literal("enter").optional(),
+    message: z.string().min(1).max(500).optional(),
+  }).strict().superRefine((outcome, context) => {
+    if (outcome.status === "complete" && (outcome.completedSteps !== 2 || outcome.stoppedAt !== undefined || outcome.message !== undefined)) {
+      context.addIssue({ code: "custom", path: ["completedSteps"], message: "A complete batch must report both steps and no failure details." });
+    }
+    if (outcome.status === "partial" && (outcome.completedSteps !== 1 || outcome.stoppedAt !== "enter" || !outcome.message)) {
+      context.addIssue({ code: "custom", path: ["completedSteps"], message: "A partial text/Enter batch must report text delivered and Enter stopped with a reason." });
+    }
+  }).optional(),
 }).strict().superRefine((result, context) => {
   if (["observed", "verified", "mismatch"].includes(result.effectStatus) && !result.observation) {
     context.addIssue({ code: "custom", path: ["observation"], message: "Observed effect status requires fresh observation evidence." });
@@ -350,6 +372,8 @@ export function computerUseActionRequirements(action: ComputerUseAction): Comput
       return { capabilities, match: "all" };
     }
     case "text": return { capabilities: [action.mode === "insert" ? "input.text.insert" : "input.text.replace",
+      ...(action.confirmFocusForeground ? ["input.shared-os" as const] : [])], match: "all" };
+    case "text_then_enter": return { capabilities: ["input.text.insert", "input.key",
       ...(action.confirmFocusForeground ? ["input.shared-os" as const] : [])], match: "all" };
     case "key": return { capabilities: ["input.key", ...(action.confirmFocusForeground ? ["input.shared-os" as const] : [])], match: "all" };
     case "select_text": return { capabilities: [action.selection.kind === "all" ? "input.select-text.all" : "input.select-text.text"], match: "all" };

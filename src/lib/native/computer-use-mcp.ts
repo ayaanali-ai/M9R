@@ -1139,6 +1139,9 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (!intent.allowSubmit && action.kind === "key" && action.key.toLowerCase() === "enter") {
         return "The current intent forbids submit-like Enter input; no key was sent.";
       }
+      if (!intent.allowSubmit && action.kind === "text_then_enter") {
+        return "The current intent forbids submit-like Enter input; neither the text nor the key was sent.";
+      }
     }
     if (action.kind === "focus") {
       return record.context.kind === "desktop" && record.context.view === "app"
@@ -1196,6 +1199,14 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       return control?.canReplaceValue && Boolean(control.role?.trim()) && Boolean(control.stageRef || control.rect)
         ? undefined
         : "The referenced desktop control does not advertise an accessible whole-value replacement action.";
+    }
+    if (action.kind === "text_then_enter") {
+      if (record.context.kind !== "desktop" || record.context.view !== "app") {
+        return "The short text/Enter batch is available only on one exact desktop app window; no input was sent.";
+      }
+      return record.context.inputSelectionConfirmed
+        ? undefined
+        : "The short text/Enter batch requires a confirmed input selection on this exact app window; no input was sent.";
     }
     if (action.kind === "select_text") {
       if (record.context.kind !== "browser" || action.locator.kind !== "element" || action.selection.kind !== "text") {
@@ -1406,6 +1417,9 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
     } else if (action.kind === "text" && action.mode === "insert") {
       stageAction = { kind: "type", mode: "insert", text: action.text, view: record.context.view,
+        ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
+    } else if (action.kind === "text_then_enter") {
+      stageAction = { kind: "type_then_enter", text: action.text, view: "app",
         ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
     } else if (action.kind === "text" && action.mode === "replace" && action.locator?.kind === "element") {
       const control = record.context.controls.get(action.locator.ref)!;
@@ -1810,6 +1824,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       const responseMutationRevision = mutationRevisionOf(resultObject?.mutationRevision);
       if (responseMutationRevision !== undefined) record.mutationRevision = responseMutationRevision;
       const outcome = recordOf(resultObject?.outcome);
+      const batchOutcomeRecord = recordOf(resultObject?.batchOutcome);
       const nativePostcondition = recordOf(resultObject?.postcondition);
       const targetClosed = response.ok && nativePostcondition?.kind === "window-closed" && nativePostcondition.verified === true
         && typeof nativePostcondition.observedAt === "string" && Number.isFinite(Date.parse(nativePostcondition.observedAt))
@@ -1821,7 +1836,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       const inputSelectionConfirmed = action.kind === "click"
         ? response.ok && (outcome?.status === "confirmed"
           || (action.confirmFocusForeground === true && outcome?.status !== "suspected-noop"))
-        : (action.kind === "text" && action.mode === "insert" || action.kind === "key")
+        : (action.kind === "text" && action.mode === "insert" || action.kind === "key" || action.kind === "text_then_enter")
           ? response.ok && record.context.inputSelectionConfirmed
           : false;
       let updated: { record: TargetRecord; observation: Record<string, unknown>; image?: ImageBlock } | undefined;
@@ -1859,7 +1874,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         : targetClosed && !action.postcondition ? "verified"
           : postconditionStatus ?? (dispatchStatus === "dispatched" && updated ? "observed" : "unknown");
       const notDispatchedRetry = preDispatchRetry(response.gateCode ?? response.code ?? "desktop-action-failed");
-      const resultError = !response.ok
+      const partialBatch = batchOutcomeRecord?.status === "partial";
+      const resultError = partialBatch
+        ? { code: "input-batch-partial", message: typeof batchOutcomeRecord.message === "string"
+            ? batchOutcomeRecord.message.slice(0, 2_000)
+            : "Text was entered, but Enter was not sent. Inspect the current field before continuing.", retry: "never" as const }
+        : !response.ok
         ? { code: response.gateCode ?? response.code ?? "desktop-action-failed", message: (response.error ?? "The desktop broker refused the action.").slice(0, 2_000),
             retry: response.dispatchState === "not-dispatched" ? notDispatchedRetry : "same-operation-id" as const }
         : dispatchStatus === "unknown"
@@ -1880,6 +1900,13 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
           ? { operationReceipt: { status: operationReceipt.state, ...(operationReceipt.updatedAt ? { updatedAt: operationReceipt.updatedAt } : {}) } } : {}),
         ...(updated ? { observation: { revision: updated.record.target.revision, observedAt: updated.record.target.observedAt, evidenceRef: updated.record.target.revision } }
           : targetClosed ? { observation: { revision: nativePostcondition!.evidenceRef as string, observedAt: Date.parse(nativePostcondition!.observedAt as string), evidenceRef: nativePostcondition!.evidenceRef as string } } : {}),
+        ...(batchOutcomeRecord?.status === "complete" && batchOutcomeRecord.completedSteps === 2
+          ? { batchOutcome: { status: "complete" as const, completedSteps: 2, totalSteps: 2 as const } }
+          : partialBatch
+            ? { batchOutcome: { status: "partial" as const, completedSteps: 1, totalSteps: 2 as const,
+                stoppedAt: "enter" as const, message: typeof batchOutcomeRecord.message === "string"
+                  ? batchOutcomeRecord.message.slice(0, 500) : "Text was entered, but Enter was not sent." } }
+            : {}),
         ...(resultError ? { error: resultError } : {}),
       });
       const updatedStructure = updated ? recordOf(updated.observation.structure) : undefined;
@@ -1887,7 +1914,9 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ? updated?.image ?? dataUrlImage(capture?.dataUrl)
         : undefined;
       if (targetClosed) removeTarget(record.target.targetId);
-      const nextStep = response.nextStep ?? (targetClosed ? "The exact window is verified closed; observe a new target before further input." : dispatchStatus === "unknown"
+      const nextStep = partialBatch
+        ? "Text was entered, but Enter was not sent. Inspect the exact field before deciding whether to send Enter separately; do not replay this batch."
+        : response.nextStep ?? (targetClosed ? "The exact window is verified closed; observe a new target before further input." : dispatchStatus === "unknown"
         ? "Reconcile with the same operation ID; do not send a second input."
         : dispatchStatus === "dispatched" && !action.postcondition
           ? updated ? "Inspect the fresh desktop observation before reporting task success; the effect is observed, not verified." : "Reconcile with the same operation ID to obtain a fresh observation."
@@ -1984,7 +2013,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   server.registerTool("m9r_computer_action", {
-    description: "Execute one action against an observed targetId and targetRevision with a stable operationId. Element locators carry ref and snapshotId from the same observation. Supports native controls, text, hotkeys, scroll, drag, windows, menus, system controls, navigation and exact browser-tab select/close. Reuse the operationId to reconcile a lost response. Delivery and verification are separate receipt fields. Follow refresh-target advice before replanning; background work never takes global focus.",
+    description: "Execute one action against an observed targetId and targetRevision with a stable operationId. Element locators carry ref and snapshotId from the same observation. Supports native controls, text, hotkeys, scroll, drag, windows, menus, system controls, navigation and exact browser-tab select/close. On a confirmed exact desktop input target, text_then_enter batches text insertion and Enter in one bounded call; durable no-submit intent blocks both steps before dispatch. Reuse the operationId to reconcile a lost response. Delivery and verification are separate receipt fields. Follow refresh-target advice before replanning; background work never takes global focus.",
     inputSchema: inputSchemas.action, outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, withComputerUseTelemetry(executeComputerAction, monotonicNow));
 

@@ -5,16 +5,56 @@ import { join } from "node:path";
 import test from "node:test";
 import { parseTaskStageAction, runTaskStageAction } from "../src/lib/native/task-stage-actions";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
+import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
 import { createWebBrokerClient } from "../src/lib/native/web-broker-client";
 
 test("desktop action parser accepts common pointer and keyboard actions but rejects malformed key input", () => {
   assert.deepEqual(parseTaskStageAction({ kind: "double_click", x: 24, y: 68 }), { kind: "double_click", x: 24, y: 68 });
   assert.deepEqual(parseTaskStageAction({ kind: "right_click", x: 24, y: 68 }), { kind: "right_click", x: 24, y: 68 });
   assert.deepEqual(parseTaskStageAction({ kind: "press_key", key: "Enter" }), { kind: "press_key", key: "Enter" });
+  assert.deepEqual(parseTaskStageAction({ kind: "type_then_enter", view: "app", text: "search terms" }),
+    { kind: "type_then_enter", view: "app", text: "search terms" });
+  assert.throws(() => parseTaskStageAction({ kind: "type_then_enter", text: "search terms" }), /exact app view/);
+  assert.throws(() => parseTaskStageAction({ kind: "type_then_enter", view: "app", text: "x".repeat(501) }), /Invalid stage input text/);
   assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L"] }), { kind: "hotkey", keys: ["Control", "L"] });
   assert.throws(() => parseTaskStageAction({ kind: "press_key", key: "not-a-key" }), /Invalid key/);
   assert.throws(() => parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L", "Shift", "F2", "F3"] }), /1–4/);
   assert.throws(() => parseTaskStageAction({ kind: "click", x: 1, y: 2, hwnd: "123" }), /Invalid stage action fields/);
+});
+
+test("type-then-Enter is one exact app-stage batch and reports a typed pre-dispatch refusal on step two as partial", async () => {
+  const identity = { handle: "codex", sessionId: "session" };
+  const calls: string[] = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() } };
+  const driver = {
+    typeText: async (_name: string, text: string, _identity: unknown, options?: unknown) => {
+      calls.push(`type:${text}:${JSON.stringify(options)}`); return proof;
+    },
+    pressKey: async (_name: string, key: string, _identity: unknown, options?: unknown) => {
+      calls.push(`key:${key}:${JSON.stringify(options)}`); return proof;
+    },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const complete = await runTaskStageAction(driver, "preview", { kind: "type_then_enter", view: "app", text: "query" }, identity);
+  assert.deepEqual(calls, ["type:query:{\"deliveryMode\":\"owner-preview\"}", "key:Enter:{\"deliveryMode\":\"owner-preview\"}"]);
+  assert.deepEqual((complete as { batchOutcome: unknown }).batchOutcome, { status: "complete", completedSteps: 2, totalSteps: 2 });
+
+  calls.length = 0;
+  const refusesEnter = { ...driver, pressKey: async () => {
+    calls.push("key:Enter"); throw new DesktopInputNotDispatchedError("Owner interaction paused before Enter; no key was sent.", "foreground-lease");
+  } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const partial = await runTaskStageAction(refusesEnter, "preview", { kind: "type_then_enter", view: "app", text: "query" }, identity);
+  assert.equal(calls.length, 2, "the key adapter is consulted, but its typed refusal guarantees that Enter was not dispatched");
+  assert.match(calls[0]!, /^type:query:/);
+  assert.equal(calls[1], "key:Enter");
+  assert.deepEqual((partial as { batchOutcome: unknown }).batchOutcome, { status: "partial", completedSteps: 1, totalSteps: 2,
+    stoppedAt: "enter", message: "Owner interaction paused before Enter; no key was sent." });
+
+  const refusesText = { ...driver, typeText: async () => {
+    throw new DesktopInputNotDispatchedError("The exact input target changed; no text was sent.", "target-identity");
+  }, pressKey: async () => { calls.push("unexpected key"); return proof; } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  await assert.rejects(runTaskStageAction(refusesText, "preview", { kind: "type_then_enter", view: "app", text: "query" }, identity),
+    (error: unknown) => error instanceof DesktopInputNotDispatchedError && error.dispatchState === "not-dispatched");
+  assert.equal(calls.includes("unexpected key"), false, "the key step never runs after a typed text refusal");
 });
 
 test("owner-preview actions route through desktop-wide driver methods", async () => {

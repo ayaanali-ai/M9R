@@ -2,6 +2,7 @@ import { createCuaStageDriver, type CuaAgentCursorIdentity, type CuaStageTargetD
 import type { WindowsSystemControlRequest } from "./windows-desktop-stage";
 import { selectActionDelivery } from "./multiplayer-action-policy";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
+import { StageInputNotDispatchedError } from "./stage-errors";
 import { classifyWebActionRisk } from "./risk-core";
 
 type TaskStageActionBody =
@@ -13,6 +14,7 @@ type TaskStageActionBody =
   | { kind: "click" | "cursor"; x: number; y: number; confirmFocusForeground?: boolean }
   | { kind: "double_click" | "middle_click" | "right_click"; x: number; y: number; confirmFocusForeground?: boolean }
   | { kind: "type"; text: string; mode?: "insert" | "replace"; x?: number; y?: number; expectedRole?: string; expectedLabel?: string; confirmFocusForeground?: boolean }
+  | { kind: "type_then_enter"; text: string; confirmFocusForeground?: boolean }
   | { kind: "scroll"; x: number; y: number; direction: "up" | "down"; confirmFocusForeground?: boolean }
   | { kind: "drag"; fromX: number; fromY: number; toX: number; toY: number; durationMs?: number; confirmFocusForeground?: boolean }
   | { kind: "press_key"; key: string; confirmFocusForeground?: boolean }
@@ -45,7 +47,7 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid stage action.");
   const action = value as Record<string, unknown>;
   const fields: Record<string, string[]> = { capture: [], stop: [], read_structure: [], window_status: [], click: ["x", "y"], double_click: ["x", "y"], middle_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
-    type: ["text", "mode", "x", "y", "expectedRole", "expectedLabel"], scroll: ["x", "y", "direction"], drag: ["fromX", "fromY", "toX", "toY", "durationMs"], press_key: ["key"], hotkey: ["keys"],
+    type: ["text", "mode", "x", "y", "expectedRole", "expectedLabel"], type_then_enter: ["text"], scroll: ["x", "y", "direction"], drag: ["fromX", "fromY", "toX", "toY", "durationMs"], press_key: ["key"], hotkey: ["keys"],
     click_element: ["ref", "expectedRole", "expectedLabel"], replace_element: ["ref", "text", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
     window_frame: ["x", "y", "width", "height"], window_state: ["state"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "imagePath", "filePath", "confirmSharedClipboard"],
     system_control: ["control", "action", "value", "step"] };
@@ -61,7 +63,7 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (action.view !== undefined && action.view !== "desktop" && action.view !== "app") throw new Error("Invalid stage action view.");
   if (action.kind === "read_structure" && action.view !== "app" && action.view !== "desktop") throw new Error("Structure observation requires an exact app or desktop view.");
   if (action.kind === "window_state" && (action.view !== "app" || !["minimized", "maximized", "restored"].includes(String(action.state)))) throw new Error("Invalid exact-app window state.");
-  if (["click_element", "replace_element", "window_frame", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write"].includes(action.kind)
+  if (["click_element", "replace_element", "type_then_enter", "window_frame", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write"].includes(action.kind)
     && action.view !== "app") throw new Error("This semantic stage action requires the exact app view.");
   if (action.kind === "click_element" || action.kind === "replace_element") {
     if (typeof action.ref !== "string" || !/^[A-Za-z0-9._:-]{1,512}$/.test(action.ref)) throw new Error("Invalid accessibility element reference.");
@@ -77,6 +79,8 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     for (const key of ["width", "height"]) if (!Number.isSafeInteger(action[key]) || (action[key] as number) < 1 || (action[key] as number) > 16383) throw new Error("Invalid window frame dimensions.");
   }
   if (action.kind === "type" && (typeof action.text !== "string" || !action.text.length || action.text.length > 500
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(action.text))) throw new Error("Invalid stage input text.");
+  if (action.kind === "type_then_enter" && (typeof action.text !== "string" || !action.text.length || action.text.length > 500
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(action.text))) throw new Error("Invalid stage input text.");
   if (action.kind === "type" && action.mode !== undefined && action.mode !== "insert" && action.mode !== "replace") throw new Error("Invalid text mode.");
   if (action.kind === "type" && action.mode === "replace" && (action.x === undefined || action.y === undefined)) throw new Error("Replace text requires an exact field point.");
@@ -178,6 +182,24 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
       return options
         ? driver.typeText(name, action.text, identity, options)
         : driver.typeText(name, action.text, identity);
+    }
+    case "type_then_enter": {
+      if (action.view !== "app") throw new DesktopInputNotDispatchedError(
+        "Type-then-Enter requires one exact app-window target; no input was sent.", "target-identity");
+      const options = stageOptions({ confirmFocusForeground });
+      const typed = options
+        ? await driver.typeText(name, action.text, identity, options)
+        : await driver.typeText(name, action.text, identity);
+      try {
+        const entered = options
+          ? await driver.pressKey(name, "Enter", identity, options)
+          : await driver.pressKey(name, "Enter", identity);
+        return { ...entered, batchOutcome: { status: "complete", completedSteps: 2, totalSteps: 2 } };
+      } catch (error) {
+        if (!(error instanceof DesktopInputNotDispatchedError) && !(error instanceof StageInputNotDispatchedError)) throw error;
+        return { ...typed, batchOutcome: { status: "partial", completedSteps: 1, totalSteps: 2,
+          stoppedAt: "enter", message: error.message.slice(0, 500) } };
+      }
     }
     case "scroll": return desktopWide ? driver.scrollDesktop(name, action.x, action.y, action.direction, identity, stageOptions({ confirmFocusForeground }))
       : driver.scroll(name, action.x, action.y, action.direction, identity, stageOptions({ confirmFocusForeground }));
