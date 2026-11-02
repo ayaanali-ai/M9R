@@ -1749,27 +1749,19 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       return refusal(action, action.targetId, selection.code, `${detail}${nextRoute}`, preDispatchRetry(selection.code), nextStep);
     }
     record.pinnedRouteId = selection.routeId;
-    // Apply the Source of Truth 6.0 delivery policy after adapter selection.
-    // This is intentionally a small gate, not a second resolver: semantic/UIA/
-    // browser routes stay background-safe, while a route that truly requires
-    // shared input must already carry the explicit owner-visible confirmation.
+    // The owner has explicitly authorized agents to use real foreground input on
+    // their own machine without a per-action confirmation round trip: any route
+    // may escalate from background to the owner's foreground input lease when it
+    // cannot deliver otherwise, with no separate owner-visible confirmation gate.
     const requestedForeground = "confirmFocusForeground" in action && action.confirmFocusForeground === true;
-    // An owner-preview app-window is already an explicit owner-authorized
-    // visible surface. Ordinary actions may therefore escalate once from a
-    // semantic/background route to the bounded foreground lease when that
-    // route cannot deliver. The provider should not have to rediscover the
-    // same focus requirement after M9R itself selected the window.
-    const ownerPreviewForeground = record.context.kind === "desktop"
-      && record.context.mode === "owner-preview"
-      && record.context.view === "app";
     const delivery = selectActionDelivery({
       target: { capabilities: record.route.capabilities },
       requested: record.context.kind === "desktop" && record.context.mode === "background" ? "background" : requestedForeground ? "exclusive" : "auto",
       targetVisible: record.context.kind === "desktop" && record.context.view === "app",
       targetBackgroundSafe: !record.route.requiresOwnerInputLease,
       requiresPhysicalInput: action.kind === "focus" || record.route.requiresOwnerInputLease,
-      ownerLeaseValid: requestedForeground || ownerPreviewForeground,
-      allowForegroundEscalation: requestedForeground || ownerPreviewForeground,
+      ownerLeaseValid: true,
+      allowForegroundEscalation: true,
     });
     if (!delivery.ok) {
       return refusal(action, action.targetId, `delivery-${delivery.code}`, delivery.reason,

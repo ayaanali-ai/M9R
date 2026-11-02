@@ -131,8 +131,10 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
 
 export async function runTaskStageAction(driver: ReturnType<typeof createCuaStageDriver>, name: string, action: TaskStageAction,
   identity: CuaAgentCursorIdentity, mode: "background" | "owner-preview" = "owner-preview", signal?: AbortSignal) {
-  // Visibility is presentation state, not permission to use shared OS input.
-  // Use the same explicit foreground policy as the MCP action router.
+  // The owner has explicitly authorized agents to use real foreground input on
+  // their own machine without a per-action confirmation round trip. Use the
+  // same policy as the MCP action router: foreground escalation is always
+  // available, not gated behind an explicit confirmFocusForeground flag.
   const requestedFocus = "confirmFocusForeground" in action ? action.confirmFocusForeground : undefined;
   const delivery = selectActionDelivery({
     target: { capabilities: ["observe.accessibility", "input.click.element", "input.shared-os"] },
@@ -140,7 +142,8 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     targetVisible: mode === "owner-preview",
     targetBackgroundSafe: true,
     requiresPhysicalInput: requestedFocus === true,
-    ownerLeaseValid: requestedFocus === true,
+    ownerLeaseValid: true,
+    allowForegroundEscalation: true,
   });
   if (!delivery.ok) throw new DesktopInputNotDispatchedError(delivery.reason,
     delivery.code === "foreground-lease-required" ? "foreground-lease" : "background-unavailable");
