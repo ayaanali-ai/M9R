@@ -43,7 +43,11 @@ export class Island {
   private viewsEl!: HTMLElement;
   private markEl!: HTMLElement;
   private markGlow!: HTMLElement;
-  private edgeGlow!: HTMLElement;
+  private edgeGlow!: SVGSVGElement;
+  private glowShape!: SVGGElement;
+  private glowIsland!: SVGPathElement;
+  private glowEarLeft!: SVGPathElement;
+  private glowEarRight!: SVGPathElement;
   private miniGrid!: HTMLElement;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
@@ -149,7 +153,18 @@ export class Island {
     this.islandEl = h("div", { id: "island" }, this.clipEl, this.markGlow, this.markEl, this.miniGrid, this.countdown);
 
     // Behind the island: the island's own outline is a clip path, which would cut off any glow drawn on it.
-    this.edgeGlow = h("div", { id: "edge-glow", "aria-hidden": "true" });
+    const ns = "http://www.w3.org/2000/svg";
+    this.edgeGlow = document.createElementNS(ns, "svg");
+    this.edgeGlow.id = "edge-glow";
+    this.edgeGlow.setAttribute("aria-hidden", "true");
+    this.glowShape = document.createElementNS(ns, "g");
+    this.glowIsland = document.createElementNS(ns, "path");
+    this.glowEarLeft = document.createElementNS(ns, "path");
+    this.glowEarRight = document.createElementNS(ns, "path");
+    this.glowEarLeft.setAttribute("d", "M 0 0 L 24 0 L 24 24 L 23 24 C 23 10 13.5 0 0 0 Z");
+    this.glowEarRight.setAttribute("d", "M 24 0 L 0 0 L 0 24 L 1 24 C 1 10 10.5 0 24 0 Z");
+    this.glowShape.append(this.glowIsland, this.glowEarLeft, this.glowEarRight);
+    this.edgeGlow.append(this.glowShape);
     this.root.append(this.wakeStrip, this.edgeGlow, this.islandEl, this.archLeft, this.archRight);
     this.applyGeometry();
   }
@@ -364,15 +379,21 @@ export class Island {
     this.islandEl.style.width = `${w}px`;
     this.islandEl.style.height = `${hh}px`;
     this.islandEl.style.borderRadius = `0 0 ${r}px ${r}px`;
-    this.islandEl.style.clipPath = `path('${squirclePath(w, hh, { br: r, bl: r })}')`;
+    const outline = squirclePath(w, hh, { br: r, bl: r });
+    this.islandEl.style.clipPath = `path('${outline}')`;
     this.islandEl.style.transform = `translateX(-50%)`;
-    // The glow box is the island plus room for the halo; its mask fades the halo in below the ears, where a
-    // full-strength glow leaked through the hairline seam and a hard cut left a visible edge.
-    this.edgeGlow.style.width = `${w + GLOW_PAD * 2}px`;
-    this.edgeGlow.style.height = `${hh + GLOW_PAD}px`;
-    this.edgeGlow.style.setProperty("--r", `${r}px`);
-    this.edgeGlow.style.setProperty("--fade-from", `${r * 0.6}px`);
-    this.edgeGlow.style.setProperty("--fade-to", `${r * 2.2}px`);
+    // The glow is a blurred copy of the whole silhouette (island and both ears) sitting behind it, so the light
+    // follows the ears' curve too instead of stopping where they begin.
+    const gw = w + 2 * r + 2 * GLOW_PAD;
+    const gh = hh + GLOW_PAD;
+    this.edgeGlow.setAttribute("width", `${gw}`);
+    this.edgeGlow.setAttribute("height", `${gh}`);
+    this.edgeGlow.setAttribute("viewBox", `0 0 ${gw} ${gh}`);
+    this.glowShape.setAttribute("transform", `translate(${GLOW_PAD + r} 0)`);
+    this.glowIsland.setAttribute("d", outline);
+    const s = r / 24;
+    this.glowEarLeft.setAttribute("transform", `translate(${-r} 0) scale(${s})`);
+    this.glowEarRight.setAttribute("transform", `translate(${w} 0) scale(${s})`);
     this.applyArches(w, r);
     this.miniGrid.style.left = `${w - 40 - 14.5}px`;
     this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
@@ -392,10 +413,11 @@ export class Island {
     if (r <= 0) return;
     this.archLeft.setAttribute("width", `${r}`);
     this.archLeft.setAttribute("height", `${r}`);
-    this.archLeft.style.transform = `translateX(${-(w / 2 + r)}px)`;
+    // Each ear overlaps the island by a pixel: edge to edge they left a hairline seam the glow showed through.
+    this.archLeft.style.transform = `translateX(${-(w / 2 + r) + 1}px)`;
     this.archRight.setAttribute("width", `${r}`);
     this.archRight.setAttribute("height", `${r}`);
-    this.archRight.style.transform = `translateX(${w / 2}px)`;
+    this.archRight.style.transform = `translateX(${w / 2 - 1}px)`;
   }
 
   private islandRect(): { x: number; y: number; w: number; h: number } {

@@ -112,24 +112,15 @@ body {
   left: 50%;
   transform: translateX(-50%);
   pointer-events: none;
+  overflow: visible;
   opacity: 0;
-  -webkit-mask-image: linear-gradient(to bottom, transparent var(--fade-from), #000 var(--fade-to));
-  mask-image: linear-gradient(to bottom, transparent var(--fade-from), #000 var(--fade-to));
+  /* A blurred copy of the pill's silhouette, ears included: only the part outside the black shape shows. */
+  filter: blur(9px);
   transition: opacity 0.9s ease;
 }
-/* The halo itself traces the island exactly; the padded parent only gives it room to spread. */
-#edge-glow::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 40px;
-  right: 40px;
-  bottom: 40px;
-  border-radius: 0 0 var(--r) var(--r);
-  box-shadow:
-    0 0 3px 0 color-mix(in srgb, var(--edge, #fff) 75%, transparent),
-    0 2px 22px 2px color-mix(in srgb, var(--edge, #fff) 45%, transparent);
-  transition: box-shadow 2s ease;
+#edge-glow path {
+  fill: color-mix(in srgb, var(--edge, #fff) 70%, transparent);
+  transition: fill 2s ease;
 }
 #edge-glow.on { opacity: 0.8; }
 #edge-glow.live { animation: edge-breathe 3.6s ease-in-out infinite; }
