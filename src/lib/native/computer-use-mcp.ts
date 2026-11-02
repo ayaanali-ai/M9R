@@ -1738,10 +1738,14 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
               : `No safe compatible route was selected (${selection.code}).`;
       const nextRoute = browserWindowFallback
         ? " Browser-page click input is unavailable. Use m9r_stage_app to select or restore the existing browser, then call m9r_computer_observe with target 'app-window' for a fresh platform-accessibility/screenshot observation; this is a new explicit route, not an automatic retry."
-        : " Choose a target or action with an advertised capability.";
+        : selection.code === "owner-input-lease-required"
+          ? " Retry this exact same action with confirmFocusForeground: true to use the owner's visible foreground input lease; nothing else about the action needs to change."
+          : " Choose a target or action with an advertised capability.";
       const nextStep = browserWindowFallback
         ? "The browser click was not dispatched. Use m9r_stage_app to select or restore the existing browser, then call m9r_computer_observe for target 'app-window' and re-plan the click using its fresh exact-window observation. No automatic retry occurred."
-        : undefined;
+        : selection.code === "owner-input-lease-required"
+          ? "Retry the identical action with confirmFocusForeground: true; this is the normal, expected recovery for a route that needs real foreground input, not a dead end."
+          : undefined;
       return refusal(action, action.targetId, selection.code, `${detail}${nextRoute}`, preDispatchRetry(selection.code), nextStep);
     }
     record.pinnedRouteId = selection.routeId;

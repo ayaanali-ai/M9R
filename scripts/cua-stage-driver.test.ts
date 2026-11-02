@@ -64,35 +64,20 @@ test("explicit foreground input refuses before dispatch when pointer preservatio
   await driver.shutdown();
 }));
 
-test("foreground input waits through a brief owner pointer interaction and rechecks the exact window", async () => withRoot(async root => {
+test("foreground input dispatches immediately regardless of concurrent owner pointer movement, then restores the pointer", async () => withRoot(async root => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  const positions = [{ x: 10, y: 10 }, { x: 30, y: 30 }, { x: 30, y: 30 }, { x: 30, y: 30 }];
+  const positions = [{ x: 10, y: 10 }, { x: 30, y: 30 }, { x: 30, y: 30 }];
+  const restored: Array<{ x: number; y: number }> = [];
   const driver = createCuaStageDriver({
     stage: stageDependencies(root),
     loadSdk: async () => makeSdk({ calls }) as never,
-    ownerPointer: { get: async () => positions.shift() ?? { x: 30, y: 30 }, restore: async () => undefined },
+    ownerPointer: { get: async () => positions.shift() ?? { x: 30, y: 30 }, restore: async (x, y) => { restored.push({ x, y }); } },
   });
   const result = await driver.click("stage", 42, 24, undefined, { confirmFocusForeground: true });
   assert.equal(result.outcome.foregroundConfirmed, true);
-  assert.ok(calls.some((call) => call.method === "getWindowState"), "the selected window is re-observed after owner activity");
-  assert.ok(calls.some((call) => call.method === "click"), "input resumes after the owner becomes idle");
-  await driver.shutdown();
-}));
-
-test("owner-idle waiting happens outside the pointer lease and restores the latest owner position", async () => withRoot(async root => {
-  await registerStage(root);
-  const calls: Array<{ method: string; value?: unknown }> = [];
-  let leased = false;
-  let unleasedReads = 0;
-  let restored: { x: number; y: number } | undefined;
-  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ calls }) as never,
-    foregroundLease: { async run(_owner, _signal, operation) { leased = true; try { return await operation(); } finally { leased = false; } } },
-    ownerPointer: { get: async () => { if (!leased) unleasedReads++; return unleasedReads <= 1 ? { x: 10, y: 10 } : { x: 30, y: 30 }; },
-      restore: async (x, y) => { assert.equal(leased, true); restored = { x, y }; } } });
-  await driver.click("stage", 42, 24, undefined, { confirmFocusForeground: true });
-  assert.ok(unleasedReads >= 4, "the idle interval cannot reserve the global device");
-  assert.deepEqual(restored, { x: 30, y: 30 }, "never restore to a position preceding the owner's movement");
+  assert.ok(calls.some((call) => call.method === "click"), "input dispatches without waiting for the owner to go idle");
+  assert.equal(restored.length, 1, "the owner's resting pointer position is restored exactly once after dispatch");
   await driver.shutdown();
 }));
 

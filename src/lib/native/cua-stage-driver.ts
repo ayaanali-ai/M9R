@@ -1369,46 +1369,13 @@ function backgroundRefusalMessage(value: unknown): string {
   return `${clean || "Background delivery is not available for the selected window."} No text was sent; M9R will not activate the window as a fallback.`;
 }
 
-/** How long to wait once before deciding the owner is actively using the mouse right now. */
-const OWNER_ACTIVITY_CHECK_MS = 150;
-/** How far the real pointer has to move between two reads to count as the owner, not noise. */
-const OWNER_ACTIVITY_THRESHOLD_PX = 3;
-/** A moving owner gets a bounded hand-back window, never an unbounded wait. Long enough that a
- * normal pause in mouse use lets the action through instead of costing the agent a whole retry. */
-const OWNER_IDLE_DEADLINE_MS = 5_000;
-const OWNER_IDLE_STABLE_SAMPLES = 2;
-
-async function waitForOwnerIdle(
-  ownerPointer: { get(): Promise<{ x: number; y: number }> },
-  previous: { x: number; y: number },
-  signal?: AbortSignal,
-): Promise<{ x: number; y: number }> {
-  const deadline = Date.now() + OWNER_IDLE_DEADLINE_MS;
-  let stableSamples = 0;
-  let last = previous;
-  while (Date.now() < deadline) {
-    signal?.throwIfAborted();
-    await delay(OWNER_ACTIVITY_CHECK_MS);
-    const current = await ownerPointer.get().catch(() => undefined);
-    if (!current) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be re-read after interaction; no foreground input was sent.", "foreground-lease");
-    const moved = Math.abs(current.x - last.x) > OWNER_ACTIVITY_THRESHOLD_PX || Math.abs(current.y - last.y) > OWNER_ACTIVITY_THRESHOLD_PX;
-    last = current;
-    if (moved) { stableSamples = 0; continue; }
-    stableSamples += 1;
-    if (stableSamples >= OWNER_IDLE_STABLE_SAMPLES) return current;
-  }
-  throw new DesktopInputNotDispatchedError("The owner is still using the pointer; the task was paused without sending foreground input. Retry when the owner is idle.", "foreground-lease");
-}
-
 /**
- * Owner-cursor-isolation fix, owner-directed: before any real SendInput, capture the owner's
- * exact physical pointer position; if it visibly moved between two quick reads (the owner is
- * actively using the mouse right this moment), wait once for a natural gap instead of grabbing
- * control out from under them. After the action, restore the owner's pointer to exactly where it
- * was -- so regardless of whether the action started foreground or background, and regardless of
- * whether the owner touched their mouse during it, their pointer is never left wherever the
- * agent's action happened to leave it. If restoration cannot be confirmed after foreground input,
- * the call fails explicitly as uncertain instead of claiming clean pointer isolation.
+ * Owner-directed: the owner has explicitly waived pointer-coexistence deferral, so real
+ * SendInput dispatches immediately regardless of concurrent owner pointer movement. The
+ * owner's pointer position is still captured before dispatch and restored afterward, purely
+ * so their cursor visibly ends up back where they left it -- a cosmetic courtesy, not a gate.
+ * If restoration cannot be confirmed after foreground input, the call fails explicitly as
+ * uncertain instead of claiming clean pointer isolation.
  * Uses `deps.ownerPointer` when supplied (the test seam); production always uses the real native
  * Windows stage manager's get/restore, which is in closure scope here via `manager`.
  */
@@ -1432,10 +1399,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     const targetWindowId = windowId as number;
     const saved = foregroundPointer;
     if (!saved) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be preserved; no foreground input was sent.", "foreground-lease");
-    const currentPointer = await ownerPointer.get().catch(() => undefined);
-    if (!currentPointer || Math.abs(currentPointer.x - saved.x) > OWNER_ACTIVITY_THRESHOLD_PX || Math.abs(currentPointer.y - saved.y) > OWNER_ACTIVITY_THRESHOLD_PX) {
-      throw new DesktopInputNotDispatchedError("The owner moved the pointer before dispatch; reobserve and continue when idle. No input was sent.", "foreground-lease");
-    }
+    // The owner has explicitly opted into sharing real input: the agent dispatches
+    // regardless of concurrent owner pointer movement. Only the pointer's resting
+    // position is preserved below, for a clean restore after the action -- the
+    // owner's movement itself is never a reason to refuse or delay dispatch.
     // `delivery_mode: foreground` selects SendInput in the native driver, but
     // it does not itself activate a registered background window. Make the
     // ownership transition explicit before any keyboard/pointer event so the
@@ -1467,21 +1434,12 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     return { ...outcome!, foregroundConfirmed: true };
   };
   const runForeground = async () => {
-    // Wait for the owner outside the global device lease. Other surfaces and
-    // independent agents remain runnable while this action is paused.
-    let saved = await ownerPointer.get().catch(() => undefined);
+    // The owner has explicitly opted into agents sharing real foreground input on
+    // their own machine: concurrent pointer movement is never a reason to wait or
+    // refuse. Only the resting position is captured here, purely so it can be
+    // restored after the action -- not to gate dispatch on it.
+    const saved = await ownerPointer.get().catch(() => undefined);
     if (!saved) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be preserved; no foreground input was sent.", "foreground-lease");
-    await delay(OWNER_ACTIVITY_CHECK_MS);
-    const after = await ownerPointer.get().catch(() => undefined);
-    if (!after) throw new DesktopInputNotDispatchedError("The owner's pointer could not be verified; no foreground input was sent.", "foreground-lease");
-    if (Math.abs(after.x - saved.x) > OWNER_ACTIVITY_THRESHOLD_PX || Math.abs(after.y - saved.y) > OWNER_ACTIVITY_THRESHOLD_PX) {
-      saved = await waitForOwnerIdle(ownerPointer, after, options.signal);
-      const refreshed = await driver.getWindowState({ pid: Number(args.pid), windowId: BigInt(Number(args.window_id)), session: String(args.session),
-        includeAccessibilityTree: false, includeScreenshot: false, timeoutMs: 750 }, asyncOptions);
-      if (refreshed && "pid" in refreshed && Number(refreshed.pid) !== Number(args.pid)) {
-        throw new DesktopInputNotDispatchedError("The selected window changed while the owner was interacting; no input was sent.", "target-identity");
-      }
-    }
     foregroundPointer = saved;
     return timed("foreground-lease", () => foregroundLease.run(name, options.signal, deliverForeground), {
     detail: `action=${name};delivery=foreground`,
@@ -1517,11 +1475,9 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     // delivers it. The only real alternatives are an isolated CDP-connected
     // profile or a browser extension; the owner has explicitly ruled both
     // out and wants their one real, already-signed-in window used as-is. The
-    // one remaining honest option is the same brief, visible pass a human
-    // would make: wait for the owner to be idle (waitForOwnerIdle), bring the
-    // exact target window forward, deliver the input, confirm and restore the
-    // owner's pointer (deliverForeground). This is bounded, logged, and never
-    // silent -- it is not the same as a stage that steals focus on a whim.
+    // owner has also explicitly waived pointer-coexistence deferral: bring
+    // the exact target window forward and deliver the input immediately,
+    // regardless of concurrent owner pointer movement (deliverForeground).
     return runForeground();
   }
   throw new DesktopInputNotDispatchedError("background input is unavailable; Background delivery is not available for the selected window. No text was sent; M9R will not activate the window as a fallback. The owner's pointer was not used; foreground input requires an explicit foreground action.", "background-unavailable");
