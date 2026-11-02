@@ -56,8 +56,12 @@ if (process.platform === "win32"
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(cliOutput, "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";
-const cuaDriverVersion = "0.34.0";
-const cuaDriverArchiveSha256 = "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b408608b0ea4423a8b888";
+const cuaDriverVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).dependencies?.["@trycua/cua-driver"];
+if (typeof cuaDriverVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(cuaDriverVersion)) {
+  throw new Error("The pinned Cua Driver dependency must be a stable semver release.");
+}
+// Official SHA-256 for cua-driver-rs-v0.37.0-windows-x86_64-binary.zip.
+const cuaDriverArchiveSha256 = "40481b55073f1225b0010235b30217bd640ef1f323e982aec0a5f6131d3e4a99";
 const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua-driver-rs-v${cuaDriverVersion}/cua-driver-rs-${cuaDriverVersion}-windows-x86_64-binary.zip`;
 
 // These are recoverable, owner-reviewed local evidence roots. They are not

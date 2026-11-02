@@ -9,13 +9,12 @@ import { pathToFileURL } from "node:url";
 import type { ActionResult, ActionTarget, ClickPosition as CuaClickPosition, CuaDriverLike, ToolResult } from "@trycua/cua-driver";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { StageCaptureRefreshError } from "./stage-errors";
-import { startCuaDriverHost, type CuaDriverHostConnection } from "./cua-driver-host";
+import { CUA_DRIVER_VERSION, startCuaDriverHost, type CuaDriverHostConnection } from "./cua-driver-host";
 import { createWindowsDesktopStageManager, type WindowsStageDependencies, type NativePointControl, type WindowsSystemControlRequest } from "./windows-desktop-stage";
 import type { VerifiedIdentity } from "./identity-core";
 import { createForegroundInputLease, ForegroundInputLeaseError, type ForegroundInputLease } from "./foreground-input-lease";
 
 const CUA_PACKAGE = "@trycua/cua-driver";
-const CUA_DRIVER_VERSION = "0.34.0";
 const PUBLIC_CURSOR_LABEL_MAX_LENGTH = 28;
 const MAX_IMAGE_DIMENSION = 1024;
 // Keep the base64 JSON response comfortably below the native pill's 4 MiB stdout cap.
