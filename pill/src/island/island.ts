@@ -3,7 +3,7 @@
 import { Tracked, Spring, clamp } from "../core/anim";
 import {
   EXPANDED_CORNER, NOTCH_W, PANEL_W, ROUNDED_CORNER, VIEW_LAYOUTS,
-  botGlowColor, botGlowOpacity, botPosition, islandSize,
+  MEDIA_TONE, botGlowColor, botGlowOpacity, botPosition, islandSize,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
@@ -21,6 +21,15 @@ const HIT_MARGIN = 14;
 
 const modeOrder = (m: IslandMode) => (m === "hidden" ? 0 : m === "compact" ? 1 : 2);
 
+/** Your voice first, then your music, then an agent that needs you, then one that's working; otherwise no glow. */
+function edgeTone(): { color: string; live: boolean } | null {
+  if (State.listening) return { color: "#FFFFFF", live: true };
+  if (State.media?.playing) return { color: MEDIA_TONE[State.media.source], live: false };
+  if (State.tasks.some((t) => t.state === "approval")) return { color: botGlowColor("approval"), live: true };
+  if (State.tasks.some((t) => t.runState === "working")) return { color: botGlowColor("working"), live: true };
+  return null;
+}
+
 export class Island {
   readonly fsm = new IslandStateMachine();
 
@@ -32,6 +41,7 @@ export class Island {
   private viewsEl!: HTMLElement;
   private markEl!: HTMLElement;
   private markGlow!: HTMLElement;
+  private edgeGlow!: HTMLElement;
   private miniGrid!: HTMLElement;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
@@ -136,7 +146,9 @@ export class Island {
     }
     this.islandEl = h("div", { id: "island" }, this.clipEl, this.markGlow, this.markEl, this.miniGrid, this.countdown);
 
-    this.root.append(this.wakeStrip, this.islandEl, this.archLeft, this.archRight);
+    // Behind the island: the island's own outline is a clip path, which would cut off any glow drawn on it.
+    this.edgeGlow = h("div", { id: "edge-glow", "aria-hidden": "true" });
+    this.root.append(this.wakeStrip, this.edgeGlow, this.islandEl, this.archLeft, this.archRight);
     this.applyGeometry();
   }
 
@@ -352,6 +364,9 @@ export class Island {
     this.islandEl.style.borderRadius = `0 0 ${r}px ${r}px`;
     this.islandEl.style.clipPath = `path('${squirclePath(w, hh, { br: r, bl: r })}')`;
     this.islandEl.style.transform = `translateX(-50%)`;
+    this.edgeGlow.style.width = `${w}px`;
+    this.edgeGlow.style.height = `${hh}px`;
+    this.edgeGlow.style.borderRadius = `0 0 ${r}px ${r}px`;
     this.applyArches(w, r);
     this.miniGrid.style.left = `${w - 40 - 14.5}px`;
     this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
@@ -651,6 +666,12 @@ export class Island {
         this.transport.focusWindow?.(false);
       }
     }
+
+    // The notch's own edge: one colour at a time, the most immediate thing wins.
+    const edge = State.mode === "hidden" ? null : edgeTone();
+    this.edgeGlow.classList.toggle("on", !!edge);
+    this.edgeGlow.classList.toggle("live", !!edge?.live);
+    if (edge) this.edgeGlow.style.setProperty("--edge", edge.color);
 
     // The focused agent's mark; rebuilt only when it changes.
     const focus = State.focusTask;

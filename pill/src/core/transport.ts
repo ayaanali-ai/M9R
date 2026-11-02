@@ -170,6 +170,15 @@ export function createMockTransport(): PillTransport {
     const codex = snap.agents.find((a) => a.handle === "codex");
     if (codex) { codex.state = "failed"; codex.activity.push("codex: initialize: no response within 180000ms"); }
   }
+  // Sample provider limits and a playing track, to see the widgets. Real hosts send these only when providers/the OS report them.
+  if (params.has("widgets")) {
+    snap.usage = [
+      { handle: "claude", fiveHour: { usedPercent: 38, resetsAt: new Date(Date.now() + 2.4 * 3600_000).toISOString() }, weekly: { usedPercent: 71, resetsAt: new Date(Date.now() + 3.2 * 86400_000).toISOString() } },
+      { handle: "codex", fiveHour: { usedPercent: 88, resetsAt: new Date(Date.now() + 0.7 * 3600_000).toISOString() }, weekly: { usedPercent: 46 } },
+    ];
+    const source = params.get("widgets") === "apple" ? "apple-music" : "spotify";
+    snap.media = { title: "Pink + White", artist: "Frank Ocean", source, playing: true };
+  }
   // Claude Code finishes its task a moment after load, to show the task card.
   if (params.has("finish")) {
     setTimeout(() => {

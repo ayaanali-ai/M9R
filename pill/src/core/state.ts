@@ -24,6 +24,26 @@ export interface PillModelAgent {
 export interface PillModelState { agents: PillModelAgent[] }
 
 /** Wire shape: what a shell gives the pill. */
+export interface PillUsageWindow {
+  /** 0–100, as the provider reports it. */
+  usedPercent: number;
+  /** ISO time the window resets, when known. */
+  resetsAt?: string;
+}
+
+export interface PillUsage {
+  handle: string;
+  fiveHour?: PillUsageWindow;
+  weekly?: PillUsageWindow;
+}
+
+export interface PillMedia {
+  title: string;
+  artist?: string;
+  source: "spotify" | "apple-music" | "other";
+  playing: boolean;
+}
+
 export interface PillSnapshot {
   agents: Array<{ handle: string; provider: Provider; state: AgentRunState; activity: string[]; task?: string }>;
   /** Optional structured collaboration layer; older hosts may omit it. */
@@ -39,6 +59,10 @@ export interface PillSnapshot {
   connectionOnly?: boolean;
   /** Browser shell only: the desktop pill is running, so this in-page pill should step aside. */
   desktopPill?: boolean;
+  /** Plan limits exactly as each provider reports them, by agent handle. Absent until a provider reports; never estimated. */
+  usage?: PillUsage[];
+  /** What the OS says is playing, when the host can read it; null when nothing is. */
+  media?: PillMedia | null;
 }
 
 /** A message that could not be delivered, with the details needed to pick a session to link and try again. */
@@ -147,6 +171,10 @@ class AppState {
   pendingFiles: DroppedFile[] = [];
   /** Who a drop was aimed at; the composer takes this as its recipients once, then clears it. */
   composeTo: string[] | null = null;
+  usage: PillUsage[] = [];
+  media: PillMedia | null = null;
+  /** Hold-to-talk is capturing right now. */
+  listening = false;
   /** Where a file is being dragged over the island, in CSS pixels; null when nothing is being dragged. */
   dragPoint: { x: number; y: number } | null = null;
   chatHistory: ChatMessage[] = [];
@@ -211,6 +239,9 @@ class AppState {
     // A tick that doesn't carry "models" at all is a gap in that message, not a real "no agents" report --
     // keep whatever we last knew rather than flashing the picker empty. An explicit `{ agents: [] }` still clears it.
     if (snapshot.models !== undefined) this.models = snapshot.models;
+    // Same rule: a tick that leaves these out is a gap, not "no limits" or "nothing playing".
+    if (snapshot.usage !== undefined) this.usage = snapshot.usage;
+    if (snapshot.media !== undefined) this.media = snapshot.media;
 
     for (const [id, resolvedAt] of this.resolvedApprovals) {
       if (now - resolvedAt >= APPROVAL_RECOVERY_MS) this.resolvedApprovals.delete(id);

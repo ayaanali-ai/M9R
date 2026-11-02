@@ -156,6 +156,13 @@ export function botGlowColor(s: BotStateName): string {
   }
 }
 
+/** Each music app's own signature colour; anything else plays in quiet white. */
+export const MEDIA_TONE: Record<"spotify" | "apple-music" | "other", string> = {
+  spotify: "#1DB954",
+  "apple-music": "#FA2D48",
+  other: "#E5E5EA",
+};
+
 export function botGlowOpacity(s: BotStateName): number {
   switch (s) {
     case "idle":

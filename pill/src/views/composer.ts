@@ -349,6 +349,8 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
         input.readOnly = on;
         send.disabled = on || sending || !input.value.trim();
         if (on) { said.textContent = "Listening…"; Sound.play("blip"); }
+        State.listening = on;
+        State.notify();
         onHeightChange();
       },
       onLive(text) { said.textContent = text; },

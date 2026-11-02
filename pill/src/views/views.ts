@@ -11,6 +11,7 @@ import type { SpeechEnv } from "../core/speech";
 import { washRGBA, botGlowColor, type IslandViewName, type Wash } from "../core/layout";
 import { plainStep, displayName } from "../core/humanize";
 import { buildDrum } from "./drum";
+import { buildWidgets } from "./widgets";
 
 export interface ViewActions {
   setView(v: IslandViewName): void;
@@ -130,7 +131,8 @@ function buildOverview(actions: ViewActions): ViewHost {
   const ticker = new Ticker();
   // Focus changes come from the wheel itself, so they skip the setFocus action's own blip; the detent tick is the sound.
   const drum = buildDrum(ticker.el, (id) => State.setFocus(id), () => actions.blip());
-  const el = h("div", { class: "view overview" }, drum.el);
+  const widgets = buildWidgets();
+  const el = h("div", { class: "view overview" }, drum.el, widgets.el);
 
   return {
     el,
@@ -143,6 +145,8 @@ function buildOverview(actions: ViewActions): ViewHost {
     sync() {
       const task = State.focusTask;
       ticker.sync(task ? { ...task, steps: task.steps.length ? task.steps.map((s) => plainStep(task, s)) : [plainStep(task, "")] } : null);
+      // Widgets take the right side only while they have something real to show; otherwise the drum keeps the width.
+      el.classList.toggle("with-widgets", widgets.sync());
       drum.sync();
     },
   };
