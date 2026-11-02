@@ -1069,7 +1069,14 @@ export function createTaskDesktopStageService(input: {
             && stage.appId === appId && stage.coordinationKey === coordinationKey && stage.anchor)) {
             try {
               const inspected = await manager.inspectStage(candidate.name);
-              if (inspected.desktop.isCurrent && inspected.anchor) coordinated.push(inspected.anchor);
+              if (!inspected.desktop.isCurrent || !inspected.anchor) continue;
+              // Cross-check against the live window inventory before trusting another
+              // stage's anchor: a coordination group can carry forward a stale anchor
+              // (e.g. a shell/desktop window mistakenly captured by an earlier launch)
+              // that stageWindowMatchesApp would otherwise have refused to join.
+              const live = before.find((window) => window.pid === inspected.anchor!.pid && window.windowId === inspected.anchor!.windowId);
+              if (live && !stageWindowMatchesApp(live, approved)) continue;
+              coordinated.push(inspected.anchor);
             } catch { /* stale groups are retained as recovery evidence, not adopted */ }
           }
           if (coordinated.length > 1) throw new Error("Multiple live windows are already assigned to this joint task; owner selection is required.");

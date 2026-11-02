@@ -221,7 +221,11 @@ export const computerUseActionSchema = z.discriminatedUnion("kind", [
     ...actionEnvelope,
     kind: z.literal("key"),
     key: z.string().min(1).max(32).regex(/^[\w-]+$/),
-    modifiers: z.array(z.enum(["Control", "Alt", "Shift", "Meta"])).max(3)
+    // "Win" is the actual OS modifier key on Windows (Win+E, Win+D, Win+L, ...). It is not
+    // an alias of "Meta" downstream -- task-stage-actions.ts's KEY_NAMES and mcp-server.ts's
+    // press_key schema already treat them as distinct supported key names -- so it must be
+    // offered explicitly rather than asking the agent to guess "Meta" means the Windows key.
+    modifiers: z.array(z.enum(["Control", "Alt", "Shift", "Meta", "Win"])).max(3)
       .refine((values) => new Set(values).size === values.length, "Key modifiers must be unique.").optional(),
     confirmFocusForeground: z.boolean().optional(),
   }).strict(),

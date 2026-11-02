@@ -75,7 +75,15 @@ export function stageWindowMatchesApp(candidate: BrowserWindowCandidate, app: St
   const key = (value: string) => basename(value).toLowerCase().replace(/\.exe$/, "");
   const expected = key(app.windowExecutable ?? app.executable);
   const actual = key(candidate.appName);
-  if (expected === actual) return true;
+  if (expected === actual) {
+    // explorer.exe hosts both real folder windows and the shell's own permanent
+    // desktop/taskbar window (title "Program Manager"), which always exists whether
+    // or not a folder window is open. Matching on process name alone let a stale or
+    // nonexistent "Explorer" request silently reuse that desktop window forever
+    // instead of ever launching a real folder window.
+    if (actual === "explorer" && /^\s*$|^program manager$/i.test(candidate.title)) return false;
+    return true;
+  }
   if (!["windowsterminal", "openconsole", "conhost"].includes(actual)) return false;
   if (expected === "powershell" || expected === "pwsh") return /powershell/i.test(candidate.title);
   if (expected === "cmd") return /(?:command prompt|cmd\.exe)/i.test(candidate.title);
