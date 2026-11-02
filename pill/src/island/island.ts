@@ -7,6 +7,8 @@ import {
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
+import { brief, speak, stopSpeaking } from "../core/voice";
+import { displayName, plainStep } from "../core/humanize";
 import { browserSpeechEnv } from "../core/speech";
 import { State, type PillSnapshot } from "../core/state";
 import type { Decision, FileDropHandlers, PillTransport } from "../core/transport";
@@ -25,7 +27,7 @@ const GLOW_PAD = 40;
 
 /** Your voice first, then your music, then an agent that needs you, then one that's working; otherwise no glow. */
 function edgeTone(): { color: string; live: boolean } | null {
-  if (State.listening) return { color: "#FFFFFF", live: true };
+  if (State.listening || State.speaking) return { color: "#FFFFFF", live: true };
   if (State.media?.playing) return { color: MEDIA_TONE[State.media.source], live: false };
   if (State.tasks.some((t) => t.state === "approval")) return { color: botGlowColor("approval"), live: true };
   if (State.tasks.some((t) => t.runState === "working")) return { color: botGlowColor("working"), live: true };
@@ -116,6 +118,12 @@ export class Island {
       toggleSound: () => {
         State.settings.soundEnabled = !State.settings.soundEnabled;
         Sound.setEnabled(State.settings.soundEnabled);
+        this.transport.saveSettings?.(State.settings);
+        State.notify();
+      },
+      updateSettings: (patch) => {
+        Object.assign(State.settings, patch);
+        if (patch.voiceEnabled === false) stopSpeaking();
         this.transport.saveSettings?.(State.settings);
         State.notify();
       },
@@ -215,6 +223,11 @@ export class Island {
       if (asking) State.setFocus(asking.agent);
       State.isPinned = true;
       this.alert("approval");
+      const who = State.tasks.find((t) => t.id === asking?.agent);
+      if (asking && who) {
+        const what = asking.title.trim().replace(/[.!]+$/, "");
+        speak(`${displayName(who)} needs your OK${what ? ` to ${what.charAt(0).toLowerCase()}${what.slice(1)}` : ""}.`);
+      }
     } else if (State.approvals.length === 0 && State.view === "approval") {
       State.isPinned = false;
       this.dropPin();
@@ -224,6 +237,11 @@ export class Island {
       State.setFocus(newFinished[newFinished.length - 1]);
       Sound.play("approve");
       this.alert("finished");
+      const done = State.focusTask;
+      if (done) {
+        const what = plainStep(done, done.task ?? done.steps.at(-1));
+        speak(`${displayName(done)} is done. ${brief(what)}.`);
+      }
     } else if (newReplies.length > 0 && this.fsm.state === "hidden") {
       this.reveal();
     } else if (State.mode === "hidden" && State.tasks.some((t) => t.state === "working")) {

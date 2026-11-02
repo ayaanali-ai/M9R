@@ -5,13 +5,14 @@ import { ICONS } from "./icons";
 import { Ticker } from "./ticker";
 import { providerLogo } from "./provider";
 import { buildPrompt } from "./composer";
-import { State, type AgentTask, type LinkOffer, type PillModelAgent } from "../core/state";
+import { State, type AgentTask, type LinkOffer, type PillModelAgent, type Settings } from "../core/state";
 import type { SessionRow } from "../core/transport";
 import type { SpeechEnv } from "../core/speech";
 import { washRGBA, botGlowColor, type IslandViewName, type Wash } from "../core/layout";
 import { plainStep, displayName } from "../core/humanize";
 import { buildDrum } from "./drum";
 import { buildWidgets } from "./widgets";
+import { speak, voiceName } from "../core/voice";
 
 export interface ViewActions {
   setView(v: IslandViewName): void;
@@ -32,6 +33,7 @@ export interface ViewActions {
     link(offer: LinkOffer, toSession: string): Promise<void>;
   };
   toggleSound(): void;
+  updateSettings(patch: Partial<Settings>): void;
   setAutoClose(seconds: number): void;
   blip(): void;
 }
@@ -374,12 +376,19 @@ function buildSettings(actions: ViewActions): ViewHost {
   const soundSwitch = h("button", { class: "switch", onclick: () => actions.toggleSound() });
   const autoLabel = h("span", {});
   const segButtons = [10, 15, 30].map((s) => h("button", { onclick: () => actions.setAutoClose(s) }, `${s}s`));
+  const voiceSwitch = h("button", { class: "switch", onclick: () => actions.updateSettings({ voiceEnabled: !State.settings.voiceEnabled }) });
+  const RATES = [{ label: "Slower", rate: 0.85 }, { label: "Normal", rate: 1 }, { label: "Faster", rate: 1.2 }];
+  const rateButtons = RATES.map((r) => h("button", { onclick: () => actions.updateSettings({ voiceRate: r.rate }) }, r.label));
+  const preview = h("button", { class: "link-btn voice-preview", text: "Preview", onclick: () => speak("Codex is done. Found three deals on monitors.", { force: true }) });
+  const voiceNote = h("span", { class: "voice-note" });
 
   const rows = h(
     "div",
     { class: "settings-rows" },
     h("div", { class: "settings-row" }, soundSwitch, h("span", { text: "Sound" })),
+    h("div", { class: "settings-row" }, voiceSwitch, h("span", { text: "Spoken updates" }), preview, h("div", { class: "seg" }, ...rateButtons)),
     h("div", { class: "settings-row" }, svg(ICONS.timer, 12), autoLabel, h("div", { class: "seg" }, ...segButtons)),
+    voiceNote,
   );
 
   const el = h("div", { class: "view" }, card(null, h("div", { class: "stack", style: "padding:14px 16px 14px 84px" }, rows)));
@@ -389,6 +398,10 @@ function buildSettings(actions: ViewActions): ViewHost {
     sync() {
       const s = State.settings;
       soundSwitch.classList.toggle("on", s.soundEnabled);
+      voiceSwitch.classList.toggle("on", s.voiceEnabled);
+      rateButtons.forEach((b, i) => b.classList.toggle("on", s.voiceRate === RATES[i].rate));
+      const name = voiceName();
+      voiceNote.textContent = name ? `Voice: ${name.replace(/^Microsoft\s+/, "").replace(/\s+-.*$/, "")}` : "No voice available on this device.";
       autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;
       segButtons.forEach((b, i) => b.classList.toggle("on", s.autoCloseInterval === [10, 15, 30][i]));
     },

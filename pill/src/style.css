@@ -597,6 +597,10 @@ body {
   .drum-tag.live::before, .drum-row.entering > * { animation: none; }
 }
 
+.voice-preview { color: var(--blue); padding: 0 2px; }
+.voice-preview:hover { text-decoration: underline; }
+.voice-note { font: 400 10px var(--font); color: var(--dim-3); }
+
 /* ── Widgets: right of the drum, only while they have something real ─────── */
 
 .drum { transition: right 420ms cubic-bezier(0.3, 1.1, 0.4, 1); }

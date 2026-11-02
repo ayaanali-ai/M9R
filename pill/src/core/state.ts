@@ -119,12 +119,18 @@ export interface Settings {
   soundEnabled: boolean;
   soundVolume: number;
   autoCloseInterval: number;
+  /** Say short updates out loud (a task finished, an agent needs you). */
+  voiceEnabled: boolean;
+  /** Speaking speed, 0.5–1.5. */
+  voiceRate: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   soundEnabled: false,
   soundVolume: 0.12,
   autoCloseInterval: 15,
+  voiceEnabled: true,
+  voiceRate: 1,
 };
 
 export const PROVIDER_COLORS: Record<Provider, string> = {
@@ -175,6 +181,8 @@ class AppState {
   media: PillMedia | null = null;
   /** Hold-to-talk is capturing right now. */
   listening = false;
+  /** A spoken update is playing right now. */
+  speaking = false;
   /** Where a file is being dragged over the island, in CSS pixels; null when nothing is being dragged. */
   dragPoint: { x: number; y: number } | null = null;
   chatHistory: ChatMessage[] = [];

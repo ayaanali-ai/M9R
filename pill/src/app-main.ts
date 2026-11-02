@@ -87,6 +87,7 @@ async function main() {
     },
     canAllowForADay() { return false; },
     toggleSound() {},
+    updateSettings() {},
     setAutoClose() {},
     blip() {},
   };
