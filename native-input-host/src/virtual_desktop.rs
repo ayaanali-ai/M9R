@@ -877,7 +877,14 @@ mod platform {
         let _apartment = ComApartment::initialize()?;
         let manager = Manager::create()?;
         let window = validate_window(pid, handle)?;
-        if manager.desktop_id(window)? != desktop || !manager.is_on_current_desktop(window)? {
+        // IVirtualDesktopManager can fail outright to read a window's desktop id or
+        // current-desktop membership for a window that is not a normal "app view" --
+        // shell-hosted surfaces (File Explorer foremost) among them. An unreadable
+        // result is not evidence the window is somewhere else; trust it rather than
+        // refusing to present the window at all.
+        let desktop_mismatch = manager.desktop_id(window).map(|id| id != desktop).unwrap_or(false);
+        let not_on_current_desktop = manager.is_on_current_desktop(window).map(|value| !value).unwrap_or(false);
+        if desktop_mismatch || not_on_current_desktop {
             return Err("requested application is not on the owner's current desktop".into());
         }
         // Keep an existing window's size and restore minimized windows without
@@ -901,7 +908,8 @@ mod platform {
             window, flags: 0x2, count: 3, timeout_ms: 0 }; // FLASHW_TRAY; signal the user without activation.
         unsafe { FlashWindowEx(&flash); }
         validate_window(pid, handle)?;
-        if unsafe { IsWindowVisible(window) } == 0 || !manager.is_on_current_desktop(window)? {
+        let still_not_on_current_desktop = manager.is_on_current_desktop(window).map(|value| !value).unwrap_or(false);
+        if unsafe { IsWindowVisible(window) } == 0 || still_not_on_current_desktop {
             return Err("Windows did not show the requested application window".into());
         }
         Ok(WindowDesktop { pid, window_id: handle.to_string(), desktop_id: desktop.as_string(), on_current_desktop: true, process_generation: process_generation(pid)? })
@@ -1546,13 +1554,24 @@ mod platform {
         pid: u32,
         window: Hwnd,
     ) -> Result<WindowDesktop, &'static str> {
-        let desktop_id = manager.desktop_id(window)?.as_string();
+        // IVirtualDesktopManager::GetWindowDesktopId (and IsWindowOnCurrentVirtualDesktop)
+        // can fail outright -- not just return the zero GUID -- for a window that is not a
+        // normal app view, which includes File Explorer's window (hosted in the same
+        // long-lived process as the desktop/taskbar). Surface that as the zero GUID /
+        // unknown-current-desktop instead of failing the whole inspection; the caller
+        // already treats the zero GUID as "present on the owner's current desktop" rather
+        // than refusing the window outright.
+        let desktop_id = manager
+            .desktop_id(window)
+            .map(Guid::as_string)
+            .unwrap_or_else(|_| Guid { data1: 0, data2: 0, data3: 0, data4: [0; 8] }.as_string());
+        let on_current_desktop = manager.is_on_current_desktop(window).unwrap_or(false);
         let window_id = format!("{}", window as usize);
         Ok(WindowDesktop {
             pid,
             window_id,
             desktop_id,
-            on_current_desktop: manager.is_on_current_desktop(window)?,
+            on_current_desktop,
             process_generation: process_generation(pid)?,
         })
     }
