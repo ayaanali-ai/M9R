@@ -270,7 +270,10 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   for (let i = 0; i < 24; i += 1) wave.append(document.createElement("i"));
   const said = h("span", { class: "said" });
   live.append(h("span", { class: "dictation-label", text: "Listening" }), wave, said);
-  const line = h("div", { class: "composer-line" }, agents, h("span", { class: "composer-rule", "aria-hidden": "true" }), draft, mic, send);
+  // Back to the drum, inside the line like Messages' "‹"; a floating button would sit on top of the bar.
+  const home = h("button", { class: "composer-home", type: "button", title: "Back (Esc)", "aria-label": "Back" }, svg(ICONS.chevronLeft, 12, { stroke: 2.2 }));
+  home.addEventListener("click", () => { actions.blip(); actions.setView(State.defaultView()); });
+  const line = h("div", { class: "composer-line" }, home, agents, h("span", { class: "composer-rule", "aria-hidden": "true" }), draft, mic, send);
   const bar = h("div", { class: "chat-bar" }, live, tray, line);
 
   const el = h("div", { class: "view prompt-view" }, h("div", { class: "chat-body" }, log, asks, bar));
@@ -388,7 +391,9 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
       e.preventDefault();
       void submit();
     }
-    e.stopPropagation(); // Escape closes the island, not the field
+    // With no tab bar, Escape is the way back to the drum; the draft stays put for when you return.
+    if (e.key === "Escape") actions.setView(State.defaultView());
+    e.stopPropagation();
   });
 
   return {
