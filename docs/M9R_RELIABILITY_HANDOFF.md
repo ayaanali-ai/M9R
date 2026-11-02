@@ -180,6 +180,19 @@ steps is an *owner* product decision, not something to change unilaterally.
    currently rendered as if it were the whole page. If the model isn't told something is truncated, it has no way
    to know to scroll — that's an observation-completeness bug, not a prompting problem, and the fix (if confirmed)
    belongs in the structure/observation contract, not in a system prompt telling the agent to "remember to scroll."
+   **This is not a YouTube fix.** The owner was explicit: this must be a general capability for any scrollable
+   surface, not a YouTube special case. `scroll` already exists as an action (`driver.scroll`,
+   `task-stage-actions.ts`); the question is only whether the observation the agent reads before deciding ever tells
+   it there's more to see. Verify the same question on at least one non-browser scrollable surface (a long Explorer
+   folder, a long document) before calling this closed, specifically to prove the fix isn't browser-specific either.
+8. **General principle for this whole phase, stated directly by the owner — read it before touching any of the
+   above:** do not special-case "skip YouTube ads," "enter theater mode," "scroll to find the latest item," or any
+   other app-specific behavior. The owner's own words: *"we can't predict every action, we can't predict every use
+   case... someone might want to use Blender, Hicksfield, PowerPoint, the file system, the terminal, some site from
+   a country we don't know about, GitHub, GitLab, Postgres, Instagram, X, Gmail."* Every fix in this phase has to be
+   a general capability (can the agent see what's on screen completely and accurately, can it scroll/dismiss/act on
+   anything when the observation tells it to) — never a rule keyed to one app or one website. If a fix only works
+   for the one case it was observed in, it is the wrong fix.
 
 ### Phase 5 — prove it
 Acceptance runs against real apps: Chrome/YouTube, Spotify, Notepad, File Explorer, a canvas, plus owner pointer
