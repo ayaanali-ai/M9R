@@ -11,6 +11,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, cpSync, read
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import ts from "typescript";
 import { buildSync } from "esbuild";
 import { publishGeneratedDirectory } from "./engine-build-transaction.mjs";
@@ -24,6 +25,22 @@ const finalOutDir = resolve(process.env.M9R_CLI_OUTPUT_DIR || resolve(cliDir, "d
 const outDir = resolve(dirname(finalOutDir), `.dist-stage-${process.pid}-${randomUUID()}`);
 
 const SHEBANG = "#!/usr/bin/env node\n";
+
+function buildMarker() {
+  // A wall-clock timestamp inside cli/dist becomes part of every SEA
+  // executable and makes byte-identical source produce a different runtime
+  // identity on every build.  The source commit already changes whenever a
+  // clean release build is allowed to change, so use it as the freshness
+  // marker as well as the reproducibility anchor.  Keep a stable fallback for
+  // package consumers that build outside a Git checkout.
+  const result = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  const commit = !result.error && result.status === 0 ? String(result.stdout).trim() : "";
+  return /^[a-f0-9]{40}$/i.test(commit) ? `git:${commit.toLowerCase()}` : "unversioned";
+}
 
 function transpile(tsSource) {
   return ts.transpileModule(tsSource, {
@@ -659,13 +676,11 @@ function build() {
   }
 
   // A running resident/bridge process has no way to know a rebuild happened
-  // out from under it -- confirmed live tonight: a process that had been
-  // running for hours after several rebuilds kept silently executing its
-  // original stale code with zero signal, and the only way to notice was
-  // manually diffing process start times against git history. Stamping the
-  // build time here is what buildFreshnessCheck() (oathlock-cli-core.ts)
-  // compares its own startup-captured value against on every poll cycle.
-  writeFileSync(resolve(outDir, "build-info.json"), JSON.stringify({ builtAt: new Date().toISOString() }, null, 2) + "\n");
+  // out from under it. The marker is intentionally source-derived rather than
+  // wall-clock-derived: it still changes on every clean source release, while
+  // repeated builds of the same source remain byte-identical for reproducible
+  // SEA artifacts and stable runtime identities.
+  writeFileSync(resolve(outDir, "build-info.json"), JSON.stringify({ builtAt: buildMarker() }, null, 2) + "\n");
 
   // Validate every generated executable entrypoint before publishing. A
   // missing generated module must fail this build, not the subsequent SEA

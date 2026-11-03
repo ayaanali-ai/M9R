@@ -58,6 +58,7 @@
     "test:implementation-order": "node ./scripts/implementation-order-gate.mjs",
     "build:engine": "node ./scripts/build-cli.mjs && node ./scripts/build-engine.mjs",
     "build:candidate": "node ./scripts/build-candidate.mjs",
+    "promote:candidate": "node ./scripts/promote-runtime-candidate.mjs",
     "build:runtime-core": "npm --prefix packages/runtime-core run build",
     "test:codex-app-server": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-alias.mjs --test ./scripts/codex-app-server-adapter.test.ts",
     "n2:acceptance": "node scripts/n2-acceptance.mjs",
