@@ -846,20 +846,20 @@ function windowCoversPoint(window: CuaWindowInfo, x: number, y: number): boolean
 /** Resolve a screen point to one exact, topmost HWND. Ambiguous stacking order fails closed. */
 export function topmostWindowAtScreenPoint(windows: readonly CuaWindowInfo[], x: number, y: number): CuaWindowInfo {
   const hits = windows.filter((window) => windowCoversPoint(window, x, y));
-  if (hits.length === 0) throw new Error("No visible application window is under that desktop point; no input was sent.");
+  if (hits.length === 0) throw new DesktopInputNotDispatchedError("No visible application window is under that desktop point; no input was sent.");
   if (hits.length === 1) return hits[0]!;
   if (hits.some((window) => typeof window.zIndex !== "bigint")) {
-    throw new Error("Cua Driver did not provide window stacking order for this desktop point; no input was sent.");
+    throw new DesktopInputNotDispatchedError("Cua Driver did not provide window stacking order for this desktop point; no input was sent.");
   }
   const ordered = hits.slice().sort((a, b) => a.zIndex! > b.zIndex! ? -1 : a.zIndex! < b.zIndex! ? 1 : 0);
   if (ordered[0]!.zIndex === ordered[1]!.zIndex) {
-    throw new Error("Cua Driver returned overlapping windows with ambiguous stacking order; no input was sent.");
+    throw new DesktopInputNotDispatchedError("Cua Driver returned overlapping windows with ambiguous stacking order; no input was sent.");
   }
   return ordered[0]!;
 }
 
 function desktopPointOnScreen(x: number, y: number, capture: { width: number; height: number }, screen: DesktopScreenSize): { x: number; y: number } {
-  if (!validPoint(x, y, capture)) throw new Error("Desktop coordinates must fall inside the latest capture.");
+  if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Desktop coordinates must fall inside the latest capture.");
   return {
     x: Math.floor((x + 0.5) * screen.width / capture.width),
     y: Math.floor((y + 0.5) * screen.height / capture.height),
@@ -872,11 +872,11 @@ function desktopPointInWindow(screenPoint: { x: number; y: number }, frame: CuaS
     || bounds.width <= 0 || bounds.height <= 0 || frame.width <= 0 || frame.height <= 0
     || screenPoint.x < bounds.x || screenPoint.y < bounds.y
     || screenPoint.x >= bounds.x + bounds.width || screenPoint.y >= bounds.y + bounds.height) {
-    throw new Error("The selected desktop point is outside the exact window snapshot; no input was sent.");
+    throw new DesktopInputNotDispatchedError("The selected desktop point is outside the exact window snapshot; no input was sent.");
   }
   const localX = Math.floor((screenPoint.x - bounds.x + 0.5) * frame.width / bounds.width);
   const localY = Math.floor((screenPoint.y - bounds.y + 0.5) * frame.height / bounds.height);
-  if (!validPoint(localX, localY, frame)) throw new Error("The desktop point could not be mapped into the exact window snapshot; no input was sent.");
+  if (!validPoint(localX, localY, frame)) throw new DesktopInputNotDispatchedError("The desktop point could not be mapped into the exact window snapshot; no input was sent.");
   return { x: localX, y: localY };
 }
 
@@ -1542,15 +1542,15 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     // Win32 hit testing respects actual input regions instead of overlapping
     // rectangles. Shell HWNDs have no titles and are excluded by Cua snapshots.
     const selected = await (deps.windowAtPoint ?? manager.windowAtPoint)(screenPoint.x, screenPoint.y);
-    if (selected.pid === runtime.processId) throw new Error("The desktop point resolves to the Cua overlay, not an application; no input was sent.");
+    if (selected.pid === runtime.processId) throw new DesktopInputNotDispatchedError("The desktop point resolves to the Cua overlay, not an application; no input was sent.");
     const { pid, windowId } = selected;
     if (selected.shell) {
       const origin = selected.screenOrigin;
       if (!origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) {
-        throw new Error("Windows did not return the shell window origin; the stage cannot position its labeled cursor without moving the owner's pointer.");
+        throw new DesktopInputNotDispatchedError("Windows did not return the shell window origin; the stage cannot position its labeled cursor without moving the owner's pointer.");
       }
       const shellControl = await (deps.pointControl ?? manager.pointControl)(screenPoint.x, screenPoint.y);
-      if (shellControl.windowPid !== pid || shellControl.windowId !== windowId.toString()) throw new Error("The shell control does not belong to the hit-tested window; no input was sent.");
+      if (shellControl.windowPid !== pid || shellControl.windowId !== windowId.toString()) throw new DesktopInputNotDispatchedError("The shell control does not belong to the hit-tested window; no input was sent.");
       return { target: { pid, windowId }, localPoint: { x: screenPoint.x - origin.x, y: screenPoint.y - origin.y },
         shellControl, nativeKeyboardWindow: selected.keyboardWindow, state: undefined };
     }
@@ -1682,7 +1682,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
   }
   async function nativeControl(name: string, kind: "click" | "type" | "scroll", point?: { x: number; y: number; imageWidth: number; imageHeight: number }, extra?: { text?: string; direction?: "up" | "down" }) {
     const { stage, anchor } = await manager.inspectStage(name);
-    if (!anchor) throw new Error("Stage has no registered app window.");
+    if (!anchor) throw new DesktopInputNotDispatchedError("Stage has no registered app window.");
     const selectionPath = join(root, `stage-input-${stage.roomDesktopId}.json`);
     if (!point) {
       if (!existsSync(selectionPath)) return false;
@@ -1737,7 +1737,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     // A driver must never change an HWND underneath a planned action.
     const inspected = await manager.inspectStage(nameInput);
     const { stage, anchor } = inspected;
-    if (!anchor) throw new Error(`Stage “${stage.name}” has no registered app window. Register an owned window before capturing or moving the Cua cursor.`);
+    if (!anchor) throw new DesktopInputNotDispatchedError(`Stage “${stage.name}” has no registered app window. Register an owned window before capturing or moving the Cua cursor.`);
     const pid = anchor.pid;
     const windowId = parseWindowId(anchor.windowId);
     const persistent = cursorIdentity ? await ensureAgentSession(cursorIdentity, nameInput) : undefined;
@@ -2361,7 +2361,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
 
   async function typeTextDesktop(name: string, text: string, identity: CuaAgentCursorIdentity, options: CuaStageTextOptions = {}) {
     if (typeof text !== "string" || text.length < 1 || text.length > MAX_TEXT_ACTION_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
-      throw new Error(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
+      throw new DesktopInputNotDispatchedError(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
     }
     const delayMs = normalizeTypeDelayMs(options.delayMs);
     // This desktop-wide route ignored `options.mode` entirely before, always using
@@ -2825,7 +2825,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
 
   async function typeText(name: string, text: string, cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageTextOptions = {}): Promise<CuaStageActionProof> {
     if (typeof text !== "string" || text.length < 1 || text.length > MAX_TEXT_ACTION_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
-      throw new Error(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
+      throw new DesktopInputNotDispatchedError(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
     }
     const delayMs = normalizeTypeDelayMs(options.delayMs);
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementAtPoint }) => {
