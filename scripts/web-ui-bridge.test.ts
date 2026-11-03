@@ -9,6 +9,7 @@ import { createWebBroker } from "@/lib/native/web-broker-core";
 import { brokerKeyPath } from "@/lib/native/web-broker-paths";
 import { startWebBroker } from "@/lib/native/web-broker-server";
 import { composeAgentMessage, createWebUiBridge, describeSelector, narrateStep, findAddressed, parseMentions, parseOwnerControl, parseUiMessage, type SessionsPort, type UiState } from "@/lib/native/web-ui-bridge";
+import { fromUiState } from "../pill/src/shells/convert.ts";
 import { createTestFixtureRoot, removeTestFixtureRoot } from "./test-fixture-temp.ts";
 
 function fakeSessions(handles = ["claude", "codex"]) {
@@ -252,9 +253,16 @@ test("raw stream chunks are appended verbatim: no dropped first letters, no lost
   const { ui } = bridgeWith();
   const chunks = ["I", "'ll", " open", " Chrome", ",", " find", " Strawberry", " Park", "'s", " latest", " You", "Tube", " video", ".", " M", "9", "R", " is", " blocked", " (\"", "overlay", "-not", "-visible", "\")."];
   for (const text of chunks) ui.onSessionEvent({ kind: "say", handle: "codex", provider: "codex", text, runId: "r1", delta: true });
+  ui.onSessionEvent({ kind: "result", handle: "codex", provider: "codex", text: "I'll open Chrome, find Strawberry Park's latest YouTube video. M9R is blocked (\"overlay-not-visible\").", runId: "r1", isError: false });
   const says = ui.snapshot().thread.filter((entry) => entry.kind === "say" && entry.agent === "codex");
   assert.equal(says.length, 1);
   assert.equal(says[0].text, "I'll open Chrome, find Strawberry Park's latest YouTube video. M9R is blocked (\"overlay-not-visible\").");
+});
+
+test("long thread replies survive the pill conversion without the activity 600-character cap", () => {
+  const text = `${"A".repeat(900)}\n${"B".repeat(900)}`;
+  const converted = fromUiState({ thread: [{ id: "long", kind: "say", agent: "codex", text }], agents: [] });
+  assert.equal(converted.thread[0]?.text, text);
 });
 
 test("whole-message say events never lose a letter to a one-character coincidental overlap", () => {

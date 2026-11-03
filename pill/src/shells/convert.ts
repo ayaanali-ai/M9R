@@ -12,6 +12,12 @@ export function providerOf(value: unknown): Provider {
 }
 
 const clip = (text: unknown, n: number) => (typeof text === "string" ? text.replace(/\s+/g, " ").trim().slice(0, n) : "");
+// Conversation text is not activity copy. Do not flatten or apply the small
+// 600-character activity cap to replies: that made long answers appear to be
+// randomly cut off in the pill. Keep one explicit UI-memory bound so a broken
+// provider cannot grow the in-memory thread without limit.
+const MAX_THREAD_TEXT = 32_768;
+const threadText = (text: unknown) => typeof text === "string" ? text.slice(0, MAX_THREAD_TEXT) : "";
 
 // ── Browser shell: the broker's `ui-state` as the extension delivers it ──────────────────────────────
 
@@ -91,7 +97,7 @@ export function fromUiState(message: UiState): PillSnapshot {
   const replies = thread
     .filter((t) => t.kind === "say" || t.kind === "system" || t.kind === "block")
     .slice(-30)
-    .map((t) => ({ id: String(t.id), from: String(t.agent ?? "").replace(/^@/, "") || "m9r", text: clip(t.text, 600) }));
+    .map((t) => ({ id: String(t.id), from: String(t.agent ?? "").replace(/^@/, "") || "m9r", text: threadText(t.text) }));
   const collaboration = sanitizePillCollaboration(message.collaboration) ?? collaborationFromAgents(agents);
   const models = modelState(message.models);
   return { agents, collaboration, approvals, thread: replies, ...(models ? { models } : {}), ...(message.desktopPill === true ? { desktopPill: true } : {}) };
@@ -155,7 +161,7 @@ export function fromFeed(feed: Feed): PillSnapshot {
   // user-facing thread bubbles; approvals stay in `approvals` and delivery
   // diagnostics remain in task history where they can be inspected/dismissed.
   const thread = needs.flatMap((n) => n.kind === "answer"
-    ? [{ id: `answer-${n.taskId}`, from: n.from, text: clip(n.summary, 600) }]
+    ? [{ id: `answer-${n.taskId}`, from: n.from, text: threadText(n.summary) }]
     : []);
   return { agents, collaboration: collaborationFromAgents(agents), approvals, thread };
 }
