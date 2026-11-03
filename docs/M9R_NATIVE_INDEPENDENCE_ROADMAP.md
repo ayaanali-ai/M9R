@@ -183,3 +183,20 @@ The owner-preview action path now selects the M9R native sender whenever one exi
   installed persistent stage host) were not run here because Phase 12 is
   explicitly a no-install/no-live-promotion boundary. They remain the owner's
   required acceptance run.
+
+### Phase 12 completion gate
+
+- Built one candidate from commit `4586cb1e6c93c7d120eeff797990d250bf59347f`:
+  `engine/candidates/2026-11-03T17-39-37-998Z-4586cb1e`.
+- Candidate runtime build ID: `95b4179b7d3bd9f97879fe2a02d3df3f4c21b0258c742f5311d4b6a65c337a00`.
+- Candidate package SHA-256:
+  `bb3dd3edf3269b1a7c895b0fe460956612013cb8ace076d9a78150670ee25121`.
+- Candidate receipt verified runtime manifest, exact artifact set, accepted
+  pill hash (`929b58ab7e32dcbc15a179088aeb374853d40b3f9a61a065d47cde479d3549e3`),
+  and package checksum. The receipt correctly records `sourceDirty: true`
+  because the pre-existing user/Claude worktree changes were intentionally
+  preserved and were not staged into any phase commit.
+- No acceptance, installation, process replacement, or live promotion was
+  performed. The candidate is ready for owner review and live testing; the
+  accepted runtime and accepted UI files remain exactly outside the phase
+  commits.
