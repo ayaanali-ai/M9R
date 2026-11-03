@@ -97,3 +97,9 @@ The owner-preview action path now selects the M9R native sender whenever one exi
 - `cargo build --release --manifest-path native-input-host/Cargo.toml`: passed.
 - `cargo test --release --manifest-path native-input-host/Cargo.toml`: 21 passed, 1 pre-existing environment-dependent cursor round-trip failure (`owner_cursor_position_round_trips_through_get_and_restore`).
 - Focused TypeScript gate remains at the previously recorded 48/54 pass profile; no new failure names were introduced by the native route.
+
+### Phase 7 completion gate
+
+- `managed-provider-owner.ts` now states and passes `allowProviderContinuation: false` explicitly at the production supervisor boundary.
+- Added a lifecycle invariant test: normal turns reuse one M9R-owned connection; a failed provider process starts a new generation on that same logical connection with no provider continuation argument.
+- M9R task-context continuation remains separate from provider-native session/thread identifiers.

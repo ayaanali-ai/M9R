@@ -384,6 +384,11 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
   // reference from the desktop owner path.
   const supervisor = createManagedProviderSupervisor({
     createConnection,
+    // M9R owns the live provider connection. Normal turns reuse that M9R-owned
+    // connection; after a process/broker restart the adapter creates a cold
+    // provider process and M9R restores only its own logical task context.
+    // Provider-native resume/thread/session discovery is never enabled here.
+    allowProviderContinuation: false,
     buildFingerprint: deps.runtimeBuildFingerprint ?? env.M9R_RUNTIME_BUILD_ID,
   });
 
